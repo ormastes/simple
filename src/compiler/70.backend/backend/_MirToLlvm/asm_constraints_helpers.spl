@@ -1,5 +1,5 @@
 # Part 3 of src/compiler/70.backend/backend/mir_to_llvm.spl
-use compiler.backend.mir_to_llvm.*
+use compiler.backend.backend.mir_to_llvm.*
 # MIR to LLVM IR Translation
 #
 # MirToLlvm class that translates MIR to LLVM IR.
@@ -8,7 +8,7 @@ use compiler.backend.mir_to_llvm.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
-use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.frontend.parser_types_expr.{AsmLocation}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
@@ -135,6 +135,29 @@ impl MirToLlvm:
             nil:
                 self.builder.emit("  call {vec_ty} @llvm.x86.sha256rnds2({vec_ty} {bc0}, {vec_ty} {bc1}, {vec_ty} {bc2})")
 
+    me emit_crc32_intrinsic(dest: LocalId?, llvm_name: text, acc_ty: text, src_ty: text, args: [MirOperand]):
+        """Emit a CRC32 scalar intrinsic: i32 @llvm_name(i32, i8|i32).
+
+        MIR args are i64; truncate to the required scalar widths.
+        """
+        val nit = self.native_int()
+        val arg0_raw = self.translate_operand(args[0])
+        val arg1_raw = self.translate_operand(args[1])
+        val tc0 = self.builder.fresh_local()
+        val tc1 = self.builder.fresh_local()
+        self.builder.emit("  {tc0} = trunc {nit} {arg0_raw} to {acc_ty}  ; crc32 acc")
+        self.builder.emit("  {tc1} = trunc {nit} {arg1_raw} to {src_ty}  ; crc32 src")
+        match dest:
+            Some(dest_local):
+                val dest_id = self.local_id_value(dest_local)
+                val dest_name = self.get_local(dest_id)
+                val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+                val raw_result = self.builder.fresh_local()
+                self.builder.emit("  {raw_result} = call {acc_ty} @{llvm_name}({acc_ty} {tc0}, {src_ty} {tc1})")
+                self.builder.emit("  {dest_name} = zext {acc_ty} {raw_result} to {ret_ty}  ; crc32 result")
+            nil:
+                self.builder.emit("  call {acc_ty} @{llvm_name}({acc_ty} {tc0}, {src_ty} {tc1})")
+
     me emit_clmul_intrinsic(dest: LocalId?, args: [MirOperand], imm8: text):
         """Emit @llvm.x86.pclmulqdq(<2 x i64>, <2 x i64>, i8 immarg).
 
@@ -220,15 +243,14 @@ impl MirToLlvm:
         self.builder.emit("declare i8 @rt_enum_check_variant(i64, i64, i64)")
         self.builder.emit("declare i64 @rt_enum_payload(i64)")
         # Dict runtime (tagged i64 handle; keys/values are the flat i64 ABI).
-        # rt_dict_set/rt_dict_contains return int8_t. Their insertion-failure
-        # status is consumed by guarded collection lowering: unspecified
-        # upper return-register bits must never become success evidence.
-        # String helpers tag a raw char* literal key
+        # rt_dict_set/rt_dict_contains return int8_t in C, declared i64 here to
+        # match the discarded MIR i64 call result (same i64-widening philosophy
+        # as the enum block above). String helpers tag a raw char* literal key
         # into a heap RtCoreString so rt_native_eq compares by content.
         self.builder.emit("declare i64 @rt_dict_new(i64)")
         self.builder.emit("declare i64 @rt_dict_get(i64, i64)")
-        self.builder.emit("declare i8 @rt_dict_set(i64, i64, i64)")
-        self.builder.emit("declare i8 @rt_dict_contains(i64, i64)")
+        self.builder.emit("declare i64 @rt_dict_set(i64, i64, i64)")
+        self.builder.emit("declare i64 @rt_dict_contains(i64, i64)")
         self.builder.emit("declare i64 @rt_strlen(ptr)")
         self.builder.emit("declare ptr @rt_strcat(ptr, ptr)")
         # Concat-drop fix: rt_strcat_tagged is the tagged-result counterpart of
@@ -261,10 +283,6 @@ impl MirToLlvm:
         # above -- see translate_call's param_ty lookup in core_codegen.spl).
         self.builder.emit("declare i64 @rt_raw_f64_to_string(double)")
         self.builder.emit("declare i64 @rt_string_new(ptr, i64)")
-        # Ordinary Opaque("str") literals are tagged RuntimeValue strings.
-        # Keep the source byte length explicit: embedded NULs are valid text
-        # bytes and must not be measured with strlen.
-        self.builder.emit("declare i64 @rt_string_new_literal(ptr, i64)")
         # rt_string_free takes a tagged string VALUE (i64) and RETURNS i64
         # (1 = reclaimed, 0 = refused). NOT the `void @f(ptr)` shape
         # rt_array_free uses -- copying that signature would mis-declare both
@@ -441,7 +459,6 @@ impl MirToLlvm:
         self.defined_func_names["rt_strcat"] = true
         self.defined_func_names["rt_strcat_tagged"] = true
         self.defined_func_names["rt_string_new"] = true
-        self.defined_func_names["rt_string_new_literal"] = true
         self.defined_func_names["rt_native_build"] = true
         self.builder.emit("")
 
@@ -481,7 +498,8 @@ impl MirToLlvm:
         unsafe(capabilities: [ffi]):
             allow_unlowered = (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") == "1"
         if not allow_unlowered:
-            self.codegen_error(message)
+            eprint("error: {message}")
+            panic("compile error: {message}")
         self.emit_panic_trap_ir(message)
 
     me emit_panic_trap_ir(message: text):
@@ -606,7 +624,6 @@ fn escape_llvm_string(value: text) -> text:
     """
     var s = value
     s = s.replace("\\", "\\5C")
-    s = s.replace("\0", "\\00")
     s = s.replace("\n", "\\0A")
     s = s.replace("\r", "\\0D")
     s = s.replace("\t", "\\09")

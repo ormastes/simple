@@ -272,14 +272,6 @@ the tree implements the trait.
 
 Devices: Timer, Serial (UART), Block (configured on the bus as address ranges; none implement `ReplayableDevice` yet).
 
-The canonical `test/03_system/tools/replay_vm_driver_spec.spl` checks this
-documented CPU contract: all integer registers, PC and cycle count after
-save/mutate/restore, independent snapshots, and unchanged CPU state on a
-missing snapshot ID. Its bounded Phase1 seed diagnostic passed all 22 cases
-in 193 ms (exit 0); no native or full-VM result is claimed. Memory-content
-restoration, device-state restoration, halted/pending-interrupt state, and
-full-VM restore-and-replay remain **OPEN**; CPU assertions do not qualify them.
-
 Key files:
 - `src/lib/nogc_sync_mut/replay/vm/vcpu.spl` — Virtual CPU (RV32I)
 - `src/lib/nogc_sync_mut/replay/vm/vmem.spl` — Virtual memory; dirty tracking records page addresses only, not contents

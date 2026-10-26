@@ -42,7 +42,7 @@
 - `FeatureDatabase` - Feature tracking
 
 ### Usage Pattern
-```simple:skip
+```simple
 use lib.database.mod.{SdnDatabase, SdnTable, SdnRow}
 
 var db = SdnDatabase.new("/path/to/db.sdn")
@@ -65,7 +65,7 @@ db.save()
 ## SFFI Patterns
 
 ### Two-Tier (Runtime)
-```simple:skip
+```simple
 extern fn rt_file_read_text(path: text) -> text
 fn file_read(path: text) -> text:
     rt_file_read_text(path)

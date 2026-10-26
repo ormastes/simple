@@ -324,7 +324,6 @@ int64_t  rt_call_ptr_0(int64_t addr);
 int64_t  rt_call_ptr_1(int64_t addr, int64_t a1);
 int64_t  rt_call_ptr_2(int64_t addr, int64_t a1, int64_t a2);
 int64_t  rt_call_ptr_3(int64_t addr, int64_t a1, int64_t a2, int64_t a3);
-int64_t  rt_dyncall_3(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2);
 int64_t  rt_volatile_read_u16(int64_t addr);
 int64_t  rt_volatile_read_u32(int64_t addr);
 int64_t  rt_volatile_read_u64(int64_t addr);
@@ -406,15 +405,7 @@ int64_t  rt_value_float(double value_f64);
 double   rt_value_as_float(int64_t value);
 int8_t   rt_value_is_float(int64_t value);
 int64_t  rt_value_bool(int64_t value);
-int8_t   rt_value_as_bool(int64_t value);
-int8_t   rt_value_truthy(int64_t value);
 int64_t  rt_value_nil(void);
-int8_t   rt_value_is_nil(int64_t value);
-int8_t   rt_value_is_bool(int64_t value);
-int8_t   rt_value_is_int(int64_t value);
-void     rt_alloc_probe_reset_v1(void);
-int64_t  rt_alloc_probe_count_v1(void);
-int64_t  rt_alloc_probe_coverage_v1(void);
 void*    rt_alloc(int64_t size);
 void*    rt_struct_alloc(int64_t size);
 int8_t   rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t access_width);
@@ -450,9 +441,7 @@ int64_t  rt_gpu_provider_submit_raw(int64_t backend_bit, int64_t session,
 int64_t  rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session,
         int64_t completion, int64_t timeout_ns, int64_t receipt_ptr);
 int64_t  rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session,
-    int64_t resource, int64_t bytes_ptr);
-int64_t  rt_gpu_provider_device_identity_raw(int64_t backend_bit,
-    int64_t session, int64_t completion, int64_t identity_ptr);
+        int64_t resource, int64_t bytes_ptr);
 int64_t  rt_gpu_provider_completion_release(int64_t backend_bit, int64_t session,
         int64_t completion);
 int64_t  rt_gpu_provider_quarantine_drain(int64_t backend_bit);
@@ -474,8 +463,6 @@ void     rt_exit(int64_t code);
 void     rt_cli_exit(int64_t code);
 int64_t  rt_heap_registry_count(void);
 int8_t rt_transient_array_scope_begin(void);
-/* Read current scope:0 inactive,1 active/unpaused,2 active/paused. No lease. */
-int64_t rt_transient_array_scope_state_v1(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 /* Graph-operation success for a supported root in an active paused scope,
@@ -483,14 +470,6 @@ int8_t rt_transient_array_scope_end(void);
  * and persistent/aliased text children. Persistent leaf-root acceptance is
  * provider-specific; callers retaining scalar texts use an explicit array. */
 int8_t rt_transient_heap_promote(int64_t value);
-/* Promotion share window over one paused scope: promote calls between begin
- * and end do not re-walk nodes an earlier call in the window committed. The
- * caller must not mutate the graph inside the window (no write barrier
- * exists); it may only promote and release temporary root carriers. begin
- * returns 0 (no window) without this thread's paused scope; end returns
- * whether a window was open. Promotion results are identical either way. */
-int8_t rt_transient_heap_promote_share_begin(void);
-int8_t rt_transient_heap_promote_share_end(void);
 /* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
  * registry; an alternate rt_alloc provider must register through this API. */
 int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
@@ -567,12 +546,10 @@ int64_t  rt_tls_client_write(int64_t handle, int64_t data);
 int64_t  rt_tls_client_write_timeout(int64_t handle, int64_t data, int64_t timeout_ms);
 int64_t  rt_tls_client_read(int64_t handle, int64_t max_bytes);
 int64_t  rt_tls_client_read_timeout(int64_t handle, int64_t max_bytes, int64_t timeout_ms);
-int64_t  rt_tls_client_read_bytes_timeout_checked(int64_t handle, int64_t max_bytes, int64_t timeout_ms);
 int64_t  rt_tls_get_protocol_version(int64_t handle);
 int8_t   rt_tls_client_close(int64_t handle);
 int64_t  rt_strcat_tagged(int64_t left, int64_t right);
 int64_t  rt_any_add(int64_t left, int64_t right);
-int64_t  rt_tagged_add(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);
 int64_t  rt_raw_u64_to_string(int64_t raw);
@@ -585,8 +562,6 @@ int64_t  rt_opt_bool_to_string(int64_t raw);
 int64_t  rt_opt_f64_to_string(int64_t raw);
 int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
-int64_t  rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
-                             const uint8_t* method_name, uint64_t method_len);
 int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
 SplArray* rt_array_new(int64_t cap);
 SplArray* rt_f64_array_alloc(int64_t len);
@@ -621,16 +596,9 @@ int64_t   rt_random_bytes_c(uint64_t count);
 double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
-int64_t  rt_sha512_digest(int64_t data);
-int64_t  rt_sha384_digest(int64_t data);
 int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_len_safe(int64_t value);
 int64_t  rt_array_get(SplArray* array, int64_t idx);
-/* Hosted twins of the arm64 freestanding byte helpers (byte_utils.spl):
- * unsigned index, out-of-bounds answers 0. Both return i64 per codegen's
- * RuntimeFuncSpec, never a bare u32 (upper x0 bits would be unspecified). */
-int64_t  rt_arm_array_len_u32(SplArray* array);
-int64_t  rt_arm_array_get_byte_u32(SplArray* array, int64_t idx);
 int64_t  rt_array_get_text(SplArray* array, int64_t idx);
 int64_t  rt_array_last(SplArray* array);
 int8_t   rt_array_set(SplArray* array, int64_t idx, int64_t value);
@@ -753,9 +721,6 @@ int8_t   rt_typed_words_u32_set(SplArray* array, int64_t idx, int64_t value);
 int64_t  rt_typed_words_u64_at(SplArray* array, int64_t idx);
 int8_t   rt_typed_words_u64_push(SplArray* array, int64_t value);
 int8_t   rt_typed_words_u64_set(SplArray* array, int64_t idx, int64_t value);
-int64_t  rt_typed_words_i64_at(SplArray* array, int64_t idx);
-int8_t   rt_typed_words_i64_push(SplArray* array, int64_t value);
-int8_t   rt_typed_words_i64_set(SplArray* array, int64_t idx, int64_t value);
 int64_t  rt_typed_words_u64_raw_data_at(int64_t data_ptr, int64_t idx);
 int8_t   rt_typed_words_u64_store_known_data_at(
     int64_t header_ptr,
@@ -786,7 +751,6 @@ int64_t  rt_io_tcp_connect_timeout(int64_t addr, int64_t timeout_ms);
 int64_t  rt_io_tcp_read(int64_t fd, int64_t size);
 int64_t  rt_io_tcp_read_line(int64_t fd);
 int64_t  rt_io_tcp_write(int64_t fd, int64_t data);
-int64_t  rt_io_socket_send_nosigpipe(int64_t fd, int64_t data);
 int64_t  rt_io_tcp_write_text(int64_t fd, int64_t text);
 int64_t  rt_io_tcp_write_bytes(int64_t fd, int64_t data);
 bool     rt_io_tcp_flush(int64_t fd);
@@ -829,20 +793,12 @@ int64_t  rt_enum_payload(int64_t value);
  * handoffs: 1 for a tagged or raw/untagged class reference outside the zero
  * page. This is a FORMATION check, not liveness -- see runtime_native.c. */
 int8_t   rt_heap_ref_wellformed(int64_t value);
-int8_t   rt_heap_ref_registered_c(int64_t value);
-#if defined(SIMPLE_CORE_C_STANDALONE) && SIMPLE_CORE_C_STANDALONE
-/* Standalone Core-C has no Rust union owner for this public ABI. */
-int8_t   rt_heap_ref_registered(int64_t value);
-#endif
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
-int64_t  rt_closure_retain(int64_t closure);
-int64_t  rt_closure_release(int64_t closure);
 int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
 int8_t   rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant);
-int8_t   rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_discriminant);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
@@ -859,8 +815,6 @@ int64_t  spl_collection_capture_note_size(int64_t site, int64_t target, int64_t 
 int64_t  spl_collection_capture_note_lookup(int64_t site, int64_t target, int64_t found);
 int64_t  spl_collection_capture_note_materialization(int64_t site, int64_t target);
 int64_t  spl_collection_capture_note_hash_probe(int64_t site, int64_t target, int64_t probes, int64_t collisions);
-int64_t  spl_collection_capture_note_filter(int64_t site, int64_t target, int64_t evaluated, int64_t accepted);
-int64_t  spl_collection_capture_note_loop(int64_t site, int64_t target, int64_t trips);
 int64_t  spl_collection_capture_finish(void);
 int64_t  spl_collection_capture_abort(void);
 int64_t  rt_text_eq_any(int64_t left, int64_t right);
@@ -947,9 +901,6 @@ int64_t  rt_f64_to_bits(double value);
 /* IEEE-754 minNum/maxNum (fmin/fmax), matching Rust f64::min / f64::max. */
 double   rt_math_min(double a, double b);
 double   rt_math_max(double a, double b);
-/* Rust f64::round (half away from zero = C round) and f64::abs. */
-double   rt_math_round(double x);
-double   rt_math_abs(double x);
 int64_t  rt_utf8_count_codepoints(int64_t bytes_value);
 int8_t   rt_utf8_validate(int64_t bytes_value);
 int64_t  rt_utf8_find_invalid(int64_t bytes_value);
@@ -1015,8 +966,6 @@ int64_t  rt_string_trim_end(int64_t value);
 int64_t  rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_off);
 int64_t  rt_string_to_int(int64_t value);
 int64_t  rt_string_to_int_lenient(int64_t value);
-int64_t  rt_to_int_dynamic(int64_t value);
-int64_t  rt_any_to_int(int64_t value);
 void     rt_print_str(const uint8_t* ptr, uint64_t len);
 void     rt_println_str(const uint8_t* ptr, uint64_t len);
 void     rt_eprint_str(const uint8_t* ptr, uint64_t len);
@@ -1026,9 +975,6 @@ void     rt_println_value(int64_t value);
 void     serial_println(int64_t value);
 void     rt_eprint_value(int64_t value);
 void     rt_eprintln_value(int64_t value);
-void     rt_print_err(int64_t msg);        /* stderr, no newline (sffi/diag.spl) */
-void     rt_debug_exit_success(void);      /* hosted: flush + exit(0) */
-int64_t  rt_perf_dump_sdn(void);           /* text; empty table in native lanes */
 
 /* ===== Output ===== */
 
@@ -1210,18 +1156,10 @@ int64_t   rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_guarded_value(int64_t cmd, SplArray* args);
-int64_t   rt_process_spawn_async_value(int64_t cmd, SplArray* args);
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1423. NOT a bare SplArray*. */
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes);
-/* Strict Windows argv, raw prefix byte arrays, registered tuple; timeout -1.
- * Each array contains at most max_output_bytes, with no injected markers. */
-int64_t rt_process_run_bounded_bytes(const char* cmd, uint64_t cmd_len, SplArray* args,
-                                    int64_t timeout_ms, int64_t max_output_bytes);
-#if !defined(_WIN32)
-int64_t simple_fork_parent_wait_bounded_bytes(int64_t child_pid, int64_t timeout_ms, uint64_t max_output_bytes);
-#endif
 bool      rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
                                        int64_t timeout_ms, uint64_t max_output_bytes,
                                        char* out, uint64_t out_cap, char* err,
@@ -1244,10 +1182,6 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 /* ===== Process Async ===== */
 
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
-#ifdef _WIN32
-/* Core-C PID/handle ownership shared with rt_process_wait. */
-int64_t  rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count);
-#endif
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 /* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
 int64_t  rt_process_spawn_inherit(void);
@@ -1371,29 +1305,6 @@ SplArray* rt_process_inspection_v1_start_pinned_value(
               SplArray* expected_input_digest);
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
 
-/* Broker-only Linux cgroup-v2/pidfd owner. The start result is [token,error];
- * poll/collect return [error,terminal,leader_reaped,tree_empty,active,
- * exit_code,timed_out,cancelled,memory_peak,memory_current]. The latter is
- * cgroup memory.current while live and zero after the tree is reaped.
- * Unsupported hosts fail closed. */
-#ifdef __linux__
-SplArray* rt_linux_group_launch_broker_v1(const char* program,
-    uint64_t program_len, const char* digest, uint64_t digest_len,
-    SplArray* args);
-SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
-    const char* digest, uint64_t digest_len, SplArray* args,
-    SplArray* environment, const char* directory, uint64_t directory_len,
-    const char* root, uint64_t root_len,
-    const char* identity, uint64_t identity_len,
-    int64_t memory_limit, int64_t timeout_ms,
-    const char* stdout_path, uint64_t stdout_len,
-    const char* stderr_path, uint64_t stderr_len);
-SplArray* rt_linux_group_poll_v1(int64_t token);
-int64_t rt_linux_group_cancel_v1(int64_t token);
-SplArray* rt_linux_group_collect_v1(int64_t token);
-SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
-#endif
-
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
@@ -1422,8 +1333,6 @@ bool        rt_process_write_stdin(int64_t pid, const char* data);
 int64_t     rt_process_write_stdin_some(int64_t pid, const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 const char* rt_process_read_stdout(int64_t pid);
 bool        rt_process_is_alive(int64_t pid);
-/* 0=stdout open/deferred, 1=observed EOF, -1=unknown/terminal error. */
-int64_t     rt_process_stdout_state(int64_t pid);
 bool        rt_process_close_piped(int64_t pid);
 int64_t     rt_editor_spawn_simple_dap(void);
 bool        rt_editor_start_simple_dap(int64_t pid);
@@ -1481,14 +1390,6 @@ char*    spl_strdup(const char* s);
 
 /* ===== Atomic Handles ===== */
 
-/* CPU parallel raw-pointer atomics: valid aligned i64 storage, SeqCst,
- * previous-value returns (also on compare-exchange failure). */
-int64_t  rt_par_atomic_add_i64(int64_t* ptr, int64_t value);
-int64_t  rt_par_atomic_sub_i64(int64_t* ptr, int64_t value);
-int64_t  rt_par_atomic_xchg_i64(int64_t* ptr, int64_t value);
-int64_t  rt_par_atomic_cmpxchg_i64(int64_t* ptr, int64_t expected, int64_t value);
-int64_t  rt_par_atomic_min_i64(int64_t* ptr, int64_t value);
-int64_t  rt_par_atomic_max_i64(int64_t* ptr, int64_t value);
 int64_t  rt_atomic_int_new(int64_t initial);
 int64_t  rt_atomic_int_load(int64_t handle);
 void     rt_atomic_int_store(int64_t handle, int64_t value);
@@ -1577,15 +1478,6 @@ int64_t     rt_file_exists_probe_test_seed_counters(int64_t total, int64_t faile
 int         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len);
-int         rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len);
-/* Encoded byte-array RuntimeValues, not semantic text pointer/length pairs. */
-int64_t     rt_sosix_directory_pair_open_v1(int64_t shared_bytes, int64_t private_bytes);
-int64_t     rt_sosix_directory_pair_check_v1(int64_t shared_bytes, int64_t private_bytes);
-int64_t     rt_sosix_directory_pair_revalidate_v1(int64_t token);
-int64_t     rt_sosix_directory_pair_snapshot_v1(int64_t token, int64_t output, int64_t bytes);
-int64_t     rt_sosix_directory_pair_close_v1(int64_t token);
-int64_t     rt_fd_stat_snapshot_v1(int64_t descriptor, int64_t out_addr, int64_t out_bytes);
-int64_t     rt_shared_parse_cell_read_v1(const uint8_t* path_ptr, uint64_t path_len, int64_t maximum);
 int         rt_file_write(const char* path, const char* content);
 int64_t     rt_file_atomic_write(int64_t path_value, int64_t content_value);
 int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
@@ -1598,12 +1490,8 @@ bool        rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
                            const uint8_t* new_ptr, uint64_t new_len);
 /* Lower-case hex SHA-256 of the file as a runtime string; nil if unreadable. */
 int64_t     rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len);
-int64_t     rt_xxh3_128_text(int64_t data_value);
-/* Tagged text cmd -> captured stdout, recording this thread's last shell status. */
+/* Tagged text cmd -> captured stdout as a runtime string; nil on spawn failure. */
 int64_t     rt_shell_exec(int64_t cmd_value);
-int64_t     rt_shell_exit_code(void);
-/* Registered (stdout, stderr, status) tuple; does not change scalar-shell status. */
-int64_t     rt_shell_exec_tuple(int64_t cmd_value);
 int         rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len);
 int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len);
@@ -1770,7 +1658,6 @@ bool        rt_driver_supports_zero_copy(int64_t handle);
 /* ===== QMP Unix-Socket Primitives ===== */
 
 int64_t     rt_unix_socket_connect(const char* path);
-int64_t     rt_unix_socket_connect_timeout(const char* path, int64_t timeout_ms);
 int64_t     rt_fd_write(int64_t fd, const char* data, int64_t len);
 const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max);
 bool        rt_fd_close(int64_t fd);

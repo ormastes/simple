@@ -1,0 +1,106 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-B-05 — CONTINUOUS native shadow write on
+the commit path. Once `scv shadow-write enable --dest <dir>` is set, every
+explicit revision (every operation through store.spl scv_write_operation:
+snapshot, new-change, close-change, ...) automatically dual-writes to the
+native shadow and is compared — tree, content, parent DAG, refs (MIG-24
+scv_dual_write_verify), and reachability (shadow fsck) — appending a
+fail-closed report row to .scv/meta/shadow_write_log.sdn. A divergence is a
+FAIL row that `scv shadow-write status` surfaces until a later PASS resolves
+it. Default (no config) is a strict no-op. Host note: jj is broken on this
+host; the git side of the dual write is the read-only backend_git/shadow
+path — nothing shells out to sj/jj.
+Audience: Maintainers of the SCV dual-write/native-shadow path.
+"""
+# @req: REQ-SCV-SHADOW-WRITE-001
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _prelude(tag: text) -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-swr-{tag}.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "mkdir work && cd work",
+        "printf 'alpha\\n' > a.txt",
+        "mkdir -p sub && printf 'beta\\n' > sub/b.txt",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    expect(out == "" and err == "").to_equal(false)
+    combined
+
+describe "scv continuous shadow write (SCV-IMPL-B-05)":
+    # @manual scenario evidence
+    it "dual-writes and compares automatically on every explicit revision once enabled":
+        # @req REQ-SCV-SHADOW-WRITE-001
+        step("Enable shadow-write, then commit twice through the normal snapshot path")
+        var lines = _prelude("cont")
+        lines.push("scv shadow-write enable --dest \"$TMP/shadow\"")
+        lines.push("printf 'gamma\\n' >> a.txt")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("printf 'delta\\n' >> sub/b.txt")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("scv shadow-write status")
+        lines.push("ls \"$TMP/shadow/objects/commits\" | wc -l")
+        val out = _run(lines)
+        step("Verify two automatic rows, both PASS, and shadow holds the commit objects")
+        expect(out).to_contain("PASS — shadow-write enabled:")
+        expect(out).to_contain("rows: 2")
+        expect(out).to_contain("1|op_")
+        expect(out).to_contain("2|op_")
+        expect(out).to_contain("verify=PASS — dual-write verified:")
+        expect(out).to_contain("fsck=PASS — shadow fsck:")
+        expect(out).to_contain("PASS — shadow-write continuous: 2 row(s), 2 pass, 0 fail, latest PASS")
+        expect(out).to_contain("exit=0")
+
+    it "records a fail-closed FAIL row on shadow divergence and surfaces it in status":
+        # @req REQ-SCV-SHADOW-WRITE-001
+        step("Enable + commit, corrupt a shadow chunk, commit again")
+        var lines = _prelude("diverge")
+        lines.push("scv shadow-write enable --dest \"$TMP/shadow\" >/dev/null")
+        lines.push("printf 'gamma\\n' >> a.txt")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("CHUNK=$(find \"$TMP/shadow/objects/chunks\" -type f | head -1)")
+        lines.push("printf 'CORRUPTED' > \"$CHUNK\"")
+        lines.push("printf 'delta\\n' >> a.txt")
+        lines.push("scv snapshot >/dev/null")
+        lines.push("scv shadow-write status || echo status-rc=$?")
+        val out = _run(lines)
+        step("Verify the divergence became a FAIL row that status refuses to hide")
+        expect(out).to_contain("|FAIL|")
+        expect(out).to_contain("FAIL — shadow-write divergence unresolved:")
+        expect(out).to_contain("status-rc=1")
+        expect(out).to_contain("exit=0")
+
+    it "is a strict no-op by default: no config, no log, unchanged commit behavior":
+        # @req REQ-SCV-SHADOW-WRITE-001
+        step("Commit without enabling shadow-write; then ask for status")
+        var lines = _prelude("noop")
+        lines.push("printf 'gamma\\n' >> a.txt")
+        lines.push("scv snapshot")
+        lines.push("test ! -e .scv/meta/shadow_write_log.sdn && echo NO-LOG-WRITTEN")
+        lines.push("test ! -e \"$TMP/shadow\" && echo NO-SHADOW-DIR")
+        lines.push("scv shadow-write status || echo status-rc=$?")
+        val out = _run(lines)
+        step("Verify nothing was written and status is a fail-closed ERROR")
+        expect(out).to_contain("snapshot commit_")
+        expect(out).to_contain("NO-LOG-WRITTEN")
+        expect(out).to_contain("NO-SHADOW-DIR")
+        expect(out).to_contain("ERROR — nothing was checked (shadow-write not enabled)")
+        expect(out).to_contain("status-rc=2")
+        expect(out).to_contain("exit=0")

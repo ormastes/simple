@@ -7,9 +7,6 @@ cd "$ROOT_DIR"
 MIN_DISK_GIB="${MIN_DISK_GIB:-250}"
 MIN_MEM_GIB="${MIN_MEM_GIB:-32}"
 MAX_CPU_FRACTION="${MAX_CPU_FRACTION:-2}"
-# Limit the reported whole-GiB usage (floor), as the original fixed limit did.
-# Unset defaults to 2; an explicitly empty or malformed override is rejected.
-MAX_SWAP_USED_GIB="${MAX_SWAP_USED_GIB-2}"
 MAX_ACTIVE_NATIVE_BUILDS="${MAX_ACTIVE_NATIVE_BUILDS:-0}"
 NATIVE_BUILD_PROC_ROOT="${NATIVE_BUILD_PROC_ROOT:-/proc}"
 
@@ -44,46 +41,6 @@ require_num() {
     return 0
 }
 
-# Keep arithmetic within signed 64-bit range and normalize decimal leading
-# zeroes so shell arithmetic cannot interpret probe/config values as octal.
-# Eighteen decimal digits leave ample headroom for every subtraction below.
-swap_uint() {
-    require_num "$1" "$2" || return 1
-    if [ "${#2}" -gt 18 ]; then
-        fail "probe_${1}_out_of_range"
-        exit_code=1
-        return 1
-    fi
-    swap_number=$2
-    while [ "${swap_number#0}" != "$swap_number" ]; do
-        swap_number=${swap_number#0}
-    done
-    swap_number=${swap_number:-0}
-}
-
-# Shared by the production swap gate and its fixtures. Invalid measurements
-# return before comparison: no sentinel can pass under a large configured cap.
-swap_within_limit() {
-    swap_uint swap_total_kb "$1" || return 1
-    swap_total_value=$swap_number
-    swap_uint swap_free_kb "$2" || return 1
-    swap_free_value=$swap_number
-    swap_uint MAX_SWAP_USED_GIB "${3-2}" || return 1
-    swap_limit_value=$swap_number
-    if [ "$swap_free_value" -gt "$swap_total_value" ]; then
-        fail "probe_swap_free_exceeds_total"
-        exit_code=1
-        return 1
-    fi
-    swap_used_gib=$(((swap_total_value - swap_free_value) / 1048576))
-    info "swap_used_gib=$swap_used_gib max_swap_used_gib=$swap_limit_value"
-    if [ "$swap_used_gib" -le "$swap_limit_value" ]; then
-        return 0
-    fi
-    exit_code=1
-    return 1
-}
-
 blocked() {
     printf 'BLOCKED %s\n' "$1"
 }
@@ -115,44 +72,6 @@ if [ "${1:-}" = "--selftest" ]; then
     fixture partially_numeric_probe '12k' 1
     fixture healthy_probe '4194304' 0
     fixture healthy_zero_probe '0' 0
-    swap_fixture() { # name, total KiB, free KiB, cap GiB (or default), want_rc
-        nfix=$((nfix + 1))
-        exit_code=0
-        got=0
-        if [ "$4" = default ]; then
-            swap_within_limit "$2" "$3" >/dev/null 2>&1 || got=$?
-        else
-            swap_within_limit "$2" "$3" "$4" >/dev/null 2>&1 || got=$?
-        fi
-        [ "$got" -eq "$5" ] || failed="$failed
-  fixture '$1': rc=$got want=$5"
-        if [ "$exit_code" -ne "$5" ]; then
-            failed="$failed
-  fixture '$1': exit_code=$exit_code want=$5"
-        fi
-    }
-    swap_fixture default_at_two 2097152 0 default 0
-    swap_fixture default_floor_below_three 3145727 0 default 0
-    swap_fixture default_reject_three 3145728 0 default 1
-    swap_fixture override_eight_accept_seven 7340032 0 8 0
-    swap_fixture override_floor_below_nine 9437183 0 8 0
-    swap_fixture override_reject_nine 9437184 0 8 1
-    swap_fixture zero_no_swap 0 0 0 0
-    swap_fixture zero_floor_below_one 1048575 0 0 0
-    swap_fixture zero_reject_one 1048576 0 0 1
-    swap_fixture subtract_free 10485760 8388608 2 0
-    swap_fixture decimal_leading_zeroes 0008388608 0 08 0
-    swap_fixture invalid_cap_empty 0 0 '' 1
-    swap_fixture invalid_cap_negative 0 0 -1 1
-    swap_fixture invalid_cap_fraction 0 0 2.5 1
-    swap_fixture invalid_cap_text 0 0 eight 1
-    swap_fixture invalid_cap_overflow 0 0 9999999999999999999 1
-    swap_fixture invalid_total_huge_cap '' 0 999999999999999999 1
-    swap_fixture invalid_free_huge_cap 0 '' 999999999999999999 1
-    swap_fixture invalid_probe_text 0 N/A 999999999999999999 1
-    swap_fixture invalid_probe_overflow 9999999999999999999 0 2 1
-    swap_fixture invalid_free_exceeds_total 0 1 999999999999999999 1
-    swap_fixture valid_large_cap 10485760 0 999999999999999999 0
     if [ -n "$failed" ]; then
         printf 'selftest: %d fixture(s) run, FAILURES:%s\n' "$nfix" "$failed"
         echo "ERROR — nothing was checked"
@@ -195,7 +114,15 @@ fi
 # --- 3. Swap not over-committed ---
 swap_total_kb=$(grep SwapTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
 swap_free_kb=$(grep SwapFree /proc/meminfo 2>/dev/null | awk '{print $2}')
-if swap_within_limit "$swap_total_kb" "$swap_free_kb" "$MAX_SWAP_USED_GIB"; then
+# THE fail-open this file carried: both probes empty => $(( "" - "" )) is 0 =>
+# swap_used_gib=0 => "swap_not_overcommitted" PASSED without reading any swap.
+if ! require_num swap_total_kb "$swap_total_kb" || ! require_num swap_free_kb "$swap_free_kb"; then
+    swap_used_gib=999
+else
+    swap_used_gib=$(((swap_total_kb - swap_free_kb) / 1048576))
+fi
+info "swap_used_gib=$swap_used_gib"
+if [ "$swap_used_gib" -le 2 ]; then
     pass "swap_not_overcommitted"
 else
     fail "swap_not_overcommitted"

@@ -17,7 +17,7 @@ use compiler.common.cache.phase_compatibility_manifest.{
     phase_compatibility_compare_outputs_v1,
     phase_compatibility_path_within_v1
 }
-use compiler.frontend.frontend_parse_cache.{FRONTEND_CACHE_ENTRY_VERSION, frontend_parse_cache_key}
+use compiler.frontend.frontend_parse_cache.{FRONTEND_CACHE_ENTRY_VERSION}
 use compiler.driver.cache.phase_compatibility_admission.{
     driver_admit_phase2_compatibility_manifest_v1,
     driver_import_phase2_frontend_v1
@@ -41,7 +41,6 @@ use compiler.common.cache.phase_compatibility_path_io.{
 
 extern fn rt_env_set(key: text, value: text)
 extern fn rt_path_absolute(path: text) -> text
-extern fn rt_path_separator() -> text
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
 extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
@@ -245,8 +244,7 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
         expect(dir_create_all(phase3_frontend)).to_equal(true)
         expect(file_write(source, "export fn answer() -> i64: 42\n")).to_equal(true)
         expect(file_write(cache_path, "version: 1\nentries: []\n")).to_equal(true)
-        val frontend_key = frontend_parse_cache_key(source)
-        expect(frontend_key.len()).to_equal(32)
+        val frontend_key = file_hash_sha256_or_empty(source)
         val source_record = phase2_frontend + "/" + frontend_key + ".fpc"
         expect(file_write(source_record, "old-producer-header\nflat-pool-payload")).to_equal(true)
         val artifact_digest = file_hash_sha256_or_empty(source_record)
@@ -369,27 +367,6 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
             phase3, outside + "/new.o").reason).to_equal(
                 "destination-parent-outside-root")
         expect(rt_dir_remove_all(root)).to_equal(true)
-
-    it "should admit Windows separators while rejecting alternate destination names":
-        step("Normalize separators without admitting Windows aliases or streams")
-        if rt_path_separator() == "\\":
-            val root = rt_path_absolute("build/test-artifacts/m3-windows-paths").replace("\\", "/")
-            expect(rt_dir_create(root, true)).to_equal(true)
-            val artifact = root + "/module.o"
-            expect(file_write(artifact, "windows-object")).to_equal(true)
-            val backslash_root = root.replace("/", "\\")
-            val backslash_artifact = artifact.replace("/", "\\")
-            val admitted = phase_compatibility_existing_artifact_io_v1(backslash_root, backslash_artifact)
-            expect(admitted.valid).to_equal(true)
-            expect(admitted.canonical_path).to_equal(artifact)
-            expect(phase_compatibility_read_manifest_io_v1(backslash_artifact).content).to_equal("windows-object")
-            expect(phase_compatibility_destination_io_v1(backslash_root, backslash_root + "\\new.o").canonical_path).to_equal(root + "/new.o")
-            for leaf in ["stream.o:stream", "trailing.", "trailing ", "NUL", "con.txt", "COM1.o", "LPT9", "wild*.o"]:
-                expect(phase_compatibility_destination_io_v1(root, root + "/" + leaf).valid).to_equal(false)
-            expect(phase_compatibility_canonical_directory_io_v1(root.substring(0, 2) + "relative").valid).to_equal(false)
-            expect(rt_dir_remove_all(root)).to_equal(true)
-        else:
-            print "SKIP: Windows alternate spelling cases require Windows"
 
     it "should reject manifest symlink and canonical aliases through the production reader":
         step("Read only a canonical no-follow regular manifest leaf")

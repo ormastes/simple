@@ -461,7 +461,7 @@ impl JitCompiler {
                         // Mirror the alias expansion in referenced_call_names
                         // (common_backend.rs): a Call to `rt_file_delete` also
                         // needs `rt_file_remove` declared/resolved.
-                        let base = super::instr::calls::strip_call_module_prefix(raw);
+                        let base = raw.rsplit_once("__").map(|(_, t)| t).unwrap_or(raw);
                         if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
                             directly_called.insert(alias);
                         }
@@ -474,11 +474,6 @@ impl JitCompiler {
                 continue;
             }
             if let Some(name) = decl.name.as_deref() {
-                // A declared byte/word accessor is always lowered inline by
-                // compile_call, so its import slot is never jumped through.
-                if super::instr::calls::is_inline_lowered_byte_accessor(name) {
-                    continue;
-                }
                 if directly_called.contains(name) && !jit_import_resolves(self.provider.as_ref(), name) {
                     return Some(name.to_string());
                 }

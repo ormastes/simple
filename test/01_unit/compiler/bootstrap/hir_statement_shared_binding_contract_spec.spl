@@ -1,15 +1,56 @@
 use std.spec
-use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
 
-describe "HIR statement strict shared bindings":
-    it "builds tuple and return values without shared binding reassignment":
-        val source = file_read("src/compiler/20.hir/hir_lowering/statements.spl")
+describe "HIR statement aggregate ownership":
+    it "retains every generated binding for a non-literal tuple destructure":
+        val source = "fn pick_text():\n    val pair = (7, \"kept\")\n    val (number, word) = pair\n    return word\n"
+        val parsed = parse_full_frontend(source, "tuple_owner.spl", "tuple_owner", Logger(level: 0))
+        var lowering = HirLowering.with_filename("tuple_owner.spl")
+        val hir = lowering.lower_module(parsed)
 
-        expect(source).to_contain("val td_base_sym: SymbolId? = match hir_init.kind:")
-        expect(source).to_contain("val td_idx_type: HirType? = if i < td_elem_types.len(): td_elem_types[i] else: nil")
-        expect(source).to_contain("val rt_hir: HirExpr? = match rt_val:")
-        expect(source).to_contain("val return_value: HirExpr? = self.lower_hir_expr(value)")
-        expect(source.contains("var td_base_sym: SymbolId? = nil")).to_equal(false)
-        expect(source.contains("var td_idx_type: HirType? = nil")).to_equal(false)
-        expect(source.contains("var rt_hir: HirExpr? = nil")).to_equal(false)
-        expect(source.contains("var return_value: HirExpr? = nil")).to_equal(false)
+        if val fn_id = hir.symbols.lookup("pick_text"):
+            val fn_ = hir.functions[fn_id]
+            if fn_.body.stmts.len() != 3:
+                fail("pick_text HIR body must contain tuple binding, destructure block, and return")
+            match fn_.body.stmts[1].kind:
+                case Block(destructure):
+                    # One owner temp plus both user bindings. Dropped value-
+                    # semantic pushes previously left this block empty.
+                    if destructure.stmts.len() != 3:
+                        fail("tuple destructure must retain its owner temp and two projected bindings")
+                    match destructure.stmts[2].kind:
+                        case Let(_, _, init):
+                            match init.kind:
+                                case Index(_, index):
+                                    match index.kind:
+                                        case IntLit(value, _):
+                                            expect(value).to_equal(1)
+                                        case _:
+                                            fail("second tuple projection index must be an integer literal")
+                                case _:
+                                    fail("second tuple binding initializer must be an index projection")
+                        case _:
+                            fail("third destructure statement must bind the second tuple element")
+                case _:
+                    fail("second function statement must be the generated destructure block")
+            match fn_.body.stmts[2].kind:
+                case Expr(return_expr):
+                    match return_expr.kind:
+                        case Return(value):
+                            if val returned = value:
+                                match returned.kind:
+                                    case NamedVar(_, name):
+                                        expect(name).to_equal("word")
+                                    case _:
+                                        fail("return value must remain the lowered word binding")
+                            else:
+                                fail("return statement must retain its value")
+                        case _:
+                            fail("final expression must lower to Return")
+                case _:
+                    fail("final function statement must be an expression statement")
+        else:
+            fail("lowered module must contain pick_text")

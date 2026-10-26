@@ -423,7 +423,7 @@ else:
 ### Build flag: `dbfs_kernel_linked`
 
 **Conditional compilation strategy in Simple:**
-```simple:skip
+```simple
 #[cfg(dbfs_kernel_linked)]
 fn create_buffer_manager() -> DbFsBufferManager {
     // Kernel build: use a single fixed-size page pool; no GC runtime

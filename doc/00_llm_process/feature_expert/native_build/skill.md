@@ -14,7 +14,6 @@ Compilation of Simple source code to native binaries: the `bin/simple native-bui
 - **Observability:** Environment knobs for progress + diagnostics:
   - `SIMPLE_COMPILER_TRACE=1` — detailed phase transitions
   - `SIMPLE_COMPILER_PHASE_PROFILE=1` — per-phase timings
-  - `SIMPLE_HIR_ABI_INTERFACE_TRACE=1` — per-module `[abi-interface]` typed-ABI digest lines (off by default; encoding every module's ABI costs ~190 s per ~600 modules, so it is no longer implied by `SIMPLE_COMPILER_PHASE_PROFILE`)
   - `--log off` controls **guest-kernel logging, NOT build verbosity**
   - Per-line flush now landed (see `doc/08_tracking/bug/simpleos_harness_silent_native_build_2026-07-26.md`)
 
@@ -79,23 +78,6 @@ SIMPLE_RUNTIME_PATH="path/to/seed/target" bin/simple native-build ...
 Hosted link backfills `rt_*` externs from `libsimple_native_all.a` only if the env var
 points to correct seed target.
 
-## Trait receivers and unresolved method calls (2026-10-20)
-- `class X with Trait:` is a trait implementation (HirImpl + vtable +
-  `trait_impls`), recorded only when the class defines every abstract method;
-  `imports.rs` is the more permissive side so a mismatch fails the link.
-  Methods in a separate `impl X:` block are not counted (both sides agree).
-- An `Option<Trait>` payload binding (`Some(x)`, `if val x = opt`) keeps the
-  declared trait (`FunctionContext.optional_trait_payloads`) and lowers to
-  `MethodCallVirtual`.
-- A bare trait-method link symbol with no definition is refused by
-  `generate_stub_object` (escape `SIMPLE_ALLOW_INTERNAL_STUBS=1`).
-  Fixture: `test/native/cross_unit_trait_dispatch`.
-- Open (see the bug doc): Cranelift AOT still emits `rt_function_not_found`
-  (nil, exit 0) for an unresolved bare call on an `Any` receiver; trait-typed
-  FIELD receivers reach it too, so it cannot be refused yet. An `Any`
-  receiver whose bare method several classes define binds the first
-  `import_map` entry.
-
 ## Freestanding linkage: the fabricated-stub gate (2026-08-04)
 On `--target x86_64-unknown-none` the link refuses to invent symbols it cannot find:
 ```
@@ -124,34 +106,6 @@ itself distinguishes stage3 emission from seed emission.
 Host-runtime parity is a real, currently-latent gap: `src/runtime/runtime_native.c` and
 the Rust runtime still lack these three, so the same erased-receiver path would fail to
 link hosted. Precedent for doing it in both: `rt_text_cmp_any`.
-
-## HIR shard adoption and streaming parse receipts (2026-10-19)
-
-- Read `[hir-cache] hits= misses=` (and now `[hir-cache] adopted= lowered=`,
-  printed by the main build before the summary) to judge whether the shard
-  pre-pass was adopted. The `[build] phase=hir ... cached=` field was a literal
-  0 on the streaming route until 2026-10-19 and misread as "re-lowered".
-- `phase2:surface:file:parse-start` is emitted BEFORE the front-end cache is
-  consulted: it is not a cold-parse count. Use `[frontend-cache] hits= misses=
-  parses=` (now printed by every process on the streaming route too) and
-  `[parse-shard] done ... parses= claimed=`; `claimed=0` on every shard means
-  the shards did not partition.
-- Hit cost matters at scale: 2702 HIR hits cost ~196 ms each (decode + a
-  redundant full re-encode) = 9 min serial. A hit now decodes once; the
-  store-side stability gate plus the checksum carry the admission.
-- Record: `doc/08_tracking/bug/phase4_hir_adoption_reported_cached0_and_parse_shards_unpartitioned_2026-10-19.md`.
-
-## Stage 4 live projection is in-process on Linux (2026-10-20)
-
-`stage4_live_runtime_requests` (`native_project/linker.rs`) no longer runs
-`cc -Wl,-r -Wl,--gc-sections`. Only LLD collects sections under `-r`.
-mold 2.42 and ld.bfd accept the flags and keep everything (775 -> 1564
-`rt_`/`spl_` on the Phase 4 CLI), which caused false "no archive owner"
-errors. `native_project/live_projection.rs` walks the section/relocation
-graph instead. On the kept 2793-input set it equals lld's undefined set
-exactly (782). Trap: a mold-linked binary still lists dead-code UND entries
-in `.symtab`, so check `nm -D -u`, not `nm -u`. Bug:
-`doc/08_tracking/bug/stage4_live_projection_mold_ignores_gc_sections_2026-10-20.md`.
 
 ## Update Rule
 After native-build defects, closure-discovery changes, or cache logic shifts, refresh

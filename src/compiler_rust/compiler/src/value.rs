@@ -314,501 +314,21 @@ thread_local! {
     static EMPTY_GLOBALS: OwnedGlobals = Arc::new(HashMap::new());
 }
 
-/// Memo of a shared name table, on the per-lookup path of every module-global
-/// read. Owned by the thread that built the table and touched ONLY from that
-/// thread, so a hit costs one `ahash` probe and no atomic operation (a lock
-/// here measured ~4% on a lookup-heavy loop). Other threads skip the memo and
-/// resolve directly, which answers the same value.
-struct NameMemo<V> {
-    owner: u64,
-    map: std::cell::UnsafeCell<FrameMap<String, V>>,
-}
-
-// SAFETY: `map` is only dereferenced by `with`, which first checks that the
-// calling thread is `owner`; `get_mut` requires `&mut self`. No two threads
-// can therefore reach the map concurrently.
-unsafe impl<V: Send> Sync for NameMemo<V> {}
-unsafe impl<V: Send> Send for NameMemo<V> {}
-
-fn current_thread_tag() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    thread_local! {
-        static TAG: u64 = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    TAG.with(|tag| *tag)
-}
-
-impl<V> Default for NameMemo<V> {
-    fn default() -> Self {
-        NameMemo {
-            owner: current_thread_tag(),
-            map: std::cell::UnsafeCell::new(FrameMap::default()),
-        }
-    }
-}
-
-impl<V> fmt::Debug for NameMemo<V> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("NameMemo")
-    }
-}
-
-impl<V> NameMemo<V> {
-    /// Run `f` on the map when called from the owning thread; `None` from any
-    /// other thread. `f` must not re-enter this memo.
-    fn with<R>(&self, f: impl FnOnce(&mut FrameMap<String, V>) -> R) -> Option<R> {
-        if current_thread_tag() != self.owner {
-            return None;
-        }
-        // SAFETY: owner-thread only (see the `Sync` impl), and `f` does not
-        // re-enter, so this is the only live reference to the map.
-        Some(f(unsafe { &mut *self.map.get() }))
-    }
-
-    fn get_mut(&mut self) -> &mut FrameMap<String, V> {
-        self.map.get_mut()
-    }
-}
-
-/// A module's export surface: the entries the module itself put in its
-/// export table (`own`, which IS the module's `Value::Dict`) plus the
-/// surfaces it imported whole (`use X.*`, `use X.{..}`, `export use X.*`),
-/// shared by `Arc` instead of copied in.
-///
-/// A lookup is `own`, then the layers latest-first, recursively -- the
-/// last-insert-wins result of copying every imported entry in import order,
-/// because a layer evicts the own entries it rebinds when it is pushed
-/// (`ExportTable::push_layer`). Copying made every export table as wide as
-/// the module's transitive import closure: 2.4M entries over 1000 modules.
-/// doc/08_tracking/bug/interpreter_use_unpack_reexports_transitive_closure_2026-10-20.md
-///
-/// Lookups never walk the layer DAG blindly: [`OWN_NAME_INDEX`] maps a name
-/// to the tables whose `own` defines it (total size = the sum of own sizes),
-/// and `reach` is the set of tables reachable from this one, so "which layer
-/// answers `name`" is a few bit tests per level, and a miss costs one index
-/// probe. Nothing per (table, name) is memoized, so no state grows with the
-/// closure. Immutable once built.
-pub struct ModuleTable {
-    id: u32,
-    own: Arc<HashMap<String, Value>>,
-    layers: Vec<Arc<ModuleTable>>,
-    /// Ids of every table reachable through `layers`, plus `id` itself.
-    reach: SparseIdSet,
-    /// `own` with `filter_functions_from_value` applied per entry, built on
-    /// first use (the captured-env-stripped view a module env holds).
-    filtered_own: OnceLock<Arc<HashMap<String, Value>>>,
-}
-
-impl fmt::Debug for ModuleTable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ModuleTable")
-            .field("id", &self.id)
-            .field("own", &self.own.len())
-            .field("layers", &self.layers.len())
-            .finish()
-    }
-}
-
-/// name -> ids of the live tables whose `own` map defines it.
-static OWN_NAME_INDEX: OnceLock<parking_lot::RwLock<FrameMap<String, Vec<u32>>>> = OnceLock::new();
-static NEXT_TABLE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-
-fn own_name_index() -> &'static parking_lot::RwLock<FrameMap<String, Vec<u32>>> {
-    OWN_NAME_INDEX.get_or_init(|| parking_lot::RwLock::new(FrameMap::default()))
-}
-
-/// Sorted (word index, 64-bit word) pairs: a bitset that stays small when ids
-/// are clustered, as they are (a process loads modules in bursts).
-#[derive(Debug, Clone, Default)]
-struct SparseIdSet {
-    words: Vec<(u32, u64)>,
-}
-
-impl SparseIdSet {
-    fn single(id: u32) -> Self {
-        SparseIdSet {
-            words: vec![(id / 64, 1u64 << (id % 64))],
-        }
-    }
-
-    fn union_with(&mut self, other: &SparseIdSet) {
-        let mut merged = Vec::with_capacity(self.words.len().max(other.words.len()));
-        let (mut i, mut j) = (0, 0);
-        while i < self.words.len() && j < other.words.len() {
-            let (a, b) = (self.words[i], other.words[j]);
-            if a.0 == b.0 {
-                merged.push((a.0, a.1 | b.1));
-                i += 1;
-                j += 1;
-            } else if a.0 < b.0 {
-                merged.push(a);
-                i += 1;
-            } else {
-                merged.push(b);
-                j += 1;
-            }
-        }
-        merged.extend_from_slice(&self.words[i..]);
-        merged.extend_from_slice(&other.words[j..]);
-        self.words = merged;
-    }
-
-    fn contains(&self, id: u32) -> bool {
-        match self.words.binary_search_by_key(&(id / 64), |w| w.0) {
-            Ok(index) => self.words[index].1 & (1u64 << (id % 64)) != 0,
-            Err(_) => false,
-        }
-    }
-}
-
-impl ModuleTable {
-    pub fn new(own: Arc<HashMap<String, Value>>, layers: Vec<Arc<ModuleTable>>) -> Self {
-        let id = NEXT_TABLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut reach = SparseIdSet::single(id);
-        for layer in &layers {
-            reach.union_with(&layer.reach);
-        }
-        if !own.is_empty() {
-            let mut index = own_name_index().write();
-            for name in own.keys() {
-                index.entry(name.clone()).or_default().push(id);
-            }
-        }
-        ModuleTable {
-            id,
-            own,
-            layers,
-            reach,
-            filtered_own: OnceLock::new(),
-        }
-    }
-
-    /// A table with no layers: exactly the given dict.
-    pub fn leaf(own: Arc<HashMap<String, Value>>) -> Self {
-        Self::new(own, Vec::new())
-    }
-
-    pub fn own(&self) -> &Arc<HashMap<String, Value>> {
-        &self.own
-    }
-
-    pub fn layers(&self) -> &[Arc<ModuleTable>] {
-        &self.layers
-    }
-
-    /// `own` with every entry passed through `filter`, built once.
-    pub fn filtered_own(&self, filter: impl Fn(&Value) -> Value) -> &Arc<HashMap<String, Value>> {
-        self.filtered_own.get_or_init(|| {
-            Arc::new(
-                self.own
-                    .iter()
-                    .map(|(name, value)| (name.clone(), filter(value)))
-                    .collect(),
-            )
-        })
-    }
-
-    /// The table whose `own` map holds the visible entry for `key`.
-    pub fn locate(&self, key: &str) -> Option<&ModuleTable> {
-        if self.own.contains_key(key) {
-            return Some(self);
-        }
-        if self.layers.is_empty() {
-            return None;
-        }
-        let candidates: Vec<u32> = {
-            let index = own_name_index().read();
-            match index.get(key) {
-                Some(ids) => ids.iter().copied().filter(|id| self.reach.contains(*id)).collect(),
-                None => return None,
-            }
-        };
-        if candidates.is_empty() {
-            return None;
-        }
-        self.locate_among(key, &candidates)
-    }
-
-    fn locate_among(&self, key: &str, candidates: &[u32]) -> Option<&ModuleTable> {
-        if self.own.contains_key(key) {
-            return Some(self);
-        }
-        // Precedence is latest layer first; the first layer that can reach a
-        // defining table is the one whose visible map answers `key`.
-        for layer in self.layers.iter().rev() {
-            if candidates.iter().any(|id| layer.reach.contains(*id)) {
-                return layer.locate_among(key, candidates);
-            }
-        }
-        None
-    }
-
-    pub fn get(&self, key: &str) -> Option<&Value> {
-        self.locate(key).and_then(|table| table.own.get(key))
-    }
-
-    pub fn contains_key(&self, key: &str) -> bool {
-        self.locate(key).is_some()
-    }
-
-    /// Every visible entry exactly once, in lookup precedence (so the first
-    /// occurrence of a name is its visible value).
-    pub fn for_each_visible<'a>(&'a self, mut f: impl FnMut(&'a ModuleTable, &'a String, &'a Value)) {
-        let mut seen: HashSet<&'a str> = HashSet::new();
-        let mut visited: HashSet<u32> = HashSet::new();
-        self.visit_visible(&mut seen, &mut visited, &mut f);
-    }
-
-    fn visit_visible<'a>(
-        &'a self,
-        seen: &mut HashSet<&'a str>,
-        visited: &mut HashSet<u32>,
-        f: &mut dyn FnMut(&'a ModuleTable, &'a String, &'a Value),
-    ) {
-        // A table met again later in precedence order can only offer names
-        // its first visit already emitted or found shadowed.
-        if !visited.insert(self.id) {
-            return;
-        }
-        for (name, value) in self.own.iter() {
-            if seen.insert(name.as_str()) {
-                f(self, name, value);
-            }
-        }
-        for layer in self.layers.iter().rev() {
-            layer.visit_visible(seen, visited, f);
-        }
-    }
-}
-
-impl Drop for ModuleTable {
-    fn drop(&mut self) {
-        if self.own.is_empty() {
-            return;
-        }
-        let Some(index) = OWN_NAME_INDEX.get() else {
-            return;
-        };
-        let mut index = index.write();
-        for name in self.own.keys() {
-            if let Some(ids) = index.get_mut(name.as_str()) {
-                ids.retain(|id| *id != self.id);
-                if ids.is_empty() {
-                    index.remove(name.as_str());
-                }
-            }
-        }
-    }
-}
-
-/// The view of a [`ModuleTable`] a consumer reads: its raw export entries, or
-/// the `filter_functions_from_value` view a module env holds.
-#[derive(Debug, Clone)]
-pub struct TableView {
-    pub table: Arc<ModuleTable>,
-    pub filtered: bool,
-}
-
-impl TableView {
-    pub fn raw(table: Arc<ModuleTable>) -> Self {
-        TableView { table, filtered: false }
-    }
-
-    pub fn get(&self, key: &str) -> Option<&Value> {
-        let located = self.table.locate(key)?;
-        if self.filtered {
-            located
-                .filtered_own(crate::interpreter::filter_functions_from_value)
-                .get(key)
-        } else {
-            located.own.get(key)
-        }
-    }
-
-    pub fn contains_key(&self, key: &str) -> bool {
-        self.table.contains_key(key)
-    }
-
-    pub fn for_each_visible<'a>(&'a self, mut f: impl FnMut(&'a String, &'a Value)) {
-        let filtered = self.filtered;
-        self.table.for_each_visible(|table, name, value| {
-            if filtered {
-                let view = table.filtered_own(crate::interpreter::filter_functions_from_value);
-                if let Some(value) = view.get(name.as_str()) {
-                    f(name, value);
-                }
-            } else {
-                f(name, value);
-            }
-        });
-    }
-
-    fn same(&self, other: &TableView) -> bool {
-        self.filtered == other.filtered && Arc::ptr_eq(&self.table, &other.table)
-    }
-}
-
-/// A module export table under construction (see [`ModuleTable`]).
-#[derive(Debug, Default, Clone)]
-pub struct ExportTable {
-    own: HashMap<String, Value>,
-    layers: Vec<Arc<ModuleTable>>,
-}
-
-impl ExportTable {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&mut self, name: String, value: Value) -> Option<Value> {
-        self.own.insert(name, value)
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Value> {
-        if let Some(value) = self.own.get(name) {
-            return Some(value);
-        }
-        self.layers.iter().rev().find_map(|layer| layer.get(name))
-    }
-
-    pub fn contains_key(&self, name: &str) -> bool {
-        self.get(name).is_some()
-    }
-
-    /// Re-export `layer`'s whole surface: what inserting each of its visible
-    /// entries used to do. Own entries it rebinds are evicted; an identical
-    /// earlier layer is moved rather than stacked.
-    pub fn push_layer(&mut self, layer: Arc<ModuleTable>) {
-        if !self.own.is_empty() {
-            self.own.retain(|name, _| !layer.contains_key(name));
-        }
-        self.layers.retain(|existing| !Arc::ptr_eq(existing, &layer));
-        self.layers.push(layer);
-    }
-
-    /// Own entries only (the partial-export snapshot taken before imports).
-    pub fn own_snapshot(&self) -> HashMap<String, Value> {
-        self.own.clone()
-    }
-
-    /// Entries this table RETAINS (own plus one per layer).
-    pub fn retained_len(&self) -> usize {
-        self.own.len() + self.layers.len()
-    }
-
-    /// Every visible entry exactly once, in lookup precedence.
-    pub fn for_each_visible<'a>(&'a self, mut f: impl FnMut(&'a String, &'a Value)) {
-        let mut seen: HashSet<&'a str> = HashSet::new();
-        let mut visited: HashSet<u32> = HashSet::new();
-        for (name, value) in self.own.iter() {
-            seen.insert(name.as_str());
-            f(name, value);
-        }
-        let mut emit = |_: &'a ModuleTable, name: &'a String, value: &'a Value| f(name, value);
-        for layer in self.layers.iter().rev() {
-            layer.visit_visible(&mut seen, &mut visited, &mut emit);
-        }
-    }
-
-    pub fn into_table(self) -> ModuleTable {
-        ModuleTable::new(Arc::new(self.own), self.layers)
-    }
-}
-
-/// One imported module's surface, bound BY REFERENCE: every visible name of
-/// `names` is bound in the importer exactly as `source` (the imported
-/// module's own binding table, snapshotted at import time) binds it, or to
-/// (`owner`, name) when `source` does not bind it.
-///
-/// This is what `use X.*` / `use X.{..}` used to copy name by name into the
-/// importer's table (`record_import_binding` once per export).
-#[derive(Debug, Clone)]
-struct BindingLayer {
-    owner: Arc<str>,
-    names: Arc<ModuleTable>,
-    source: Option<Arc<ModuleBindings>>,
-}
-
-impl BindingLayer {
-    fn same(&self, other: &BindingLayer) -> bool {
-        self.owner == other.owner
-            && Arc::ptr_eq(&self.names, &other.names)
-            && match (&self.source, &other.source) {
-                (None, None) => true,
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                _ => false,
-            }
-    }
-
-    /// The binding the eager copy would have recorded for `name`:
-    /// `imported_binding(owner, name)` evaluated against the snapshot.
-    fn resolve(&self, name: &str) -> Option<(Arc<str>, String)> {
-        if !self.names.contains_key(name) {
-            return None;
-        }
-        Some(
-            self.source
-                .as_ref()
-                .and_then(|source| source.get(name).map(std::borrow::Cow::into_owned))
-                .unwrap_or_else(|| (Arc::clone(&self.owner), name.to_owned())),
-        )
-    }
-}
-
-type BindingMemo = NameMemo<Option<Box<(Arc<str>, String)>>>;
-
 /// Per-module import table: local alias -> (defining owner, defining name),
 /// plus the reverse index (owner -> name -> aliases) so every alias of a
 /// written global is found in O(1) instead of scanning the whole table.
-///
-/// `forward`/`reverse` hold the module's explicit bindings (aliases,
-/// selective re-exports). Whole-surface imports are `layers`, resolved
-/// lazily: a lookup is `forward`, then the layers latest-first, exactly the
-/// last-insert-wins result the per-name copy produced, because pushing a
-/// layer evicts the `forward` entries it rebinds.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ModuleBindings {
     forward: HashMap<String, (Arc<str>, String)>,
     reverse: HashMap<Arc<str>, HashMap<String, Vec<String>>>,
-    layers: Vec<BindingLayer>,
-    /// Lookups already answered once the table has layers (`None` = unbound).
-    /// Each answer is boxed, so its address survives map growth. INSERT-ONLY
-    /// while `&self` is borrowed; cleared only through `&mut self` (`insert`,
-    /// `push_layer`) or by `Clone` starting empty. That invariant is what
-    /// makes the `&` returned by `get` sound.
-    memo: BindingMemo,
-}
-
-impl Clone for ModuleBindings {
-    fn clone(&self) -> Self {
-        ModuleBindings {
-            forward: self.forward.clone(),
-            reverse: self.reverse.clone(),
-            layers: self.layers.clone(),
-            memo: NameMemo::default(),
-        }
-    }
 }
 
 impl ModuleBindings {
-    fn remove_forward(&mut self, local_name: &str) {
-        if let Some(old) = self.forward.remove(local_name) {
-            if let Some(aliases) = self.reverse.get_mut(&old.0).and_then(|by_name| by_name.get_mut(&old.1)) {
-                aliases.retain(|alias| alias != local_name);
-            }
-        }
-    }
-
     pub fn insert(&mut self, local_name: String, binding: (Arc<str>, String)) {
         if let Some(old) = self.forward.get(&local_name) {
             if *old == binding {
                 return;
             }
-        }
-        if !self.layers.is_empty() {
-            self.memo.get_mut().clear();
-        }
-        if let Some(old) = self.forward.get(&local_name) {
             if let Some(aliases) = self.reverse.get_mut(&old.0).and_then(|by_name| by_name.get_mut(&old.1)) {
                 aliases.retain(|alias| alias != &local_name);
             }
@@ -822,278 +342,29 @@ impl ModuleBindings {
         self.forward.insert(local_name, binding);
     }
 
-    /// Bind every visible name of `names` the way `source` binds it (see
-    /// [`BindingLayer`]). Equivalent to `insert`ing each name in turn: the
-    /// explicit entries a name rebinds are evicted so the layer answers them,
-    /// and re-pushing an identical layer moves it to the front of the
-    /// precedence order instead of stacking a duplicate.
-    pub fn push_layer(&mut self, owner: Arc<str>, names: Arc<ModuleTable>, source: Option<Arc<ModuleBindings>>) {
-        let layer = BindingLayer { owner, names, source };
-        let evicted: Vec<String> = self
-            .forward
-            .keys()
-            .filter(|name| layer.names.contains_key(name.as_str()))
-            .cloned()
-            .collect();
-        for name in evicted {
-            self.remove_forward(&name);
-        }
-        self.layers.retain(|existing| !existing.same(&layer));
-        self.layers.push(layer);
-        self.memo.get_mut().clear();
+    pub fn get(&self, local_name: &str) -> Option<&(Arc<str>, String)> {
+        self.forward.get(local_name)
     }
 
-    /// The binding for `local_name`. Borrowed from the table on the owning
-    /// thread; owned when another thread reads a layered table (it may not
-    /// touch the memo that anchors borrowed answers).
-    pub fn get(&self, local_name: &str) -> Option<std::borrow::Cow<'_, (Arc<str>, String)>> {
-        use std::borrow::Cow;
-        if self.layers.is_empty() {
-            return self.forward.get(local_name).map(Cow::Borrowed);
-        }
-        // Explicit bindings always win over layers, so they need no memo.
-        if let Some(binding) = self.forward.get(local_name) {
-            return Some(Cow::Borrowed(binding));
-        }
-        let addr = |entry: &Option<Box<(Arc<str>, String)>>| entry.as_deref().map(|b| b as *const (Arc<str>, String));
-        // Outer `Some`: answered before (inner `None` = memoized "unbound").
-        let cached = self.memo.with(|memo| memo.get(local_name).map(addr)).flatten();
-        let ptr = match cached {
-            Some(ptr) => ptr,
-            None => {
-                // Resolve outside the memo: a layer's source is a different
-                // (earlier-finished) module's table with its own memo.
-                let resolved = self.layers.iter().rev().find_map(|layer| layer.resolve(local_name));
-                match self
-                    .memo
-                    .with(|memo| addr(memo.entry(local_name.to_owned()).or_insert(resolved.map(Box::new))))
-                {
-                    Some(ptr) => ptr,
-                    // Not the owning thread: hand the answer out by value.
-                    None => {
-                        return self
-                            .layers
-                            .iter()
-                            .rev()
-                            .find_map(|layer| layer.resolve(local_name))
-                            .map(Cow::Owned)
-                    }
-                }
-            }
-        };
-        // SAFETY: the pointee is boxed inside a memo entry, and memo entries
-        // are never replaced or removed while `&self` is borrowed (see the
-        // field's invariant), so it outlives the returned borrow.
-        ptr.map(|ptr| Cow::Borrowed(unsafe { &*ptr }))
+    /// Local aliases bound to (`owner`, `name`).
+    pub fn aliases_of(&self, owner: &str, name: &str) -> &[String] {
+        self.reverse
+            .get(owner)
+            .and_then(|by_name| by_name.get(name))
+            .map(|aliases| aliases.as_slice())
+            .unwrap_or(&[])
     }
 
-    /// Local aliases bound to (`owner`, `name`), appended to `out`.
-    pub fn aliases_of(&self, owner: &str, name: &str, out: &mut Vec<String>) {
-        let start = out.len();
-        if let Some(aliases) = self.reverse.get(owner).and_then(|by_name| by_name.get(name)) {
-            out.extend(aliases.iter().cloned());
-        }
-        if self.layers.is_empty() {
-            return;
-        }
-        // Superset of the layered names that can resolve to (owner, name),
-        // then filtered through the real lookup so shadowing is exact.
-        let mut candidates: Vec<String> = Vec::new();
-        let mut visited: HashSet<usize> = HashSet::new();
-        self.layer_alias_candidates(owner, name, &mut candidates, &mut visited);
-        candidates.sort();
-        candidates.dedup();
-        for candidate in candidates {
-            if self.forward.contains_key(&candidate) || out[start..].contains(&candidate) {
-                continue;
-            }
-            if self
-                .get(&candidate)
-                .is_some_and(|binding| &*binding.0 == owner && binding.1 == name)
-            {
-                out.push(candidate);
-            }
-        }
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &(Arc<str>, String))> {
+        self.forward.iter()
     }
 
-    fn layer_alias_candidates(&self, owner: &str, name: &str, out: &mut Vec<String>, visited: &mut HashSet<usize>) {
-        for layer in &self.layers {
-            if &*layer.owner == owner && layer.names.contains_key(name) {
-                out.push(name.to_owned());
-            }
-            if let Some(source) = &layer.source {
-                if !visited.insert(Arc::as_ptr(source) as usize) {
-                    continue;
-                }
-                if let Some(aliases) = source.reverse.get(owner).and_then(|by_name| by_name.get(name)) {
-                    out.extend(aliases.iter().cloned());
-                }
-                source.layer_alias_candidates(owner, name, out, visited);
-            }
-        }
-    }
-
-    /// Every binding in precedence order, each local name once.
-    pub fn for_each_resolved<'a>(&'a self, mut f: impl FnMut(&'a String, (Arc<str>, String))) {
-        for (local_name, binding) in &self.forward {
-            f(local_name, binding.clone());
-        }
-        if self.layers.is_empty() {
-            return;
-        }
-        let mut seen: HashSet<&'a str> = self.forward.keys().map(String::as_str).collect();
-        for layer in self.layers.iter().rev() {
-            layer.names.for_each_visible(|_, local_name, _| {
-                if seen.insert(local_name.as_str()) {
-                    if let Some(binding) = layer.resolve(local_name) {
-                        f(local_name, binding);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Entries this table RETAINS (explicit bindings plus one per layer), not
-    /// the number of names it resolves.
     pub fn len(&self) -> usize {
-        self.forward.len() + self.layers.len()
+        self.forward.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.forward.is_empty() && self.layers.is_empty()
-    }
-}
-
-/// Module-scope name table: the module's OWN entries plus the export tables
-/// it imported, shared by `Arc` instead of copied in. A lookup is `own`, then
-/// the layers latest-first -- the last-insert-wins result of copying each
-/// layer in import order, because `push_layer` evicts the own entries a layer
-/// rebinds. Replaces the flat `Arc<HashMap>` a module env used to freeze into
-/// (as wide as the transitive import closure).
-/// doc/08_tracking/bug/interpreter_use_unpack_reexports_transitive_closure_2026-10-20.md
-#[derive(Debug, Default)]
-pub struct LayeredEnv {
-    own: HashMap<String, Value>,
-    layers: Vec<TableView>,
-    /// name -> address of the visible `Value` (0: unbound), once the table
-    /// has layers. Bounded by the names code in this module actually looks
-    /// up. The values live in `own` or in immutable tables `layers` holds by
-    /// `Arc`, so an address stays valid while `self` does; entries are
-    /// insert-only under `&self` and cleared only by `push_layer` (`&mut`).
-    memo: NameMemo<usize>,
-}
-
-impl Clone for LayeredEnv {
-    fn clone(&self) -> Self {
-        LayeredEnv {
-            own: self.own.clone(),
-            layers: self.layers.clone(),
-            memo: NameMemo::default(),
-        }
-    }
-}
-
-impl LayeredEnv {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn from_map(own: HashMap<String, Value>) -> Self {
-        Self::from_parts(own, Vec::new())
-    }
-
-    pub fn from_parts(own: HashMap<String, Value>, layers: Vec<TableView>) -> Self {
-        LayeredEnv {
-            own,
-            layers,
-            memo: NameMemo::default(),
-        }
-    }
-
-    pub fn own(&self) -> &HashMap<String, Value> {
-        &self.own
-    }
-
-    pub fn layers(&self) -> &[TableView] {
-        &self.layers
-    }
-
-    /// Append an imported table (see the type docs). Own entries it rebinds
-    /// are evicted; an identical earlier layer is moved, not duplicated --
-    /// both leave the same visible map as re-copying it.
-    pub fn push_layer(&mut self, layer: TableView) {
-        if !self.own.is_empty() {
-            self.own.retain(|name, _| !layer.contains_key(name));
-        }
-        self.layers.retain(|existing| !existing.same(&layer));
-        self.layers.push(layer);
-        self.memo.get_mut().clear();
-    }
-
-    pub fn get(&self, key: &str) -> Option<&Value> {
-        if self.layers.is_empty() {
-            return self.own.get(key);
-        }
-        let cached = self.memo.with(|memo| memo.get(key).copied()).flatten();
-        let addr = match cached {
-            Some(addr) => addr,
-            None => {
-                let found = self
-                    .own
-                    .get(key)
-                    .or_else(|| self.layers.iter().rev().find_map(|layer| layer.get(key)));
-                let addr = found.map_or(0, |value| value as *const Value as usize);
-                if self.memo.with(|memo| memo.insert(key.to_owned(), addr)).is_none() {
-                    // Not the owning thread: answer without memoizing.
-                    return found;
-                }
-                addr
-            }
-        };
-        if addr == 0 {
-            None
-        } else {
-            // SAFETY: see the `memo` field: the value sits in `own` or in an
-            // immutable table owned (through `Arc`) by `self.layers`.
-            Some(unsafe { &*(addr as *const Value) })
-        }
-    }
-
-    pub fn contains_key(&self, key: &str) -> bool {
-        self.get(key).is_some()
-    }
-
-    /// Every entry in lookup precedence (own, then each layer's visible
-    /// entries latest-first). A name may be offered more than once; the FIRST
-    /// offer is the visible one, so callers dedupe first-wins.
-    pub fn for_each_precedence<'a>(&'a self, mut f: impl FnMut(&'a String, &'a Value)) {
-        for (name, value) in self.own.iter() {
-            f(name, value);
-        }
-        // One seen/visited set across all layers: a table shared by several
-        // layers is walked once, not once per layer.
-        let mut seen: HashSet<&'a str> = self.own.keys().map(String::as_str).collect();
-        let mut visited: HashSet<u32> = HashSet::new();
-        for layer in self.layers.iter().rev() {
-            let filtered = layer.filtered;
-            let mut emit = |table: &'a ModuleTable, name: &'a String, value: &'a Value| {
-                if filtered {
-                    let view = table.filtered_own(crate::interpreter::filter_functions_from_value);
-                    if let Some(value) = view.get(name.as_str()) {
-                        f(name, value);
-                    }
-                } else {
-                    f(name, value);
-                }
-            };
-            layer.table.visit_visible(&mut seen, &mut visited, &mut emit);
-        }
-    }
-
-    /// Entries this table RETAINS (own entries plus one per layer), not the
-    /// number of names it resolves.
-    pub fn retained_len(&self) -> usize {
-        self.own.len() + self.layers.len()
+        self.forward.is_empty()
     }
 }
 
@@ -1106,7 +377,7 @@ impl LayeredEnv {
 #[derive(Debug, Clone)]
 pub struct GlobalScope {
     owner: Arc<str>,
-    module_env: Option<Arc<LayeredEnv>>,
+    module_env: Option<Arc<HashMap<String, Value>>>,
     bindings: Option<Arc<ModuleBindings>>,
     globals: OwnedGlobals,
 }
@@ -1114,7 +385,7 @@ pub struct GlobalScope {
 impl GlobalScope {
     pub fn new(
         owner: Arc<str>,
-        module_env: Option<Arc<LayeredEnv>>,
+        module_env: Option<Arc<HashMap<String, Value>>>,
         bindings: Option<Arc<ModuleBindings>>,
         globals: OwnedGlobals,
     ) -> Self {
@@ -1158,8 +429,7 @@ impl GlobalScope {
         if let Some(value) = self.owner_globals().and_then(|globals| globals.get(name)) {
             return Some(value);
         }
-        let binding = self.bindings.as_ref()?.get(name)?;
-        let (owner, source) = &*binding;
+        let (owner, source) = self.bindings.as_ref()?.get(name)?;
         self.globals.get(owner)?.get(source.as_str())
     }
 
@@ -1180,7 +450,7 @@ impl GlobalScope {
         if self.owner_has(name) {
             return Some((Arc::clone(&self.owner), name.to_owned()));
         }
-        self.bindings.as_ref()?.get(name).map(std::borrow::Cow::into_owned)
+        self.bindings.as_ref()?.get(name).cloned()
     }
 
     /// Live value of `name` read from the store of the module that defines
@@ -1189,8 +459,7 @@ impl GlobalScope {
         if self.owner_has(name) {
             return Some(crate::interpreter::owned_global(&self.owner, name));
         }
-        let binding = self.bindings.as_ref()?.get(name)?;
-        let (owner, source) = &*binding;
+        let (owner, source) = self.bindings.as_ref()?.get(name)?;
         Some(crate::interpreter::owned_global(owner, source))
     }
 
@@ -1200,7 +469,7 @@ impl GlobalScope {
             out.push(source.to_owned());
         }
         if let Some(bindings) = &self.bindings {
-            bindings.aliases_of(owner, source, out);
+            out.extend(bindings.aliases_of(owner, source).iter().cloned());
         }
     }
 
@@ -1211,7 +480,9 @@ impl GlobalScope {
             }
         }
         if let Some(bindings) = &self.bindings {
-            bindings.for_each_resolved(f);
+            for (local_name, binding) in bindings.iter() {
+                f(local_name, binding.clone());
+            }
         }
     }
 
@@ -1223,12 +494,11 @@ impl GlobalScope {
             }
         }
         if let Some(bindings) = &self.bindings {
-            let globals = &self.globals;
-            bindings.for_each_resolved(|local_name, (owner, source)| {
-                if let Some(value) = globals.get(&owner).and_then(|globals| globals.get(source.as_str())) {
+            for (local_name, (owner, source)) in bindings.iter() {
+                if let Some(value) = self.globals.get(owner).and_then(|globals| globals.get(source.as_str())) {
                     f(local_name, value);
                 }
-            });
+            }
         }
     }
 }
@@ -1243,7 +513,7 @@ impl GlobalScope {
 #[derive(Debug)]
 pub struct CowEnv {
     /// Shared immutable base environment (cheap to clone via Arc)
-    base: Option<Arc<LayeredEnv>>,
+    base: Option<Arc<HashMap<String, Value>>>,
     /// Module scope resolved by parent pointer: never copied into the frame.
     scope: Option<GlobalScope>,
     /// Local modifications/additions (typically small — function args, locals)
@@ -1714,10 +984,14 @@ impl CowEnv {
             scope.for_each_live(&mut push_shared);
         }
         if let Some(base) = &self.base {
-            base.for_each_precedence(&mut push_shared);
+            for (k, v) in base.iter() {
+                push_shared(k, v);
+            }
         }
         if let Some(env) = self.scope.as_ref().and_then(|scope| scope.module_env.as_ref()) {
-            env.for_each_precedence(&mut push_shared);
+            for (k, v) in env.iter() {
+                push_shared(k, v);
+            }
         }
         out
     }
@@ -1736,7 +1010,7 @@ impl CowEnv {
     /// recycled while the entry exists, and a dead base fails `upgrade()`.
     /// Returns `None` for both "no base" and "not a template-able env" --
     /// callers pair it with `template_key`, which distinguishes the two.
-    pub fn template_base(&self) -> Option<Arc<LayeredEnv>> {
+    pub fn template_base(&self) -> Option<Arc<HashMap<String, Value>>> {
         if !self.overlay.is_empty() || !self.tombstones.is_empty() {
             return None;
         }
@@ -2057,7 +1331,7 @@ impl CowEnv {
     }
 
     /// Create a CowEnv with a shared base (for function calls).
-    pub fn with_base(base: Arc<LayeredEnv>) -> Self {
+    pub fn with_base(base: Arc<HashMap<String, Value>>) -> Self {
         CowEnv {
             base: Some(base),
             scope: None,
@@ -2083,48 +1357,9 @@ impl CowEnv {
             .collect()
     }
 
-    /// Bind an imported module's whole export table into this env BY
-    /// REFERENCE: what `insert`ing every entry of `layer` used to do, without
-    /// copying it. Overlay entries the layer rebinds are evicted directly
-    /// (never through `remove`, whose tombstone would hide the layer), so
-    /// "later wins" holds in both directions: an overlay write after the
-    /// layer shadows it, one before is replaced by it.
-    pub fn push_import_layer(&mut self, layer: TableView) {
-        let evicted: Vec<String> = self
-            .overlay
-            .keys()
-            .filter(|name| layer.contains_key(name.as_str()))
-            .cloned()
-            .collect();
-        for name in &evicted {
-            self.unnote_overlay_key(name);
-            self.overlay.remove(name);
-            // No longer a frame write: the layer now answers the name.
-            self.dirty_names.remove(name.as_str());
-        }
-        // `insert` also clears these per key; they are empty in a module
-        // evaluation env, so only pay for the scan when they are not.
-        if !self.tombstones.is_empty() {
-            self.tombstones.retain(|name| !layer.contains_key(name.as_str()));
-        }
-        if !self.refreshed_globals.is_empty() {
-            self.refreshed_globals.retain(|name| !layer.contains_key(name.as_str()));
-        }
-        if !self.uninit_names.is_empty() {
-            self.uninit_names.retain(|name| !layer.contains_key(name.as_str()));
-        }
-        let base = self.base.get_or_insert_with(|| Arc::new(LayeredEnv::new()));
-        Arc::make_mut(base).push_layer(layer);
-    }
-
-    /// The module-evaluation shape of this env -- overlay over an optional
-    /// layered base, no live scope, no tombstones -- or `None` for any other
-    /// shape (callers then materialize with `iter`).
-    pub fn module_parts(&self) -> Option<(impl Iterator<Item = (&String, &Value)>, Option<&Arc<LayeredEnv>>)> {
-        if self.scope.is_some() || !self.tombstones.is_empty() {
-            return None;
-        }
-        Some((self.overlay.iter(), self.base.as_ref()))
+    /// Freeze current state into a shareable Arc<HashMap> for capture.
+    pub fn freeze(&self) -> Arc<HashMap<String, Value>> {
+        Arc::new(self.to_map())
     }
 
     /// Clear all entries.
@@ -2510,357 +1745,6 @@ impl ClassInstance {
     }
 }
 
-/// Element storage of a mutable `Value::Array`.
-///
-/// Two representations, chosen so that every observable behaviour is that of
-/// the boxed `Vec<Value>` (doc/05_design/compiler/interpreter/packed_word_array_storage_2026-10-05.md):
-///
-/// * `Boxed` -- one `Value` per element (64 bytes each).
-/// * `Packed` -- exact compact storage for arrays whose every element is
-///   `Value::Int(v)` with `0 <= v <= u32::MAX` or `Value::UInt { width: 32 }`:
-///   a `u32` word plus one kind bit per element, about 4 bytes per element.
-///   Reading an element rebuilds exactly the `Value` that was stored.
-///
-/// Invariants that make the packed form unobservable:
-/// * `Deref` (`&Vec<Value>`) on a packed array materializes a boxed VIEW once
-///   (`OnceLock`) and returns it. The view is derived from the words; nothing
-///   can write through `&Vec<Value>`, so the view stays equal to the words.
-/// * `DerefMut` (`&mut Vec<Value>`) permanently converts a packed array to
-///   boxed first (reusing the view when one exists). Every mutation the
-///   interpreter has not been taught about therefore runs on a boxed array --
-///   correct by construction, at the old memory cost.
-/// * Packed-aware mutators (`assign_index`, `write_span_from`) take `&mut
-///   self`, write the words, and drop any materialized view, so the view can
-///   never go stale.
-pub struct ArrayData {
-    store: ArrayStore,
-}
-
-enum ArrayStore {
-    Boxed(Vec<Value>),
-    Packed(Box<PackedWords>),
-}
-
-/// Kind of one packed element.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum WordKind {
-    Int,
-    U32,
-}
-
-struct PackedWords {
-    words: Vec<u32>,
-    /// One bit per element: set = `Value::Int`, clear = `Value::UInt { width: 32 }`.
-    int_bits: Vec<u64>,
-    /// Boxed view, built on first `Deref`.
-    view: std::sync::OnceLock<Vec<Value>>,
-}
-
-/// Process-wide count of packed arrays materialized to a boxed view or
-/// converted to boxed storage (element counts). `SIMPLE_MEM_TRACE` reports
-/// it; a framebuffer-sized entry means a hot path is not packed-aware.
-pub static ARRAY_MATERIALIZE_ELEMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static ARRAY_MATERIALIZE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Smallest array the repeat literal stores packed. Below it the boxed form is
-/// cheap and the packed bookkeeping is not worth having.
-pub const PACKED_WORDS_MIN_LEN: usize = 1024;
-
-fn packed_word_of(value: &Value) -> Option<(u32, WordKind)> {
-    match value {
-        Value::Int(v) if (0..=i64::from(u32::MAX)).contains(v) => Some((*v as u32, WordKind::Int)),
-        Value::UInt { value, width: 32 } if *value <= u64::from(u32::MAX) => Some((*value as u32, WordKind::U32)),
-        _ => None,
-    }
-}
-
-impl PackedWords {
-    fn len(&self) -> usize {
-        self.words.len()
-    }
-
-    fn kind(&self, i: usize) -> WordKind {
-        if self.int_bits[i / 64] & (1u64 << (i % 64)) != 0 {
-            WordKind::Int
-        } else {
-            WordKind::U32
-        }
-    }
-
-    fn value(&self, i: usize) -> Value {
-        let w = self.words[i];
-        match self.kind(i) {
-            WordKind::Int => Value::Int(i64::from(w)),
-            WordKind::U32 => Value::UInt {
-                value: u64::from(w),
-                width: 32,
-            },
-        }
-    }
-
-    fn set(&mut self, i: usize, word: u32, kind: WordKind) {
-        self.words[i] = word;
-        let bit = 1u64 << (i % 64);
-        match kind {
-            WordKind::Int => self.int_bits[i / 64] |= bit,
-            WordKind::U32 => self.int_bits[i / 64] &= !bit,
-        }
-        // Any materialized view is now stale; drop it (we hold `&mut`).
-        self.view = std::sync::OnceLock::new();
-    }
-
-    fn to_values(&self) -> Vec<Value> {
-        ARRAY_MATERIALIZE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        ARRAY_MATERIALIZE_ELEMS.fetch_add(self.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        if crate::mem_trace::enabled() && self.len() >= 1 << 16 {
-            eprintln!(
-                "[mem][array-materialize] packed array of {} elements boxed; interp stack: {}\n{}",
-                self.len(),
-                crate::mem_trace::interp_stack_tail(8),
-                std::backtrace::Backtrace::force_capture()
-                    .to_string()
-                    .lines()
-                    .filter(|l| l.contains("simple_compiler::") && !l.contains("value::ArrayData") && !l.contains("PackedWords") && !l.contains("mem_trace"))
-                    .take(10)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
-        }
-        (0..self.len()).map(|i| self.value(i)).collect()
-    }
-
-    fn repeat(word: u32, kind: WordKind, n: usize) -> Self {
-        let fill = if kind == WordKind::Int { u64::MAX } else { 0 };
-        PackedWords {
-            words: vec![word; n],
-            int_bits: vec![fill; n.div_ceil(64)],
-            view: std::sync::OnceLock::new(),
-        }
-    }
-}
-
-impl Clone for PackedWords {
-    fn clone(&self) -> Self {
-        // The view is a cache; a clone rebuilds it only if it is needed.
-        PackedWords {
-            words: self.words.clone(),
-            int_bits: self.int_bits.clone(),
-            view: std::sync::OnceLock::new(),
-        }
-    }
-}
-
-impl Clone for ArrayData {
-    fn clone(&self) -> Self {
-        ArrayData {
-            store: match &self.store {
-                ArrayStore::Boxed(values) => ArrayStore::Boxed(values.clone()),
-                ArrayStore::Packed(p) => ArrayStore::Packed(p.clone()),
-            },
-        }
-    }
-}
-
-impl Default for ArrayData {
-    fn default() -> Self {
-        ArrayData {
-            store: ArrayStore::Boxed(Vec::new()),
-        }
-    }
-}
-
-impl ArrayData {
-    /// `[value; n]`: packed when `value` is in the packed domain and the
-    /// array is large, boxed otherwise. Element-for-element equal either way.
-    pub fn repeat(value: Value, n: usize) -> Self {
-        if n >= PACKED_WORDS_MIN_LEN {
-            if let Some((word, kind)) = packed_word_of(&value) {
-                return ArrayData {
-                    store: ArrayStore::Packed(Box::new(PackedWords::repeat(word, kind, n))),
-                };
-            }
-        }
-        ArrayData::from(vec![value; n])
-    }
-
-    /// The boxed elements, by value.
-    pub fn into_vec(self) -> Vec<Value> {
-        match self.store {
-            ArrayStore::Boxed(values) => values,
-            ArrayStore::Packed(mut p) => p.view.take().unwrap_or_else(|| p.to_values()),
-        }
-    }
-
-    /// Whether the elements are currently stored packed (tests, tracing).
-    pub fn is_packed(&self) -> bool {
-        matches!(self.store, ArrayStore::Packed(_))
-    }
-
-    /// Element count, without materializing a packed array.
-    pub fn len(&self) -> usize {
-        match &self.store {
-            ArrayStore::Boxed(values) => values.len(),
-            ArrayStore::Packed(p) => p.len(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Element `i` by value, without materializing a packed array.
-    pub fn get_value(&self, i: usize) -> Option<Value> {
-        match &self.store {
-            ArrayStore::Boxed(values) => values.get(i).cloned(),
-            ArrayStore::Packed(p) => (i < p.len()).then(|| p.value(i)),
-        }
-    }
-
-    /// A boxed copy of the elements. Shadows `<[Value]>::to_vec` so a packed
-    /// array is copied once, without also building (and keeping) its view.
-    pub fn to_vec(&self) -> Vec<Value> {
-        match &self.store {
-            ArrayStore::Boxed(values) => values.clone(),
-            ArrayStore::Packed(p) => match p.view.get() {
-                Some(view) => view.clone(),
-                None => (0..p.len()).map(|i| p.value(i)).collect(),
-            },
-        }
-    }
-
-    /// Iterate the elements by value, without materializing a packed array.
-    pub fn values_iter(&self) -> impl Iterator<Item = Value> + '_ {
-        (0..self.len()).map(move |i| self.get_value(i).expect("index below len"))
-    }
-
-    /// `arr[idx] = value`, with exactly the boxed semantics the interpreter's
-    /// index-assignment paths implement: overwrite when `idx < len`, otherwise
-    /// pad with `nil` up to `idx` and append. A packed array stays packed when
-    /// the store is an in-range overwrite with an in-domain value; any other
-    /// store converts it to boxed first.
-    pub fn assign_index(&mut self, idx: usize, value: Value) {
-        if let ArrayStore::Packed(p) = &mut self.store {
-            if idx < p.len() {
-                if let Some((word, kind)) = packed_word_of(&value) {
-                    p.set(idx, word, kind);
-                    return;
-                }
-            }
-        }
-        let arr: &mut Vec<Value> = self;
-        if idx < arr.len() {
-            arr[idx] = value;
-        } else {
-            while arr.len() < idx {
-                arr.push(Value::Nil);
-            }
-            arr.push(value);
-        }
-    }
-
-    /// `dst[dst_off..dst_off+n] = src[src_off..src_off+n]` for a range the
-    /// caller has already validated, where `src` is a snapshot taken before
-    /// this call (memmove semantics). Stays packed when every copied element
-    /// is in the packed domain.
-    pub fn write_span_from(&mut self, src: &ArrayData, dst_off: usize, src_off: usize, n: usize) {
-        if let (ArrayStore::Packed(dst), ArrayStore::Packed(s)) = (&mut self.store, &src.store) {
-            dst.words[dst_off..dst_off + n].copy_from_slice(&s.words[src_off..src_off + n]);
-            for i in 0..n {
-                let kind = s.kind(src_off + i);
-                let bit = 1u64 << ((dst_off + i) % 64);
-                match kind {
-                    WordKind::Int => dst.int_bits[(dst_off + i) / 64] |= bit,
-                    WordKind::U32 => dst.int_bits[(dst_off + i) / 64] &= !bit,
-                }
-            }
-            dst.view = std::sync::OnceLock::new();
-            return;
-        }
-        if let ArrayStore::Packed(dst) = &mut self.store {
-            let words: Option<Vec<(u32, WordKind)>> =
-                (src_off..src_off + n).map(|i| src.get_value(i).and_then(|v| packed_word_of(&v))).collect();
-            if let Some(words) = words {
-                for (k, (word, kind)) in words.into_iter().enumerate() {
-                    dst.set(dst_off + k, word, kind);
-                }
-                return;
-            }
-        }
-        let dst: &mut Vec<Value> = self;
-        for k in 0..n {
-            dst[dst_off + k] = src.get_value(src_off + k).expect("validated span");
-        }
-    }
-}
-
-impl std::ops::Deref for ArrayData {
-    type Target = Vec<Value>;
-    fn deref(&self) -> &Vec<Value> {
-        match &self.store {
-            ArrayStore::Boxed(values) => values,
-            ArrayStore::Packed(p) => p.view.get_or_init(|| p.to_values()),
-        }
-    }
-}
-
-impl std::ops::DerefMut for ArrayData {
-    fn deref_mut(&mut self) -> &mut Vec<Value> {
-        if let ArrayStore::Packed(p) = &mut self.store {
-            let values = p.view.take().unwrap_or_else(|| p.to_values());
-            self.store = ArrayStore::Boxed(values);
-        }
-        match &mut self.store {
-            ArrayStore::Boxed(values) => values,
-            ArrayStore::Packed(_) => unreachable!("converted to boxed above"),
-        }
-    }
-}
-
-impl From<Vec<Value>> for ArrayData {
-    fn from(values: Vec<Value>) -> Self {
-        ArrayData {
-            store: ArrayStore::Boxed(values),
-        }
-    }
-}
-
-impl FromIterator<Value> for ArrayData {
-    fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
-        ArrayData::from(iter.into_iter().collect::<Vec<Value>>())
-    }
-}
-
-/// Debug renders exactly as the `Vec<Value>` it replaced, so every
-/// `{:?}`-based diagnostic and probe is byte-identical.
-impl std::fmt::Debug for ArrayData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.store {
-            ArrayStore::Boxed(values) => std::fmt::Debug::fmt(values, f),
-            ArrayStore::Packed(_) => f.debug_list().entries(self.values_iter()).finish(),
-        }
-    }
-}
-
-/// Element-wise `Value` equality: the same answer the boxed `Vec<Value>`
-/// comparison gave, for any mix of representations.
-impl PartialEq for ArrayData {
-    fn eq(&self, other: &Self) -> bool {
-        match (&self.store, &other.store) {
-            (ArrayStore::Boxed(a), ArrayStore::Boxed(b)) => a == b,
-            _ => self.len() == other.len() && self.values_iter().zip(other.values_iter()).all(|(a, b)| a == b),
-        }
-    }
-}
-
-impl<'a> IntoIterator for &'a ArrayData {
-    type Item = &'a Value;
-    type IntoIter = std::slice::Iter<'a, Value>;
-    fn into_iter(self) -> Self::IntoIter {
-        let values: &'a Vec<Value> = self;
-        values.iter()
-    }
-}
-
 /// Runtime value representation.
 #[derive(Debug)]
 pub enum Value {
@@ -2899,14 +1783,12 @@ pub enum Value {
     StrBytes(Arc<Vec<u8>>),
     Symbol(String),
     /// Mutable array (default for array literals)
-    /// Wrapped in Arc for O(1) clone (COW via Arc::make_mut for mutations).
-    /// `ArrayData` derefs to `Vec<Value>`; it is the storage seam for packed
-    /// word arrays (doc/05_design/compiler/interpreter/packed_word_array_storage_2026-10-05.md).
-    Array(Arc<ArrayData>),
+    /// Wrapped in Arc for O(1) clone (COW via Arc::make_mut for mutations)
+    Array(Arc<Vec<Value>>),
     /// Packed mutable `[u8]` storage. Mutations use `Arc::make_mut` COW.
     ByteArray(Arc<Vec<u8>>),
     /// Immutable frozen array (created via freeze(), copy-on-freeze semantics)
-    FrozenArray(Arc<ArrayData>),
+    FrozenArray(Arc<Vec<Value>>),
     /// Packed immutable `[u8]` storage.
     FrozenByteArray(Arc<Vec<u8>>),
     /// Fixed-size array with runtime size checking ([T; N] syntax)
@@ -3117,8 +1999,8 @@ impl Value {
     }
 
     /// Create a new mutable array value (default for array literals)
-    pub fn array(vec: impl Into<ArrayData>) -> Self {
-        Value::Array(Arc::new(vec.into()))
+    pub fn array(vec: Vec<Value>) -> Self {
+        Value::Array(Arc::new(vec))
     }
 
     pub fn byte_array(vec: Vec<u8>) -> Self {
@@ -3126,8 +2008,8 @@ impl Value {
     }
 
     /// Create a new frozen (immutable) array value
-    pub fn frozen_array(vec: impl Into<ArrayData>) -> Self {
-        Value::FrozenArray(Arc::new(vec.into()))
+    pub fn frozen_array(vec: Vec<Value>) -> Self {
+        Value::FrozenArray(Arc::new(vec))
     }
 
     pub fn frozen_byte_array(vec: Vec<u8>) -> Self {

@@ -1,62 +1,19 @@
 # Collect bootstrap, build, and test failures
 
-## Windows bootstrap harness prerequisites
-
-The Windows compiler seed links the hosted WebGPU provider. Its runtime
-dependency selects `hosted-webgpu-provider` so the runtime's three overlapping
-backfills do not also export the ABI; the selected provider must also link
-into the runtime cdylib. The bounded regression is
-`sh scripts/check/check-webgpu-runtime-export-ownership.shs` (set
-`RUSTC_LINKER` to the pinned `lld-link.exe` on Windows). It uses actual provider
-source archives, a duplicate-definition negative control, and standalone,
-hosted, and native-all positive controls; it does not admit a seed build.
-
-Preflight's paired-conflict-marker scan prunes `vendor` directories before
-reading files. Vendored compiler dependencies are outside owned-code scope;
-filtering their matches after a recursive grep still incurs their full scan.
-`sh scripts/check/check-bootstrap-preflight.shs --selftest` checks owned paired
-and unpaired markers, vendor exclusion, and paths containing spaces without
-running Cargo or a full preflight.
-
-The MSVC setup helper supports callers using `set -euo pipefail`. SDK discovery
-must skip non-SDK Include children such as `wdf` without turning the final
-directory predicate into a pipeline failure. Keep missing-SDK and tool failures
-visible. `bash scripts/check/check-windows-msvc-sdk-discovery.shs` checks that
-boundary; see the [SDK discovery bug](../../08_tracking/bug/windows_msvc_sdk_discovery_pipefail_2026-10-11.md).
-
-Run the PATH fixture with
-`python scripts/check/check-bootstrap-path-access.py --script scripts/bootstrap/bootstrap-from-scratch.sh --output <fresh-private-directory>`.
-On Windows it discovers native Bash beside Git on PATH; for MSYS2 or a custom
-installation, pass `--shell "C:/path with spaces/bash.exe"`. On POSIX it resolves
-`bash` from PATH. Windows ambient Bash is not selected automatically because it
-may be the WSL launcher. Shell discovery occurs before creating the output
-directory, and an existing output directory is rejected to preserve evidence.
-
-`sh scripts/check/check-bootstrap-windows-authority-paths.shs` exercises the
-actual `run_rust_authority_cargo` and `run_rust_authority_command` owners together.
-The fixture binds `PLATFORM_RUST_TRIPLE`, checks the forwarded
-`build --target x86_64-pc-windows-msvc` arguments, and checks scoped
-`TEMP`/`TMP`/`SystemRoot` through all four LLVM/LTO branches. It substitutes the
-Cargo process and resource setup; it does not compile the seed or admit a phase.
-Keep these host-harness results separate from compiler and Phase4 evidence.
-See the [harness drift bug and retained results](../../08_tracking/bug/windows_bootstrap_contract_harness_drift_2026-10-11.md).
-
 During bootstrap diagnosis, reach the end of all independently runnable build
 and test work instead of ending the investigation at the first failure. This
 is the shared agent policy for SPipe, bootstrap, builds, tests, and bug repair.
-Full bootstrap and its phase matrix collect independent failures by default on
-hosts and CI (`CI=true` or `CI=1`). Compatible caches are reused by default.
-Select the
+Native-build and the bootstrap phase matrix collect independent failures by
+default on a host. CI (`CI=true` or `CI=1`) defaults to fail fast. Select the
 policy with `--keep-going` or `--fail-fast`; the last explicit flag wins.
-`SIMPLE_COMPILE_FAIL_FAST=0` or `1` overrides that default and is inherited
-by worker processes. An empty or other environment value uses the go-to-end
+`SIMPLE_COMPILE_FAIL_FAST=0` or `1` overrides the CI/host default and is inherited
+by worker processes. An empty or other environment value uses the CI/host
 default. This policy does not change inventory scope (`normal` versus `full`).
 
 The phase matrix retains its first failure and exits nonzero even if later rows
 succeed. In fail-fast mode, unlaunched tasks and spec rows are `SKIPPED`; already
 launched bounded workers finish. Missing prerequisites remain `BLOCKED` or
-`UNSUPPORTED`. Invalid snapshots/admission remain fatal to the canonical
-admitted result, not to separately identified diagnostic work. Successful objects
+`UNSUPPORTED`, and invalid snapshots/admission remain fatal. Successful objects
 and admitted cache entries survive either policy. A failed compile never gains
 a successful output merely because diagnostic collection reached the end.
 
@@ -64,150 +21,6 @@ The regression `sh scripts/check/check-bootstrap-keep-going-policy.shs` exercise
 production orchestration with failing/passing fake commands and inventory rows;
 it also checks policy inheritance, ordered overrides, cache preservation, and
 fatal snapshot admission. Other runners may still need their own policy wiring.
-
-## Phase verification campaign bounds
-
-The phase verifier has a single 7200-second campaign deadline, separate from
-`--timeout-seconds` for each row. Set `--campaign-timeout-seconds` or
-`BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS` to select another positive budget.
-The owner reaps its job/process tree on expiry or interruption and retains
-partial rows, incomplete counts, caches and a nonpassing campaign receipt.
-Nested row RSS enforcement remains unchanged.
-
-If mandatory fullCLI or test-runner construction fails, independent module
-diagnostics default to 8 deterministic entries. Configure the nonnegative
-`BOOTSTRAP_VERIFY_FAILED_TOOL_MODULE_LIMIT` for another finite sample. The full
-inventory remains retained; excluded entries are explicitly unexecuted/BLOCKED.
-Healthy prerequisites retain the complete inventory. This sample cannot admit
-missing tools or replace test-suite evidence. Regression:
-`sh scripts/bootstrap/tests/verification-campaign-test.shs`.
-
-## Agent continuation and explicit diagnostic exceptions
-
-Always finish the finite inventory of independently runnable modules, binary
-builds and tests. A failed row is a result to collect, not a reason to stop the
-whole pipeline. Let healthy sibling jobs finish; after collecting failures,
-group them by cause and delegate independent repairs to parallel agents with
-separate writable source/cache ownership. A repair already understood may run
-while collection continues. Distinguish logic defects, performance defects,
-resource-policy exits and unavailable prerequisites.
-
-When a bug appears during an active diagnostic bootstrap, register it in the
-bug database and repair it in parallel. Prefer a scoped, semantics-preserving
-workaround with the current compiler over returning to an earlier compiler or
-rebuilding the producer immediately. Keep the failed attempt and workaround
-identity separate. Apply changed inputs only to a new isolated attempt after
-the relevant owner has finished; do not patch a running source snapshot.
-Continue remaining independent cases to the end of Phase 4 where prerequisites
-permit. After that collection run ends, rebuild the full chain with accumulated
-fixes and required checks restored. A workaround is not proof that the underlying
-bug is fixed, and cannot turn a failed assertion or missing output into a pass.
-
-Every temporary workaround must identify its open underlying bug, background
-repair owner, original failing form and removal check. Keep the root-cause fix
-separate from the workaround. The later full rebuild must exercise the original
-form with the corrected producer before retiring the workaround, then run the
-affected regression cases without it. Do not leave a workaround permanently in
-place merely because the altered form passes, and do not remove it before the
-replacement is verified. Record explicitly which diagnostic policy exceptions
-are restored for qualification.
-
-For every performance fix, check memory behavior as well as elapsed time. For
-every memory fix, check performance as well as lifetime and peak usage. Run
-relevant correctness regressions in both cases. Record comparable inputs and
-producer identities; measurements without a comparable baseline are evidence,
-not a claimed improvement. Preserve valid caches while making these comparisons.
-
-When the user authorizes continuation past a time, memory or other policy
-failure, record that authorization and the exact disabled check in a separate
-**DIAGNOSTIC** attempt. Continue eligible work with elapsed-time, memory/RSS,
-process-tree, progress and exit-status monitoring. Monitoring must not silently
-re-enable the disabled kill threshold. Keep any other selected limits explicit;
-do not claim a watchdog was disabled when an enclosing job still enforces it.
-Use supported per-attempt settings, or a reviewed isolated diagnostic source
-change when no setting exists. Preserve the original failed receipt and cache.
-Do not repeatedly request permission already granted for that scoped exception.
-
-An exception changes diagnostic execution policy, not facts: retain actual
-source/producer/runtime/tool hashes, label altered inputs and descendants, and
-never forge PASS, admission, test counts or cache compatibility. Do not turn
-invalid inputs, missing binaries, empty payloads or failed assertions into
-successful results. A disabled policy check does not authorize unsafe memory
-access or a false provenance claim. Restore normal checks and obtain the
-required verification before formal admission, deployment or release promotion.
-
-Before a dependent provisional phase starts, the exact produced compiler must
-compile a real Hello World fixture **and its output executable must run with
-the expected output and exit status**. Record both commands and artifacts.
-This gate permits diagnostic continuation before full qualification; it does
-not grant admission. If Hello fails, record its failing boundary and continue
-independent builds/tests or an explicitly authorized diagnostic repair of that
-boundary. Do not label the dependent phase runnable from binary existence alone.
-
-At the next actual restart, fetch the requested release branch and integrate
-reviewed, applicable unmerged fixes in an isolated source owner. Coordinate with
-their owners; preserve unrelated work and do not take over active drafts. Freeze
-the resulting revision/patch identities before launching. Never mutate a live
-producer or source snapshot. Reuse compatible persisted frontend/HIR/native
-caches; changed inputs invalidate only the scope the cache contract requires.
-
-The Windows LLVM/Cranelift repair request recorded on 2026-10-03 selects 40
-backend jobs per lane, parallel failure collection, monitored diagnostic policy
-exceptions, and Hello-gated provisional continuation. This is the active repair
-profile, not a universal worker count: later explicit user choices supersede
-it. Frontend process fanout must account for shared host and enclosing process
-budgets; backend thread count is not permission to spawn that many large HIR
-processes. Keep performance and correctness fixes separate when requested.
-
-## Canonical managed Phase 3 and Phase 4
-
-The grouped canonical wrapper schedules fourteen binary tasks, six three-case
-compiler/loader/interpreter suites, and four index/module pairs across both
-phases and LLVM/Cranelift. A verified compiler
-`ERROR` with exit 1 continues independent tasks; a failed index blocks only its
-own module group. The task-outcomes TSV is scheduling evidence, not an admission
-receipt. Any failed or blocked task prevents the canonical PASS receipt.
-
-Canonical admitted continuation requires the updated compiled manager: exit 1 is reserved for an
-identity-checked compiler failure with actual tree reap and a retained matching
-result. Launch rejection, timeout, cancellation, unknown crash, capacity,
-integrity, and cleanup errors abort with exit 2. Retained failures are admitted
-again on resume. The owner stop and systemic stop paths are
-`SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE` and
-`SIMPLE_MODULE_SYSTEMIC_STOP_FILE`; they stop the next scheduling boundary.
-They do not replace process-owner cancellation of an already active task.
-
-The canonical resource policy defaults to one attempt. Deterministic compiler
-`ERROR/1` is terminal even with a larger explicit attempt budget; unrelated
-groups continue. The shell regression is
-`scripts/bootstrap/tests/managed-task-schedule-test.shs`. Native policy and
-manager tests remain required before qualification. These are current canonical
-runner semantics. A user-authorized diagnostic exception uses a separate,
-explicitly labeled attempt or independent entrypoint; it does not rewrite an
-exit-2 receipt or stop unrelated runnable work.
-
-The aggregate phase owner queues two isolated phase tasks, reserving their
-full memory caps, disk growth and CPU demand before staging/spawn. Each phase
-runs only one native module group at a time, leaving space for its managers.
-Unknown cleanup retains its reservation and blocks recovery. Phase journals,
-scratch snapshots and hash files are private; the parent merges after both
-owned trees are reaped. Source and native enforcement are still unqualified
-until the rebuilt manager passes actual overlap, cancellation and recovery
-tests. Shell spy tests do not prove native enforcement.
-
-The aggregate lifetime covers both execution and resource waiting. The default
-six-hour parent lease is the effective upper bound for a phase started under
-it, even though generic task manifests permit up to twenty-four hours. A late
-phase receives only the remaining parent lifetime. Parent expiry cancels and
-reaps the owned trees; it does not promise twenty-four hours or authorize a
-fresh attempt. Timeout recovery needs preserved, validated checkpoint progress
-and a presealed attempt budget; absent that proof the run remains aborted.
-
-Do not deploy the new shell around old manager images. The canonical image
-preparer compares its full source snapshot to the admitted Stage 2 snapshot;
-there is no independent tool-source closure authority. Rebuild and admit a
-candidate containing the manager changes, then prepare all eight manager
-images from that same authority. Do not rewrite an older admission receipt.
 
 ## Module diagnostics after a tool binary fails
 
@@ -235,16 +48,6 @@ that count at `BOOTSTRAP_VERIFY_BUILD_THREADS` and divides the thread budget
 among workers. Each bounded batch finishes before the next starts. Host policy
 collects remaining independent modules; fail-fast records unlaunched modules as
 SKIPPED, including the whole sweep after a prior binary failure.
-
-For Phase2/3 CLI and test-runner builds,
-`BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY` accepts 1 or 2 (default 2).
-Set it to 1 to build the two large closures sequentially while allowing each
-closure to use `BOOTSTRAP_VERIFY_BUILD_THREADS` threads. This keeps process-tree
-memory caps effective without forcing the individual builds to one thread.
-The default retains concurrent builds and divides the thread budget between
-them. The existing fail-fast behavior is unchanged unless sequential closure
-concurrency is explicitly selected. This setting does not skip tests or alter
-the profile's qualification requirements.
 
 Caches live under `module-diagnostics/<phase>/<producer-sha>/<input-identity>/`
 with a stable hash of each relative module path. Attempts have separate logs,
@@ -286,67 +89,6 @@ mass-rename or rewrite existing scripts merely to change their extension.
 
 ## Continue by dependency
 
-### Full bootstrap execution graph
-
-For the full profile, plan the following work for both LLVM and Cranelift.
-The user's selected Windows build/test budget is 80 jobs; divide available
-capacity among concurrent lanes and retain memory-aware admission. Eighty
-code-generation jobs do not imply eighty independent frontend processes.
-
-| Producer ready | Work to collect | Diagnostic continuation |
-|---|---|---|
-| Phase 1 | Whole Phase 1 test inventory | Build Phase 2 after the Phase 1 collection reaches its terminal summary. Record failures without discarding a usable, sanity-tested producer. |
-| Phase 2 plus compile-and-run sanity | Build, enumerate and execute compiler, interpreter and loader test binaries for each backend | Start Phase 3 and early Phase 4 using Phase 2 concurrently with tests. |
-| Phase 3 plus compile-and-run sanity | Whole Phase 3 inventory, including binary tools and library tests | Build Phase 4 using Phase 3 concurrently with tests. |
-| Either Phase 4 product cohort | Product sanity and the whole Phase 4 test inventory | Retain separate Phase-2-produced and Phase-3-produced results; neither substitutes for the other. |
-
-Each backend has three Phase 2 subsystem binaries, six across both backends.
-Use Simple's existing aggregate test generation and registry, enumerate the
-actual cases first, then execute every runnable case. Record discovered,
-executed, passed, failed and blocked counts separately; do not assume a target
-count or substitute tests of a third-party framework. A compiler-only CLI
-cannot stand in for the generated test binary or the full CLI's whole suite.
-
-These are execution requirements, not a claim that every platform wrapper
-already implements this graph. A runner lacking an edge must report that gap
-and use an identity-checked independent diagnostic lane until it is wired.
-Formal qualification, lineage admission and publication still require all
-their evidence; early descendants remain quarantined.
-
-### Bind newly built producers between waves
-
-A fresh bootstrap cannot validate the hashes of compilers it has not built.
-Construct each next wave after the preceding producer and its compile-and-run
-sanity task have retained terminal evidence. The managed task owner must bind
-the actual compiler output path and digest into that wave's commands and cache
-identity. A static inventory that accepts only pre-existing compilers does not
-implement the fresh bootstrap graph above.
-
-The implementation lane adds `managed-tasks-next-producer` to the existing
-managed owner and `managed-next-producer-launch.shs` as argument transport.
-Its native factory checks remain pending until exercised with a built compiler;
-passing shell transport fixtures does not qualify the factory. Keep the whole
-test inventory and early build waves independent after producer sanity, and
-retain failed test summaries as failures.
-
-`--full-bootstrap --stop-after-seed` prepares the canonical seed generation and
-writes `phase1-seed.env`. It records whole tests as `NOT_RUN`, Stage 2 as
-unadmitted and backend dynload as unqualified. Combining seed-stop with receipt
-validation, resume, deployment or later-phase stop options is an error before
-dispatch; no alternate exit may be mistaken for seed preparation success.
-
-### Windows RC1 completion scope
-
-For the current release, one successful host qualifies the RC: Windows is the
-RC1 host. Complete its requested bootstrap graph, required test inventories
-and local deployment before creating the release tag or publishing. Linux,
-macOS and BSD are RC2 targets; record them as unverified for RC1 rather than
-requiring their success or claiming cross-platform validation. Stop GitHub
-synchronization during the local repair/build cycle. After local success,
-inspect current remote state before the requested branch update, landing and
-tag publication, and check the remote release result. A Windows-only scope
-does not waive failed Windows tests or missing Windows artifacts.
-
 Inventory the requested phases, entries, tool builds, and test shards before
 launching them. Record dependencies and plan concurrency against available
 memory and disk, with explicit per-process timeout budgets. Memory planning
@@ -357,9 +99,8 @@ unbounded retries. Respect explicit user stop points and scope.
 
 A produced compiler may start the next **diagnostic** phase once its immutable
 bytes and producer identity are recorded and minimum sanity proves the required
-operation works: launch it, compile Hello World, and execute its output with
-checked output and exit status. Add another representative fixture when the
-next phase requires a capability that Hello does not exercise. Binary existence
+operation works: launch it, compile a small representative fixture, and execute
+that fixture with checked output. A version string or binary existence alone
 is insufficient. Do not wait for full suite completion or formal phase admission
 to start this diagnostic continuation. Label the compiler and descendants
 unadmitted and retain their exact lineage. Failed qualification still blocks
@@ -371,20 +112,9 @@ collecting from independent entries, platforms, phases with usable artifacts,
 and test shards. Do not rerun a known crashing producer without a changed input
 or a concrete bounded diagnostic hypothesis. If a wrapper exits early, use
 supported independent entrypoints with equivalent identity and sanity checks;
-record any remaining runner limitation. Apply a user-authorized diagnostic
-policy exception in its own attempt; never bypass guards to publish admission.
+record any remaining runner limitation instead of bypassing admission guards.
 
 ## Preserve truthful terminal results
-
-When using the Rust seed for bootstrap with `--runtime-bundle core-c-bootstrap`,
-the runtime source checkout takes precedence over a prebuilt `--runtime-path`.
-The current source resolver searches the working directory's ancestors, then
-the seed's build-time manifest ancestors. `SIMPLE_PROJECT_ROOT` alone does not
-select this C runtime source. Run from the intended frozen checkout and retain
-the actual C compiler input paths/hashes in the receipt. An explicit runtime
-path is not evidence that a provider source fix was compiled. This rule is
-specific to that seed runtime lane; inspect the actual command owner for other
-producers instead of assuming identical selection behavior.
 
 Keep one terminal row per planned operation, with phase, producer hash, source
 revision, entry/shard, exact command, log path, exit status, elapsed time,
@@ -406,28 +136,11 @@ the overall run unsuccessful and its orchestration exit status nonzero. If the
 tool cannot express this, report its raw status and the unresolved aggregate
 failure explicitly. No finite sweep proves the absence of all bugs.
 
-### Windows log observers and collector failures
-
-Open an active temporary log with read, write **and delete** sharing. A reader
-that denies delete sharing can prevent the collector's final rename or cleanup:
-a controlled Windows test reproduced collector exit 126 and a missing receipt
-even though the child had already returned its ordinary failure. Avoid plain
-`Get-Content` for active temporary logs; use an explicit shared file handle or
-wait for the published terminal log.
-
-Capture the collector's own stdout and stderr separately from its bounded child
-log. A missing collector receipt is a process-owner failure, not a successful
-or ordinary failed compiler receipt. Preserve the raw child evidence and the
-reservation until closure is proved or explicitly recovered under the shared
-admission lock. External recovery must retain its own evidence and must never
-fabricate the missing native completion receipt.
-
 ## Repair without losing evidence
 
 Group failures by the first actionable root cause, retain each affected row,
 and claim or create a bug ID with an exact reproduction and artifact identity.
-Assign independent root causes to parallel repair agents with explicit file and
-cache ownership. After fixing the owner, add a same-mechanism regression and a similar scenario;
+After fixing the owner, add a same-mechanism regression and a similar scenario;
 link fixes and remaining blockers from the owning knowledge entry.
 
 Preserve caches by phase, producer identity, and entry. Invalidate only proven
@@ -439,131 +152,6 @@ writable caches between lanes or alter stamps to admit stale data. See the
 Run only the checks needed to resolve changed or failed evidence. Reuse recorded
 green results for unchanged identities; changed producer/source inputs make
 affected evidence stale and require explicit explanation before rechecking.
-Use at most three verify/fix cycles per scoped cause by default. On exhaustion,
-report that cause and its resume steps while finishing other independent rows.
-Record an explicit user-directed exception before additional finite repair
-cycles; do not infer unlimited retries. Never repeat an identical failing
-command without a changed input or concrete diagnostic hypothesis, or replay
-green checks for unchanged identities. Stop at convergence. Completing a finite
-work graph is different from repeatedly restarting the same failed operation.
-
-At the third unresolved cycle, enter or update the canonical bug database with
-the failure group, affected rows, producer/source identities, three attempt
-receipts and reproduction. Record a narrow workaround with its bug link,
-scope, original behavior and removal/retest condition. A workaround may route
-independent diagnostic work around the unavailable operation; it cannot turn
-a failed assertion into PASS, fabricate an artifact, or admit a stale cache.
-If no valid workaround exists, leave that dependency BLOCKED and continue
-other work. Preserve progress rather than rebuilding from Phase 1. A later
-rebuild must revisit the owning bug and verify the intended path before
-removing the workaround; restarting a process does not reset the repair count.
-
-## Cached object continuation and early linking
-
-Keep caches enabled with a stable, exclusively owned cache directory. Preserve
-successful frontend, HIR and native outputs and report actual cache reuse; never
-force fingerprints or infer reuse from object existence. Minimize compiler
-rebuilds by using the existing producer for valid source workarounds while a
-separate agent repairs the compiler. A new producer or changed dependency may
-invalidate more than the failed file; obey the normal cache contract.
-
-Freeze the complete requested source/target inventory before collection. Report
-HIR failures, monomorphization failures, MIR failures, object-emission failures,
-dependency-blocked files and unattempted files separately. Worker progress is
-not the final aggregate ledger. HIR acceptance does not prove an object exists.
-Count emitted objects by their actual paths, sizes and hashes, with producer,
-source, target, backend and ABI identities retained in the receipt.
-
-Advance independent passing files through HIR, monomorphization, MIR and object
-generation where the supported compiler interface and complete dependencies
-permit it. A diagnostic subset must preserve the remaining required inventory;
-do not disable the full build's aggregate guard or call blocked files successful.
-Use supported per-unit object commands rather than inventing a failed-only mode.
-Bound each collection epoch, preserve pending rows and caches, and resume without
-rerunning unchanged successes. Parallel jobs need separate writable source/SCV
-and cache ownership as well as measured combined resource capacity.
-
-For user-authorized workarounds, freeze a separate source revision and retain the
-original failure. Tag affected blocks using the existing
-[@workaround contract](bug_linked_workarounds.md), linking the bug, exact scope
-and removal/retest condition. Preserve pattern binders, guards, error behavior
-and every required module; never replace an unsupported construct with a dummy
-success. Retry failed files and normally invalidated dependents, then continue
-through later stages. A workaround build remains provisional until its real
-runtime checks pass. Fix the underlying owner in parallel and add both an exact
-reproducing scenario and similar prevention cases, including negative cases
-where relevant. Authored tests remain unexecuted until observed on the real runner.
-
-As soon as a target has its complete verified object set, attempt manual linking
-to expose linker failures early. Retain the actual generated linker argv and
-verify every object/runtime input against the target's compile receipts; do not
-guess flags or substitute stale objects. Preserve the primary link failure,
-all missing/duplicate-symbol and relocation diagnostics, and the separate relink
-result. Link success still requires executable smoke tests and the exact new
-compiler's Hello compile/run before dependent provisional phases.
-
-When observing a successful compile, read only the last log line, exit code and
-object size; retain full logs on disk. Inspect additional log contents only when
-the run fails. A crash, nonzero exit, or absent/empty required object is a failure.
-Run lint with the built pure-Simple CLI, retain real diagnostics, and report a
-missing lint owner as blocked rather than substituting the seed.
-
-Host access in product code goes through SoSix aliases/facades, with raw runtime
-calls confined to the appropriate provider owner. Review OS fixes against
-Windows, macOS, FreeBSD and SimpleOS contracts. Distinguish source review from
-actual platform execution and unavailable providers; Linux PASS cannot stand
-for another host. The [POSIX/host interface index](../app/llm/simpleos_posix_host_interface_index.md)
-and LLM wiki's SOSIX/QEMU matrix route to the canonical owners and platform checks.
-
-## Native staging and terminal consumers
-
-Use [native staging and terminal evidence](bootstrap_native_staging.md) for the
-measured Linux/WSL cache-parent staging path, launch-interrupt ownership and atomic
-terminal receipts. Preserve the exact source/runtime boundaries and the campaign
-Phase 3/full-CLI gates; neither a progress marker nor a partial object inventory
-is a completed producer.
-
-For a Windows durable-flush stall, retain the native stack and compare a bounded
-independent file-sync probe on the affected volume and NTFS. The
-[ReFS incident](../../08_tracking/bug/windows_refs_durable_flush_stall_2026-10-11.md)
-required an NTFS source copy as well as output, CAS and temporary roots: compile
-SCV writes remain under `<checkout>/build/scv`. Keep durability enabled and
-preserve failed receipts; storage relocation does not admit the candidate.
-
-The provisional Hello owner scopes `SIMPLE_SCV_INVENTORY_COLD_INIT=1` to its
-first compile only when both current and legacy inventory publication paths
-are absent. Existing publications use warm admission, including malformed
-ones; preserve their failures. Do not export cold initialization across an
-entire phase campaign. See the [first-build fix](../../08_tracking/bug/provisional_hello_missing_inventory_init_2026-10-11.md).
-
-## Resuming bounded object campaigns
-
-Failed CLI/runner construction reduces the next campaign's object batch, but it
-never limits the overall source inventory to a permanent prefix. Linux Stage2/3
-object diagnostics keep progress in the verification cache under a digest of the
-full inventory, admitted source snapshot, producer, runtime, tool inputs, target
-and progress helper. A positive failed-tool limit selects that many unfinished
-entries; zero removes the selection limit while the finite campaign watchdog
-still owns the global deadline. Healthy tooling selects all remaining entries.
-
-A kernel flock lease on a subshell-owned descriptor excludes concurrent writers
-and remains held by inherited workers until they exit. Joined batches publish
-atomic per-row seals only after compiler jobs are reaped and full source/runtime
-authority validates. PASS seals bind the original row, log and actual ELF ET_REL
-object, including its architecture/class; FAIL seals bind terminal evidence and
-remain failures of the whole matrix. BLOCKED, skipped and interrupted rows never
-become seals. Malformed, missing or changed sealed evidence refuses resumption.
-Any context change selects a new lineage; no entry-only dependency guesses or
-dummy objects are used. Existing unsealed historical attempts remain evidence,
-but cannot be adopted without the new authority checks.
-
-Unfinished inventory is INCOMPLETE and retained failures keep the overall result
-FAIL. These diagnostic objects do not admit a compiler or permit linking a
-partial build. This first progress protocol supports Linux ELF targets only;
-other platforms report an explicit blocked diagnostic surface while their other
-matrix rows continue. Native bootstrap and cross-target runtime qualification
-remain required independently of the shell/protocol controls.
-
-## Native tool aliases and receipt artifacts
-
-PATH-selected native tools are resolved to executable physical regular-file targets before hashing (for example Debian llvm-config aliases). Receipt-named compiler artifacts retain strict rejection of symlink leaves. Dangling/cyclic/nonexecutable tool targets fail closed. The focused harness is `sh scripts/check/check-bootstrap-native-command-alias.shs`; it does not qualify Windows execution or a bootstrap stage.
+Stop repairs after at most three verify/fix cycles per feature, report remaining
+failures and exact resume steps, and finish independent collection within the
+declared budget. Collection is bounded work, not an endless repair loop.

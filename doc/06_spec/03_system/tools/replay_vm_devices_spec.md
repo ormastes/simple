@@ -1,629 +1,1013 @@
-# Replay virtual devices specification
+# Replay Vm Devices Specification
 
-Real VirtualTimer, VirtualSerial and VirtualBlock diagnostics for
-`REQ-SSPEC-SYSTEM`. This evidence concerns the pure virtual devices, not
-physical UARTs, guest execution or native-runtime qualification.
+> 1. var timer = VirtualTimer create
 
-| Field | State |
-|---|---|
-| Source | `test/03_system/tools/replay_vm_devices_spec.spl` |
-| Scenarios | 42: 40 preserved device cases, 2 new UART regressions |
-| Baseline diagnostic | Cycle one: **41/42 passed, 1 failed**, 514 ms |
-| Repaired-source diagnostic | Cycle two: **selected case 41 PASS, 1/1**, 343 ms |
-| Coverage | Timer, serial and block 80% annotations are targets, not measured coverage |
-| Manual generation | Exact source transcription; self-hosted docgen pending |
+<!-- sdn-diagram:id=replay_vm_devices_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
 
-The original 40 scenario names/order and device obligations remain: timer
-configuration/ticks/interrupts/snapshots; serial TX/RX and current output;
-block initialization, read/write isolation and bounds errors. Setup write
-Results now fail explicitly on error. Existing indexed TX/sector checks have
-length guards because expectation failures do not abort execution. Each
-scenario has a concrete step.
+```sdn id=replay_vm_devices_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
 
-| New index | Scenario | Assertions |
-|---|---|---|
-| 41 | Every printable ASCII byte | Production MMIO receives all 95 bytes from 32 through 126; every write Result is checked; the entire TX buffer equals the input and output equals an independently written literal alphabet. |
-| 42 | Existing newline/control policy | TX retains NUL, tab, LF, CR, other controls, DEL and non-ASCII bytes; rendered output retains only printable ASCII plus LF, producing exactly `A\nH`. |
+replay_vm_devices_spec -> std
+```
 
-The input helper constructs numeric bytes; the output oracle is a literal
-95-character alphabet, not the production character converter. The MMIO
-setup helper propagates the actual write error and returns the mutated device.
-There is no FFI, process, file I/O or substitute output implementation in the
-new regressions.
+</details>
 
-The baseline ran with production unchanged. Source inspection found
-`serial.spl`'s local `char_from_code` accepts only space, 0, 1, A, H, e, l and o;
-other printable bytes become `?`. The old H/Hello assertions did not expose
-that defect. Cycle one reproduced the full-alphabet failure: output used `?`
-for printable characters outside that table. The authorized production repair
-imports `common.string_core.char_from_code(code: i64)`, casts the stored byte
-to i64 and removes the local partial converter. The existing printable/LF
-filtering and raw TX storage remain unchanged. The repaired source passed the selected full-alphabet regression in cycle two.
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
 
-Production baseline SHA-256 (`src/lib/nogc_sync_mut/replay/vm/devices/serial.spl`):
-`0efe7b85fea9013d36e0b5535a2cea1606019b1d97d42fb46f754ca3c43db9cd`.
+```ascii generated-from=replay_vm_devices_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
 
-The removed `test/system/replay_vm_devices_spec.spl` had byte-identical
-executable content to the former canonical file. The only file difference
-was the canonical first-line timer-only `@cover ... 0%`. Legacy SHA-256:
-`c37db990f208fbb435c3cd6085fefa101400197350d935144bea97ea94c071d7`. Supported behavior was preserved before removal; duplicate
-removal is not execution evidence.
+</details>
+<!-- sdn-diagram:end -->
 
-The coordinator owns diagnostic admission and runtime execution. The feature
-has a maximum of three verification cycles; previously passing cases are not
-rerun without a new justified change. Any later Phase 1 seed result remains
-diagnostic evidence and does not close native, physical-device, measured
-coverage or self-hosted docgen requirements.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 40 | 40 | 0 | 0 |
 
-Cycle-one evidence: [`cycle-one.log`](../../../../build/phase-one-storage-gui-diagnostic/replay_vm_devices_spec/cycle-one.log).
-The authoritative verdict was 42 executed, 41 passed, 1 failed, 0 skipped and
-0 dropped. Only case 41 failed; case 42's control/newline policy and the forty
-existing device cases passed. The canonical source and all 41 passing cases
-are unchanged after that run.
+<details>
+<summary>Full Scenario Manual</summary>
 
-Cycle two was restricted to the original failed case:
-[`replay-uart-printable-cycle-two_spec.spl`](../../../../build/phase-one-storage-gui-diagnostic/replay-uart-printable-cycle-two_spec.spl) with
-[selection/source-hash mapping](../../../../build/phase-one-storage-gui-diagnostic/replay-uart-printable-cycle-two-mapping.sdn). It preserves the
-original imports/helpers, describe and case body. It passed **1/1**, with no failures, skips or dropped cases.
-The full 42-case file and its 41 prior passing cases were not rerun.
+# Replay Vm Devices Specification
 
-Cycle-two evidence: [`cycle-two.log`](../../../../build/phase-one-storage-gui-diagnostic/replay-uart-printable-cycle-two_spec/cycle-two.log),
-[`cycle-two.rss.env`](../../../../build/phase-one-storage-gui-diagnostic/replay-uart-printable-cycle-two_spec/cycle-two.rss.env),
-[`cycle-two.exit`](../../../../build/phase-one-storage-gui-diagnostic/replay-uart-printable-cycle-two_spec/cycle-two.exit),
-and [`uart-devices-cycle-two-inputs.sdn`](../../../../build/phase-one-storage-gui-diagnostic/uart-devices-cycle-two-inputs.sdn).
-The process exited 0 in 343 ms; peak process-tree RSS was 210496 KiB under
-an enforced 5859375-KiB limit, and the receipt reports quiescent=1. The
-coordinator verified the frozen 15-file manifest before and after execution.
-These are separate snapshots: baseline 41 passes/1 failure, followed by one
-selected pass on the repaired source. They are not a full 42-case pass on the
-repaired source or a native-runtime qualification.
+## Scenarios
 
-Production candidate SHA-256: `1dc71660a13cb7019bafa82eb13f9d30e8a2f9c739de79d14e336d9fe2a5503a`.
-The shared converter adds no FFI boundary. Native runtime qualification and
-required compiler/lib/MCP/LSP checks remain unverified; the admitted pure-Simple
-full CLI is still unavailable. The passing seed diagnostic does not replace
-those checks.
+### VirtualTimer create
 
-Source SHA-256: `c455f2a4c125ae673f9ac3151c98218e3d5839ce1d6a42d9424f8fd8d63e1f97`.
+#### counter is zero after create
+
+1. var timer = VirtualTimer create
+   - Expected: timer.counter equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# codex-system-test
-# @req REQ-SSPEC-SYSTEM
-# @cover src/lib/nogc_sync_mut/replay/vm/devices/timer.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/vm/devices/serial.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/vm/devices/block.spl 80%
-# Coverage percentages are admission targets, not measured coverage.
-# @tag:system
-# Pure virtual-device diagnostics; no physical UART, guest or native qualification.
-# System Tests — VM Virtual Devices
-#
-# Tests for VirtualTimer, VirtualSerial, and VirtualBlock devices.
-
-use std.spec.{describe, it, expect, fail, step}
-use std.nogc_sync_mut.replay.vm.devices.timer.{VirtualTimer}
-use std.nogc_sync_mut.replay.vm.devices.serial.{VirtualSerial}
-use std.nogc_sync_mut.replay.vm.devices.block.{VirtualBlock}
-
-# ============================================================================
-# Module-level helpers (it-block var mutation not reliable in interpreter mode)
-# ============================================================================
-
-fn make_sector_zeros() -> [i32]:
-    # Build a 512-byte all-zero sector
-    var sec: [i32] = []
-    var i = 0
-    while i < 512:
-        sec.push(0)
-        i = i + 1
-    sec
-
-fn make_sector_filled(value: i32) -> [i32]:
-    # Build a 512-byte sector filled with a constant value
-    var sec: [i32] = []
-    var i = 0
-    while i < 512:
-        sec.push(value)
-        i = i + 1
-    sec
-
-fn make_sector_with_first(first_byte: i32) -> [i32]:
-    # Build a 512-byte zero sector with first_byte at index 0
-    var sec: [i32] = []
-    sec.push(first_byte)
-    var i = 1
-    while i < 512:
-        sec.push(0)
-        i = i + 1
-    sec
-
-# Inputs and production MMIO setup shared by the two UART regressions.
-fn uart_regression_printable_bytes() -> [i32]:
-    var values: [i32] = []
-    var code = 32
-    while code < 127:
-        values.push(code)
-        code = code + 1
-    values
-
-fn uart_regression_write_bytes(values: [i32]) -> Result<VirtualSerial, text>:
-    var device = VirtualSerial.create("uart-ascii", 10)
-    for value in values:
-        device.mmio_write(0x00, value as i64, 1)?
-    Ok(device)
-
-# ============================================================================
-# VirtualTimer — create
-# ============================================================================
-
-describe "VirtualTimer create":
-    it "counter is zero after create":
-        step("Counter is zero after create")
-        var timer = VirtualTimer.create("timer0", 7)
-        expect(timer.counter).to_equal(0)
-
-    it "irq matches constructor arg":
-        step("Irq matches constructor arg")
-        var timer = VirtualTimer.create("timer0", 7)
-        expect(timer.irq).to_equal(7)
-
-    it "enabled is false after create":
-        step("Enabled is false after create")
-        var timer = VirtualTimer.create("timer0", 7)
-        expect(timer.enabled).to_equal(false)
-
-    it "no pending irq after create":
-        step("No pending irq after create")
-        var timer = VirtualTimer.create("timer0", 7)
-        expect(timer.pending_irq()).to_equal(-1)
-
-# ============================================================================
-# VirtualTimer — tick increments counter when enabled
-# ============================================================================
-
-describe "VirtualTimer tick increments counter":
-    it "counter equals tick cycles when enabled":
-        step("Counter equals tick cycles when enabled")
-        var timer = VirtualTimer.create("timer0", 7)
-        # Enable via mmio_write offset 0x14, value 1
-        match timer.mmio_write(0x14, 1, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        timer.tick(100)
-        expect(timer.counter).to_equal(100)
-
-    it "counter stays zero when disabled":
-        step("Counter stays zero when disabled")
-        var timer = VirtualTimer.create("timer0", 7)
-        timer.tick(100)
-        expect(timer.counter).to_equal(0)
-
-    it "counter accumulates across multiple ticks":
-        step("Counter accumulates across multiple ticks")
-        var timer = VirtualTimer.create("timer0", 7)
-        match timer.mmio_write(0x14, 1, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        timer.tick(50)
-        timer.tick(50)
-        expect(timer.counter).to_equal(100)
-
-# ============================================================================
-# VirtualTimer — interrupt fires at compare_value
-# ============================================================================
-
-describe "VirtualTimer interrupt fires at compare":
-    it "no irq before compare_value is reached":
-        step("No irq before compare_value is reached")
-        var timer = VirtualTimer.create("timer0", 7)
-        match timer.mmio_write(0x14, 1, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match timer.mmio_write(0x08, 200, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        timer.tick(100)
-        expect(timer.pending_irq()).to_equal(-1)
-
-    it "irq fires once compare_value is reached":
-        step("Irq fires once compare_value is reached")
-        var timer = VirtualTimer.create("timer0", 7)
-        match timer.mmio_write(0x14, 1, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match timer.mmio_write(0x08, 100, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        timer.tick(100)
-        val irq = timer.pending_irq()
-        expect(irq).to_equal(7)
-
-    it "irq number matches constructor irq":
-        step("Irq number matches constructor irq")
-        var timer = VirtualTimer.create("timer0", 42)
-        match timer.mmio_write(0x14, 1, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match timer.mmio_write(0x08, 10, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        timer.tick(10)
-        expect(timer.pending_irq()).to_equal(42)
-
-    it "acknowledge_irq clears pending irq":
-        step("Acknowledge_irq clears pending irq")
-        var timer = VirtualTimer.create("timer0", 7)
-        match timer.mmio_write(0x14, 1, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match timer.mmio_write(0x08, 10, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        timer.tick(10)
-        timer.acknowledge_irq()
-        expect(timer.pending_irq()).to_equal(-1)
-
-# ============================================================================
-# VirtualTimer — snapshot and restore
-# ============================================================================
-
-describe "VirtualTimer snapshot and restore":
-    it "snapshot returns non-empty data":
-        step("Snapshot returns non-empty data")
-        var timer = VirtualTimer.create("timer0", 7)
-        match timer.mmio_write(0x14, 1, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        timer.tick(50)
-        val data = timer.snapshot()
-        expect(data.len()).to_be_greater_than(0)
-
-    it "snapshot has at least 6 entries":
-        step("Snapshot has at least 6 entries")
-        var timer = VirtualTimer.create("timer0", 7)
-        val data = timer.snapshot()
-        expect(data.len()).to_be_greater_than(5)
-
-    it "counter is restored from snapshot":
-        step("Counter is restored from snapshot")
-        var timer = VirtualTimer.create("timer0", 7)
-        match timer.mmio_write(0x14, 1, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        timer.tick(77)
-        val data = timer.snapshot()
-        # Reset and restore
-        var timer2 = VirtualTimer.create("timer0", 7)
-        timer2.restore(data)
-        expect(timer2.counter).to_equal(77)
-
-    it "enabled flag is restored from snapshot":
-        step("Enabled flag is restored from snapshot")
-        var timer = VirtualTimer.create("timer0", 7)
-        match timer.mmio_write(0x14, 1, 4):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        val data = timer.snapshot()
-        var timer2 = VirtualTimer.create("timer0", 7)
-        timer2.restore(data)
-        expect(timer2.enabled).to_equal(true)
-
-# ============================================================================
-# VirtualSerial — create
-# ============================================================================
-
-describe "VirtualSerial create":
-    it "tx_buffer is empty after create":
-        step("Tx_buffer is empty after create")
-        var serial = VirtualSerial.create("uart0", 10)
-        expect(serial.tx_buffer.len()).to_equal(0)
-
-    it "rx_buffer is empty after create":
-        step("Rx_buffer is empty after create")
-        var serial = VirtualSerial.create("uart0", 10)
-        expect(serial.rx_buffer.len()).to_equal(0)
-
-    it "irq matches constructor arg":
-        step("Irq matches constructor arg")
-        var serial = VirtualSerial.create("uart0", 10)
-        expect(serial.irq).to_equal(10)
-
-    it "no pending irq after create":
-        step("No pending irq after create")
-        var serial = VirtualSerial.create("uart0", 10)
-        expect(serial.pending_irq()).to_equal(-1)
-
-# ============================================================================
-# VirtualSerial — mmio_write TX
-# ============================================================================
-
-describe "VirtualSerial mmio_write TX":
-    it "write byte to offset 0x00 appends to tx_buffer":
-        step("Write byte to offset 0x00 appends to tx_buffer")
-        var serial = VirtualSerial.create("uart0", 10)
-        match serial.mmio_write(0x00, 0x41, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        expect(serial.tx_buffer.len()).to_equal(1)
-
-    it "written byte value is in tx_buffer":
-        step("Written byte value is in tx_buffer")
-        var serial = VirtualSerial.create("uart0", 10)
-        match serial.mmio_write(0x00, 0x41, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        expect(serial.tx_buffer.len()).to_equal(1)
-        if serial.tx_buffer.len() == 1:
-            expect(serial.tx_buffer[0]).to_equal(0x41)
-
-    it "multiple writes accumulate in tx_buffer":
-        step("Multiple writes accumulate in tx_buffer")
-        var serial = VirtualSerial.create("uart0", 10)
-        match serial.mmio_write(0x00, 0x41, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match serial.mmio_write(0x00, 0x42, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        expect(serial.tx_buffer.len()).to_equal(2)
-
-# ============================================================================
-# VirtualSerial — mmio_read RX
-# ============================================================================
-
-describe "VirtualSerial mmio_read RX":
-    it "reading offset 0x00 with no input returns 0":
-        step("Reading offset 0x00 with no input returns 0")
-        var serial = VirtualSerial.create("uart0", 10)
-        val result = serial.mmio_read(0x00, 1)
-        val byte_val = match result:
-            case Ok(v): v
-            case Err(_): -1
-        expect(byte_val).to_equal(0)
-
-    it "inject_input then read returns injected byte":
-        step("Inject_input then read returns injected byte")
-        var serial = VirtualSerial.create("uart0", 10)
-        serial.inject_input([0x48])
-        val result = serial.mmio_read(0x00, 1)
-        val byte_val = match result:
-            case Ok(v): v
-            case Err(_): -1
-        expect(byte_val).to_equal(0x48)
-
-    it "second inject_input byte readable after first consumed":
-        step("Second inject_input byte readable after first consumed")
-        var serial = VirtualSerial.create("uart0", 10)
-        serial.inject_input([0x41, 0x42])
-        match serial.mmio_read(0x00, 1):
-            Ok(first_byte): expect(first_byte).to_equal(0x41)
-            Err(captured_device_error): fail(captured_device_error)
-        val result = serial.mmio_read(0x00, 1)
-        val byte_val = match result:
-            case Ok(v): v
-            case Err(_): -1
-        expect(byte_val).to_equal(0x42)
-
-# ============================================================================
-# VirtualSerial — get_output
-# ============================================================================
-
-describe "VirtualSerial get_output":
-    it "get_output contains H from byte 72":
-        step("Get_output contains H from byte 72")
-        var serial = VirtualSerial.create("uart0", 10)
-        match serial.mmio_write(0x00, 72, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        val out = serial.get_output()
-        expect(out).to_contain("H")
-
-    it "get_output contains Hello from bytes 72 101 108 108 111":
-        step("Get_output contains Hello from bytes 72 101 108 108 111")
-        var serial = VirtualSerial.create("uart0", 10)
-        match serial.mmio_write(0x00, 72, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match serial.mmio_write(0x00, 101, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match serial.mmio_write(0x00, 108, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match serial.mmio_write(0x00, 108, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match serial.mmio_write(0x00, 111, 1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        val out = serial.get_output()
-        expect(out).to_contain("Hello")
-
-    it "get_output is empty string when nothing written":
-        step("Get_output is empty string when nothing written")
-        var serial = VirtualSerial.create("uart0", 10)
-        val out = serial.get_output()
-        expect(out).to_equal("")
-
-# ============================================================================
-# VirtualBlock — create
-# ============================================================================
-
-describe "VirtualBlock create":
-    it "sectors.len() equals num_sectors":
-        step("Sectors.len() equals num_sectors")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        expect(blk.sectors.len()).to_equal(4)
-
-    it "sector_size is 512":
-        step("Sector_size is 512")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        expect(blk.sector_size).to_equal(512)
-
-    it "irq matches constructor arg":
-        step("Irq matches constructor arg")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        expect(blk.irq).to_equal(5)
-
-# ============================================================================
-# VirtualBlock — read empty sector
-# ============================================================================
-
-describe "VirtualBlock read empty sector":
-    it "read_sector(0) returns Ok":
-        step("Read_sector(0) returns Ok")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        val result = blk.read_sector(0)
-        val is_ok = match result:
-            case Ok(_): true
-            case Err(_): false
-        expect(is_ok).to_equal(true)
-
-    it "empty sector first byte is zero":
-        step("Empty sector first byte is zero")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        val result = blk.read_sector(0)
-        val first = match result:
-            case Ok(data):
-                expect(data.len()).to_equal(512)
-                if data.len() == 512:
-                    data[0]
-                else:
-                    -1
-            case Err(_): -1
-        expect(first).to_equal(0)
-
-    it "empty sector has 512 bytes":
-        step("Empty sector has 512 bytes")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        val result = blk.read_sector(0)
-        val length = match result:
-            case Ok(data): data.len()
-            case Err(_): 0
-        expect(length).to_equal(512)
-
-# ============================================================================
-# VirtualBlock — write and read sector
-# ============================================================================
-
-describe "VirtualBlock write and read sector":
-    it "written byte appears when sector read back":
-        step("Written byte appears when sector read back")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        val sec = make_sector_with_first(0xAB)
-        match blk.write_sector(0, sec):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        val result = blk.read_sector(0)
-        val first = match result:
-            case Ok(data):
-                expect(data.len()).to_equal(512)
-                if data.len() == 512:
-                    data[0]
-                else:
-                    -1
-            case Err(_): -1
-        expect(first).to_equal(0xAB)
-
-    it "write_sector to valid index returns Ok":
-        step("Write_sector to valid index returns Ok")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        val sec = make_sector_zeros()
-        val result = blk.write_sector(0, sec)
-        val is_ok = match result:
-            case Ok(_): true
-            case Err(_): false
-        expect(is_ok).to_equal(true)
-
-    it "sectors are independent after separate writes":
-        step("Sectors are independent after separate writes")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        val sec0 = make_sector_filled(0xAA)
-        val sec1 = make_sector_filled(0xBB)
-        match blk.write_sector(0, sec0):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        match blk.write_sector(1, sec1):
-            Ok(_): pass
-            Err(captured_device_error): fail(captured_device_error)
-        val r0 = blk.read_sector(0)
-        val byte0 = match r0:
-            case Ok(data):
-                expect(data.len()).to_equal(512)
-                if data.len() == 512:
-                    data[0]
-                else:
-                    -1
-            case Err(_): -1
-        val r1 = blk.read_sector(1)
-        val byte1 = match r1:
-            case Ok(data):
-                expect(data.len()).to_equal(512)
-                if data.len() == 512:
-                    data[0]
-                else:
-                    -1
-            case Err(_): -1
-        expect(byte0).to_equal(0xAA)
-        expect(byte1).to_equal(0xBB)
-
-# ============================================================================
-# VirtualBlock — out of range
-# ============================================================================
-
-describe "VirtualBlock out of range":
-    it "read_sector(999) returns Err":
-        step("Read_sector(999) returns Err")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        val result = blk.read_sector(999)
-        val is_err = match result:
-            case Ok(_): false
-            case Err(_): true
-        expect(is_err).to_equal(true)
-
-    it "write_sector(999) returns Err":
-        step("Write_sector(999) returns Err")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        val sec = make_sector_zeros()
-        val result = blk.write_sector(999, sec)
-        val is_err = match result:
-            case Ok(_): false
-            case Err(_): true
-        expect(is_err).to_equal(true)
-
-    it "read_sector(-1) returns Err":
-        step("Read_sector(-1) returns Err")
-        var blk = VirtualBlock.create("vblk0", 5, 4)
-        val result = blk.read_sector(-1)
-        val is_err = match result:
-            case Ok(_): false
-            case Err(_): true
-        expect(is_err).to_equal(true)
-
-# ============================================================================
-# VirtualSerial — complete printable alphabet and existing filtering policy
-# ============================================================================
-
-describe "VirtualSerial printable output contract":
-    it "preserves every printable ASCII byte through MMIO and exact text output":
-        step("Write all 95 printable ASCII bytes through the production MMIO owner")
-        val values = uart_regression_printable_bytes()
-        expect(values.len()).to_equal(95)
-        match uart_regression_write_bytes(values):
-            Err(captured_uart_error): fail(captured_uart_error)
-            Ok(device):
-                step("Compare the complete TX buffer and independently specified alphabet")
-                expect(device.tx_buffer).to_equal(values)
-                val expected = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{{|}}~"
-                expect(expected.len()).to_equal(95)
-                expect(device.get_output()).to_equal(expected)
-
-    it "retains raw TX bytes while rendering newline and filtering other controls":
-        step("Write printable bytes, newline, controls and non-ASCII bytes through MMIO")
-        val values: [i32] = [65, 0, 9, 10, 13, 31, 72, 127, 128, 255]
-        match uart_regression_write_bytes(values):
-            Err(captured_uart_error): fail(captured_uart_error)
-            Ok(device):
-                expect(device.tx_buffer).to_equal(values)
-                step("Render only the existing printable-ASCII and newline policy")
-                expect(device.get_output()).to_equal("A\nH")
+var timer = VirtualTimer.create("timer0", 7)
+expect(timer.counter).to_equal(0)
 ```
+
+</details>
+
+#### irq matches constructor arg
+
+1. var timer = VirtualTimer create
+   - Expected: timer.irq equals `7`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+expect(timer.irq).to_equal(7)
+```
+
+</details>
+
+#### enabled is false after create
+
+1. var timer = VirtualTimer create
+   - Expected: timer.enabled is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+expect(timer.enabled).to_equal(false)
+```
+
+</details>
+
+#### no pending irq after create
+
+1. var timer = VirtualTimer create
+   - Expected: timer.pending_irq() equals `-1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+expect(timer.pending_irq()).to_equal(-1)
+```
+
+</details>
+
+### VirtualTimer tick increments counter
+
+#### counter equals tick cycles when enabled
+
+1. var timer = VirtualTimer create
+2. timer mmio write
+3. timer tick
+   - Expected: timer.counter equals `100`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+# Enable via mmio_write offset 0x14, value 1
+timer.mmio_write(0x14, 1, 4)
+timer.tick(100)
+expect(timer.counter).to_equal(100)
+```
+
+</details>
+
+#### counter stays zero when disabled
+
+1. var timer = VirtualTimer create
+2. timer tick
+   - Expected: timer.counter equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+timer.tick(100)
+expect(timer.counter).to_equal(0)
+```
+
+</details>
+
+#### counter accumulates across multiple ticks
+
+1. var timer = VirtualTimer create
+2. timer mmio write
+3. timer tick
+4. timer tick
+   - Expected: timer.counter equals `100`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+timer.mmio_write(0x14, 1, 4)
+timer.tick(50)
+timer.tick(50)
+expect(timer.counter).to_equal(100)
+```
+
+</details>
+
+### VirtualTimer interrupt fires at compare
+
+#### no irq before compare_value is reached
+
+1. var timer = VirtualTimer create
+2. timer mmio write
+3. timer mmio write
+4. timer tick
+   - Expected: timer.pending_irq() equals `-1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+timer.mmio_write(0x14, 1, 4)    # enable
+timer.mmio_write(0x08, 200, 4)  # compare_value = 200
+timer.tick(100)
+expect(timer.pending_irq()).to_equal(-1)
+```
+
+</details>
+
+#### irq fires once compare_value is reached
+
+1. var timer = VirtualTimer create
+2. timer mmio write
+3. timer mmio write
+4. timer tick
+   - Expected: irq equals `7`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+timer.mmio_write(0x14, 1, 4)    # enable
+timer.mmio_write(0x08, 100, 4)  # compare_value = 100
+timer.tick(100)
+val irq = timer.pending_irq()
+expect(irq).to_equal(7)
+```
+
+</details>
+
+#### irq number matches constructor irq
+
+1. var timer = VirtualTimer create
+2. timer mmio write
+3. timer mmio write
+4. timer tick
+   - Expected: timer.pending_irq() equals `42`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 42)
+timer.mmio_write(0x14, 1, 4)
+timer.mmio_write(0x08, 10, 4)
+timer.tick(10)
+expect(timer.pending_irq()).to_equal(42)
+```
+
+</details>
+
+#### acknowledge_irq clears pending irq
+
+1. var timer = VirtualTimer create
+2. timer mmio write
+3. timer mmio write
+4. timer tick
+5. timer acknowledge irq
+   - Expected: timer.pending_irq() equals `-1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+timer.mmio_write(0x14, 1, 4)
+timer.mmio_write(0x08, 10, 4)
+timer.tick(10)
+timer.acknowledge_irq()
+expect(timer.pending_irq()).to_equal(-1)
+```
+
+</details>
+
+### VirtualTimer snapshot and restore
+
+#### snapshot returns non-empty data
+
+1. var timer = VirtualTimer create
+2. timer mmio write
+3. timer tick
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+timer.mmio_write(0x14, 1, 4)
+timer.tick(50)
+val data = timer.snapshot()
+expect(data.len()).to_be_greater_than(0)
+```
+
+</details>
+
+#### snapshot has at least 6 entries
+
+1. var timer = VirtualTimer create
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+val data = timer.snapshot()
+expect(data.len()).to_be_greater_than(5)
+```
+
+</details>
+
+#### counter is restored from snapshot
+
+1. var timer = VirtualTimer create
+2. timer mmio write
+3. timer tick
+4. var timer2 = VirtualTimer create
+5. timer2 restore
+   - Expected: timer2.counter equals `77`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+timer.mmio_write(0x14, 1, 4)
+timer.tick(77)
+val data = timer.snapshot()
+# Reset and restore
+var timer2 = VirtualTimer.create("timer0", 7)
+timer2.restore(data)
+expect(timer2.counter).to_equal(77)
+```
+
+</details>
+
+#### enabled flag is restored from snapshot
+
+1. var timer = VirtualTimer create
+2. timer mmio write
+3. var timer2 = VirtualTimer create
+4. timer2 restore
+   - Expected: timer2.enabled is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var timer = VirtualTimer.create("timer0", 7)
+timer.mmio_write(0x14, 1, 4)  # enable
+val data = timer.snapshot()
+var timer2 = VirtualTimer.create("timer0", 7)
+timer2.restore(data)
+expect(timer2.enabled).to_equal(true)
+```
+
+</details>
+
+### VirtualSerial create
+
+#### tx_buffer is empty after create
+
+1. var serial = VirtualSerial create
+   - Expected: serial.tx_buffer.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+expect(serial.tx_buffer.len()).to_equal(0)
+```
+
+</details>
+
+#### rx_buffer is empty after create
+
+1. var serial = VirtualSerial create
+   - Expected: serial.rx_buffer.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+expect(serial.rx_buffer.len()).to_equal(0)
+```
+
+</details>
+
+#### irq matches constructor arg
+
+1. var serial = VirtualSerial create
+   - Expected: serial.irq equals `10`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+expect(serial.irq).to_equal(10)
+```
+
+</details>
+
+#### no pending irq after create
+
+1. var serial = VirtualSerial create
+   - Expected: serial.pending_irq() equals `-1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+expect(serial.pending_irq()).to_equal(-1)
+```
+
+</details>
+
+### VirtualSerial mmio_write TX
+
+#### write byte to offset 0x00 appends to tx_buffer
+
+1. var serial = VirtualSerial create
+2. serial mmio write
+   - Expected: serial.tx_buffer.len() equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+serial.mmio_write(0x00, 0x41, 1)
+expect(serial.tx_buffer.len()).to_equal(1)
+```
+
+</details>
+
+#### written byte value is in tx_buffer
+
+1. var serial = VirtualSerial create
+2. serial mmio write
+   - Expected: serial.tx_buffer[0] equals `0x41`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+serial.mmio_write(0x00, 0x41, 1)
+expect(serial.tx_buffer[0]).to_equal(0x41)
+```
+
+</details>
+
+#### multiple writes accumulate in tx_buffer
+
+1. var serial = VirtualSerial create
+2. serial mmio write
+3. serial mmio write
+   - Expected: serial.tx_buffer.len() equals `2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+serial.mmio_write(0x00, 0x41, 1)
+serial.mmio_write(0x00, 0x42, 1)
+expect(serial.tx_buffer.len()).to_equal(2)
+```
+
+</details>
+
+### VirtualSerial mmio_read RX
+
+#### reading offset 0x00 with no input returns 0
+
+1. var serial = VirtualSerial create
+   - Expected: byte_val equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+val result = serial.mmio_read(0x00, 1)
+val byte_val = match result:
+    case Ok(v): v
+    case Err(_): -1
+expect(byte_val).to_equal(0)
+```
+
+</details>
+
+#### inject_input then read returns injected byte
+
+1. var serial = VirtualSerial create
+2. serial inject input
+   - Expected: byte_val equals `0x48`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+serial.inject_input([0x48])
+val result = serial.mmio_read(0x00, 1)
+val byte_val = match result:
+    case Ok(v): v
+    case Err(_): -1
+expect(byte_val).to_equal(0x48)
+```
+
+</details>
+
+#### second inject_input byte readable after first consumed
+
+1. var serial = VirtualSerial create
+2. serial inject input
+3. serial mmio read
+   - Expected: byte_val equals `0x42`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+serial.inject_input([0x41, 0x42])
+serial.mmio_read(0x00, 1)
+val result = serial.mmio_read(0x00, 1)
+val byte_val = match result:
+    case Ok(v): v
+    case Err(_): -1
+expect(byte_val).to_equal(0x42)
+```
+
+</details>
+
+### VirtualSerial get_output
+
+#### get_output contains H from byte 72
+
+1. var serial = VirtualSerial create
+2. serial mmio write
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+serial.mmio_write(0x00, 72, 1)   # H
+val out = serial.get_output()
+expect(out).to_contain("H")
+```
+
+</details>
+
+#### get_output contains Hello from bytes 72 101 108 108 111
+
+1. var serial = VirtualSerial create
+2. serial mmio write
+3. serial mmio write
+4. serial mmio write
+5. serial mmio write
+6. serial mmio write
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+serial.mmio_write(0x00, 72, 1)   # H
+serial.mmio_write(0x00, 101, 1)  # e
+serial.mmio_write(0x00, 108, 1)  # l
+serial.mmio_write(0x00, 108, 1)  # l
+serial.mmio_write(0x00, 111, 1)  # o
+val out = serial.get_output()
+expect(out).to_contain("Hello")
+```
+
+</details>
+
+#### get_output is empty string when nothing written
+
+1. var serial = VirtualSerial create
+   - Expected: out equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var serial = VirtualSerial.create("uart0", 10)
+val out = serial.get_output()
+expect(out).to_equal("")
+```
+
+</details>
+
+### VirtualBlock create
+
+#### sectors.len() equals num_sectors
+
+1. var blk = VirtualBlock create
+   - Expected: blk.sectors.len() equals `4`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+expect(blk.sectors.len()).to_equal(4)
+```
+
+</details>
+
+#### sector_size is 512
+
+1. var blk = VirtualBlock create
+   - Expected: blk.sector_size equals `512`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+expect(blk.sector_size).to_equal(512)
+```
+
+</details>
+
+#### irq matches constructor arg
+
+1. var blk = VirtualBlock create
+   - Expected: blk.irq equals `5`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+expect(blk.irq).to_equal(5)
+```
+
+</details>
+
+### VirtualBlock read empty sector
+
+#### read_sector(0) returns Ok
+
+1. var blk = VirtualBlock create
+   - Expected: is_ok is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+val result = blk.read_sector(0)
+val is_ok = match result:
+    case Ok(_): true
+    case Err(_): false
+expect(is_ok).to_equal(true)
+```
+
+</details>
+
+#### empty sector first byte is zero
+
+1. var blk = VirtualBlock create
+   - Expected: first equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+val result = blk.read_sector(0)
+val first = match result:
+    case Ok(data): data[0]
+    case Err(_): -1
+expect(first).to_equal(0)
+```
+
+</details>
+
+#### empty sector has 512 bytes
+
+1. var blk = VirtualBlock create
+   - Expected: length equals `512`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+val result = blk.read_sector(0)
+val length = match result:
+    case Ok(data): data.len()
+    case Err(_): 0
+expect(length).to_equal(512)
+```
+
+</details>
+
+### VirtualBlock write and read sector
+
+#### written byte appears when sector read back
+
+1. var blk = VirtualBlock create
+2. blk write sector
+   - Expected: first equals `0xAB`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+val sec = make_sector_with_first(0xAB)
+blk.write_sector(0, sec)
+val result = blk.read_sector(0)
+val first = match result:
+    case Ok(data): data[0]
+    case Err(_): -1
+expect(first).to_equal(0xAB)
+```
+
+</details>
+
+#### write_sector to valid index returns Ok
+
+1. var blk = VirtualBlock create
+   - Expected: is_ok is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+val sec = make_sector_zeros()
+val result = blk.write_sector(0, sec)
+val is_ok = match result:
+    case Ok(_): true
+    case Err(_): false
+expect(is_ok).to_equal(true)
+```
+
+</details>
+
+#### sectors are independent after separate writes
+
+1. var blk = VirtualBlock create
+2. blk write sector
+3. blk write sector
+   - Expected: byte0 equals `0xAA`
+   - Expected: byte1 equals `0xBB`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+val sec0 = make_sector_filled(0xAA)
+val sec1 = make_sector_filled(0xBB)
+blk.write_sector(0, sec0)
+blk.write_sector(1, sec1)
+val r0 = blk.read_sector(0)
+val byte0 = match r0:
+    case Ok(data): data[0]
+    case Err(_): -1
+val r1 = blk.read_sector(1)
+val byte1 = match r1:
+    case Ok(data): data[0]
+    case Err(_): -1
+expect(byte0).to_equal(0xAA)
+expect(byte1).to_equal(0xBB)
+```
+
+</details>
+
+### VirtualBlock out of range
+
+#### read_sector(999) returns Err
+
+1. var blk = VirtualBlock create
+   - Expected: is_err is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+val result = blk.read_sector(999)
+val is_err = match result:
+    case Ok(_): false
+    case Err(_): true
+expect(is_err).to_equal(true)
+```
+
+</details>
+
+#### write_sector(999) returns Err
+
+1. var blk = VirtualBlock create
+   - Expected: is_err is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+val sec = make_sector_zeros()
+val result = blk.write_sector(999, sec)
+val is_err = match result:
+    case Ok(_): false
+    case Err(_): true
+expect(is_err).to_equal(true)
+```
+
+</details>
+
+#### read_sector(-1) returns Err
+
+1. var blk = VirtualBlock create
+   - Expected: is_err is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var blk = VirtualBlock.create("vblk0", 5, 4)
+val result = blk.read_sector(-1)
+val is_err = match result:
+    case Ok(_): false
+    case Err(_): true
+expect(is_err).to_equal(true)
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/tools/replay_vm_devices_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- VirtualTimer create
+- VirtualTimer tick increments counter
+- VirtualTimer interrupt fires at compare
+- VirtualTimer snapshot and restore
+- VirtualSerial create
+- VirtualSerial mmio_write TX
+- VirtualSerial mmio_read RX
+- VirtualSerial get_output
+- VirtualBlock create
+- VirtualBlock read empty sector
+- VirtualBlock write and read sector
+- VirtualBlock out of range
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 40 |
+| Active scenarios | 40 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

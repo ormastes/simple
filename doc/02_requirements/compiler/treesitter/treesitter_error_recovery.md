@@ -17,7 +17,7 @@ src/lib/std/src/parser/treesitter/error_recovery.spl
 
 ## API
 
-```simple:skip
+```simple
 use std.parser.treesitter (
     ErrorRecovery, RecoveryStrategy, SyncPoint, ErrorInfo, ParserContext
 )

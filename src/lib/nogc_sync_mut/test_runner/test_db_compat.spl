@@ -17,13 +17,6 @@ use std.database.test_extended.{
 use std.test_runner.test_db_types.{TestStatus, status_to_str}
 use std.common.perf.execution_metrics.{ResourceUsage, resource_evidence_quality_name, termination_cause_name}
 use std.test_runner.test_db_core.{parse_rfc3339_to_micros}
-use std.nogc_sync_mut.test_runner.test_db_record.{TestDbFileRow}
-use std.common.traceability.case_events.{decode_trace_case_events}
-use std.common.traceability.run_plan.{TraceRunPlan}
-use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request, materialize_trace_run_plan}
-use std.common.traceability.run_request_codec.{encode_trace_run_request}
-use std.common.traceability.sspec_inventory.{TraceSspecPlannedRequest}
-use std.common.traceability.sspec_inventory_codec.{encode_trace_sspec_planned_request}
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
 
 # ============================================================================
@@ -33,105 +26,6 @@ use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_da
 class RunnerTestDb:
     db: TestDatabaseExtended
     current_run_id: text
-    _trace_prepare_failed: bool = false
-    _trace_prepared_run_id: text = ""
-
-    # Save the plan and its full definition metadata in one owner generation.
-    # This is still unverified intent; the caller must bind execution inputs.
-    me prepare_trace_sspec_request(metadata: TraceSspecPlannedRequest) -> Result<TraceRunPlan, text>:
-        if self._trace_prepare_failed or self.current_run_id != "":
-            return Err("trace SSpec request requires a fresh database owner")
-        encode_trace_sspec_planned_request(metadata)?
-        val run_id = self.start_run()
-        val plan = match materialize_trace_run_plan(metadata.request, run_id):
-            case Ok(value): value
-            case Err(reason):
-                self._trace_prepare_failed = true
-                return Err(reason)
-        match self.db.record_trace_run_plan(plan):
-            case Err(reason):
-                self._trace_prepare_failed = true
-                return Err(reason)
-            case Ok(_): pass
-        match self.db.record_trace_sspec_metadata(run_id, metadata):
-            case Err(reason):
-                self._trace_prepare_failed = true
-                return Err(reason)
-            case Ok(_): pass
-        match self.save():
-            case Err(reason):
-                self._trace_prepare_failed = true
-                Err("trace SSpec intent was not durably prepared: " + reason)
-            case Ok(_):
-                self._trace_prepared_run_id = run_id
-                Ok(plan)
-
-    # A metadata-aware child must use this entry rather than accepting a
-    # legacy plan-only run. Fresh load validates the stored envelope and plan.
-    static fn resume_trace_sspec_run(run_id: text) -> Result<RunnerTestDb, text>:
-        var owner = RunnerTestDb.resume_trace_run(run_id)?
-        match owner.db.get_trace_sspec_metadata(run_id)?:
-            case Some(_): Ok(owner)
-            case nil: Err("persisted trace SSpec metadata is missing")
-
-    # The owner allocates the run identity; callers supply only frozen intent.
-    # A returned plan means save succeeded, not that evidence is qualified.
-    me prepare_trace_request(request: TraceRunRequest) -> Result<TraceRunPlan, text>:
-        if self._trace_prepare_failed or self.current_run_id != "":
-            return Err("trace request requires a fresh database owner")
-        validate_trace_run_request(request)?
-        # Enforce transport bounds before allocating any mutable run state.
-        encode_trace_run_request(request)?
-        val run_id = self.start_run()
-        match materialize_trace_run_plan(request, run_id):
-            case Err(reason):
-                self._trace_prepare_failed = true
-                Err(reason)
-            case Ok(plan):
-                match self.prepare_trace_run(plan):
-                    case Ok(_): Ok(plan)
-                    case Err(reason):
-                        self._trace_prepare_failed = true
-                        Err(reason)
-
-    # Persist immutable execution intent before dispatch. A failed save poisons
-    # this wrapper: callers must discard it and reload the persisted owner.
-    # Preparation does not admit evidence or establish a concurrent run lease.
-    me prepare_trace_run(plan: TraceRunPlan) -> Result<(), text>:
-        if self._trace_prepare_failed:
-            return Err("trace preparation previously failed; reload the database owner")
-        if self.current_run_id == "" or plan.run_id != self.current_run_id:
-            return Err("trace plan must belong to this database owner's active run")
-        if self._trace_prepared_run_id != "":
-            return Err("trace run intent is already prepared")
-        self.db.record_trace_run_plan(plan)?
-        match self.save():
-            case Ok(_):
-                self._trace_prepared_run_id = plan.run_id
-                Ok(())
-            case Err(reason):
-                self._trace_prepare_failed = true
-                Err("trace intent was not durably prepared: " + reason)
-
-    fn trace_run_is_prepared(run_id: text) -> bool:
-        if self._trace_prepare_failed or run_id == "" or self.current_run_id != run_id or self._trace_prepared_run_id != run_id:
-            return false
-        match self.db.validate_trace_run_active(run_id):
-            case Ok(_): true
-            case Err(_): false
-
-    # Resume attaches only freshly loaded persisted intent. It cannot attach
-    # unsaved in-memory rows and does not grant a concurrent writer lease.
-    static fn resume_trace_run(run_id: text) -> Result<RunnerTestDb, text>:
-        var owner = RunnerTestDb.load()?
-        owner.db.validate_trace_run_active(run_id)?
-        match owner.db.get_trace_run_plan(run_id)? :
-            case Some(_):
-                owner.current_run_id = run_id
-                owner._trace_prepared_run_id = run_id
-                Ok(owner)
-            case nil:
-                Err("persisted trace run intent is missing")
 
     # Load from default path with auto-migration
     static fn load() -> Result<RunnerTestDb, text>:
@@ -150,25 +44,11 @@ class RunnerTestDb:
 
     # Save database
     fn save() -> Result<(), text>:
-        if self._trace_prepare_failed:
-            return Err("trace preparation failed; discard and reload this database owner")
         val success = self.db.save()
         if success:
             Ok(())
         else:
             Err("Failed to save database")
-
-    # Framework observations are persisted by the same database writer as
-    # summary rows. Their presence never establishes admitted provenance.
-    me record_trace_case_events(run_id: text, test_file: text, events_sdn: text) -> Result<(), text>:
-        if self._trace_prepare_failed:
-            return Err("trace preparation failed; observations require a reloaded owner")
-        if run_id == "" or run_id != self.current_run_id or test_file == "":
-            return Err("trace events must belong to this database owner's active run")
-        val events = decode_trace_case_events(events_sdn)?
-        if events.len() == 0:
-            return Err("trace events cannot be an empty execution claim")
-        self.db.record_trace_case_events(run_id, test_file, events)
 
     # Update test result (custom API)
     me update_test_result(
@@ -199,8 +79,6 @@ class RunnerTestDb:
 
     # Start run tracking
     me start_run() -> text:
-        if self._trace_prepare_failed or self._trace_prepared_run_id != "":
-            return ""
         val run_id = self.db.start_run()
         self.current_run_id = run_id
         run_id
@@ -228,19 +106,6 @@ class RunnerTestDb:
             resource_evidence_quality_name(usage.evidence_quality),
             termination_cause_name(usage.termination), usage.signal,
             usage.exit_code, budget_status, anomaly_status
-        )
-
-    # Same row as record_resource_run, from a flattened TestDbFileRow
-    # (std.nogc_sync_mut.test_runner.test_db_record) whose enum fields are
-    # already rendered to their canonical names.
-    me record_resource_row(run_id: text, row: TestDbFileRow):
-        self.db.record_resource_run(
-            run_id, row.path, row.resource_class, row.cohort_id, row.compile_ms, row.execution_ms,
-            row.wall_ms, row.user_cpu_ms, row.system_cpu_ms,
-            row.peak_tree_charge_bytes, row.peak_direct_child_rss_bytes,
-            row.io_read_bytes, row.io_write_bytes, row.pids_peak,
-            row.evidence_quality, row.termination, row.signal,
-            row.exit_code, row.budget_status, row.anomaly_status
         )
 
     # Cleanup stale runs

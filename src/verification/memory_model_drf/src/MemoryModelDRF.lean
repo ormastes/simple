@@ -76,6 +76,7 @@ def hasDataRace (exec : Execution) : Prop :=
     (id1, op1) ∈ exec.ops ∧
     (id2, op2) ∈ exec.ops ∧
     id1 ≠ id2 ∧
+    op1.threadId ≠ op2.threadId ∧
     conflicts op1 op2 ∧
     ¬happensBefore exec id1 id2 ∧
     ¬happensBefore exec id2 id1

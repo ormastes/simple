@@ -74,7 +74,7 @@ per-PUT, and a crash after persist but before ack is at-least-once.
 
 ```
 bin/simple run test/01_unit/os/port/sqlite_vfs_contract_spec.spl
-bin/simple run test/03_system/database/server/db_durability_spec.spl
+bin/simple run test/system/database/server/db_durability_spec.spl
 SIMPLE_EXECUTION_MODE=interpreter bin/simple run <same spec>   # always A/B
 ```
 sspec prints one `"N examples, M failures"` line **per describe block** — check

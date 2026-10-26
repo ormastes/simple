@@ -168,22 +168,6 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
-    /// Run `f` with the `as T else:` cast-fallback suffix disabled, restoring
-    /// the previous setting afterwards (also on error). Used for the THEN arm
-    /// of an inline `if`, whose `else` belongs to the `if`: without this,
-    /// `if c: x as i64 else: 7` parsed as `if c: (x as i64 else: 7)` and the
-    /// else arm was silently lost.
-    pub(crate) fn parse_without_cast_else<T>(
-        &mut self,
-        f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
-    ) -> Result<T, ParseError> {
-        let old = self.inline_if_then_call_depth;
-        self.inline_if_then_call_depth = Some(self.call_arg_depth);
-        let result = f(self);
-        self.inline_if_then_call_depth = old;
-        result
-    }
-
     /// Parse an if/elif expression (shared logic)
     pub(crate) fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
         // Temporarily disable brace postfix to prevent { body } from being consumed as method call
@@ -289,12 +273,11 @@ impl<'a> Parser<'a> {
             } // close else for empty-then-branch check
         } else if self.check(&TokenKind::Return) || self.check(&TokenKind::Break) || self.check(&TokenKind::Continue) {
             // Diverging statement in then branch: `if cond: return val`
-            let stmt = self.parse_without_cast_else(|p| p.parse_item())?;
+            let stmt = self.parse_item()?;
             Expr::DoBlock(vec![stmt])
         } else {
-            // Inline form: parse as expression. A trailing `as T` must not
-            // claim this if's `else:` as its cast-fallback suffix.
-            let expr = self.parse_without_cast_else(|p| p.parse_expression())?;
+            // Inline form: parse as expression
+            let expr = self.parse_expression()?;
             // A multi-line CONDITION's trailing-operator continuation
             // (`if a == x and\n    b == y: ...`) can leave a compensating
             // pseudo-DEDENT queued in `deferred_dedent_count` (see
@@ -586,19 +569,6 @@ impl<'a> Parser<'a> {
                     // `auto` is a hard keyword (auto modules); it must still work as a
                     // named-arg/field label (e.g. FrontendOffloadSwitch(auto: true)).
                     TokenKind::Auto => Some("auto".to_string()),
-                    // Soft keywords that are already legal field names (see
-                    // `keyword_name`) must also work as named-arg labels, e.g.
-                    // `S(flat: 1, base: 2)`. `flat`/`slice` stay real keywords
-                    // in tensor literals; this only affects `<kw> :|=` in args.
-                    TokenKind::Flat => Some("flat".to_string()),
-                    TokenKind::Slice => Some("slice".to_string()),
-                    TokenKind::Common => Some("common".to_string()),
-                    TokenKind::Comptime => Some("comptime".to_string()),
-                    TokenKind::Newtype => Some("newtype".to_string()),
-                    TokenKind::Bitfield => Some("bitfield".to_string()),
-                    TokenKind::Extend => Some("extend".to_string()),
-                    TokenKind::Asm => Some("asm".to_string()),
-                    TokenKind::OutErr => Some("out_err".to_string()),
                     _ => None,
                 }
             };
@@ -747,15 +717,6 @@ impl<'a> Parser<'a> {
                         | TokenKind::Lazy
                         | TokenKind::Skip
                         | TokenKind::Exists
-                        | TokenKind::Flat
-                        | TokenKind::Slice
-                        | TokenKind::Common
-                        | TokenKind::Comptime
-                        | TokenKind::Newtype
-                        | TokenKind::Bitfield
-                        | TokenKind::Extend
-                        | TokenKind::Asm
-                        | TokenKind::OutErr
                 );
 
                 if is_likely_named_arg {

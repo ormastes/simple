@@ -1,21 +1,87 @@
-# SQLite-shaped Database Wrapper
-# Simple-friendly connection/statement/row API over the raw handle layer.
-# Backed by Simple's embedded SQL engine — never libsqlite3 (CLAUDE.md).
+# SQLite Database SFFI Wrapper
+# SFFI pattern for embedded database operations
+# Dependencies: rusqlite (Rust crate with bundled SQLite)
 
 use std.nogc_sync_mut.io.sffi_common.{is_empty_string}
 
-# Tier 1 used to be 27 `rt_sqlite_*` externs whose only hosted provider wrapped
-# the external libsqlite3. The raw handle API is now served by Simple's embedded
-# SQL engine (sqlite_embedded.spl); no `rt_sqlite_*` symbol is referenced here.
-use std.nogc_sync_mut.io.sqlite_embedded.{
-    sqlite_raw_open, sqlite_raw_open_memory, sqlite_raw_close,
-    sqlite_raw_execute, sqlite_raw_execute_batch,
-    sqlite_raw_query, sqlite_raw_query_next, sqlite_raw_query_done,
-    sqlite_raw_column_count, sqlite_raw_column_name, sqlite_raw_column_text,
-    sqlite_raw_prepare, sqlite_raw_bind_text, sqlite_raw_bind_int, sqlite_raw_bind_float, sqlite_raw_bind_null,
-    sqlite_raw_reset, sqlite_raw_finalize,
-    sqlite_raw_begin, sqlite_raw_commit, sqlite_raw_rollback,
-    sqlite_raw_last_insert_rowid, sqlite_raw_changes, sqlite_raw_error_message}
+# ============================================================================
+# Tier 1: Extern Function Declarations (Raw SFFI)
+# ============================================================================
+
+# --- Connection Management ---
+
+@unsafe(reason: "raw path text ABI; returns a nullable owned connection handle", capabilities: [ffi])
+extern fn rt_sqlite_open(path: text) -> i64
+@unsafe(reason: "returns a nullable owned connection handle", capabilities: [ffi])
+extern fn rt_sqlite_open_memory() -> i64
+@unsafe(reason: "consumes an owned connection handle and returns an integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_close(handle: i64) -> i64
+
+# --- Basic Execution ---
+
+@unsafe(reason: "raw connection handle and SQL text ABI with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_execute(conn: i64, sql: text) -> i64
+@unsafe(reason: "raw connection handle and SQL text ABI with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_execute_batch(conn: i64, sql: text) -> i64
+
+# --- Query Execution ---
+
+@unsafe(reason: "raw connection handle and SQL text ABI; returns a nullable owned statement handle", capabilities: [ffi])
+extern fn rt_sqlite_query(conn: i64, sql: text) -> i64
+@unsafe(reason: "raw statement handle ABI; zero conflates done and failure", capabilities: [ffi])
+extern fn rt_sqlite_query_next(stmt: i64) -> i64
+@unsafe(reason: "consumes an owned statement handle", capabilities: [ffi])
+extern fn rt_sqlite_query_done(stmt: i64)
+
+# --- Column Access ---
+
+@unsafe(reason: "raw statement handle ABI; zero conflates empty and invalid", capabilities: [ffi])
+extern fn rt_sqlite_column_count(stmt: i64) -> i64
+@unsafe(reason: "raw statement handle and unchecked column index with runtime-owned text return", capabilities: [ffi])
+extern fn rt_sqlite_column_name(stmt: i64, idx: i64) -> text
+@unsafe(reason: "raw statement handle and unchecked column index with nullable runtime-owned text return", capabilities: [ffi])
+extern fn rt_sqlite_column_text(stmt: i64, idx: i64) -> text
+@unsafe(reason: "raw statement handle and unchecked column index; zero conflates value and failure", capabilities: [ffi])
+extern fn rt_sqlite_column_int(stmt: i64, idx: i64) -> i64
+@unsafe(reason: "raw statement handle and unchecked column index; zero conflates value and failure", capabilities: [ffi])
+extern fn rt_sqlite_column_float(stmt: i64, idx: i64) -> f64
+@unsafe(reason: "raw statement handle and unchecked column index with runtime-owned tag text return", capabilities: [ffi])
+extern fn rt_sqlite_column_type(stmt: i64, idx: i64) -> text
+
+# --- Prepared Statements ---
+
+@unsafe(reason: "raw connection handle and SQL text ABI; returns a nullable owned statement handle", capabilities: [ffi])
+extern fn rt_sqlite_prepare(conn: i64, sql: text) -> i64
+@unsafe(reason: "raw statement handle, unchecked bind index, and text ABI with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_bind_text(stmt: i64, idx: i64, value: text) -> i64
+@unsafe(reason: "raw statement handle and unchecked bind index with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_bind_int(stmt: i64, idx: i64, value: i64) -> i64
+@unsafe(reason: "raw statement handle and unchecked bind index with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_bind_float(stmt: i64, idx: i64, value: f64) -> i64
+@unsafe(reason: "raw statement handle and unchecked bind index with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_bind_null(stmt: i64, idx: i64) -> i64
+@unsafe(reason: "raw statement handle ABI with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_reset(stmt: i64) -> i64
+@unsafe(reason: "consumes an owned statement handle", capabilities: [ffi])
+extern fn rt_sqlite_finalize(stmt: i64)
+
+# --- Transactions ---
+
+@unsafe(reason: "raw connection handle ABI with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_begin(conn: i64) -> i64
+@unsafe(reason: "raw connection handle ABI with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_commit(conn: i64) -> i64
+@unsafe(reason: "raw connection handle ABI with integer status sentinel", capabilities: [ffi])
+extern fn rt_sqlite_rollback(conn: i64) -> i64
+
+# --- Metadata ---
+
+@unsafe(reason: "raw connection handle ABI; zero conflates valid rowid and failure", capabilities: [ffi])
+extern fn rt_sqlite_last_insert_rowid(conn: i64) -> i64
+@unsafe(reason: "raw connection handle ABI; zero conflates no changes and failure", capabilities: [ffi])
+extern fn rt_sqlite_changes(conn: i64) -> i64
+@unsafe(reason: "raw connection handle and runtime-owned text ABI; empty text is ambiguous", capabilities: [ffi])
+extern fn rt_sqlite_error_message(conn: i64) -> text
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -69,7 +135,7 @@ fn sqlite_open(path: text) -> SqliteConnection:
             # Use database
             sqlite_close(db)
     """
-    val handle = sqlite_raw_open(path)
+    val handle = rt_sqlite_open(path)
     SqliteConnection(handle: handle, path: path, is_valid: sqlite_handle_valid(handle))
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -82,7 +148,7 @@ fn sqlite_open_memory() -> SqliteConnection:
         db = sqlite_open_memory()
         # Fast temporary database
     """
-    val handle = sqlite_raw_open_memory()
+    val handle = rt_sqlite_open_memory()
     SqliteConnection(handle: handle, path: ":memory:", is_valid: sqlite_handle_valid(handle))
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -94,7 +160,7 @@ fn sqlite_close(conn: SqliteConnection) -> bool:
     if sqlite_handle_invalid(conn.handle):
         return false
 
-    val result = sqlite_raw_close(conn.handle)
+    val result = rt_sqlite_close(conn.handle)
     result == 1
 
 # --- Basic Execution ---
@@ -117,7 +183,7 @@ fn sqlite_execute(conn: SqliteConnection, sql: text) -> bool:
     if sqlite_handle_invalid(conn.handle):
         return false
 
-    val result = sqlite_raw_execute(conn.handle, sql)
+    val result = rt_sqlite_execute(conn.handle, sql)
     result == 1
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -140,7 +206,7 @@ fn sqlite_execute_batch(conn: SqliteConnection, sql: text) -> bool:
     if sqlite_handle_invalid(conn.handle):
         return false
 
-    val result = sqlite_raw_execute_batch(conn.handle, sql)
+    val result = rt_sqlite_execute_batch(conn.handle, sql)
     result == 1
 
 # --- Query Execution (Simple API) ---
@@ -164,33 +230,33 @@ fn sqlite_query_all(conn: SqliteConnection, sql: text) -> [SqliteRow]:
     if sqlite_handle_invalid(conn.handle):
         return []
 
-    val stmt_handle = sqlite_raw_query(conn.handle, sql)
+    val stmt_handle = rt_sqlite_query(conn.handle, sql)
     if sqlite_handle_invalid(stmt_handle):
         return []
 
     var rows = []
 
     # Get column names
-    val col_count = sqlite_raw_column_count(stmt_handle)
+    val col_count = rt_sqlite_column_count(stmt_handle)
     var column_names = []
     for i in 0..col_count:
-        val name = sqlite_raw_column_name(stmt_handle, i)
+        val name = rt_sqlite_column_name(stmt_handle, i)
         column_names.push(name)
 
     # Fetch all rows
-    var has_row = sqlite_raw_query_next(stmt_handle)
+    var has_row = rt_sqlite_query_next(stmt_handle)
     while has_row == 1:
         var values = []
         for i in 0..col_count:
-            val value = sqlite_raw_column_text(stmt_handle, i)
+            val value = rt_sqlite_column_text(stmt_handle, i)
             values.push(value)
 
         val row = SqliteRow(values: values, column_names: column_names)
         rows.push(row)
 
-        has_row = sqlite_raw_query_next(stmt_handle)
+        has_row = rt_sqlite_query_next(stmt_handle)
 
-    sqlite_raw_query_done(stmt_handle)
+    rt_sqlite_query_done(stmt_handle)
     rows
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -249,7 +315,7 @@ fn sqlite_prepare(conn: SqliteConnection, sql: text) -> SqliteStatement:
     if sqlite_handle_invalid(conn.handle):
         return SqliteStatement(handle: 0, sql: sql, is_valid: false)
 
-    val handle = sqlite_raw_prepare(conn.handle, sql)
+    val handle = rt_sqlite_prepare(conn.handle, sql)
     SqliteStatement(handle: handle, sql: sql, is_valid: sqlite_handle_valid(handle))
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -266,7 +332,7 @@ fn sqlite_bind_text(stmt: SqliteStatement, idx: i64, value: text) -> bool:
     if sqlite_handle_invalid(stmt.handle):
         return false
 
-    val result = sqlite_raw_bind_text(stmt.handle, idx, value)
+    val result = rt_sqlite_bind_text(stmt.handle, idx, value)
     result == 1
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -275,7 +341,7 @@ fn sqlite_bind_int(stmt: SqliteStatement, idx: i64, value: i64) -> bool:
     if sqlite_handle_invalid(stmt.handle):
         return false
 
-    val result = sqlite_raw_bind_int(stmt.handle, idx, value)
+    val result = rt_sqlite_bind_int(stmt.handle, idx, value)
     result == 1
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -284,7 +350,7 @@ fn sqlite_bind_float(stmt: SqliteStatement, idx: i64, value: f64) -> bool:
     if sqlite_handle_invalid(stmt.handle):
         return false
 
-    val result = sqlite_raw_bind_float(stmt.handle, idx, value)
+    val result = rt_sqlite_bind_float(stmt.handle, idx, value)
     result == 1
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -293,7 +359,7 @@ fn sqlite_bind_null(stmt: SqliteStatement, idx: i64) -> bool:
     if sqlite_handle_invalid(stmt.handle):
         return false
 
-    val result = sqlite_raw_bind_null(stmt.handle, idx)
+    val result = rt_sqlite_bind_null(stmt.handle, idx)
     result == 1
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -305,14 +371,14 @@ fn sqlite_reset(stmt: SqliteStatement) -> bool:
     if sqlite_handle_invalid(stmt.handle):
         return false
 
-    val result = sqlite_raw_reset(stmt.handle)
+    val result = rt_sqlite_reset(stmt.handle)
     result == 1
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
 fn sqlite_finalize(stmt: SqliteStatement):
     """Finalize prepared statement and free resources"""
     if stmt.is_valid:
-        sqlite_raw_finalize(stmt.handle)
+        rt_sqlite_finalize(stmt.handle)
 
 # --- Transactions ---
 
@@ -332,7 +398,7 @@ fn sqlite_begin(conn: SqliteConnection) -> bool:
     if sqlite_handle_invalid(conn.handle):
         return false
 
-    val result = sqlite_raw_begin(conn.handle)
+    val result = rt_sqlite_begin(conn.handle)
     result == 1
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -344,7 +410,7 @@ fn sqlite_commit(conn: SqliteConnection) -> bool:
     if sqlite_handle_invalid(conn.handle):
         return false
 
-    val result = sqlite_raw_commit(conn.handle)
+    val result = rt_sqlite_commit(conn.handle)
     result == 1
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -356,7 +422,7 @@ fn sqlite_rollback(conn: SqliteConnection) -> bool:
     if sqlite_handle_invalid(conn.handle):
         return false
 
-    val result = sqlite_raw_rollback(conn.handle)
+    val result = rt_sqlite_rollback(conn.handle)
     result == 1
 
 # --- Metadata ---
@@ -374,7 +440,7 @@ fn sqlite_last_insert_rowid(conn: SqliteConnection) -> i64:
     if sqlite_handle_invalid(conn.handle):
         return 0
 
-    sqlite_raw_last_insert_rowid(conn.handle)
+    rt_sqlite_last_insert_rowid(conn.handle)
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
 fn sqlite_changes(conn: SqliteConnection) -> i64:
@@ -389,7 +455,7 @@ fn sqlite_changes(conn: SqliteConnection) -> i64:
     if sqlite_handle_invalid(conn.handle):
         return 0
 
-    sqlite_raw_changes(conn.handle)
+    rt_sqlite_changes(conn.handle)
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
 fn sqlite_error_message(conn: SqliteConnection) -> text:
@@ -400,7 +466,7 @@ fn sqlite_error_message(conn: SqliteConnection) -> text:
     if sqlite_handle_invalid(conn.handle):
         return "Invalid connection"
 
-    sqlite_raw_error_message(conn.handle)
+    rt_sqlite_error_message(conn.handle)
 
 # --- Helper Functions ---
 
@@ -455,7 +521,7 @@ fn sqlite_insert(conn: SqliteConnection, table: text, columns: [text], values: [
     for i in 0..values.len():
         sqlite_bind_text(stmt, i + 1, values[i])
 
-    val result = sqlite_raw_query_next(stmt.handle)
+    val result = rt_sqlite_query_next(stmt.handle)
     sqlite_finalize(stmt)
 
     if result == 1:
@@ -495,7 +561,16 @@ fn sqlite_row_get_int(row: SqliteRow, column: text) -> i64:
 # Export Functions
 # ============================================================================
 
-export SqliteConnection, SqliteStatement, SqliteRow, sqlite_handle_valid, sqlite_handle_invalid
+export rt_sqlite_open, rt_sqlite_open_memory, rt_sqlite_close
+export rt_sqlite_execute, rt_sqlite_execute_batch
+export rt_sqlite_query, rt_sqlite_query_next, rt_sqlite_query_done
+export rt_sqlite_column_count, rt_sqlite_column_name, rt_sqlite_column_text
+export rt_sqlite_column_int, rt_sqlite_column_float, rt_sqlite_column_type
+export rt_sqlite_prepare, rt_sqlite_bind_text, rt_sqlite_bind_int, rt_sqlite_bind_float, rt_sqlite_bind_null
+export rt_sqlite_reset, rt_sqlite_finalize
+export rt_sqlite_begin, rt_sqlite_commit, rt_sqlite_rollback
+export rt_sqlite_last_insert_rowid, rt_sqlite_changes, rt_sqlite_error_message
+export SqliteConnection, SqliteStatement, SqliteRow
 export sqlite_open, sqlite_open_memory, sqlite_close
 export sqlite_execute, sqlite_execute_batch, sqlite_query_all, sqlite_query_one, sqlite_query_value
 export sqlite_prepare, sqlite_bind_text, sqlite_bind_int, sqlite_bind_float, sqlite_bind_null

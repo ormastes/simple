@@ -581,7 +581,7 @@ fn test_value_equality_mismatch() {
         assert_eq!(env.to_map().len(), 2);
         assert_eq!(env.get("a"), Some(&Value::Int(1)));
 
-        let base = Arc::new(crate::value::LayeredEnv::from_map(seed));
+        let base = Arc::new(seed);
         let mut layered = CowEnv::with_base(base);
         assert_eq!(layered.get("b"), Some(&Value::Int(2)));
         // remove a shared key -> tombstone hides it

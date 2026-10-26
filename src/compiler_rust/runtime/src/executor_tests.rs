@@ -160,9 +160,8 @@ fn test_worker_survives_panicking_task() {
 // Isolated Thread tests
 // ========================================================================
 
-fn native_closure_record(func: *const ()) -> Box<[usize; 2]> {
-    // Word 1 is read for the direct-function marker; keep it in bounds.
-    Box::new([func as usize, 0])
+fn native_closure_record(func: *const ()) -> Box<usize> {
+    Box::new(func as usize)
 }
 
 fn native_direct_function_record(func: *const ()) -> Box<[usize; 2]> {
@@ -183,7 +182,7 @@ extern "C" fn add_values(_closure: u64, v1: RuntimeValue, v2: RuntimeValue) -> R
 #[test]
 fn test_isolated_thread_spawn_and_join() {
     let closure = native_closure_record(double_value as *const ());
-    let handle = rt_thread_spawn_isolated(closure.as_ptr() as u64, RuntimeValue::from_int(21));
+    let handle = rt_thread_spawn_isolated((&*closure) as *const usize as u64, RuntimeValue::from_int(21));
 
     assert!(handle != 0);
     assert!(rt_thread_id(handle) > 0);
@@ -199,7 +198,7 @@ fn test_isolated_thread_spawn_and_join() {
 fn test_isolated_thread_spawn_with_args_and_join() {
     let closure = native_closure_record(add_values as *const ());
     let handle = rt_thread_spawn_isolated_with_args(
-        closure.as_ptr() as u64,
+        (&*closure) as *const usize as u64,
         RuntimeValue::from_int(10),
         RuntimeValue::from_int(32),
     );
@@ -217,7 +216,7 @@ fn test_isolated_thread_spawn_with_args_and_join() {
 fn test_isolated_thread_rejects_mutable_heap_graph_before_spawn() {
     let closure = native_closure_record(double_value as *const ());
     let array = crate::value::rt_array_new(1);
-    let handle = rt_thread_spawn_isolated(closure.as_ptr() as u64, array);
+    let handle = rt_thread_spawn_isolated((&*closure) as *const usize as u64, array);
 
     assert_eq!(handle, 0);
     crate::value::rt_array_free(array);
@@ -228,7 +227,7 @@ fn test_isolated_thread_with_args_rejects_heap_graph_in_second_input() {
     let closure = native_closure_record(add_values as *const ());
     let array = crate::value::rt_array_new(1);
     let handle =
-        rt_thread_spawn_isolated_with_args(closure.as_ptr() as u64, RuntimeValue::from_int(1), array);
+        rt_thread_spawn_isolated_with_args((&*closure) as *const usize as u64, RuntimeValue::from_int(1), array);
 
     assert_eq!(handle, 0);
     crate::value::rt_array_free(array);
@@ -242,7 +241,7 @@ fn test_isolated_thread_accepts_synchronized_channel_handle() {
 
     let closure = native_closure_record(channel_worker as *const ());
     let channel = crate::value::rt_channel_new();
-    let handle = rt_thread_spawn_isolated(closure.as_ptr() as u64, channel);
+    let handle = rt_thread_spawn_isolated((&*closure) as *const usize as u64, channel);
 
     assert_ne!(handle, 0);
     assert_eq!(rt_thread_join(handle), RuntimeValue::TRUE);
@@ -254,7 +253,7 @@ fn test_isolated_thread_accepts_synchronized_channel_handle() {
 fn test_limited_thread_rejects_mutable_heap_graph_before_spawn() {
     let closure = native_closure_record(double_value as *const ());
     let array = crate::value::rt_array_new(1);
-    let handle = rt_thread_spawn_limited(closure.as_ptr() as u64, array, -1, -1, -1, -1);
+    let handle = rt_thread_spawn_limited((&*closure) as *const usize as u64, array, -1, -1, -1, -1);
 
     assert_eq!(handle, 0);
     crate::value::rt_array_free(array);
@@ -265,7 +264,7 @@ fn test_limited_thread_with_args_rejects_heap_graph_in_second_input() {
     let closure = native_closure_record(add_values as *const ());
     let array = crate::value::rt_array_new(1);
     let handle = rt_thread_spawn_limited_with_args(
-        closure.as_ptr() as u64,
+        (&*closure) as *const usize as u64,
         RuntimeValue::from_int(1),
         array,
         -1,
@@ -280,8 +279,7 @@ fn test_limited_thread_with_args_rejects_heap_graph_in_second_input() {
 
 #[test]
 fn test_isolated_thread_spawn_and_join_direct_function_record() {
-    // A direct-function entry takes no hidden environment argument.
-    extern "C" fn direct_worker(v: RuntimeValue) -> RuntimeValue {
+    extern "C" fn direct_worker(_closure: u64, v: RuntimeValue) -> RuntimeValue {
         RuntimeValue::from_int(v.as_int() + 1)
     }
 
@@ -300,46 +298,8 @@ fn test_isolated_thread_spawn_and_join_direct_function_record() {
 }
 
 #[test]
-fn test_isolated_thread_static_direct_record_is_data_not_code() {
-    // A record in a loaded object's data segment resolves under dladdr, so
-    // dladdr alone would call the record itself as code. It also sits above
-    // 2^47 on aarch64 PIE, which the old x86_64-only ceiling read as an
-    // int-tagged word.
-    extern "C" fn static_direct_worker(v: RuntimeValue) -> RuntimeValue {
-        RuntimeValue::from_int(v.as_int() + 2)
-    }
-    #[repr(C)]
-    struct DirectRecord {
-        entry: extern "C" fn(RuntimeValue) -> RuntimeValue,
-        marker: usize,
-    }
-    static RECORD: DirectRecord = DirectRecord {
-        entry: static_direct_worker,
-        marker: NATIVE_DIRECT_FUNCTION_RECORD_MARKER,
-    };
-    let record_addr = &RECORD as *const DirectRecord as u64;
-    assert!(!native_word_exceeds_user_va(record_addr));
-    let handle = rt_thread_spawn_isolated(record_addr, RuntimeValue::from_int(40));
-    assert!(handle != 0);
-    let result = rt_thread_join(handle);
-    assert!(result.is_int());
-    assert_eq!(result.as_int(), 42);
-    rt_thread_free(handle);
-}
-
-#[cfg(target_arch = "aarch64")]
-#[test]
-fn test_native_word_user_va_ceiling_aarch64() {
-    // 48-bit user VA; a Top-Byte-Ignore tag is not part of the address.
-    assert!(!native_word_exceeds_user_va(0x0000_ffff_ffff_fff8));
-    assert!(!native_word_exceeds_user_va(0x5a00_aaaa_aaab_0000));
-    // addr << 3 of an aarch64 PIE address lands above the ceiling.
-    assert!(native_word_exceeds_user_va(0x0000_aaaa_aaab_0000u64 << 3));
-}
-
-#[test]
 fn test_isolated_thread_spawn_with_args_and_join_direct_function_record() {
-    extern "C" fn direct_add(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+    extern "C" fn direct_add(_closure: u64, left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
         RuntimeValue::from_int(left.as_int() + right.as_int())
     }
 
@@ -366,7 +326,7 @@ fn test_isolated_thread_is_done() {
     }
 
     let closure = native_closure_record(slow_work as *const ());
-    let handle = rt_thread_spawn_isolated(closure.as_ptr() as u64, RuntimeValue::from_int(1));
+    let handle = rt_thread_spawn_isolated((&*closure) as *const usize as u64, RuntimeValue::from_int(1));
 
     // Thread should not be done immediately
     assert_eq!(rt_thread_is_done(handle), 0);

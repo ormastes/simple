@@ -135,7 +135,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         // fires (with proper text-arg expansion) instead of
                         // falling through to the cross-module path.
                         // e.g., "rt_file_delete" → also insert "rt_file_remove"
-                        let base = super::instr::calls::strip_call_module_prefix(raw);
+                        let base = raw.rsplit_once("__").map(|(_, t)| t).unwrap_or(raw);
                         if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
                             names.insert(alias.to_string());
                         }
@@ -206,9 +206,6 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         names.insert("rt_value_as_int".to_string());
                     }
                     MirInst::Cast { from_ty, to_ty, .. } => {
-                        if *from_ty == TypeId::ANY && *to_ty == TypeId::BOOL {
-                            names.insert("rt_value_truthy".to_string());
-                        }
                         if matches!(*from_ty, TypeId::ANY | TypeId::STRING)
                             && matches!(
                                 *to_ty,
@@ -456,16 +453,35 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     // suffix so this family is only pulled in for programs
                     // that actually use one of these methods.
                     MirInst::MethodCallStatic { func_name, .. } => {
-                        // try_emit_vtable_type_switch (closures_structs.rs)
-                        // falls back to rt_method_not_found on a vtable miss.
-                        names.insert("rt_method_not_found".to_string());
                         let method_suffix = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
-                        // Same table the method lowering consults, so a method it
-                        // routes to `rt_math_*` is always predeclared here.
-                        if let Some(n) = super::scalar_float_methods::rt_math_unary(method_suffix)
-                            .or_else(|| super::scalar_float_methods::rt_math_binary(method_suffix))
-                        {
-                            names.insert(n.to_string());
+                        const MATH_METHODS: &[&str] = &[
+                            "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp", "ln", "log2",
+                            "log10", "cbrt", "pow", "powf", "max", "min", "atan2", "hypot",
+                        ];
+                        if MATH_METHODS.contains(&method_suffix) {
+                            for n in [
+                                "rt_math_sin",
+                                "rt_math_cos",
+                                "rt_math_tan",
+                                "rt_math_asin",
+                                "rt_math_acos",
+                                "rt_math_atan",
+                                "rt_math_sinh",
+                                "rt_math_cosh",
+                                "rt_math_tanh",
+                                "rt_math_exp",
+                                "rt_math_log",
+                                "rt_math_log2",
+                                "rt_math_log10",
+                                "rt_math_cbrt",
+                                "rt_math_pow",
+                                "rt_math_max",
+                                "rt_math_min",
+                                "rt_math_atan2",
+                                "rt_math_hypot",
+                            ] {
+                                names.insert(n.to_string());
+                            }
                         }
                     }
                     MirInst::FStringFormat { .. } => {
@@ -611,10 +627,6 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_string_data"
             | "rt_string_len"
             | "rt_string_bytes"
-            // Erased `.to_i64()`/`.to_int()` receivers synthesize this call
-            // during Cranelift lowering, so it is absent from MIR call names.
-            | "rt_to_int_dynamic"
-            | "rt_any_to_int"
             | "rt_string_builder_new"
             | "rt_string_builder_push"
             | "rt_string_builder_finish"
@@ -685,7 +697,6 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_is_some"
             | "rt_is_present"
             | "rt_is_none"
-            | "rt_try_is_absent"
             | "rt_enum_check_variant"
             | "rt_value_as_u64"
             | "rt_string_eq"
@@ -1400,12 +1411,6 @@ impl<M: Module> CodegenBackend<M> {
         self.fn_arities = arities;
     }
 
-    /// Seed cross-module call results before declaring this module's bodies.
-    /// Local declarations remain authoritative in `declare_functions`.
-    pub(crate) fn set_function_return_types(&mut self, return_types: std::collections::HashMap<String, TypeId>) {
-        self.function_return_types = return_types;
-    }
-
     pub fn set_enum_defs(
         &mut self,
         defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
@@ -1465,7 +1470,7 @@ impl<M: Module> CodegenBackend<M> {
         locally_defined_names: &HashSet<String>,
     ) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
         let mut funcs = HashMap::new();
-        let call_conv = module.isa().default_call_conv();
+        let call_conv = super::shared::platform_call_conv();
 
         for spec in runtime_funcs_for_target(target) {
             if locally_defined_names.contains(spec.name) {
@@ -1489,7 +1494,7 @@ impl<M: Module> CodegenBackend<M> {
         referenced_names: &HashSet<String>,
         locally_defined_names: &HashSet<String>,
     ) -> BackendResult<()> {
-        let call_conv = self.module.isa().default_call_conv();
+        let call_conv = super::shared::platform_call_conv();
 
         for spec in runtime_funcs_for_target(&self.target) {
             if self.runtime_funcs.contains_key(spec.name) {
@@ -1567,7 +1572,7 @@ impl<M: Module> CodegenBackend<M> {
                 continue;
             }
 
-            let sig = super::shared::build_mir_signature(func, self.module.isa().default_call_conv());
+            let sig = super::shared::build_mir_signature(func);
 
             // Determine linkage and symbol name.
             //
@@ -1740,7 +1745,7 @@ impl<M: Module> CodegenBackend<M> {
                             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
                     let is_data_export = self.data_exports.contains(resolved) || self.data_exports.contains(&sanitized);
                     if !is_data_export && !looks_like_const_data {
-                        let call_conv = self.module.isa().default_call_conv();
+                        let call_conv = super::shared::platform_call_conv();
                         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                         sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
@@ -1901,7 +1906,7 @@ impl<M: Module> CodegenBackend<M> {
             return Ok(());
         }
 
-        let sig = build_mir_signature(func, self.module.isa().default_call_conv());
+        let sig = build_mir_signature(func);
         self.ctx.func.signature = sig;
         self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
 
@@ -1958,12 +1963,6 @@ impl<M: Module> CodegenBackend<M> {
                 "[CODEGEN VERIFY] Function '{}' has verifier errors: {}",
                 func.name, errors
             );
-        }
-
-        // SIMPLE_DUMP_CLIF=<function name> prints that function's Cranelift IR
-        // (the codegen-level twin of SIMPLE_DUMP_MIR).
-        if std::env::var("SIMPLE_DUMP_CLIF").is_ok_and(|want| want == func.name) {
-            eprintln!("[CLIF-DUMP] function: {}\n{}", func.name, self.ctx.func.display());
         }
 
         if std::env::var("SIMPLE_DUMP_STACK_SLOTS").is_ok() {
@@ -2277,22 +2276,7 @@ impl<M: Module> CodegenBackend<M> {
                     }
                 }
             }
-            let fn_compile_start = if native_trace { Some(std::time::Instant::now()) } else { None };
-            let compiled = self.compile_function(func);
-            if let Some(start) = fn_compile_start {
-                let elapsed = start.elapsed();
-                if elapsed.as_millis() >= 500 {
-                    let insts: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
-                    eprintln!(
-                        "[rust-jit] slow function {} took {} ms (blocks={} insts={})",
-                        func.name,
-                        elapsed.as_millis(),
-                        func.blocks.len(),
-                        insts
-                    );
-                }
-            }
-            match compiled {
+            match self.compile_function(func) {
                 Ok(()) => {}
                 Err(_e) => {
                     // Loud, distinctive marker so missing-body bugs cannot hide
@@ -2375,7 +2359,7 @@ impl<M: Module> CodegenBackend<M> {
                     continue;
                 }
                 // Create a stub with the correct signature
-                let sig = build_mir_signature(func, self.module.isa().default_call_conv());
+                let sig = build_mir_signature(func);
                 self.ctx.func.signature = sig.clone();
                 self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
 
@@ -2448,7 +2432,6 @@ impl<M: Module> CodegenBackend<M> {
                 &mir.global_init_functions,
                 &mir.global_init_structs,
                 &dynamic_init_func_ids,
-                &mir.extern_fn_names,
             )?;
         }
 
@@ -2470,7 +2453,6 @@ impl<M: Module> CodegenBackend<M> {
         init_functions: &std::collections::HashMap<String, String>,
         init_structs: &std::collections::HashMap<String, crate::hir::HirGlobalStructInit>,
         dynamic_init_func_ids: &[cranelift_module::FuncId],
-        extern_fn_names: &std::collections::HashSet<String>,
     ) -> BackendResult<()> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
@@ -2556,20 +2538,11 @@ impl<M: Module> CodegenBackend<M> {
         };
 
         // Declare the init function: fn() -> void
-        let call_conv = self.module.isa().default_call_conv();
+        let call_conv = super::shared::platform_call_conv();
         let sig = cranelift_codegen::ir::Signature::new(call_conv);
-        // COFF WeakExternal definitions can resolve to the generated
-        // /ALTERNATENAME empty fallback instead of this initializer, leaving
-        // heap-backed globals as null. A module has exactly one init owner,
-        // so export its definition strongly on Windows (as for global data).
-        let linkage = if self.target.os == TargetOS::Windows {
-            cranelift_module::Linkage::Export
-        } else {
-            cranelift_module::Linkage::Preemptible
-        };
         let func_id = self
             .module
-            .declare_function(&init_name, linkage, &sig)
+            .declare_function(&init_name, cranelift_module::Linkage::Preemptible, &sig)
             .map_err(|e| BackendError::ModuleError(format!("declare __module_init: {e}")))?;
         self.func_ids.insert(init_name.clone(), func_id);
 
@@ -2899,65 +2872,38 @@ impl<M: Module> CodegenBackend<M> {
         sorted_functions.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, func_name) in &sorted_functions {
             trace_module_init!(format!("function:{global_name}"));
-            let sanitized_func = func_name.replace('.', "_dot_");
-            // A user function (local or imported) is stored the way a
-            // `GlobalLoad` builds its value: a zero-capture closure over
-            // `F$boxed` (closure_boxed_entry.rs). Only an extern entry point
-            // keeps the raw direct record, which runtime consumers taking an
-            // extern entry accept; `rt_closure_func_ptr` rejects it, so a user
-            // function stored that way called address 0.
-            let boxed_id = self
+            let func_id = self
                 .func_ids
-                .get(&super::boxed_entry_name(func_name))
-                .or_else(|| self.func_ids.get(&super::boxed_entry_name(&sanitized_func)))
-                .copied();
-            let is_extern =
-                extern_fn_names.contains(func_name.as_str()) || extern_fn_names.contains(sanitized_func.as_str());
-            let value = if let Some(boxed_id) = boxed_id {
-                let new_id = *self
-                    .runtime_funcs
-                    .get("rt_closure_new")
-                    .ok_or_else(|| BackendError::ModuleError("rt_closure_new not declared".into()))?;
-                let new_ref = self.module.declare_func_in_func(new_id, builder.func);
-                let boxed_ref = self.module.declare_func_in_func(boxed_id, builder.func);
-                let addr = builder.ins().func_addr(types::I64, boxed_ref);
-                let count = builder.ins().iconst(types::I32, 0);
-                let call = builder.ins().call(new_ref, &[addr, count]);
-                builder.inst_results(call)[0]
-            } else if is_extern {
-                let func_id = self
-                    .func_ids
-                    .get(func_name.as_str())
-                    .or_else(|| self.func_ids.get(sanitized_func.as_str()))
-                    .copied()
-                    .ok_or_else(|| {
-                        BackendError::ModuleError(format!(
-                            "function global initializer '{}' references unknown function '{}'",
-                            global_name, func_name
-                        ))
-                    })?;
-                let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
-                let closure_size = builder.ins().iconst(types::I64, 16);
-                let call_inst = builder.ins().call(alloc_ref, &[closure_size]);
-                let closure_ptr = builder.inst_results(call_inst)[0];
-                let func_ref = self.module.declare_func_in_func(func_id, builder.func);
-                let fn_addr = builder.ins().func_addr(types::I64, func_ref);
-                let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
-                builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
-                builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
-                closure_ptr
-            } else {
-                return Err(BackendError::ModuleError(format!(
-                    "function global initializer '{}' = '{}' has no boxed entry; refusing to store a \
-                     function value that indirect calls reject (would call address 0)",
-                    global_name, func_name
-                )));
-            };
+                .get(func_name.as_str())
+                .copied()
+                .or_else(|| {
+                    let sanitized = if func_name.contains('.') {
+                        func_name.replace('.', "_dot_")
+                    } else {
+                        func_name.to_string()
+                    };
+                    self.func_ids.get(sanitized.as_str()).copied()
+                })
+                .ok_or_else(|| {
+                    BackendError::ModuleError(format!(
+                        "function global initializer '{}' references unknown function '{}'",
+                        global_name, func_name
+                    ))
+                })?;
+            let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
+            let closure_size = builder.ins().iconst(types::I64, 16);
+            let call_inst = builder.ins().call(alloc_ref, &[closure_size]);
+            let closure_ptr = builder.inst_results(call_inst)[0];
+            let func_ref = self.module.declare_func_in_func(func_id, builder.func);
+            let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+            let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
+            builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+            builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
 
             if let Some(&gid) = self.global_ids.get(global_name.as_str()) {
                 let global_ref = self.module.declare_data_in_func(gid, builder.func);
                 let global_addr = builder.ins().global_value(types::I64, global_ref);
-                builder.ins().store(MemFlags::new(), value, global_addr, 0);
+                builder.ins().store(MemFlags::new(), closure_ptr, global_addr, 0);
             } else {
                 let mangled = match &self.module_prefix {
                     Some(prefix) => format!("{}__{}", prefix, global_name),
@@ -2966,7 +2912,7 @@ impl<M: Module> CodegenBackend<M> {
                 if let Some(&gid) = self.global_ids.get(mangled.as_str()) {
                     let global_ref = self.module.declare_data_in_func(gid, builder.func);
                     let global_addr = builder.ins().global_value(types::I64, global_ref);
-                    builder.ins().store(MemFlags::new(), value, global_addr, 0);
+                    builder.ins().store(MemFlags::new(), closure_ptr, global_addr, 0);
                 }
             }
         }
@@ -3076,7 +3022,7 @@ impl<M: Module> CodegenBackend<M> {
         // Skip .init_array registration — define_zeroinit + write_function_addr
         // corrupts Mach-O output (object crate bug). Module init functions are
         // called explicitly from the native binary's startup code instead.
-        // The function is still defined and externally visible (linkage above),
+        // The function is still defined and exported (Preemptible linkage above),
         // so the linker/startup code can find and call it.
 
         Ok(())
@@ -3217,7 +3163,6 @@ mod tests {
     #[test]
     fn synthesized_runtime_symbols_are_retained() {
         assert!(runtime_symbol_is_codegen_root("rt_string_bytes"));
-        assert!(runtime_symbol_is_codegen_root("rt_to_int_dynamic"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_discriminant"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_id"));
     }
@@ -3728,67 +3673,5 @@ mod tests {
         assert!(!module_init_trace_enabled_for(None));
         assert!(!module_init_trace_enabled_for(Some("0")));
         assert!(module_init_trace_enabled_for(Some("1")));
-    }
-
-    #[test]
-    fn cross_target_signatures_follow_object_isa() {
-        use simple_common::target::TargetArch;
-        use object::Object;
-
-        // Exercise both directions on every host: the historical host-based
-        // helper necessarily gives the wrong ABI for one of these targets.
-        for (os, expected, format) in [
-            (TargetOS::Windows, CallConv::WindowsFastcall, object::BinaryFormat::Coff),
-            (TargetOS::Linux, CallConv::SystemV, object::BinaryFormat::Elf),
-        ] {
-            let target = Target::new(TargetArch::X86_64, os);
-            let settings = BackendSettings::aot_for_target(target);
-            let (_, isa) = create_isa_and_flags(&settings).expect("target ISA");
-            let builder = ObjectBuilder::new(isa, "cross_abi", cranelift_module::default_libcall_names())
-                .expect("object builder");
-            let mut backend = CodegenBackend::with_module_and_target(ObjectModule::new(builder), target)
-                .expect("target backend");
-            backend.set_module_prefix("cross_abi".to_string());
-
-            let mut mir = MirModule::new();
-            mir.functions.push(main_returning_zero());
-            backend.compile_all_functions(&mir).expect("compile MIR function");
-            let strings = HashMap::from([("message".to_string(), "cross-target global string".to_string())]);
-            backend.ensure_runtime_functions_declared(
-                &HashSet::from(["rt_string_new".to_string()]), &HashSet::new(),
-            ).expect("declare runtime string allocator");
-            backend.generate_module_init(&strings, &Default::default(), &Default::default(), &Default::default(), &[], &Default::default())
-                .expect("compile initializer calling runtime");
-            super::super::shared::create_body_stub(&mut backend.module, &mut backend.ctx, "outlined_body")
-                .expect("compile outlined body");
-
-            for (_, declaration) in backend.module.declarations().get_functions() {
-                assert_eq!(declaration.signature.call_conv, expected, "target {os:?}: {:?}", declaration.name);
-            }
-            assert_eq!(backend.module.declarations().get_function_decl(backend.runtime_funcs["rt_string_new"])
-                .signature.call_conv, expected);
-            let bytes = backend.module.finish().emit().expect("emit target object");
-            let object = object::File::parse(bytes.as_slice()).expect("parse target object");
-            assert_eq!(object.format(), format);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn coff_module_initializer_is_a_strong_definition() {
-        use object::{Object, ObjectSymbol};
-        let mut backend = test_backend();
-        backend.set_module_prefix("init_owner".to_string());
-        backend.generate_module_init(
-            &Default::default(), &Default::default(), &Default::default(),
-            &Default::default(), &[], &Default::default(),
-        ).expect("emit module initializer");
-        let bytes = backend.module.finish().emit().expect("emit COFF");
-        let object = object::File::parse(bytes.as_slice()).expect("read COFF");
-        let initializer = object.symbols()
-            .find(|symbol| symbol.name() == Ok("__module_init_init_owner"))
-            .expect("initializer definition");
-        assert!(initializer.is_definition());
-        assert!(!initializer.is_weak(), "weak COFF init can resolve to the empty /ALTERNATENAME stub");
     }
 }

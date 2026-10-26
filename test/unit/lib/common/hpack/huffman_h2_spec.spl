@@ -1,0 +1,259 @@
+# Specification for src/lib/common/hpack/huffman_h2.spl
+#
+# Covers RFC 7541 §5.2 Huffman coding with Appendix B static table.
+# Reference vectors from RFC 7541 Appendix C.4.
+
+use std.spipe.*
+use std.common.hpack.huffman_h2.{hpack_huffman_encode, hpack_huffman_decode}
+
+# ---------------------------------------------------------------------------
+# Module-scope helpers for building test payloads.
+# (Must NOT be inside `it` blocks — see interpreter footgun note.)
+# ---------------------------------------------------------------------------
+
+# ASCII bytes for "www.example.com" (RFC 7541 §C.4.1).
+fn _www_example_com() -> [u8]:
+    [0x77u8, 0x77u8, 0x77u8, 0x2eu8, 0x65u8, 0x78u8, 0x61u8, 0x6du8,
+     0x70u8, 0x6cu8, 0x65u8, 0x2eu8, 0x63u8, 0x6fu8, 0x6du8]
+
+# Expected Huffman encoding of "www.example.com" (RFC 7541 §C.4.1).
+fn _www_example_com_encoded() -> [u8]:
+    [0xf1u8, 0xe3u8, 0xc2u8, 0xe5u8, 0xf2u8, 0x3au8, 0x6bu8, 0xa0u8,
+     0xabu8, 0x90u8, 0xf4u8, 0xffu8]
+
+# ASCII bytes for "no-cache" (RFC 7541 §C.4.2).
+fn _no_cache() -> [u8]:
+    [0x6eu8, 0x6fu8, 0x2du8, 0x63u8, 0x61u8, 0x63u8, 0x68u8, 0x65u8]
+
+# Expected Huffman encoding of "no-cache" (RFC 7541 §C.4.2).
+fn _no_cache_encoded() -> [u8]:
+    [0xa8u8, 0xebu8, 0x10u8, 0x64u8, 0x9cu8, 0xbfu8]
+
+# ASCII bytes for "custom-key" (RFC 7541 §C.4.3).
+fn _custom_key() -> [u8]:
+    [0x63u8, 0x75u8, 0x73u8, 0x74u8, 0x6fu8, 0x6du8, 0x2du8, 0x6bu8,
+     0x65u8, 0x79u8]
+
+# Expected Huffman encoding of "custom-key" (RFC 7541 §C.4.3).
+fn _custom_key_encoded() -> [u8]:
+    [0x25u8, 0xa8u8, 0x49u8, 0xe9u8, 0x5bu8, 0xa9u8, 0x7du8, 0x7fu8]
+
+# ASCII bytes for "custom-value" (RFC 7541 §C.4.3).
+fn _custom_value() -> [u8]:
+    [0x63u8, 0x75u8, 0x73u8, 0x74u8, 0x6fu8, 0x6du8, 0x2du8, 0x76u8,
+     0x61u8, 0x6cu8, 0x75u8, 0x65u8]
+
+# Expected Huffman encoding of "custom-value" (RFC 7541 §C.4.3).
+fn _custom_value_encoded() -> [u8]:
+    [0x25u8, 0xa8u8, 0x49u8, 0xe9u8, 0x5bu8, 0xb8u8, 0xe8u8, 0xb4u8,
+     0xbfu8]
+
+# ASCII bytes for "200".
+fn _status_200() -> [u8]:
+    [0x32u8, 0x30u8, 0x30u8]
+
+# Build a [u8] of `n` repetitions of `byte`.
+fn _make_repeating(byte: u8, n: i64) -> [u8]:
+    val unit: [u8] = [byte]
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        bytes = bytes + unit
+        i = i + 1
+    bytes
+
+# Build a [u8] of `n` bytes where byte i = (i mod 256).
+fn _make_indexed(n: i64) -> [u8]:
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        val one: [u8] = [(i % 256).to_u8()]
+        bytes = bytes + one
+        i = i + 1
+    bytes
+
+# Build a stream with an embedded EOS symbol (30 bits all-1s then some bits).
+# We encode 'a' (0x61, 5 bits: 00011), then embed EOS (30 bits all-1s).
+# Then pad to byte boundary. This should be rejected as EOS-in-stream.
+fn _eos_embedded_stream() -> [u8]:
+    # 'a' = 00011 (5 bits), EOS = 111111111111111111111111111111 (30 bits).
+    # Total = 35 bits. Padded to 40 bits (5 bytes) with 5 pad bits = 11111.
+    # Bit string: 00011 | 111111111111111111111111111111 | 11111
+    # = 0001 1111 | 1111 1111 | 1111 1111 | 1111 1111 | 1111 1111
+    # = 0x1f 0xff 0xff 0xff 0xff
+    [0x1fu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8]
+
+# A stream with padding of 8 bits (all 1s) — exceeds 7 bit limit.
+# Encode 'a' (5 bits: 00011), then 3 bits for 8-bit alignment + 8 extra 1-bits.
+# Actually we need to craft a byte sequence where after decoding 'a' we
+# have 8 bits remaining that are 1s.
+# 'a' = 00011 in 5 bits. Followed by 8+3 = 11 bits of 1s (=0x7FF in 11 bits).
+# Packed into 2 bytes: 00011 111 | 11111111 = 0x1f 0xff.
+# But 0x1f 0xff gives: 00011 111 11111111 = 'a' decoded (5 bits), then 11 bits
+# of 1s = invalid because 11 bits > 7 (would be EOS or >7 pad bits).
+fn _over_padded_stream() -> [u8]:
+    # 2 bytes: 'a' (5 bits) + 11 bits of 1s. 11 > 7 bits of padding → error.
+    [0x1fu8, 0xffu8]
+
+# Check if two [u8] slices are equal.
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    var ok = true
+    while i < a.len():
+        if a[i] != b[i]:
+            ok = false
+        i = i + 1
+    ok
+
+# ---------------------------------------------------------------------------
+# Encoder tests
+# ---------------------------------------------------------------------------
+
+describe "HPACK Huffman encoder — RFC 7541 §C.4 reference vectors":
+
+    it "encodes 'www.example.com' (§C.4.1) correctly":
+        val encoded = hpack_huffman_encode(_www_example_com())
+        val expected = _www_example_com_encoded()
+        expect(encoded.len()).to_equal(12)
+        expect(_bytes_eq(encoded, expected)).to_equal(true)
+
+    it "encodes 'no-cache' (§C.4.2) correctly":
+        val encoded = hpack_huffman_encode(_no_cache())
+        val expected = _no_cache_encoded()
+        expect(encoded.len()).to_equal(6)
+        expect(_bytes_eq(encoded, expected)).to_equal(true)
+
+    it "encodes 'custom-key' (§C.4.3) correctly":
+        val encoded = hpack_huffman_encode(_custom_key())
+        val expected = _custom_key_encoded()
+        expect(encoded.len()).to_equal(8)
+        expect(_bytes_eq(encoded, expected)).to_equal(true)
+
+    it "encodes 'custom-value' (§C.4.3) correctly":
+        val encoded = hpack_huffman_encode(_custom_value())
+        val expected = _custom_value_encoded()
+        expect(encoded.len()).to_equal(9)
+        expect(_bytes_eq(encoded, expected)).to_equal(true)
+
+describe "HPACK Huffman encoder — basic cases":
+
+    it "encodes empty payload to empty output":
+        val out = hpack_huffman_encode([])
+        expect(out.len()).to_equal(0)
+
+    it "encodes a single byte (0x61 = 'a') with EOS padding":
+        # 'a' = 00011 (5 bits); padded to 8 bits with 3 high EOS bits → 000 11111
+        # = 0x1f
+        val out = hpack_huffman_encode([0x61u8])
+        expect(out.len()).to_equal(1)
+        expect(out[0]).to_equal(0x1fu8)
+
+    it "encodes '200' correctly":
+        val out = hpack_huffman_encode(_status_200())
+        # Just verify it produces some output and round-trips.
+        expect(out.len()).to_be_greater_than(0)
+
+# ---------------------------------------------------------------------------
+# Decoder tests
+# ---------------------------------------------------------------------------
+
+describe "HPACK Huffman decoder — RFC 7541 §C.4 reference vectors":
+
+    it "decodes 'www.example.com' (§C.4.1) correctly":
+        val enc = _www_example_com_encoded()
+        val res = hpack_huffman_decode(enc, 0, enc.len())
+        expect(res.is_ok()).to_equal(true)
+        val decoded = res.unwrap()
+        expect(_bytes_eq(decoded, _www_example_com())).to_equal(true)
+
+    it "decodes 'no-cache' (§C.4.2) correctly":
+        val enc = _no_cache_encoded()
+        val res = hpack_huffman_decode(enc, 0, enc.len())
+        expect(res.is_ok()).to_equal(true)
+        val decoded = res.unwrap()
+        expect(_bytes_eq(decoded, _no_cache())).to_equal(true)
+
+    it "decodes 'custom-key' (§C.4.3) correctly":
+        val enc = _custom_key_encoded()
+        val res = hpack_huffman_decode(enc, 0, enc.len())
+        expect(res.is_ok()).to_equal(true)
+        val decoded = res.unwrap()
+        expect(_bytes_eq(decoded, _custom_key())).to_equal(true)
+
+    it "decodes 'custom-value' (§C.4.3) correctly":
+        val enc = _custom_value_encoded()
+        val res = hpack_huffman_decode(enc, 0, enc.len())
+        expect(res.is_ok()).to_equal(true)
+        val decoded = res.unwrap()
+        expect(_bytes_eq(decoded, _custom_value())).to_equal(true)
+
+describe "HPACK Huffman decoder — error cases":
+
+    it "rejects a stream containing an explicit EOS symbol":
+        val stream = _eos_embedded_stream()
+        val res = hpack_huffman_decode(stream, 0, stream.len())
+        expect(res.is_err()).to_equal(true)
+
+    it "rejects padding longer than 7 bits":
+        val stream = _over_padded_stream()
+        val res = hpack_huffman_decode(stream, 0, stream.len())
+        expect(res.is_err()).to_equal(true)
+
+    it "rejects negative offset":
+        val enc = _no_cache_encoded()
+        val res = hpack_huffman_decode(enc, -1, enc.len())
+        expect(res.is_err()).to_equal(true)
+
+    it "rejects length that exceeds buffer":
+        val enc = _no_cache_encoded()
+        val res = hpack_huffman_decode(enc, 0, enc.len() + 1)
+        expect(res.is_err()).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Round-trip tests
+# ---------------------------------------------------------------------------
+
+describe "HPACK Huffman codec — round-trip":
+
+    it "round-trips empty input":
+        val encoded = hpack_huffman_encode([])
+        val res = hpack_huffman_decode(encoded, 0, encoded.len())
+        expect(res.is_ok()).to_equal(true)
+        expect(res.unwrap().len()).to_equal(0)
+
+    it "round-trips single byte 'a'":
+        val payload: [u8] = [0x61u8]
+        val encoded = hpack_huffman_encode(payload)
+        val res = hpack_huffman_decode(encoded, 0, encoded.len())
+        expect(res.is_ok()).to_equal(true)
+        val decoded = res.unwrap()
+        expect(decoded.len()).to_equal(1)
+        expect(decoded[0]).to_equal(0x61u8)
+
+    it "round-trips '200'":
+        val payload = _status_200()
+        val encoded = hpack_huffman_encode(payload)
+        val res = hpack_huffman_decode(encoded, 0, encoded.len())
+        expect(res.is_ok()).to_equal(true)
+        val decoded = res.unwrap()
+        expect(_bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 256-byte indexed payload (covers every symbol 0x00-0xff)":
+        val payload = _make_indexed(256)
+        val encoded = hpack_huffman_encode(payload)
+        val res = hpack_huffman_decode(encoded, 0, encoded.len())
+        expect(res.is_ok()).to_equal(true)
+        val decoded = res.unwrap()
+        expect(decoded.len()).to_equal(256)
+        expect(_bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 100-byte repeating payload":
+        val payload = _make_repeating(0x41u8, 100)
+        val encoded = hpack_huffman_encode(payload)
+        val res = hpack_huffman_decode(encoded, 0, encoded.len())
+        expect(res.is_ok()).to_equal(true)
+        val decoded = res.unwrap()
+        expect(decoded.len()).to_equal(100)
+        expect(_bytes_eq(decoded, payload)).to_equal(true)

@@ -1,37 +1,9 @@
-use std.common.crypto.xxh3.{xxh3_128_hex}
-use std.common.text_bytes.{text_to_utf8_bytes}
-
 # SFFI - Runtime Operations
 # Centralized RuntimeValue and GC SFFI wrappers
 
 # ============================================================================
 # Value Creation
 # ============================================================================
-
-# Opaque handle into the selected runtime's tagged-value ABI. Declared here
-# (the only src/lib user); the alias previously lived only in
-# compiler/70.backend/sffi_minimal.spl, so every extern below failed with
-# 'unresolved type: RuntimeValuePtr' under lanes without that import.
-type RuntimeValuePtr = i64
-
-# Same tagged-value ABI in the selected C, Rust or Simple runtime owner.
-# This alias never interprets or reconstructs a handle from another owner.
-@unsafe(reason: "selected runtime tagged arithmetic ABI; operands must belong to that runtime owner", capabilities: [ffi])
-extern fn rt_tagged_add(left: RuntimeValuePtr, right: RuntimeValuePtr) -> RuntimeValuePtr
-
-@unsafe(reason: "owned tagged runtime-value operands; preserves selected runtime representation", capabilities: [ffi])
-@always_inline
-fn tagged_add(left: RuntimeValuePtr, right: RuntimeValuePtr) -> RuntimeValuePtr:
-    rt_tagged_add(left, right)
-
-# Observation of the selected runtime's current scope:0 inactive,1 running,
-# 2 paused. This does not begin/claim a scope or confer borrowed ownership.
-@unsafe(reason: "side-effect-free query of actual selected runtime scope context", capabilities: [ffi])
-extern fn rt_transient_array_scope_state_v1() -> i64
-
-fn transient_array_scope_state_v1() -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_transient_array_scope_state_v1()
 
 @unsafe(reason: "raw owned runtime-value allocation ABI; zero means failure", capabilities: [ffi])
 extern fn rt_value_nil() -> RuntimeValuePtr
@@ -132,31 +104,3 @@ fn value_as_float(value: RuntimeValuePtr) -> f64:
 # ============================================================================
 # Value Operations
 # ============================================================================
-
-# ============================================================================
-# Hashing accelerator
-# ============================================================================
-# Lives here, not in sffi.crypto: the compiler frontend keys its parse cache
-# with it, and sffi.crypto also wraps rt_base64url_encode, which only the
-# ordinary runtime.c defines -- importing it broke the core-C Stage 2 link.
-
-@unsafe(reason: "raw runtime ABI for rt_xxh3_128_text; empty text is the unsupported/provider-failure sentinel", capabilities: [ffi])
-extern fn rt_xxh3_128_text(data: text) -> text
-
-# Set when the runtime digest was unavailable and the pure-Simple fallback ran.
-var _xxh3_128_text_fallback_used: bool = false
-
-fn xxh3_128_text_fallback_used() -> bool:
-    _xxh3_128_text_fallback_used
-
-# XXH3-128 of the text's UTF-8 bytes as 32 lowercase hex (canonical: high64
-# then low64), through the C/Rust runtime accelerator. Anything but a full
-# 32-hex answer falls back to the pure-Simple std.common.crypto.xxh3, which is
-# the oracle. NOT collision-resistant: local cache indexing only.
-fn xxh3_128_text(data: text) -> text:
-    val hex = unsafe(capabilities: [ffi]):
-        rt_xxh3_128_text(data)
-    if hex.len() == 32:
-        return hex
-    _xxh3_128_text_fallback_used = true
-    xxh3_128_hex(text_to_utf8_bytes(data))

@@ -70,8 +70,7 @@ module rejects unknown names up front rather than letting that happen.
 
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
 use std.io_runtime.{env_get, env_set}
-use std.io_runtime.{file_exists, getpid, host_os}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{file_exists}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
 
 val PROBE_TIMEOUT_MS: i64 = 120000
@@ -99,10 +98,6 @@ pub fn is_known_engine(engine: text) -> bool:
     """An unrecognised SIMPLE_EXECUTION_MODE silently means JIT — reject it."""
     engine == "jit" or engine == "interpret" or engine == "interpreter"
 
-# The Windows self-exe answer costs one PowerShell spawn; a pid's image path
-# cannot change, so ask once per process.
-var _self_exe_windows_cache = ""
-
 pub fn simple_binary() -> text:
     """Resolve the compiler binary to spawn probes with.
 
@@ -125,17 +120,6 @@ pub fn simple_binary() -> text:
     val self_path = path_absolute("/proc/self/exe") ?? ""
     if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
         return self_path
-    # Windows has no /proc: ask PowerShell for this pid's image path so the probe
-    # still runs on the invoking build instead of the tracked bin/simple.exe,
-    # which can be older than the source tree (BUG-IT-1, 2026-10-10).
-    if host_os() == "windows":
-        if _self_exe_windows_cache != "":
-            return _self_exe_windows_cache
-        val (win_out, _win_err, win_code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
-        val win_path = win_out.trim()
-        if win_code == 0 and win_path != "" and not win_path.ends_with(".spl") and file_exists(win_path):
-            _self_exe_windows_cache = win_path
-            return win_path
     if file_exists("bin/simple"):
         return "bin/simple"
     "./bin/simple"
@@ -170,36 +154,6 @@ pub fn run_under_engine(spl_path: text, engine: text) -> (text, text, i64):
     env_set("SIMPLE_EXECUTION_MODE", previous)
     env_set("SIMPLE_RUNTIME_MODE", previous_runtime)
     result
-
-pub fn engine_max_rss_kb(spl_path: text, engine: text) -> i64:
-    """Peak resident set (KiB) of `spl_path` under `engine`, or -1 if unmeasurable.
-
-    Measured from OUTSIDE the probe with /usr/bin/time, because a probe that
-    imports a sysinfo extern the JIT cannot resolve is demoted to the
-    interpreter and would measure the wrong engine. Same engine pinning and
-    reentrancy guard as `run_under_engine`.
-    """
-    if not is_known_engine(engine) or not file_exists(spl_path) or probe_spawn_is_reentrant():
-        return -1
-    if not file_exists("/usr/bin/time"):
-        return -1
-
-    val binary = simple_binary()
-    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
-    env_set("SIMPLE_EXECUTION_MODE", engine)
-    val previous_runtime = env_get("SIMPLE_RUNTIME_MODE") ?? ""
-    env_set("SIMPLE_RUNTIME_MODE", engine)
-    env_set(PROBE_DEPTH_VAR, "1")
-
-    val (_out, err, _code) = rt_process_run_bounded("/usr/bin/time", ["-f", "MAXRSS_KB %M", binary, "run", spl_path], PROBE_TIMEOUT_MS, PROBE_MAX_OUTPUT)
-
-    env_set(PROBE_DEPTH_VAR, "")
-    env_set("SIMPLE_EXECUTION_MODE", previous)
-    env_set("SIMPLE_RUNTIME_MODE", previous_runtime)
-    for line in err.split("\n"):
-        if line.starts_with("MAXRSS_KB "):
-            return line.replace("MAXRSS_KB ", "").trim().to_int()
-    -1
 
 pub fn engine_stdout(spl_path: text, engine: text) -> text:
     """stdout of `spl_path` run under `engine` — the usual `expect` target."""

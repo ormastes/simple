@@ -15,7 +15,6 @@
 
 use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_IDENT}
-use compiler.core.tokens.{TOK_INT_LIT}
 use compiler.core.tokens.{TOK_KW_FN, TOK_KW_DYN}
 use compiler.core.tokens.{TOK_LT, TOK_GT, TOK_LT_GENERIC}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
@@ -26,11 +25,10 @@ use compiler.core.tokens.{TOK_QUESTION, TOK_DOUBLE_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_SEMICOLON}
 use compiler.core.tokens.{TOK_AMPERSAND, TOK_STAR, TOK_KW_NIL}
-use compiler.core.tokens.{TOK_AT, TOK_MINUS, TOK_PLUS}
+use compiler.core.tokens.{TOK_AT, TOK_MINUS}
 use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next, lex_next_snapshot, lex_mark_current_token_as_generic_close}
 use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
-use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_rollback}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
 use compiler.core.ast.{module_set_path, module_get_path}
 use compiler.core.ast.{ast_reset}
@@ -50,23 +48,19 @@ use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_
 use compiler.core.types.{TYPE_UNION}
 use compiler.core.types.{int_to_str}
 use compiler.core.types.{named_type_find, named_type_register}
-use compiler.core.types.{named_type_apply}
 use compiler.core.types.{primitive_integer_bit_width_from_name}
-use compiler.core.types.{type_pools_promote_hir_owners}
 use compiler.core.types.{union_type_register}
 use compiler.core.types.{dict_type_register}
 use compiler.core.types.{tuple_type_register}
 use compiler.core.types.{array_generic_type_register}
-use compiler.core.types.{option_generic_type_register, is_option_generic_tag, is_function_tag}
-use compiler.core.types.{named_generic_instance_register}
+use compiler.core.types.{option_generic_type_register, is_option_generic_tag}
 use compiler.core.types.{result_type_register}
 use compiler.core.types.{isolated_type_register}
 use compiler.core.types.{exclusive_type_register}
 use compiler.core.types.{reference_type_register}
-use compiler.core.types.{pointer_type_register_flag, POINTER_FLAG_SHARED, POINTER_FLAG_RAW_CONST, POINTER_FLAG_RAW_MUT}
+use compiler.core.types.{pointer_type_register}
 use compiler.core.types.{atomic_type_register}
 use compiler.core.types.{weak_type_register}
-use compiler.core.types.{function_type_register, TYPE_FUNCTION_BASE, TYPE_FUNCTION_LIMIT}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -91,79 +85,20 @@ use compiler.frontend.rt_criticality_registry.{rt_criticality_reset_module}
 use compiler.frontend.aspect_registry.{aspect_registry_reset_module, aspect_pending_reset}
 use compiler.core.parser_decls.{parse_val_decl, parse_lazy_val_decl, parse_var_decl}
 use compiler.core.parser_decls.{parse_module_body}
-use compiler.frontend.core.representation_declarations_v1.{representation_parser_reset_v1}
 use compiler.frontend.core.flat_pool_codec.*
 
 # ===== Parser State =====
-
-use compiler.frontend.core.parser_lexical_bindings.{ParserLexicalBindings}
-
-# Owned by this Parser lifecycle; unresolved outer names stay unresolved.
-var par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
-
-fn parser_lexical_scope_enter():
-    par_lexical_bindings.enter_scope()
-
-fn parser_lexical_scope_leave():
-    par_lexical_bindings.leave_scope()
-
-fn parser_lexical_bind_value(name: text):
-    par_lexical_bindings.bind_value(name)
-
-fn parser_lexical_unknown_shadow():
-    par_lexical_bindings.unknown_shadow()
-
-fn parser_lexical_has_new_value() -> bool:
-    par_lexical_bindings.has_new_value()
 
 var par_errors: [text] = []
 var par_warnings: [text] = []
 var par_struct_names: [text] = []
 var par_had_error: bool = false
-# True once this file has a `use` that may bring a `List` type into scope
-# (explicit `List` item or alias, `use m.List`, or any wildcard). The
-# `List<T>` -> `[T]` seed-parity rewrite is only sound without one:
-# common.core.collections exports a real `pub class List<T>`.
-var par_list_type_import_seen: bool = false
-# Local names this file imports by an explicit `use` item (`use m.{Box}`,
-# `use m.{Box as B}` -> "B"). Only such a name may become an imported
-# generic instance type; wildcard imports keep the ANY fallback.
-var par_imported_type_names: [text] = []
-# Fixed-array side-channel: element tag + literal-int size of the most recent
-# `[T; N]` annotation parsed by parser_parse_type_impl. The flat type-tag lane
-# is dynamic and drops N ("stage4 arrays are dynamic"), but the var-decl
-# declare-without-initializer paths (parse_var_decl_stmt, parse_var_decl) need
-# N to synthesize the seed's zero-filled default (`var g: [u8; 32]` with no
-# `=` is a zero-filled global in the seed — hir/lower/module_lowering/
-# module_pass.rs — and a zero-filled FixedSizeArray local — interpreter/
-# node_exec.rs). 0 / -1 means "the last annotation was not a sized array".
-var par_fixed_array_elem: i64 = 0
-var par_fixed_array_size: i64 = -1
 var par_diagnostics_suppressed: bool = false
 var par_diagnostic_emit_count: i64 = 0
 var par_kind_slot: [i64] = [0]
 var par_text_slot: [text] = [""]
 var par_line_slot: [i64] = [0]
 var par_col_slot: [i64] = [0]
-var par_initialization_generation_v1: i64 = 0
-
-pub fn parser_initialization_generation_v1() -> i64:
-    par_initialization_generation_v1
-
-extern fn rt_transient_heap_promote<T>(value: T) -> bool
-
-# Token slot owners can be allocated by the first parse in a native process.
-# Keep them and public diagnostics alive before reclaiming the file's scratch;
-# parser_init_with_path reuses non-nil token slots on the next file.
-pub fn parser_promote_transient_owners() -> bool:
-    rt_transient_heap_promote(par_kind_slot) and
-        rt_transient_heap_promote(par_text_slot) and
-        rt_transient_heap_promote(par_line_slot) and
-        rt_transient_heap_promote(par_col_slot) and
-        rt_transient_heap_promote(par_errors) and
-        rt_transient_heap_promote(par_warnings) and
-        rt_transient_heap_promote(par_struct_names) and
-        type_pools_promote_hir_owners()
 # Perf: cache SIMPLE_BOOTSTRAP_PAR_ENV_SAVE env var to avoid per-token getenv() syscall.
 # -1 = uncached, 0 = disabled, 1 = enabled
 var par_env_save_cached: i64 = -1
@@ -301,33 +236,10 @@ fn parser_diagnostic_emit_count_get() -> i64:
 
 # ===== Parser Init =====
 
-fn parser_note_use_import(module_path: text, imported_names: [text], wildcard: bool):
-    """Record whether a parsed `use` may bring a `List` type into scope."""
-    if wildcard:
-        par_list_type_import_seen = true
-        return
-    if imported_names.len() == 0:
-        if module_path == "List" or module_path.ends_with(".List"):
-            par_list_type_import_seen = true
-        # `use m.Box` imports the item `Box` (a capitalized last segment;
-        # `use lib.ext` imports a module).
-        val item_at = module_path.rfind(".")
-        val item = if item_at >= 0: module_path.substring(item_at + 1) else: module_path
-        if item != "" and item.substring(0, 1) != item.substring(0, 1).lower():
-            par_imported_type_names.push(item)
-        return
-    for imported in imported_names:
-        if imported == "List" or imported.ends_with(":List"):
-            par_list_type_import_seen = true
-        val alias_at = imported.rfind(":")
-        val local_name = if alias_at >= 0: imported.substring(alias_at + 1) else: imported
-        par_imported_type_names.push(local_name)
-
 fn parser_init(source: text):
     parser_init_with_path(source, "")
 
 fn parser_init_with_path(source: text, path: text):
-    par_initialization_generation_v1 = par_initialization_generation_v1 + 1
     # Profile policy is immutable within one parse but may change between
     # same-process compiler requests. Resample once before the first token;
     # split declaration profiling consumes this same cached decision.
@@ -338,7 +250,6 @@ fn parser_init_with_path(source: text, path: text):
     # reclaims that backing; clear() on the next file would reuse freed memory.
     # Assignment discards the stale owner before any read and makes this
     # file's scratch explicitly scope-local.
-    par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
     par_errors = []
     par_warnings = []
     par_struct_names = []
@@ -355,14 +266,7 @@ fn parser_init_with_path(source: text, path: text):
         par_col_slot = [0]
     par_col_slot[0] = 0
     par_had_error = false
-    par_list_type_import_seen = false
-    par_fixed_array_elem = 0
-    par_fixed_array_size = -1
-    par_imported_type_names = []
     par_diagnostics_suppressed = false
-    # First-error text belongs to this module, including ordinary driver
-    # parses. A preceding failed file must not supply this file's diagnostic.
-    par_first_error_mirror_clear()
     par_diagnostic_emit_count = 0
     if (env_get("SIMPLE_TRACE_AST_RESET") == "1" and
         not frontend_trace_suppressed()):
@@ -375,7 +279,6 @@ fn parser_init_with_path(source: text, path: text):
     # (e.g. a spec that parses two source strings) must not leak the first
     # parse's resource facts into the second. See resource_registry.spl.
     resource_registry_reset()
-    representation_parser_reset_v1(source, path)
     # C1: same reason, for the `@layer_eq`/`@layer_field` facts. Without this a
     # spec (or any multi-module compile) that parses a second source would keep
     # the first source's view->target claims alive and re-check them against a
@@ -397,12 +300,7 @@ fn parser_init_with_path(source: text, path: text):
     aspect_pending_reset()
     if path != "":
         module_set_path(path)
-    # Single owner of conditional compilation for every module parse:
-    # parse_and_build_module* (driver, lint semantic check, provider seam,
-    # flat-AST cache restore) and parse_module* all enter here. Preprocessing
-    # is idempotent -- directive lines become blank, so source already
-    # selected (e.g. by the target-receipted frontend) passes through intact.
-    lex_init_with_path(_pp_preprocess_conditionals(source), path)
+    lex_init_with_path(source, path)
     parser_advance()
 
 # Parse-scoped timing policy (level-gated, DEFAULT OFF;
@@ -503,19 +401,6 @@ fn parser_error(msg: text):
     par_had_error_mirror_set()
     par_record_error(full)
     par_first_error_mirror_set(par_line_get(), par_col_get(), msg)
-
-# A diagnostic found after the parse (a whole-module check), reported at the
-# position of the offending node instead of the parser's final token.
-fn parser_error_at(line: i64, col: i64, msg: text):
-    val full = "line " + int_to_str(line) + ":" + int_to_str(col) + ": " + msg
-    if not par_diagnostics_suppressed:
-        print "[parser_error] {full}"
-        print "[parser_error_ctx] path " + module_get_path()
-        par_diagnostic_emit_count = par_diagnostic_emit_count + 1
-    par_had_error_set(true)
-    par_had_error_mirror_set()
-    par_record_error(full)
-    par_first_error_mirror_set(line, col, msg)
 
 # Append to the recorded-error list that backs parser_get_errors() and
 # parser_error_count(). `par_errors` was declared, replaced on init and exported,
@@ -685,17 +570,6 @@ fn parser_absorb_optional_suffix(base: i64) -> i64:
 fn parser_parse_type() -> i64:
     parser_parse_type_impl(true)
 
-fn parser_function_type_tag(param_tags: [i64], ret_tag: i64) -> i64:
-    """Intern one `fn(params...) -> ret` annotation. The registry block holds
-    TYPE_FUNCTION_LIMIT - TYPE_FUNCTION_BASE distinct shapes per module;
-    exhausting it is a parse error. TYPE_FN is returned only as a recovery
-    placeholder so parsing can continue; the module fails to compile."""
-    val tag = function_type_register(param_tags, ret_tag)
-    if tag >= 0:
-        return tag
-    parser_error("function type registry exhausted (" + int_to_str(TYPE_FUNCTION_LIMIT - TYPE_FUNCTION_BASE) + " distinct `fn(..) -> R` shapes per module)")
-    TYPE_FN
-
 fn parser_parse_cast_type() -> i64:
     parser_parse_type_impl(false)
 
@@ -703,102 +577,13 @@ fn parser_parse_cast_type() -> i64:
 # bootstrap tag registry. Parse `label: T` by discarding the provisional named
 # type for `label` and retaining T; anonymous tuple elements remain unchanged.
 fn parser_parse_tuple_element_type() -> i64:
-    val candidate = parser_parse_type_with_union()
+    val candidate = parser_parse_type()
     if par_kind_get() == TOK_COLON:
         parser_advance()
-        return parser_parse_type_with_union()
+        return parser_parse_type()
     candidate
 
-fn parser_array_tag_for_elem(elem_type: i64) -> i64:
-    """Array type tag for an element tag: `[T]` and `List<T>` share it."""
-    if elem_type == TYPE_TEXT:
-        return TYPE_ARRAY_TEXT
-    if elem_type == TYPE_BOOL:
-        return TYPE_ARRAY_BOOL
-    if elem_type == TYPE_I64 or elem_type == TYPE_VOID:
-        # TYPE_VOID here means parser_parse_type_impl's ident branch could
-        # not resolve the element name at all (e.g. bare `Any`, which has
-        # no dedicated primitive check and no matching named type) --
-        # keep this pre-existing fallback byte-identical to before.
-        return TYPE_ARRAY_I64
-    # Nested arrays use the same recursive specialization registry as
-    # named and fixed-width elements. Collapsing [[T]] to [Any] here
-    # loses the declared receiver type before HIR/MIR can project it.
-    # The registry already participates in flat-pool cache transport.
-    val arr_generic_tag = array_generic_type_register(elem_type)
-    if arr_generic_tag < 0:
-        return TYPE_ARRAY_I64
-    arr_generic_tag
-
-# Legacy `let [mut]` declaration prefix, seed parity:
-# src/compiler_rust/parser/src/stmt_parsing/var_decl.rs parse_let /
-# parse_mut_let -- `let` is the legacy mutable-binding spelling, the `mut`
-# after it is redundant and absorbed, and the binding lowers exactly like
-# `var`. `let` is NOT a keyword token in this lexer (unlike the seed), so
-# the prefix is recognised contextually: an identifier spelled `let` whose
-# next token can open a binding. `parser_legacy_let_decl_ahead` excludes the
-# identifier usages (`let = 5`, `let.push(x)`), matching how the seed's
-# statement router guards `mut`/`shared`/`ghost` behind a peek for `let`.
-fn parser_peek_is_binding_name(steps: i64) -> bool:
-    val snap = lex_snapshot_save()
-    val (nums, txt) = parser_tok_save()
-    var i = 0
-    while i < steps:
-        parser_advance()
-        i = i + 1
-    val k = par_kind_get()
-    lex_snapshot_rollback(snap)
-    parser_tok_restore(nums, txt)
-    k == TOK_IDENT or k == 169
-
-# `new(&)` / `new(*)` / `new(-)` / `new(+)` (memory.md's canonical constructor
-# spelling). Called with the stream on the token after `(`. Returns the
-# new-expression kind code (see primary_expr.spl NEW_KIND_*) and consumes the
-# sigil and `)` when they are present, else returns -1 and leaves the stream
-# untouched so `new(alloc_expr)` still parses as an allocator.
-fn parser_new_paren_sigil_kind() -> i64:
-    val k = par_kind_get()
-    var kind = -1
-    if k == TOK_AMPERSAND:
-        kind = 1
-    elif k == TOK_STAR:
-        kind = 2
-    elif k == TOK_MINUS:
-        kind = 3
-    elif k == TOK_PLUS:
-        kind = 4
-    if kind < 0:
-        return -1
-    val snap = lex_snapshot_save()
-    val (nums, txt) = parser_tok_save()
-    parser_advance()
-    if par_kind_get() == 141:
-        parser_advance()
-        return kind
-    lex_snapshot_rollback(snap)
-    parser_tok_restore(nums, txt)
-    -1
-
-fn parser_legacy_let_decl_ahead() -> bool:
-    par_kind_get() == TOK_IDENT and par_text_get() == "let" and
-        parser_peek_is_binding_name(1)
-
-# Consume a confirmed legacy `let` prefix: the stream is positioned at the
-# token AFTER `let`; absorb a redundant `mut` only when a real binding name
-# follows it, so `let mut = 5` still binds a variable named `mut` (the seed's
-# parse_pattern does the same).
-fn parser_consume_legacy_let_prefix():
-    if par_kind_get() == TOK_IDENT and par_text_get() == "mut" and
-            parser_peek_is_binding_name(1):
-        parser_advance()
-
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
-    # Clear the fixed-array side-channel before parsing this annotation so a
-    # var-decl caller never reads a stale `[T; N]` from an earlier annotation
-    # in the file. A nested/recursive call may set it again below; the
-    # outermost sized-array branch writes last and wins.
-    par_fixed_array_elem = 0
-    par_fixed_array_size = -1
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
     # Canonical reference types.  Register the inner tag and mutability so the
@@ -816,20 +601,19 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             parser_error("too many distinct reference type annotations")
             return reference_inner
         return reference_tag
-    # Shared and raw pointer types (doc/05_design/language/misc/memory.md):
-    # `*T` is the shared (Rc) owner; `*const T` / `*mut T` are raw pointers.
-    # The registry flag keeps all three apart (POINTER_FLAG_* in types.spl).
+    # Raw/shared pointer types.  The flat type lane carries the inner tag and
+    # the only distinction supported by pure HIR (`Ptr(inner, mutable)`).
+    # `*T` and `*const T` are immutable; `*mut T` is mutable.
     if kind == TOK_STAR:
         parser_advance()
-        var pointer_flag = POINTER_FLAG_SHARED
+        var pointer_mutable = false
         if par_text_get() == "const":
             parser_advance()
-            pointer_flag = POINTER_FLAG_RAW_CONST
         elif par_text_get() == "mut":
             parser_advance()
-            pointer_flag = POINTER_FLAG_RAW_MUT
+            pointer_mutable = true
         val pointer_inner = parser_parse_type_impl(allow_spaced_generics)
-        val pointer_tag = pointer_type_register_flag(pointer_inner, pointer_flag)
+        val pointer_tag = pointer_type_register(pointer_inner, pointer_mutable)
         if pointer_tag < 0:
             parser_error("too many distinct pointer type annotations")
             return pointer_inner
@@ -922,36 +706,22 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # fn" + phantom "untyped function returns a value" on ANNOTATED fns.
     # The bootstrap tag registry has no first-class fn-type, so consume the
     # full shape and answer TYPE_FN (callables are dynamically dispatched).
-    # The shape is interned as a TYPE_FUNCTION_BASE tag so the flat bridge
-    # can rebuild `TypeKind.Function(params, ret)` and HIR keeps the real
-    # callable signature (a generic visitor's `f: fn(Node, C) -> C` must
-    # bind `C` at its nested calls). Only when the block is exhausted does
-    # the bare TYPE_FN tag remain.
     if kind == 20:
         parser_advance()
-        var fnty_params: [i64] = []
-        var fnty_has_shape = false
         if par_kind_get() == 140:
-            fnty_has_shape = true
             parser_advance()
             for _fnty_i in 0..20:
                 if par_kind_get() == 141:
                     break
-                fnty_params.push(parser_parse_type())
+                val _fnty_param = parser_parse_type()
                 if par_kind_get() == 160:
                     parser_advance()
             if par_kind_get() == 141:
                 parser_advance()
-        var fnty_ret = TYPE_VOID
         if par_kind_get() == 167:
-            fnty_has_shape = true
             parser_advance()
-            fnty_ret = parser_parse_type()
-        # A bare `fn` annotation (no parameter list, no arrow) means "any
-        # callable", not `fn() -> void`: keep it on the shapeless TYPE_FN tag.
-        if not fnty_has_shape:
-            return TYPE_FN
-        return parser_function_type_tag(fnty_params, fnty_ret)
+            val _fnty_ret = parser_parse_type()
+        return TYPE_FN
     if kind == 199:
         parser_advance()
         # Parse the trait name
@@ -998,14 +768,12 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             # Handle multi-param generics: Dict<K, V>, Result<T, E>
             var extra_type = inner_type
             var has_extra_type: bool = false
-            var generic_arg_tags: [i64] = [inner_type]
             for i in 0..10:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
                 extra_type = parser_parse_type()
                 has_extra_type = true
-                generic_arg_tags.push(extra_type)
             # The same token represents binary `>` and a generic type close.
             # Tell the lexer which meaning the parser established before
             # advancing: otherwise a following newline is treated as a
@@ -1031,13 +799,7 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 # TYPE_OPTION_GENERIC_BASE and bug:
                 # native_option_unwrap_receiver_unresolved_2026-08-09. Register
                 # the inner tag instead, mirroring Result<T,E>/Dict<K,V> above.
-                # A callable inner (`Option<fn(text) -> i64>`, interned in
-                # TYPE_FUNCTION_BASE..LIMIT, below TYPE_NAMED_BASE) collapsed
-                # the same way, so the payload reached MIR as Optional(Any) and
-                # `if val f = self.opt_fn` / `.unwrap()` had no proven arity
-                # (bug: native_optional_fn_payload_binding_arity_mir_2026_10_20).
-                val inner_is_callable = is_function_tag(inner_type)
-                if inner_type >= TYPE_NAMED_BASE or inner_is_callable:
+                if inner_type >= TYPE_NAMED_BASE:
                     val opt_generic_tag = option_generic_type_register(inner_type)
                     if opt_generic_tag >= 0:
                         return parser_absorb_optional_suffix(opt_generic_tag)
@@ -1063,44 +825,14 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                         return parser_absorb_optional_suffix(TYPE_DICT)
                     return parser_absorb_optional_suffix(dict_tag)
                 return parser_absorb_optional_suffix(TYPE_DICT)
-            # A generic base this file imports by name (`use lib.dep.{Box}`)
-            # keeps its identity and argument types -- see
-            # named_generic_instance_register. Collapsing it to ANY left
-            # `b: Box<i64>` with no class for MIR method resolution and no
-            # type arguments for 40.mono to specialize `b.get()` with. Checked
-            # before the named-type lookup: a bare `Box` use earlier in the file
-            # registers the base name, which must not erase these arguments.
-            if par_imported_type_names.contains(type_name):
-                val instance_tag = named_generic_instance_register(type_name, generic_arg_tags)
-                return parser_absorb_optional_suffix(instance_tag)
-            # Adaptive containers need their declared key/value instantiation
-            # at the typed attribute boundary. Keep ordinary runtime layouts.
-            if type_name == "AdaptiveMap" or type_name == "AdaptiveSet":
-                return parser_absorb_optional_suffix(named_type_apply(type_name, generic_arg_tags))
-            # Local declarations need the same instance record as imports.
-            # Returning the bare base tag here erased T in Bag<text> before
-            # HIR and made parameter-field text operations integer adds.
+            # Unknown generic type - check if base is a named struct
             val gid = named_type_find(type_name)
             if gid >= 0:
-                return parser_absorb_optional_suffix(named_generic_instance_register(type_name, generic_arg_tags))
-            # SEED-PARITY: `List<T>` is the array type `[T]` (the seed's
-            # type_resolver.rs maps "List" with one argument to
-            # HirType::Array). It fell through to TYPE_ANY here, so every
-            # `samples: List<f64>` parameter reached MIR as an erased I64 and
-            # `for s in samples` died as "#143 for-in over non-array
-            # iterables" -- 75 of the 93 for-in errors in the 2026-10-09
-            # stage2 test-runner build. A `List` declared in THIS file still
-            # wins via the named_type_find check above. An imported `List`
-            # class (common.core.collections exports `pub class List<T>`)
-            # must keep its name for HIR, so any `use` that may bring one into
-            # scope -- explicit item/alias or a wildcard -- disables the
-            # rewrite for the file (par_list_type_import_seen).
-            if type_name == "List" and not has_extra_type and not par_list_type_import_seen:
-                return parser_absorb_optional_suffix(parser_array_tag_for_elem(inner_type))
-            # Keep forward declarations too; HIR resolves the base after the
-            # file's declarations are registered. Unresolvable imported
-            # instances retain HIR's existing compatibility recovery.
-            return parser_absorb_optional_suffix(named_generic_instance_register(type_name, generic_arg_tags))
+                return parser_absorb_optional_suffix(TYPE_NAMED_BASE + gid)
+            # A written generic base can be declared in another module and
+            # therefore absent from this file's named-type registry. Preserve
+            # the annotation as ANY; TYPE_VOID means no return was written.
+            return parser_absorb_optional_suffix(TYPE_ANY)
         # Check for postfix ? for Option shorthand: i64? -> Option<i64>
         kind = par_kind_get()
         if kind == 130:
@@ -1182,11 +914,8 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # bridge's `has_ret = ret > 0` then read ANNOTATED `-> any` functions
         # as declaring no return type (phantom "untyped function returns a
         # value" storms across std.common.json).
-        # Written `any` takes the same named path as written `Any`, so the
-        # bridge can tell it from the TYPE_ANY fallbacks below; consumers
-        # treat the named type "Any" as unconstrained.
         if type_name == "any":
-            return TYPE_NAMED_BASE + named_type_register("Any", [], [])
+            return TYPE_ANY
         # Check for struct type
         val sid = named_type_find(type_name)
         if sid >= 0:
@@ -1232,45 +961,65 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             parser_advance()
             return parser_absorb_optional_suffix(TYPE_ARRAY_ANY)
         val elem_type = parser_parse_type()
-        # Sized array type: [T; N] — the returned type tag is dynamic and
-        # drops N (stage4 arrays are dynamic; N may be a literal or const
-        # ident). Record an integer-literal N in the par_fixed_array_*
-        # side-channel anyway: the var-decl no-initializer paths read it to
-        # synthesize the seed's zero-filled `[zero; N]` default initializer.
+        # Sized array type: [T; N] — accept and drop the size expression
+        # (stage4 arrays are dynamic; N is a literal or const ident).
         kind = par_kind_get()
         if kind == 163:
             parser_advance()
-            if par_kind_get() == TOK_INT_LIT:
-                par_fixed_array_elem = elem_type
-                par_fixed_array_size = parse_int_text(par_text_get())
-                parser_advance()
             for _si in 0..50:
                 if par_kind_get() == 145 or par_kind_get() == 190:
                     break
                 parser_advance()
         parser_expect(145)
+        # Nested array types [[T]] -> TYPE_ARRAY_ANY
+        val is_nested = elem_type == TYPE_ARRAY_I64
+        val is_nested2 = elem_type == TYPE_ARRAY_TEXT
+        val is_nested3 = elem_type == TYPE_ARRAY_BOOL
+        val is_nested4 = elem_type == TYPE_ARRAY_ANY
+        val any_nested = is_nested or is_nested2
+        val any_nested2 = any_nested or is_nested3
+        val any_nested3 = any_nested2 or is_nested4
+        var arr_type = TYPE_ARRAY_I64
+        if any_nested3:
+            arr_type = TYPE_ARRAY_ANY
+        elif elem_type == TYPE_TEXT:
+            arr_type = TYPE_ARRAY_TEXT
+        elif elem_type == TYPE_BOOL:
+            arr_type = TYPE_ARRAY_BOOL
+        elif elem_type == TYPE_I64 or elem_type == TYPE_VOID:
+            # TYPE_VOID here means parser_parse_type_impl's ident branch could
+            # not resolve the element name at all (e.g. bare `Any`, which has
+            # no dedicated primitive check and no matching named type) --
+            # keep this pre-existing fallback byte-identical to before.
+            arr_type = TYPE_ARRAY_I64
+        else:
+            # Preserve every non-dedicated element tag, including fixed-width
+            # integers such as `[u32]`, through the flat AST bridge.
+            val arr_generic_tag = array_generic_type_register(elem_type)
+            if arr_generic_tag < 0:
+                arr_type = TYPE_ARRAY_I64
+            else:
+                arr_type = arr_generic_tag
         # absorb optional suffix: [T]? -> Option
-        return parser_absorb_optional_suffix(parser_array_tag_for_elem(elem_type))
-    # Function type: fn(T, T) -> T (interned like the keyword branch above)
+        return parser_absorb_optional_suffix(arr_type)
+    # Function type: fn(T, T) -> T
     if par_kind_get() == 20:
         parser_advance()
         parser_expect(140)
-        var fnty2_params: [i64] = []
         if par_kind_get() != 141:
-            fnty2_params.push(parser_parse_type())
+            parser_parse_type()
             while true:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
                 if par_kind_get() == 141:
                     break
-                fnty2_params.push(parser_parse_type())
+                parser_parse_type()
         parser_expect(141)
-        var fnty2_ret = TYPE_VOID
         if par_kind_get() == 167:
             parser_advance()
-            fnty2_ret = parser_parse_type()
-        return parser_absorb_optional_suffix(parser_function_type_tag(fnty2_params, fnty2_ret))
+            parser_parse_type()
+        return parser_absorb_optional_suffix(TYPE_FN)
     # Tuple type: (T, T)
     if par_kind_get() == 140:
         parser_advance()
@@ -1282,13 +1031,11 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # element types and a destructure of the call result defaulted every
         # element to i64 (parity case process_run_timeout).
         var tuple_elem_tags: [i64] = []
-        var tuple_has_comma = false
         if par_kind_get() != 141:
             tuple_elem_tags.push(parser_parse_tuple_element_type())
             while true:
                 if par_kind_get() != 160:
                     break
-                tuple_has_comma = true
                 parser_advance()
                 if par_kind_get() == 141:
                     break
@@ -1304,8 +1051,8 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # the `-> i64` tokens for the param parser to choke on.
         if par_kind_get() == 167:
             parser_advance()
-            val paren_fn_ret = parser_parse_type()
-            return parser_absorb_optional_suffix(parser_function_type_tag(tuple_elem_tags, paren_fn_ret))
+            parser_parse_type()
+            return parser_absorb_optional_suffix(TYPE_FN)
         # Unit `()` is the empty tuple and must retain an explicit type tag;
         # TYPE_ANY makes `-> ()` indistinguishable from a dynamic return.
         if tuple_elem_tags.len() == 0:
@@ -1315,35 +1062,25 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 return parser_absorb_optional_suffix(TYPE_ANY)
             return parser_absorb_optional_suffix(unit_tag)
         # A real tuple (2+ elements) carries its element tags via the
-        # registry. A sole unseparated element is grouping, so retain its
-        # actual type (including a nested union) instead of erasing it to Any.
-        # Preserve the separate legacy single-element trailing-comma path.
+        # registry; a one-element paren group keeps the old TYPE_ANY behavior
+        # because `(T)` is not a tuple.
         if tuple_elem_tags.len() >= 2:
             val tuple_tag = tuple_type_register(tuple_elem_tags)
             if tuple_tag < 0:
                 parser_error("too many distinct tuple type annotations")
                 return parser_absorb_optional_suffix(TYPE_ANY)
             return parser_absorb_optional_suffix(tuple_tag)
-        if not tuple_has_comma:
-            return parser_absorb_optional_suffix(tuple_elem_tags[0])
         return parser_absorb_optional_suffix(TYPE_ANY)
     # Dict type: {K: V}
     if par_kind_get() == 142:
         parser_advance()
-        var dict_tag = TYPE_DICT
         if par_kind_get() != 143:
-            val key_tag = parser_parse_type()
+            parser_parse_type()
             if par_kind_get() == 161:
                 parser_advance()
-                val value_tag = parser_parse_type()
-                # Both spellings share structural identity. Discarding these
-                # tags made indexed array values become Any before HIR/MIR.
-                dict_tag = dict_type_register(key_tag, value_tag)
-                if dict_tag < 0:
-                    parser_error("too many distinct dictionary type annotations")
-                    dict_tag = TYPE_DICT
+                parser_parse_type()
         parser_expect(143)
-        return parser_absorb_optional_suffix(dict_tag)
+        return parser_absorb_optional_suffix(TYPE_DICT)
     parser_error("expected type annotation")
     TYPE_VOID
 
@@ -1376,7 +1113,8 @@ fn _parse_module_with_diagnostics(source: text, path: text, suppress_diagnostics
     val saved_trace_suppressed = frontend_trace_suppression_set(
         suppress_diagnostics or frontend_trace_suppressed())
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
-    parser_init_with_path(source, path)
+    val preprocessed = _pp_preprocess_conditionals(source)
+    parser_init_with_path(preprocessed, path)
     parser_diagnostics_suppressed_set(suppress_diagnostics)
     parse_module_body()
     # Read the error state before returning across the split parser-module
@@ -1408,6 +1146,7 @@ fn parse_module_silent(source: text, path: text):
 # bool is returned by value and is therefore reliable.
 fn parse_module_silent_checked(source: text, path: text) -> bool:
     par_had_error_mirror_clear()
+    par_first_error_mirror_clear()
     _parse_module_with_diagnostics(source, path, true)
 
 fn parse_module_file(source: text, path: text):
@@ -1470,14 +1209,9 @@ fn parser_tok_restore(nums: [i64], saved_text: text):
 
 # Parser state (needed by split modules and external consumers)
 export par_errors, par_warnings, par_struct_names
-export par_fixed_array_elem, par_fixed_array_size
-export parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix, parser_new_paren_sigil_kind
 export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
-export parser_note_use_import
 export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
-export parser_error_at
 export parser_first_error_get
-export parser_initialization_generation_v1, parser_promote_transient_owners
 export parser_tok_save, parser_tok_restore
 export parser_path_is_script, parser_warn_print_if_needed
 export par_prof_enabled
@@ -1547,13 +1281,9 @@ pub fn flat_parser_state_dump() -> text:
     parts = parts.push(flat_pool_enc_scalar_i64(par_diagnostic_emit_count))
     parts = parts.push(flat_pool_enc_scalar_bool(par_diagnostics_suppressed))
     parts = parts.push(flat_pool_enc_text(par_errors))
-    parts = parts.push(flat_pool_enc_scalar_i64(par_fixed_array_elem))
-    parts = parts.push(flat_pool_enc_scalar_i64(par_fixed_array_size))
     parts = parts.push(flat_pool_enc_scalar_bool(par_had_error))
-    parts = parts.push(flat_pool_enc_text(par_imported_type_names))
     parts = parts.push(flat_pool_enc_i64(par_kind_slot))
     parts = parts.push(flat_pool_enc_i64(par_line_slot))
-    parts = parts.push(flat_pool_enc_scalar_bool(par_list_type_import_seen))
     parts = parts.push(flat_pool_enc_text(par_struct_names))
     parts = parts.push(flat_pool_enc_text(par_text_slot))
     parts = parts.push(flat_pool_enc_text(par_warnings))
@@ -1562,17 +1292,13 @@ pub fn flat_parser_state_dump() -> text:
 # Returns false when the blob ran short or was malformed; the caller must
 # treat that as a cache MISS and reparse, never as an empty parse.
 pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
-    par_col_slot = flat_pool_dec_i64_into(par_col_slot, r)
+    par_col_slot = flat_pool_dec_i64(r)
     par_diagnostic_emit_count = flat_pool_dec_scalar_i64(r)
     par_diagnostics_suppressed = flat_pool_dec_scalar_bool(r)
     par_errors = flat_pool_dec_text(r)
-    par_fixed_array_elem = flat_pool_dec_scalar_i64(r)
-    par_fixed_array_size = flat_pool_dec_scalar_i64(r)
     par_had_error = flat_pool_dec_scalar_bool(r)
-    par_imported_type_names = flat_pool_dec_text(r)
-    par_kind_slot = flat_pool_dec_i64_into(par_kind_slot, r)
-    par_line_slot = flat_pool_dec_i64_into(par_line_slot, r)
-    par_list_type_import_seen = flat_pool_dec_scalar_bool(r)
+    par_kind_slot = flat_pool_dec_i64(r)
+    par_line_slot = flat_pool_dec_i64(r)
     par_struct_names = flat_pool_dec_text(r)
     par_text_slot = flat_pool_dec_text(r)
     par_warnings = flat_pool_dec_text(r)

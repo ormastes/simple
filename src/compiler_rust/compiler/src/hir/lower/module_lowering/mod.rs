@@ -13,7 +13,6 @@
 mod aop;
 mod contract;
 mod flatten_global_owner;
-mod flatten_struct_owner;
 mod function;
 mod import;
 mod mock;
@@ -25,5 +24,4 @@ mod validation;
 pub use module_pass::*;
 pub use nested_def_hoist::module_with_hoisted_defs;
 pub(crate) use flatten_global_owner::flattened_global_symbol;
-pub(crate) use flatten_struct_owner::{struct_scope_for, FlattenStructOwners, FlattenStructScope};
 pub(crate) use function::block_uses_self;

@@ -45,7 +45,7 @@ here:
 
 ## Known trap: do not chain off a static factory
 
-```simple:skip
+```simple
 expect(PaneId.create(0, 80, 24).area()).to_equal(1920)   # fails to resolve
 ```
 

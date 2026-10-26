@@ -18,7 +18,7 @@ Both can be mixed: use Pure Simple for small models or prototyping, switch to Py
 
 ## Quick Start: Pure Simple Neural Network
 
-```simple:skip
+```simple
 use std.ml.{Tensor, Linear, relu, cross_entropy_loss, SGD}
 
 fn main():
@@ -47,7 +47,7 @@ fn main():
 
 ### Tensors
 
-```simple:skip
+```simple
 use std.ml.{Tensor}
 
 # Create tensors
@@ -66,7 +66,7 @@ val reshaped = a.reshape(6, 2)
 
 ### Autograd
 
-```simple:skip
+```simple
 use std.ml.{Tensor, requires_grad}
 
 # Enable gradient tracking
@@ -91,7 +91,7 @@ print "dy/dx = {x.grad}"      # [7.0, 9.0] (2x + 3)
 
 ### Activation Functions
 
-```simple:skip
+```simple
 use std.ml.{relu, sigmoid, tanh, softmax, gelu}
 
 val h = relu(x)         # max(0, x)
@@ -103,7 +103,7 @@ val h = gelu(x)         # Gaussian Error Linear Unit
 
 ### Loss Functions
 
-```simple:skip
+```simple
 use std.ml.{cross_entropy_loss, mse_loss, binary_cross_entropy}
 
 val loss = cross_entropy_loss(predicted, target)
@@ -113,7 +113,7 @@ val loss = binary_cross_entropy(predicted, target)
 
 ### Optimizers
 
-```simple:skip
+```simple
 use std.ml.{SGD, Adam, AdamW}
 
 val sgd = SGD(lr: 0.01, momentum: 0.9)
@@ -133,7 +133,7 @@ optimizer.step(model.parameters())
 
 ### Basic Pattern
 
-```simple:skip
+```simple
 use std.ml.{Tensor, Linear, relu, cross_entropy_loss, Adam, DataLoader}
 
 fn train(model: Model, train_data: DataLoader, epochs: i64):
@@ -161,7 +161,7 @@ fn train(model: Model, train_data: DataLoader, epochs: i64):
 
 ### With Validation
 
-```simple:skip
+```simple
 fn train_with_validation(model: Model, train_data: DataLoader, val_data: DataLoader, epochs: i64):
     val optimizer = Adam(lr: 0.001)
     var best_val_loss = 1e10
@@ -216,7 +216,7 @@ bin/simple build --features=pytorch-cuda
 
 ### API
 
-```simple:skip
+```simple
 use std.torch.{Tensor as TorchTensor, cuda_available}
 
 fn main():
@@ -300,7 +300,7 @@ Operations below the threshold use PureSimple; above use PyTorchFFI:
 
 ### Configuration System
 
-```simple:skip
+```simple
 use std.ml.config.{TrainConfig, ModelConfig, DataConfig}
 
 val config = TrainConfig(
@@ -325,7 +325,7 @@ val config = TrainConfig(
 
 ### Experiment Tracking
 
-```simple:skip
+```simple
 use std.ml.tracking.{Experiment}
 
 val exp = Experiment.create("mnist_classifier")
@@ -346,7 +346,7 @@ exp.finish()
 
 PyTorch Ignite-style training engine for structured training loops:
 
-```simple:skip
+```simple
 use std.ml.engine.{TrainingEngine, Events}
 
 val engine = TrainingEngine(model, optimizer, loss_fn)
@@ -365,7 +365,7 @@ engine.run(train_data, max_epochs: 100)
 
 ### Metrics
 
-```simple:skip
+```simple
 use std.ml.metrics.{Accuracy, Precision, Recall, F1Score}
 
 val accuracy = Accuracy()
@@ -387,7 +387,7 @@ print "F1 Score: {f1.compute()}"
 
 Fine-tune large language models efficiently using Low-Rank Adaptation:
 
-```simple:skip
+```simple
 use std.ml.lora.{LoRAConfig, apply_lora, merge_lora}
 
 # Configure LoRA
@@ -431,7 +431,7 @@ final_model.save("finetuned_model.sdn")
 
 ### MNIST Classifier
 
-```simple:skip
+```simple
 class MnistClassifier:
     fc1: Linear
     fc2: Linear
@@ -455,7 +455,7 @@ class MnistClassifier:
 
 ### Transformer Block
 
-```simple:skip
+```simple
 class TransformerBlock:
     attention: MultiHeadAttention
     ffn: FeedForward

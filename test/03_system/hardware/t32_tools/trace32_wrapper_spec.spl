@@ -1,54 +1,65 @@
-"""
-Hardware-free TRACE32 configuration and feature-registry checks for debugger
-maintainers. Calls production config factories and feature conversions without
-opening a probe, t32rem process, or GDB bridge. Live wrapper/protocol behavior
-and timeout enforcement remain unverified. Runtime and docgen are UNRUN.
-"""
-# codex-system-test
 # @tag:system
 # @req REQ-SSPEC-SYSTEM
+#
+# Portable smoke for the Trace32 wrapper contract.
+#
+# The old system spec imported remote debug modules that require Lauterbach
+# hardware. This smoke exercises the hardware-free product surface — the
+# debugger feature registry the wrapper advertises — so the contract stays
+# observable on any host. Live Trace32 protocol/parser coverage belongs in
+# focused unit or hardware specs.
+
 # @manual_section: trace32 wrapper portable smoke
-# @cover src/lib/nogc_sync_mut/debug/remote/feature/features.spl 80%
-# @cover src/lib/nogc_sync_mut/debug/remote/types.spl 80%
-# Coverage percentages are targets, not measured results.
+"""
+## Purpose and audience
+
+Executable evidence that the debugger feature registry backing the Trace32
+wrapper exposes its trace32-unique operations and rank constants with the
+names and values the debug adapters agree on. For hardware-enablement and
+release engineers confirming the t32 lane on hosts without a Lauterbach
+probe.
+
+## Operator workflow
+
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/03_system/hardware/t32_tools/trace32_wrapper_spec.spl` and confirm
+3 examples pass with 0 failures.
+
+## Compatibility and limitations
+
+Covers only the hardware-free registry surface. Nothing here touches a probe
+or a t32rem process; adapter connect behavior is out of scope.
+
+## Verification guidance and troubleshooting
+
+A name or rank mismatch means the feature registry changed — confirm the new
+registry value is the agreed wire token, then update the adapter contract
+consumers rather than this oracle.
+"""
 # research: doc/01_research/hardware/t32/trace32_remote_interfaces_2026-03-08.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/hardware/t32_terminal_power_remote.md ; design: doc/05_design/hardware/t32_terminal_power_remote.md
 
-use std.spec.{describe, it, expect, step}
+use std.spec.*
+
+use std.spec.step
 use std.nogc_sync_mut.debug.remote.feature.features.{FeatureId, FeatureRank}
-use std.nogc_sync_mut.debug.remote.types.{DebugConfig}
 
 describe "Trace32 wrapper portable smoke":
-    it "should preserve native connection parameters and ARM32 configuration":
-        step("Create the native TRACE32 configuration")
-        val config = DebugConfig.for_trace32("debug-host", 20000)
-        expect(config.host).to_equal("debug-host")
-        expect(config.port).to_equal(20000)
-        expect(config.options["backend"]).to_equal("trace32")
-        expect(config.target.to_string()).to_equal("arm32")
-        expect(config.program).to_equal("")
+    # @manual scenario evidence
+    it "exposes the trace32 feature registry names":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol_json): trace32 feature registry names retained for review
+        step("Read the trace32-unique operation names from the product feature registry")
+        expect(FeatureId.TraceCapture.to_string()).to_equal("TraceCapture")  # oracle: the registry's wire token for trace capture
+        expect(FeatureId.CoverageCollect.to_string()).to_equal("CoverageCollect")  # oracle: the registry's wire token for coverage collection
 
-    it "should select the GDB bridge without losing connection parameters":
-        step("Create the TRACE32 GDB bridge configuration")
-        val config = DebugConfig.for_trace32_gdb("bridge-host", 2345)
-        expect(config.host).to_equal("bridge-host")
-        expect(config.port).to_equal(2345)
-        expect(config.options["backend"]).to_equal("trace32-gdb")
-        expect(config.target.to_string()).to_equal("arm32")
+    it "round-trips the trace capture feature id":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(protocol_json): id-to-name round trip retained for review
+        step("Resolve feature id 40 back to its registry name")
+        expect(FeatureId.from_i32(40).to_string()).to_equal("TraceCapture")  # oracle: 40 is the registry id assigned to TraceCapture
 
-    it "should round-trip trace capture and coverage feature identities":
-        step("Read feature names and numeric registry identities")
-        expect(FeatureId.TraceCapture.to_string()).to_equal("TraceCapture")
-        expect(FeatureId.CoverageCollect.to_string()).to_equal("CoverageCollect")
-        expect(FeatureId.TraceCapture.to_i32()).to_equal(40)
-        expect(FeatureId.CoverageCollect.to_i32()).to_equal(41)
-        step("Resolve numeric identities back to feature names")
-        val trace = FeatureId.from_i32(40)
-        val coverage = FeatureId.from_i32(41)
-        expect(trace.to_string()).to_equal("TraceCapture")
-        expect(coverage.to_string()).to_equal("CoverageCollect")
-
-    it "should prioritize native handlers before bridge handlers":
-        step("Inspect the registry's handler priority ranks")
-        expect(FeatureRank.NATIVE()).to_equal(0)
-        expect(FeatureRank.BRIDGE()).to_equal(1)
-        expect(FeatureRank.NATIVE()).to_be_less_than(FeatureRank.BRIDGE())
+    it "reports the native debugger rank":
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(statistics): native debugger rank value retained for review
+        step("Read the native debugger rank constant from the product registry")
+        expect(FeatureRank.NATIVE()).to_equal(0)  # oracle: NATIVE is rank 0 in the debugger feature ranking

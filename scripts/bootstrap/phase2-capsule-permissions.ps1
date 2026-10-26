@@ -3,22 +3,6 @@ param(
     [Parameter(Mandatory=$true)][string]$Path
 )
 $ErrorActionPreference = 'Stop'
-function ConvertTo-NativeAclPath([string]$FullName) {
-    # FileSystemInfo retains the ordinary path for traversal and reparse checks.
-    # Only .NET ACL operations need the extended Windows spelling: Framework
-    # GetAccessControl rejects otherwise valid leaves beyond MAX_PATH.
-    $native = $FullName.Replace('/', '\')
-    if ($native.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
-        $native = '\\' + $native.Substring(8)
-    } elseif ($native.StartsWith('\\?\', [StringComparison]::Ordinal)) {
-        $native = $native.Substring(4)
-    }
-    if ($native -match '^[A-Za-z]:\\') { return '\\?\' + $native }
-    if ($native -match '^\\\\[^\\]+\\[^\\]+(?:\\|$)') {
-        return '\\?\UNC\' + $native.Substring(2)
-    }
-    throw "unsupported absolute Windows ACL path: $FullName"
-}
 try {
     # MSYS chmod maps file writes to READONLY, but cannot protect directories.
     # Deny content/namespace writes explicitly, as POSIX a-w does. The owner can
@@ -55,24 +39,17 @@ try {
             $everyone, $rights, [System.Security.AccessControl.AccessControlType]::Deny)
         # Use the Windows PowerShell/.NET ACL API directly. An inherited
         # PowerShell 7 PSModulePath can prevent Security-module auto-loading.
-        $aclPath = ConvertTo-NativeAclPath $node.FullName
-        if ($node.PSIsContainer) {
-            $acl = [IO.Directory]::GetAccessControl($aclPath)
-        } else {
-            $acl = [IO.File]::GetAccessControl($aclPath)
-        }
+        $acl = $node.GetAccessControl()
         if ($Action -eq 'freeze') {
             $acl.AddAccessRule($rule)
-            if ($node.PSIsContainer) { [IO.Directory]::SetAccessControl($aclPath, $acl) }
-            else { [IO.File]::SetAccessControl($aclPath, $acl) }
+            $node.SetAccessControl($acl)
         } elseif ($Action -eq 'thaw') {
             $acl.RemoveAccessRuleSpecific($rule)
             # Test/output cleanup may thaw a parent containing several roots.
             $baseRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
                 $everyone, $baseRights, [System.Security.AccessControl.AccessControlType]::Deny)
             $acl.RemoveAccessRuleSpecific($baseRule)
-            if ($node.PSIsContainer) { [IO.Directory]::SetAccessControl($aclPath, $acl) }
-            else { [IO.File]::SetAccessControl($aclPath, $acl) }
+            $node.SetAccessControl($acl)
         } else {
             $denied = 0
             foreach ($entry in $acl.GetAccessRules($true, $true,
@@ -90,6 +67,6 @@ try {
         }
     }
 } catch {
-    [Console]::Error.WriteLine("phase2-capsule-permissions: action=$Action node=$($node.FullName): $($_.Exception.Message)")
+    [Console]::Error.WriteLine("phase2-capsule-permissions: $($_.Exception.Message)")
     exit 1
 }

@@ -2,12 +2,6 @@
 #
 # Defines the session model for reusable long-lived test environments.
 
-use app.io.mod.{getpid}
-
-# Descriptor allocation is owned by the serial daemon control plane.
-# This sequence is not a concurrent allocator.
-var _session_instance_sequence: i64 = 0
-
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_hash_text(s: text) -> i64
 
@@ -115,7 +109,6 @@ val LEASE_IDLE: i64 = 0
 val LEASE_ACTIVE: i64 = 1
 val LEASE_RESETTING: i64 = 2
 val LEASE_STOPPING: i64 = 3
-val LEASE_PENDING: i64 = 4
 
 # ============================================================================
 # Core Structs
@@ -147,25 +140,12 @@ struct SessionDescriptor:
     max_concurrent: i64
 
 fn session_descriptor_new(key: SessionKey) -> SessionDescriptor:
-    # Reuse keys remain deterministic; external instances need distinct names.
-    # PID/time namespace plus sequence remains unique within one serial owner
-    # even if two allocations observe the same clock value.
-    _session_instance_sequence = _session_instance_sequence + 1
-    val owner_pid = getpid()
-    val now = rt_time_now_unix_micros()
-    var config: {text: text} = {}
-    config["__session_instance_id"] = "s{owner_pid}_{now}_{_session_instance_sequence}"
     SessionDescriptor(
         key: key,
-        config: config,
+        config: {},
         timeout_ms: 60000,
         max_concurrent: 1
     )
-
-fn session_descriptor_instance_id(desc: SessionDescriptor) -> text:
-    if desc.config.contains_key("__session_instance_id"):
-        return desc.config["__session_instance_id"]
-    ""
 
 struct SessionLease:
     session_id: text
@@ -186,35 +166,6 @@ fn session_lease_new(key: SessionKey) -> SessionLease:
         pid: 0,
         qmp_socket: "",
         status: LEASE_IDLE,
-        snapshot_name: "",
-        created_at: now,
-        last_used_at: now,
-        test_count: 0
-    )
-
-fn session_lease_from_descriptor(desc: SessionDescriptor) -> SessionLease:
-    val instance_id = session_descriptor_instance_id(desc)
-    val now = rt_time_now_unix_micros()
-    SessionLease(
-        session_id: instance_id,
-        key: desc.key,
-        pid: 0,
-        qmp_socket: "",
-        status: if instance_id == "": LEASE_PENDING else: LEASE_IDLE,
-        snapshot_name: "",
-        created_at: now,
-        last_used_at: now,
-        test_count: 0
-    )
-
-fn session_lease_pending(key: SessionKey) -> SessionLease:
-    val now = rt_time_now_unix_micros()
-    SessionLease(
-        session_id: "",
-        key: key,
-        pid: 0,
-        qmp_socket: "",
-        status: LEASE_PENDING,
         snapshot_name: "",
         created_at: now,
         last_used_at: now,

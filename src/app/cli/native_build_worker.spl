@@ -1,8 +1,12 @@
+use app.io._CliCompile.compile_targets.{
+    cli_native_build_with_environment_variant_policy_v1}
 use app.io.args_ops.{get_args}
 use app.io.env_ops.{env_get}
-use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
-# This source entry remains the fallback for older CLI images. Their
-# `simple run` interpreter resolves
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_extract_v1,
+    environment_variant_policy_handoff_owner_error_label_v1
+}
+# The worker is interpreted (`simple run`), and the interpreter resolves
 # `compiler.driver.bootstrap_k1_selected` to the fail-closed stub
 # (src/compiler/80.driver/bootstrap_k1_selected.spl), never to the committed
 # composition, so the composition is named by its own path here.
@@ -71,7 +75,15 @@ fn main() -> i64:
             not install_full_static_backends_for_k1_policy_v1(selected_k1_backend_policy_v1()):
         print "error: PLUG-E-TABLE: native-build worker backend composition refused: {selected_k1_backend_table_diagnostic_v1()}"
         rt_exit(1)
+    val opened = match environment_variant_policy_handoff_extract_v1(
+        native_build_entry_args()):
+        case Ok(value): value
+        case Err(failure):
+            val reason = environment_variant_policy_handoff_owner_error_label_v1(failure)
+            print "error: native-build worker rejected its internal policy handoff: {reason}"
+            rt_exit(1)
     mem_probe_dump("worker_entry")
-    val worker_rc = run_native_build_worker_entry(native_build_entry_args())
+    val worker_rc = cli_native_build_with_environment_variant_policy_v1(
+        opened.user_args, opened.handoff.collection)
     mem_probe_dump("worker_exit")
     worker_rc

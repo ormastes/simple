@@ -252,7 +252,7 @@ drop method calls the paired release extern exactly once.
 
 **Wrapped (OK):**
 
-```text
+```simple
 @sffi(prefix: "rt_file", invalid: -1)
 resource File
 
@@ -261,7 +261,7 @@ fn read_config(path: text) -> text:
     file.read_all()
 ```
 
-```text
+```simple
 # Until `resource` lands: hand-written wrapper is also compliant.
 class Database:
     handle: i64                       # private field, not re-exposed
@@ -278,7 +278,7 @@ class Database:
 
 **Unwrapped (flagged):**
 
-```text
+```simple
 extern fn rt_file_open(path: text) -> i64
 extern fn rt_file_close(handle: i64) -> bool
 

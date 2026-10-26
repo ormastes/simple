@@ -29,7 +29,7 @@ Sets atomic `TIMEOUT_EXCEEDED` checked at every expression boundary.
 
 **Files:** `src/compiler_rust/common/src/fault_detection.rs`, `src/lib/common/fault_detection.spl`
 
-```simple:skip
+```simple
 enum FaultKind:
     StackOverflow(depth: i64, limit: i64)
     Timeout
@@ -59,7 +59,7 @@ enum FaultKind:
 | `AppExitDisposition` | Restart, Quarantine, Escalate, Halt, Reboot |
 
 **CrashRecord** — structured crash metadata:
-```text
+```simple
 class CrashRecord:
     timestamp, pid, reason, domain, exit_code, message, source_location, restart_attempt
     fn is_fatal() -> bool    # true for trap/abort/invariant_violation
@@ -67,7 +67,7 @@ class CrashRecord:
 ```
 
 **CrashLog** — accumulates records across restarts:
-```text
+```simple
 class CrashLog:
     fn add(record), count(), last(), recent(n), has_fatal()
 ```
@@ -89,7 +89,7 @@ Default policies: UserApp 1/30s, SystemService 5/60s, KernelComponent 0 restarts
 
 **File:** `src/lib/nogc_async_mut/monitor.spl`
 
-```text
+```simple
 # One-way watch — watcher gets DownEvent when target exits
 val ref = monitor_from(supervisor_pid, child_pid)
 
@@ -120,7 +120,7 @@ val links = poll_link_events(actor_a)           # [LinkExitEvent]
 
 **File:** `src/compiler_rust/runtime/src/value/ffi/env_process.rs`
 
-```text
+```simple
 extern fn rt_process_run_with_limits(
     cmd, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs
 ) -> (stdout, stderr, exit_code)

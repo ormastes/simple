@@ -22,9 +22,8 @@
 # FORMAT: one scalar per line (flat_pool_codec escaping), a list is its length
 # then its elements, an optional is 0 or 1 then the value, an enum is its
 # declaration index then its payload, a dict is its length then key/value
-# pairs in stable typed key order. Native `.keys()` follows hash buckets, so
-# copying a dictionary during decode does not preserve its enumeration order.
-# Sorting snapshots leaves the live dictionaries and symbol IDs unchanged.
+# pairs in `.keys()` order -- insertion order, so a decoded module iterates in
+# the same order the lowered one did and MIR sees identical sequences.
 
 use std.io_runtime.{read_file_text, file_exists, file_write, dir_create_all, exit}
 use app.compiler_schema.extract.{VariantRow, extract_enum_variants}
@@ -49,13 +48,12 @@ fn codec_decl_sources() -> [text]:
         "src/compiler/00.common/dynamic_identity/closure.spl",
         "src/compiler/00.common/_Attributes/decl_attrs.spl",
         "src/compiler/30.types/_TypeLayout/layout_core.spl",
-        "src/compiler/10.frontend/parser_types_expr.spl",
-        "src/lib/common/facet_abi.spl"
+        "src/compiler/10.frontend/parser_types_expr.spl"
     ]
 
 fn codec_opaque_types() -> [text]:
     """Hand-coded in hir_codec_support.spl; the generator emits a call, never a body."""
-    ["Expr", "BlockValue", "RepresentationDeclarationV1"]
+    ["Expr", "BlockValue"]
 
 fn codec_use_lines() -> text:
     var out = "use compiler.hir.hir_definitions.*\n"
@@ -67,28 +65,14 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.hir.hir_types.{{HirModule}}  # explicit: a glob is not an import-origin for surface projection\n"
     out = out + "use compiler.hir.hir_operators.{{HirBinOp, HirUnaryOp, HirAssignOp}}\n"
     out = out + "use compiler.common.diagnostics.span.{{Span}}\n"
-    out = out + "use compiler.common.assurance.representation_manifest_v1.{{RepresentationDeclarationV1}}\n"
-    out = out + "use compiler.hir.hir_codec_support.{{hc_enc_opaque_representation_declaration_v1, hc_dec_opaque_representation_declaration_v1}}\n"
-    # Formation probe for the fail-closed encoder node guards (the erased-read
-    # campaign: a corrupt NON-NIL node must refuse the cache entry, never
-    # deref). Generic extern, the established declaration shape.
-    out = out + "extern fn rt_heap_ref_wellformed<T>(value: T) -> bool\n"
-    # Registry-membership probe: rt_heap_ref_wellformed is a SHAPE check that
-    # any large garbage integer passes (v19: wild HirSymbol span
-    # 0xb4b1cdae6eec3880 sailed through and faulted). The encoder requires
-    # liveness: cache-eligible HIR is fully transient-heap-promoted, so an
-    # unregistered node is corrupt by definition.
-    out = out + "extern fn rt_heap_ref_registered<T>(value: T) -> bool\n"
     out = out + "use compiler.common.dependency.visibility.{{Visibility}}\n"
     out = out + "use compiler.common.dynamic_identity.closure.{{Closure}}\n"
     out = out + "use compiler.blocks.value.{{BlockValue}}\n"
     out = out + "use compiler.types.type_layout.{{LayoutAttr, TypeLayoutKind}}\n"
     out = out + "use compiler.common.attributes.{{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}}\n"
     out = out + "use compiler.frontend.parser_types_expr.{{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}}\n"
-    out = out + "use common.facet_abi.*\n"
     out = out + "use compiler.frontend.core.flat_pool_codec.{{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}}\n"
-    out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64, hc_enc_enum_bool, hc_enc_enum_text, hc_enc_enum_char, hc_put_char, hc_read_char, hc_restore_enum_nil}}\n"
-    out = out + "use compiler.hir.hir_codec_key_order.{{hc_order_i64_keys_v1, hc_order_text_keys_v1, hc_order_symbol_id_keys_v1}}\n"
+    out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64}}\n"
     out
 
 # ============================================================================
@@ -171,9 +155,7 @@ class CodecUniverse:
             val path = repo_root + "/" + rel
             if not file_exists(path):
                 _codec_fail("hir codec generator: declaration source missing: {rel}")
-            # Normalize public ABI declaration introducers for the same
-            # strict line scanner used by compiler-internal schema sources.
-            val body = read_file_text(path).replace("pub struct ", "struct ").replace("pub enum ", "enum ")
+            val body = read_file_text(path)
             texts.push(body)
             names.push(rel)
             for line in body.split("\n"):
@@ -255,9 +237,7 @@ class CodecUniverse:
             return TypeShape(cat: "prim_i64", a: "", b: "", name: "")
         if t == "bool":
             return TypeShape(cat: "prim_bool", a: "", b: "", name: "")
-        if t == "char":
-            return TypeShape(cat: "prim_char", a: "", b: "", name: "")
-        if t == "text":
+        if t == "text" or t == "char":
             return TypeShape(cat: "prim_text", a: "", b: "", name: "")
         if t == "f64":
             return TypeShape(cat: "prim_f64", a: "", b: "", name: "")
@@ -413,8 +393,7 @@ class EmitCounter:
         self.n = self.n + 1
         v
 
-fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCounter,
-        required_node: bool = false) -> text:
+fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCounter) -> text:
     """Statements that write one value `v` of `type_text`."""
     val s = u.classify(type_text)
     if s.cat == "prim_i64":
@@ -423,8 +402,6 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         return indent + "w.put_bool(" + v + ")\n"
     if s.cat == "prim_text":
         return indent + "w.put_text(" + v + ")\n"
-    if s.cat == "prim_char":
-        return indent + "hc_put_char(w, " + v + ")\n"
     if s.cat == "prim_f64":
         return indent + "w.put_f64(" + v + ")\n"
     # A declared non-optional node field can still hold nil in a real
@@ -433,24 +410,11 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
     # state instead of crashing on `.kind` of nil.
     if s.cat == "node" or s.cat == "opaque":
         val callee = if s.cat == "node": enc_fn_name(s.name) else: "hc_enc_opaque_" + _codec_snake(s.name)
-        # @workaround bug=a174_struct_nil_comparison_dispatch_2026_10_16 recover=e458621e87670403385147dd4380acb0b925153d reason=old-producer-record-presence-dispatch
-        val record_presence = s.cat == "opaque" or u.is_struct(s.name)
-        # v21 (2026-10-18): bind the node ONCE and use that word for both the
-        # presence check and the encode call. The guard-first double read
-        # (check, then argument) drew non-nil then ERASED-NIL on
-        # module.functions, so the required-entry gate refused EVERY module
-        # (p2_add: stores=0 refused=everything) even though every entry was
-        # present. The single annotated bind is the codec-pool proven class.
-        val bind_k = c.next()
-        var out = indent + "val enc_node_v" + "{bind_k}" + ": " + _strip_default(s.name).trim() + " = " + v + "\n"
-        out = out + (if record_presence: indent + "if not enc_node_v{bind_k}.?:\n" else: indent + "if enc_node_v{bind_k} == nil:\n")
-        if required_node:
-            out = out + indent + "    w.reject(\"missing_required_hir_module_function_entry\")\n"
-        else:
-            out = out + indent + "    w.put_i64(0)\n"
+        var out = indent + "if " + v + " == nil:\n"
+        out = out + indent + "    w.put_i64(0)\n"
         out = out + indent + "else:\n"
         out = out + indent + "    w.put_i64(1)\n"
-        out = out + indent + "    " + callee + "(w, enc_node_v{bind_k})\n"
+        out = out + indent + "    " + callee + "(w, " + v + ")\n"
         return out
     val k = c.next()
     if s.cat == "opt":
@@ -478,27 +442,17 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         var out = indent + "var ks{k}: [" + s.a + "] = []\n"
         out = out + indent + "if " + v + " != nil:\n"
         out = out + indent + "    ks{k} = " + v + ".keys()\n"
-        val order_fn = if s.a == "i64": "hc_order_i64_keys_v1"
-            elif s.a == "text": "hc_order_text_keys_v1"
-            elif s.a == "SymbolId": "hc_order_symbol_id_keys_v1"
-            else: ""
-        if order_fn == "":
-            _codec_fail("hir codec generator: unsupported dictionary key order " + s.a)
-        out = out + indent + "ks{k} = " + order_fn + "(ks{k})\n"
         out = out + indent + "w.put_i64(ks{k}.len())\n"
         out = out + indent + "for dk{k} in ks{k}:\n"
-        out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c, required_node)
-        out = out + _emit_enc(u, s.b, v + "[dk{k}]", indent + "    ", c, required_node)
+        out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c)
+        out = out + _emit_enc(u, s.b, v + "[dk{k}]", indent + "    ", c)
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")
 
-fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
-        required_node: bool = false) -> text:
+fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter) -> text:
     """Statements that read one value of `type_text` into a new local `target`."""
     val s = u.classify(type_text)
     val decl_type = _strip_default(type_text).trim()
-    if s.cat == "prim_char":
-        return indent + "val " + target + " = hc_read_char(r, r.next())\n"
     # Scalars are decoded INLINE through an if-expression rather than a
     # helper returning `T?`: a helper's Some(false) is a truthy box to the
     # encoder's `if v:` and re-encoded as 1 (seen on the first round-trip run).
@@ -526,34 +480,18 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         # hc_enc_hir_type. Same defect class the scalar note above records as
         # already hit once and fixed by inlining; the node/opaque case was left
         # unmitigated. The statement form assigns the bare value without
-        # boxing; the `opt` branch below keeps that bare value for node/opaque
-        # inners (see its note). Wire format is unchanged.
+        # boxing -- which is exactly why the `opt` branch below must write
+        # `Some(...)` explicitly. Wire format is unchanged.
         var out = indent + "var " + target + ": " + decl_type + "? = nil\n"
         out = out + indent + "if r.next_i64() == 1:\n"
         out = out + indent + "    " + target + " = " + callee + "(r)\n"
-        if required_node:
-            out = out + indent + "else:\n"
-            out = out + indent + "    r.reject_malformed(\"missing_required_hir_module_function_entry\")\n"
         return out
     val k = c.next()
     if s.cat == "opt":
         var out = indent + "var " + target + ": " + decl_type + " = nil\n"
         out = out + indent + "if r.next_i64() == 1:\n"
         out = out + _emit_dec(u, s.a, "ov{k}", indent + "    ", c)
-        # A node/opaque inner value is already decoded into a `T?` local
-        # (statement form above). Wrapping it again as `Some(ov)` stores an
-        # Option box in the field, while fresh HIR lowering stores the bare
-        # node (expression_core.spl Range: "bare-lift"). A consumer that passes
-        # the field through unwrapped -- `struct_construct_spread_base` returns
-        # Range.end straight into lower_expr -- then reads the box as a HirExpr
-        # and MIR reports a garbage expression handle on warm (decoded) builds
-        # only (bug hir_cache_warm_decode_mir_divergence_core_c_2026-10-19).
-        # Assign the bare value so decoded and lowered HIR share one shape.
-        val inner = u.classify(s.a)
-        if inner.cat == "node" or inner.cat == "opaque":
-            out = out + indent + "    " + target + " = ov{k}\n"
-        else:
-            out = out + indent + "    " + target + " = Some(ov{k})\n"
+        out = out + indent + "    " + target + " = Some(ov{k})\n"
         return out
     if s.cat == "list":
         var out = indent + "var " + target + ": " + decl_type + " = []\n"
@@ -579,41 +517,9 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "val n{k} = r.next_len()\n"
         out = out + indent + "var i{k} = 0\n"
         out = out + indent + "while i{k} < n{k}:\n"
-        out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node)
-        val value_shape = u.classify(s.b)
-        if value_shape.cat == "prim_i64":
-            # Keep later emitted local names aligned with scalar _emit_dec.
-            val _wire_slot = c.next()
-            out = out + indent + "    val value_pos{k} = r.pos\n"
-            out = out + indent + "    val dv{k}: i64 = r.next_i64()\n"
-        else:
-            out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c, required_node)
-        # Store through a presence bind of the decoded optional value, never
-        # the optional itself: dict[key] = T? stores land erased (nil) on
-        # the stage2 LLVM draw -- the decoded module.functions dict holds
-        # nil HirFunction values while the cache blob is complete, and the
-        # first values()/for-in consumer passes a nil declaration into
-        # record_exact_extern_declaration_v1 (SIGSEGV, EXC_BAD_ACCESS at
-        # 0x70, stage2 p2_add sanity smoke). The presence-guarded concrete
-        # bind is the proven-clean shape; absent values are skipped rather
-        # than stored as nil (the cache re-encode selfcheck already rejects
-        # lossy entries). Kept inside the tip's required_node/r.ok rejection
-        # guard so a rejected decode never reaches the dictionary either.
-        if required_node:
-            out = out + indent + "    if r.ok:\n"
-            out = out + indent + "        if val present_v{k} = dv{k}:\n"
-            out = out + indent + "            " + target + "[dk{k}] = present_v{k}\n"
-        elif value_shape.cat == "prim_i64":
-            # Raw integers are not optional node handles. Preserve 3 and reject
-            # nil/malformed tokens even under the legacy unbounded reader.
-            out = out + indent + "    if r.ok:\n"
-            out = out + indent + "        if r.lines[value_pos{k}] != \"{{dv{k}}}\":\n"
-            out = out + indent + "            r.reject_malformed(\"integer_dictionary_value\")\n"
-            out = out + indent + "        else:\n"
-            out = out + indent + "            " + target + "[dk{k}] = dv{k}\n"
-        else:
-            out = out + indent + "    if val present_v{k} = dv{k}:\n"
-            out = out + indent + "        " + target + "[dk{k}] = present_v{k}\n"
+        out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c)
+        out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c)
+        out = out + indent + "    " + target + "[dk{k}] = dv{k}\n"
         out = out + indent + "    i{k} = i{k} + 1\n"
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")
@@ -632,22 +538,6 @@ fn _codec_binders(fields: [FieldDecl]) -> text:
 
 fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var parts: [text] = ["fn " + enc_fn_name(decl.name) + "(w: HirCodecWriter, node: " + decl.name + "):\n"]
-    # Fail closed on a nil node: live compiler state can present a nil/corrupt
-    # composite (erased-read draw; measured hc_enc_span SIGSEGV at address 0x8
-    # encoding app.cli.check_dbs on the stage2 candidate, 2026-10-18). A nil
-    # node cannot be encoded faithfully, so refuse this cache entry; the
-    # owning build continues from its in-memory HIR (the shard lane finishes
-    # PASS+UNCACHED via the driver_hir_pipeline_lowering codec-refusal
-    # fallback). Never write fields off a nil node.
-    parts.push("    if node == nil:\n")
-    parts.push("        w.reject(\"nil " + decl.name + " node\")\n")
-    parts.push("        return\n")
-    parts.push("    if not rt_heap_ref_wellformed(node):\n")
-    parts.push("        w.reject(\"illformed " + decl.name + " node\")\n")
-    parts.push("        return\n")
-    parts.push("    if not rt_heap_ref_registered(node):\n")
-    parts.push("        w.reject(\"unregistered " + decl.name + " node\")\n")
-    parts.push("        return\n")
     var c = EmitCounter(n: 0)
     if decl.is_enum:
         parts.push("    match node:\n")
@@ -660,29 +550,22 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
             # Visibility values to hc_bad_tag(..., -1).
             parts.push("        case " + decl.name + "." + row.variant + _codec_binders(fields) + ":\n")
             parts.push("            w.put_i64(" + "{idx}" + ")\n")
-            var field_index = 0
             for f in fields:
-                val shape = u.classify(f.type_text)
-                if shape.cat == "prim_bool" or shape.cat == "prim_text" or shape.cat == "prim_char":
-                    val helper = if shape.cat == "prim_bool": "hc_enc_enum_bool" elif shape.cat == "prim_char": "hc_enc_enum_char" else: "hc_enc_enum_text"
-                    parts.push("            " + helper + "(w, node, " + "{fields.len()}" + ", " + "{field_index}" + ", b_" + f.binder + ")\n")
-                else:
-                    parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
-                field_index = field_index + 1
+                parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
             idx = idx + 1
-        parts.push("        case _: hc_bad_tag(\"" + decl.name + "\", -1)\n")
+        # Encoding sees live compiler state, not an untrusted cache blob. A
+        # malformed/unsupported enum must refuse this cache entry and let the
+        # owning build continue from its in-memory HIR; only decoding a stored
+        # unknown tag is process-fatal.
+        parts.push("        case _: w.reject(\"unencodable " + decl.name + " enum\")\n")
         return parts.join("")
     var body: [text] = []
     for f in decl.fields:
-        # A function dictionary entry cannot represent an absent declaration.
-        # Enforce in the actual presence branch, not a separate live-state read.
-        val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry))
+        body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c))
     if body.len() == 0:
         body.push("    val _leaf = 0\n")
     parts.join("") + body.join("")
 
-# @workaround bug=a174_enum_scalar_codec_wire_boundary_2026_10_16 recover=5c3e501759ae833a828b14b4e23c9238c73b76a6 reason=generate-typed-enum-prototypes-and-schema-owned-wire-nil-slots
 fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var parts: [text] = ["fn " + dec_fn_name(decl.name) + "(r: FlatPoolReader) -> " + decl.name + ":\n"]
     var c = EmitCounter(n: 0)
@@ -693,45 +576,11 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
             val fields = parse_payload_fields(row.payload_schema)
             parts.push("    if tag == " + "{idx}" + ":\n")
             var names: [text] = []
-            var nil_flags: [text] = []
-            var nil_indices: [i64] = []
-            var field_index = 0
             for f in fields:
-                val shape = u.classify(f.type_text)
-                if shape.cat == "prim_bool" or shape.cat == "prim_text" or shape.cat == "prim_char":
-                    val k = c.next()
-                    val target = "f_" + f.binder
-                    val flag = "wire_nil_" + f.binder
-                    parts.push("        val raw{k} = r.next()\n")
-                    if shape.cat == "prim_bool":
-                        parts.push("        val " + flag + " = raw{k} == \"N\"\n")
-                        parts.push("        val " + target + " = raw{k} == \"1\"\n")
-                    elif shape.cat == "prim_char":
-                        parts.push("        val " + flag + " = raw{k} == \"\\\\N\"\n")
-                        parts.push("        val " + target + ": char = if " + flag + ": 0 as char else: hc_read_char(r, raw{k})\n")
-                        parts.push("        if not r.ok: return nil\n")
-                    else:
-                        parts.push("        val " + flag + " = raw{k} == \"\\\\N\"\n")
-                        parts.push("        val " + target + " = if " + flag + ": \"\" else: flat_pool_unescape(raw{k})\n")
-                    nil_flags.push(flag)
-                    nil_indices.push(field_index)
-                else:
-                    parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
+                parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
                 names.push("f_" + f.binder)
-                field_index = field_index + 1
             if fields.len() == 0:
                 parts.push("        return " + decl.name + "." + row.variant + "\n")
-            elif nil_flags.len() > 0:
-                parts.push("        val wire_prototype = " + decl.name + "." + row.variant + "(" + _join(names, ", ") + ")\n")
-                parts.push("        if " + _join(nil_flags, " or ") + ":\n")
-                parts.push("            if not r.reserve(" + "{64 + fields.len() * 16}" + "): return nil\n")
-                parts.push("            var wire_nil_slots: [i64] = []\n")
-                var ni = 0
-                while ni < nil_flags.len():
-                    parts.push("            if " + nil_flags[ni] + ": wire_nil_slots.push(" + "{nil_indices[ni]}" + ")\n")
-                    ni = ni + 1
-                parts.push("            return hc_restore_enum_nil(r, wire_prototype, " + "{fields.len()}" + ", wire_nil_slots)\n")
-                parts.push("        return wire_prototype\n")
             else:
                 parts.push("        return " + decl.name + "." + row.variant + "(" + _join(names, ", ") + ")\n")
             idx = idx + 1
@@ -742,8 +591,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
         return parts.join("")
     var names: [text] = []
     for f in decl.fields:
-        val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry))
+        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c))
         names.push(f.binder + ": f_" + f.binder)
     parts.push("    " + decl.name + "(" + _join(names, ", ") + ")\n")
     parts.join("")
@@ -753,7 +601,8 @@ fn emit_codec_file(u: CodecUniverse) -> text:
     parts.push("#\n# HirModule <-> line blob codec. One encoder and one decoder per\n")
     parts.push("# declaration reachable from HirModule (see codec_gen.spl for the format).\n")
     parts.push("# Enum arms are exhaustive by construction; the trailing `_` arm only\n")
-    parts.push("# satisfies the seed's match checker and routes to hc_bad_tag, which exits.\n\n")
+    parts.push("# satisfies the seed's match checker. Encoders reject the cache entry;\n")
+    parts.push("# decoders route an unknown stored tag to hc_bad_tag, which exits.\n\n")
     parts.push(codec_use_lines() + "\n")
     val order = codec_emit_order(u)
     for name in order:

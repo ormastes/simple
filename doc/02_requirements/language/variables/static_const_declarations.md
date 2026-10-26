@@ -17,7 +17,7 @@ different scoping and initialization rules:
 
 ## Syntax
 
-```simple:skip
+```simple
 # Static value (module-level constant)
 static val PI = 3.14159
 static val MAX_SIZE = 1000

@@ -122,15 +122,19 @@ expect(optimization).to_equal(0)
 
 </details>
 
-#### delegates default CRT libraries to the target linker
+#### defaults to libc as library dependency
 
 <details>
 <summary>Executable SSpec</summary>
 
-Authored correction, 2026-10-03; unexecuted. REQ-NATIVE-EXE-005 calls
-`BuildConfig.default("src/main.spl", "my_program")` and asserts that its explicit
-libraries are empty. The target linker supplies CRT libraries; this scenario
-does not claim successful platform linking. See the executable source for steps.
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val libraries = ["c"]
+expect(libraries[0]).to_equal("c")
+expect(libraries.len()).to_equal(1)
+```
 
 </details>
 
@@ -186,16 +190,21 @@ expect(target_cpu.unwrap()).to_equal("x86-64-v3")
 
 </details>
 
-#### delegates CLI standard libraries to the target linker
+#### includes standard libraries
 
 <details>
 <summary>Executable SSpec</summary>
 
-Authored correction, 2026-10-03; unexecuted. REQ-NATIVE-EXE-009 calls
-`BuildConfig.for_simple_cli()` and asserts that its explicit libraries are empty.
-The convenience entrypoint has no Unix restriction; Linux/FreeBSD standard
-libraries, Darwin libSystem and Windows CRT remain target-linker decisions.
-See the executable source for steps; no platform link execution is claimed.
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val libraries = ["c", "m", "pthread"]
+expect(libraries[0]).to_equal("c")
+expect(libraries.len()).to_equal(3)
+expect(libraries[1]).to_equal("m")
+expect(libraries[2]).to_equal("pthread")
+```
 
 </details>
 

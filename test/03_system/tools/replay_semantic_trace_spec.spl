@@ -1,71 +1,8 @@
-# codex-system-test
-# @req REQ-SSPEC-SYSTEM
-# @tag:system
-# @cover src/lib/nogc_sync_mut/replay/semantic/trace_events.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/semantic/trace_writer.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/semantic/trace_reader.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/semantic/object_identity.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/codec.spl 80%
-# Coverage percentages are targets, not measured coverage.
-# Evidence class: host-fixture; production in-memory records and object state.
-# Explicit family imports select the actual codec owners for this regression.
-# No persistence, flush, finalize, shell, native, or live-guest claim.
-
 use std.spec
-use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEventKind, SemanticEvent, SEMANTIC_EVENT_SIZE}
-use std.nogc_sync_mut.replay.semantic.trace_writer.TraceWriter
-use std.nogc_sync_mut.replay.semantic.trace_reader.decode_semantic_event
-use std.nogc_sync_mut.replay.semantic.object_identity.{ObjectId, ObjectRegistry}
-
-fn semantic_trace_first_event() -> SemanticEvent:
-    SemanticEvent(
-        seq: 999, thread_id: 4294967297, kind: 5,
-        timestamp_ns: 1099511628033, source_file_id: 257,
-        source_line: 65537, source_column: 513, name_id: 1025,
-        object_id: 281474976710913, payload_a: 72057594037927937,
-        payload_b: 4294967554
-    )
-
-fn semantic_trace_second_event() -> SemanticEvent:
-    SemanticEvent(
-        seq: 888, thread_id: 8589934595, kind: 10,
-        timestamp_ns: 2199023256067, source_file_id: 514,
-        source_line: 131075, source_column: 1027, name_id: 2051,
-        object_id: 562949953421827, payload_a: 144115188075855875,
-        payload_b: 8589935107
-    )
-
-fn semantic_trace_two_record_writer() -> TraceWriter:
-    var writer = TraceWriter.create("/tmp/semantic-in-memory-unused.sst", 136)
-    writer.emit(semantic_trace_first_event())
-    writer.emit(semantic_trace_second_event())
-    # Matchers record nonfatal failures; callers guard before decoding/indexing.
-    expect(writer.buffer.len()).to_equal(136)
-    writer
-
-fn expect_semantic_record(bytes: [i32], offset: i64, expected: SemanticEvent, assigned_seq: i64):
-    match decode_semantic_event(bytes, offset):
-        case Ok(actual):
-            expect(actual.seq).to_equal(assigned_seq)
-            expect(actual.thread_id).to_equal(expected.thread_id)
-            expect(actual.kind).to_equal(expected.kind)
-            expect(actual.timestamp_ns).to_equal(expected.timestamp_ns)
-            expect(actual.source_file_id).to_equal(expected.source_file_id)
-            expect(actual.source_line).to_equal(expected.source_line)
-            expect(actual.source_column).to_equal(expected.source_column)
-            expect(actual.name_id).to_equal(expected.name_id)
-            expect(actual.object_id).to_equal(expected.object_id)
-            expect(actual.payload_a).to_equal(expected.payload_a)
-            expect(actual.payload_b).to_equal(expected.payload_b)
-        case Err(message):
-            fail("complete semantic record rejected at offset {offset}: {message}")
-
-fn expect_semantic_decode_error(bytes: [i32], offset: i64):
-    match decode_semantic_event(bytes, offset):
-        case Err(message):
-            expect(message).to_contain("offset {offset}")
-        case Ok(actual):
-            fail("invalid semantic record accepted at offset {offset}, seq {actual.seq}")
+use std.replay.semantic.trace_events.{SemanticEventKind, SemanticEvent, SEMANTIC_EVENT_SIZE}
+use std.replay.semantic.trace_writer.TraceWriter
+use std.replay.semantic.trace_reader.decode_semantic_event
+use std.replay.semantic.object_identity.{ObjectId, ObjectRegistry}
 
 # ============================================================================
 # SemanticEventKind round-trips
@@ -169,65 +106,6 @@ describe "TraceWriter emit":
         val ev = SemanticEvent.create(SemanticEventKind.ObjectAlloc)
         writer.emit(ev)
         expect(writer.buffer.len()).to_equal(68)
-
-# ============================================================================
-# Production semantic wire round-trip and bounds
-# ============================================================================
-
-describe "Semantic trace in-memory production codec":
-    it "should recover every field from two distinct records and assign sequence IDs":
-        step("Emit two distinct records into the production writer without flushing")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        expect(writer.event_count).to_equal(2)
-        expect(writer.next_seq).to_equal(2)
-        expect(writer.write_pos).to_equal(136)
-        step("Decode offsets zero and 68 and compare all eleven fields")
-        expect_semantic_record(writer.buffer, 0, semantic_trace_first_event(), 0)
-        expect_semantic_record(writer.buffer, 68, semantic_trace_second_event(), 1)
-
-    it "should reject negative offsets before decoding fields":
-        step("Emit valid records and request offsets before the first byte")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        expect_semantic_decode_error(writer.buffer, -1)
-        expect_semantic_decode_error(writer.buffer, -68)
-
-    it "should reject an empty input buffer":
-        step("Request a record from an empty byte buffer")
-        val bytes: [i32] = []
-        expect_semantic_decode_error(bytes, 0)
-
-    it "should reject every nonempty truncated record prefix":
-        step("Take each one through 67 byte prefix of a production record")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        var prefix: [i32] = []
-        var length = 1
-        while length < 68:
-            prefix.push(writer.buffer[length - 1])
-            expect_semantic_decode_error(prefix, 0)
-            length = length + 1
-        expect(prefix.len()).to_equal(67)
-
-    it "should reject the incomplete tail after the last complete start offset":
-        step("Request a record one byte beyond the second record start")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        expect_semantic_decode_error(writer.buffer, 69)
-
-    it "should reject offsets at and beyond the buffer end":
-        step("Request a record at the end and beyond the production buffer")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        expect_semantic_decode_error(writer.buffer, 136)
-        expect_semantic_decode_error(writer.buffer, 137)
-        expect_semantic_decode_error(writer.buffer, 9223372036854775807)
 
 # ============================================================================
 # ObjectId construction

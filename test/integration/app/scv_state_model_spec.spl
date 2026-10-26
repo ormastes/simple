@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-G-03 — the v2 commit state model:
+journal_only → private_editing/private_unparsed/private_parse_error/
+private_parsed → compile_ok → test_ok → verified_ok → public_ready, with
+transitions enforced (no skipping the chain, edits demote, forced_unparsed
+never reaches public_ready), plus canonical mapping of legacy state names.
+Audience: Maintainers of the SCV commit gates.
+"""
+# @req: REQ-SCV-STATE-MODEL-001
+use std.spec.{describe, it, expect, step}
+use std.scv.state_model.{scv_state_model_valid, scv_state_canonical, scv_state_tier, scv_state_transition_allowed, scv_state_transition}
+
+describe "scv v2 state model (G-03)":
+    it "accepts every canonical state and rejects junk":
+        for state in ["journal_only", "private_editing", "private_unparsed", "private_parse_error", "private_parsed", "forced_unparsed", "compile_ok", "test_ok", "verified_ok", "public_ready"]:
+            expect(scv_state_model_valid(state)).to_be(true)
+        expect(scv_state_model_valid("")).to_be(false)
+        expect(scv_state_model_valid("green")).to_be(false)
+        expect(scv_state_model_valid("private_dirty")).to_be(false)
+
+    it "maps legacy state names onto the v2 model":
+        expect(scv_state_canonical("private_dirty")).to_be("private_editing")
+        expect(scv_state_canonical("parsed_error")).to_be("private_parse_error")
+        expect(scv_state_canonical("parsed_ok")).to_be("private_parsed")
+        step("v2 names map to themselves; unknown names map to ERROR")
+        expect(scv_state_canonical("compile_ok")).to_be("compile_ok")
+        expect(scv_state_canonical("nonsense").starts_with("ERROR")).to_be(true)
+
+    it "orders the promotion chain by tier":
+        expect(scv_state_tier("journal_only") < scv_state_tier("private_editing")).to_be(true)
+        expect(scv_state_tier("private_parsed") < scv_state_tier("compile_ok")).to_be(true)
+        expect(scv_state_tier("compile_ok") < scv_state_tier("test_ok")).to_be(true)
+        expect(scv_state_tier("test_ok") < scv_state_tier("verified_ok")).to_be(true)
+        expect(scv_state_tier("verified_ok") < scv_state_tier("public_ready")).to_be(true)
+
+    it "allows the forward chain one step at a time":
+        expect(scv_state_transition_allowed("journal_only", "private_editing")).to_be(true)
+        expect(scv_state_transition_allowed("private_editing", "private_unparsed")).to_be(true)
+        expect(scv_state_transition_allowed("private_editing", "private_parse_error")).to_be(true)
+        expect(scv_state_transition_allowed("private_parse_error", "private_parsed")).to_be(true)
+        expect(scv_state_transition_allowed("private_parsed", "compile_ok")).to_be(true)
+        expect(scv_state_transition_allowed("compile_ok", "test_ok")).to_be(true)
+        expect(scv_state_transition_allowed("test_ok", "verified_ok")).to_be(true)
+        expect(scv_state_transition_allowed("verified_ok", "public_ready")).to_be(true)
+
+    it "refuses skipping the gate chain":
+        expect(scv_state_transition_allowed("private_editing", "compile_ok")).to_be(false)
+        expect(scv_state_transition_allowed("private_parsed", "test_ok")).to_be(false)
+        expect(scv_state_transition_allowed("compile_ok", "verified_ok")).to_be(false)
+        expect(scv_state_transition_allowed("compile_ok", "public_ready")).to_be(false)
+        expect(scv_state_transition_allowed("test_ok", "public_ready")).to_be(false)
+        expect(scv_state_transition_allowed("journal_only", "public_ready")).to_be(false)
+
+    it "demotes on edit from any state, and never demotes below journal":
+        for state in ["private_unparsed", "private_parse_error", "private_parsed", "compile_ok", "test_ok", "verified_ok", "public_ready", "forced_unparsed"]:
+            expect(scv_state_transition_allowed(state, "private_editing")).to_be(true)
+        expect(scv_state_transition_allowed("private_editing", "journal_only")).to_be(false)
+        expect(scv_state_transition_allowed("compile_ok", "private_parsed")).to_be(false)
+
+    it "never lets forced_unparsed reach public_ready (or the gate chain)":
+        expect(scv_state_transition_allowed("private_editing", "forced_unparsed")).to_be(true)
+        expect(scv_state_transition_allowed("forced_unparsed", "public_ready")).to_be(false)
+        expect(scv_state_transition_allowed("forced_unparsed", "compile_ok")).to_be(false)
+        expect(scv_state_transition_allowed("forced_unparsed", "test_ok")).to_be(false)
+        expect(scv_state_transition_allowed("forced_unparsed", "verified_ok")).to_be(false)
+
+    it "reports transitions with honest verdict text":
+        val ok = scv_state_transition("compile_ok", "test_ok")
+        expect(ok).to_contain("state: test_ok")
+        val bad = scv_state_transition("compile_ok", "public_ready")
+        expect(bad.starts_with("ERROR")).to_be(true)
+        val junk = scv_state_transition("compile_ok", "green")
+        expect(junk.starts_with("ERROR")).to_be(true)
+        step("Legacy from-states are canonicalised before enforcement")
+        val legacy = scv_state_transition("parsed_ok", "compile_ok")
+        expect(legacy).to_contain("state: compile_ok")

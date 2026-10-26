@@ -13,7 +13,7 @@
 
 ## Neural Network Pipeline
 
-```simple:skip
+```simple
 # Layer connection with dimension checking
 model = Linear(784, 256) ~> ReLU() ~> Linear(256, 10)
 # Type: Layer<[batch, 784], [batch, 10]>
@@ -25,14 +25,14 @@ bad = Linear(784, 256) ~> Linear(128, 64)
 
 ## Data Processing Pipeline
 
-```simple:skip
+```simple
 result = data |> normalize |> transform |> predict
 preprocess = normalize >> augment >> to_tensor
 ```
 
 ## Math Blocks
 
-```simple:skip
+```simple
 # Inside m{}: ^ is power operator
 formula = m{ x^2 + 2*x*y + y^2 }
 

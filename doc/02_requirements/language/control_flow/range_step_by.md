@@ -14,7 +14,7 @@ over every Nth element or reversing sequences.
 
 ## Syntax
 
-```simple:skip
+```simple
 # Slice with step
 arr[::2]       # Every other element (step=2)
 arr[1::2]      # Every other starting from index 1

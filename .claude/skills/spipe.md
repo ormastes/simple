@@ -7,18 +7,6 @@ description: SPipe Skill — runner/docgen/process around executable SSpec `.spl
 
 ## Bootstrap failure collection
 
-For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
-owned-process finality, use [native staging and terminal evidence](../../doc/07_guide/tooling/bootstrap_native_staging.md).
-A compile last-line/exit/object-size observation is not an SSpec verdict. Preserve
-actual test counts, stopped bug records, campaign Phase 3 priority and the full
-CLI command-owner gate; authored fixtures remain unexecuted until observed.
-
-For cached per-file continuation and manual link diagnosis, use
-[cached object continuation and early linking](../../doc/07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
-Keep tagged workarounds separate from permanent fixes; create a reproducing
-scenario and similar prevention scenarios, with authored tests clearly marked
-unexecuted until the real runner executes them.
-
 For bootstrap build/test sweeps, continue independent scenarios after failures
 and collect terminal results. A usable artifact plus minimum sanity permits
 diagnostic continuation; failed qualification still prevents admission and
@@ -756,7 +744,7 @@ Acceptance-spec shape that keeps ALL of the above (this is the file measured bel
 `# @tag:in-development` stays on line 1 — it is a separate runner mechanism and
 costs nothing):
 
-```simple:skip
+```simple
 # @tag:in-development
 """
 ## Purpose and audience
@@ -903,7 +891,7 @@ verdict, and keep release cohort-size gates separate.
 Module: `src/lib/common/spec/evidence/model.spl` (selectors, `OracleCheck`,
 `OracleSpec`), `evidence_comparator.spl` (`compare_evidence`).
 
-```text
+```simple
 val checks = [
     check_exact("frame.type", "SYN"),
     check_full_pattern("frame.nonce", "hex:16"),
@@ -913,7 +901,7 @@ val checks = [
 val spec = oracle_spec("protocol.v1", checks)
 ```
 
-```text
+```simple
 # correlate a request id echoed back in the response
 val checks = [
     check_bind("request.id", "req_id"),
@@ -921,7 +909,7 @@ val checks = [
 ]
 ```
 
-```text
+```simple
 val result = compare_evidence(evidence, spec)
 expect(result.status).to_equal(EvidenceStatus.passed)
 ```
@@ -959,7 +947,7 @@ is exactly one such pipeline, do not start a second.
 
 Import surface:
 
-```text
+```simple
 use std.spec.evidence.counterpart.model            # frozen contracts (common)
 use std.spec.evidence.counterpart.evidence_projection
 # registries / converter graph / relation engine / matrix / artifact store:
@@ -1025,7 +1013,7 @@ missed.
 Use `std.spec.*` as the canonical SSpec test-library import in new executable
 specs:
 
-```text
+```simple
 use std.spec.*
 
 describe "Feature":
@@ -1116,7 +1104,7 @@ the SSpec case.
 primitive set (P0 of `doc/03_plan/ui/testing/ui_test_infra_plan.md`) that
 UI-lane specs should instrument with rather than ad-hoc `print`:
 
-```text
+```simple
 use std.diag.{dbg_stage, dbg_deadline, dbg_deadline_clear, dbg_time_begin,
               dbg_time_end, dbg_summary, dbg_provenance, dbg_event_hop,
               dbg_force_facet, dbg_diag_reset}
@@ -2057,25 +2045,6 @@ Two judgement rules that go with it:
   line count was a legitimate split; a 294-byte file was a deliberate facade
   over a 123 KB core. Size opens an investigation; it never closes one.
 
-## Host-dependent specs read the host config (2026-10-09)
-
-A spec or scenario that depends on host facts (worker count, cpu family / ISA
-features, os, LLVM root, gpu) reads them from the layered host config, never
-from a hardcoded value: `SIMPLE_HOST_<KEY>` env > `~/.config/simple/host.sdn`
-> `config/host/<hostname>.sdn` > `config/host/host_config.sdn` (tracked, values
-commented). Pure resolver: `std.common.config_core.host_config` (pass document
-texts + env snapshot, so fixtures stay hermetic); shell: `sh
-scripts/setup/host-env.shs --get <key>`. Gate an ISA-specific scenario on
-`host_config_cpu_features(...)` and record the skip reason when the extension
-is absent. Precedence spec: `test/01_unit/lib/common/config_core/host_config_spec.spl`.
-Guide: `doc/07_guide/infra/toolchain/host_config.md`.
-Cache settings live there too (`cache_root`, `cache_scope`, `frontend_cache`,
-`hir_cache`, `native_build_cache_dir`, `cache_max_bytes`, `cache_max_gb`) as
-defaults for the existing `SIMPLE_*CACHE*` vars; a spec that needs a specific
-cache state sets the consumer var explicitly (it always wins) and never relies
-on the host's user file. Use `host_config_cache_env(entries, env)` to test the
-mapping hermetically.
-
 ## Running specs on a loaded box (harness truths, 2026-07-29)
 
 Under parallel sessions these look like test failures but are not:
@@ -2699,10 +2668,6 @@ reimplement an existing algorithm:
 - **Algorithms** (reuse, never reimplement) → `src/lib/common/{crypto,compress,
   hash,base64,base_encoding,huffman,rsa,signature,jwt,...}`; verify against
   RFC/NIST known-answer vectors (never self-comparison — see false-green guard).
-  For a codec, also check the ENCODER with an independent decoder (host
-  `gzip -dc`): a same-path compress→inflate round trip hid a stored-block LEN
-  truncated mod 65536 (2026-10-18). BLAKE3/XXH3/gzip map, vectors and seed
-  coverage recipe: `doc/00_llm_process/feature_expert/hash_compress/skill.md`.
 - **Custom-typed algorithm layers** (additive, wrap the primitive cores — never
   rewrite them): `src/lib/common/search/` (types + exact/prefilter/inverted
   index + BM25/TF-IDF + IVF/kNN ANN + roaring, fixed-point not f64),

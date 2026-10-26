@@ -11,7 +11,7 @@
 use compiler.driver.driver_compile_vhdl_util.{
     _simple_split_top_level, _simple_find_top_level,
     _simple_vhdl_identifier, _simple_param_vhdl_name,
-    vhdl_text_list_contains, _text_list_index,
+    _text_list_contains, _text_list_index,
     _simple_type_to_vhdl, _simple_implicit_width_type_error,
     _simple_strip_return, _is_decimal_digit
 }
@@ -110,15 +110,26 @@ fn _simple_anonymous_body_lowering(body_lines: [text], labels: [text], port_name
 
 fn _simple_lower_hardware_local_call(line: text, call_ordinal: i64, param_names: [text], param_types: [text], all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<[text], text>:
     val eq_opt = line.find("=")
-    if eq_opt < 0:
+    if not eq_opt.?:
         return Err("VHDL subset fallback hardware local binding must use `val name = callee(...)`")
-    val eq_index = eq_opt
+    # Stage-3 native lowering cannot reliably carry `Some(binding)` through a
+    # nested enum match payload. The equivalent if-val form is the canonical
+    # nullable extraction path and preserves the explicit None diagnostic.
+    var eq_index = -1
+    if val value = eq_opt:
+        eq_index = value
+    else:
+        return Err("VHDL subset fallback hardware local binding must use `val name = callee(...)`")
     val local_name = line.substring(4, eq_index).trim()
     val call_text = line.substring(eq_index + 1, line.len()).trim()
     val open_opt = call_text.find("(")
-    if local_name == "" or open_opt < 0 or not call_text.ends_with(")"):
+    if local_name == "" or not open_opt.? or not call_text.ends_with(")"):
         return Err("VHDL subset fallback hardware local binding must call a direct hardware function")
-    val open_index = open_opt
+    var open_index = -1
+    if val value = open_opt:
+        open_index = value
+    else:
+        return Err("VHDL subset fallback hardware local binding must call a direct hardware function")
     val callee_name = call_text.substring(0, open_index).trim()
     val callee_index = _text_list_index(all_names, callee_name)
     if callee_index < 0 or hardware_flags[callee_index] != "hardware":
@@ -252,9 +263,13 @@ fn _simple_labeled_body_assignments(body_lines: [text], labels: [text], port_nam
     while i < labels.len():
         val part = parts[i].trim()
         val sep = part.find(":")
-        if sep < 0:
+        if not sep.?:
             return Err("VHDL subset fallback labeled tuple return field is missing ':'")
-        val sep_index = sep
+        var sep_index = -1
+        if val value = sep:
+            sep_index = value
+        else:
+            return Err("VHDL subset fallback labeled tuple return field is missing ':'")
         val label = part.substring(0, sep_index).trim()
         if label != labels[i]:
             return Err("VHDL subset fallback labeled tuple return expected `{labels[i]}`, found `{label}`")

@@ -407,10 +407,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_const_bool(&mut self, dest: VReg, value: bool) -> Result<(), String> {
-        // MIR scalar booleans remain raw until an explicit runtime boxing call.
-        // Result payload extraction also yields raw bits; tagged constants
-        // would compare unequal to the same boolean after extraction.
-        let bits = u64::from(value);
+        let bits = if value { 11u64 } else { 19u64 };
         let val = self.backend.runtime_int_type().const_int(bits, false);
         self.set(dest, val.into());
         Ok(())
@@ -2045,16 +2042,20 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
     fn emit_unbox_int(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
-        let unboxed = if matches!(val, BasicValueEnum::IntValue(_)) {
-            self.backend
-                .build_unbox_int_value(val, self.builder, self.module)
-                .map_err(|e| e.to_string())?
+        if let BasicValueEnum::IntValue(int_val) = val {
+            let i64_type = self.backend.runtime_int_type();
+            let three = i64_type.const_int(3, false);
+            let unboxed = self
+                .builder
+                .build_right_shift(int_val, three, true, "unbox_sshr")
+                .map_err(|e| format!("sshr failed: {}", e))?;
+            self.set(dest, unboxed.into());
         } else {
-            val
-        };
-        self.set(dest, unboxed);
+            self.set(dest, val);
+        }
         Ok(())
     }
+
     fn emit_unbox_float(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
         let unboxed = self

@@ -32,7 +32,7 @@ interrupt paths.
   parallel-array pool; bump the slot's generation on release so stale handles
   are rejected cheaply (no GC):
 
-```simple:skip
+```simple
 struct Handle:
     index:      i64
     generation: i64

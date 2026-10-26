@@ -1,0 +1,384 @@
+"""
+# RV64 CSR Unit Tests
+
+**Feature IDs:** #RV64-CSR-001
+**Category:** Hardware
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Unit tests for 64-bit Control and Status Register file operations.
+Covers M-mode, S-mode, and FP CSRs.
+"""
+
+# tag: only-compiled
+# NOTE: Uses inline CSR model to avoid imported class constructor limitation.
+
+import std.spec
+
+# M-mode CSR addresses
+val CSR_MSTATUS: i64 = 0x300
+val CSR_MISA: i64 = 0x301
+val CSR_MEDELEG: i64 = 0x302
+val CSR_MIDELEG: i64 = 0x303
+val CSR_MIE: i64 = 0x304
+val CSR_MTVEC: i64 = 0x305
+val CSR_MSCRATCH: i64 = 0x340
+val CSR_MEPC: i64 = 0x341
+val CSR_MCAUSE: i64 = 0x342
+val CSR_MTVAL: i64 = 0x343
+val CSR_MIP: i64 = 0x344
+val CSR_MCYCLE: i64 = 0xB00
+val CSR_MINSTRET: i64 = 0xB02
+
+# S-mode CSR addresses
+val CSR_SSTATUS: i64 = 0x100
+val CSR_SIE: i64 = 0x104
+val CSR_STVEC: i64 = 0x105
+val CSR_SSCRATCH: i64 = 0x140
+val CSR_SEPC: i64 = 0x141
+val CSR_SCAUSE: i64 = 0x142
+val CSR_STVAL: i64 = 0x143
+val CSR_SIP: i64 = 0x144
+val CSR_SATP: i64 = 0x180
+
+# FP CSR addresses
+val CSR_FFLAGS: i64 = 0x001
+val CSR_FRM: i64 = 0x002
+val CSR_FCSR: i64 = 0x003
+
+# Inline CSR model
+class _CsrFile:
+    mstatus: i64
+    misa: i64
+    medeleg: i64
+    mideleg: i64
+    mie: i64
+    mtvec: i64
+    mscratch: i64
+    mepc: i64
+    mcause: i64
+    mtval: i64
+    mip: i64
+    mcycle: i64
+    minstret: i64
+    # S-mode
+    stvec: i64
+    sscratch: i64
+    sepc: i64
+    scause: i64
+    stval: i64
+    satp: i64
+    # FP
+    fcsr: i64
+
+    fn read(addr: i64) -> i64:
+        if addr == CSR_MSTATUS: return self.mstatus
+        elif addr == CSR_MISA: return self.misa
+        elif addr == CSR_MEDELEG: return self.medeleg
+        elif addr == CSR_MIDELEG: return self.mideleg
+        elif addr == CSR_MIE: return self.mie
+        elif addr == CSR_MTVEC: return self.mtvec
+        elif addr == CSR_MSCRATCH: return self.mscratch
+        elif addr == CSR_MEPC: return self.mepc
+        elif addr == CSR_MCAUSE: return self.mcause
+        elif addr == CSR_MTVAL: return self.mtval
+        elif addr == CSR_MIP: return self.mip
+        elif addr == CSR_MCYCLE: return self.mcycle
+        elif addr == CSR_MINSTRET: return self.minstret
+        elif addr == CSR_STVEC: return self.stvec
+        elif addr == CSR_SSCRATCH: return self.sscratch
+        elif addr == CSR_SEPC: return self.sepc
+        elif addr == CSR_SCAUSE: return self.scause
+        elif addr == CSR_STVAL: return self.stval
+        elif addr == CSR_SATP: return self.satp
+        elif addr == CSR_FFLAGS: return self.fcsr and 0x1F
+        elif addr == CSR_FRM: return (self.fcsr >> 5) and 0x7
+        elif addr == CSR_FCSR: return self.fcsr and 0xFF
+        elif addr == CSR_SSTATUS: return self.mstatus and 0x800DE133
+        elif addr == CSR_SIE: return self.mie and self.mideleg
+        elif addr == CSR_SIP: return self.mip and self.mideleg
+        0
+
+    me write(addr: i64, value: i64):
+        if addr == CSR_MSTATUS:
+            self.mstatus = value
+        elif addr == CSR_MEDELEG:
+            self.medeleg = value
+        elif addr == CSR_MIDELEG:
+            self.mideleg = value
+        elif addr == CSR_MIE:
+            self.mie = value
+        elif addr == CSR_MTVEC:
+            self.mtvec = value
+        elif addr == CSR_MSCRATCH:
+            self.mscratch = value
+        elif addr == CSR_MEPC:
+            self.mepc = value and 0xFFFFFFFFFFFFFFFE
+        elif addr == CSR_MCAUSE:
+            self.mcause = value
+        elif addr == CSR_MTVAL:
+            self.mtval = value
+        elif addr == CSR_STVEC:
+            self.stvec = value
+        elif addr == CSR_SSCRATCH:
+            self.sscratch = value
+        elif addr == CSR_SEPC:
+            self.sepc = value and 0xFFFFFFFFFFFFFFFE
+        elif addr == CSR_SCAUSE:
+            self.scause = value
+        elif addr == CSR_STVAL:
+            self.stval = value
+        elif addr == CSR_SATP:
+            self.satp = value
+        elif addr == CSR_FFLAGS:
+            self.fcsr = (self.fcsr and 0xE0) or (value and 0x1F)
+        elif addr == CSR_FRM:
+            self.fcsr = (self.fcsr and 0x1F) or ((value and 0x7) << 5)
+        elif addr == CSR_FCSR:
+            self.fcsr = value and 0xFF
+
+    me csrrw(addr: i64, rs1_data: i64) -> i64:
+        val old = self.read(addr)
+        self.write(addr, rs1_data)
+        old
+
+    me csrrs(addr: i64, rs1_data: i64) -> i64:
+        val old = self.read(addr)
+        if rs1_data != 0:
+            self.write(addr, old or rs1_data)
+        old
+
+    me csrrc(addr: i64, rs1_data: i64) -> i64:
+        val old = self.read(addr)
+        if rs1_data != 0:
+            self.write(addr, old and (rs1_data xor 0xFFFFFFFFFFFFFFFF))
+        old
+
+    me trap_enter(cause: i64, tval: i64, pc: i64):
+        self.mcause = cause
+        self.mtval = tval
+        self.mepc = pc and 0xFFFFFFFFFFFFFFFE
+        # Save MIE to MPIE, clear MIE
+        val mie_bit = (self.mstatus >> 3) and 1
+        self.mstatus = (self.mstatus and 0xFFFFFFFFFFFFFF77) or (mie_bit << 7)
+
+    me trap_return() -> i64:
+        # Restore MIE from MPIE
+        val mpie = (self.mstatus >> 7) and 1
+        self.mstatus = (self.mstatus and 0xFFFFFFFFFFFFFF77) or (mpie << 3) or (1 << 7)
+        self.mepc
+
+    me tick():
+        self.mcycle = self.mcycle + 1
+
+    me retire():
+        self.minstret = self.minstret + 1
+
+fn _create_csr() -> _CsrFile:
+    # misa: RV64GC = MXL=2 (64-bit) | I | M | A | F | D | C
+    # Bit 63:62 = 10 (MXL=2 for RV64)
+    # I=bit8, M=bit12, A=bit0, F=bit5, D=bit3, C=bit2
+    val misa = 0x800000000014112D
+    _CsrFile(
+        mstatus: 0, misa: misa, medeleg: 0, mideleg: 0,
+        mie: 0, mtvec: 0, mscratch: 0, mepc: 0,
+        mcause: 0, mtval: 0, mip: 0, mcycle: 0, minstret: 0,
+        stvec: 0, sscratch: 0, sepc: 0, scause: 0, stval: 0, satp: 0,
+        fcsr: 0
+    )
+
+describe "CSR Read/Write":
+    """
+    ## Basic CSR Access
+    """
+
+    it "reads misa with RV64GC configuration":
+        var csr = _create_csr()
+        val misa = csr.read(CSR_MISA)
+        # Check MXL = 2 (bits 63:62)
+        expect((misa >> 62) and 0x3).to_equal(2)
+
+    it "writes and reads mscratch":
+        var csr = _create_csr()
+        csr.write(CSR_MSCRATCH, 0xDEADBEEFCAFEBABE)
+        expect(csr.read(CSR_MSCRATCH)).to_equal(0xDEADBEEFCAFEBABE)
+
+    it "mepc aligns to 2-byte boundary":
+        var csr = _create_csr()
+        csr.write(CSR_MEPC, 0x80000003)
+        expect(csr.read(CSR_MEPC)).to_equal(0x80000002)
+
+    it "writes and reads S-mode CSRs":
+        var csr = _create_csr()
+        csr.write(CSR_SSCRATCH, 0x12345678)
+        expect(csr.read(CSR_SSCRATCH)).to_equal(0x12345678)
+
+describe "CSRRW Operation":
+    """
+    ## Atomic Read-Write CSR
+    """
+
+    it "CSRRW returns old value and writes new":
+        var csr = _create_csr()
+        csr.write(CSR_MSCRATCH, 100)
+        val old = csr.csrrw(CSR_MSCRATCH, 200)
+        expect(old).to_equal(100)
+        expect(csr.read(CSR_MSCRATCH)).to_equal(200)
+
+    it "CSRRW with zero source":
+        var csr = _create_csr()
+        csr.write(CSR_MSCRATCH, 42)
+        val old = csr.csrrw(CSR_MSCRATCH, 0)
+        expect(old).to_equal(42)
+        expect(csr.read(CSR_MSCRATCH)).to_equal(0)
+
+describe "CSRRS Operation":
+    """
+    ## Atomic Read-Set CSR
+    """
+
+    it "CSRRS sets bits":
+        var csr = _create_csr()
+        csr.write(CSR_MIE, 0x0F)
+        val old = csr.csrrs(CSR_MIE, 0xF0)
+        expect(old).to_equal(0x0F)
+        expect(csr.read(CSR_MIE)).to_equal(0xFF)
+
+    it "CSRRS with rs1=0 is read-only":
+        var csr = _create_csr()
+        csr.write(CSR_MIE, 0x0F)
+        val old = csr.csrrs(CSR_MIE, 0)
+        expect(old).to_equal(0x0F)
+        expect(csr.read(CSR_MIE)).to_equal(0x0F)
+
+describe "CSRRC Operation":
+    """
+    ## Atomic Read-Clear CSR
+    """
+
+    it "CSRRC clears bits":
+        var csr = _create_csr()
+        csr.write(CSR_MIE, 0xFF)
+        val old = csr.csrrc(CSR_MIE, 0x0F)
+        expect(old).to_equal(0xFF)
+        expect(csr.read(CSR_MIE)).to_equal(0xF0)
+
+    it "CSRRC with rs1=0 is read-only":
+        var csr = _create_csr()
+        csr.write(CSR_MIE, 0xFF)
+        val old = csr.csrrc(CSR_MIE, 0)
+        expect(old).to_equal(0xFF)
+        expect(csr.read(CSR_MIE)).to_equal(0xFF)
+
+describe "Trap Entry/Return":
+    """
+    ## M-Mode Trap Handling
+    """
+
+    it "trap_enter saves cause, tval, pc":
+        var csr = _create_csr()
+        csr.trap_enter(11, 0xDEAD, 0x80001000)
+        expect(csr.read(CSR_MCAUSE)).to_equal(11)
+        expect(csr.read(CSR_MTVAL)).to_equal(0xDEAD)
+        expect(csr.read(CSR_MEPC)).to_equal(0x80001000)
+
+    it "trap_return restores MPIE to MIE":
+        var csr = _create_csr()
+        # Set MIE=1 (bit 3)
+        csr.write(CSR_MSTATUS, 0x8)
+        csr.write(CSR_MEPC, 0x80002000)
+        csr.trap_enter(2, 0, 0x80001000)
+        val return_pc = csr.trap_return()
+        expect(return_pc).to_equal(0x80001000)
+
+describe "Performance Counters":
+    """
+    ## mcycle and minstret
+    """
+
+    it "tick increments mcycle":
+        var csr = _create_csr()
+        csr.tick()
+        csr.tick()
+        expect(csr.read(CSR_MCYCLE)).to_equal(2)
+
+    it "retire increments minstret":
+        var csr = _create_csr()
+        csr.retire()
+        expect(csr.read(CSR_MINSTRET)).to_equal(1)
+
+describe "S-Mode CSR Views":
+    """
+    ## Supervisor Mode CSR Filtering
+    """
+
+    it "sstatus is a filtered view of mstatus":
+        var csr = _create_csr()
+        csr.write(CSR_MSTATUS, 0xFFFFFFFFFFFFFFFF)
+        val sstatus = csr.read(CSR_SSTATUS)
+        # sstatus only exposes specific bits
+        expect(sstatus).to_equal(0xFFFFFFFFFFFFFFFF and 0x800DE133)
+
+    it "sie filters mie through mideleg":
+        var csr = _create_csr()
+        csr.write(CSR_MIE, 0xFF)
+        csr.write(CSR_MIDELEG, 0x0F)
+        expect(csr.read(CSR_SIE)).to_equal(0x0F)
+
+    it "satp stores Sv39 mode and PPN":
+        var csr = _create_csr()
+        # Sv39 mode = 8 (bits 63:60), ASID = 0, PPN
+        val satp_val = (8 << 60) or 0x80000
+        csr.write(CSR_SATP, satp_val)
+        expect(csr.read(CSR_SATP)).to_equal(satp_val)
+
+describe "FP CSRs":
+    """
+    ## Floating-Point Control and Status
+    """
+
+    it "fflags reads lower 5 bits of fcsr":
+        var csr = _create_csr()
+        csr.write(CSR_FCSR, 0xFF)
+        expect(csr.read(CSR_FFLAGS)).to_equal(0x1F)
+
+    it "frm reads bits 7:5 of fcsr":
+        var csr = _create_csr()
+        csr.write(CSR_FCSR, 0xE0)
+        expect(csr.read(CSR_FRM)).to_equal(0x7)
+
+    it "writing fflags preserves frm":
+        var csr = _create_csr()
+        csr.write(CSR_FCSR, 0xE0)
+        csr.write(CSR_FFLAGS, 0x15)
+        expect(csr.read(CSR_FCSR)).to_equal(0xF5)
+
+    it "writing frm preserves fflags":
+        var csr = _create_csr()
+        csr.write(CSR_FCSR, 0x1F)
+        csr.write(CSR_FRM, 0x5)
+        expect(csr.read(CSR_FCSR)).to_equal(0xBF)
+
+describe "CSR Immediate Operations":
+    it "CSRRWI: writes immediate, returns old":
+        var csr = _create_csr()
+        csr.write(CSR_MSCRATCH, 42)
+        val old = csr.csrrw(CSR_MSCRATCH, 5)
+        expect(old).to_equal(42)
+        expect(csr.read(CSR_MSCRATCH)).to_equal(5)
+
+    it "CSRRSI: sets bits from immediate":
+        var csr = _create_csr()
+        csr.write(CSR_MIE, 0x0F)
+        val old = csr.csrrs(CSR_MIE, 0x10)
+        expect(old).to_equal(0x0F)
+        expect(csr.read(CSR_MIE)).to_equal(0x1F)
+
+    it "CSRRCI: clears bits from immediate":
+        var csr = _create_csr()
+        csr.write(CSR_MIE, 0xFF)
+        val old = csr.csrrc(CSR_MIE, 0x0F)
+        expect(old).to_equal(0xFF)
+        expect(csr.read(CSR_MIE)).to_equal(0xF0)

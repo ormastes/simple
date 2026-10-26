@@ -2,18 +2,6 @@
 
 ## Bootstrap failure collection
 
-The full-bootstrap test inventory includes Phase 1 whole tests; Phase 2's
-compiler/interpreter/loader aggregate binaries for both LLVM and Cranelift
-(six binaries); Phase 3 whole tools/library tests; and whole tests for both
-Phase-2-produced and Phase-3-produced Phase 4 cohorts. Enumerate the real
-registry before running cases and retain separate producer identities. Open
-independent build/test branches after compile-and-run sanity according to the
-[execution graph](../../../doc/07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph).
-After three unresolved repair cycles, record the canonical bug and a scoped
-workaround or blocked dependency, preserve caches, and continue independent
-work. A workaround never converts a failed assertion or zero tests into PASS;
-the later rebuild must revisit and verify the original path.
-
 During bootstrap collection, retain failing assertions and continue independent
 shards. A crash blocks its dependent chain, not every suite. Report
 FAILED/BLOCKED/SKIPPED/PASS with non-vacuous evidence and an unsuccessful
@@ -75,7 +63,7 @@ See `doc/06_spec/FILE.md` for generated-vs-manual rules.
 
 Tests in `test/` directory, use `*_spec.spl` naming. Use docstring markdown, NOT println().
 
-```simple:skip
+```simple
 describe "Feature":
     """
     # Feature Module -- overview, usage examples.
@@ -115,7 +103,7 @@ bin/simple test --prune-runs=50          # Keep 50 most recent
 
 Test TUI/Web UI via `UITestClient` over HTTP test API.
 
-```text
+```simple
 use std.ui_test.client.{UITestClient}
 val client = UITestClient.connect("127.0.0.1", port)?
 client.wait_ready(5000)?

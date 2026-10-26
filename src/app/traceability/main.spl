@@ -1,67 +1,83 @@
 # Traceability Checker CLI
 
-use std.cli.cli_util.{get_cli_args}
-use std.cli.log_modes.{render_progress}
-use app.io.minimal_runtime_ops.{report_error, exit}
-use app.traceability.cli_options_v1.{trace_cli_options_parse_v1, trace_cli_help_v1}
-use app.traceability.capture_v1.{trace_capture_worktree_v1, TraceCaptureLimitsV1}
-use app.traceability.structural_report_v1.{trace_evaluate_captured_v1,
-    trace_qualification_from_structural_result_v1, trace_qualification_infrastructure_v1}
-use std.common.traceability.types_v1.{TraceQualificationV1, trace_qualification_codec_limits_v1}
-use std.common.traceability.qualification_v1.{trace_qualification_encode_v1}
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+use app.traceability.core.{load_traceability_config, analyze_repo_traceability, format_traceability_warning, traceability_report_to_json}
 
-fn trace_cli_run_v1(args: [text]) -> i64:
-    val options = match trace_cli_options_parse_v1(args):
-        case Ok(value): value
-        case Err(reason):
-            report_error("traceability", reason)
-            return 2
-    if options.help:
-        val help = trace_cli_help_v1()
-        print help.substring(0, help.len() - 1)
-        return 0
-    var document: TraceQualificationV1
-    match trace_capture_worktree_v1(options, TraceCaptureLimitsV1()):
-        case Err(issue):
-            document = trace_qualification_infrastructure_v1(issue.snapshot_id, false,
-                options, issue.code, issue.path, issue.message)
-        case Ok(inputs):
-            match trace_evaluate_captured_v1(inputs, options.scope, 100000):
-                case Ok(warnings):
-                    document = trace_qualification_from_structural_result_v1(inputs.snapshot_id, options, warnings)
-                case Err(reason):
-                    document = trace_qualification_infrastructure_v1(inputs.snapshot_id, true,
-                        options, "TRC-EVALUATION-BUDGET", "", reason)
-    var code = document.evaluation.exit_code
-    var output = ""
-    match trace_qualification_encode_v1(document, trace_qualification_codec_limits_v1()):
-        case Ok(encoded): output = encoded
-        case Err(issue):
-            # Argument bytes are capped at 64 KiB before capture. Reserve the
-            # standard 1 MiB report budget for this infrastructure summary,
-            # retaining the captured snapshot and authored selection.
-            code = 2
-            val incomplete = trace_qualification_infrastructure_v1(document.snapshot.id,
-                document.snapshot.complete, options, "TRC-REPORT", "",
-                "Cannot encode the complete structural report within the codec contract")
-            match trace_qualification_encode_v1(incomplete, trace_qualification_codec_limits_v1()):
-                case Ok(encoded): output = encoded
-                case Err(_):
-                    report_error("traceability", "Infrastructure report encoding failed: " + issue.code)
-                    return 2
-    # The encoder includes one LF. The print primitive supplies that LF, so
-    # remove exactly its final byte and emit one machine document.
-    print output.substring(0, output.len() - 1)
-    if not options.quiet and (options.progress != "summary" or options.verbose):
-        val mode = if options.verbose and options.progress == "summary": "count" else: options.progress
-        val line = render_progress(mode, options.paths.len(),
-            if options.paths.len() == 0: 3 else: options.paths.len(), "traceability")
-        if line != "":
-            report_error("traceability", line)
-    code
+fn print_help():
+    print "Usage: simple traceability-check [options] [paths...]"
+    print ""
+    print "Checks source/test/doc traceability."
+    print ""
+    print "Options:"
+    print "  --scope=<name>    all (default), src, spec, doc"
+    print "  --format=<name>   text (default), json"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help        Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 fn main() -> i64:
-    # Use the canonical process boundary for explicit CLI status.
-    val code = trace_cli_run_v1(get_cli_args())
-    exit(code)
-    code
+    val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("traceability", log_opts.error)
+        return 1
+
+    var scope = "all"
+    var format = if log_opts.log_mode == "json": "json" else: "text"
+    var paths: [text] = []
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg.starts_with("--scope="):
+            scope = arg[8:]
+        elif arg == "--scope" and i + 1 < args.len():
+            i = i + 1
+            scope = args[i]
+        elif arg.starts_with("--format="):
+            format = arg[9:]
+        elif arg == "--format" and i + 1 < args.len():
+            i = i + 1
+            format = args[i]
+        elif arg == "--json" or arg == "--log-mode=json":
+            format = "json"
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 1
+        elif _is_log_option(arg):
+            pass
+        elif not arg.starts_with("-"):
+            paths.push(arg)
+        i = i + 1
+
+    val warnings = analyze_repo_traceability(paths, scope, load_traceability_config(), true)
+    if log_opts.progress != "summary" and format != "json":
+        val progress_line = render_progress(log_opts.progress, paths.len(), if paths.len() > 0: paths.len() else: 1, "traceability")
+        if progress_line != "":
+            print progress_line
+    if format == "json":
+        print traceability_report_to_json(warnings)
+    else:
+        if warnings.len() == 0:
+            print "traceability: clean"
+        else:
+            for warning in warnings:
+                print format_traceability_warning(warning)
+            print ""
+            print "traceability: {warnings.len()} warning(s)"
+
+    if warnings.len() > 0:
+        return 1
+    0

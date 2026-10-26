@@ -15,29 +15,22 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel, BackendCompileOptions, CompiledModule, CompileError,
     compileerror_backend_error}
-use compiler.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
-use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default, optimize_module_for_backend, OptLevel}
+use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
+use compiler.mir_opt.mir_opt.mod.{TargetOptContext, target_opt_context_default, optimize_module_for_backend, OptLevel}
 use compiler.backend.feature_caps.{TargetCapsKind, x86_caps_from_target}
-use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
+use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
     llvm_compile_module_direct_compiled, llvm_compile_module_direct_to_path}
 use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.codegen_factory.{CodegenFactory}
-use compiler.backend.llvm_target.{LlvmTargetConfig}
-# No Cranelift adapter import here: the kernel reaches Cranelift only through
-# the K1 static backend table the selected composition installed
-# (static_backend_registry.spl), so a composition without Cranelift
-# (kernel_llvm, the core-c-bootstrap lane) links with no rt_cranelift_*
-# reference and answers k1_backend_unavailable_message_v1 instead.
-use compiler.backend.static_backend_registry.{
-    active_static_backend_table_v1, select_static_backend_v1, k1_backend_unavailable_message_v1}
-use compiler.backend.cranelift_retained_params_v2.{cranelift_retained_params_encode_v2}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter, cranelift_compile_module_direct}
 use compiler.backend.llvm_support_matrix.{lookup_support, is_combination_usable}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
-use compiler.mir_opt.storage_projection_lowering.{
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
     MirStorageViewSiteBindingV1, lower_mir_storage_project_fields_v1
 }
-use compiler.mir_opt.typed_storage_view_declaration.{MirTypedStorageViewDeclarationV1}
-use compiler.mir_opt.typed_storage_view_producer.{produce_mir_typed_storage_views_v1}
+use compiler.mir_opt.mir_opt.typed_storage_view_declaration.{MirTypedStorageViewDeclarationV1}
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.{produce_mir_typed_storage_views_v1}
 use std.io_runtime.{env_get_opt}
 use std.simd.{has_avx2}
 
@@ -56,7 +49,7 @@ fn backend_helper_trace_enabled() -> bool:
 # per-instruction DWARF locations need MIR spans that DS5 hasn't landed yet
 # (see MirToLlvm.translate_function's debug_info doc). Explicit
 # none/line-tables/full always wins over the release-mode default.
-pub fn backend_helper_debug_info(is_release: bool) -> bool:
+fn backend_helper_debug_info(is_release: bool) -> bool:
     val level = env_get_opt("SIMPLE_DEBUG_INFO_LEVEL") ?? ""
     if level == "none":
         return false
@@ -64,7 +57,7 @@ pub fn backend_helper_debug_info(is_release: bool) -> bool:
         return true
     not is_release
 
-pub fn backend_helper_native_target_for(target: text) -> CodegenTarget:
+fn backend_helper_native_target_for(target: text) -> CodegenTarget:
     if target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos":
         return CodegenTarget.SimpleOS_X86_64
     match mir_target_context_normalize_arch(target.split("-")[0]):
@@ -309,31 +302,6 @@ fn codegen_output_to_compiled_module(output: CodegenOutput) -> CompiledModule:
         compile_time_ms: output.compile_time_ms
     )
 
-pub fn cranelift_compile_module_via_k1_v1(
-    options: BackendCompileOptions,
-    module: MirModule,
-    retained_target_triple: text? = nil,
-    retained_cpu_v2: text? = nil,
-    retained_features_v2: [text] = []
-) -> Result<CodegenOutput, CompileError>:
-    """Compile through the K1 table's Cranelift entry, or refuse by name.
-
-    The composition root decides whether Cranelift is linked at all; this is
-    the single kernel-side request site, so an LLVM-only kernel never carries
-    a static Cranelift reference and never answers with a nil stub.
-    """
-    # The bootstrap producer does not materialize computed argument defaults.
-    # Use the same explicit table boundary as CodegenFactory.create; see
-    # stage2_backend_selector_missing_table_argument_2026-09-09.md.
-    val table = active_static_backend_table_v1()
-    match select_static_backend_v1("cranelift", table):
-        case Err(_):
-            Err(compileerror_backend_error(BackendKind.Cranelift,
-                k1_backend_unavailable_message_v1("cranelift")))
-        case Ok(entry):
-            entry.plugin.run(cranelift_retained_params_encode_v2(options,
-                retained_target_triple, retained_cpu_v2, retained_features_v2), module)
-
 fn compile_module_with_backend(
     backend_name: text,
     module: MirModule,
@@ -529,7 +497,7 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
                 return Err(err)
 
     if kind == BackendKind.Cranelift:
-        val result = cranelift_compile_module_via_k1_v1(
+        val result = cranelift_compile_module_direct(
             options, backend_module, retained_cranelift_triple,
             retained_cranelift_cpu_v2, retained_cranelift_features_v2)
         match result:

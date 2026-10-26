@@ -62,7 +62,7 @@ Render Template {{ expr }}  {% code %}
 
 **Logic File:** `app/logic/components/Counter.spl`
 
-```simple:skip
+```spl
 class Counter:
     fn reset():
         this.count = 0
@@ -229,7 +229,7 @@ A complete graphics framework built on production-grade Rust libraries via SFFI.
 
 ### Windowing (Winit)
 
-```simple:skip
+```simple
 val event_loop = window_create_event_loop()
 val window = window_create(event_loop, 800, 600, "My App")
 
@@ -244,7 +244,7 @@ Configuration includes size, position, resizable, fullscreen, decorations, trans
 
 GPU-based vector graphics tessellation:
 
-```simple:skip
+```simple
 val builder = graphics_path_builder_new()
 graphics_path_begin(builder, Point2D(x: 0.0, y: 0.0))
 graphics_path_line_to(builder, Point2D(x: 100.0, y: 0.0))
@@ -261,7 +261,7 @@ Shape primitives: Rectangle, Circle, Ellipse, Polygon, Star. Stroke options: lin
 
 ### Physics (Rapier2D)
 
-```simple:skip
+```simple
 val world = physics_create_world(Vector2(x: 0.0, y: -9.81))
 
 # Create rigid bodies (Dynamic, Static, Kinematic)
@@ -283,7 +283,7 @@ Cross-platform controller input: button states, axis values (sticks, triggers), 
 
 Compiles Simple MIR to SPIR-V bytecode for GPU execution:
 
-```text
+```simple
 extern fn rt_vk_device_create() -> u64
 extern fn rt_vk_buffer_alloc(device: u64, size: u64) -> u64
 extern fn rt_vk_buffer_upload(buffer: u64, data: *const u8, size: u64) -> i32
@@ -295,7 +295,7 @@ extern fn rt_vk_kernel_launch_1d(...) -> i32
 
 Simple reduces Vulkan verbosity by 95-98%:
 
-```text
+```simple
 import vulkan.{Device, Swapchain, Pipeline, Buffer}
 
 fn main():

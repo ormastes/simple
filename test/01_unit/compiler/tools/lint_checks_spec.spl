@@ -12,15 +12,15 @@
 
 use std.spec.step
 
-use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access, check_raw_rt_access_with_allowlist}
+use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access}
 use compiler.semantics.lint.param_tag.{check_param_tag}
 use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
 
 
 describe "check_raw_rt_access":
     # @manual scenario evidence
-    """RAW-RT-001: product code must not declare raw `extern fn rt_*`
-    intrinsics unless its owning provider is explicitly allowlisted."""
+    """RAW-RT-001: application code (outside src/lib/, src/runtime/) must not
+    declare a raw `extern fn rt_*` intrinsic directly."""
 
     it "flags an extern rt_* declaration in non-privileged app code":
         # @req REQ-SSPEC-UNIT
@@ -30,26 +30,12 @@ describe "check_raw_rt_access":
         expect(findings.len() > 0).to_equal(true)
         assert_equal(findings[0].code, "RAW-RT-001")
 
-    it "does not treat ordinary src/lib modules as runtime providers":
+    it "does not flag privileged src/lib/ modules":
         # @req REQ-SSPEC-UNIT
-        step("Require explicit provider admission for library product code")
+        step("does not flag privileged src/lib/ modules")
         val source = "extern fn rt_frobnicate(x: i64) -> i64\n"
         val findings = check_raw_rt_access(source, "src/lib/nogc_sync_mut/ffi/example.spl")
-        assert_equal(findings.len(), 1)
-        assert_equal(findings[0].code, "RAW-RT-001")
-
-    it "exempts only an explicitly allowlisted runtime provider":
-        # @req REQ-SSPEC-UNIT
-        step("Check provider admission and its neighboring product boundary")
-        val source = "extern fn rt_frobnicate(x: i64) -> i64\n"
-        val allowlist = "src/lib/nogc_sync_mut/ffi/example.spl\n"
-        val admitted = check_raw_rt_access_with_allowlist(
-            source, "src/lib/nogc_sync_mut/ffi/example.spl", allowlist)
-        val ordinary = check_raw_rt_access_with_allowlist(
-            source, "src/lib/nogc_sync_mut/ffi/ordinary.spl", allowlist)
-        assert_equal(admitted.len(), 0)
-        assert_equal(ordinary.len(), 1)
-        assert_equal(ordinary[0].code, "RAW-RT-001")
+        assert_equal(findings.len(), 0)
 
     it "does not flag ordinary code with no extern declarations":
         # @req REQ-SSPEC-UNIT

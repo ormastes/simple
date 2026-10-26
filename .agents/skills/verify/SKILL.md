@@ -17,13 +17,6 @@ description: Production readiness verification. Checks SPipe tests for stubs/dum
 
 ### 1. SPipe Tests
 
-- For native provider overlays, use ordered repeated `--native-source PATH`
-  roots with the canonical runner; bare `--native` is unsupported. Verify
-  compiler/worker roots, receipt identity, and actual fixture output.
-  `SIMPLE_LIB` does not select native providers. Follow
-  `doc/07_guide/infra/testing/native_test_binary_workflow.md`; without an
-  executable producer, authored native specs remain TEST_BLOCKED.
-
 - Verify longest-prefix receipt coverage for every changed source path and
   reject MDSOC+ profiles for kernel or drivers.
 SPipe is verified here, before release. Release consumes `STATUS: PASS`; it does

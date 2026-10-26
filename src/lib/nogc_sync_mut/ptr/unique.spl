@@ -1,18 +1,55 @@
-# Unique integer ownership handles for the synchronous no-GC library.
-# The table is authoritative: copied handles are invalid after move/release.
-# This module is synchronous, not a cross-thread atomic ownership primitive.
-# It owns integer payload slots; it does not run arbitrary heap destructors.
+# Unique Pointer — Move-Tracking Wrapper
+# @tag:api
+#
+# UniquePtr provides exclusive ownership semantics via cooperative move tracking.
+# Since Simple copies on assignment, unique_move returns a new valid ptr and
+# the caller must invalidate the old one.
+#
+# Usage:
+#     val p = unique_new(42, "my_value")
+#     val v = unique_get(p)           # returns 42
+#     val p2 = unique_move(p)         # returns new valid ptr
+#     unique_invalidate(p.id)         # mark old as moved
+#     val v2 = unique_get(p2)         # returns 42
+
+# =========================================================================
+# Module-level state (parallel arrays)
+# =========================================================================
 
 var g_unique_ids: [i64] = []
 var g_unique_values: [i64] = []
 var g_unique_moved: [bool] = []
 var g_unique_tags: [text] = []
-# Never reset this counter: a stale handle must not name a later allocation.
 var g_unique_next_id: i64 = 0
 
 struct UniquePtr:
     id: i64
+    value: i64
     tag: text
+
+# =========================================================================
+# Lifecycle
+# =========================================================================
+
+fn unique_new(value: i64, tag: text) -> UniquePtr:
+    val id = g_unique_next_id
+    g_unique_next_id = g_unique_next_id + 1
+    g_unique_ids.push(id)
+    g_unique_values.push(value)
+    g_unique_moved.push(false)
+    g_unique_tags.push(tag)
+    UniquePtr(id: id, value: value, tag: tag)
+
+fn unique_reset():
+    g_unique_ids = []
+    g_unique_values = []
+    g_unique_moved = []
+    g_unique_tags = []
+    g_unique_next_id = 0
+
+# =========================================================================
+# Internal lookup
+# =========================================================================
 
 fn unique_find_index(id: i64) -> i64:
     var i = 0
@@ -22,95 +59,53 @@ fn unique_find_index(id: i64) -> i64:
         i = i + 1
     -1
 
-fn unique_new(value: i64, tag: text) -> UniquePtr:
-    # Reserve the final value rather than wrap into previously issued IDs.
-    if g_unique_next_id == 9223372036854775807:
-        return UniquePtr(id: -1, tag: "invalid")
-    val id = g_unique_next_id
-    g_unique_next_id = g_unique_next_id + 1
-    var i = 0
-    while i < g_unique_ids.len():
-        if g_unique_moved[i]:
-            g_unique_ids[i] = id
-            g_unique_values[i] = value
-            g_unique_tags[i] = tag
-            g_unique_moved[i] = false
-            return UniquePtr(id: id, tag: tag)
-        i = i + 1
-    g_unique_ids.push(id)
-    g_unique_values.push(value)
-    g_unique_moved.push(false)
-    g_unique_tags.push(tag)
-    UniquePtr(id: id, tag: tag)
+# =========================================================================
+# Access
+# =========================================================================
 
-fn unique_reset():
-    g_unique_ids = []
-    g_unique_values = []
-    g_unique_moved = []
-    g_unique_tags = []
+fn unique_get(ptr: UniquePtr) -> i64:
+    val idx = unique_find_index(ptr.id)
+    if idx < 0:
+        return -1
+    if g_unique_moved[idx] == true:
+        return -1
+    g_unique_values[idx]
 
 fn unique_is_valid(ptr: UniquePtr) -> bool:
     val idx = unique_find_index(ptr.id)
     if idx < 0:
         return false
-    not g_unique_moved[idx]
+    g_unique_moved[idx] == false
 
-# Checked access distinguishes a valid -1 payload from an invalid handle.
-fn unique_try_get(ptr: UniquePtr) -> i64?:
-    val idx = unique_find_index(ptr.id)
-    if idx < 0:
-        return nil
-    if g_unique_moved[idx]:
-        return nil
-    Some(g_unique_values[idx])
-
-# Compatibility accessor; use unique_try_get when -1 is a valid payload.
-fn unique_get(ptr: UniquePtr) -> i64:
-    val idx = unique_find_index(ptr.id)
-    if idx < 0:
-        return -1
-    if g_unique_moved[idx]:
-        return -1
-    g_unique_values[idx]
-
-fn unique_drop(ptr: UniquePtr) -> bool:
-    val idx = unique_find_index(ptr.id)
-    if idx < 0:
-        return false
-    if g_unique_moved[idx]:
-        return false
-    g_unique_moved[idx] = true
-    g_unique_values[idx] = 0
-    g_unique_tags[idx] = ""
-    true
-
-fn unique_release(ptr: UniquePtr) -> bool:
-    unique_drop(ptr)
+# =========================================================================
+# Move semantics
+# =========================================================================
 
 fn unique_move(ptr: UniquePtr) -> UniquePtr:
     val idx = unique_find_index(ptr.id)
     if idx < 0:
-        return UniquePtr(id: -1, tag: "invalid")
-    if g_unique_moved[idx] or g_unique_next_id == 9223372036854775807:
-        return UniquePtr(id: -1, tag: "invalid")
+        return UniquePtr(id: -1, value: 0, tag: "invalid")
+    if g_unique_moved[idx] == true:
+        return UniquePtr(id: -1, value: 0, tag: "invalid")
     val value = g_unique_values[idx]
     val tag = g_unique_tags[idx]
-    # Synchronous transfer invalidates every copy before publishing its successor.
+    # Mark old as moved
     g_unique_moved[idx] = true
-    g_unique_values[idx] = 0
-    g_unique_tags[idx] = ""
+    # Create new entry
     unique_new(value, tag)
 
-# Compatibility invalidation consumes the same authoritative table entry.
 fn unique_invalidate(id: i64):
-    unique_drop(UniquePtr(id: id, tag: ""))
+    val idx = unique_find_index(id)
+    if idx >= 0:
+        g_unique_moved[idx] = true
 
 fn unique_into_inner(ptr: UniquePtr) -> i64:
     val idx = unique_find_index(ptr.id)
     if idx < 0:
         return -1
-    if g_unique_moved[idx]:
+    if g_unique_moved[idx] == true:
         return -1
     val value = g_unique_values[idx]
-    unique_drop(ptr)
+    g_unique_moved[idx] = true
     value
+

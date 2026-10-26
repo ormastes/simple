@@ -2,8 +2,7 @@
 #
 # Provides: parse, parse_with_spans, parse_with_issues, parse_untrusted.
 
-use std.common.sdn.structural_scalar_value_v1.{
-    sdn_unescape_scalar_v1, sdn_integer_from_span_v1, sdn_decode_quoted_scalar_v1}
+use std.common.sdn.structural_scalar_value_v1.{sdn_unescape_scalar_v1}
 use std.common.sdn.value.{SdnValue, SdnSpan}
 
 # A non-fatal problem found while parsing (e.g. a duplicate dict key).
@@ -38,9 +37,8 @@ fn parse(source: text) -> Result<SdnValue, text>:
         return Ok(SdnValue.Bool(false))
     # Quoted string (escape sequences \\ \" \n \t \r are decoded)
     if trimmed.starts_with("\""):
-        match sdn_decode_quoted_scalar_v1(trimmed):
-            case Ok(inner): return Ok(SdnValue.String(inner))
-            case Err(reason): return Err(reason)
+        val inner = trimmed.slice(1, trimmed.len() - 1)
+        return Ok(SdnValue.String(sdn_unescape_scalar_v1(inner)))
     # Inline array: [a, b, c]
     if trimmed.starts_with("["):
         return Ok(_sdn_parse_inline_array(trimmed))
@@ -64,10 +62,7 @@ fn parse(source: text) -> Result<SdnValue, text>:
         return _sdn_parse_mapping(trimmed)
     # Integer
     if _looks_like_int(trimmed):
-        val bytes = trimmed.bytes()
-        match sdn_integer_from_span_v1(bytes, 0, bytes.len()):
-            case Ok(value): return Ok(SdnValue.Int(value))
-            case Err(reason): return Err(reason)
+        return Ok(SdnValue.Int(trimmed.to_int()))
     # Float
     if _looks_like_float(trimmed):
         return Ok(SdnValue.Float(trimmed.to_float()))
@@ -167,29 +162,25 @@ fn _sdn_index_of(s: text, ch: text) -> i64:
     -1
 
 fn _sdn_split_lines(s: text) -> [text]:
-    # Slice-based: emit s[start:i] at each '\n' instead of accumulating
-    # `cur = cur + c` per character, which was O(line_bytes^2) per line
-    # (a 1 MiB single-line document cost ~5e11 byte copies before parse).
     var out: [text] = []
-    var start = 0
+    var cur = ""
     var i = 0
-    val n = s.len()
-    while i < n:
-        if s.byte_at(i) == 10:
-            out.push(s.slice(start, i))
-            start = i + 1
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if c == "\n":
+            out.push(cur)
+            cur = ""
+        else:
+            cur = cur + c
         i = i + 1
-    out.push(s.slice(start, n))
+    out.push(cur)
     out
 
 fn _sdn_parse_mapping(source: text) -> Result<SdnValue, text>:
     val lines = _sdn_split_lines(source)
     if _sdn_next_is_seq(lines, 0, 0):
         match _sdn_parse_seq(lines, 0, 0):
-            case Ok(sq):
-                # @workaround bug=native_sdn_empty_payload_owner_2026_10_11 reason=retain array element owner after tuple projection
-                val seq_items: [SdnValue] = sq.0
-                return Ok(SdnValue.Array(seq_items))
+            case Ok(sq): return Ok(SdnValue.Array(sq.0))
             case Err(e): return Err(e)
     match _sdn_parse_block(lines, 0, 0):
         case Ok(result): Ok(result.0)
@@ -201,8 +192,7 @@ fn _sdn_indent(line: text) -> i64:
     var i = 0
     var counting = true
     while counting and i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        if (b[i] as i64) == 32:
+        if b[i].to_i64() == 32:
             i = i + 1
         else:
             counting = false
@@ -213,8 +203,7 @@ fn _sdn_indent(line: text) -> i64:
 # lines nests those lines as its value (indent-based hierarchy). Returns the
 # Dict and the index of the first line NOT consumed by this block.
 fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue, i64), text>:
-    # @workaround bug=native_sdn_empty_payload_owner_2026_10_11 reason=retain dictionary key and value owners for enum payload validation
-    var m: Dict<text, SdnValue> = {}
+    var m = {}
     var i = start
     var running = true
     while running and i < lines.len():
@@ -258,9 +247,7 @@ fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue,
                         if _sdn_next_is_seq(lines, i + 1, ind + 1):
                             match _sdn_parse_seq(lines, i + 1, ind + 1):
                                 case Ok(sq):
-                                    # @workaround bug=native_sdn_empty_payload_owner_2026_10_11 reason=retain array element owner after tuple projection
-                                    val seq_items: [SdnValue] = sq.0
-                                    m[key] = SdnValue.Array(seq_items)
+                                    m[key] = SdnValue.Array(sq.0)
                                     i = sq.1
                                 case Err(e):
                                     return Err(e)
@@ -382,8 +369,7 @@ fn _sdn_collection_depth(s: text) -> Result<i64, text>:
     var escaped = false
     var i = 0
     while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+        val c = b[i].to_i64()
         if in_str:
             if escaped:
                 escaped = false
@@ -420,8 +406,7 @@ fn _sdn_top_sep(s: text) -> i64:
     var escaped = false
     var i = 0
     while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+        val c = b[i].to_i64()
         if in_str:
             if escaped:
                 escaped = false
@@ -460,8 +445,7 @@ fn _sdn_split_top_commas(s: text) -> [text]:
     var start = 0
     var i = 0
     while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+        val c = b[i].to_i64()
         if in_str:
             if escaped:
                 escaped = false
@@ -508,8 +492,7 @@ fn _sdn_parse_inline_array(s: text) -> SdnValue:
 # Parse an inline dict `{key: value, ...}` into SdnValue.Dict, recursing on values.
 fn _sdn_parse_inline_dict(s: text) -> SdnValue:
     val inner = s.slice(1, s.len() - 1).trim()
-    # @workaround bug=native_sdn_empty_payload_owner_2026_10_11 reason=retain dictionary key and value owners for enum payload validation
-    var m: Dict<text, SdnValue> = {}
+    var m = {}
     if inner != "":
         for pair in _sdn_split_top_commas(inner):
             val ci = _sdn_top_sep(pair)
@@ -522,40 +505,6 @@ fn _sdn_parse_inline_dict(s: text) -> SdnValue:
                     case Err(_):
                         m[key] = SdnValue.String(valstr)
     SdnValue.Dict(m)
-
-# ---- string unescaping ----
-
-# Decode the escape sequences the canonical encoder emits: \\ \" \n \t \r.
-# Unknown escapes are preserved verbatim (backslash kept).
-fn _sdn_unescape(s: text) -> text:
-    if not s.contains("\\"):
-        return s
-    # Accumulate parts and join ONCE; the old `out = out + ch` per character
-    # was O(n^2) on every escaped string (each concat re-copied the prefix).
-    var parts: [text] = []
-    var i = 0
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
-        if ch == "\\" and i + 1 < s.len():
-            val nx = s.substring(i + 1, i + 2)
-            if nx == "n":
-                parts.push("\n")
-            else:
-                if nx == "t":
-                    parts.push("\t")
-                else:
-                    if nx == "r":
-                        parts.push("\r")
-                    else:
-                        if nx == "\"" or nx == "\\":
-                            parts.push(nx)
-                        else:
-                            parts.push(ch + nx)
-            i = i + 2
-        else:
-            parts.push(ch)
-            i = i + 1
-    parts.join("")
 
 # ---- table parsing ----
 
@@ -690,8 +639,7 @@ fn _sdn_split_top_commas_offsets(s: text) -> [SdnPartOffset]:
     var start = 0
     var i = 0
     while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+        val c = b[i].to_i64()
         if in_str:
             if escaped:
                 escaped = false
@@ -933,8 +881,7 @@ fn _sdn_scan_depth_entries(s: text) -> (i64, i64):
     var escaped = false
     var i = 0
     while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+        val c = b[i].to_i64()
         if in_str:
             if escaped:
                 escaped = false

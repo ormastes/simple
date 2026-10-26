@@ -51,7 +51,7 @@ simple script.spl --read-write /app/data
 ## Available APIs
 
 Process execution for sandbox testing:
-```simple:skip
+```simple
 import sys.process
 
 # Run command with timeout

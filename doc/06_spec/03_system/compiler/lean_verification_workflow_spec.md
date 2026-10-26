@@ -1,6 +1,30 @@
 # Lean Verification Workflow Specification
 
-> Tests covering Lean Verification Workflow.
+> 1. opts = codegen LeanCodegenOptions new
+
+<!-- sdn-diagram:id=lean_verification_workflow_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=lean_verification_workflow_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+lean_verification_workflow_spec -> std
+lean_verification_workflow_spec -> verification
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=lean_verification_workflow_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,7 +43,19 @@
 
 #### assembles Lean codegen state
 
-- assembles Lean codegen state
+1. opts = codegen LeanCodegenOptions new
+2. opts = opts with module name
+3. opts = opts with output dir
+4. opts = opts with stubs
+5. gen = codegen LeanCodegen new
+6. func = codegen LeanFunction new
+7. func = func add param
+8. func = func with return type
+9. func = func with body
+10. gen = gen add function
+11. thm = codegen LeanTheorem new
+12. thm = thm add param
+13. gen = gen add theorem
    - Expected: gen.options.module_name equals `SystemDemo`
    - Expected: gen.options.output_dir equals `temp_root`
    - Expected: gen.functions.len() equals `1`
@@ -31,28 +67,26 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("assembles Lean codegen state")
 val temp_root = "/tmp/simple-lean-verification-system"
 
-var opts = codegen.LeanCodegenOptions.new()
+opts = codegen.LeanCodegenOptions.new()
 opts = opts.with_module_name("SystemDemo")
 opts = opts.with_output_dir(temp_root)
 opts = opts.with_stubs(false)
 
-var gen = codegen.LeanCodegen.new(opts)
+gen = codegen.LeanCodegen.new(opts)
 
-var func = codegen.LeanFunction.new("system_demo")
+func = codegen.LeanFunction.new("system_demo")
 func = func.add_param("x", "Int")
 func = func.with_return_type("Int")
 func = func.with_body("x")
 gen = gen.add_function(func)
 
-var thm = codegen.LeanTheorem.new("system_demo_nonnegative", "system_demo x >= 0")
+thm = codegen.LeanTheorem.new("system_demo_nonnegative", "system_demo x >= 0")
 thm = thm.add_param("x", "Int")
 gen = gen.add_theorem(thm)
 
@@ -70,7 +104,8 @@ expect(gen.theorems[0].name).to_equal("system_demo_nonnegative")
 
 #### formats a mixed proof summary
 
-- formats a mixed proof summary
+1. exit code: Some
+2. exit code: Some
    - Expected: summary.files_checked equals `2`
    - Expected: summary.files_passed equals `2`
    - Expected: summary.files_failed equals `0`
@@ -84,12 +119,10 @@ expect(gen.theorems[0].name).to_equal("system_demo_nonnegative")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("formats a mixed proof summary")
 val proven = runner.LeanCheckResult(
     file: "src/verification/proven.lean",
     success: true,
@@ -132,12 +165,12 @@ expect(summary.format()).to_contain("Admitted (sorry): 2")
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/lean_verification_workflow_spec.spl` |
-| Updated | 2026-10-06 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Lean Verification Workflow.
+Tests covering:
 - Lean Verification Workflow
 
 ## Scenario Summary

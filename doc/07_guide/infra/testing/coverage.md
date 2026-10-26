@@ -90,52 +90,12 @@ fn validate(age: i32, score: i32) -> bool:
     else:
         return false
 
-# Condition coverage needs each operand both true and false:
+# Full condition coverage requires all combinations:
 validate(20, 60)    # age: true,  score: true
 validate(20, 40)    # age: true,  score: false
-validate(15, 60)    # age: false  (score short-circuited, not evaluated)
+validate(15, 60)    # age: false, score: true
+validate(15, 40)    # age: false, score: false
 ```
-
-### Decision and condition semantics
-
-What the interpreter (`SIMPLE_EXECUTION_MODE=interpreter`, Rust seed)
-counts, and what `scripts/check/check-hash-algos-coverage.shs` gates on:
-
-| Site | Decision key | Conditions |
-|------|--------------|------------|
-| `if` / `while` (also `if val` / `while val`) | its statement span | leaves of an `and`/`or` condition |
-| `elif` #i (also `elif val`) | parent `if` span + i | leaves of its condition |
-| match-arm guard `case P if g:` | the arm span | leaves of `g` |
-| if-expression `if c: a else: b` | enclosing function span + hash of `c` | leaves of `c` |
-| standalone `and`/`or` (`return a and b`) | enclosing function span + hash of the expression | its leaves |
-
-- A decision is covered when it evaluated both true and false; a condition
-  (an atomic operand of an `and`/`or` tree, numbered in pre-order) likewise.
-  `not` is transparent: `not x` has the same covered status as `x`.
-- Short-circuited operands are not evaluated and record nothing.
-- An unguarded `match` arm is not a decision.
-- **Denominator.** Every site of every loaded file is registered with zero
-  counts when the module loads (`interpreter/coverage_sites.rs`), so an
-  uncalled function, an unreached `elif` or an unexecuted if-expression is
-  reported uncovered instead of missing.
-- The shape-specialised `while`/`for` fast paths are skipped while coverage is
-  on (they run the body natively and would bypass every probe inside it).
-- Anchoring an expression-level site on its function means two textually
-  identical if-expression conditions (or `and`/`or` expressions) in one
-  function share one site. The SDN `line` of such a site is its statement's
-  line; an `elif` reports the line before its block.
-- Lambdas inherit their caller's file and anchor (as they always have for
-  line coverage), so a lambda body run by a Simple-implemented higher-order
-  function in another module is attributed to that caller.
-
-Run a spec with `bin/simple run <spec>` to collect its coverage.
-`bin/simple test --coverage` additionally requires the child to publish a
-Phase-7 coverage APK activation receipt
-(`src/app/test_runner_new/test_runner_single.spl` `_phase7_child_receipt_valid`),
-which only the self-hosted full CLI writes
-(`src/app/cli/_CliMain/main_and_help.spl` `activate_required_child_coverage_apk`);
-the Rust seed has no APK loader, so under the seed `test --coverage` fails with
-"did not publish a valid child APK activation receipt" by contract.
 
 ---
 
@@ -236,7 +196,7 @@ bin/simple test --sdoctest
 
 **1. Public API Documentation** -- Docstrings for public functions, classes, structs, enums:
 
-```text
+```simple
 fn parse_config(path: text) -> Config:
     """
     Parse configuration file and return Config struct.
@@ -253,13 +213,13 @@ fn parse_config(path: text) -> Config:
 
 **2. SDoctest Examples** -- Executable code examples in docstrings:
 
-```text
+```simple
 fn factorial(n: i64) -> i64:
     """
     Compute factorial of n.
 
     Examples:
-        ```text
+        ```simple
         val result = factorial(5)
         expect(result).to_equal(120)
         ```
@@ -274,7 +234,7 @@ fn factorial(n: i64) -> i64:
 
 **4. Group Comments** -- Related variables grouped with a comment header:
 
-```text
+```simple
 # Parser state tracking
 var current_token: Token = nil
 var peek_token: Token = nil
@@ -330,7 +290,7 @@ Configure in `doc_coverage.sdn`:
 
 ### Grouped Example
 
-```text
+```simple
 # File operations
 #   - file_read
 #   - file_write
@@ -339,7 +299,7 @@ Configure in `doc_coverage.sdn`:
 
 One example covering any function in the group satisfies coverage:
 
-```text
+```simple
 use std.io.{file_read}
 val content = file_read("example.txt")
 print content
@@ -347,7 +307,7 @@ print content
 
 ### Non-grouped Example
 
-```text
+```simple
 # Public API:
 #   - sqrt
 #   - pow
@@ -419,7 +379,7 @@ cargo test
 
 Get coverage data BEFORE clearing:
 
-```text
+```simple
 val sdn = coverage.get_coverage_sdn()  # Has data
 coverage.clear_coverage()              # Now clear
 ```
@@ -430,7 +390,7 @@ coverage.clear_coverage()              # Now clear
 - Must use `"""` triple-quotes
 - No blank lines between declaration and docstring
 
-```text
+```simple
 # Wrong:
 fn my_function():
 
@@ -445,10 +405,10 @@ fn my_function():
 
 Must use proper fence syntax with `simple` language tag:
 
-```text
+```simple
 """
 Examples:
-    ```text
+    ```simple
     val result = my_function(5)
     expect(result).to_equal(10)
     ```

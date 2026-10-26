@@ -16,9 +16,9 @@
 # Compiler-start wiring: frontend.spl calls run_plugin_startup() before
 # desugar_collections.
 
-use compiler.blocks.registry.{register_block, block_registry, is_block}
-use compiler.blocks.easy.{define_block}
-use compiler.blocks.definition.{BlockDefinition, BlockExample}
+use compiler.blocks.blocks.registry.{register_block, block_registry, is_block}
+use compiler.blocks.blocks.easy.{define_block}
+use compiler.blocks.blocks.definition.{BlockDefinition, BlockExample}
 use compiler.blocks.value.{BlockValue}
 use compiler.blocks.context.{BlockContext, BlockError}
 use compiler.blocks.modes.{LexerMode, SyntaxFeatures}
@@ -67,7 +67,7 @@ struct _SoBlockProxy(BlockDefinition):
 
     Wraps a native parse function pointer obtained via spl_dlsym.
     parse_payload serialises the payload to a C text handle, calls the
-    C parse function via spl_wffi_call_i64, and wraps its text as BlockValue.Raw.
+    C parse function via spl_wffi_call_i64, and returns the text result.
 
     Fields:
         _keyword:    Block keyword string (e.g. "csv")
@@ -80,12 +80,12 @@ struct _SoBlockProxy(BlockDefinition):
     fn kind() -> text:
         self._keyword
 
-    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+    fn parse_payload(payload: text, ctx: BlockContext) -> text:
         val result_handle = unsafe(capabilities: [ffi, raw_ptr]):
             spl_wffi_call_i64(self._parse_fptr, [payload.to_handle()], 1)
         if result_handle <= 0:
             panic("E-SFFI-009: plugin parse returned a null text handle")
-        Ok(BlockValue.Raw(text.from_handle(result_handle)))
+        text.from_handle(result_handle)
 
     fn lexer_mode() -> LexerMode:
         LexerMode.Normal
@@ -98,7 +98,7 @@ struct _SoBlockProxy(BlockDefinition):
         val _ = ctx
         []
 
-    fn eval_const(value: BlockValue) -> ConstValue?:
+    fn eval_const(value: BlockValue) -> has_ConstValue?:
         val _ = value
         nil
 
@@ -299,7 +299,7 @@ fn activate_plugin(name: text) -> bool:
 
     var j = 0
     while j < _indexed_entries.len():
-        val entry: StartupPluginEntry = _indexed_entries[j]
+        val entry = _indexed_entries[j]
         if entry.name == name:
             if entry.library == "":
                 return false

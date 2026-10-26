@@ -1,10 +1,11 @@
 # Write-Ahead Log for crash recovery
 # Format: one entry per line, pipe-separated: seq|type|table|key|data|timestamp
 
-use nogc_sync_mut.database.atomic (atomic_write, atomic_read, atomic_append_framed, get_timestamp)
+use nogc_sync_mut.database.atomic (atomic_write, atomic_read, atomic_append, get_timestamp)
 use nogc_sync_mut.database.core (SdnRow, split_sdn_row)
 use std.convert (try_parse_int)
 
+use std.io_runtime.{file_exists}
 use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
 
 enum WalEntryType:
@@ -136,74 +137,29 @@ class WriteAheadLog:
         )
 
     me append(entry: WalEntry) -> bool:
-        # Preserve the legacy single-entry size policy. Bounded new callers use
-        # append_batch; both paths publish owner state only after persistence.
-        self._append_entries([entry], 1, 9223372036854775807)
-
-    me append_batch(batch: [WalEntry]) -> bool:
-        """Append at most 4096 line-safe entries / 1 MiB in one file lease.
-
-        Requires one serialized live WAL owner. Sequence recovery, competing
-        handles and strict replay admission remain separate owner obligations.
-        """
-        if batch.len() > 4096:
-            return false
-        var remaining = 1048576
-        for entry in batch:
-            for field in [entry.table_name, entry.row_key, entry.data]:
-                if field.len() > remaining:
-                    return false
-                remaining = remaining - field.len()
-                if field.contains("\n") or field.contains("\r"):
-                    return false
-            if entry.table_name.contains("|") or entry.row_key.contains("|"):
-                return false
-        self._append_entries(batch, 4096, 1048576)
-
-    me _append_entries(batch: [WalEntry], max_count: i64, max_bytes: i64) -> bool:
-        if batch.len() == 0:
-            return true
-        if batch.len() > max_count or self.sequence_counter < 0:
-            return false
-        if batch.len() > 9223372036854775807 - self.sequence_counter:
-            return false
-        var next_sequence = self.sequence_counter
-        var pending: [WalEntry] = []
-        var lines: [text] = []
-        var remaining = max_bytes
-        for entry in batch:
-            # Bound raw fields before allocating the encoded line.
-            for field in [entry.table_name, entry.row_key, entry.data]:
-                if field.len() > remaining:
-                    return false
-            next_sequence = next_sequence + 1
-            val numbered = WalEntry(
-                sequence: next_sequence, entry_type: entry.entry_type,
-                table_name: entry.table_name, row_key: entry.row_key,
-                data: entry.data, timestamp: entry.timestamp
-            )
-            val line = wal_entry_to_line(numbered)
-            if line.len() > remaining:
-                return false
-            remaining = remaining - line.len()
-            pending.push(numbered)
-            lines.push(line)
-        if not atomic_append_framed(self.path, lines.join(""), "#wal-version:2\n"):
-            return false
+        # Write version header on first append to a new WAL file
+        if not file_exists(self.path):
+            atomic_write(self.path, "#wal-version:2\n")
+        self.sequence_counter = self.sequence_counter + 1
+        val e = WalEntry(
+            sequence: self.sequence_counter,
+            entry_type: entry.entry_type,
+            table_name: entry.table_name,
+            row_key: entry.row_key,
+            data: entry.data,
+            timestamp: entry.timestamp
+        )
         var entries = self.entries
-        for entry in pending:
-            entries.push(entry)
+        entries.push(e)
         self.entries = entries
-        self.sequence_counter = next_sequence
-        true
+        val line = wal_entry_to_line(e)
+        atomic_append(self.path, line)
 
     me flush() -> bool:
         # All writes go through atomic_append which syncs per call; nothing extra needed
         true
 
     me checkpoint() -> bool:
-        if self.sequence_counter < 0 or self.sequence_counter == 9223372036854775807:
-            return false
         val ts = get_timestamp()
         val cp = WalEntry(
             sequence: self.sequence_counter + 1,
@@ -213,10 +169,10 @@ class WriteAheadLog:
             data: "",
             timestamp: ts
         )
+        self.sequence_counter = self.sequence_counter + 1
         val line = wal_entry_to_line(cp)
         val ok = atomic_write(self.path, "#wal-version:2\n" + line)
         if ok:
-            self.sequence_counter = cp.sequence
             self.flushed_up_to = self.sequence_counter
             self.entries = []
         ok
@@ -311,7 +267,3 @@ fn wal_payload_to_row(payload: text, columns: [text]) -> SdnRow?:
         row.set(col, unquoted)
         i = i + 1
     Some(row)
-
-# Strict segmented persistence reuses this canonical WAL entry codec. Legacy
-# permissive replay remains unchanged for existing callers.
-export WalEntry, WalEntryType, wal_entry_to_line, wal_entry_from_line

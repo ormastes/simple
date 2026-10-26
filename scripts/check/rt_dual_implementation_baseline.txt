@@ -56,28 +56,6 @@
 # core-C definition in runtime_native.c AND a Rust twin in the runtime crate
 # (value/sffi/file_io/descriptor.rs), so they enter dual-lane; no row added.
 # Debt count moves down by 2.
-#
-# 2026-10-09, reviewed update (Windows stage-3 core-C link gaps): rt_array_sum,
-# rt_array_take, rt_shared_downgrade and rt_weak_upgrade GAINED their C lane
-# (runtime_native.c) and are removed as stale. No row added. Debt count moves
-# down by 4.
-#
-# 2026-10-09, reviewed update (stage-3 core-C closure via std.nogc_sync_mut.ptr.raw):
-# rt_write_u32s_to_raw and rt_write_fill_u32s_to_raw_checksum GAINED their C lane
-# (runtime_native.c, mirrors file_ops.rs) and are removed as stale. No row added.
-# Debt count moves down by 2.
-# 2026-10-10, reviewed removal of TWO rows: rt_math_abs and rt_math_round (were
-# rust-only). Both now have genuine C definitions in src/runtime/runtime_native.c
-# (`double rt_math_round(double)` = round(), half away from zero like Rust
-# f64::round; `double rt_math_abs(double)` = fabs()) plus declarations in
-# src/runtime/runtime.h, alongside the Rust
-# src/compiler_rust/runtime/src/value/sffi/math.rs definitions, so they are no
-# longer single-lane and the ratchet reported them as STALE baseline rows.
-# Behaviour is pinned by src/runtime/test/
-# rt_array_packed_reverse_index_enumerate_selfcheck.c. No row was added and
-# nothing was regenerated wholesale: the two stale lines were deleted after
-# verifying both lanes (the census reports `both` for each).
-#
 rt_ab_close	c-only
 rt_ab_destroy	c-only
 rt_ab_fsync	c-only
@@ -120,7 +98,9 @@ rt_arena_free	rust-only
 rt_arena_new	rust-only
 rt_arena_reset	rust-only
 rt_arena_used	rust-only
+rt_array_bytes_basis_len	c-only
 rt_array_bytes_basis_len_packed_span_default	c-only
+rt_array_bytes_basis_ptr	c-only
 rt_array_bytes_basis_ptr_packed_span_default	c-only
 rt_array_bytes_store_checked	c-only
 rt_array_count	rust-only
@@ -144,6 +124,8 @@ rt_array_range	rust-only
 rt_array_reversed	rust-only
 rt_array_reverse	rust-only
 rt_array_sort_desc	rust-only
+rt_array_sum	rust-only
+rt_array_take	rust-only
 rt_array_unique	rust-only
 rt_array_write_span	rust-only
 rt_array_zip	rust-only
@@ -1119,10 +1101,12 @@ rt_log_warn	rust-only
 rt_ltr	c-only
 rt_m3_owned_path	c-only
 rt_make_addr_string	c-only
+rt_math_abs	rust-only
 rt_math_clamp	rust-only
 rt_math_gcd	rust-only
 rt_math_inf	rust-only
 rt_math_nan	rust-only
+rt_math_round	rust-only
 rt_math_trunc	rust-only
 rt_mem_attr_report_print	rust-only
 rt_memcmp	c-only
@@ -1484,6 +1468,7 @@ rt_println	c-only
 rt_process_close_pinned_executable	c-only
 rt_process_close_piped	c-only
 rt_process_execute	rust-only
+rt_process_hwm_kib	c-only
 rt_process_is_alive	c-only
 rt_process_output	c-only
 rt_process_owned_terminate	c-only
@@ -1494,6 +1479,7 @@ rt_process_owned_test_legacy_cancel_v2	c-only
 rt_process_pin_executable	c-only
 rt_process_read_stdout	c-only
 rt_process_result_to_tuple	c-only
+rt_process_rss_kib	c-only
 rt_process_run_array	c-only
 rt_process_run_bounded	rust-only
 rt_process_run_inherit_value	c-only
@@ -1876,11 +1862,12 @@ rt_sha256_reset	rust-only
 rt_sha256_rotr	c-only
 rt_sha256_write	rust-only
 rt_shared_clone	rust-only
+rt_shared_downgrade	rust-only
 rt_shared_needs_trace	rust-only
-rt_shared_parse_cell_read_v1	c-only
 rt_shared_ref_count	rust-only
 rt_shared_release	rust-only
 rt_shell	c-only
+rt_shell_exec	c-only
 rt_shell_output	c-only
 rt_signal_check	c-only
 rt_signal_install	c-only
@@ -2060,6 +2047,7 @@ rt_text_slice_audit_level	c-only
 rt_text_slice_audit_self_test	c-only
 rt_text_slice_audit_violations	c-only
 rt_text_validate_utf8_bytes	c-only
+rt_text_validate_utf8	c-only
 rt_thread_free_limited	rust-only
 rt_thread_get_violation_type	rust-only
 rt_thread_get_violation_value	rust-only
@@ -2531,6 +2519,7 @@ rt_wait	rust-only
 rt_weak_free	rust-only
 rt_weak_is_valid	rust-only
 rt_weak_new	rust-only
+rt_weak_upgrade	rust-only
 rt_webgpu_create_surface	c-only
 rt_webgpu_destroy_surface	c-only
 rt_webgpu_init	c-only
@@ -2542,9 +2531,11 @@ rt_wire_to_hex	c-only
 rt_write_cr3	c-only
 rt_write_cr3_raw	c-only
 rt_write_file	rust-only
+rt_write_fill_u32s_to_raw_checksum	rust-only
 rt_write_msr	c-only
 rt_write_u32s_strided_to_raw	rust-only
 rt_write_u32s_to_raw_checksum	rust-only
+rt_write_u32s_to_raw	rust-only
 rt_ws_mask_bytes	rust-only
 rt_xxhash_finish	rust-only
 rt_xxhash_free	rust-only
@@ -2566,14 +2557,6 @@ rt_zero_bss	c-only
 #   so the standing directive (a C implementation AND a Simple implementation) is
 #   already satisfied; only this gate's C-vs-Rust proxy classifies it single-lane.
 #   Real debt: none. Proxy artefact.
-#
-# rt_shared_parse_cell_read_v1 -- grouped shared parse CAS, 2026-10-01.
-#   C hosted Win/Unix provider in runtime_secure_staging.c; bounded POSIX
-#   SimpleOS twin in src/runtime/simple_core/core_fs.spl. Both reject absent,
-#   symlink/reparse, changed and oversized cells as cache misses. The exact
-#   parser-key/payload-SHA verifier is pure Simple in
-#   src/compiler/10.frontend/frontend_shared_parse_cas_v1.spl. This C-vs-Rust
-#   proxy sees one lane, but the standing C-plus-Simple contract is satisfied.
 #
 # rt_transient_raw_owner_query / _register / _register_state / _thread_allows /
 # _unregister -- ca716186466, src/runtime/runtime_memory.c.
@@ -2650,14 +2633,6 @@ rt_vulkan_readback_u32_array_checksum	rust-only
 # single-lane debt (not the "no architectural counterpart" exception that
 # baselines the rt_vulkan_* family) and is baselined here only as a reviewed,
 # named exception pending the Rust twin — see the bug doc for owner and scope.
-# ---------------------------------------------------------------------------
-#
-# 2026-10-20, reviewed removal of TWO rows: rt_process_rss_kib and
-# rt_process_hwm_kib (were c-only). db00168b079 made the self-hosted compiler
-# call rt_process_rss_kib for its [mir] progress line; the macOS Stage 2 link
-# (Rust runtime archive) failed with an undefined _rt_process_rss_kib. Both now
-# have Rust twins in src/compiler_rust/runtime/src/mem_snapshot.rs beside the
-# existing dual rt_mem_snapshot_* family. Debt moves -2.
 # ---------------------------------------------------------------------------
 rt_file_atomic_write_mode	c-only
 rt_file_list_dir	c-only

@@ -48,7 +48,7 @@ pub struct ArMember:
 """The parsed ar archive reader."""
 pub struct ArReader:
     members: [ArMember]
-    raw: [u8]             # full archive bytes
+    raw: [i64]            # full archive bytes
     is_valid: bool
 
 """A single entry in the symbol index."""
@@ -65,10 +65,10 @@ pub struct ArSymbolIndex:
 # ============================================================================
 
 """Check if bytes start with the ar archive magic "!<arch>\n"."""
-pub fn ar_check_magic(bytes: [u8]) -> bool:
+pub fn ar_check_magic(bytes: [i64]) -> bool:
     if bytes.len() < AR_MAGIC_SIZE:
         return false
-    ((bytes[0] as i64) == AR_MAGIC_0 and (bytes[1] as i64) == AR_MAGIC_1 and
+    (bytes[0] == AR_MAGIC_0 and bytes[1] == AR_MAGIC_1 and
      bytes[2] == AR_MAGIC_2 and bytes[3] == AR_MAGIC_3 and
      bytes[4] == AR_MAGIC_4 and bytes[5] == AR_MAGIC_5 and
      bytes[6] == AR_MAGIC_6 and bytes[7] == AR_MAGIC_7)
@@ -78,20 +78,20 @@ pub fn ar_check_magic(bytes: [u8]) -> bool:
 # ============================================================================
 
 """Read a big-endian u32 from bytes at offset, return as i64."""
-fn ar_read_be_u32(bytes: [u8], offset: i64) -> i64:
-    val b0 = bytes[offset] as i64
-    val b1 = bytes[offset + 1] as i64
-    val b2 = bytes[offset + 2] as i64
-    val b3 = bytes[offset + 3] as i64
+fn ar_read_be_u32(bytes: [i64], offset: i64) -> i64:
+    val b0 = bytes[offset]
+    val b1 = bytes[offset + 1]
+    val b2 = bytes[offset + 2]
+    val b3 = bytes[offset + 3]
     (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
 
 """Parse a decimal ASCII integer from bytes[offset .. offset+AR_SIZE_LEN], skipping spaces."""
-pub fn ar_parse_size(bytes: [u8], offset: i64) -> i64:
+pub fn ar_parse_size(bytes: [i64], offset: i64) -> i64:
     var result: i64 = 0
     var i = offset
     val end = offset + AR_SIZE_LEN
     while i < end:
-        val b = bytes[i] as i64
+        val b = bytes[i]
         if b >= 0x30 and b <= 0x39:
             result = result * 10 + (b - 0x30)
         i = i + 1
@@ -115,12 +115,12 @@ fn ar_byte_to_char(b: i64) -> text:
 Extract text from bytes[offset .. offset+max_len], stopping at first space (0x20),
 NUL (0x00), or newline (0x0A).
 """
-fn ar_bytes_to_text_raw(bytes: [u8], offset: i64, max_len: i64) -> text:
+fn ar_bytes_to_text_raw(bytes: [i64], offset: i64, max_len: i64) -> text:
     var result = ""
     var i = offset
     val end = offset + max_len
     while i < end:
-        val b = bytes[i] as i64
+        val b = bytes[i]
         if b == 0x20 or b == 0x00 or b == 0x0A:
             return result
         result = result + ar_byte_to_char(b)
@@ -183,7 +183,7 @@ Name field is bytes[offset .. offset+16]:
   - "/N"  : long name at offset N in the "//" table
   - other : plain ASCII name, strip trailing '/' and spaces
 """
-pub fn ar_parse_name(bytes: [u8], offset: i64, name_table: text?) -> text:
+pub fn ar_parse_name(bytes: [i64], offset: i64, name_table: text?) -> text:
     val raw = ar_bytes_to_text_raw(bytes, offset, AR_NAME_SIZE)
 
     # Special names: "/" (symbol index) or "//" (extended name table)
@@ -220,13 +220,13 @@ pub fn ar_parse_name(bytes: [u8], offset: i64, name_table: text?) -> text:
 Parse a single member header at bytes[offset].
 Returns ArMember or error text.
 """
-pub fn ar_parse_header(bytes: [u8], offset: i64, name_table: text?) -> Result<ArMember, text>:
+pub fn ar_parse_header(bytes: [i64], offset: i64, name_table: text?) -> Result<ArMember, text>:
     if offset + AR_HEADER_SIZE > bytes.len():
         return Err("Truncated archive header at offset {offset}")
 
     # Validate end-of-header magic: "`\n" (0x60, 0x0A)
-    val fmag0 = bytes[offset + AR_FMAG_OFFSET] as i64
-    val fmag1 = bytes[offset + AR_FMAG_OFFSET + 1] as i64
+    val fmag0 = bytes[offset + AR_FMAG_OFFSET]
+    val fmag1 = bytes[offset + AR_FMAG_OFFSET + 1]
     if fmag0 != AR_FMAG_0 or fmag1 != AR_FMAG_1:
         return Err("Invalid ar header magic at offset {offset}")
 
@@ -252,7 +252,7 @@ pub fn ar_parse_header(bytes: [u8], offset: i64, name_table: text?) -> Result<Ar
 Parse an ar archive from a byte array.
 Returns ArReader on success or an error message.
 """
-pub fn ar_parse(bytes: [u8]) -> Result<ArReader, text>:
+pub fn ar_parse(bytes: [i64]) -> Result<ArReader, text>:
     if not ar_check_magic(bytes):
         return Err("Not a valid ar archive: bad magic")
 
@@ -260,8 +260,8 @@ pub fn ar_parse(bytes: [u8]) -> Result<ArReader, text>:
     var name_table: text? = nil
     var scan_offset = AR_MAGIC_SIZE
     while scan_offset + AR_HEADER_SIZE <= bytes.len():
-        val fmag0 = bytes[scan_offset + AR_FMAG_OFFSET] as i64
-        val fmag1 = bytes[scan_offset + AR_FMAG_OFFSET + 1] as i64
+        val fmag0 = bytes[scan_offset + AR_FMAG_OFFSET]
+        val fmag1 = bytes[scan_offset + AR_FMAG_OFFSET + 1]
         if fmag0 != AR_FMAG_0 or fmag1 != AR_FMAG_1:
             # Not a valid header — stop first-pass scan
             scan_offset = bytes.len()
@@ -276,7 +276,7 @@ pub fn ar_parse(bytes: [u8]) -> Result<ArReader, text>:
                 var ni = data_off
                 val ntbl_end = data_off + size
                 while ni < ntbl_end:
-                    ntbl = ntbl + ar_byte_to_char(bytes[ni] as i64)
+                    ntbl = ntbl + ar_byte_to_char(bytes[ni])
                     ni = ni + 1
                 name_table = ntbl
 
@@ -319,7 +319,7 @@ pub fn ar_member_count(reader: ArReader) -> i64:
     reader.members.len()
 
 """Return the raw data bytes for a given member."""
-pub fn ar_member_data(reader: ArReader, member: ArMember) -> [u8]:
+pub fn ar_member_data(reader: ArReader, member: ArMember) -> [i64]:
     val start = member.data_offset
     val end = start + member.data_size
     reader.raw[start..end]
@@ -379,7 +379,7 @@ pub fn ar_parse_symbol_index(reader: ArReader) -> ArSymbolIndex?:
             while si < count and str_pos < data.len():
                 var sym_name = ""
                 while str_pos < data.len() and data[str_pos] != 0:
-                    sym_name = sym_name + ar_byte_to_char(data[str_pos] as i64)
+                    sym_name = sym_name + ar_byte_to_char(data[str_pos])
                     str_pos = str_pos + 1
                 # Skip the NUL terminator
                 str_pos = str_pos + 1

@@ -2,10 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use object::{Object, ObjectSymbol};
 use simple_common::target::{LinkerFlavor, Target, TargetOS};
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
@@ -38,90 +36,6 @@ fn hosted_elf_link_args(target: Target, exact_stage4: bool) -> &'static [&'stati
 
 fn is_linux_link_target(target: Target) -> bool {
     target.os == TargetOS::Linux
-}
-
-/// Read relocatable ELF globals without spawning `nm` from the large native
-/// compiler process. The object reader is already a compiler dependency. Keep
-/// archive and non-ELF inputs on their existing tool path.
-fn read_elf_relocatable_globals(obj: &Path) -> Result<Option<Vec<(String, bool)>>, String> {
-    if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
-        return Ok(None);
-    }
-    let mut file = match std::fs::File::open(obj) {
-        Ok(file) => file,
-        Err(_) => return Ok(None), // Retain the existing nm error policy.
-    };
-    let mut magic = [0u8; 4];
-    if file.read_exact(&mut magic).is_err() || magic != *b"\x7fELF" {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(obj).map_err(|e| format!("read ELF object {}: {e}", obj.display()))?;
-    let parsed = object::File::parse(bytes.as_slice())
-        .map_err(|e| format!("parse ELF object {}: {e}", obj.display()))?;
-    if parsed.kind() != object::ObjectKind::Relocatable {
-        return Ok(None);
-    }
-    let mut globals = Vec::new();
-    for symbol in parsed.symbols().filter(|symbol| symbol.is_global()) {
-        let name = symbol
-            .name()
-            .map_err(|e| format!("read ELF symbol in {}: {e}", obj.display()))?;
-        if !name.is_empty() {
-            globals.push((name.to_string(), symbol.is_undefined()));
-        }
-    }
-    Ok(Some(globals))
-}
-
-/// Read relocatable COFF globals in-process on Windows hosts, mirroring
-/// `llvm-nm -g`: every EXTERNAL or WEAK_EXTERNAL symbol, with WEAK_EXTERNAL
-/// reported as undefined exactly as nm's `w` class is by
-/// `read_undefined_symbol_set`. Measured 2026-10-09 on the Stage 2 link: the
-/// hosted init-caller scan spawned `llvm-nm` once per object (1,210 objects,
-/// 0.27-0.86 s per spawn on a loaded host), which was the whole 329 s "link".
-/// Archives, import objects and every other format keep the nm path.
-fn read_coff_relocatable_globals(obj: &Path) -> Result<Option<Vec<(String, bool)>>, String> {
-    if !cfg!(target_os = "windows") {
-        return Ok(None);
-    }
-    let mut file = match std::fs::File::open(obj) {
-        Ok(file) => file,
-        Err(_) => return Ok(None), // Retain the existing nm error policy.
-    };
-    let mut magic = [0u8; 8];
-    if file.read_exact(&mut magic).is_err() || magic.starts_with(b"!<arch>") || magic.starts_with(b"!<thin>") {
-        return Ok(None);
-    }
-    drop(file);
-    let bytes = std::fs::read(obj).map_err(|e| format!("read COFF object {}: {e}", obj.display()))?;
-    if !matches!(
-        object::FileKind::parse(bytes.as_slice()),
-        Ok(object::FileKind::Coff) | Ok(object::FileKind::CoffBig)
-    ) {
-        return Ok(None);
-    }
-    let parsed = object::File::parse(bytes.as_slice())
-        .map_err(|e| format!("parse COFF object {}: {e}", obj.display()))?;
-    if parsed.kind() != object::ObjectKind::Relocatable {
-        return Ok(None);
-    }
-    let mut globals = Vec::new();
-    for symbol in parsed.symbols().filter(|symbol| symbol.is_global()) {
-        let name = symbol
-            .name()
-            .map_err(|e| format!("read COFF symbol in {}: {e}", obj.display()))?;
-        if !name.is_empty() {
-            globals.push((name.to_string(), symbol.is_undefined() || symbol.is_weak()));
-        }
-    }
-    Ok(Some(globals))
-}
-
-fn read_relocatable_globals_in_process(obj: &Path) -> Result<Option<Vec<(String, bool)>>, String> {
-    if let Some(globals) = read_elf_relocatable_globals(obj)? {
-        return Ok(Some(globals));
-    }
-    read_coff_relocatable_globals(obj)
 }
 
 // CreateProcessW rejects command lines over 32,767 UTF-16 code units. The
@@ -378,25 +292,6 @@ pub(super) const STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS: &[&str] = &[
 /// the GNU-style `clang` driver against an MSVC target, where `-Wl,` is right.
 fn clang_cl_whole_archive_arg(path: &Path) -> String {
     format!("/WHOLEARCHIVE:{}", path.display())
-}
-
-/// lld-link options for the MSVC stub-fallback lane (SIMPLE_NO_STUB_FALLBACK
-/// unset), appended to the single trailing `/link` group.
-///
-/// Each element must be ONE lld-link option. The previous
-/// `/FORCE:MULTIPLE,UNRESOLVED` is not a spelling lld-link knows (its options
-/// are `/force`, `/force:multiple`, `/force:unresolved`); an unmatched
-/// `/`-prefixed argument is taken as an input path, so every link on this lane
-/// died with `lld-link: could not open '/FORCE:MULTIPLE,UNRESOLVED'` (measured
-/// with lld-link 23.1.1).
-///
-/// `/FORCE:UNRESOLVED` is deliberately NOT emitted: it would let the first link
-/// succeed with genuinely missing symbols bound to NULL (the rt_unwrap_or_trap
-/// SEGV class), pre-empting the stub-parity retry in `link_objects`, which
-/// replaces exactly the reported names with loud trap stubs and lists them.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn msvc_stub_fallback_link_args() -> &'static [&'static str] {
-    &["/FORCE:MULTIPLE"]
 }
 
 /// Linker stdout+stderr, with source attribution appended for any undefined
@@ -836,13 +731,6 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbols(obj: &Path) -> Result<Vec<String>, String> {
-        if let Some(globals) = read_relocatable_globals_in_process(obj)? {
-            let mut names: Vec<String> = globals.into_iter().map(|(name, _)| name).collect();
-            // `nm -g` sorts by name by default; preserve the selection order
-            // used by freestanding main discovery as well as hosted init scans.
-            names.sort_unstable();
-            return Ok(names);
-        }
         let output = nm_command()?
             .arg("-g")
             .arg(external_tool_path(obj))
@@ -881,19 +769,12 @@ impl NativeProjectBuilder {
     fn read_defined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
         Ok(Self::read_global_symbol_types(obj)?
             .into_iter()
-            // `w`/`v` are weak UNDEFINED references, not definitions.
-            .filter(|(kind, _)| !matches!(kind.as_str(), "U" | "w" | "v"))
+            .filter(|(kind, _)| kind != "U")
             .map(|(_, name)| name)
             .collect())
     }
 
     fn read_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
-        if let Some(globals) = read_relocatable_globals_in_process(obj)? {
-            return Ok(globals
-                .into_iter()
-                .filter_map(|(name, undefined)| undefined.then_some(name))
-                .collect());
-        }
         let output = nm_command()?
             .arg("-g")
             .arg("-p")
@@ -1025,13 +906,29 @@ impl NativeProjectBuilder {
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     fn quote_linker_response_path(path: &Path) -> String {
-        super::archive::quote_posix_response_path(path)
+        let raw = path.to_string_lossy();
+        debug_assert!(
+            !raw.contains(['\n', '\r']),
+            "response file paths must not contain newlines: {}",
+            path.display()
+        );
+        let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     fn write_linker_object_response_file(temp_dir: &Path, object_paths: &[PathBuf]) -> Result<PathBuf, String> {
         let rsp_path = temp_dir.join("spl_objects.rsp");
-        super::archive::write_object_response_file(&rsp_path, object_paths, false)?;
+        let mut quoted_paths = Vec::with_capacity(object_paths.len());
+        for obj in object_paths {
+            let raw = obj.to_string_lossy();
+            if raw.contains(['\n', '\r']) {
+                return Err(format!("object path contains unsupported newline: {}", obj.display()));
+            }
+            quoted_paths.push(Self::quote_linker_response_path(obj));
+        }
+        let contents = quoted_paths.join("\n");
+        std::fs::write(&rsp_path, format!("{contents}\n")).map_err(|e| format!("write object response file: {e}"))?;
         Ok(rsp_path)
     }
 
@@ -1050,54 +947,14 @@ impl NativeProjectBuilder {
         }
         inputs.extend_from_slice(object_paths);
         inputs.push(alias_stub.to_path_buf());
-        let mut requested: Vec<String> = Self::stage4_live_undefined_symbols(temp_dir, &inputs)?
-            .into_iter()
-            .filter(|symbol| {
-                symbol.starts_with("rt_")
-                    || symbol.starts_with("spl_")
-                    || matches!(
-                        symbol.as_str(),
-                        "panic"
-                            | "stderr_write"
-                            | "stderr_flush"
-                            // Legacy Text.from_char_code import emitted by
-                            // the native backend; core-C owns its exact ABI.
-                            | "text_dot_from_char_code"
-                            | "__simple_runtime_init"
-                            | "__simple_runtime_shutdown"
-                            | "__simple_call_module_inits"
-                    )
-            })
-            .collect();
-        requested.sort();
-        if requested.is_empty() {
-            return Err("Stage4 live entry projection produced no runtime requests".to_string());
-        }
-        Ok(requested)
-    }
-
-    /// Undefined globals left once everything unreachable from `main` /
-    /// `spl_main` is collected. Computed in-process: `-r --gc-sections` is
-    /// honoured only by LLD (mold and ld.bfd accept it and keep every
-    /// section), so a linker-driven projection made the result depend on the
-    /// host's default `ld`. See `live_projection.rs`.
-    #[cfg(target_os = "linux")]
-    fn stage4_live_undefined_symbols(_temp_dir: &Path, inputs: &[PathBuf]) -> Result<HashSet<String>, String> {
-        Ok(super::live_projection::live_undefined_symbols(inputs, &["main", "spl_main"])?
-            .into_iter()
-            .collect())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn stage4_live_undefined_symbols(temp_dir: &Path, inputs: &[PathBuf]) -> Result<HashSet<String>, String> {
         let projection_dir = temp_dir.join("stage4_live");
         std::fs::create_dir_all(&projection_dir)
             .map_err(|err| format!("create Stage4 live projection directory: {err}"))?;
-        let response = Self::write_linker_object_response_file(&projection_dir, inputs)?;
+        let response = Self::write_linker_object_response_file(&projection_dir, &inputs)?;
         let live = temp_dir.join("stage4_live_entry.o");
         let cc = target_c_compiler(effective_target());
         let mut command = std::process::Command::new(&cc);
-        // The trial link below is a real linker invocation, so it must honour the
+        // `-Wl,-r` below is a real linker invocation, so it must honour the
         // same SIMPLE_LINKER preference as the final link — otherwise a run
         // that asked for lld still spawns the default linker here. The caller
         // (`link_objects`) already resolved and validated the value, so this
@@ -1105,6 +962,14 @@ impl NativeProjectBuilder {
         if let Some(name) = requested_linker_driver_name()? {
             command.arg(format!("-fuse-ld={name}"));
         }
+        #[cfg(target_os = "linux")]
+        command
+            .arg("-nostdlib")
+            .arg("-Wl,-r")
+            .arg("-no-pie")
+            .arg("-Wl,--gc-sections")
+            .arg("-Wl,-u,main")
+            .arg("-Wl,-u,spl_main");
         // ld64 rejects `-r` together with `-dead_strip`, and a non-stripped
         // relocatable projection keeps runtime references from unreachable
         // closure code (kernel port I/O, virtio, baremetal intrinsics) that no
@@ -1129,7 +994,30 @@ impl NativeProjectBuilder {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        Self::read_undefined_symbol_set(&live)
+        let mut requested: Vec<String> = Self::read_undefined_symbol_set(&live)?
+            .into_iter()
+            .filter(|symbol| {
+                symbol.starts_with("rt_")
+                    || symbol.starts_with("spl_")
+                    || matches!(
+                        symbol.as_str(),
+                        "panic"
+                            | "stderr_write"
+                            | "stderr_flush"
+                            // Legacy Text.from_char_code import emitted by
+                            // the native backend; core-C owns its exact ABI.
+                            | "text_dot_from_char_code"
+                            | "__simple_runtime_init"
+                            | "__simple_runtime_shutdown"
+                            | "__simple_call_module_inits"
+                    )
+            })
+            .collect();
+        requested.sort();
+        if requested.is_empty() {
+            return Err("Stage4 live entry projection produced no runtime requests".to_string());
+        }
+        Ok(requested)
     }
 
     fn cached_global_symbols<'a>(
@@ -1541,17 +1429,16 @@ int main(int argc, char** argv) {
             && selected_runtime
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| *is_native_all)
-            // Native FreeBSD uses the same ELF closure and LLVM objcopy
-            // semantics as GNU/Linux. Keep Rust's array providers authoritative
-            // when supplying the C-only bootstrap runtime exports.
-            && cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "freebsd", target_os = "macos"))
+            // The exact archive projection uses GNU ld/objcopy or Apple ld
+            // semantics. Preserve the existing native-all path on other hosts
+            // until that projection has a native implementation there.
+            && cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))
         {
             let core = build_core_c_runtime_library(&temp_dir.join("bootstrap_mutex_core_c_runtime"))
                 .ok_or_else(|| "failed to build the bootstrap mutex core-C authority".to_string())?;
             Some(build_bootstrap_mutex_runtime_capsule_archive(
                 &core,
                 &temp_dir.join("bootstrap_mutex_runtime_capsule"),
-                Some(&selected_runtime.as_ref().expect("selected native-all authority").0),
             )?)
         } else {
             None
@@ -1789,10 +1676,6 @@ int main(int argc, char** argv) {
             // handles both. Emitted BEFORE any SIMPLE_LINKER override below so
             // an explicit request still wins (clang takes the last -fuse-ld).
             cmd.arg("-fuse-ld=lld");
-            // LLVM runtime, never libgcc/libgcc_eh: llvm-mingw ships compiler-rt
-            // builtins + libunwind (+ libc++), not GCC's runtime.
-            cmd.arg("--rtlib=compiler-rt");
-            cmd.arg("--unwindlib=libunwind");
         }
         // Honour SIMPLE_LINKER. `-fuse-ld=<name>` is used rather than invoking
         // the linker binary directly because this is the HOSTED link: the C
@@ -2178,47 +2061,13 @@ int main(int argc, char** argv) {
                             cmd.arg(runtime_lib);
                             cmd.arg("-Wl,--no-whole-archive");
                         } else {
-                            let mut roots = Self::runtime_retention_symbols(
+                            let roots = Self::runtime_retention_symbols(
                                 object_paths,
                                 &main_o,
                                 init_o.as_ref(),
                                 runtime_lib,
                                 imports,
                             )?;
-                            if bootstrap_mutex_runtime.is_some() {
-                                // Pull Rust-owned providers before the
-                                // projected core-C supplement: fd-stat is
-                                // private there, and SOSIX path checks must
-                                // use the Rust `[u8]` array representation.
-                                let owned = Self::read_defined_symbol_set(runtime_lib)?;
-                                // Force the actual native-all member before weak
-                                // fallback definitions arrive in the supplement.
-                                // Without these roots, weak copies can satisfy
-                                // references and prevent authoritative extraction.
-                                // Root every native-all-owned symbol the capsule
-                                // retains, not only the requested ones: the
-                                // C-only exports pull members that also carry
-                                // weakened rt_string_*/rt_array_* copies.
-                                let capsule = bootstrap_mutex_runtime.as_ref().expect("checked above");
-                                let mut retained: Vec<String> = Self::read_defined_symbol_set(capsule)?
-                                    .into_iter()
-                                    .filter(|symbol| owned.contains(symbol))
-                                    .collect();
-                                retained.sort();
-                                roots.extend(retained);
-                                for symbol in [
-                                    "rt_fd_stat_snapshot_v1",
-                                    "rt_array_bytes_validate",
-                                    "rt_array_bytes_copy_checked",
-                                ] {
-                                    if !owned.contains(symbol) {
-                                        return Err(format!(
-                                            "bootstrap native-all runtime lacks array owner `{symbol}`"
-                                        ));
-                                    }
-                                    roots.push(symbol.to_string());
-                                }
-                            }
                             Self::add_elf_undefined_roots(&mut cmd, &roots);
                             cmd.arg(runtime_lib);
                         }
@@ -2370,16 +2219,6 @@ int main(int argc, char** argv) {
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
         }
-        // Extra search paths for cross links whose target sysroot lacks the
-        // platform libraries (e.g. riscv64 sqlite3/z/zstd/tinfo fetched
-        // rootless into a local deb root). The platform config above is
-        // hardcoded and the cross gcc driver ignores LIBRARY_PATH, so this
-        // explicit knob is the only rootless injection point.
-        if let Some(extra_paths) = std::env::var_os("SIMPLE_LINK_LIBRARY_PATHS") {
-            for path in std::env::split_paths(&extra_paths) {
-                cmd.arg(format!("-L{}", path.display()));
-            }
-        }
         let omit_unwind = is_linux_target
             && selected_runtime
                 .as_ref()
@@ -2471,16 +2310,6 @@ int main(int argc, char** argv) {
                 if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
                     provider_paths.push(core_runtime.as_path());
                 }
-                // Cycle-170: the bootstrap mutex core-C capsule carries fresh
-                // C-runtime exports (the rt_secure_temp_dir split pair) that
-                // are absent from the authority archives. Without this scan
-                // the stub generator never sees them in `defined`, fabricates
-                // weak return-3 stubs, and the real definitions never bind
-                // (measured: set_parent returned 3 with the argument
-                // crossing intact).
-                if let Some(mutex_runtime) = bootstrap_mutex_runtime.as_ref() {
-                    provider_paths.push(mutex_runtime.as_path());
-                }
                 provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
                 let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
                 cmd.arg(&stubs_o);
@@ -2543,11 +2372,9 @@ int main(int argc, char** argv) {
             // (measured 4x in simple_native_all.lib). Nothing depends on it:
             // the runtime archive's retention roots are emitted unconditionally
             // on the non-force path above, and SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1
-            // remains the escape hatch. Duplicate definitions are tolerated
-            // here; unresolved symbols are NOT -- they fail this link and are
-            // handled by the trap-stub retry below (see
-            // msvc_stub_fallback_link_args).
-            msvc_link_args.extend(msvc_stub_fallback_link_args().iter().map(|s| s.to_string()));
+            // remains the escape hatch. `/FORCE:MULTIPLE,UNRESOLVED` stays --
+            // that is what makes the stub-fallback path tolerant.
+            msvc_link_args.push("/FORCE:MULTIPLE,UNRESOLVED".to_string());
         }
 
         if self.config.strip {
@@ -2684,30 +2511,6 @@ int main(int argc, char** argv) {
             Ok(())
         } else {
             let diagnostics = link_failure_output(&output_result.stdout, &output_result.stderr);
-            // Diagnosability (2026-10-11): the bootstrap links with
-            // SIMPLE_NO_STUB_FALLBACK=1, so the parity-stub retry above is off
-            // and an undefined symbol is (correctly) fatal. lld-link prints it
-            // AFTER hundreds of /FORCE:MULTIPLE duplicate warnings, so name the
-            // undefined set first and say why only this lane sees it. See
-            // doc/08_tracking/bug/stage2_link_undefined_diag_externs_2026-10-11.md.
-            #[cfg(target_os = "windows")]
-            let diagnostics = {
-                let undefined = super::stubs::lld_link_undefined_symbols(&diagnostics);
-                if is_msvc && strict_no_stub_fallback && !undefined.is_empty() {
-                    format!(
-                        "{} undefined symbol(s) with SIMPLE_NO_STUB_FALLBACK=1: {}\n\
-note: on Windows the module archive is /WHOLEARCHIVE'd and lld-link resolves before /OPT:REF, so an \
-extern declared by ANY module in the closure must be defined even if nothing calls it (ELF/Mach-O drop \
-the dead section first). Define the symbol in the runtime lane this link uses, or keep the declaring \
-module out of the closure.\n{}",
-                        undefined.len(),
-                        undefined.join(", "),
-                        diagnostics
-                    )
-                } else {
-                    diagnostics
-                }
-            };
             if selected_runtime
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)
@@ -2846,8 +2649,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                     let mut v = vec![];
                     #[cfg(target_os = "macos")]
                     for p in [
-                        "/opt/homebrew/opt/llvm/bin/clang",
                         "/opt/homebrew/opt/llvm@18/bin/clang",
+                        "/opt/homebrew/opt/llvm/bin/clang",
                         "/usr/local/opt/llvm/bin/clang",
                     ] {
                         if std::path::Path::new(p).exists() && !v.contains(&p.to_string()) {
@@ -3521,139 +3324,6 @@ mod linker_tests {
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    #[test]
-    fn in_process_elf_globals_match_nm_including_weak_undefined() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("symbols.c");
-        let object = dir.path().join("symbols.o");
-        std::fs::write(
-            &source,
-            "extern int required_missing(void);\n\
-             extern int weak_missing(void) __attribute__((weak));\n\
-             static int local_hidden(void) { return 3; }\n\
-             int __module_init_fixture(void) { return local_hidden() + required_missing() +\n\
-                 (weak_missing ? weak_missing() : 0); }\n",
-        )
-        .unwrap();
-        assert!(std::process::Command::new("cc")
-            .arg("-c")
-            .arg(&source)
-            .arg("-o")
-            .arg(&object)
-            .status()
-            .unwrap()
-            .success());
-
-        let output = nm_command().unwrap().arg("-g").arg(&object).output().unwrap();
-        assert!(output.status.success());
-        let nm_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.split_whitespace().last().map(str::to_string))
-            .collect();
-        let actual = NativeProjectBuilder::read_global_symbols(&object).unwrap();
-        assert_eq!(actual, nm_names);
-        assert!(actual.contains(&"__module_init_fixture".to_string()));
-        assert!(!actual.contains(&"local_hidden".to_string()));
-
-        let undefined = NativeProjectBuilder::read_undefined_symbol_set(&object).unwrap();
-        assert!(undefined.contains("required_missing"));
-        assert!(undefined.contains("weak_missing"));
-        assert!(!undefined.contains("__module_init_fixture"));
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    #[test]
-    fn defined_symbol_set_excludes_weak_undefined_references() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("weakref.c");
-        let object = dir.path().join("weakref.o");
-        std::fs::write(
-            &source,
-            "extern int weak_missing(void) __attribute__((weak));\n\
-             extern int weak_data_missing __attribute__((weak));\n\
-             int weak_defined(void) __attribute__((weak));\n\
-             int weak_defined(void) { return 1; }\n\
-             int strong_defined(void) { return weak_missing ? weak_missing() : weak_data_missing; }\n",
-        )
-        .unwrap();
-        assert!(std::process::Command::new("cc")
-            .arg("-c")
-            .arg(&source)
-            .arg("-o")
-            .arg(&object)
-            .status()
-            .unwrap()
-            .success());
-        let defined = NativeProjectBuilder::read_defined_symbol_set(&object).unwrap();
-        assert!(defined.contains("strong_defined"));
-        assert!(defined.contains("weak_defined"));
-        // A weak undefined reference (nm `w`/`v`) is not a definition: counting
-        // it made Stage4 request `__pthread_unwind_next` from the C capsule.
-        assert!(!defined.contains("weak_missing"));
-        assert!(!defined.contains("weak_data_missing"));
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    #[test]
-    fn in_process_elf_reader_rejects_corruption_and_skips_archives() {
-        let dir = tempfile::tempdir().unwrap();
-        let corrupt = dir.path().join("corrupt.o");
-        std::fs::write(&corrupt, b"\x7fELF\x02bad").unwrap();
-        assert!(NativeProjectBuilder::read_global_symbols(&corrupt).is_err());
-        assert!(NativeProjectBuilder::read_undefined_symbol_set(&corrupt).is_err());
-
-        let archive = dir.path().join("runtime.a");
-        std::fs::write(&archive, b"!<arch>\n").unwrap();
-        assert!(read_elf_relocatable_globals(&archive).unwrap().is_none());
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn in_process_coff_globals_match_nm_including_weak_external() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("symbols.c");
-        let object = dir.path().join("symbols.o");
-        std::fs::write(
-            &source,
-            "extern int required_missing(void);\n\
-             extern int weak_missing(void) __attribute__((weak));\n\
-             static int local_hidden(void) { return 3; }\n\
-             int __module_init_fixture(void) { return local_hidden() + required_missing() +\n\
-                 (weak_missing ? weak_missing() : 0); }\n",
-        )
-        .unwrap();
-        let cc = std::env::var("CC").unwrap_or_else(|_| "clang-cl".to_string());
-        assert!(std::process::Command::new(&cc)
-            .arg("-c")
-            .arg(&source)
-            .arg(format!("-Fo{}", object.display()))
-            .status()
-            .unwrap()
-            .success());
-        assert!(read_coff_relocatable_globals(&object).unwrap().is_some());
-
-        let output = nm_command().unwrap().arg("-g").arg(&object).output().unwrap();
-        assert!(output.status.success());
-        let nm_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.split_whitespace().last().map(str::to_string))
-            .collect();
-        let actual = NativeProjectBuilder::read_global_symbols(&object).unwrap();
-        assert_eq!(actual, nm_names);
-        assert!(actual.contains(&"__module_init_fixture".to_string()));
-        assert!(!actual.contains(&"local_hidden".to_string()));
-
-        let undefined = NativeProjectBuilder::read_undefined_symbol_set(&object).unwrap();
-        assert!(undefined.contains("required_missing"));
-        assert!(undefined.contains("weak_missing"));
-        assert!(!undefined.contains("__module_init_fixture"));
-
-        let archive = dir.path().join("runtime.lib");
-        std::fs::write(&archive, b"!<arch>\n").unwrap();
-        assert!(read_coff_relocatable_globals(&archive).unwrap().is_none());
-    }
-
     #[cfg(unix)]
     #[test]
     fn failed_elf32_wrap_preserves_elf64_bytes_when_output_has_elf64_extension() {
@@ -3737,34 +3407,6 @@ mod linker_tests {
         assert_eq!(
             clang_cl_whole_archive_arg(Path::new("simple_native_all.lib")),
             "/WHOLEARCHIVE:simple_native_all.lib"
-        );
-    }
-
-    #[test]
-    fn msvc_stub_fallback_link_args_are_single_lld_link_options() {
-        let args = msvc_stub_fallback_link_args();
-        assert_eq!(args, &["/FORCE:MULTIPLE"]);
-        for arg in args {
-            // lld-link reads a comma-joined /FORCE value as an input path.
-            assert!(!arg.contains(','), "{arg} is not a single lld-link option");
-            assert!(!arg.eq_ignore_ascii_case("/FORCE:UNRESOLVED"));
-            assert!(!arg.eq_ignore_ascii_case("/FORCE"));
-        }
-
-        // The MSVC platform config contributes nothing before `/link`; the
-        // GNU/MinGW/ELF/Mach-O spellings stay as they were.
-        let msvc = Target::parse("x86_64-pc-windows-msvc").unwrap();
-        let msvc_config = simple_common::platform::link_config::PlatformLinkConfig::for_target(&msvc);
-        assert!(msvc_config.unresolved_symbol_flags.is_empty());
-        let mingw_config = simple_common::platform::link_config::PlatformLinkConfig::windows_mingw();
-        assert!(mingw_config
-            .unresolved_symbol_flags
-            .iter()
-            .all(|flag| flag.starts_with("-Wl,")));
-        let linux = Target::parse("x86_64-unknown-linux-gnu").unwrap();
-        assert_eq!(
-            simple_common::platform::link_config::PlatformLinkConfig::for_target(&linux).unresolved_symbol_flags,
-            vec!["-Wl,--allow-multiple-definition", "-Wl,--unresolved-symbols=ignore-all"]
         );
     }
 

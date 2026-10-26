@@ -22,24 +22,10 @@
 # (src/compiler_rust/lib/std/src/sdn/serializer.spl).
 
 use std.common.sdn.value.{SdnValue}
-use std.common.sdn.structural_scalar_value_v1.{sdn_float_spelling_v1}
 
 # Serialize an SdnValue to canonical SDN text.
 pub fn sdn_encode_canonical(v: SdnValue) -> text:
     _sdn_enc(v)
-
-# Exact byte count using the same quote decision as the writer. Callers can
-# enforce output bounds before allocating escaped strings or table rows.
-pub fn sdn_encoded_text_size_v1(s: text) -> i64:
-    if _sdn_enc_bare_ok(s): return s.len()
-    var size = s.len() + 2
-    var index = 0
-    while index < s.len():
-        val ch = s.byte_at(index)
-        if ch == 92 or ch == 34 or ch == 10 or ch == 9 or ch == 13:
-            size = size + 1
-        index = index + 1
-    size
 
 fn _sdn_enc(v: SdnValue) -> text:
     match v:
@@ -104,7 +90,7 @@ fn _sdn_enc_table(headers: [text], rows: [[SdnValue]]) -> text:
 fn _sdn_enc_bare_ok(s: text) -> bool:
     if s == "" or s == "null" or s == "true" or s == "false":
         return false
-    if _sdn_enc_is_int(s) or sdn_float_spelling_v1(s):
+    if _sdn_enc_is_int(s) or _sdn_enc_is_float(s):
         return false
     _sdn_enc_all_safe_chars(s)
 
@@ -132,7 +118,30 @@ fn _sdn_enc_is_int(s: text) -> bool:
         i = i + 1
     true
 
+fn _sdn_enc_is_float(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    if s.substring(0, 1) == "-":
+        i = 1
+    if i >= s.len():
+        return false
+    val digits = "0123456789"
+    var dots = 0
+    var seen_digit = false
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == ".":
+            dots = dots + 1
+        else:
+            if digits.contains(ch):
+                seen_digit = true
+            else:
+                return false
+        i = i + 1
+    seen_digit and dots == 1
 
+# Escape a string for a quoted SDN literal (mirror of the parser's unescape).
 fn _sdn_enc_escape(s: text) -> text:
     var out = ""
     var i = 0

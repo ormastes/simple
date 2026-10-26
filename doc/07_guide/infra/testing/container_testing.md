@@ -116,7 +116,7 @@ Tests are categorized into resource tiers. Configure in `simple.test.sdn`:
 
 ### Tagging Tests with Profiles
 
-```text
+```simple
 # Fast (default -- no tag needed)
 describe "String.trim":
     it "removes whitespace":
@@ -348,12 +348,3 @@ wait
 4. **Use mocks for I/O** -- mock file/network operations in unit tests
 5. **Clean up resources** -- close files, connections in `after_each` hooks
 6. **Document assumptions** -- note why a test needs intensive/critical profile
-
-## Doctest Sanity Block
-
-The snippets above are tag/profile references that only run inside the full
-project test harness; the block below keeps one runnable doctest.
-
-```simple
-val container_guide_sanity_ok = (1 + 1) == 2
-```

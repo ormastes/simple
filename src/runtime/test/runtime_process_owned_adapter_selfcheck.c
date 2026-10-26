@@ -102,22 +102,6 @@ void* rt_alloc(int64_t size) {
 }
 void rt_free(void* ptr) { free(ptr); }
 void rt_array_free(SplArray* array) { if (array) { free(array->items); free(array); } }
-/* Registered-tuple owner shape (runtime_native.c rt_tuple_*): the owned
- * `*_value` capsules return a tuple handle, read back through rt_tuple_get. */
-int64_t rt_tuple_new(int64_t len) {
-    SplArray* tuple = rt_array_new(len);
-    if (!tuple) return 0;
-    tuple->len = len;
-    return (int64_t)(uintptr_t)tuple;
-}
-int8_t rt_tuple_set(int64_t tuple, int64_t idx, int64_t value) {
-    SplArray* array = (SplArray*)(uintptr_t)tuple;
-    if (!array || idx < 0 || idx >= array->len) return 0;
-    array->items[idx].as_int = value; return 1;
-}
-int64_t rt_tuple_get(int64_t tuple, int64_t idx) {
-    return rt_array_get((SplArray*)(uintptr_t)tuple, idx);
-}
 int64_t rt_free_deep(int64_t value) {
     for (int i = 0; i < text_count; i++) if (texts[i].handle == value) { free((void*)texts[i].data); return 1; }
     return 0;
@@ -204,9 +188,9 @@ int main(void) {
 
     int64_t* tuple = rt_process_run_owned_bounded_value("/bin/sh", 7, args, 2000, 32);
     assert(tuple);
-    assert(rt_string_len(rt_tuple_get((int64_t)(uintptr_t)tuple, 0)) == 2);
-    assert(memcmp(rt_string_data(rt_tuple_get((int64_t)(uintptr_t)tuple, 0)), "ok", 2) == 0);
-    SplArray* receipt = (SplArray*)(uintptr_t)rt_tuple_get((int64_t)(uintptr_t)tuple, 2);
+    assert(rt_string_len(tuple[0]) == 2);
+    assert(memcmp(rt_string_data(tuple[0]), "ok", 2) == 0);
+    SplArray* receipt = (SplArray*)(uintptr_t)tuple[2];
     assert(rt_array_len(receipt) == 19);
     assert(rt_array_get(receipt, 0) == RT_OWNED_PROCESS_RECEIPT_VERSION);
     assert(rt_array_get(receipt, 3) > 0 && rt_array_get(receipt, 5) > 0);
@@ -214,7 +198,7 @@ int main(void) {
 
     int64_t* observed_tuple = rt_process_run_owned_observed_bounded_value("/bin/sh", 7, args, 2000, 32);
     assert(observed_tuple);
-    SplArray* observed = (SplArray*)(uintptr_t)rt_tuple_get((int64_t)(uintptr_t)observed_tuple, 2);
+    SplArray* observed = (SplArray*)(uintptr_t)observed_tuple[2];
     assert(rt_array_len(observed) == 30);
     assert(rt_array_get(observed, 19) == RT_OWNED_PROCESS_OBSERVATION_VERSION);
     assert(rt_array_get(observed, 20) & RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE);
@@ -226,7 +210,7 @@ int main(void) {
     int64_t* tree_tuple = rt_process_run_owned_observed_bounded_value(
         "/bin/sh", 7, args_of(tree_values, 2), 2000, 32);
     assert(tree_tuple);
-    SplArray* tree_observed = (SplArray*)(uintptr_t)rt_tuple_get((int64_t)(uintptr_t)tree_tuple, 2);
+    SplArray* tree_observed = (SplArray*)(uintptr_t)tree_tuple[2];
     assert(rt_array_get(tree_observed, 20) & RT_PROCESS_EVIDENCE_SAMPLED_TREE);
     assert(rt_array_get(tree_observed, 24) > 0);
     assert(rt_array_get(tree_observed, 27) >= 2);
@@ -236,7 +220,7 @@ int main(void) {
     int64_t* signal_tuple = rt_process_run_owned_observed_bounded_value(
         "/bin/sh", 7, args_of(signal_values, 2), 2000, 32);
     assert(signal_tuple);
-    SplArray* signal_observed = (SplArray*)(uintptr_t)rt_tuple_get((int64_t)(uintptr_t)signal_tuple, 2);
+    SplArray* signal_observed = (SplArray*)(uintptr_t)signal_tuple[2];
     /* The typed signal is the oracle.  The compatibility exit code remains
      * diagnostic evidence and must never be used to infer this cause. */
     assert(rt_array_get(signal_observed, 28) == SIGSEGV);

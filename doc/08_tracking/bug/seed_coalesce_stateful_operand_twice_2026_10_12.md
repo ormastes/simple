@@ -1,6 +1,5 @@
 # Seed compiled coalesce duplicates a stateful operand
 
-Status: open; caller workaround active, seed compiler repair pending.
 Date: 2026-10-12. Status: OPEN compiler defect; caller workaround committed and Phase1 encoder regression passed.
 Bug key: `seed_coalesce_stateful_operand_twice_2026_10_12`.
 Owner scopes: Rust seed HIR lowering; generated pure-Simple AST semantic hash finish and its generator.
@@ -41,13 +40,3 @@ Root's admitted, failed-only attempt3 used the actual generated production owner
 Receipt: `build/native_probe/phase1-shell-encoder-20261012-root/RESULT3.json`, SHA-256 `26a488dbd6a6d650193823dd0992b8f825a74638c8da8b3edfd37b03624ed626`. Actual log: `encoder-run3/child.log`, SHA-256 `1dfa0c9baa5d46fd68254b3476acf6bc32d8e652c723d53c29a6fd39ce960d4a`; process evidence in `encoder-run3/receipt.env`. This verifies the local caller workaround and real encoder outputs under Phase1. It does not establish a deployed seed lowering repair, native serializer parity, Phase3, full-suite, or performance qualification.
 
 Encoder criterion attempts used: 3 of 3; criterion PASS and closed. Do not replay encoder or the separately passed storage test. True seed lowering proposals and their side-effect-count tests remain separate and unrun; qualified bug database reconciliation remains pending. The bootstrap snapshot at 0defcbb is now terminal before compiler start because of a collector RSS enumeration error, with its cycle3/attempt3 receipt preserved. That source snapshot remains unchanged; the caller workaround only enters a later rebuilt snapshot.
-
-## release_phase3 port linkage (2026-10-19)
-
-The original recovery commit `0defcbb2ec87ac187e480c618b3b23f9818f1f7b` and
-workaround commit `4f5cf392ec9` exist only in a local worktree. On the
-release_phase3 port (PR #3803) the workaround was re-applied to upstream's
-`state.stream.finish_hex()` form as commit `0f7368cd97dca86e99379c5173a4c530d1d6f2c2`,
-and the source tags now use `recover=fcc1d91ea1b92992c7ebd7ba50f44379999bab4e`,
-its parent on that branch (the pre-workaround state). A row was added to
-`bug_db.sdn` by hand; qualified bug-database reconciliation remains pending.

@@ -62,7 +62,7 @@ Window Manager IPC
 
 Tracks a running OS process.
 
-```simple:skip
+```simple
 struct ProcessRecord:
     pid: i64
     app_path: text
@@ -82,7 +82,7 @@ struct ProcessRecord:
 
 Declares an app's identity and capabilities.
 
-```simple:skip
+```simple
 struct AppManifest:
     app_id: text
     exec_path: text
@@ -103,7 +103,7 @@ struct AppManifest:
 
 Wraps kernel syscall return values.
 
-```simple:skip
+```simple
 struct SyscallResult:
     is_ok: bool
     retval: i64
@@ -121,7 +121,7 @@ struct SyscallResult:
 
 Represents a window owned by a process.
 
-```simple:skip
+```simple
 struct WmWindowHandle:
     window_id: i64
     owner_pid: i64
@@ -147,7 +147,7 @@ struct WmWindowHandle:
 
 Discovers and manages app loading from the filesystem.
 
-```simple:skip
+```simple
 struct AppInfo:
     name: text
     path: text
@@ -167,7 +167,7 @@ struct AppInfo:
 
 Tracks VFS file-read proofs for acceptance testing.
 
-```simple:skip
+```simple
 struct VfsReadProof:
     app_id: text
     source: text
@@ -198,7 +198,7 @@ Proof structs for QEMU serial acceptance contract.
 
 Registry of the 6 tool apps with canonical paths.
 
-```simple:skip
+```simple
 struct LauncherAppEntry:
     canonical_id: text       # e.g. "simple_browser"
     canonical_exec: text     # e.g. "/sys/apps/simple_browser"

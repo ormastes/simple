@@ -73,7 +73,6 @@ fn decode_inline_actor_message(message: Message) -> Option<RuntimeValue> {
 /// Returns a heap-allocated actor handle.
 #[no_mangle]
 pub extern "C" fn rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeValue {
-    crate::value::note_user_threads_started();
     // Passing a heap context would donate a process-local pointer to another
     // execution domain. Reject it until actor construction accepts an owned or
     // encoded transfer packet.

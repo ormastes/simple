@@ -130,7 +130,7 @@ Constraints: `fn sort<T>(items: [T]) where T: Comparable<T>`
 
 **Import forms:**
 
-```text
+```simple
 use std.collections.List        # Specific item
 use std.collections.*           # All exports
 use my_lib.utils as U           # Alias

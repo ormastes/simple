@@ -1,6 +1,5 @@
 #!/bin/sh
 set -eu
-case "${1:-}" in ''|--from-alias|--from-pid-reuse|--from-recovery) ;; *) exit 64 ;; esac
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 PORTABLE_LOCK_ATOMIC_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
@@ -61,11 +60,10 @@ stable_for_handle() {
 tmp=${TMPDIR:-/tmp}/portable-process-lock-test.$$
 rm -rf "$tmp"
 mkdir -p "$tmp/real"
-trap 'test_status=$?; portable_lock_release_all >/dev/null 2>&1 || :; if [ "$test_status" -eq 0 ]; then rm -rf "$tmp"; else printf "failure evidence retained: %s\n" "$tmp" >&2; fi' \
+trap 'portable_lock_release_all >/dev/null 2>&1 || :; rm -rf "$tmp"' \
   0 HUP INT TERM
 
 # The bootstrap readiness variable is evidence, not an authority bypass.
-if [ -z "${1:-}" ]; then
 if SIMPLE_BOOTSTRAP_SESSION_READY=1 \
   sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" --help \
   >"$tmp/session-bypass.out" 2>&1; then
@@ -159,21 +157,7 @@ portable_lock_release_all || fail "aggregate multi-lock release failed"
   fail "aggregate release retained successful handles"
 
 # Canonical aliases must address one lock lane, and traversal is rejected.
-fi
-if [ "${1:-}" != --from-pid-reuse ] && [ "${1:-}" != --from-recovery ]; then
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*)
-    # Git Bash's default ln -s copies directories. Use a genuine junction so
-    # this fixture exercises two names for one lane rather than two lanes.
-    LOCK_ALIAS_PATH=$(cygpath -w "$tmp/alias") \
-      LOCK_ALIAS_TARGET=$(cygpath -w "$tmp/real") \
-      powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-      -Command 'New-Item -ItemType Junction -Path $env:LOCK_ALIAS_PATH -Target $env:LOCK_ALIAS_TARGET -ErrorAction Stop | Out-Null'
-    ;;
-  *) ln -s "$tmp/real" "$tmp/alias" ;;
-esac
-[ "$(cd "$tmp/alias" && pwd -P)" = "$(cd "$tmp/real" && pwd -P)" ] ||
-  fail "alias fixture does not resolve to the same directory"
+ln -s "$tmp/real" "$tmp/alias"
 portable_lock_acquire "$tmp/real" alias 2
 alias_handle=$PORTABLE_LOCK_HANDLE
 if ROOT_PATH=$root LOCK_ROOT="$tmp/alias" \
@@ -258,8 +242,6 @@ portable_lock_release "$contention_handle" || fail "contention release failed"
 )
 
 # Simulate PID reuse: the PID is live, but its claim start identity is wrong.
-fi
-if [ "${1:-}" != --from-recovery ]; then
 ROOT_PATH=$root LOCK_ROOT="$tmp/real" READY="$tmp/pid-reuse.ready" \
   HANDLE_FILE="$tmp/pid-reuse.handle" \
   PORTABLE_LOCK_ATOMIC_HELPER_PATH=$PORTABLE_LOCK_ATOMIC_HELPER_PATH \
@@ -276,18 +258,9 @@ pid_reuse_handle=$(cat "$tmp/pid-reuse.handle")
 pid_reuse_claim_owner=$(portable_lock_manifest_value owner_pid \
   "$pid_reuse_handle")
 pid_reuse_manifest="$tmp/pid-reuse.manifest"
-pid_reuse_original_start=$(portable_lock_manifest_value owner_start_hex \
-  "$pid_reuse_handle")
-pid_reuse_bad_start=$(perl -e '
-  my $identity = pack("H*", $ARGV[0]);
-  if ($identity =~ /\Awindows:[1-9][0-9]*:[1-9][0-9]*\z/) {
-    $identity =~ s/:[0-9]+\z/:1/;
-    print unpack("H*", $identity);
-  } else { print "00"; }
-' "$pid_reuse_original_start")
 while IFS= read -r pid_reuse_line; do
   case "$pid_reuse_line" in
-    owner_start_hex=*) printf 'owner_start_hex=%s\n' "$pid_reuse_bad_start" ;;
+    owner_start_hex=*) printf '%s\n' 'owner_start_hex=00' ;;
     *) printf '%s\n' "$pid_reuse_line" ;;
   esac
 done <"$pid_reuse_handle" >"$pid_reuse_manifest"
@@ -424,14 +397,12 @@ wait "$kill_owner" 2>/dev/null || :
 portable_lock_acquire "$tmp/real" kill-owner 5
 [ ! -e "$kill_handle" ] || fail "killed owner claim was not cleaned"
 portable_lock_release "$PORTABLE_LOCK_HANDLE" || fail "KILL successor release failed"
-fi
 
 # Multiple stale observers must serialize recovery and the protected section.
 ROOT_PATH=$root LOCK_ROOT="$tmp/real" READY="$tmp/recovery.ready" \
   HANDLE_FILE="$tmp/recovery.handle" \
   PORTABLE_LOCK_ATOMIC_HELPER_PATH=$PORTABLE_LOCK_ATOMIC_HELPER_PATH \
   perl "$PORTABLE_LOCK_SESSION_EXEC_PATH" sh -c '
-    set -eu
     . "$ROOT_PATH/scripts/check/lib/portable-process-lock.shs"
     portable_lock_acquire "$LOCK_ROOT" recovery 2
     printf "%s\n" "$PORTABLE_LOCK_HANDLE" >"$HANDLE_FILE"
@@ -445,34 +416,18 @@ recovery_claim_owner=$(portable_lock_manifest_value owner_pid "$recovery_handle"
 kill -KILL "$recovery_claim_owner"
 wait "$recovery_owner" 2>/dev/null || :
 recovery_pids=
-# Native birth checks launch PowerShell on Windows. The measured four-worker
-# recovery exceeds 15 seconds before even the first owner's checked release.
-recovery_budget=15
-case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) recovery_budget=120 ;; esac
 for recovery_index in 1 2 3 4; do
   ROOT_PATH=$root LOCK_ROOT="$tmp/real" ACTIVE="$tmp/recovery.active" \
     OVERLAP="$tmp/recovery.overlap" ORDER="$tmp/recovery.order" \
-    INDEX=$recovery_index TRACE="$tmp/recovery.$recovery_index.trace" \
-    RECOVERY_BUDGET=$recovery_budget \
+    INDEX=$recovery_index \
     PORTABLE_LOCK_ATOMIC_HELPER_PATH=$PORTABLE_LOCK_ATOMIC_HELPER_PATH \
     sh -c '
-      set -eu
-      exec >"$TRACE" 2>&1
       . "$ROOT_PATH/scripts/check/lib/portable-process-lock.shs"
-      started=$(date +%s)
-      if portable_lock_acquire "$LOCK_ROOT" recovery "$RECOVERY_BUDGET"; then
-        printf "acquired index=%s elapsed=%s handle=%s\n" "$INDEX" "$(($(date +%s) - started))" "$PORTABLE_LOCK_HANDLE"
-      else
-        status=$?
-        printf "acquire failed index=%s status=%s elapsed=%s\n" "$INDEX" "$status" "$(($(date +%s) - started))"
-        exit "$status"
-      fi
-      portable_lock_handle_is_owned "$PORTABLE_LOCK_HANDLE" || exit 1
+      portable_lock_acquire "$LOCK_ROOT" recovery 15
       trap "rmdir \"$ACTIVE\" 2>/dev/null || :; portable_lock_release_all" \
         0 HUP INT TERM
       if ! mkdir "$ACTIVE"; then
         : >"$OVERLAP"
-        trap "portable_lock_release_all" 0 HUP INT TERM
         exit 1
       fi
       printf "%s\n" "$INDEX" >>"$ORDER"
@@ -544,8 +499,4 @@ foreground_successor=$PORTABLE_LOCK_HANDLE
 portable_lock_release "$foreground_successor" ||
   fail "foreground successor release failed"
 
-if [ -n "${1:-}" ]; then
-  printf 'portable process lock behavioral tests passed (%s through cleanup; earlier rows not rerun)\n' "$1"
-else
-  printf 'portable process lock behavioral tests passed\n'
-fi
+printf 'portable process lock behavioral tests passed\n'

@@ -619,75 +619,6 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
         | ast::Expr::ContractOld(expr) => expr_uses_self(expr),
         ast::Expr::UnwrapOrReturn { expr, default } => expr_uses_self(expr) || expr_uses_self(default),
         ast::Expr::DoBlock(nodes) | ast::Expr::UnsafeBlock(nodes, _) => nodes.iter().any(node_uses_self),
-        // Every remaining variant that can hold a sub-expression. A `fn`
-        // method whose ONLY self use sat inside one of these (e.g. the whole
-        // body `self.buckets.get(k) ?? []`) was classified static, so `self`
-        // lowered as an unresolved global and the JIT stubbed the body out
-        // (BrowserDomEventExecutor.listener_indices_for_target_event,
-        // 2026-10-05).
-        ast::Expr::Coalesce { expr, default }
-        | ast::Expr::UnwrapOr { expr, default }
-        | ast::Expr::CastOr { expr, default, .. } => expr_uses_self(expr) || expr_uses_self(default),
-        ast::Expr::UnwrapElse { expr, fallback_fn } | ast::Expr::CastElse { expr, fallback_fn, .. } => {
-            expr_uses_self(expr) || expr_uses_self(fallback_fn)
-        }
-        ast::Expr::CastOrReturn { expr, .. }
-        | ast::Expr::OptionalChain { expr, .. }
-        | ast::Expr::New { expr, .. }
-        | ast::Expr::Spread(expr)
-        | ast::Expr::DictSpread(expr)
-        | ast::Expr::StructSpread(expr) => expr_uses_self(expr),
-        ast::Expr::OptionalMethodCall { receiver, args, .. } => expr_uses_self(receiver) || args_use_self(args),
-        ast::Expr::FunctionalUpdate { target, args, .. } => expr_uses_self(target) || args_use_self(args),
-        ast::Expr::Slice {
-            receiver,
-            start,
-            end,
-            step,
-        } => {
-            expr_uses_self(receiver)
-                || [start, end, step]
-                    .iter()
-                    .any(|part| part.as_ref().map(|expr| expr_uses_self(expr)).unwrap_or(false))
-        }
-        ast::Expr::Range { start, end, .. } => {
-            start.as_ref().map(|expr| expr_uses_self(expr)).unwrap_or(false)
-                || end.as_ref().map(|expr| expr_uses_self(expr)).unwrap_or(false)
-        }
-        ast::Expr::Lambda { body, .. } => expr_uses_self(body),
-        ast::Expr::ListComprehension {
-            expr,
-            iterable,
-            condition,
-            ..
-        } => {
-            expr_uses_self(expr)
-                || expr_uses_self(iterable)
-                || condition.as_ref().map(|expr| expr_uses_self(expr)).unwrap_or(false)
-        }
-        ast::Expr::DictComprehension {
-            key,
-            value,
-            iterable,
-            condition,
-            ..
-        } => {
-            expr_uses_self(key)
-                || expr_uses_self(value)
-                || expr_uses_self(iterable)
-                || condition.as_ref().map(|expr| expr_uses_self(expr)).unwrap_or(false)
-        }
-        ast::Expr::LabeledTuple(fields) => fields.iter().any(|field| expr_uses_self(&field.value)),
-        ast::Expr::Go { args, body, .. } => args.iter().any(expr_uses_self) || expr_uses_self(body),
-        ast::Expr::Forall { range, predicate, .. } | ast::Expr::Exists { range, predicate, .. } => {
-            expr_uses_self(range) || expr_uses_self(predicate)
-        }
-        ast::Expr::KernelLaunch {
-            kernel,
-            grid,
-            block,
-            args,
-        } => expr_uses_self(kernel) || expr_uses_self(grid) || expr_uses_self(block) || args_use_self(args),
         _ => false,
     }
 }
@@ -713,55 +644,6 @@ mod implicit_receiver_tests {
         assert!(expr_uses_self(&Expr::Dict(vec![(self_expr(), literal("value"))])));
         assert!(expr_uses_self(&Expr::Dict(vec![(literal("key"), self_expr())])));
         assert!(!expr_uses_self(&Expr::Dict(vec![(literal("key"), literal("value"))])));
-    }
-
-    // Repro: `self.buckets.get(k) ?? []` as the whole method body.
-    #[test]
-    fn coalesce_retains_implicit_receiver() {
-        let self_field = || Expr::FieldAccess {
-            receiver: Box::new(Expr::Identifier("self".to_string())),
-            field: "buckets".to_string(),
-        };
-        let empty = || Expr::Array(Vec::new());
-        assert!(expr_uses_self(&Expr::Coalesce {
-            expr: Box::new(self_field()),
-            default: Box::new(empty()),
-        }));
-        assert!(expr_uses_self(&Expr::Coalesce {
-            expr: Box::new(empty()),
-            default: Box::new(self_field()),
-        }));
-        assert!(!expr_uses_self(&Expr::Coalesce {
-            expr: Box::new(empty()),
-            default: Box::new(empty()),
-        }));
-    }
-
-    // Generalization: the other wrapper shapes that can carry `self`.
-    #[test]
-    fn wrapper_expressions_retain_implicit_receiver() {
-        let self_expr = || Box::new(Expr::Identifier("self".to_string()));
-        assert!(expr_uses_self(&Expr::UnwrapOr {
-            expr: self_expr(),
-            default: Box::new(Expr::Nil),
-        }));
-        assert!(expr_uses_self(&Expr::OptionalChain {
-            expr: self_expr(),
-            field: "x".to_string(),
-        }));
-        assert!(expr_uses_self(&Expr::OptionalMethodCall {
-            receiver: self_expr(),
-            method: "m".to_string(),
-            args: Vec::new(),
-        }));
-        assert!(expr_uses_self(&Expr::Slice {
-            receiver: self_expr(),
-            start: None,
-            end: None,
-            step: None,
-        }));
-        assert!(expr_uses_self(&Expr::Spread(self_expr())));
-        assert!(!expr_uses_self(&Expr::Spread(Box::new(Expr::Nil))));
     }
 }
 
@@ -1073,7 +955,6 @@ impl Lowerer {
         let previous_function_line = self.current_function_line;
         let fn_flatten_owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
         let previous_function_owner = std::mem::replace(&mut self.current_function_owner, fn_flatten_owner.clone());
-        let previous_type_scope = self.enter_flatten_struct_scope();
         self.current_function_name = Some(func_name.clone());
         // Attribution anchor for the `lenient_types` unresolved-name fallback:
         // `Expr::Identifier` has no span, so the enclosing function's
@@ -1168,14 +1049,13 @@ impl Lowerer {
             } else {
                 param.mutability
             };
-            let param_index = ctx.add_local_with_inject_and_type_hint(
+            ctx.add_local_with_inject_and_type_hint(
                 param.name.clone(),
                 ty,
                 param.ty.as_ref().and_then(type_name_hint),
                 param_mutability,
                 param.inject,
             );
-            self.record_optional_trait_payload(param.ty.as_ref(), param_index, &mut ctx);
         }
 
         let params: Vec<LocalVar> = ctx.locals.clone();
@@ -1197,18 +1077,7 @@ impl Lowerer {
         };
         let effective_body: &ast::Block = driver_synthesized.as_ref().unwrap_or(&f.body);
 
-        let mut body = match self.lower_block(effective_body, &mut ctx) {
-            Ok(body) => body,
-            Err(error) => {
-                // A whole-module de-JIT names only the entry file; this names
-                // the function whose body failed (explicit `return` mismatches
-                // and field-inference failures surface here).
-                if std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
-                    eprintln!("lowering error in function {}: {error:?}", func_name);
-                }
-                return Err(error);
-            }
-        };
+        let mut body = self.lower_block(effective_body, &mut ctx)?;
         let return_type = match declared_return_type {
             Some(ty) => ty,
             None if f.name == "main" => TypeId::VOID,
@@ -1381,7 +1250,6 @@ impl Lowerer {
         self.current_function_name = previous_function_name;
         self.current_function_line = previous_function_line;
         self.current_function_owner = previous_function_owner;
-        self.module.types.replace_scope_aliases(previous_type_scope);
 
         // Use qualified name for methods (ClassName.method) for DI compatibility
         let name = if let Some(owner) = owner_type {

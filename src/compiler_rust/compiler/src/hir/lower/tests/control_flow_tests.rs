@@ -1155,10 +1155,8 @@ fn test_try_operator_on_any_subject_keeps_propagate_behavior() {
     let module = parse_and_lower("fn f(x: any) -> any:\n    return x?\n").unwrap();
     let repr = format!("{:?}", module.functions[0].body);
 
-    // The Err-variant test is part of `rt_try_is_absent` (exactly
-    // `rt_is_none || rt_enum_check_variant(.., Err)`), one call per `?`.
     assert!(
-        repr.contains("rt_try_is_absent"),
+        repr.contains("rt_enum_check_variant"),
         "`?` on an ANY subject must keep testing for the Err-tagged variant: {repr}"
     );
     assert!(

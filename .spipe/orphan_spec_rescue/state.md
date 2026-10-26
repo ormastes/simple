@@ -49,7 +49,7 @@ all 24.
 | # | mirror original | numbered home |
 |---|---|---|
 | 1–16 | `test/unit/compiler/verification/{cache_correctness, deterministic_emission, lean_basic, lean_block_integration, lean_codegen, lean_workflow, memory_capabilities, naming, proof_reference, regeneration, report_rendering, tool_checker, toolchain_detection, unified_attrs, unsupported_construct, verification_diagnostics}_spec.spl` | `test/01_unit/compiler/verification/<same>` |
-| 17 | `test/01_unit/compiler/parser_gap_array_repeat_mut_param_spec.spl` | `test/01_unit/compiler/parser_gap_array_repeat_mut_param_spec.spl` |
+| 17 | `test/unit/compiler/parser_gap_array_repeat_mut_param_spec.spl` | `test/01_unit/compiler/parser_gap_array_repeat_mut_param_spec.spl` |
 | 18–23 | `test/system/coverage/{coverage_build, coverage_check_api, coverage_core, coverage_doc_stats, coverage_runtime_ffi, coverage_test_runner}_spec.spl` | `test/03_system/coverage/<same>` |
 | 24 | `test/system/database/server/db_server_tier_spec.spl` | `test/03_system/database/server/db_server_tier_spec.spl` |
 

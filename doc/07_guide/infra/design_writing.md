@@ -32,7 +32,7 @@ User -> PaymentService -> Gateway -> Bank
 
 ## 2. Write Tests from Draft
 
-```simple:skip
+```simple
 import std.spec
 import diagram.integration.{with_all_diagrams}
 

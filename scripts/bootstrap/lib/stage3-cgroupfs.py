@@ -101,25 +101,6 @@ def populated(directory):
     return value == '1'
 
 
-def oom_kills(directory):
-    rows = [line.split() for line in read_fd(directory, 'memory.events').splitlines()]
-    values = [row[1] for row in rows if len(row) == 2 and row[0] == 'oom_kill']
-    if len(values) != 1 or not values[0].isdigit():
-        raise RuntimeError('missing or invalid parent OOM counter')
-    return int(values[0])
-
-
-def record_parent_oom(outcome, before, after):
-    if after < before:
-        raise RuntimeError('parent OOM counter decreased')
-    outcome['parent_oom_kills_after'] = after
-    outcome['parent_oom_kills_delta'] = after - before
-    # The leader can race to exit zero before another member is OOM-killed.
-    # Its original wait status remains separate from the containment outcome.
-    if after > before and outcome['exit_code'] == 0:
-        outcome['exit_code'] = 137
-
-
 def drain(directory):
     # The pinned directory FD cannot be substituted with another cgroup path.
     write_fd(directory, 'cgroup.kill', 1)
@@ -146,8 +127,6 @@ def root_run(args):
     created = []
     fds = {}
     child = None
-    parent_fd = None
-    parent_oom_before = None
     outcome = {'backend': 'cgroupfs', 'root_helper_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'root_pid': os.getpid(), 'uid': user.pw_uid, 'high_bytes': args.high * MIB, 'max_bytes': args.maximum * MIB, 'path': str(parent), 'command': command}
     def interrupted(signum, _frame):
         raise InterruptedError('root supervisor signal ' + str(signum))
@@ -159,21 +138,6 @@ def root_run(args):
         created.append(parent)
         if (parent / 'cgroup.type').read_text().strip() != 'domain':
             raise RuntimeError('fresh parent is not a domain')
-        if args.bound_supervisor:
-            # Bound both leaves without moving the privileged cleanup owner.
-            # No process exists in this fresh hierarchy until Popen below.
-            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            if populated(parent_fd):
-                raise RuntimeError('fresh bounded parent is already populated')
-            for name, value in [('memory.max', args.maximum * MIB), ('memory.oom.group', 1)]:
-                write_fd(parent_fd, name, value)
-                if read_fd(parent_fd, name) != str(value):
-                    raise RuntimeError('parent memory policy did not take effect: ' + name)
-            parent_oom_before = oom_kills(parent_fd)
-            if parent_oom_before:
-                raise RuntimeError('fresh parent already has OOM kills')
-            outcome['parent_max_bytes'] = args.maximum * MIB
-            outcome['parent_oom_kills_before'] = parent_oom_before
         # Enable only this new task-owned hierarchy, never the enclosing root.
         (parent / 'cgroup.subtree_control').write_text('+memory')
         for name in ('supervisor', 'worker'):
@@ -202,7 +166,6 @@ def root_run(args):
         child = subprocess.Popen(command, env=env, preexec_fn=enter, close_fds=True, start_new_session=True)
         outcome['coordinator_pid'] = child.pid
         outcome['exit_code'] = child.wait()
-        outcome['child_wait_status'] = outcome['exit_code']
     except BaseException as error:
         outcome['error'] = str(error)
         outcome['exit_code'] = 125
@@ -238,14 +201,6 @@ def root_run(args):
                 child.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 errors.append('coordinator did not terminate after cgroup cleanup')
-        if parent_fd is not None:
-            try:
-                if parent_oom_before is not None:
-                    record_parent_oom(outcome, parent_oom_before, oom_kills(parent_fd))
-            except BaseException as error:
-                errors.append(str(error))
-            finally:
-                os.close(parent_fd)
         if not errors:
             for path in reversed(created):
                 try:
@@ -275,16 +230,12 @@ def main():
     parser.add_argument('--maximum', type=int, required=True)
     parser.add_argument('--user', default='ormastes')
     parser.add_argument('--receipt')
-    parser.add_argument('--bound-supervisor', action='store_true',
-                        help='also enforce --maximum on the private parent containing both leaves')
     args, command = parser.parse_known_args()
     args.command = command
     if args.high <= 0 or args.maximum <= 0:
         raise RuntimeError('positive memory limits required')
     if args.mode == 'root-run':
         return root_run(args)
-    if args.bound_supervisor:
-        raise RuntimeError('--bound-supervisor is valid only for root-run')
     if not args.group:
         raise RuntimeError('worker path required')
     directory, path = validate(args.group, args.high, args.maximum)

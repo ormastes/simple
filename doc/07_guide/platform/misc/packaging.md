@@ -317,7 +317,7 @@ distribution:
 | Issue | Solution |
 |-------|----------|
 | `GLIBC_2.XX not found` | Build on older Linux or use MUSL target |
-| Cross-compilation linker not found | Install cross-compiler (clang + lld; on Windows the llvm-mingw UCRT toolchain, never GCC) |
+| Cross-compilation linker not found | Install cross-compiler (gcc-aarch64-linux-gnu, mingw-w64) |
 | UPX compression fails | Skip with `--no-compress` or update UPX |
 | `Permission denied` | `chmod +x bin/simple` |
 | Package not found | Check spelling, run `simple search <name>` |

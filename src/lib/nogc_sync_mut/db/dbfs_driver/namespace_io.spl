@@ -117,38 +117,6 @@ impl DbFsDriver:
 
     # --- open ---
 
-    fn _open_path_bounded_v1_locked(
-        path: Path, flags: OpenFlags,
-        max_visible_files: i64, max_live_file_handles: i64
-    ) -> Result<FileHandle, FsError>:
-        if max_visible_files < 0 or max_live_file_handles < 0:
-            return Err(FsError.InvalidArg)
-        # Preserve ordinary open errors before applying admission policy.
-        if (flags.bits & 512u32) != 0u32 and not flags.is_writable():
-            return Err(FsError.InvalidArg)
-        val existing = _find_inode_idx_locked(self.inst_id, path.raw)
-        if existing >= 0:
-            if (flags.bits & 64u32) != 0u32 and (flags.bits & 128u32) != 0u32:
-                return Err(FsError.AlreadyExists)
-        elif (flags.bits & 64u32) == 0u32:
-            return Err(FsError.NotFound)
-        var live_handles: i64 = 0
-        for descriptor in _dbfs_fds:
-            if descriptor.inst_id == self.inst_id and not descriptor.closed and not descriptor.is_dir:
-                live_handles = live_handles + 1
-        if live_handles >= max_live_file_handles:
-            return Err(FsError.TooLarge)
-        if existing < 0:
-            var visible_files: i64 = 0
-            for inode in _dbfs_inodes:
-                if inode.inst_id == self.inst_id and not inode.unlinked and inode.kind == DbFsKind.File:
-                    visible_files = visible_files + 1
-            if visible_files >= max_visible_files:
-                return Err(FsError.TooLarge)
-        # Counting and mutation share the same namespace transaction. Reject
-        # before creating an inode, allocating a descriptor, or truncating.
-        self._open_path_locked(path, flags)
-
     fn _open_path_locked(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
         """Open a file by path, creating it only when O_CREAT is present."""
         val raw = path.raw
@@ -797,20 +765,6 @@ impl DbFsDriver:
     fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._open_path_locked(path, flags))
-
-    fn open_path_bounded_v1(
-        path: Path, flags: OpenFlags,
-        max_visible_files: i64, max_live_file_handles: i64
-    ) -> Result<FileHandle, FsError>:
-        """Admit one open against this instance's actual namespace and handles.
-
-        Existing files remain openable at the visible-file limit. Closed and
-        directory descriptors do not consume file-handle admission. Ordinary
-        DBFS callers retain open_path's existing policy.
-        """
-        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
-        _namespace_finish(self._open_path_bounded_v1_locked(
-            path, flags, max_visible_files, max_live_file_handles))
 
     fn opendir_path(path: Path) -> Result<DirHandle, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)

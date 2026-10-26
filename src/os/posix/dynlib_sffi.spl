@@ -22,8 +22,7 @@
 # canonical packed buffers. Loader-session pinning remains a separate owner
 # rule: a successful result must not outlive the DynLibKind generation.
 
-use os.posix.dynlib.{DynLibKind, dynlib_symbol, dynlib_symbol_is_process_callable}
-use std.nogc_sync_mut.sffi.dyn_bytes_abi.{dyn_bytes_abi_pack_lens, DYN_BYTES_ABI_MAX_LEN}
+use os.posix.dynlib.{DynLibKind, dynlib_symbol}
 use os.smf.provider_query_wire.{
     encode_provider_query_request_v1, decode_provider_query_result_v1
 }
@@ -36,49 +35,25 @@ use std.nogc_sync_mut.composition.cli_command_wire.{
     CliCommandResultViewV1, encode_cli_command_request_v1,
     decode_cli_command_result_v1, cli_command_result_used_length_v1
 }
-use std.nogc_sync_mut.composition.vector_kernel_contract.{
-    SIMPLE_VECTOR_KERNELS_V1_APPLY_SYMBOL,
-    SIMPLE_VECTOR_RESPONSE_V1_SIZE,
-    SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
-    SimpleVectorKernelRequestV1, SimpleVectorKernelResponseV1
-}
-use std.nogc_sync_mut.composition.vector_kernel_wire.{
-    encode_simple_vector_request_v1, decode_simple_vector_response_v1
-}
 
 # --- Scalar runtime externs ---
 
 @unsafe(reason: "generic integer-only dynamic call has no typed ABI proof", capabilities: [ffi, raw_ptr])
 extern fn rt_dyncall_0(fn_ptr: i64) -> i64
-@unsafe(reason: "generic integer-only dynamic call has no typed ABI proof", capabilities: [ffi, raw_ptr])
 extern fn rt_dyncall_1(fn_ptr: i64, arg0: i64) -> i64
-@unsafe(reason: "generic integer-only dynamic call has no typed ABI proof", capabilities: [ffi, raw_ptr])
 extern fn rt_dyncall_2(fn_ptr: i64, arg0: i64, arg1: i64) -> i64
-@unsafe(reason: "generic integer-only dynamic call has no typed ABI proof", capabilities: [ffi, raw_ptr])
 extern fn rt_dyncall_3(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64) -> i64
-@unsafe(reason: "generic integer-only dynamic call has no typed ABI proof", capabilities: [ffi, raw_ptr])
 extern fn rt_dyncall_4(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64) -> i64
-@unsafe(reason: "generic integer-only dynamic call has no typed ABI proof", capabilities: [ffi, raw_ptr])
 extern fn rt_dyncall_5(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64) -> i64
-@unsafe(reason: "generic integer-only dynamic call has no typed ABI proof", capabilities: [ffi, raw_ptr])
 extern fn rt_dyncall_6(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64, arg5: i64) -> i64
-@unsafe(reason: "exact provider-query ABI still consumes raw pointers and an unverified function address", capabilities: [ffi, raw_ptr])
 extern fn rt_provider_query_v1_call(fn_ptr: i64, request_ptr: i64, result_ptr: i64) -> i32
-@unsafe(reason: "exact CLI-command ABI still consumes raw pointers and unverified handles", capabilities: [ffi, raw_ptr])
 extern fn rt_cli_command_v1_call(fn_ptr: i64, interface_handle: i64,
     provider_context: i64, request_ptr: i64, request_len: i64,
     result_ptr: i64, result_capacity: i64) -> i32
-@unsafe(reason: "byte-slice ABI call through an unverified loaded-component address", capabilities: [ffi, raw_ptr])
-extern fn rt_call_ptr_3(addr: i64, arg1: i64, arg2: i64, arg3: i64) -> i64
-@unsafe(reason: "foreign allocation returns a nullable raw pointer", capabilities: [ffi, raw_ptr])
 extern fn rt_alloc(size: i64) -> i64
-@unsafe(reason: "foreign deallocation consumes an owned raw pointer", capabilities: [ffi, raw_ptr])
 extern fn rt_free(ptr: i64)
-@unsafe(reason: "foreign memory fill requires validated pointer and extent", capabilities: [ffi, raw_ptr])
 extern fn rt_memset(dest: i64, value: i64, len: i64) -> i64
-@unsafe(reason: "nonnull raw store; dynamic-loader allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
-@unsafe(reason: "foreign raw bytes require validated pointer, extent, and copy ownership", capabilities: [ffi, raw_ptr])
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 
 class ProviderQueryCallV1:
@@ -93,12 +68,6 @@ class CliCommandCallV1:
     result: CliCommandResultViewV1
     diagnostic: text
 
-class VectorKernelCallV1:
-    ok: bool
-    transport_status: i64
-    response: SimpleVectorKernelResponseV1
-    diagnostic: text
-
 fn _provider_query_call_error(status: i32, diagnostic: text) -> ProviderQueryCallV1:
     ProviderQueryCallV1(
         ok: false,
@@ -107,59 +76,6 @@ fn _provider_query_call_error(status: i32, diagnostic: text) -> ProviderQueryCal
         diagnostic: diagnostic
     )
 
-fn _vector_kernel_call_error(status: i64, diagnostic: text) -> VectorKernelCallV1:
-    VectorKernelCallV1(
-        ok: false, transport_status: status,
-        response: SimpleVectorKernelResponseV1(
-            struct_size: SIMPLE_VECTOR_RESPONSE_V1_SIZE,
-            status: SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
-            bytes_written: 0, scalar_result: -1),
-        diagnostic: diagnostic)
-
-@unsafe(reason: "invokes the checked integer-only vector provider ABI over borrowed spans", capabilities: [ffi, raw_ptr])
-fn call_vector_kernel_v1(lib: DynLibKind, interface_handle: u64,
-        request: SimpleVectorKernelRequestV1) -> VectorKernelCallV1:
-    val encoded = encode_simple_vector_request_v1(request)
-    if not encoded.ok:
-        return _vector_kernel_call_error(-1, encoded.diagnostic)
-    if interface_handle == 0 or interface_handle > 9223372036854775807:
-        return _vector_kernel_call_error(-1, "vector-interface-handle-invalid")
-    if not dynlib_symbol_is_process_callable(lib, SIMPLE_VECTOR_KERNELS_V1_APPLY_SYMBOL):
-        return _vector_kernel_call_error(-1, "vector-apply-symbol-not-process-callable")
-
-    val request_ptr = rt_alloc(encoded.bytes.len())
-    if request_ptr <= 0:
-        return _vector_kernel_call_error(-1, "vector-request-allocation-failed")
-    val response_ptr = rt_alloc(SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64)
-    if response_ptr <= 0:
-        rt_free(request_ptr)
-        return _vector_kernel_call_error(-1, "vector-response-allocation-failed")
-
-    var i = 0
-    while i < encoded.bytes.len():
-        rt_ptr_write_u8(request_ptr, i, encoded.bytes[i] as i64)
-        i = i + 1
-    rt_memset(response_ptr, 165, SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64)
-    val transport_status = dynlib_call_3(
-        lib, SIMPLE_VECTOR_KERNELS_V1_APPLY_SYMBOL,
-        interface_handle as i64, request_ptr, response_ptr)
-    if transport_status != 0:
-        rt_free(response_ptr)
-        rt_free(request_ptr)
-        return _vector_kernel_call_error(
-            transport_status, "vector-provider-transport-failed")
-
-    val response_bytes = rt_bytes_from_raw(
-        response_ptr, SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64)
-    rt_free(response_ptr)
-    rt_free(request_ptr)
-    val decoded = decode_simple_vector_response_v1(response_bytes, request)
-    if not decoded.ok:
-        return _vector_kernel_call_error(-1, decoded.diagnostic)
-    VectorKernelCallV1(
-        ok: true, transport_status: 0, response: decoded.value, diagnostic: "")
-
-@unsafe(reason: "invokes an unverified provider address over owned raw buffers", capabilities: [ffi, raw_ptr])
 fn call_provider_query_v1(fn_ptr: i64, request: SimpleProviderQueryV1) -> ProviderQueryCallV1:
     val encoded = encode_provider_query_request_v1(request)
     if not encoded.ok:
@@ -202,7 +118,6 @@ fn _cli_command_call_error(status: i32, diagnostic: text) -> CliCommandCallV1:
         diagnostic: diagnostic
     )
 
-@unsafe(reason: "invokes unverified provider handles over owned raw buffers", capabilities: [ffi, raw_ptr])
 fn call_cli_command_v1(fn_ptr: i64, interface_handle: u64, provider_context: u64,
         command: text, args: [text], operation: u32, output_capacity: u32) -> CliCommandCallV1:
     if fn_ptr <= 0 or interface_handle == 0:
@@ -245,113 +160,56 @@ fn call_cli_command_v1(fn_ptr: i64, interface_handle: u64, provider_context: u64
         return _cli_command_call_error(status, "cli-command-status-mismatch")
     CliCommandCallV1(true, status, decoded, "")
 
-class BytesCallV1:
-    ok: bool
-    status: i64
-    bytes: [u8]
-    diagnostic: text
-
-fn _bytes_call_once_v1(fn_ptr: i64, input: [u8], out_cap: i64) -> BytesCallV1:
-    val in_ptr = rt_alloc(input.len() + 1)
-    if in_ptr <= 0:
-        return BytesCallV1(false, -1, [], "bytes-call-input-allocation-failed")
-    val out_ptr = rt_alloc(out_cap + 1)
-    if out_ptr <= 0:
-        rt_free(in_ptr)
-        return BytesCallV1(false, -1, [], "bytes-call-output-allocation-failed")
-    var i = 0
-    while i < input.len():
-        rt_ptr_write_u8(in_ptr, i, input[i] as i64)
-        i = i + 1
-    rt_memset(out_ptr, 0, out_cap + 1)
-    val status = rt_call_ptr_3(fn_ptr, in_ptr, out_ptr,
-        dyn_bytes_abi_pack_lens(input.len(), out_cap))
-    val bytes: [u8] = if status > 0 and status <= out_cap: rt_bytes_from_raw(out_ptr, status) else: []
-    rt_free(out_ptr)
-    rt_free(in_ptr)
-    if status < 0:
-        return BytesCallV1(false, status, [], "bytes-call-callee-error")
-    if status > out_cap:
-        return BytesCallV1(false, status, [], "bytes-call-capacity-short")
-    BytesCallV1(true, status, bytes, "")
-
-@unsafe(reason: "invokes an unverified loaded-component address over owned raw buffers", capabilities: [ffi, raw_ptr])
-fn call_bytes_fn_v1(fn_ptr: i64, input: [u8], out_cap: i64) -> BytesCallV1:
-    """Call a loaded component through the byte-slice ABI (`std.nogc_sync_mut.sffi.dyn_bytes_abi`).
-
-    Callee: `fn(in_ptr, out_ptr, lens) -> i64` with `lens = (out_cap << 32) | in_len`.
-    A return in `0..=out_cap` is the output length; a return above `out_cap`
-    is the size the callee needs, and this wrapper retries once with it;
-    a negative return is a callee error.
-    """
-    if fn_ptr <= 0:
-        return BytesCallV1(false, -1, [], "bytes-call-pointer-invalid")
-    if input.len() > DYN_BYTES_ABI_MAX_LEN or out_cap < 0 or out_cap > DYN_BYTES_ABI_MAX_LEN:
-        return BytesCallV1(false, -1, [], "bytes-call-length-invalid")
-    val first = _bytes_call_once_v1(fn_ptr: fn_ptr, input: input, out_cap: out_cap)
-    if first.ok or first.status <= out_cap or first.status > DYN_BYTES_ABI_MAX_LEN:
-        return first
-    _bytes_call_once_v1(fn_ptr: fn_ptr, input: input, out_cap: first.status)
-
 # --- Safe wrappers: resolve symbol by name, then call ---
 
-@unsafe(reason: "per-call symbol lookup feeds an untyped integer-only dynamic ABI", capabilities: [ffi, raw_ptr])
 fn dynlib_call_0(lib: DynLibKind, name: text) -> i64:
     """Resolve `name` from `lib` and call it with 0 arguments."""
     val ptr = dynlib_symbol(lib, name)
-    if ptr <= 0:
-        return if ptr < 0: ptr else: -1
+    if ptr < 0:
+        return ptr
     rt_dyncall_0(ptr)
 
-@unsafe(reason: "per-call symbol lookup feeds an untyped integer-only dynamic ABI", capabilities: [ffi, raw_ptr])
 fn dynlib_call_1(lib: DynLibKind, name: text, arg0: i64) -> i64:
     """Resolve `name` from `lib` and call it with 1 argument."""
     val ptr = dynlib_symbol(lib, name)
-    if ptr <= 0:
-        return if ptr < 0: ptr else: -1
+    if ptr < 0:
+        return ptr
     rt_dyncall_1(ptr, arg0)
 
-@unsafe(reason: "per-call symbol lookup feeds an untyped integer-only dynamic ABI", capabilities: [ffi, raw_ptr])
 fn dynlib_call_2(lib: DynLibKind, name: text, arg0: i64, arg1: i64) -> i64:
     """Resolve `name` from `lib` and call it with 2 arguments."""
     val ptr = dynlib_symbol(lib, name)
-    if ptr <= 0:
-        return if ptr < 0: ptr else: -1
+    if ptr < 0:
+        return ptr
     rt_dyncall_2(ptr, arg0, arg1)
 
-@unsafe(reason: "per-call symbol lookup feeds an untyped integer-only dynamic ABI", capabilities: [ffi, raw_ptr])
 fn dynlib_call_3(lib: DynLibKind, name: text, arg0: i64, arg1: i64, arg2: i64) -> i64:
     """Resolve `name` from `lib` and call it with 3 arguments."""
     val ptr = dynlib_symbol(lib, name)
-    if ptr <= 0:
-        return if ptr < 0: ptr else: -1
+    if ptr < 0:
+        return ptr
     rt_dyncall_3(ptr, arg0, arg1, arg2)
 
-@unsafe(reason: "per-call symbol lookup feeds an untyped integer-only dynamic ABI", capabilities: [ffi, raw_ptr])
 fn dynlib_call_4(lib: DynLibKind, name: text, arg0: i64, arg1: i64, arg2: i64, arg3: i64) -> i64:
     """Resolve `name` from `lib` and call it with 4 arguments."""
     val ptr = dynlib_symbol(lib, name)
-    if ptr <= 0:
-        return if ptr < 0: ptr else: -1
+    if ptr < 0:
+        return ptr
     rt_dyncall_4(ptr, arg0, arg1, arg2, arg3)
 
-@unsafe(reason: "per-call symbol lookup feeds an untyped integer-only dynamic ABI", capabilities: [ffi, raw_ptr])
 fn dynlib_call_5(lib: DynLibKind, name: text, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64) -> i64:
     """Resolve `name` from `lib` and call it with 5 arguments."""
     val ptr = dynlib_symbol(lib, name)
-    if ptr <= 0:
-        return if ptr < 0: ptr else: -1
+    if ptr < 0:
+        return ptr
     rt_dyncall_5(ptr, arg0, arg1, arg2, arg3, arg4)
 
-@unsafe(reason: "per-call symbol lookup feeds an untyped integer-only dynamic ABI", capabilities: [ffi, raw_ptr])
 fn dynlib_call_6(lib: DynLibKind, name: text, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64, arg5: i64) -> i64:
     """Resolve `name` from `lib` and call it with 6 arguments."""
     val ptr = dynlib_symbol(lib, name)
-    if ptr <= 0:
-        return if ptr < 0: ptr else: -1
+    if ptr < 0:
+        return ptr
     rt_dyncall_6(ptr, arg0, arg1, arg2, arg3, arg4, arg5)
 
 export ProviderQueryCallV1, call_provider_query_v1
 export CliCommandCallV1, call_cli_command_v1
-export BytesCallV1, call_bytes_fn_v1
-export VectorKernelCallV1, call_vector_kernel_v1

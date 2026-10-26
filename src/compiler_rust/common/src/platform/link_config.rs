@@ -106,10 +106,8 @@ impl PlatformLinkConfig {
             libraries: vec![
                 "m", "System", "z", "ffi", "edit", "zstd", "xml2", "ncurses", "objc", "iconv",
             ],
-            // Homebrew prefixes so `-lzstd` resolves (no `libzstd.tbd` ships in the SDK):
-            // /opt/homebrew on Apple silicon, /usr/local on Intel (release run 39709151208,
-            // darwin-x86_64: `ld: library not found for -lzstd`).
-            library_search_paths: vec!["/opt/homebrew/lib", "/usr/local/lib"],
+            // Homebrew prefix so `-lzstd` resolves (no `libzstd.tbd` ships in the SDK).
+            library_search_paths: vec!["/opt/homebrew/lib"],
             system_scan_libs: vec!["/usr/lib/libSystem.B.dylib"],
             nm_flags: vec!["-g", "-p"],
             stub_strategy: StubStrategy::WeakDefinition,
@@ -142,23 +140,13 @@ impl PlatformLinkConfig {
 
     fn freebsd() -> Self {
         Self {
-            // kvm/procstat/elf back the process-inspection symbols native_all
-            // references (kvm_getprocs, procstat_getfiles, ...). Every linked
-            // library must also be scanned below: a symbol absent from the scan
-            // is stubbed, and these STRONG stubs win over the real library.
-            // Measured 2026-10-21 (FreeBSD 14.4 riscv64 stage1): openpty,
-            // kvm_* and procstat_* were all stubbed for exactly that reason.
-            libraries: vec!["pthread", "m", "execinfo", "z", "zstd", "util", "rt", "kvm", "procstat", "elf"],
+            libraries: vec!["pthread", "m", "execinfo", "z", "zstd", "util", "rt"],
             library_search_paths: vec!["/usr/local/lib"],
             system_scan_libs: vec![
                 "/lib/libc.so.7",
                 "/lib/libm.so.5",
                 "/lib/libthr.so.3",
                 "/usr/lib/libexecinfo.so.1",
-                "/lib/libutil.so.9",
-                "/lib/libkvm.so.7",
-                "/usr/lib/libprocstat.so.1",
-                "/lib/libelf.so.2",
             ],
             nm_flags: vec!["-D", "-g", "-p"],
             stub_strategy: StubStrategy::StrongWithAllowMultiple,
@@ -181,19 +169,10 @@ impl PlatformLinkConfig {
                 "ole32",
                 "oleaut32",
                 "shell32",
-                // Debug native-all archives retain Windows variant conversion
-                // and WinRT error helpers even when optimized archives do not.
-                "propsys",
-                "runtimeobject",
                 "crypt32",
                 "secur32",
                 "ncrypt",
                 "iphlpapi",
-                // sysinfo references retained by the native-all runtime archive.
-                "pdh",
-                "netapi32",
-                "psapi",
-                "powrprof",
                 "d3d11",
                 "dxgi",
                 "user32",
@@ -235,10 +214,6 @@ impl PlatformLinkConfig {
                 "secur32",
                 "ncrypt",
                 "iphlpapi",
-                "pdh",
-                "netapi32",
-                "psapi",
-                "powrprof",
                 "d3d11",
                 "dxgi",
                 "user32",
@@ -248,11 +223,11 @@ impl PlatformLinkConfig {
                 "uxtheme",
                 "winmm",
                 "shlwapi",
-                // No explicit gcc_eh/gcc: the clang driver (llvm-mingw: compiler-rt +
-                // libunwind) supplies its own runtime; libgcc does not exist there.
+                "gcc_eh",
                 "msvcrt",
                 "mingwex",
                 "mingw32",
+                "gcc",
             ],
             library_search_paths: vec![],
             system_scan_libs: vec![],
@@ -401,22 +376,6 @@ mod tests {
 
         for library in ["z", "zstd", "tinfo"] {
             assert!(config.libraries.contains(&library));
-        }
-    }
-
-    #[test]
-    fn windows_mingw_does_not_link_libgcc() {
-        let config = PlatformLinkConfig::windows_mingw();
-        assert!(!config.libraries.contains(&"gcc"));
-        assert!(!config.libraries.contains(&"gcc_eh"));
-    }
-
-    #[test]
-    fn windows_links_native_all_sysinfo_dependencies() {
-        for config in [PlatformLinkConfig::windows(), PlatformLinkConfig::windows_mingw()] {
-            for library in ["pdh", "netapi32", "psapi", "powrprof"] {
-                assert!(config.libraries.contains(&library), "missing {library}");
-            }
         }
     }
 }

@@ -133,12 +133,10 @@ pub use channels::RuntimeChannel;
 pub use collections::{
     rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_extend_i64, rt_array_free, rt_array_free_deep,
     rt_array_first, rt_array_get, rt_array_get_i64_raw, rt_array_get_text, rt_array_header_ptr, rt_array_len,
-    rt_array_len_safe, rt_arm_array_get_byte_u32, rt_arm_array_len_u32, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_push_i64_raw,
+    rt_array_len_safe, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_push_i64_raw,
     rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
     rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
-    rt_transient_array_scope_state_v1,
-    rt_transient_heap_promote, rt_transient_heap_promote_share_begin, rt_transient_heap_promote_share_end,
-    transient_heap_scope_paused, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
+    rt_transient_heap_promote, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
     rt_bytes_u8_at, rt_bytes_u8_set, rt_collection_set, rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get,
     rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
     rt_string_chars, rt_string_lines, rt_string_byte_at, rt_string_char_code_at, rt_string_concat, rt_string_contains,
@@ -152,19 +150,17 @@ pub use collections::{
     rt_string_partition, rt_string_rpartition, rt_string_sorted, rt_take, rt_string_parse_int, rt_string_split,
     rt_string_split_limit, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_int_lenient,
     rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_string_trim_end, rt_string_trim_start, rt_to_string,
-    rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set, rt_typed_bytes_u8_data_at, rt_array_is_byte_packed, rt_typed_bytes_u8_push,
+    rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set, rt_typed_bytes_u8_data_at, rt_typed_bytes_u8_push,
     rt_typed_words_u32_at, rt_typed_words_u32_data_at, rt_typed_words_u32_push, rt_typed_words_u32_push_known_at,
     rt_typed_words_u32_push_known_data_at, rt_typed_words_u32_set, rt_typed_words_u32_store_known_data_at,
     rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_data_at,
     rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push, rt_typed_words_u64_push_known_at,
     rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at, rt_typed_words_u64_set,
-    rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked, rt_typed_words_i64_at,
-    rt_typed_words_i64_push, rt_typed_words_i64_set,
+    rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
 };
-pub use collections::note_user_threads_started;
 pub(crate) use collections::{byte_array_bytes, byte_array_write, word_array_le_bytes};
 pub use collections::{
-    rt_any_add, rt_tagged_add, rt_array_all, rt_array_any, rt_array_each, rt_array_filter, rt_array_find, rt_array_map,
+    rt_any_add, rt_array_all, rt_array_any, rt_array_each, rt_array_filter, rt_array_find, rt_array_map,
     rt_array_reduce, rt_map,
 };
 pub use utf8_kernels::{
@@ -243,10 +239,8 @@ pub use hpcollections::{
 
 // Re-export object SFFI functions
 pub use objects::{
-    hash_variant_discriminant, rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_release,
-    rt_closure_retain, rt_closure_set_capture, closure_pin_stats,
+    hash_variant_discriminant, rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture,
     rt_enum_check_discriminant, rt_enum_check_variant, rt_enum_discriminant, rt_enum_id, rt_enum_new, rt_enum_payload,
-    rt_try_is_absent,
     rt_option_map,
     rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set, rt_object_new, rt_is_some,
     rt_unwrap_or_self, rt_unwrap_or_trap, rt_unwrap_or_value, rt_expect_or_trap, rt_heap_ref_wellformed,
@@ -361,7 +355,6 @@ pub use sffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_st
 // Re-export print SFFI functions
 pub use sffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
-    rt_debug_exit_success, rt_perf_dump_sdn, rt_print_err,
     rt_println_value, rt_raw_i64_to_string, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush,
     rt_stdout_write, rt_value_format_string, rt_value_to_string, rt_opt_bool_to_string, rt_opt_f64_to_string,
     rt_opt_i64_to_string,
@@ -384,7 +377,7 @@ pub use sffi::{
     rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_lexer_source_set,
     rt_lexer_source_slice, rt_path_probe, rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill,
     rt_process_run, rt_process_run_bounded, rt_process_run_inherit, rt_process_run_timeout, rt_process_spawn,
-    rt_process_spawn_async, rt_process_spawn_async_value, rt_process_spawn_guarded, rt_process_spawn_inherit, rt_process_wait, rt_set_env,
+    rt_process_spawn_async, rt_process_spawn_guarded, rt_process_spawn_inherit, rt_process_wait, rt_set_env,
     rt_term_enable_ansi, rt_term_get_size,
 };
 
@@ -502,8 +495,8 @@ pub use sffi::{
 pub use sffi::{
     rt_sha1_finish, rt_sha1_finish_base64, rt_sha1_finish_bytes, rt_sha1_free, rt_sha1_new, rt_sha1_reset,
     rt_sha1_write, rt_sha256_finish, rt_sha256_finish_bytes, rt_sha256_free, rt_sha256_new, rt_sha256_reset,
-    rt_sha256_write, rt_sha384_digest, rt_sha512_digest, rt_tls13_sha256, rt_xxhash_finish, rt_xxhash_free,
-    rt_xxhash_new, rt_xxhash_new_with_seed, rt_xxhash_reset, rt_xxhash_write, rt_xxh3_128_text,
+    rt_sha256_write, rt_tls13_sha256, rt_xxhash_finish, rt_xxhash_free, rt_xxhash_new, rt_xxhash_new_with_seed,
+    rt_xxhash_reset, rt_xxhash_write,
 };
 
 // Re-export atomic operations SFFI functions
@@ -950,8 +943,7 @@ pub use net::{
 #[cfg(feature = "runtime-tls")]
 pub use net::{
     rt_tls_client_close, rt_tls_client_connect, rt_tls_client_connect_address_with_sni_timeout,
-    rt_tls_client_connect_with_sni, rt_tls_client_read_bytes_timeout_checked, rt_tls_client_read_checked,
-    rt_tls_client_read_timeout_checked, tls_client_read_bytes_timeout,
+    rt_tls_client_connect_with_sni, rt_tls_client_read_checked, rt_tls_client_read_timeout_checked,
     rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
     rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept, rt_tls_server_close_connection,
     rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_create_on, rt_tls_server_read_checked,
@@ -1142,11 +1134,6 @@ fn clear_global_variables() {
 pub fn clear_all_runtime_registries() {
     numeric_kernels::clear_numeric_kernel_provider_cache();
     collections::clear_collection_provider_cache();
-    // The cached SIMPLE_SIMD_TIER override lives in the simd crate's host
-    // config cache (cached per epoch since 2026-10-18; a per-call getenv was
-    // an O(environ) scan on every kernel dispatch). Every registry clear must
-    // reset it too or a tier-sensitive test sees a stale epoch.
-    simple_simd::clear_host_cpu_config_cache();
 
     // Clear HP collections registries
     clear_hashmap_registry();

@@ -21,7 +21,7 @@ use std.lifecycle_persistence.{
 
 ## Define and validate a graph
 
-```text
+```simple
 fn service_graph() -> LifecycleGraph:
     LifecycleGraph(
         levels: [

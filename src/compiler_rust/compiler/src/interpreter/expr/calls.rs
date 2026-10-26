@@ -153,24 +153,6 @@ pub(super) fn eval_call_expr(
         Expr::MethodCall {
             receiver, method, args, ..
         } => {
-            // BDD negation link: `expect(x).not.to_contain(y)`. The receiver is
-            // `FieldAccess { expect(x), "not" }`, which otherwise evaluates
-            // `.not` as a field of the subject ("unknown property or method
-            // 'not' on String") and never runs the matcher.
-            if method.starts_with("to") {
-                if let Some((expect_call, true)) = super::super::peel_bdd_matcher_receiver(receiver) {
-                    return Ok(Some(super::super::evaluate_negated_bdd_matcher(
-                        expect_call,
-                        method,
-                        args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?));
-                }
-            }
             // Check if receiver is an identifier - if so, we may need to update it
             // after calling a mutating (me) method
             if let Expr::Identifier(var_name) = receiver.as_ref() {
@@ -438,7 +420,7 @@ pub(super) fn eval_call_expr(
                         let len = arr.len() as i64;
                         let real_idx = if idx < 0 { len + idx } else { idx };
                         if real_idx >= 0 && real_idx < len {
-                            let elem = arr.get_value(real_idx as usize).expect("index checked against len");
+                            let elem = arr[real_idx as usize].clone();
                             if let Value::Object { class, fields } = elem {
                                 if let Some((result, updated_elem)) = super::super::find_and_exec_method_with_self(
                                     method,
@@ -453,7 +435,7 @@ pub(super) fn eval_call_expr(
                                 )? {
                                     let mut new_arr = (*arr).clone();
                                     new_arr[real_idx as usize] = updated_elem;
-                                    let new_arr_val = Value::array(new_arr);
+                                    let new_arr_val = Value::Array(std::sync::Arc::new(new_arr));
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     if !env.is_local(arr_name)
                                         && super::super::MODULE_GLOBALS
@@ -524,27 +506,6 @@ pub(super) fn eval_call_expr(
             }
         }
         Expr::FieldAccess { receiver, field } => {
-            // Paren-less arg-less BDD matcher: `expect(x).to_be_nil` (or
-            // `expect(x).not.to_be_nil`) parses as a FieldAccess, not a call.
-            if super::super::is_argless_bdd_matcher(field) {
-                if let Some((expect_call, negated)) = super::super::peel_bdd_matcher_receiver(receiver) {
-                    let result = if negated {
-                        super::super::evaluate_negated_bdd_matcher(
-                            expect_call,
-                            field,
-                            &[],
-                            env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?
-                    } else {
-                        evaluate_method_call(expect_call, field, &[], env, functions, classes, enums, impl_methods)?
-                    };
-                    return Ok(Some(result));
-                }
-            }
             // Support module-style access (lib.foo) by resolving directly to functions/classes
             if let Expr::Identifier(module_name) = receiver.as_ref() {
                 if env.get(module_name).is_none() {
@@ -1112,12 +1073,12 @@ pub(super) fn eval_call_expr(
                 // Dict property access (e.g., dict.len, dict.is_empty)
                 // Also supports module namespace access and no-paren method calls
                 Value::Dict(ref map) => match field.as_str() {
-                    "len" => Ok(Value::Int(crate::interpreter::module_dict_len(map) as i64)),
-                    "is_empty" => Ok(Value::Bool(crate::interpreter::module_dict_len(map) == 0)),
+                    "len" => Ok(Value::Int(map.len() as i64)),
+                    "is_empty" => Ok(Value::Bool(map.is_empty())),
                     _ => {
                         // Check if this is a key in the dict (module namespace access)
-                        if let Some(value) = crate::interpreter::module_dict_get(map, field) {
-                            Ok(value)
+                        if let Some(value) = map.get(field) {
+                            Ok(value.clone())
                         } else {
                             // Try calling as a no-arg method (e.g., dict.keys, dict.values)
                             let empty_args: Vec<Argument> = vec![];

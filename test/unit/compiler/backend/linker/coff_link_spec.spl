@@ -1,0 +1,1205 @@
+use std.spec.*
+use std.spec.step
+use compiler.backend.linker.coff.coff_link.{
+    CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
+    coff_link_amd64_retained_policy, coff_link_amd64_retained_image_policy,
+    coff_link_amd64_retained_image_policy_gc,
+    coff_link_amd64_retained_image_policy_opt,
+    coff_link_amd64_retained_image_policy_options,
+    coff_link_amd64_retained_image_policy_full,
+    coff_link_arm64, coff_link_arm64_retained_policy,
+    coff_link_default_libraries, coff_attach_amd64_tls_directory,
+    coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
+    coff_sort_arm64_exception_table,
+    coff_validate_resource_sections, coff_validate_export_sections}
+use compiler.backend.linker.coff.pe_image_writer.{
+    PeImageSection, PeImagePolicy, PE_SUBSYSTEM_WINDOWS}
+use compiler.backend.linker.coff.coff_directives.{CoffExportDirective}
+use compiler.backend.linker.pe_inspect.{IMAGE_FILE_MACHINE_ARM64, pe_inspect}
+use std.io_runtime.{file_read_bytes}
+
+val COFF_FIX: text = "test/fixtures/linker/coff"
+
+fn _cl_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _cl_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result.push(((value >> 24) & 0xff) as u8)
+
+fn _cl_u64(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push(((value >> (i * 8)) & 0xff) as u8)
+        i = i + 1
+    result
+
+fn _cl_read_u32(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) |
+        ((bytes[offset + 3] as i64) << 24)
+
+fn _cl_read_u64(bytes: [u8], offset: i64) -> i64:
+    var result: i64 = 0
+    var i: i64 = 0
+    while i < 8:
+        result = result | ((bytes[offset + i] as i64) << (i * 8))
+        i = i + 1
+    result
+
+fn _cl_name(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _cl_object(symbol_name: text, section_number: i64) -> [u8]:
+    # Header 20 + section 40 + one-byte RET + symbol 18 + string size 4.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 61)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc3)
+    bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, section_number)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_comdat_object(symbol_name: text, opcode: i64) -> [u8]:
+    # One IMAGE_COMDAT_SELECT_ANY section plus its external key symbol.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 61)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60001020)
+    bytes = bytes.push(opcode as u8)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(3)
+    bytes = bytes.push(1)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x1234)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    bytes = bytes.push(0)
+    bytes = bytes.push(0)
+    bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_comdat_reference_object(symbol_name: text, target_name: text) -> [u8]:
+    # A discardable section whose sole relocation names an external.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 74)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 64)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60001020)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_u16(bytes, 4)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(3)
+    bytes = bytes.push(1)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    bytes = bytes.push(0)
+    bytes = bytes.push(0)
+    bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    bytes = _cl_name(bytes, target_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_arm64_object(symbol_name: text) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0xaa64)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 64)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc0).push(0x03).push(0x5f).push(0xd6)
+    bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_arm64_relocation_object(relocation_type: i64, field: i64,
+        field_width: i64) -> [u8]:
+    # Header 20 + section 40 + data 24 + relocation 10 + symbols 36 + strings 4.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0xaa64)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 94)
+    bytes = _cl_u32(bytes, 2)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 24)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 84)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = _cl_u32(bytes, 0xd65f03c0)
+    if field_width == 8:
+        bytes = _cl_u64(bytes, field)
+    else:
+        bytes = _cl_u32(bytes, field)
+        bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0xd65f03c0)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, relocation_type)
+    bytes = _cl_name(bytes, "_start")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    bytes = _cl_name(bytes, "target")
+    bytes = _cl_u32(bytes, 20)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_set_section_name(bytes: [u8], name: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result[20 + i] = (if i < name.len(): name.byte_at(i) else: 0) as u8
+        i = i + 1
+    result
+
+fn _cl_set_second_symbol_name(bytes: [u8], name: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result[94 + i] = (if i < name.len(): name.byte_at(i) else: 0) as u8
+        i = i + 1
+    result
+
+fn _cl_ascii(bytes: [u8], value: text, width: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < width:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0x20) as u8)
+        i = i + 1
+    result
+
+fn _cl_short_import() -> [u8]:
+    val symbol = "ExitProcess"
+    val dll = "KERNEL32.dll"
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0xffff)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, symbol.len() + dll.len() + 2)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 4)
+    var i: i64 = 0
+    while i < symbol.len():
+        bytes = bytes.push(symbol.byte_at(i) as u8)
+        i = i + 1
+    bytes = bytes.push(0)
+    i = 0
+    while i < dll.len():
+        bytes = bytes.push(dll.byte_at(i) as u8)
+        i = i + 1
+    bytes.push(0)
+
+fn _cl_archive(member: [u8]) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _cl_ascii(bytes, "!<arch>\n", 8)
+    bytes = _cl_ascii(bytes, "exit.obj/", 16)
+    bytes = _cl_ascii(bytes, "0", 12)
+    bytes = _cl_ascii(bytes, "0", 6)
+    bytes = _cl_ascii(bytes, "0", 6)
+    bytes = _cl_ascii(bytes, "100644", 8)
+    bytes = _cl_ascii(bytes, member.len().to_text(), 10)
+    bytes = bytes.push(0x60).push(0x0a)
+    for b in member: bytes = bytes.push(b)
+    if member.len() % 2 != 0: bytes = bytes.push(0x0a)
+    bytes
+
+fn _cl_directive_object(content: text) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".drectve")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, content.len())
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x200)
+    var index: i64 = 0
+    while index < content.len():
+        bytes = bytes.push(content.byte_at(index) as u8)
+        index = index + 1
+    bytes
+
+fn _cl_object_with_directive(symbol: text, directive: text) -> [u8]:
+    val symbol_offset = 101 + directive.len()
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664).push(2).push(0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, symbol_offset)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0).push(0).push(0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0).push(0).push(0).push(0).push(0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 100)
+    bytes = _cl_u32(bytes, 0).push(0).push(0).push(0).push(0)
+    bytes = _cl_u16(bytes, 0).push(0).push(0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = _cl_name(bytes, ".drectve")
+    bytes = _cl_u32(bytes, 0).push(0).push(0).push(0).push(0)
+    bytes = _cl_u32(bytes, directive.len())
+    bytes = _cl_u32(bytes, 101)
+    bytes = _cl_u32(bytes, 0).push(0).push(0).push(0).push(0)
+    bytes = _cl_u16(bytes, 0).push(0).push(0)
+    bytes = _cl_u32(bytes, 0x200)
+    bytes = bytes.push(0xc3)
+    var index: i64 = 0
+    while index < directive.len():
+        bytes = bytes.push(directive.byte_at(index) as u8)
+        index = index + 1
+    bytes = _cl_name(bytes, symbol)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20).push(2).push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_importing_object() -> [u8]:
+    # CALL rel32 ExitProcess; RET. Symbol table has _start plus the import.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 76)
+    bytes = _cl_u32(bytes, 2)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 6)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 66)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xe8).push(0).push(0).push(0).push(0).push(0xc3)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 4)
+    bytes = _cl_name(bytes, "_start")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    bytes = _cl_name(bytes, "ExitProc")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(2).push(0)
+    # Long symbol name: replace the inline truncated name with a string-table reference.
+    val second_symbol = 94
+    bytes[second_symbol] = 0
+    bytes[second_symbol + 1] = 0
+    bytes[second_symbol + 2] = 0
+    bytes[second_symbol + 3] = 0
+    bytes[second_symbol + 4] = 4
+    bytes[second_symbol + 5] = 0
+    bytes[second_symbol + 6] = 0
+    bytes[second_symbol + 7] = 0
+    bytes = _cl_u32(bytes, 16)
+    var i: i64 = 0
+    val long_name = "ExitProcess"
+    while i < long_name.len():
+        bytes = bytes.push(long_name.byte_at(i) as u8)
+        i = i + 1
+    bytes.push(0)
+
+fn _cl_weak_calling_object() -> [u8]:
+    # CALL rel32 weak; weak aliases strong through its auxiliary record.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 76)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 6)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 66)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xe8).push(0).push(0).push(0).push(0).push(0xc3)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 4)
+    bytes = _cl_name(bytes, "_start")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    bytes = _cl_name(bytes, "weak")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(105).push(1)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_name(bytes, "")
+    bytes = bytes.push(0).push(0)
+    bytes = _cl_name(bytes, "strong")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _cl_u32(bytes, 4)
+
+describe "internal freestanding Windows linker":
+    it "removes unreachable COMDATs under OPT REF":
+        val request = CoffLinkRequest(objects: [
+            _cl_comdat_object("_start", 0xc3),
+            _cl_comdat_object("dead", 0xcc)], archives: [], entry: "_start")
+        val kept = coff_link_amd64_retained_image_policy_gc(
+            request, [], PeImagePolicy.default(), 0x140000000, false).unwrap()
+        val collected = coff_link_amd64_retained_image_policy_gc(
+            request, [], PeImagePolicy.default(), 0x140000000, true).unwrap()
+        val explicitly_retained = coff_link_amd64_retained_image_policy_gc(
+            request, ["dead"], PeImagePolicy.default(), 0x140000000, true).unwrap()
+        expect(_cl_read_u32(kept, 0x188)).to_equal(2)
+        expect(_cl_read_u32(collected, 0x188)).to_equal(1)
+        expect(_cl_read_u32(explicitly_retained, 0x188)).to_equal(2)
+        expect(collected[0x200] as i64).to_equal(0xc3)
+
+        val dead_reference = CoffLinkRequest(objects: [
+            _cl_comdat_object("_start", 0xc3),
+            _cl_comdat_reference_object("dead", "missing")],
+            archives: [], entry: "_start")
+        expect(coff_link_amd64_retained_image_policy_gc(
+            dead_reference, [], PeImagePolicy.default(),
+            0x140000000, false).is_err()).to_equal(true)
+        expect(coff_link_amd64_retained_image_policy_gc(
+            dead_reference, [], PeImagePolicy.default(),
+            0x140000000, true).is_ok()).to_equal(true)
+
+        val reachable_reference = CoffLinkRequest(objects: [
+            _cl_comdat_reference_object("_start", "helper"),
+            _cl_comdat_object("helper", 0xc3)], archives: [], entry: "_start")
+        val reachable = coff_link_amd64_retained_image_policy_gc(
+            reachable_reference, [], PeImagePolicy.default(),
+            0x140000000, true).unwrap()
+        expect(_cl_read_u32(reachable, 0x188)).to_equal(5)
+
+    it "folds byte- and relocation-identical COMDATs under OPT ICF":
+        val plain_request = CoffLinkRequest(objects: [
+            _cl_comdat_object("_start", 0xc3),
+            _cl_comdat_object("twin", 0xc3)], archives: [], entry: "_start")
+        val plain = coff_link_amd64_retained_image_policy_opt(
+            plain_request, [], PeImagePolicy.default(), 0x140000000,
+            false, false).unwrap()
+        val folded = coff_link_amd64_retained_image_policy_opt(
+            plain_request, [], PeImagePolicy.default(), 0x140000000,
+            false, true).unwrap()
+        expect(_cl_read_u32(plain, 0x188)).to_equal(2)
+        expect(_cl_read_u32(folded, 0x188)).to_equal(1)
+
+        val relocated_request = CoffLinkRequest(objects: [
+            _cl_comdat_reference_object("_start", "helper"),
+            _cl_comdat_reference_object("twin", "helper"),
+            _cl_comdat_object("helper", 0xc3)], archives: [], entry: "_start")
+        val relocated_plain = coff_link_amd64_retained_image_policy_opt(
+            relocated_request, [], PeImagePolicy.default(), 0x140000000,
+            false, false).unwrap()
+        val relocated_folded = coff_link_amd64_retained_image_policy_opt(
+            relocated_request, [], PeImagePolicy.default(), 0x140000000,
+            false, true).unwrap()
+        expect(_cl_read_u32(relocated_plain, 0x188)).to_equal(9)
+        expect(_cl_read_u32(relocated_folded, 0x188)).to_equal(5)
+
+    it "resolves a reference to a SELECT_ANY COMDAT defined in several objects":
+        # The losing copy's external symbol must not count as a second
+        # definition (lld-link keeps only the selected leader's symbol).
+        val request = CoffLinkRequest(objects: [
+            _cl_comdat_reference_object("_start", "helper"),
+            _cl_comdat_object("helper", 0xc3),
+            _cl_comdat_object("helper", 0xc3)], archives: [], entry: "_start")
+        val linked = coff_link_amd64_retained_image_policy_opt(
+            request, [], PeImagePolicy.default(), 0x140000000, false, false)
+        expect(linked.is_ok()).to_equal(true)
+        expect(_cl_read_u32(linked.unwrap(), 0x188)).to_equal(5)
+
+    it "writes typed optional-header and alignment policy into PE32+":
+        val policy = PeImagePolicy(
+            subsystem: PE_SUBSYSTEM_WINDOWS,
+            stack_reserve: 0x200000, stack_commit: 0x2000,
+            heap_reserve: 0x300000, heap_commit: 0x3000,
+            dynamic_base: false, high_entropy_va: false,
+            nx_compat: false, large_address_aware: false,
+            terminal_server_aware: false, fixed_image: true,
+            section_alignment: 0x2000, file_alignment: 0x400,
+            os_version_major: 10, os_version_minor: 1,
+            image_version_major: 2, image_version_minor: 3,
+            subsystem_version_major: 6, subsystem_version_minor: 2)
+        val image = coff_link_amd64_retained_image_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], policy, 0x180000000).unwrap()
+        expect(_cl_read_u64(image, 0xb0)).to_equal(0x180000000)
+        expect(image[0xdc] as i64).to_equal(PE_SUBSYSTEM_WINDOWS)
+        expect(_cl_read_u64(image, 0xe0)).to_equal(0x200000)
+        expect(_cl_read_u64(image, 0xe8)).to_equal(0x2000)
+        expect(_cl_read_u64(image, 0xf0)).to_equal(0x300000)
+        expect(_cl_read_u64(image, 0xf8)).to_equal(0x3000)
+        expect(_cl_read_u32(image, 0xa8)).to_equal(0x2000)
+        expect(_cl_read_u32(image, 0xb8)).to_equal(0x2000)
+        expect(_cl_read_u32(image, 0xbc)).to_equal(0x400)
+        expect(image[0xc0] as i64).to_equal(10)
+        expect(image[0xc2] as i64).to_equal(1)
+        expect(image[0xc4] as i64).to_equal(2)
+        expect(image[0xc6] as i64).to_equal(3)
+        expect(image[0xc8] as i64).to_equal(6)
+        expect(image[0xca] as i64).to_equal(2)
+        expect(_cl_read_u32(image, 0x19c)).to_equal(0x400)
+        expect(image[0x400] as i64).to_equal(0xc3)
+        expect(image[0x96] as i64).to_equal(0x03)
+        expect(image[0xde] as i64).to_equal(0x00)
+        expect(image[0xdf] as i64).to_equal(0x00)
+
+        var compact = PeImagePolicy.default()
+        compact.section_alignment = 0x200
+        compact.file_alignment = 0x200
+        val compact_image = coff_link_amd64_retained_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], compact).unwrap()
+        expect(_cl_read_u32(compact_image, 0xa8)).to_equal(0x200)
+        expect(_cl_read_u32(compact_image, 0xb8)).to_equal(0x200)
+        expect(_cl_read_u32(compact_image, 0xbc)).to_equal(0x200)
+        expect(compact_image[0x200] as i64).to_equal(0xc3)
+
+    it "rejects invalid PE reserve and commit policy":
+        val invalid = PeImagePolicy(
+            subsystem: PE_SUBSYSTEM_WINDOWS,
+            stack_reserve: 0x1000, stack_commit: 0x2000,
+            heap_reserve: 0x100000, heap_commit: 0x1000,
+            dynamic_base: true, high_entropy_va: true,
+            nx_compat: true, large_address_aware: true,
+            terminal_server_aware: true, fixed_image: false,
+            section_alignment: 0x1000, file_alignment: 0x200,
+            os_version_major: 6, os_version_minor: 0,
+            image_version_major: 0, image_version_minor: 0,
+            subsystem_version_major: 6, subsystem_version_minor: 0)
+        val linked = coff_link_amd64_retained_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], invalid)
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("stack commit")
+
+        val bad_base = coff_link_amd64_retained_image_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], PeImagePolicy.default(), 0x180001000)
+        expect(bad_base.is_err()).to_equal(true)
+        expect(bad_base.unwrap_err()).to_contain("image base")
+
+        var bad_alignment = PeImagePolicy.default()
+        bad_alignment.file_alignment = 0x300
+        val bad_aligned = coff_link_amd64_retained_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], bad_alignment)
+        expect(bad_aligned.is_err()).to_equal(true)
+        expect(bad_aligned.unwrap_err()).to_contain("file alignment")
+
+        var inconsistent = PeImagePolicy.default()
+        inconsistent.dynamic_base = false
+        val bad_aslr = coff_link_amd64_retained_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], inconsistent)
+        expect(bad_aslr.is_err()).to_equal(true)
+        expect(bad_aslr.unwrap_err()).to_contain("high-entropy")
+    it "attaches TLS metadata only to a complete file-backed directory":
+        var directory: [u8] = []
+        while directory.len() < 48: directory = directory.push(0)
+        val sections = [PeImageSection(name: ".rdata", virtual_address: 0x2000,
+            virtual_size: 48, data: directory, characteristics: 0x40000040)]
+        val attached = coff_attach_amd64_tls_directory(sections, 0x2008).unwrap()
+        expect(attached[0].tls_directory_offset).to_equal(8)
+        expect(attached[0].tls_directory_size).to_equal(40)
+        expect(coff_attach_amd64_tls_directory(sections, 0x2010).is_err()).to_equal(true)
+
+        val missing_directory = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1),
+            _cl_set_section_name(_cl_object("tlsdata", 1), ".tls$A")],
+            archives: [], entry: "_start"))
+        expect(missing_directory.is_err()).to_equal(true)
+        expect(missing_directory.unwrap_err()).to_contain("_tls_used")
+
+        directory[8] = 40
+        val config_sections = [PeImageSection(name: ".rdata",
+            virtual_address: 0x2000, virtual_size: 48, data: directory,
+            characteristics: 0x40000040)]
+        val load_config = coff_attach_amd64_load_config(
+            config_sections, 0x2008).unwrap()
+        expect(load_config[0].load_config_offset).to_equal(8)
+        expect(load_config[0].load_config_size).to_equal(40)
+        directory[8] = 64
+        val oversized = [PeImageSection(name: ".rdata", virtual_address: 0x2000,
+            virtual_size: 48, data: directory, characteristics: 0x40000040)]
+        expect(coff_attach_amd64_load_config(
+            oversized, 0x2008).is_err()).to_equal(true)
+
+    it "sorts and validates AMD64 runtime-function records":
+        var records: [u8] = []
+        records = _cl_u32(records, 0x3000)
+        records = _cl_u32(records, 0x3020)
+        records = _cl_u32(records, 0x5000)
+        records = _cl_u32(records, 0x1000)
+        records = _cl_u32(records, 0x1010)
+        records = _cl_u32(records, 0x4000)
+        val pdata = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 24, data: records, characteristics: 0x40000040)
+        val sorted = coff_sort_amd64_exception_table([pdata]).unwrap()
+        expect(sorted[0].data[0] as i64).to_equal(0)
+        expect(sorted[0].data[1] as i64).to_equal(0x10)
+        expect(sorted[0].data[12] as i64).to_equal(0)
+        expect(sorted[0].data[13] as i64).to_equal(0x30)
+
+        var malformed = records
+        malformed = malformed.push(0)
+        val bad = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 25, data: malformed, characteristics: 0x40000040)
+        expect(coff_sort_amd64_exception_table([bad]).is_err()).to_equal(true)
+        var reversed: [u8] = []
+        reversed = _cl_u32(reversed, 0x2020)
+        reversed = _cl_u32(reversed, 0x2010)
+        reversed = _cl_u32(reversed, 0x4000)
+        val invalid = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 12, data: reversed, characteristics: 0x40000040)
+        expect(coff_sort_amd64_exception_table(
+            [invalid]).unwrap_err()).to_contain("BeginAddress")
+
+    it "sorts and validates ARM64 runtime-function records":
+        var records: [u8] = []
+        records = _cl_u32(records, 0x3000)
+        records = _cl_u32(records, 0x25)
+        records = _cl_u32(records, 0x1000)
+        records = _cl_u32(records, 0x49)
+        val pdata = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 16, data: records, characteristics: 0x40000040)
+        val sorted = coff_sort_arm64_exception_table([pdata]).unwrap()
+        expect(sorted[0].data[0] as i64).to_equal(0)
+        expect(sorted[0].data[1] as i64).to_equal(0x10)
+        expect(sorted[0].data[8] as i64).to_equal(0)
+        expect(sorted[0].data[9] as i64).to_equal(0x30)
+
+        val malformed = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 9, data: records.push(0), characteristics: 0x40000040)
+        expect(coff_sort_arm64_exception_table([malformed]).is_err()).to_equal(true)
+        var unaligned: [u8] = []
+        unaligned = _cl_u32(unaligned, 0x1002)
+        unaligned = _cl_u32(unaligned, 0x25)
+        val invalid = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 8, data: unaligned, characteristics: 0x40000040)
+        expect(coff_sort_arm64_exception_table(
+            [invalid]).unwrap_err()).to_contain("instruction-aligned")
+
+    it "validates the file-backed PE resource tree":
+        var resource: [u8] = []
+        resource = _cl_u32(resource, 0)
+        resource = _cl_u32(resource, 0)
+        resource = _cl_u16(resource, 0)
+        resource = _cl_u16(resource, 0)
+        resource = _cl_u16(resource, 0)
+        resource = _cl_u16(resource, 1)
+        resource = _cl_u32(resource, 1)
+        resource = _cl_u32(resource, 24)
+        resource = _cl_u32(resource, 0x2028)
+        resource = _cl_u32(resource, 4)
+        resource = _cl_u32(resource, 0)
+        resource = _cl_u32(resource, 0)
+        resource = resource.push(1).push(2).push(3).push(4)
+        val section = PeImageSection(name: ".rsrc", virtual_address: 0x2000,
+            virtual_size: 44, data: resource, characteristics: 0x40000040)
+        expect(coff_validate_resource_sections([section]).unwrap()).to_equal(true)
+        val truncated = PeImageSection(name: ".rsrc", virtual_address: 0x2000,
+            virtual_size: 1, data: [0 as u8], characteristics: 0x40000040)
+        expect(coff_validate_resource_sections([truncated]).is_err()).to_equal(true)
+
+        var cyclic: [u8] = []
+        while cyclic.len() < 24: cyclic = cyclic.push(0)
+        cyclic[14] = 1
+        cyclic[20] = 0
+        cyclic[21] = 0
+        cyclic[22] = 0
+        cyclic[23] = 0x80
+        val cycle = PeImageSection(name: ".rsrc", virtual_address: 0x2000,
+            virtual_size: 24, data: cyclic, characteristics: 0x40000040)
+        expect(coff_validate_resource_sections(
+            [cycle]).unwrap_err()).to_contain("cycle")
+
+    it "validates file-backed PE export tables and ordinals":
+        var exports: [u8] = []
+        exports = _cl_u32(exports, 0)
+        exports = _cl_u32(exports, 0)
+        exports = _cl_u16(exports, 0)
+        exports = _cl_u16(exports, 0)
+        exports = _cl_u32(exports, 0x2028)
+        exports = _cl_u32(exports, 1)
+        exports = _cl_u32(exports, 1)
+        exports = _cl_u32(exports, 1)
+        exports = _cl_u32(exports, 0x2030)
+        exports = _cl_u32(exports, 0x2034)
+        exports = _cl_u32(exports, 0x2038)
+        exports = exports.push(116).push(0)
+        while exports.len() < 48: exports = exports.push(0)
+        exports = _cl_u32(exports, 0x1000)
+        exports = _cl_u32(exports, 0x203a)
+        exports = _cl_u16(exports, 0)
+        exports = exports.push(120).push(0)
+        val section = PeImageSection(name: ".edata", virtual_address: 0x2000,
+            virtual_size: exports.len(), data: exports, characteristics: 0x40000040)
+        expect(coff_validate_export_sections([section]).unwrap()).to_equal(true)
+        var invalid = exports
+        invalid[56] = 1
+        val bad = PeImageSection(name: ".edata", virtual_address: 0x2000,
+            virtual_size: invalid.len(), data: invalid, characteristics: 0x40000040)
+        expect(coff_validate_export_sections(
+            [bad]).unwrap_err()).to_contain("ordinal")
+
+    it "uses .drectve INCLUDE symbols as archive closure roots":
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1), _cl_directive_object(" /INCLUDE:forced")],
+            archives: [_cl_archive(_cl_object("forced", 1))], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        expect(pe_inspect(linked.unwrap()).unwrap().sections[0].virtual_size).to_equal(2)
+
+        val missing = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1), _cl_directive_object(" /INCLUDE:missing")],
+            archives: [], entry: "_start"))
+        expect(missing.is_err()).to_equal(true)
+        expect(missing.unwrap_err()).to_contain("retained COFF symbol not found")
+
+    it "synthesizes loader-visible exports from .drectve EXPORT rows":
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object_with_directive("_start", " /EXPORT:api=_start,@7")],
+            archives: [], entry: "_start")).unwrap()
+        val inspected = pe_inspect(linked).unwrap()
+        expect(inspected.sections[1].name).to_equal(".edata")
+        expect(inspected.data_directories[0].rva).to_equal(
+            inspected.sections[1].virtual_address)
+        expect(inspected.data_directories[0].size).to_be_greater_than(40)
+
+        val command_linked = coff_link_amd64_retained_image_policy_full(
+            CoffLinkRequest(objects: [_cl_object("_start", 1)],
+                archives: [], entry: "_start"), [], PeImagePolicy.default(),
+            0x140000000, false, false, false, [CoffExportDirective(
+                public_name: "api", internal_name: "_start", ordinal: 7,
+                noname: false, data: false, private_export: false)]).unwrap()
+        val command_inspected = pe_inspect(command_linked).unwrap()
+        expect(command_inspected.sections[1].name).to_equal(".edata")
+        expect(command_inspected.data_directories[0].size).to_be_greater_than(40)
+
+        val conflicting = coff_link_amd64_retained_image_policy_full(
+            CoffLinkRequest(objects: [
+                _cl_object_with_directive("_start", " /EXPORT:api=_start")],
+                archives: [], entry: "_start"), [], PeImagePolicy.default(),
+            0x140000000, false, false, false, [CoffExportDirective(
+                public_name: "api", internal_name: "_start", ordinal: 7,
+                noname: false, data: false, private_export: false)])
+        expect(conflicting.is_err()).to_equal(true)
+        expect(conflicting.unwrap_err()).to_contain("conflicting COFF /EXPORT")
+
+        val missing = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object_with_directive("_start", " /EXPORT:missing")],
+            archives: [], entry: "_start"))
+        expect(missing.unwrap_err()).to_contain("retained COFF symbol not found")
+
+    it "reports DEFAULTLIB directives from selected archive members only":
+        val reference = _cl_set_second_symbol_name(_cl_importing_object(), "forced")
+        val selected = _cl_object_with_directive(
+            "forced", " /DEFAULTLIB:selected.lib")
+        val dependencies = coff_link_default_libraries(CoffLinkRequest(
+            objects: [reference], archives: [_cl_archive(selected)], entry: "_start"), [])
+        expect(dependencies.is_ok()).to_equal(true)
+        expect(dependencies.unwrap()).to_equal(["selected.lib"])
+
+        val unused = coff_link_default_libraries(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)],
+            archives: [_cl_archive(selected)], entry: "_start"), [])
+        expect(unused.unwrap().len()).to_equal(0)
+
+        val suppressed_member = _cl_object_with_directive(
+            "forced", " /DEFAULTLIB:selected.lib /NODEFAULTLIB:selected")
+        val suppressed = coff_link_default_libraries(CoffLinkRequest(
+            objects: [reference], archives: [_cl_archive(suppressed_member)],
+            entry: "_start"), [])
+        expect(suppressed.unwrap().len()).to_equal(0)
+
+    it "enforces FAILIFMISMATCH for roots and selected archive members":
+        val compatible = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MT"),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MT")],
+            archives: [], entry: "_start"))
+        expect(compatible.is_ok()).to_equal(true)
+
+        val root_conflict = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MD"),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MT")],
+            archives: [], entry: "_start"))
+        expect(root_conflict.is_err()).to_equal(true)
+        expect(root_conflict.unwrap_err()).to_contain("FAILIFMISMATCH")
+
+        val reference = _cl_set_second_symbol_name(_cl_importing_object(), "forced")
+        val selected_conflict = coff_link_amd64(CoffLinkRequest(objects: [
+            reference, _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MD")],
+            archives: [_cl_archive(_cl_object_with_directive(
+                "forced", " /FAILIFMISMATCH:RuntimeLibrary=MT"))], entry: "_start"))
+        expect(selected_conflict.is_err()).to_equal(true)
+        expect(selected_conflict.unwrap_err()).to_contain("FAILIFMISMATCH")
+
+        val unused_conflict = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MD")],
+            archives: [_cl_archive(_cl_object_with_directive(
+                "unused", " /FAILIFMISMATCH:RuntimeLibrary=MT"))], entry: "_start"))
+        expect(unused_conflict.is_ok()).to_equal(true)
+
+    it "uses .drectve ALTERNATENAME fallbacks for archive closure and relocation":
+        val reference = _cl_set_second_symbol_name(_cl_importing_object(), "weak")
+        val directive = _cl_directive_object(" /ALTERNATENAME:weak=strong")
+        val fallback = coff_link_amd64(CoffLinkRequest(objects: [reference, directive],
+            archives: [_cl_archive(_cl_object("strong", 1))], entry: "_start"))
+        expect(fallback.is_ok()).to_equal(true)
+        expect(pe_inspect(fallback.unwrap()).unwrap().sections[0].virtual_size).to_equal(7)
+
+        val primary = coff_link_amd64(CoffLinkRequest(objects: [
+            reference, directive, _cl_object("weak", 1)],
+            archives: [_cl_archive(_cl_object("strong", 1))], entry: "_start"))
+        expect(primary.is_ok()).to_equal(true)
+        expect(pe_inspect(primary.unwrap()).unwrap().sections[0].virtual_size).to_equal(7)
+
+        val cycle = coff_link_amd64(CoffLinkRequest(objects: [
+            reference, _cl_directive_object(
+                " /ALTERNATENAME:weak=other /ALTERNATENAME:other=weak")],
+            archives: [], entry: "_start"))
+        expect(cycle.is_err()).to_equal(true)
+        expect(cycle.unwrap_err()).to_contain("ALTERNATENAME cycle")
+
+    it "retained symbols pull otherwise-unreferenced library members":
+        val request = CoffLinkRequest(objects: [_cl_object("_start", 1)],
+            archives: [_cl_archive(_cl_object("kept_fn", 1))], entry: "_start")
+        val linked = coff_link_amd64_retained(request, ["kept_fn"])
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap()).unwrap()
+        expect(inspected.sections[0].virtual_size).to_equal(2)
+
+    it "missing retained COFF symbols fail by name":
+        val request = CoffLinkRequest(objects: [_cl_object("_start", 1)], archives: [], entry: "_start")
+        val linked = coff_link_amd64_retained(request, ["missing_kept_fn"])
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("retained COFF symbol not found")
+
+    it "links a raw AMD64 object into a PE32+ executable":
+        step("Resolve _start, retain its code section, and emit PE headers")
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [_cl_object("_start", 1)], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap())
+        expect(inspected.is_ok()).to_equal(true)
+        expect(inspected.unwrap().header.entry_point_rva).to_equal(0x1000)
+        expect(inspected.unwrap().sections[0].name).to_equal(".text")
+
+    it "links a raw ARM64 object into a PE32+ executable":
+        val linked = coff_link_arm64(CoffLinkRequest(
+            objects: [_cl_arm64_object("_start")], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap()).unwrap()
+        expect(inspected.header.machine).to_equal(IMAGE_FILE_MACHINE_ARM64)
+        expect(inspected.header.entry_point_rva).to_equal(0x1000)
+        expect(inspected.sections[0].name).to_equal(".text")
+
+    it "applies extended ARM64 relocations through PE emission":
+        val cases = [
+            _cl_arm64_relocation_object(0x000f, 0x54000000, 4),
+            _cl_arm64_relocation_object(0x0010, 0x37000001, 4),
+            _cl_arm64_relocation_object(0x0011, 0, 4),
+            _cl_arm64_relocation_object(0x000d, 0, 4),
+            _cl_arm64_relocation_object(0x0008, 0, 4),
+            _cl_arm64_relocation_object(0x0009, 0x91000000, 4)
+        ]
+        val expected_offsets = [4, 4, 4, 4, 4, 5]
+        val expected = [0x80, 0x81, 0x0c, 0x01, 0x14, 0x50]
+        var i: i64 = 0
+        while i < cases.len():
+            val image = coff_link_arm64(CoffLinkRequest(
+                objects: [cases[i]], archives: [], entry: "_start")).unwrap()
+            val text = pe_inspect(image).unwrap().sections[0]
+            expect(image[text.raw_pointer + expected_offsets[i]] as i64).to_equal(expected[i])
+            i = i + 1
+
+    it "publishes ARM64 ADDR64 sites in the PE base-relocation directory":
+        val image = coff_link_arm64(CoffLinkRequest(objects: [
+            _cl_arm64_relocation_object(0x000e, 0, 8)
+        ], archives: [], entry: "_start")).unwrap()
+        val inspected = pe_inspect(image).unwrap()
+        val text = inspected.sections[0]
+        expect(image[text.raw_pointer + 4] as i64).to_equal(0x14)
+        expect(inspected.data_directories[5].size).to_be_greater_than(0)
+        expect(image[0x96] as i64).to_equal(0x22)
+        expect(image[0xde] as i64).to_equal(0x60)
+        expect(image[0xdf] as i64).to_equal(0x81)
+
+    it "strips base relocations from an explicitly fixed image":
+        var policy = PeImagePolicy.default()
+        policy.fixed_image = true
+        policy.dynamic_base = false
+        policy.high_entropy_va = false
+        val image = coff_link_arm64_retained_policy(CoffLinkRequest(objects: [
+            _cl_arm64_relocation_object(0x000e, 0, 8)
+        ], archives: [], entry: "_start"), [], policy).unwrap()
+        val inspected = pe_inspect(image).unwrap()
+        expect(inspected.data_directories[5].size).to_equal(0)
+        expect(image[0x96] as i64).to_equal(0x23)
+        expect(image[0xde] as i64).to_equal(0x00)
+        expect(image[0xdf] as i64).to_equal(0x81)
+
+    it "links the compiler-generated Windows corpus with unwind metadata":
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [
+            file_read_bytes("{COFF_FIX}/windows_corpus_main.obj"),
+            file_read_bytes("{COFF_FIX}/windows_corpus_provider.obj")
+        ], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val bytes = linked.unwrap()
+        val inspected = pe_inspect(bytes).unwrap()
+        expect(inspected.header.entry_point_rva).to_equal(0x1000)
+        expect(inspected.data_directories[3].size).to_equal(12)
+        var saw_text = false
+        var saw_xdata = false
+        var saw_pdata = false
+        var saw_value = false
+        for section in inspected.sections:
+            if section.name == ".text": saw_text = true
+            if section.name == ".xdata": saw_xdata = true
+            if section.name == ".pdata": saw_pdata = true
+            if section.name == ".data":
+                saw_value = bytes[section.raw_pointer] == 41
+        expect(saw_text).to_equal(true)
+        expect(saw_xdata).to_equal(true)
+        expect(saw_pdata).to_equal(true)
+        expect(saw_value).to_equal(true)
+
+    it "fails closed when the entry symbol is unresolved":
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [_cl_object("_start", 0)], archives: [], entry: "_start"))
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("unresolved external")
+
+    it "rejects unreferenced unresolved externals and duplicate definitions":
+        var unresolved = _cl_importing_object()
+        unresolved[52] = 0
+        unresolved[53] = 0
+        val missing = coff_link_amd64(CoffLinkRequest(objects: [unresolved],
+            archives: [], entry: "_start"))
+        expect(missing.is_err()).to_equal(true)
+        expect(missing.unwrap_err()).to_contain("unresolved external COFF symbol 'ExitProcess'")
+
+        val duplicate = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1), _cl_object("helper", 1),
+            _cl_object("helper", 1)], archives: [], entry: "_start"))
+        expect(duplicate.is_err()).to_equal(true)
+        expect(duplicate.unwrap_err()).to_contain("duplicate external COFF symbol 'helper'")
+
+        val forced = coff_link_amd64_retained_image_policy_options(
+            CoffLinkRequest(objects: [
+                _cl_object("_start", 1), _cl_object("helper", 1),
+                _cl_object("helper", 2)], archives: [], entry: "_start"),
+            [], PeImagePolicy.default(), 0x140000000, false, false, true)
+        expect(forced.is_ok()).to_equal(true)
+
+    it "resolves weak aliases and prefers a primary weak-name definition":
+        step("Link a relocation through its strong fallback")
+        val fallback = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_weak_calling_object(), _cl_object("strong", 1)],
+            archives: [], entry: "_start"))
+        expect(fallback.is_ok()).to_equal(true)
+        step("Provide the weak name directly without its fallback")
+        val primary = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_weak_calling_object(), _cl_object("weak", 1)],
+            archives: [], entry: "_start"))
+        expect(primary.is_ok()).to_equal(true)
+
+    it "rejects an empty request":
+        expect(coff_link_amd64(CoffLinkRequest(objects: [], archives: [], entry: "_start")).is_err()).to_equal(true)
+
+    it "links a selected short import through .idata and an AMD64 thunk":
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [_cl_importing_object()],
+            archives: [_cl_archive(_cl_short_import())], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap()).unwrap()
+        expect(inspected.sections.len()).to_equal(3)
+        expect(inspected.sections[1].name).to_equal(".text$im")
+        expect(inspected.sections[2].name).to_equal(".idata")
+
+    it "allocates unresolved nonzero common symbols in zero-file-byte BSS":
+        var object = _cl_importing_object()
+        object[74] = 3
+        object[102] = 8
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [object],
+            archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap()).unwrap()
+        expect(inspected.sections.len()).to_equal(2)
+        expect(inspected.sections[1].name).to_equal(".bss")
+        expect(inspected.sections[1].virtual_size).to_equal(8)
+        expect(inspected.sections[1].raw_size).to_equal(0)
+
+    it "applies SECTION and SECREL debug relocations":
+        var section_object = _cl_importing_object()
+        section_object[74] = 0x0a
+        section_object[106] = 1
+        val section_image = coff_link_amd64(CoffLinkRequest(objects: [section_object],
+            archives: [], entry: "_start")).unwrap()
+        expect(section_image[0x201] as i64).to_equal(1)
+        expect(section_image[0x202] as i64).to_equal(0)
+
+        var secrel_object = _cl_importing_object()
+        secrel_object[74] = 0x0b
+        secrel_object[102] = 4
+        secrel_object[106] = 1
+        val secrel_image = coff_link_amd64(CoffLinkRequest(objects: [secrel_object],
+            archives: [], entry: "_start")).unwrap()
+        expect(secrel_image[0x201] as i64).to_equal(4)
+        expect(secrel_image[0x202] as i64).to_equal(0)
+
+    it "uses absolute COFF symbol values without image-base adjustment":
+        var object = _cl_importing_object()
+        object[74] = 0x02
+        object[102] = 0x78
+        object[103] = 0x56
+        object[104] = 0x34
+        object[105] = 0x12
+        object[106] = 0xff
+        object[107] = 0xff
+        object[110] = 3
+        val image = coff_link_amd64(CoffLinkRequest(objects: [object],
+            archives: [], entry: "_start")).unwrap()
+
+        expect(image[0x201] as i64).to_equal(0x78)
+        expect(image[0x202] as i64).to_equal(0x56)
+        expect(image[0x203] as i64).to_equal(0x34)
+        expect(image[0x204] as i64).to_equal(0x12)
+
+        object[74] = 0x0a
+        val invalid = coff_link_amd64(CoffLinkRequest(objects: [object],
+            archives: [], entry: "_start"))
+        expect(invalid.is_err()).to_equal(true)
+        expect(invalid.unwrap_err()).to_contain("cannot target absolute COFF symbol")
+
+    it "resolves an external reference to an absolute definition in another object":
+        var reference = _cl_set_second_symbol_name(_cl_importing_object(), "constant")
+        reference[74] = 0x02
+        var definition = _cl_object("constant", -1)
+        definition[69] = 0x78
+        definition[70] = 0x56
+        definition[71] = 0x34
+        definition[72] = 0x12
+        val image = coff_link_amd64(CoffLinkRequest(
+            objects: [reference, definition], archives: [], entry: "_start")).unwrap()
+
+        expect(image[0x201] as i64).to_equal(0x78)
+        expect(image[0x202] as i64).to_equal(0x56)
+        expect(image[0x203] as i64).to_equal(0x34)
+        expect(image[0x204] as i64).to_equal(0x12)
+
+        reference[74] = 0x0a
+        val invalid = coff_link_amd64(CoffLinkRequest(
+            objects: [reference, definition], archives: [], entry: "_start"))
+        expect(invalid.is_err()).to_equal(true)
+        expect(invalid.unwrap_err()).to_contain("cannot target absolute COFF symbol")
+
+    it "applies SECREL7 and rejects offsets outside seven bits":
+        var object = _cl_importing_object()
+        object[74] = 0x0c
+        object[61] = 0x80
+        object[102] = 5
+        object[106] = 1
+        val image = coff_link_amd64(CoffLinkRequest(objects: [object],
+            archives: [], entry: "_start")).unwrap()
+        expect(image[0x201] as i64).to_equal(0x85)
+
+        object[61] = 0
+        object[102] = 128
+        val overflow = coff_link_amd64(CoffLinkRequest(objects: [object],
+            archives: [], entry: "_start"))
+        expect(overflow.is_err()).to_equal(true)
+        expect(overflow.unwrap_err()).to_contain("SECREL7 out of 7-bit range")
+
+    it "sorts dollar subsections and merges them into one PE section":
+        var z_section = _cl_set_section_name(_cl_object("_start", 1), ".text$z")
+        var a_section = _cl_set_section_name(_cl_object("helper", 1), ".text$a")
+        z_section[60] = 0x5a
+        a_section[60] = 0x41
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [z_section, a_section],
+            archives: [], entry: "_start")).unwrap()
+        val inspected = pe_inspect(linked).unwrap()
+        expect(inspected.sections.len()).to_equal(1)
+        expect(inspected.sections[0].name).to_equal(".text")
+        expect(inspected.header.entry_point_rva).to_equal(0x1001)
+        expect(linked[0x200] as i64).to_equal(0x41)
+        expect(linked[0x201] as i64).to_equal(0x5a)
+
+    it "preserves input alignment while merging dollar subsections":
+        var first = _cl_set_section_name(_cl_object("helper", 1), ".text$a")
+        var aligned = _cl_set_section_name(_cl_object("_start", 1), ".text$z")
+        aligned[58] = 0x50
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [first, aligned],
+            archives: [], entry: "_start")).unwrap()
+        val inspected = pe_inspect(linked).unwrap()
+        expect(inspected.header.entry_point_rva).to_equal(0x1010)
+        expect(inspected.sections[0].virtual_size).to_equal(17)
+        expect(linked[0x200] as i64).to_equal(0xc3)
+        expect(linked[0x20f] as i64).to_equal(0)
+        expect(linked[0x210] as i64).to_equal(0xc3)
+
+    it "rejects the reserved COFF section alignment encoding":
+        var object = _cl_object("_start", 1)
+        object[58] = 0xf0
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [object],
+            archives: [], entry: "_start"))
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("reserved alignment encoding 15")
+
+    it "aligns the first contribution against its absolute image address":
+        var object = _cl_object("_start", 1)
+        object[58] = 0xe0
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [object],
+            archives: [], entry: "_start")).unwrap()
+        val inspected = pe_inspect(linked).unwrap()
+        expect(inspected.header.entry_point_rva).to_equal(0x2000)
+        expect(inspected.sections[0].virtual_address).to_equal(0x2000)
+        expect(linked[0x200] as i64).to_equal(0xc3)
+
+    it "discards object-only CodeView streams from PE output":
+        val debug = _cl_set_section_name(
+            _cl_object("debug_record", 1), ".debug$S")
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1), debug], archives: [], entry: "_start")).unwrap()
+        val inspected = pe_inspect(linked).unwrap()
+        expect(inspected.sections.len()).to_equal(1)
+        expect(inspected.sections[0].name).to_equal(".text")
+        expect(inspected.sections[0].virtual_size).to_equal(1)

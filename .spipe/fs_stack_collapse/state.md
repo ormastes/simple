@@ -236,7 +236,7 @@ Exact work required, file by file:
      the tree-walk assertion then covers all of `src/os` and still passes, since
      nothing imports the deleted modules);
    - **remove the `it "keeps legacy FAT unit coverage from instantiating the retired
-     driver"` block**, which does `read_file("test/01_unit/os/services/fat32/fat32_spec.spl")`
+     driver"` block**, which does `read_file("test/unit/os/services/fat32/fat32_spec.spl")`
      — this is the path-valued guard that dangles on step 2, and it is the reason
      this step must not be done casually.
    - Keep `_assert_no_legacy_fat_driver` / `_assert_no_legacy_fat_module_import`:
@@ -296,7 +296,7 @@ Deleted (`src/lib/nogc_sync_mut/fs_driver/`): `direct_io.spl`, `driver_adapter.s
 `extension.spl`, `instance.spl`, `ops.spl`, `mount_table.spl`, `ramfs.spl`,
 `fat32_cache.spl`.
 Deleted (specs): `test/01_unit/lib/fs_driver/fat32_cache_spec.spl`,
-`test/01_unit/lib/fs_driver/fat32_cache_spec.spl`.
+`test/unit/lib/fs_driver/fat32_cache_spec.spl`.
 Edited: 25 test files (`@cover` repoint, 1 line each),
 `test/01_unit/os/services/vfs/.spipe_wrapped_entry_nvme_filesystem_mounts_spec.spl`
 (VFS2 dangling-path repair).

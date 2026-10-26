@@ -36,7 +36,7 @@ use std.common.science_math.ml_metrics.{
 
 ### Construction
 
-```text
+```simple
 val model = LinearRegression.new()
 ```
 
@@ -46,14 +46,14 @@ val model = LinearRegression.new()
 
 After solving `(XᵀX)β = Xᵀy` with `std.linalg.solve`, inject the result:
 
-```text
+```simple
 var model = LinearRegression.new()
 model.set_coef([2.0, 0.5], 1.0)   # coef vector, intercept
 ```
 
 `set_coef` marks the model as fitted.  Query state with:
 
-```text
+```simple
 model.is_fitted()    # -> bool
 model.coef()         # -> [f64]
 model.intercept()    # -> f64
@@ -61,13 +61,13 @@ model.intercept()    # -> f64
 
 ### Single-row prediction
 
-```text
+```simple
 val y = model.predict([3.0, 4.0])   # dot(coef, x) + intercept
 ```
 
 ### Batch prediction
 
-```text
+```simple
 val preds = model.predict_batch([[0.0], [1.0], [2.0]])   # -> [f64]
 ```
 
@@ -80,7 +80,7 @@ Ridge adds L2 regularisation: the normal equation becomes
 documentation and auditing; the caller is responsible for
 incorporating it into the solve step.
 
-```text
+```simple
 var model = Ridge.new(0.1)         # alpha = 0.1
 model.set_coef([1.5, -0.3], 0.0)
 val y = model.predict([2.0, 1.0])
@@ -88,7 +88,7 @@ val y = model.predict([2.0, 1.0])
 
 Accessor methods are identical to `LinearRegression`, plus:
 
-```text
+```simple
 model.alpha()   # -> f64
 ```
 
@@ -110,7 +110,7 @@ no matrix types required.
 | `ml_r2` | `(y_true: [f64], y_pred: [f64]) -> f64` | R² coefficient of determination |
 | `ml_rmse` | `(y_true: [f64], y_pred: [f64]) -> f64` | Root Mean Squared Error |
 
-```text
+```simple
 val mse  = ml_mse_metric([1.0, 2.0, 3.0], [1.1, 1.9, 3.2])
 val r2   = ml_r2([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])   # 1.0 = perfect
 val rmse = ml_rmse([0.0, 1.0], [0.5, 0.5])
@@ -122,7 +122,7 @@ returns `0.0`.
 
 ### Classification accuracy
 
-```text
+```simple
 val acc = ml_accuracy_int([1, 0, 1, 1], [1, 0, 0, 1])    # integer labels
 val acc = ml_accuracy_float([1.0, 0.0], [1.0, 1.0])       # float labels
 ```
@@ -133,7 +133,7 @@ Both return a `f64` fraction in `[0.0, 1.0]`.
 
 `ConfusionMatrix2` works with integer labels `0` and `1`.
 
-```text
+```simple
 val cm = ConfusionMatrix2.compute([1, 1, 0, 0], [1, 0, 0, 0])
 val p  = cm.precision()   # -> f64
 val r  = cm.recall()      # -> f64
@@ -148,14 +148,14 @@ These helpers are exported from `ml_linear` alongside the class types.
 
 ### `ml_predict_linear`
 
-```text
+```simple
 fn ml_predict_linear(coef: [f64], intercept: f64, x_row: [f64]) -> f64
 ```
 
 Computes `dot(coef, x_row) + intercept` without constructing a model
 object.  Useful for one-off predictions or custom evaluation loops.
 
-```text
+```simple
 val y = ml_predict_linear([2.0, 3.0], 1.0, [4.0, 5.0])  # 2*4 + 3*5 + 1 = 24
 ```
 
@@ -163,7 +163,7 @@ val y = ml_predict_linear([2.0, 3.0], 1.0, [4.0, 5.0])  # 2*4 + 3*5 + 1 = 24
 
 A lightweight MSE helper co-located in `ml_linear`:
 
-```text
+```simple
 fn ml_mse(y_true: [f64], y_pred: [f64]) -> f64
 ```
 

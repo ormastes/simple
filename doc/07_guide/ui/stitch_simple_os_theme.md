@@ -84,7 +84,7 @@ with three token-driven factories: `GlassConfig.dark()`, `.light()`, and
 `Compositor.glass_config` (`src/os/compositor/compositor.spl`) holds one of these.
 The runtime default is:
 
-```simple:skip
+```spl
 glass_config: GlassConfig.obsidian_dark()
 ```
 

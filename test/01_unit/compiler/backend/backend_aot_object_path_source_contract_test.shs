@@ -10,7 +10,6 @@ driver=$root/src/compiler/80.driver/driver_aot_native_output.spl
 builtin=$root/src/compiler/70.backend/backend_plugin/builtin_adapter.spl
 dynamic=$root/src/compiler/70.backend/backend_plugin/dynamic_adapter.spl
 diagnostic=$root/src/compiler/70.backend/backend/aot_path_diagnostic.spl
-artifacts=$root/src/compiler/80.driver/native_aot_artifacts.spl
 registry=$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
 extern_abi=$root/src/compiler/50.mir/text_extern_abi.spl
 rust_seed_calls=$root/src/compiler_rust/compiler/src/codegen/instr/calls.rs
@@ -31,16 +30,7 @@ grep -F 'val stage_dir = secure_temp_dir_raw(dirname(object_path),' "$dynamic" >
 grep -F 'val publish_status = file_publish_noreplace_raw(staged_object, object_path)' "$dynamic" >/dev/null
 grep -F 'diagnostic_path, envelope.diagnostic' "$dynamic" >/dev/null
 grep -F 'session.compile_owned_aot_into_path_v2(' "$driver" >/dev/null
-# The capsule error branch may record ICE/progress evidence before returning
-# its bound payload. Check the branch rather than requiring a one-line form.
-awk '
-    /^fn _compile_frozen_module_capsule\(/ { capsule = 1; next }
-    capsule && /^fn / { capsule = 0 }
-    capsule && /case Err\(error\):/ { error_branch = 1 }
-    capsule && error_branch && /return Err\(error\)/ { forwarded = 1 }
-    capsule && /case Ok\(/ { error_branch = 0 }
-    END { exit !forwarded }
-' "$driver"
+grep -F 'case Err(error): return Err(error)' "$driver" >/dev/null
 if sed -n '/fn _compile_frozen_module_capsule(/,/fn _compile_selected_module(/p' "$driver" \
     | grep -F 'case Err(_): return result'; then
     echo 'frozen capsule forwards a consumed Result and may lose diagnostics' >&2
@@ -49,31 +39,9 @@ fi
 grep -F 'secure_temp_dir_raw(' "$driver" >/dev/null
 grep -F 'file_read_regular_no_follow_bounded(' "$driver" >/dev/null
 grep -F 'file_atomic_write(path, bounded)' "$diagnostic" >/dev/null
-# Failed diagnostic transport must retain the original bounded message on an
-# unconditional stderr facade, without importing the higher driver layer.
-grep -F 'use std.nogc_sync_mut.io.process_ops.{eprint}' "$diagnostic" >/dev/null
-sed -n '/if path == "":/,/return false/p' "$diagnostic" \
-    | grep -F 'eprint("error: backend AOT diagnostic path is empty: {bounded}")' >/dev/null
-sed -n '/if not written:/,/^    written/p' "$diagnostic" \
-    | grep -F 'eprint("error: backend AOT diagnostic write failed: {bounded}")' >/dev/null
-grep -F 'eprint("error: backend AOT diagnostic readback length mismatch: {bounded}")' "$diagnostic" >/dev/null
-grep -F 'eprint("error: backend AOT diagnostic readback failed: {bounded}")' "$diagnostic" >/dev/null
-if grep -E 'use compiler\.driver|eprint\(.*\{message\}' "$diagnostic"; then
-    echo 'diagnostic fallback imports the driver or emits unbounded text' >&2
-    exit 1
-fi
-awk '
-    /val bounded =/ { bounded = NR }
-    /if path == "":/ { empty = NR }
-    /^    written$/ { retained_status = 1 }
-    END { exit !(bounded > 0 && empty > bounded && retained_status) }
-' "$diagnostic"
 grep -F 'print "warning: backend AOT:' "$driver" >/dev/null
 grep -F 'print "warning: published object; diagnostic staging cleanup failed:' "$driver" >/dev/null
-grep -F 'if not native_aot_finish_diagnostics_v1(diagnostic_dir, status, obj_path):' "$driver" >/dev/null
-grep -F 'if backend_status != 0 or not file_is_regular_no_follow(object_path)' "$artifacts" >/dev/null
-grep -F 'or file_size_raw(object_path) <= 0:' "$artifacts" >/dev/null
-grep -F 'dir_remove(diagnostic_dir, true)' "$artifacts" >/dev/null
+grep -F 'if not dir_remove(diagnostic_dir, true):' "$driver" >/dev/null
 grep -F 'RuntimeFuncSpec::new("rt_secure_temp_dir", &[I64, I64, I64, I64], &[I64])' "$registry" >/dev/null
 grep -F 'RuntimeFuncSpec::new("rt_file_publish_noreplace", &[I64, I64, I64, I64], &[I64])' "$registry" >/dev/null
 grep -F '"rt_secure_temp_dir" | "rt_file_publish_noreplace"' "$extern_abi" >/dev/null

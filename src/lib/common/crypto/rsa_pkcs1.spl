@@ -18,10 +18,12 @@
 # BUG(rsa_pkcs1_modexp_2048_interp_timeout_2026-06-15): RSA-2048 modexp
 # times out in interpreter.  KAT specs use tiny keys (n=3233, 12-bit).
 #
+# BUG(rsa_pkcs1_encrypt_deterministic_padding_2026-06-15): type-2 PS uses
+# 0xFF bytes; real TLS MUST use CSPRNG.  See bug doc for fix plan.
+#
 # tag: crypto, rsa, pkcs1
 
 use std.common.crypto.sha256.{sha256_bytes}
-use std.common.aes.utilities.{csprng_bytes}
 
 # ============================================================================
 # 30-bit limb big-integer (little-endian limb order)
@@ -320,48 +322,21 @@ fn _append_u8(dst: [u8], src: [u8]) -> [u8]:
 
 # ============================================================================
 # PKCS#1 v1.5 type-2 padding (encryption) — RFC 8017 §7.2.1
-# PS = pad_len random NONZERO octets from the OS CSPRNG (csprng_bytes ->
-# rt_random_i64; rt_entropy_fill has no runtime backing yet). Zero bytes are
-# rejection-sampled. Returns [] on short key OR malformed entropy (never a
-# fixed fill).
-# Bug: doc/08_tracking/bug/rsa_pkcs1_encrypt_deterministic_padding_2026-06-15.md
+# WARNING: PS uses 0xFF (deterministic placeholder).
+# Real TLS MUST use CSPRNG bytes for PS.
+# See doc/08_tracking/bug/rsa_pkcs1_encrypt_deterministic_padding_2026-06-15.md
 # ============================================================================
-
-fn _pkcs1_random_nonzero(count: u64) -> [u8]:
-    var ps: [u8] = []
-    var rounds = 0
-    while ps.len() < count:
-        # An all-zero source (e.g. /dev/urandom unreadable: the C lane then
-        # returns 0) would otherwise loop forever; fail closed instead.
-        rounds = rounds + 1
-        if rounds > 16:
-            return []
-        val need = count - ps.len()
-        # Over-draw by 1/2 + 8 so one round almost always suffices.
-        val want = need + need / 2 + 8
-        val buf = csprng_bytes(want.to_i64())
-        if buf.len() != want.to_i64():
-            return []
-        var i: i64 = 0
-        while i < buf.len().to_i64() and ps.len() < count:
-            val b = buf[i]
-            if b < 0 or b > 255:
-                return []
-            if b != 0:
-                ps.push(b.to_u8())
-            i = i + 1
-    ps
 
 fn _pkcs1_v15_pad_type2(plaintext: [u8], key_len: u64) -> [u8]:
     val t_len = plaintext.len()
     if key_len < t_len + 11:
         return []
-    val pad_len = key_len - t_len - 3
-    val ps = _pkcs1_random_nonzero(pad_len)
-    if ps.len() != pad_len:
-        return []
     var out: [u8] = [0x00u8, 0x02]
-    out = _append_u8(out, ps)
+    val pad_len = key_len - t_len - 3
+    var pi: u64 = 0
+    while pi < pad_len:
+        out.push(0xFF)
+        pi = pi + 1
     out.push(0x00)
     _append_u8(out, plaintext)
 
@@ -408,7 +383,7 @@ fn rsa_pkcs1_raw_modexp(base_bytes: [u8], exp_bytes: [u8], mod_bytes: [u8]) -> [
     _bigint_to_bytes(result, mod_bytes.len())
 
 # RSAES-PKCS1-v1_5 encrypt — RFC 8017 §7.2.1.
-# PS is random nonzero (CSPRNG); returns [] if entropy is unavailable.
+# WARNING: deterministic padding (see bug doc).
 fn rsa_pkcs1_public_encrypt(n_bytes: [u8], e_bytes: [u8], plaintext: [u8]) -> [u8]:
     val key_len = n_bytes.len()
     val em = _pkcs1_v15_pad_type2(plaintext, key_len)

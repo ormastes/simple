@@ -49,7 +49,7 @@ Phase 2.3 requires 4 features to unblock 6 pending TreeSitter tests:
 - `rt_ts_node_end_point(handle: i64) -> (i64, i64)`
 
 **Data Structures:**
-```simple:skip
+```simple
 struct Point:
     row: i64      # Zero-indexed line number
     column: i64   # Zero-indexed column number

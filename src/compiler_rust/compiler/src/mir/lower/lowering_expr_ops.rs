@@ -22,11 +22,11 @@ impl<'a> MirLowerer<'a> {
             let (line, column) = self.current_decision_span.unwrap_or((0, 0));
 
             // Lower left operand and emit condition probe
-            let left_reg = self.lower_condition_expr(left)?;
+            let left_reg = self.lower_expr(left)?;
             self.emit_condition_probe(decision_id, left_reg, line, column)?;
 
             // Lower right operand and emit condition probe
-            let right_reg = self.lower_condition_expr(right)?;
+            let right_reg = self.lower_expr(right)?;
             self.emit_condition_probe(decision_id, right_reg, line, column)?;
 
             // Compute the final result
@@ -353,47 +353,6 @@ impl<'a> MirLowerer<'a> {
                 });
             }
 
-            // `text * int` / `int * text` is repetition (interpreter BinOp::Mul).
-            // It used to fall through to a native `imul` on the string pointer,
-            // so `"x" * 4000` was not a string at all (len -1, and it blanked any
-            // interpolation it appeared in) under the JIT.
-            let is_raw_int = |t: TypeId| {
-                matches!(
-                    t,
-                    TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
-                )
-            };
-            let repeat_operands = if op == BinOp::Mul && left.ty == TypeId::STRING && is_raw_int(right.ty) {
-                Some((left_reg, right_reg, right.ty))
-            } else if op == BinOp::Mul && is_raw_int(left.ty) && right.ty == TypeId::STRING {
-                Some((right_reg, left_reg, left.ty))
-            } else {
-                None
-            };
-            if let Some((text_reg, count_reg, count_ty)) = repeat_operands {
-                return self.with_func(|func, current_block| {
-                    let count = if count_ty == TypeId::I64 {
-                        count_reg
-                    } else {
-                        let widened = func.new_vreg();
-                        func.block_mut(current_block).unwrap().instructions.push(MirInst::Cast {
-                            dest: widened,
-                            source: count_reg,
-                            from_ty: count_ty,
-                            to_ty: TypeId::I64,
-                        });
-                        widened
-                    };
-                    let dest = func.new_vreg();
-                    func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
-                        dest: Some(dest),
-                        target: crate::mir::CallTarget::from_name("rt_string_repeat"),
-                        args: vec![text_reg, count],
-                    });
-                    dest
-                });
-            }
-
             // Only use string concat when at least one operand is known STRING.
             // ANY-typed operands (untyped fn params) do not reach here for Add —
             // they are handled above. Sub/Mul always emit BinOp.
@@ -464,7 +423,7 @@ impl<'a> MirLowerer<'a> {
     /// (interpreter/expr/ops.rs) and the block/temp-local merge pattern used
     /// for `HirStmt::If` (lowering_stmt.rs).
     fn lower_short_circuit_logical(&mut self, op: BinOp, left: &HirExpr, right: &HirExpr) -> MirLowerResult<VReg> {
-        let left_reg = self.lower_condition_expr(left)?;
+        let left_reg = self.lower_expr(left)?;
 
         // Temp local to carry the boolean result across the two branches into
         // the merge block (VRegs don't survive block boundaries without a
@@ -537,7 +496,7 @@ impl<'a> MirLowerer<'a> {
         // eval_rhs_block: result is `right`'s truthiness (right is only ever
         // lowered here, never on the short-circuit path).
         self.set_current_block(eval_rhs_block)?;
-        let right_reg = self.lower_condition_expr(right)?;
+        let right_reg = self.lower_expr(right)?;
         self.with_func(|func, current_block| {
             let addr = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
@@ -573,11 +532,7 @@ impl<'a> MirLowerer<'a> {
     }
 
     pub(super) fn lower_unary_expr(&mut self, op: UnaryOp, operand: &HirExpr) -> MirLowerResult<VReg> {
-        let operand_reg = if op == UnaryOp::Not {
-            self.lower_condition_expr(operand)?
-        } else {
-            self.lower_expr(operand)?
-        };
+        let operand_reg = self.lower_expr(operand)?;
 
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();

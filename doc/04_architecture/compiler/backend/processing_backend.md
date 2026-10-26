@@ -76,7 +76,7 @@ not depend on each other's private lowering internals.
 
 The core abstraction is a processing device, not a vendor GPU:
 
-```simple:skip
+```simple
 val dev = processing.Device.select(
     kind: "auto",
     prefer: ["vulkan", "simplegpu", "cuda", "rv64v", "cpu"]

@@ -29,7 +29,7 @@ about open-world business-interface bindings:
 
 §22.4 Binding IR (line 1579) defines the only structure named "*BindingPlan*":
 
-```simple:skip
+```simple
 struct FacetBindingPlan:
     aspect_id: AspectId
     facet_interface_id: TypeId

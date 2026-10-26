@@ -51,26 +51,12 @@ fn try_collect_int_match<'a>(body: &'a HirExpr, local_idx: usize) -> Option<(Vec
 }
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_block_expr(&mut self, stmts: &[HirStmt], block_ty: TypeId) -> MirLowerResult<VReg> {
+    pub(super) fn lower_block_expr(&mut self, stmts: &[HirStmt]) -> MirLowerResult<VReg> {
         let saved_last_expr = self.last_expr_value;
         self.last_expr_value = None;
-        // The block's tail statement yields the BLOCK's value, so its
-        // tagged/raw coercion must target `block_ty`, not the function's
-        // return type. Coercing to the return type unboxed the ANY result of
-        // `val a = s.parse_int() ?? 8` (lowered as a block) into an ANY local
-        // inside an `-> i64` function, and the later read unboxed it again:
-        // the fallback 8 came back as 1 under the JIT.
-        let func_name = self.with_func(|func, _| func.name.clone())?;
-        let saved_tail = self.block_expr_tail.replace((func_name, block_ty));
-        let mut lowered: MirLowerResult<()> = Ok(());
         for stmt in stmts {
-            lowered = self.lower_stmt(stmt, None);
-            if lowered.is_err() {
-                break;
-            }
+            self.lower_stmt(stmt, None)?;
         }
-        self.block_expr_tail = saved_tail;
-        lowered?;
         let result = if let Some(result) = self.last_expr_value {
             result
         } else {
@@ -92,7 +78,7 @@ impl<'a> MirLowerer<'a> {
         use crate::mir::function::MirLocal;
 
         // Lower condition
-        let cond_reg = self.lower_condition_expr(condition)?;
+        let cond_reg = self.lower_expr(condition)?;
 
         // Create temporary local for result BEFORE branching
         let temp_local_index = self.with_func(|func, _| {
@@ -136,10 +122,6 @@ impl<'a> MirLowerer<'a> {
         // Lower then branch
         self.set_current_block(then_id)?;
         let then_value = self.lower_expr(then_branch)?;
-        // A tagged branch value (`if v == nil: false else: v` with `v: any?`)
-        // stored into a raw-scalar merge slot must be decoded, exactly like a
-        // return/val slot; otherwise a boxed FALSE reads as true under the JIT.
-        let then_value = self.unbox_scalar_for_raw_slot(expr_ty, then_branch.ty, then_value)?;
         self.with_func(|func, current_block| {
             let block = func.block_mut(current_block).unwrap();
             block.instructions.push(MirInst::Store {
@@ -162,10 +144,6 @@ impl<'a> MirLowerer<'a> {
                 block.instructions.push(MirInst::ConstInt { dest, value: 0 });
                 dest
             })?
-        };
-        let else_value = match else_branch {
-            Some(else_expr) => self.unbox_scalar_for_raw_slot(expr_ty, else_expr.ty, else_value)?,
-            None => else_value,
         };
         self.with_func(|func, current_block| {
             let block = func.block_mut(current_block).unwrap();

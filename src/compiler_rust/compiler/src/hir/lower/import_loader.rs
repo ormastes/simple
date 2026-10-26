@@ -23,13 +23,12 @@ use crate::CompileError;
 /// `IMPORT_AST_PARSES` still counts the parses THIS lane caused, which is why
 /// the lookup and the fill are separate calls.
 pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync::Arc<simple_parser::ast::Module>> {
-    let target = crate::pipeline::cfg_strip::cfg_target();
-    if let Some(hit) = crate::interpreter::shared_source_lookup_for_target(path, target.clone()) {
+    if let Some(hit) = crate::interpreter::shared_source_lookup(path) {
         crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_HITS, 1);
         return hit.ast();
     }
     crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_PARSES, 1);
-    crate::interpreter::shared_source_for_target(path, target).ast()
+    crate::interpreter::shared_source(path).ast()
 }
 
 impl Lowerer {
@@ -318,20 +317,9 @@ impl Lowerer {
                 .any(|item| Self::item_defines_type_like_symbol(item, &original_name));
             if is_type_like {
                 if let Some(type_id) = self.module.types.lookup(&original_name) {
-                    // The type-level alias is what lets a dependency's own
-                    // signatures (`fn make() -> Alias`) resolve, so it is
-                    // registered at every depth.
                     self.module.types.register_alias(alias_name.clone(), type_id);
                     self.register_type_alias_mapping(alias_name.clone(), original_name.clone());
-                    // A module global, however, becomes a per-module symbol
-                    // (`<importer>__Alias`) at native codegen. A dependency's
-                    // private alias published here left every TRANSITIVE
-                    // importer referencing an undefined `<importer>__Alias`
-                    // (79 such symbols from builtin_blocks_helpers'
-                    // `JsonValue as BlockJsonValue` in the core-C Stage 2 link).
-                    if self.dependency_import_depth == 0 {
-                        self.globals.insert(alias_name.clone(), type_id);
-                    }
+                    self.globals.insert(alias_name.clone(), type_id);
                 }
 
                 // Trait parameters retain their authored name as a MIR hint
@@ -349,17 +337,11 @@ impl Lowerer {
                 }
             }
 
-            if self.dependency_import_depth == 0 {
-                if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
-                    self.globals.insert(alias_name.clone(), symbol_ty);
-                }
+            if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
+                self.globals.insert(alias_name.clone(), symbol_ty);
             }
             if let Some(return_ty) = self.method_return_types.get(&original_name).copied() {
                 self.method_return_types.insert(alias_name.clone(), return_ty);
-            }
-
-            if let Some(declared) = self.declared_function_returns.get(&original_name).cloned() {
-                self.declared_function_returns.insert(alias_name.clone(), declared);
             }
 
             let is_callable = items
@@ -369,9 +351,6 @@ impl Lowerer {
                 self.register_function_alias(alias_name.clone(), original_name.clone());
                 if self.imported_function_names.contains(&original_name) {
                     self.imported_function_names.insert(alias_name.clone());
-                }
-                if let Some(fn_ty) = self.imported_function_value_types.get(&original_name).copied() {
-                    self.imported_function_value_types.insert(alias_name.clone(), fn_ty);
                 }
                 if self.extern_fn_names.contains(&original_name) {
                     self.extern_fn_names.insert(alias_name.clone());
@@ -414,27 +393,7 @@ impl Lowerer {
         })
     }
 
-    fn bind_imported_trait_declarations(&mut self, source: &std::path::Path, caller: &std::path::Path, target: &ImportTarget) {
-        let source = crate::interpreter::normalize_path_key(source);
-        let caller = crate::interpreter::normalize_path_key(caller);
-        let declarations = self.trait_declared_owners.get(&source).cloned().unwrap_or_default();
-        let mut aliases = Vec::new();
-        Self::aliased_import_pairs(target, &mut aliases);
-        for (name, declaration) in declarations {
-            if self.should_import_symbol(&name, target) {
-                let names: Vec<_> = aliases.iter().filter(|(original, _)| original == &name)
-                    .map(|(_, alias)| alias.clone()).collect();
-                let bindings = self.trait_declared_owners.entry(caller.clone()).or_default();
-                if names.is_empty() {
-                    bindings.insert(name, declaration);
-                } else {
-                    for alias in names { bindings.insert(alias, declaration.clone()); }
-                }
-            }
-        }
-    }
-
-    fn register_imported_symbols_from_items(&mut self, items: &[Node], target: &ImportTarget, declaration_file: &std::path::Path) -> LowerResult<usize> {
+    fn register_imported_symbols_from_items(&mut self, items: &[Node], target: &ImportTarget) -> LowerResult<usize> {
         let mut imported_count = 0;
 
         // Intra-file Pass 0: Pre-register ALL struct/class/enum names from this
@@ -526,19 +485,6 @@ impl Lowerer {
                         self.globals.insert(func_def.name.clone(), ret_ty);
                         self.method_return_types.insert(func_def.name.clone(), ret_ty);
                         self.imported_function_names.insert(func_def.name.clone());
-                        // A parameter whose type does not resolve in this unit
-                        // (generic, or a type the import does not bring in) is
-                        // carried as ANY: the value still has the right arity.
-                        let params: Vec<TypeId> = func_def
-                            .params
-                            .iter()
-                            .map(|p| match &p.ty {
-                                Some(t) => self.resolve_type(t).unwrap_or(TypeId::ANY),
-                                None => TypeId::ANY,
-                            })
-                            .collect();
-                        let fn_ty = self.module.types.register(HirType::Function { params, ret: ret_ty });
-                        self.imported_function_value_types.insert(func_def.name.clone(), fn_ty);
                         if func_def.is_pure() {
                             self.pure_functions.insert(func_def.name.clone());
                         }
@@ -553,7 +499,7 @@ impl Lowerer {
                 }
                 Node::Trait(trait_def) => {
                     if self.should_import_symbol(&trait_def.name, target) {
-                        self.register_trait_in_file(trait_def, Some(declaration_file))?;
+                        self.register_trait(trait_def)?;
                         imported_count += 1;
                     }
                 }
@@ -661,44 +607,34 @@ impl Lowerer {
             // but are themselves still placeholders (0 fields).
             let mut needs_registration: Vec<String> = Vec::new();
 
-            let mut pending = Vec::new();
             for (_tid, hir_ty) in self.module.types.iter() {
                 if let HirType::Struct { fields, .. } = hir_ty {
-                    pending.extend(fields.iter().map(|(_, ty)| *ty));
-                }
-            }
-            // Container edges retain declaration dependencies too: importing
-            // ElfObject must complete its [ElfSymbol] element layout from THIS
-            // declaration file, not guess among same-named global layouts.
-            // TypeIds may form cycles (including recursive containers), so visit
-            // each registry node once per registration pass.
-            let mut visited = std::collections::HashSet::new();
-            while let Some(ty) = pending.pop() {
-                if !visited.insert(ty) {
-                    continue;
-                }
-                match self.module.types.get(ty) {
-                    Some(HirType::Struct { name, fields, .. }) => {
-                        if fields.is_empty() && !transitive_processed.contains(name) {
-                            needs_registration.push(name.clone());
+                    if fields.is_empty() {
+                        continue; // This is itself a placeholder, skip
+                    }
+                    for (_field_name, field_type_id) in fields {
+                        if let Some(HirType::Struct {
+                            name: ref dep_name,
+                            fields: ref dep_fields,
+                            ..
+                        }) = self.module.types.get(*field_type_id)
+                        {
+                            if dep_fields.is_empty() && !transitive_processed.contains(dep_name) {
+                                needs_registration.push(dep_name.clone());
+                            }
+                        }
+                        // Also check enum placeholders (0 variants)
+                        if let Some(HirType::Enum {
+                            name: ref dep_name,
+                            variants: ref dep_variants,
+                            ..
+                        }) = self.module.types.get(*field_type_id)
+                        {
+                            if dep_variants.is_empty() && !transitive_processed.contains(dep_name) {
+                                needs_registration.push(dep_name.clone());
+                            }
                         }
                     }
-                    Some(HirType::Enum { name, variants, .. }) => {
-                        if variants.is_empty() && !transitive_processed.contains(name) {
-                            needs_registration.push(name.clone());
-                        }
-                        pending.extend(variants.iter().filter_map(|(_, payload)| payload.as_ref()).flatten().copied());
-                    }
-                    Some(HirType::Array { element, .. } | HirType::Simd { element, .. }) => pending.push(*element),
-                    Some(HirType::Pointer { inner, .. } | HirType::Promise { inner }) => pending.push(*inner),
-                    Some(HirType::Tuple(elements) | HirType::Union { variants: elements }) => pending.extend(elements.iter().copied()),
-                    Some(HirType::LabeledTuple(fields)) => pending.extend(fields.iter().map(|(_, ty)| *ty)),
-                    Some(HirType::Dict { key, value }) => pending.extend([*key, *value]),
-                    Some(HirType::Function { params, ret }) => {
-                        pending.extend(params.iter().copied());
-                        pending.push(*ret);
-                    }
-                    _ => {}
                 }
             }
 
@@ -768,19 +704,6 @@ impl Lowerer {
         }
 
         imported_count += self.load_reexported_symbols_from_items(items, target)?;
-        // Capture this declaration file's trait signature before another import
-        // can overwrite a colliding short trait name in the legacy registry.
-        for item in items {
-            if let Node::Function(f) = item {
-                if self.should_import_symbol(&f.name, target) {
-                    let dispatch = match &f.return_type {
-                        Some(simple_parser::ast::Type::Simple(name)) => self.trait_declaration_in_file(name, Some(declaration_file)),
-                        _ => None,
-                    };
-                    self.declared_function_returns.insert(f.name.clone(), dispatch);
-                }
-            }
-        }
         self.materialize_import_aliases(items, target);
 
         Ok(imported_count)
@@ -829,9 +752,7 @@ impl Lowerer {
             // from the cached text: the cache keeps the io/parse error's
             // `Display` rather than the error itself, precisely so a borrowed
             // entry yields the same diagnostic a private read+parse did.
-            let sibling_module = match crate::interpreter::shared_source_for_target(
-                &sibling_path, crate::pipeline::cfg_strip::cfg_target(),
-            ) {
+            let sibling_module = match crate::interpreter::shared_source(&sibling_path) {
                 crate::interpreter::SharedSource::Parsed { ast: Ok(ast), .. } => ast,
                 crate::interpreter::SharedSource::Parsed { ast: Err(e), .. } => {
                     return Err(LowerError::ModuleResolution(format!(
@@ -847,17 +768,7 @@ impl Lowerer {
                 }
             };
 
-            imported_count += self.register_imported_symbols_from_items(&sibling_module.items, target, &sibling_path)?;
-            let declarations = self.trait_declared_owners.get(&crate::interpreter::normalize_path_key(&sibling_path))
-                .cloned().unwrap_or_default();
-            for (name, declaration) in declarations {
-                if self.should_import_symbol(&name, target) {
-                    // Keep authored export names here; the outer package-to-
-                    // caller handoff applies selective aliases exactly once.
-                    self.trait_declared_owners.entry(crate::interpreter::normalize_path_key(package_init_path))
-                        .or_default().insert(name, declaration);
-                }
-            }
+            imported_count += self.register_imported_symbols_from_items(&sibling_module.items, target)?;
         }
 
         Ok(imported_count)
@@ -1008,20 +919,6 @@ impl Lowerer {
         let import_key = (unit_key.clone(), Self::import_target_cache_key(target));
         if self.loaded_import_targets.contains(&import_key) {
             self.bind_imported_defaults(&unit_key, &caller_key, target);
-            self.bind_imported_trait_declarations(&unit_key, &caller_key, target);
-            // The cached load may have been a dependency-only load, which keeps
-            // aliases private. A load on behalf of the module being lowered
-            // (its own `use`, or a facade re-export it requested) must still
-            // bind them. Idempotent when the cached load already did.
-            if self.dependency_import_depth == 0 {
-                let mut aliases = Vec::new();
-                Self::aliased_import_pairs(target, &mut aliases);
-                if !aliases.is_empty() {
-                    if let Some(imported_module) = parsed_imported_module(&resolved.path) {
-                        self.materialize_import_aliases(&imported_module.items, target);
-                    }
-                }
-            }
             return Ok(());
         }
 
@@ -1089,30 +986,13 @@ impl Lowerer {
             // Cycle-guarded by `loaded_modules`/`loaded_import_targets` above,
             // and failures stay non-fatal here exactly as they are for the
             // entry module.
-            //
-            // These are the imported module's OWN imports: loaded only so its
-            // signatures resolve, never as names of the module being lowered.
-            self.dependency_import_depth += 1;
             for item in &imported_module.items {
                 if let Node::UseStmt(use_stmt) = item {
                     let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
                 }
             }
-            self.dependency_import_depth -= 1;
 
-            let imported_count = self.register_imported_symbols_from_items(&imported_module.items, target, &resolved.path)?;
-            let prefix = module_path.segments.join(".");
-            if !prefix.is_empty() {
-                for item in &imported_module.items {
-                    if let Node::Function(f) = item {
-                        if self.should_import_symbol(&f.name, target) {
-                            if let Some(dispatch) = self.declared_function_returns.get(&f.name).cloned() {
-                                self.declared_function_returns.insert(format!("{}.{}", prefix, f.name), dispatch);
-                            }
-                        }
-                    }
-                }
-            }
+            let imported_count = self.register_imported_symbols_from_items(&imported_module.items, target)?;
 
             if imported_count == 0 && resolved.path.file_name().is_some_and(|name| name == "__init__.spl") {
                 let _ = self.load_imported_symbols_from_package_siblings(&resolved.path, target)?;
@@ -1126,7 +1006,6 @@ impl Lowerer {
         self.loaded_modules.remove(&unit_key);
         if result.is_ok() {
             self.bind_imported_defaults(&unit_key, &caller_key, target);
-            self.bind_imported_trait_declarations(&unit_key, &caller_key, target);
             self.loaded_import_targets.insert(import_key);
         }
         result
@@ -1439,67 +1318,6 @@ fn read_hardware(addr: u64) -> u64:
 
         assert!(body.contains("Global(\"mmio_read64\")"), "body: {body}");
         assert!(!body.contains("Global(\"hardware_mmio_read64\")"), "body: {body}");
-    }
-
-    /// A type alias a dependency declares for itself (`use owner.{Thing as
-    /// Renamed}` in `middle`) is private to that dependency. Before the fix the
-    /// transitive signature load published it as a module global of every
-    /// importer of `middle`, which native codegen turned into an undefined
-    /// `<importer>__Renamed` data import (core-C Stage 2: 79 undefined
-    /// `<module>__BlockJsonValue`).
-    #[test]
-    fn transitive_type_import_alias_stays_private_to_its_module() {
-        let dir = create_test_project();
-        let src = dir.path().join("src");
-        let chain = src.join("chain");
-        fs::create_dir_all(&chain).unwrap();
-        fs::write(chain.join("owner.spl"), "struct Thing:\n    n: i64\n").unwrap();
-        let middle_path = chain.join("middle.spl");
-        fs::write(
-            &middle_path,
-            "use chain.owner.{Thing as Renamed}\n\nfn make_renamed(n: i64) -> Renamed:\n    Renamed(n: n)\n",
-        )
-        .unwrap();
-        let consumer_path = chain.join("consumer.spl");
-        fs::write(
-            &consumer_path,
-            "use chain.middle.{make_renamed}\n\nfn total() -> i64:\n    make_renamed(41).n\n",
-        )
-        .unwrap();
-        // Imports the alias itself AND reaches the same `owner` target through
-        // `middle` first, so its own binding is served from the loader cache.
-        let both_path = chain.join("both.spl");
-        fs::write(
-            &both_path,
-            "use chain.middle.{make_renamed}\nuse chain.owner.{Thing as Renamed}\n\nfn build() -> Renamed:\n    Renamed(n: make_renamed(1).n)\n",
-        )
-        .unwrap();
-
-        let lower = |path: &std::path::Path| {
-            let source = crate::read_trace::rts(file!(), line!(), path).unwrap();
-            let ast = Parser::new(&source).parse().expect("parse failed");
-            let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
-            Lowerer::with_module_resolver(resolver, path.to_path_buf())
-                .lower_module(&ast)
-                .unwrap_or_else(|e| panic!("lowering {} failed: {e:?}", path.display()))
-        };
-        let has_global = |module: &crate::hir::HirModule, name: &str| module.globals.iter().any(|(n, _)| n == name);
-
-        let consumer = lower(&consumer_path);
-        assert!(
-            !has_global(&consumer, "Renamed"),
-            "dependency-private alias leaked as an importer global: {:?}",
-            consumer.globals
-        );
-        let total = consumer.functions.iter().find(|f| f.name == "total").expect("total function");
-        let body = format!("{:?}", total.body);
-        assert!(body.contains("FieldAccess"), "field access through the aliased return type must resolve: {body}");
-
-        let middle = lower(&middle_path);
-        assert!(has_global(&middle, "Renamed"), "the declaring module keeps its alias: {:?}", middle.globals);
-
-        let both = lower(&both_path);
-        assert!(has_global(&both, "Renamed"), "an importer's own alias is bound even on a cache hit: {:?}", both.globals);
     }
 
     #[test]
@@ -1876,88 +1694,6 @@ fn available(backend: SelectedBackend) -> bool:
             &ImportTarget::Single("persistent_trie".to_string())
         ));
     }
-    #[test]
-    fn returned_trait_locals_keep_exact_dispatch_owner_without_capability_hints() {
-        use crate::mir::MirInst;
-        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../test/fixtures/returned_trait_owner");
-        let dir = create_test_project();
-        let src = dir.path().join("src");
-        for file in ["definition.spl", "alternate_definition.spl", "provider.spl", "alternate.spl"] {
-            fs::copy(fixtures.join(file), src.join(file)).unwrap();
-        }
-        let mut provider = fs::read_to_string(src.join("provider.spl")).unwrap();
-        provider.push_str("\nfn optional() -> Reader?:\n    nil\n");
-        fs::write(src.join("provider.spl"), provider).unwrap();
-        let mut source = fs::read_to_string(fixtures.join("main.spl")).unwrap();
-        source.push_str(r#"
-use provider.{optional}
-fn first():
-    7
-fn unannotated_shadow():
-    val value = first()
-fn local_callable(make_first: fn() -> i64) -> i64:
-    val value = make_first()
-    value
-fn wrapped():
-    val maybe = optional()
-fn dynamic(value: Any):
-    val copied = value
-fn primitive() -> i64:
-    val number: i64 = 7
-    number
-fn passthrough(value: SelectedReader) -> SelectedReader:
-    value
-fn implless_declared(value: SelectedReader) -> i64:
-    val returned = passthrough(value)
-    returned.read()
-fn unknown_receiver(value: Any) -> i64:
-    value.read()
-"#);
-        let path = src.join("main.spl");
-        fs::write(&path, &source).unwrap();
-        let ast = Parser::new(&source).parse().expect("parse trait return consumer");
-        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
-        let mut lowerer = Lowerer::with_module_resolver(resolver, path);
-        let lowered = lowerer.lower_module(&ast).expect("lower trait return consumer");
-        assert!(lowered.impls.is_empty(), "consumer contains no concrete trait implementation");
-        let main = lowered.functions.iter().find(|f| f.name == "main").unwrap();
-        // The caller imports each trait first; function-only provider imports
-        // then rebind that cached declaration into their own lexical scopes.
-        for (name, file, slot) in [("first_value", "definition.spl", 0), ("second_value", "alternate_definition.spl", 1),
-            ("explicit_first", "definition.spl", 0), ("explicit_second", "alternate_definition.spl", 1)] {
-            let local = main.locals.iter().find(|l| l.name == name).unwrap();
-            assert!(local.type_name_hint.is_none(), "DI/security hints unchanged");
-            let snapshot = local.trait_dispatch_owner.as_ref().expect("exact receiver table");
-            let owner = crate::interpreter::normalize_path_key(&src.join(file));
-            assert_eq!(snapshot.owner, format!("{}::Reader", owner.to_string_lossy()));
-            assert_eq!(snapshot.info.get_vtable_slot("read"), Some(slot));
-        }
-        for name in ["wrapped", "dynamic", "primitive", "unannotated_shadow", "local_callable"] {
-            let f = lowered.functions.iter().find(|f| f.name == name).unwrap();
-            assert!(f.locals.iter().all(|l| l.trait_dispatch_owner.is_none()), "unexpected owner for {name}");
-            assert!(f.locals.iter().all(|l| l.type_name_hint.is_none()));
-        }
-        let mir = crate::mir::lower_to_mir(&lowered).expect("lower virtual calls");
-        let f = mir.functions.iter().find(|f| f.name == "main").unwrap();
-        let slots: Vec<_> = f.blocks.iter().flat_map(|b| &b.instructions).filter_map(|i| {
-            if let MirInst::MethodCallVirtual {vtable_slot, ..} = i { Some(*vtable_slot) } else { None }
-        }).collect();
-        assert_eq!(slots, vec![0, 1, 0, 1]);
-        assert!(!f.blocks.iter().flat_map(|b| &b.instructions)
-            .any(|i| matches!(i, MirInst::MethodCallStatic {func_name, ..} if func_name.ends_with("read"))));
-        let declared = mir.functions.iter().find(|f| f.name == "implless_declared").unwrap();
-        assert!(declared.blocks.iter().flat_map(|b| &b.instructions)
-            .any(|i| matches!(i, MirInst::MethodCallVirtual {vtable_slot: 0, ..})),
-            "declared trait return preserves the same impl-less ABI policy as a typed parameter");
-        let unknown = mir.functions.iter().find(|f| f.name == "unknown_receiver").unwrap();
-        assert!(!unknown.blocks.iter().flat_map(|b| &b.instructions)
-            .any(|i| matches!(i, MirInst::MethodCallVirtual {..})),
-            "plain Any must retain unknown/duck dispatch rather than gaining a declared slot");
-        assert!(unknown.blocks.iter().flat_map(|b| &b.instructions)
-            .any(|i| matches!(i, MirInst::MethodCallStatic {func_name, ..} if func_name == "read")));
-    }
-
 }
 
 #[cfg(test)]
@@ -2035,5 +1771,4 @@ mod imported_module_ast_memo_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

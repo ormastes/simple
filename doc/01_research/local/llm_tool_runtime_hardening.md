@@ -35,9 +35,9 @@ vLLM/SGLang serve plan:
 Executable specs:
 
 - `test/01_unit/app/llm_caret/opencode_cli_spec.spl`
-- `test/01_unit/app/llm_caret/opencode_cli_spec.spl`
+- `test/unit/app/llm_caret/opencode_cli_spec.spl`
 - `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl`
-- `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl`
+- `test/unit/app/llm_runtime/vllm_readiness_spec.spl`
 
 Generated/manual evidence:
 

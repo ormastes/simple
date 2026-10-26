@@ -36,7 +36,7 @@ print('    it should grant access:')
 ```
 
 **Correct code:**
-```text
+```simple
 # Good
 describe "User authentication":
     """
@@ -233,7 +233,7 @@ Manual pass/fail tracking instead of `expect()` assertions.
 - `if condition: print('[PASS]')`
 
 **Example violation:**
-```text
+```simple
 # Bad
 var passed = 0
 var failed = 0
@@ -247,7 +247,7 @@ else:
 ```
 
 **Correct code:**
-```text
+```simple
 # Good
 expect(result).to(eq(expected))
 ```

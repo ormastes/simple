@@ -131,7 +131,7 @@ matters, not `rustup default`:
 env -i PATH="$PATH" RUSTUP_TOOLCHAIN=stable rustc --print sysroot   # must end in -gnu
 ```
 
-Once the host is gnu, linking goes through llvm-mingw `clang` + `ld.lld` (never GCC) and MSYS's `link.exe` is
+Once the host is gnu, linking goes through `gcc`/`ld` and MSYS's `link.exe` is
 irrelevant.
 
 ## 1. Run phase 1
@@ -285,60 +285,6 @@ bootstrap has produced a `bin/simple`.
 The root is disposable; `deploy-local-temp-mcp.shs` `rm -rf`s and recreates it on
 every run. Nothing under `bin/release/**` is touched, so there is no deployed
 state to roll back.
-
-## Update 2026-10-22 (release_phase3 lane, measured on DESKTOP-5A4V03J)
-
-The §0 rust-toolchain fix is necessary but no longer sufficient on a
-`release_phase3` checkout. Five additional blockers were hit and measured
-while running `--full-bootstrap --stop-after-seed` from a fresh worktree on
-`origin/release_phase3` (lane `work/phase1-mcp-redeploy-20261021`). With all
-five applied, phase 1 completed
-`VERDICT — PREPARED: stage=seed exit=0 reason=stop-after-seed` and the seed
-self-identified with the banner + `Simple Language v1.0.0-rc.1`
-(37,871,173 bytes, x86_64-pc-windows-gnu, cranelift backend).
-
-1. **The repo pins a dated nightly.** `src/compiler_rust/rust-toolchain.toml`
-   on release_phase3 sets `channel = "nightly-2026-09-15"` (main still floats
-   `nightly`). The authority resolver requires
-   `$RUSTUP_HOME/toolchains/nightly-2026-09-15-x86_64-pc-windows-gnu` to
-   exist as a REAL directory. Install it for the interactive home
-   (`rustup toolchain install nightly-2026-09-15 --component rustfmt --component clippy`),
-   then mirror it into the `%USERPROFILE%\.rustup` fallback home that the
-   `env -i` probes use.
-
-2. **The junction workaround is dead.** The 2026-09-07 PowerShell-junction
-   recipe in §0 now fails the fingerprint with
-   `rust-toolchain-check=toolchain-directory=invalid`: the check is
-   `[ -d "$dir" ] && [ ! -L "$dir" ]` followed by a canonical `pwd -P`
-   comparison, so any MSYS-visible junction/symlink toolchain is rejected.
-   Replace the junction with a real directory copy (`robocopy /E /MT:16`,
-   ~1-2 GiB on C:). A plain `cp -r` under Git Bash took >9 minutes for this
-   tree; robocopy finished in under a minute.
-
-3. **Disk-preflight floor.** `check-bootstrap-preflight.shs` requires
-   `MIN_FREE_GB=20` (default, env knob) free on the cargo target partition
-   even for a seed-only lane. A `--stop-after-seed` run fits comfortably
-   under 10 GiB; pass `MIN_FREE_GB=10` when the host is disk-tight instead
-   of bypassing the preflight entirely.
-
-4. **Receipt allowlist in worktrees.** `materialize-symlinks-windows.shs`
-   requires its receipt under `<repo>/build/bootstrap/`. With centralized
-   storage the default output root lands under
-   `<repo>/.simple/storage/build/bootstrap`, so a fresh worktree aborts
-   before Cargo with "receipt must use the dedicated bootstrap output root".
-   Pass `--output=<repo>/build/bootstrap/<lane-name>`.
-
-5. **SCV cold init.** The first `native-build` in a fresh checkout dies
-   with `SCV-E-ADMISSION: compile-event-journal-missing (first build in this
-   checkout: rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)`. Export
-   `SIMPLE_SCV_INVENTORY_COLD_INIT=1` for the first native-build invocation
-   in a new worktree (applies to `bootstrap-mcp-build-deploy.shs` builds
-   too — the script does not set it itself).
-
-Also measured on this host: `bootstrap-mcp-build-deploy.shs` builds each
-server with the phase-1 seed fine in its default `--mode one-binary` (the
-seed only refuses an explicit `--mode dynload`), so no mode flag is needed
-when rebuilding the MCP/LSP servers from a phase-1 compiler.
 
 ## See also
 

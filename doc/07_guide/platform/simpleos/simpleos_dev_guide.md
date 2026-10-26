@@ -456,7 +456,7 @@ qualified.
 
 Provides configuration for `simple native-build --target simpleos`:
 
-```simple:skip
+```simple
 val config = simpleos_build_config("x86_64-simpleos")
 val x86_config = simpleos_build_config("i686-simpleos")
 val flags = simpleos_linker_flags()

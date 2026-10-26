@@ -76,7 +76,10 @@ for an ordinary interaction, never the sole oracle.
 Every constructor below is from `model.spl` and is exercised by the spec.
 
 ```simple
-use std.common.spec.evidence.model.{check_exact, check_full_pattern, check_ignore, check_multiset, check_bind, check_same_as, oracle_spec, canonical_evidence, evidence_node}
+use std.common.spec.evidence.model.{
+    check_exact, check_full_pattern, check_ignore, check_multiset,
+    check_bind, check_same_as, oracle_spec
+}
 use std.common.spec.evidence.evidence_comparator.{compare_evidence}
 
 val spec = oracle_spec(
@@ -86,17 +89,6 @@ val spec = oracle_spec(
         check_full_pattern("response.headers.request-id", "hex:16"),
         check_ignore("response.headers.date", "server clock"),
         check_multiset("response.body.items", ["alpha", "beta"])
-    ]
-)
-val evidence = canonical_evidence(
-    "api",
-    "simple-list/1",
-    [
-        evidence_node("response.status", "200"),
-        evidence_node("response.headers.request-id", "0123456789abcdef"),
-        evidence_node("response.headers.date", "Tue, 21 Oct 2026 00:00:00 GMT"),
-        evidence_node("response.body.items", "alpha"),
-        evidence_node("response.body.items", "beta")
     ]
 )
 val result = compare_evidence(evidence, spec)

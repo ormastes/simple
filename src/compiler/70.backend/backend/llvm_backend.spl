@@ -1,3 +1,4 @@
+use compiler.backend.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
 # LLVM Backend
 #
 # LLVM-based code generation for the Simple compiler.
@@ -21,15 +22,15 @@ use compiler.backend.backend_api.*
 use compiler.backend.backend.backend_types.{CompiledModule, CompiledSymbol, CompiledSymbolKind, CodegenTarget, OptimizationLevel}
 export use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
-use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, llvm_codegen_error_from_ir}
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder}
 use compiler.backend.mir_to_llvm.{MirToLlvm}
-use compiler.mir_opt.mod.{optimize_module, optimize_module_with_context, TargetOptContext, target_opt_context_default, OptLevel}
+use compiler.mir_opt.mir_opt.mod.{optimize_module, optimize_module_with_context, TargetOptContext, target_opt_context_default, OptLevel}
 use compiler.backend.feature_caps.{X86Caps}
-use compiler.backend.io_compat.{backend_shell_tuple}
+use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-use compiler.backend.runtime_compiler.{_get_temp_dir}
+use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 
 # Import tools from split module
 use compiler.backend.llvm_backend_tools.{LlvmObjectCode, find_llc, find_llvm_as, find_opt, opt_available, llc_available, llvm_as_available}
@@ -285,9 +286,7 @@ class LlvmBackend:
         val runtime_decls = generate_runtime_declarations_for_target(self.target)
         var llvm_ir = runtime_decls + "\n" + "\n"
         llvm_ir = llvm_ir + translator.translate_module(optimized_module)
-        # Checked here, not only in compile_ir_to_object: the `opt` round trip
-        # below and the emit_llvm_ir return would otherwise hand a recorded
-        # codegen error back as successful IR.
+
         val codegen_error = llvm_codegen_error_from_ir(llvm_ir)
         if codegen_error != "":
             return Err(codegen_error)
@@ -413,7 +412,6 @@ fn generate_runtime_declarations_for_target(target: CodegenTarget) -> text:
     decls = decls + "declare i1 @rt_dir_create(ptr, i64, i8)\n"
     decls = decls + "declare i1 @rt_dir_delete(ptr)\n"
     decls = decls + "declare i1 @rt_dir_exists(ptr, i64)\n"
-    decls = decls + "declare i1 @rt_dir_is_real_no_follow(ptr, i64)\n"
     decls = decls + "declare ptr @rt_dir_list(ptr, i64)\n"
 
     # Process operations
@@ -467,11 +465,8 @@ fn generate_runtime_declarations_for_target(target: CodegenTarget) -> text:
     # Dict/Map operations
     decls = decls + "declare ptr @rt_dict_new(i64)\n"
     decls = decls + "declare ptr @rt_dict_get(ptr, ptr)\n"
-    # Keep the host preamble consistent with MIR's tagged handles and the
-    # runtime's int8_t status. The status now guards failed materialization;
-    # void/i1 declarations cannot describe the consumed i8 call result.
-    decls = decls + "declare i8 @rt_dict_set(i64, i64, i64)\n"
-    decls = decls + "declare i8 @rt_dict_contains(i64, i64)\n"
+    decls = decls + "declare void @rt_dict_set(ptr, ptr, ptr)\n"
+    decls = decls + "declare i1 @rt_dict_contains(ptr, ptr)\n"
     decls = decls + "declare i64 @rt_dict_len(ptr)\n"
 
     # I/O operations

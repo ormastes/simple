@@ -12,7 +12,7 @@ if/elif/else, while, for, match, loop, and suspension operators.
 
 ## Syntax
 
-```simple:skip
+```simple
 if condition:
     body
 elif condition:

@@ -154,10 +154,6 @@ pub(super) fn alloc_handle() -> i64 {
 pub(super) struct VulkanState {
     pub instance: Option<Arc<VulkanInstance>>,
     pub device: Option<Arc<VulkanDevice>>,
-    /// Active selection token. It is never a VkDevice pointer or device UUID.
-    pub selected_device_token: i64,
-    /// Process-lifetime monotonic allocator; zero permanently means exhausted.
-    pub next_selected_device_token: i64,
 
     pub buffers: HashMap<i64, Arc<VulkanBuffer>>,
     pub compute_pipelines: HashMap<i64, Arc<ComputePipeline>>,
@@ -215,8 +211,6 @@ impl VulkanState {
         Self {
             instance: None,
             device: None,
-            selected_device_token: 0,
-            next_selected_device_token: 1,
             buffers: HashMap::new(),
             compute_pipelines: HashMap::new(),
             shader_modules: HashMap::new(),
@@ -258,22 +252,6 @@ impl VulkanState {
     pub fn set_error(&mut self, msg: String) {
         tracing::error!("Vulkan runtime error: {}", msg);
         self.last_error = msg;
-    }
-
-    fn allocate_selected_device_token(&mut self) -> Result<i64, String> {
-        let token = self.next_selected_device_token;
-        if token <= 0 {
-            return Err("selected Vulkan device generation exhausted".to_string());
-        }
-        self.next_selected_device_token = token.checked_add(1).unwrap_or(0);
-        Ok(token)
-    }
-
-    pub fn install_selected_device(&mut self, device: Arc<VulkanDevice>) -> Result<(), String> {
-        let token = self.allocate_selected_device_token()?;
-        self.device = Some(device);
-        self.selected_device_token = token;
-        Ok(())
     }
 
     pub fn require_device(&self) -> Result<Arc<VulkanDevice>, String> {
@@ -466,11 +444,8 @@ pub extern "C" fn rt_vulkan_init() -> i64 {
 
     match VulkanDevice::new_default() {
         Ok(dev) => {
-            if let Err(error) = state.install_selected_device(dev.clone()) {
-                state.set_error(error);
-                return 0;
-            }
             state.semaphore_pool = Some(SemaphorePool::new(dev.clone()));
+            state.device = Some(dev);
             1
         }
         Err(e) => {
@@ -544,7 +519,6 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     state.window_manager = None;
     state.physical_devices.clear();
     state.device = None;
-    state.selected_device_token = 0;
     state.instance = None;
     state.last_error.clear();
     state.strings.clear();
@@ -661,22 +635,6 @@ pub extern "C" fn rt_vulkan_get_last_error() -> *const c_char {
 // ============================================================================
 // Tests: the feature-disabled stubs must fail LOUD, never silently return 0
 // ============================================================================
-
-#[cfg(all(test, feature = "vulkan"))]
-mod selected_device_generation_tests {
-    use super::VulkanState;
-
-    #[test]
-    fn selection_tokens_start_positive_and_never_wrap() {
-        let mut state = VulkanState::new();
-        assert_eq!(state.allocate_selected_device_token().unwrap(), 1);
-        assert_eq!(state.allocate_selected_device_token().unwrap(), 2);
-        state.next_selected_device_token = i64::MAX;
-        assert_eq!(state.allocate_selected_device_token().unwrap(), i64::MAX);
-        assert_eq!(state.next_selected_device_token, 0);
-        assert!(state.allocate_selected_device_token().is_err());
-    }
-}
 
 #[cfg(all(test, not(feature = "vulkan")))]
 mod vulkan_feature_disabled_tests {

@@ -74,38 +74,13 @@ fn dce_tv_optimize(source: DceTvProgramV1) -> DceTvProgramV1:
             target = target.push(source.instructions[index])
     DceTvProgramV1(target, source.result_register)
 
-# Reverse flags describe the SAME one-pass full-source-suffix relation as
-# _dce_tv_live_in, including reads of instructions which will be removed.
-# Keep is observed before kill/gen. No SSA assumption: read-before-write and
-# repeated destinations retain their legacy abstract meaning.
-fn dce_tv_keep_flags_v1(source: DceTvProgramV1) -> [bool]:
-    var needed: Dict<i64, bool> = {}
-    needed[source.result_register] = true
-    var reverse_flags: [bool] = []
-    var index = source.instructions.len()
-    while index > 0:
-        index = index - 1
-        val instruction = source.instructions[index]
-        val destination = instruction.destination()
-        reverse_flags.push(needed.get(destination) ?? false)
-        needed[destination] = false
-        match instruction:
-            case DceTvInstructionV1.Const(_, _): ()
-            case DceTvInstructionV1.Add(_, left, right):
-                needed[left] = true
-                needed[right] = true
-            case DceTvInstructionV1.Copy(_, from_register):
-                needed[from_register] = true
-    reverse_flags
-
 fn dce_tv_validate(source: DceTvProgramV1, target: DceTvProgramV1) -> bool:
     if source.diagnostic() != "" or target.diagnostic() != "": return false
     if source.result_register != target.result_register: return false
-    val reverse_flags = dce_tv_keep_flags_v1(source)
     var source_index = 0
     var target_index = 0
     while source_index < source.instructions.len():
-        if not reverse_flags[source.instructions.len() - 1 - source_index]:
+        if dce_tv_instruction_is_dead(source, source_index):
             source_index = source_index + 1
             continue
         if target_index >= target.instructions.len(): return false

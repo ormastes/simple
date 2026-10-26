@@ -40,7 +40,7 @@ fail.
 
 ## Quick Start — Embedded
 
-```simple:skip
+```simple
 use std.database.bug.{create_bug_database, Bug, BugSeverity, BugStatus}
 use app.io.{rt_timestamp_now}
 
@@ -126,7 +126,7 @@ PostgreSQL-compatible storage engine. Follows **MDSOC+** (capsule boundary + int
 
 The `simple_db_if` trait surface in stdlib defines the contract between embedded and full tiers. Both tiers implement these traits, so application code can target the interface and swap backends:
 
-```simple:skip
+```simple
 use std.simple_db_if.{StorageApi, PageRef, TxHandle}
 
 fn write_record(storage: StorageApi, data: [u8]):
@@ -163,7 +163,7 @@ The standard library provides specialized databases built on the shared SDN/Quer
 
 Track compiler bugs with severity and status metadata.
 
-```simple:skip
+```simple
 use std.database.bug.{create_bug_database, load_bug_database, Bug, BugSeverity, BugStatus}
 
 val db = create_bug_database("bugs.sdn")
@@ -177,7 +177,7 @@ db.save()
 
 Track test execution results, timing, and flakiness.
 
-```simple:skip
+```simple
 use std.database.test.{create_test_database, TestResult, TestStatus, RunStatus}
 
 val db = create_test_database("tests.sdn")
@@ -191,7 +191,7 @@ db.save()
 
 Track feature implementation across compilation modes (Pure, Hybrid, LLVM).
 
-```simple:skip
+```simple
 use std.database.feature.{create_feature_database, Feature, FeatureStatus, FeatureMode}
 
 val db = create_feature_database("features.sdn")
@@ -204,7 +204,7 @@ db.save()
 
 Advanced filtering, sorting, and limiting across any SDN table:
 
-```simple:skip
+```simple
 use std.database.query.{QueryBuilder, CompareOp}
 
 var query = QueryBuilder.for_table(table)

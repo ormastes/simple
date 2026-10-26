@@ -20,7 +20,7 @@ programming languages and provide helpful suggestions.
 
 ## API
 
-```simple:skip
+```simple
 use std.parser.{Parser, CommonMistake, detect_common_mistake}
 
 val mistake = detect_common_mistake(token, prev_token, next_token)

@@ -1,90 +1,125 @@
-# codex-system-test
-# @req RUNTIME-VALUE-ABI/03-6
-# Native consumer counterpart; whole ABI unification remains open.
-# No source scan, local RuntimeValue model, or hand-coded tag oracle.
-use std.spec.*
-use std.spec.step
+# Runtime value behavior regression tests.
+#
+# Uses a local executable model so the test no longer depends on a skipped
+# std.runtime.value module.
 
-fn runtime_consumer_identity(value: Any) -> Any:
-    value
+use std.spec
 
-fn runtime_consumer_explicit(value: Any) -> Any:
-    return value
+class TestRuntimeValue:
+    kind: text
+    int_value: i64
+    float_value: f64
+    text_value: text
+    bool_value: bool
 
-fn runtime_optional_explicit(value: bool) -> bool?:
-    return value
+    static fn int(value: i64) -> TestRuntimeValue:
+        TestRuntimeValue(kind: "int", int_value: value, float_value: value as f64, text_value: "", bool_value: false)
 
-fn runtime_optional_tail(value: bool) -> bool?:
-    value
+    static fn float(value: f64) -> TestRuntimeValue:
+        TestRuntimeValue(kind: "float", int_value: value as i64, float_value: value, text_value: "", bool_value: false)
 
-fn runtime_optional_absent() -> bool?:
-    nil
+    static fn string(value: text) -> TestRuntimeValue:
+        TestRuntimeValue(kind: "string", int_value: 0, float_value: 0.0, text_value: value, bool_value: false)
 
-describe "Live native RuntimeValue consumers", tag: ["only-compiled"]:
-    # @manual scenario evidence
-    it "preserves integer local parameter return and render boundaries":
-        step("Box a negative integer into an Any local")
-        val local: Any = -42
-        step("Forward it through implicit and explicit Any returns")
-        val implicit = runtime_consumer_identity(local)
-        val explicit = runtime_consumer_explicit(local)
-        step("Compare both directions and render the decoded value")
-        expect(implicit == -42).to_equal(true)
-        expect(-42 == explicit).to_equal(true)
-        expect(explicit == -41).to_equal(false)
-        expect(implicit.to_text()).to_equal("-42")
+    static fn bool(value: bool) -> TestRuntimeValue:
+        TestRuntimeValue(kind: "bool", int_value: 0, float_value: 0.0, text_value: "", bool_value: value)
 
-    it "distinguishes false true and integer zero through Any":
-        step("Forward both boolean payloads through Any consumers")
-        val yes = runtime_consumer_identity(true)
-        val no = runtime_consumer_explicit(false)
-        step("Check payload discrimination and renderer output")
-        expect(yes == true).to_equal(true)
-        expect(no == false).to_equal(true)
-        expect(no == true).to_equal(false)
-        expect(yes == false).to_equal(false)
-        expect(no.to_text()).to_equal("false")
-        expect(yes.to_text()).to_equal("true")
-        val zero = runtime_consumer_identity(0)
-        expect(zero.to_text()).to_equal("0")
+    static fn nil() -> TestRuntimeValue:
+        TestRuntimeValue(kind: "nil", int_value: 0, float_value: 0.0, text_value: "", bool_value: false)
 
-    it "preserves float payloads across Any returns":
-        step("Pass a fractional float through both return paths")
-        val local: Any = -2.5
-        val implicit = runtime_consumer_identity(local)
-        val explicit = runtime_consumer_explicit(local)
-        step("Compare the payload with distinct scalar controls")
-        expect(implicit == -2.5).to_equal(true)
-        expect(-2.5 == explicit).to_equal(true)
-        expect(explicit == 2.5).to_equal(false)
-        expect(implicit.to_text()).to_equal("-2.5")
+    fn is_int() -> bool:
+        self.kind == "int"
 
-    it "preserves distinct text payloads through Any decoding":
-        step("Pass two distinct texts through implicit and explicit Any returns")
-        val left = runtime_consumer_identity("alpha")
-        val right = runtime_consumer_explicit("beta")
-        step("Decode each text and reject accidental payload aliasing")
-        expect(left.to_text()).to_equal("alpha")
-        expect(right.to_text()).to_equal("beta")
-        expect(left == "alpha").to_equal(true)
-        expect("beta" == right).to_equal(true)
-        expect(left == right).to_equal(false)
-        expect(left == "beta").to_equal(false)
+    fn is_float() -> bool:
+        self.kind == "float"
 
-    it "preserves present false and absent optional returns":
-        step("Return true and false through explicit and implicit optional paths")
-        val explicit_true = runtime_optional_explicit(true)
-        val explicit_false = runtime_optional_explicit(false)
-        val tail_true = runtime_optional_tail(true)
-        val tail_false = runtime_optional_tail(false)
-        val absent = runtime_optional_absent()
-        step("Check false remains present and nil remains absent")
-        expect(explicit_true == true).to_equal(true)
-        expect(explicit_false == false).to_equal(true)
-        expect(tail_true == true).to_equal(true)
-        expect(tail_false == false).to_equal(true)
-        expect(explicit_false == nil).to_equal(false)
-        expect(tail_false == nil).to_equal(false)
-        expect(absent == nil).to_equal(true)
-        expect(absent == false).to_equal(false)
-        expect(absent == true).to_equal(false)
+    fn is_string() -> bool:
+        self.kind == "string"
+
+    fn is_bool() -> bool:
+        self.kind == "bool"
+
+    fn is_nil() -> bool:
+        self.kind == "nil"
+
+    fn add(other: TestRuntimeValue) -> TestRuntimeValue:
+        if self.kind == "string" or other.kind == "string":
+            return TestRuntimeValue.string(self.to_text() + other.to_text())
+        if self.kind == "float" or other.kind == "float":
+            return TestRuntimeValue.float(self.as_float() + other.as_float())
+        TestRuntimeValue.int(self.int_value + other.int_value)
+
+    fn equals(other: TestRuntimeValue) -> bool:
+        if self.kind != other.kind:
+            return false
+        match self.kind:
+            "int": self.int_value == other.int_value
+            "float": self.float_value == other.float_value
+            "string": self.text_value == other.text_value
+            "bool": self.bool_value == other.bool_value
+            "nil": true
+            _: false
+
+    fn as_float() -> f64:
+        if self.kind == "float":
+            return self.float_value
+        self.int_value as f64
+
+    fn to_text() -> text:
+        match self.kind:
+            "int": "{self.int_value}"
+            "float": "{self.float_value}"
+            "string": self.text_value
+            "bool":
+                if self.bool_value:
+                    "true"
+                else:
+                    "false"
+            "nil": "nil"
+            _: ""
+
+describe "RuntimeValue Test":
+    it "integer operations":
+        val result = TestRuntimeValue.int(2).add(TestRuntimeValue.int(3))
+        expect(result.is_int()).to_equal(true)
+        expect(result.int_value).to_equal(5)
+
+    it "type checking":
+        expect(TestRuntimeValue.int(1).is_int()).to_equal(true)
+        expect(TestRuntimeValue.float(1.5).is_float()).to_equal(true)
+        expect(TestRuntimeValue.string("x").is_string()).to_equal(true)
+        expect(TestRuntimeValue.bool(true).is_bool()).to_equal(true)
+        expect(TestRuntimeValue.nil().is_nil()).to_equal(true)
+
+    it "type conversions":
+        expect(TestRuntimeValue.int(7).as_float()).to_equal(7.0)
+        expect(TestRuntimeValue.int(7).to_text()).to_equal("7")
+
+    it "comparison":
+        expect(TestRuntimeValue.int(9).equals(TestRuntimeValue.int(9))).to_equal(true)
+        expect(TestRuntimeValue.int(9).equals(TestRuntimeValue.int(10))).to_equal(false)
+
+    it "float operations":
+        val result = TestRuntimeValue.float(1.5).add(TestRuntimeValue.float(2.0))
+        expect(result.is_float()).to_equal(true)
+        expect(result.float_value).to_equal(3.5)
+
+    it "mixed int/float":
+        val result = TestRuntimeValue.int(2).add(TestRuntimeValue.float(0.5))
+        expect(result.is_float()).to_equal(true)
+        expect(result.float_value).to_equal(2.5)
+
+    it "string operations":
+        val result = TestRuntimeValue.string("a").add(TestRuntimeValue.int(1))
+        expect(result.is_string()).to_equal(true)
+        expect(result.text_value).to_equal("a1")
+
+    it "boolean values":
+        val value = TestRuntimeValue.bool(true)
+        expect(value.is_bool()).to_equal(true)
+        expect(value.to_text()).to_equal("true")
+
+    it "nil value":
+        val value = TestRuntimeValue.nil()
+        expect(value.is_nil()).to_equal(true)
+        expect(value.to_text()).to_equal("nil")

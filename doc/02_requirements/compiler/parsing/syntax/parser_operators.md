@@ -11,7 +11,7 @@ including arithmetic, comparison, logical, bitwise, and special operators.
 
 ## Syntax
 
-```simple:skip
+```simple
 # Arithmetic: + - * / % ** //
 # Comparison: < > <= >= == !=
 # Logical: and or not

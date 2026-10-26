@@ -42,7 +42,7 @@ simple scripts/lib_tool.spl list mylib.lsm
 
 ### Use a Library
 
-```text
+```simple
 use mylib.math.{add}
 use mylib.hello.{greet}
 
@@ -68,7 +68,7 @@ simple scripts/lib_tool.spl create libstd.lsm build/smf/*.smf
 
 ### Programmatic (LibSmfBuilder)
 
-```simple:skip
+```simple
 use compiler.linker.lib_smf_writer.{LibSmfBuilder}
 
 var builder = LibSmfBuilder.new()
@@ -96,7 +96,7 @@ simple scripts/build_libstd.spl --verbose
 
 ### Loading Modules at Runtime
 
-```simple:skip
+```simple
 use compiler.loader.module_loader_lib_support.{ModuleLoaderWithLibs}
 
 var loader = ModuleLoaderWithLibs.new(config)
@@ -117,7 +117,7 @@ val modules = loader.list_available_modules()
 
 `SmfGetter` provides transparent access to both single SMF files and library archives:
 
-```simple:skip
+```simple
 use compiler.linker.smf_getter.{SmfGetter, create_standard_getter}
 
 var getter = create_standard_getter()
@@ -146,7 +146,7 @@ simple scripts/compile_with_objects.spl --input-dir=src
 
 ### Link with Libraries
 
-```simple:skip
+```simple
 use compiler.linker.linker_wrapper_lib_support.{link_with_libraries}
 use compiler.linker.linker_wrapper.{NativeLinkConfig}
 
@@ -288,7 +288,7 @@ sudo cp build/lib/libstd.lsm /usr/lib/simple/
 
 ### LibSmfBuilder
 
-```text
+```simple
 var builder = LibSmfBuilder.new()
 builder.add_module(name: text, path: text) -> Result
 builder.add_module_data(name: text, data: [u8]) -> Result
@@ -298,7 +298,7 @@ builder.set_verbose(verbose: bool)
 
 ### ModuleLoaderWithLibs
 
-```text
+```simple
 var loader = ModuleLoaderWithLibs.new(config)
 loader.add_library(path: text) -> Result
 loader.load_module(name: text) -> Result<SmfReaderMemory>
@@ -308,7 +308,7 @@ loader.list_available_modules() -> [text]
 
 ### link_with_libraries
 
-```text
+```simple
 link_with_libraries(
     object_files: [text],
     output: text,
@@ -318,7 +318,7 @@ link_with_libraries(
 
 ### NativeLinkConfig
 
-```text
+```simple
 var config = NativeLinkConfig.default()
 config.libraries: [text]         # System libraries to link
 config.library_paths: [text]     # Paths to search for .lsm files

@@ -1,50 +1,11 @@
 # Frozen registry indexes and import/export route projections.
 
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position}
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_logical_name_from_path, module_surface_package_name_from_name}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
-use compiler.common.module_path_naming.{module_relative_name_from_path}
 use std.common.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
-val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v3"
-
-# Stable bottom-up merge sort: each pass appends every row once instead of
-# rebuilding an ever-longer prefix for every insertion. Keep text `<` and
-# retain equal rows in their original order; these bytes define cache identity.
-pub(package) fn module_surface_resolution_rows_sorted_v1(rows: [text]) -> [text]:
-    val count = rows.len()
-    var sorted = rows
-    var width = 1
-    while width < count:
-        var next: [text] = []
-        var start = 0
-        while start < count:
-            val middle = if width > count - start: count else: start + width
-            val end = if width > count - middle: count else: middle + width
-            var left = start
-            var right = middle
-            while left < middle and right < end:
-                if sorted[right] < sorted[left]:
-                    next.push(sorted[right])
-                    right = right + 1
-                else:
-                    next.push(sorted[left])
-                    left = left + 1
-            while left < middle:
-                next.push(sorted[left])
-                left = left + 1
-            while right < end:
-                next.push(sorted[right])
-                right = right + 1
-            start = end
-        sorted = next
-        # Avoid overflowing width on the final doubling, even for a large input.
-        if width >= count - width:
-            break
-        width = width * 2
-    sorted
+val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v2"
 
 fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName) -> text:
     var rows: [text] = []
@@ -55,7 +16,17 @@ fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName
             rows.push(registry.ordered_names[index] + "=" +
                 registry.surfaces[surface_index].canonical_path)
         index = index + 1
-    val sorted = module_surface_resolution_rows_sorted_v1(rows)
+    var sorted: [text] = []
+    for row in rows:
+        var inserted = false
+        var next: [text] = []
+        for current in sorted:
+            if not inserted and row < current:
+                next.push(row)
+                inserted = true
+            next.push(current)
+        if not inserted: next.push(row)
+        sorted = next
     sha256_text(sorted.join("\n"))
 
 pub(package) fn module_surfaces_validate_index_alignment(
@@ -76,22 +47,25 @@ pub(package) fn module_surfaces_validate_index_alignment(
        dict_names.len() != ordered_names.len():
         return Err("module surface name/index representation is inconsistent")
 
-    # This is a construction-time check while the compatibility Dict is live.
-    # Hash lookups replace two full scans per alias; frozen lookup helpers
-    # below must still use their retained scalar arrays, never this Dict.
-    # contains_key + indexing avoids the native Dict.get() boxed-i64 defect.
-    var seen_names: Dict<text, bool> = {}
     var i = 0
     while i < ordered_names.len():
         if ordered_indices[i] < 0 or ordered_indices[i] >= surfaces.len():
             return Err("module surface index out of range for {ordered_names[i]}")
-        if seen_names.contains_key(ordered_names[i]):
-            return Err("duplicate ordered module surface name: {ordered_names[i]}")
-        seen_names[ordered_names[i]] = true
-        if not index_by_name.contains_key(ordered_names[i]):
+        var prior = 0
+        while prior < i:
+            if ordered_names[prior] == ordered_names[i]:
+                return Err("duplicate ordered module surface name: {ordered_names[i]}")
+            prior = prior + 1
+        var dict_position = 0
+        var found = false
+        while dict_position < dict_names.len():
+            if dict_names[dict_position] == ordered_names[i]:
+                if dict_indices[dict_position] != ordered_indices[i]:
+                    return Err("module surface name maps to conflicting indices: {ordered_names[i]}")
+                found = true
+            dict_position = dict_position + 1
+        if not found:
             return Err("module surface ordered name missing from compatibility index: {ordered_names[i]}")
-        if index_by_name[ordered_names[i]] != ordered_indices[i]:
-            return Err("module surface name maps to conflicting indices: {ordered_names[i]}")
         i = i + 1
     Ok(())
 
@@ -122,18 +96,8 @@ pub(package) fn module_surface_resolve_absolute_key(
         return name
     var candidates: [text] = []
     candidates = candidates.push(name + ".__init__")
-    # NEVER fall back to `lib.<name>` for an unresolved non-std name: when a
-    # same-suffixed module exists under BOTH roots (src/compiler/... and the
-    # src/lib/compiler/... mirror tree), that fallback cross-wires the chase
-    # onto the WRONG physical module -- observed cycle-35/36 compiler_cli
-    # 'unresolved type: MirType': a shard-child registry that failed the
-    # exact-name scan for compiler.mir_opt.optimization_passes routed to the
-    # lib.compiler.mir_opt.optimization_passes STUB FACADE, whose package
-    # bucket (2) instead of the compiler.mir_opt bucket (~40) made the
-    # re-export chase's sibling inference miss and memoize a false negative.
-    # A loud miss (empty string -> chase-unresolved receipt) is correct here;
-    # a silent wrong-module route is the bug. The std.-spelled fold below is
-    # the only legitimate lib. fallback and is unchanged.
+    candidates = candidates.push("lib." + name)
+    candidates = candidates.push("lib." + name + ".__init__")
     if name.starts_with("std."):
         val std_tail = name.substring(4)
         val lib_tail = "lib." + std_tail
@@ -160,12 +124,6 @@ pub(package) fn module_surface_resolve_relative_key(
 ) -> text:
     if not name.starts_with("."):
         return module_surface_resolve_absolute_key(registry, name)
-    # Importer normalization can collapse a repeated tier while its sibling
-    # keeps that tier to distinguish a root-level twin. Resolve the physical
-    # sibling first; a miss must not select the unrelated collapsed twin.
-    val physical_name = module_relative_name_from_path(facade.canonical_path, name)
-    if physical_name != "":
-        return module_surface_resolve_absolute_key(registry, physical_name)
     var dots = 0
     while dots < name.len() and name.substring(dots, dots + 1) == ".":
         dots = dots + 1
@@ -180,59 +138,7 @@ pub(package) fn module_surface_resolve_relative_key(
     val absolute_name = if package_name == "": tail else package_name + "." + tail
     if module_surface_registry_index(registry, absolute_name) >= 0:
         return absolute_name
-    # TWIN-TIER PHYSICAL SIBLING (2026-10-13): the entry-closure loader
-    # resolves a relative import against the importer's on-disk DIRECTORY
-    # (driver_source_loading.spl _driver_resolve_relative_entry_import), so a
-    # file inside an `NN.<tier>/<tier>/` inner-repeat dir binds `.x` to the
-    # physically adjacent file. The logical splice above cannot express that:
-    # module_logical_name_from_path COLLAPSES the repeated tier for non-twin
-    # files (99.loader/loader/module_loader.spl -> compiler.loader.module_loader)
-    # so `.object_mapper` splices to the tier-root spelling, while twin-listed
-    # files KEEP the doubled name, so a doubled importer splices one tier too
-    # deep (compiler.loader.loader.exec_mapping for a file registered as
-    # compiler.loader.exec_mapping). Neither spelling is registered when only
-    # the closure-loaded sibling is -- the tier root may not be in the closure
-    # at all -- and the import froze to "", later dying as
-    # "missing module surface for .x" / "unresolved type: X". Derive the
-    # sibling's key from its physical path with the SAME naming derivation
-    # that registered it, which agrees with the closure in both directions.
-    val physical_name = module_surface_physical_sibling_key(
-        registry, facade.canonical_path, tail, dots)
-    if physical_name != "":
-        return physical_name
     module_surface_resolve_absolute_key(registry, absolute_name)
-
-# Registry key of the file the entry-closure loader binds one relative import
-# to, or "" when no such surface is registered. Candidate order mirrors the
-# loader's probes: sibling file, then package facade, then mod.spl.
-fn module_surface_physical_sibling_key(
-    registry: ModuleSurfacesByName, importer_path: text, tail: text, dots: i64
-) -> text:
-    var dir = importer_path
-    var up = 0
-    while up < dots:
-        var cut = -1
-        var scan = 0
-        while scan < dir.len():
-            if dir.substring(scan, scan + 1) == "/":
-                cut = scan
-            scan = scan + 1
-        if cut < 0:
-            return ""
-        dir = dir[0:cut]
-        up = up + 1
-    val rel = tail.replace(".", "/")
-    val file_name = module_surface_logical_name_from_path(dir + "/" + rel + ".spl")
-    if module_surface_registry_index(registry, file_name) >= 0:
-        return file_name
-    val package_name = module_surface_logical_name_from_path(
-        dir + "/" + rel + "/__init__.spl")
-    if module_surface_registry_index(registry, package_name) >= 0:
-        return package_name
-    val mod_name = module_surface_logical_name_from_path(dir + "/" + rel + "/mod.spl")
-    if module_surface_registry_index(registry, mod_name) >= 0:
-        return mod_name
-    ""
 
 pub(package) fn module_surface_resolve_import_key(
     registry: ModuleSurfacesByName,
@@ -298,9 +204,6 @@ pub(package) fn module_surface_import_resolution_trace_with_generation_v1(
             package_name = module_surface_package_name_from_name(package_name)
             package_index = package_index + 1
         base = if package_name == "": tail else: package_name + "." + tail
-        val physical_name = module_relative_name_from_path(facade.canonical_path, import_id)
-        if physical_name != "":
-            base = physical_name
     var candidates: [text] = [base, base + ".__init__", "lib." + base,
         "lib." + base + ".__init__"]
     if base.starts_with("std."):
@@ -419,7 +322,7 @@ pub(package) fn module_surfaces_frozen_alignment_error(
         alias_index = alias_index + 1
     var surface_index = 0
     while surface_index < registry.surfaces.len():
-        val surface: ModuleSurface = registry.surfaces[surface_index]
+        val surface = registry.surfaces[surface_index]
         if not surface.frozen:
             return "surface not frozen: index={surface_index}"
         if not surface.export_origin_index.frozen:
@@ -484,7 +387,7 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         return Err("module surface registry is already frozen")
     var existing_surface_index = 0
     while existing_surface_index < registry.surfaces.len():
-        val existing_surface: ModuleSurface = registry.surfaces[existing_surface_index]
+        val existing_surface = registry.surfaces[existing_surface_index]
         if existing_surface.frozen or existing_surface.export_origin_index.frozen:
             return Err("module surface is already frozen: {existing_surface_index}")
         existing_surface_index = existing_surface_index + 1
@@ -504,24 +407,12 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         var surface = registry.surfaces[surface_index]
         surface.physical_index = surface_index
         surface.logical_name = module_surface_logical_name_from_path(surface.canonical_path)
-        surface.canonical_name = module_surface_fold_std_alias(surface.logical_name)
-        surface.package_name = module_surface_package_name_from_name(surface.canonical_name)
+        surface.canonical_name = surface.logical_name
+        surface.package_name = module_surface_package_name_from_name(surface.logical_name)
         val preferred_result = module_surface_preferred_registry_name(registry, surface)
         if preferred_result.is_err():
             return Err(preferred_result.unwrap_err())
         surface.preferred_registry_name = preferred_result.unwrap()
-        if (env_get_opt("SIMPLE_HIR_SURFACE_IDENT_DUMP") ?? "") == "1":
-            # Cross-wire detector (cycle-35/36 compiler_cli 'unresolved type'):
-            # dump every surface whose registry alias disagrees with its
-            # admission-time module_name or whose path-derived truth disagrees
-            # with its re-derived canonical name. Runs in EVERY process that
-            # freezes a registry (the parent AND each HIR shard child, which
-            # build their own registries); the shard tag attributes rows.
-            val ident_truth = module_surface_logical_name_from_path(surface.canonical_path)
-            val ident_shard = env_get_opt("SIMPLE_HIR_SHARD_OWNER") ?? env_get_opt("SIMPLE_HIR_SHARD") ?? env_get_opt("SIMPLE_PARSE_SHARD") ?? "parent"
-            if surface.module_name != surface.preferred_registry_name or
-                    surface.canonical_name != module_surface_fold_std_alias(ident_truth):
-                eprint("[surface-ident] shard={ident_shard} idx={surface_index} module_name={surface.module_name} logical={surface.logical_name} canonical={surface.canonical_name} preferred={surface.preferred_registry_name} package={surface.package_name} path={surface.canonical_path} path_truth={ident_truth}")
 
         # Per-file promotion keeps these projections readable until freeze,
         # but their backing arrays still belong to the file scope. Publish
@@ -552,7 +443,7 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
             return Err("pre-freeze import item projections are misaligned: {surface_index}")
         var import_index = 0
         while import_index < surface.imports.len():
-            val import_decl: ParserImport = surface.imports[import_index]
+            val import_decl = surface.imports[import_index]
             val item_start = surface.import_item_offsets[import_index]
             val item_end = surface.import_item_offsets[import_index + 1]
             if (item_start < 0 or item_start > item_end or
@@ -672,23 +563,20 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
                         source_name = parts[0]
                         if parts.len() > 1:
                             local_name = parts[1]
-                    if source_name.contains("."):
-                        # QUALIFIED export -- `export module.Name` or, after an
-                        # alias split, `export module.Name:alias` (the braced
-                        # re-export form `export use module.{Name as alias}`
-                        # records exactly that). Stored verbatim, the route's
-                        # local name is the whole dotted string, so
-                        # `find_reexport_source_walk`'s `exp_local == wanted`
-                        # test never matches the short name a consumer actually
-                        # writes and the route is skipped outright. That
-                        # surfaced as the hard `unresolved type: CodegenTarget`
+                    elif export_item.contains("."):
+                        # QUALIFIED bare export -- `export module.Name`.
+                        # Stored verbatim, the route's local name is the whole
+                        # dotted string, so `find_reexport_source_walk`'s
+                        # `exp_local == wanted` test never matches the short
+                        # name a consumer actually writes and the route is
+                        # skipped outright. That surfaced as the hard
+                        # `unresolved type: CodegenTarget`
                         # (`src/compiler/70.backend/backend/__init__.spl:326`
                         # spells it `export backend_api.CodegenTarget`), blamed
                         # on an innocent importing module. Split the qualifier
                         # off and record the module it names as the route
                         # target, exactly as the `.*` glob branch already does.
-                        # The alias local (if any) is preserved.
-                        val qualified_parts = source_name.split(".")
+                        val qualified_parts = export_item.split(".")
                         val member_name = qualified_parts[qualified_parts.len() - 1]
                         var qualifier = ""
                         var qualifier_index = 0
@@ -720,8 +608,7 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
                                     registry, qualifier)
                             if route_target_name != "":
                                 source_name = member_name
-                                if not export_item.contains(":"):
-                                    local_name = member_name
+                                local_name = member_name
                     export_route_sources = export_route_sources.push(source_name)
                     export_route_locals = export_route_locals.push(local_name)
                     var route_target_index = -1
@@ -758,32 +645,6 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         surface.frozen = true
         surface.export_origin_index.frozen = true
         registry.surfaces[surface_index] = surface
-        surface_index = surface_index + 1
-    # Preferred-identity repair pass, reading the STORED rows. The per-row
-    # freeze loop above copies each ModuleSurface aggregate, mutates it, and
-    # writes it back; under the stage2 native aggregate-copy miscompilation
-    # family a neighbouring iteration's write-back can smear one row's
-    # preferred_registry_name onto another (observed cycle-35/36: the lib
-    # compiler/mir_opt re-export FACADE stored
-    # preferred=compiler.mir_opt.optimization_passes while its module_name/
-    # canonical stayed lib.*, so the re-export chase's package-sibling
-    # inference searched the 2-member lib bucket, memoized a false negative,
-    # and innocent importers died with hard 'unresolved type: MirType').
-    # preferred is a pure function of (ordered aliases, physical_index), so
-    # re-applying it from the stored row repairs a pure field smear without
-    # touching anything the first pass computed from file content.
-    surface_index = 0
-    while surface_index < registry.surfaces.len():
-        var stored = registry.surfaces[surface_index]
-        if stored.physical_index == surface_index:
-            val repair_preferred = module_surface_preferred_registry_name(registry, stored)
-            if repair_preferred.is_err():
-                return Err(repair_preferred.unwrap_err())
-            if stored.preferred_registry_name != repair_preferred.unwrap():
-                if (env_get_opt("SIMPLE_HIR_SURFACE_IDENT_DUMP") ?? "") == "1":
-                    eprint("[surface-ident-repair] idx={surface_index} module_name={stored.module_name} smeared_preferred={stored.preferred_registry_name} repaired={repair_preferred.unwrap()}")
-                stored.preferred_registry_name = repair_preferred.unwrap()
-                registry.surfaces[surface_index] = stored
         surface_index = surface_index + 1
     registry.generation = generation
     registry.frozen = true

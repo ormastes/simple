@@ -16,26 +16,11 @@ fn main() {
     println!("cargo:rerun-if-changed=src/runtime_signature_scan.rs");
     println!("cargo:rerun-if-changed=../compiler/src/codegen/runtime_sffi.rs");
     println!("cargo:rerun-if-changed=src");
-    // The C/H compile list is discovered dynamically from ../../runtime, so a
-    // per-file rerun-if-changed list can never be complete: runtime_native.c
-    // (2026-10-22) had no row, an edit to it was silently absent from every
-    // rebuild candidate, and the stage2 sanity panic it fixed persisted across
-    // "rebuilds". Watch the whole tree; the explicit rows below stay as
-    // documentation of the load-bearing inputs.
-    println!("cargo:rerun-if-changed=../../runtime");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_alloc_observer.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_alloc_observer.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_dynload.c");
-    println!("cargo:rerun-if-changed=../../runtime/simple_gpu_provider_abi_v1.h");
-    println!("cargo:rerun-if-changed=../../runtime/runtime.h");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_fd_stat_rust_bridge.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_secure_staging.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_shared_parse_cell_private.h");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_bootstrap_linux_provider.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
@@ -214,9 +199,6 @@ fn runtime_symbol_declaration(
     let signature = match symbol {
         "rt_alloc" => "(size: i64) -> *mut u8",
         "rt_free" => "(ptr: *mut u8)",
-        // The SFFI machine lane is I64, but the C owner returns a borrowed
-        // pointer. Keep this linker declaration identical to linked_registry.
-        "rt_gpu_provider_path" => "(backend_bit: i64) -> *const std::ffi::c_char",
         "rt_ptr_read_i64" => "(addr: i64, offset: i64) -> i64",
         "rt_ptr_read_u8" => "(addr: i64, offset: i64) -> i64",
         "rt_ptr_read_i32" => "(addr: i64, offset: i64) -> i32",
@@ -300,7 +282,6 @@ fn compile_c_runtime_sources() {
     let mut c_sources = vec![
         "runtime_backend_plugin.c",
         "runtime_memory.c",
-        "runtime_alloc_observer.c",
         "runtime_time.c",
         "runtime_timestamp.c",
         "runtime_db.c",
@@ -311,7 +292,6 @@ fn compile_c_runtime_sources() {
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
         "runtime_file_view.c",
-        "runtime_fd_stat_rust_bridge.c",
         "runtime_font.c",
         "runtime_memtrack.c",
         // Shared capture state uses this runtime owner's text and builder ABI.
@@ -425,12 +405,6 @@ fn compile_c_runtime_sources() {
     // a host liburing that can disagree with the headers.  The Rust facade
     // below remains the owner of the rt_driver_* ABI; the C layer contributes
     // only the spl_driver vtable and backend implementation.
-    // The Rust seed cannot include runtime_native.c/runtime_thread.c: both
-    // carry other rt_* owners. Stage 2 still needs these two POSIX calls on
-    // every hosted Unix target (Linux and macOS alike).
-    if target_os != "windows" {
-        c_sources.push("runtime_bootstrap_linux_provider.c");
-    }
     let linux_uring = target_os == "linux";
     if linux_uring {
         c_sources.push("platform/async_driver.c");
@@ -523,12 +497,6 @@ fn compile_c_runtime_sources() {
         // `/experimental:c11atomics` switch even when `/std:c11` is set.
         build.flag_if_supported("/std:c11");
         build.flag_if_supported("/experimental:c11atomics");
-    }
-    if native_all_provider {
-        // One registry owns authentication and every session/resource lease.
-        // Keep the Rust legacy GPU/dynlib APIs; do not create duplicate owners.
-        c_sources.push("runtime_dynload.c");
-        build.define("SIMPLE_GPU_PROVIDER_REGISTRY_ONLY", None);
     }
     for source in &c_sources {
         let src_path = runtime_c_dir.join(source);
@@ -657,15 +625,8 @@ fn collect_defined_runtime_symbols(
 }
 
 fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: bool, exported: &mut HashSet<String>) {
-    if native_all_provider {
-        let source = fs::read_to_string(root.join("runtime_dynload.c"))
-            .expect("read native-all GPU registry owner");
-        exported.extend(runtime_export_scan::c_function_definitions(&source)
-            .into_iter().filter(|symbol| symbol.starts_with("rt_gpu_provider_")));
-    }
     const LINKED_C_SOURCES: &[&str] = &[
         "runtime_memory.c",
-        "runtime_alloc_observer.c",
         "runtime_time.c",
         "runtime_timestamp.c",
         "runtime_db.c",
@@ -682,13 +643,9 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         "runtime_collection_capture_impl.h",
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
-        "runtime_bootstrap_linux_provider.c",
     ];
     for source in LINKED_C_SOURCES {
         if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {
-            continue;
-        }
-        if *source == "runtime_bootstrap_linux_provider.c" && target_os == "windows" {
             continue;
         }
         let path = root.join(source);

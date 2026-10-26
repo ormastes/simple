@@ -168,35 +168,3 @@ fn every_bindable_soft_keyword_reads_back_in_ordinary_expression_positions() {
         parse_ok(&format!("var {kw} = 1\nlet d = str({kw})"));
     }
 }
-
-/// REPRODUCING TEST. `unit`/`newunit` lex as `TokenKind::Unit`; expression
-/// position already reads them back as identifiers, but a statement that
-/// STARTS with `unit` was routed unconditionally to `parse_unit()` and died
-/// on `unit = ...` (src/lib/common/encoding/host_text_boundary_v1.spl:101).
-#[test]
-fn unit_reassignment_statement_parses_as_an_assignment() {
-    parse_ok("var unit = 1\nunit = unit + 1\nprint(unit)");
-    parse_ok("var unit = 1\nunit += 1\nunit -= 1\nunit *= 2");
-    parse_ok("fn f(x: i64) -> i64:\n    var unit = x\n    if unit > 0:\n        unit = 0x10000 + ((unit - 0xD800) << 10)\n    while unit > 10:\n        unit = unit - 1\n    return unit");
-    parse_ok("var newunit = 1\nnewunit = newunit + 1");
-    parse_ok("var unit = [1, 2]\nunit[0] = 3");
-    parse_ok("var unit = 1\nunit.foo = 3");
-}
-
-/// COUNTERPART: unit declarations still parse as declarations.
-#[test]
-fn unit_declarations_still_parse_as_declarations() {
-    for src in [
-        "unit UserId: i64 as uid",
-        "newunit UserId: i64 as uid",
-        "unit velocity = length / time",
-        "unit length(base: f64): m = 1.0, km = 1000.0",
-    ] {
-        let mut parser = Parser::new(src);
-        let items = parser.parse().unwrap_or_else(|e| panic!("{src}: {e}"));
-        let dbg = format!("{:?}", items);
-        assert!(dbg.contains("Unit"), "{src} should parse as a unit decl, got {dbg}");
-    }
-    let mut parser = Parser::new("newunit velocity = length / time");
-    assert!(parser.parse().is_err(), "newunit compound must still be rejected");
-}

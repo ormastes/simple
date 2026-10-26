@@ -1,0 +1,37 @@
+"""
+# Unsupported flat EXPR kinds must be reported loudly, never silently NilLit'd
+
+Lane C2 (flat-AST bridge transition census), extending
+`doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md`.
+
+`convert_flat_expr` has 48 of 57 `EXPR_*` tags handled. `EXPR_DO_BLOCK` (44) is
+one of the remainder and is produced from ordinary source by
+`_ParserPrimary/primary_expr.spl`; the bug record leaves it deliberately
+unfixed (the target `ExprKind` mapping is a semantic decision, not a mechanical
+one), so its honest state in
+`spec/compiler_schema/transitions/flat_expr_to_ast_expr.sdn` is
+`Unsupported`. What must hold is that it is loud rather than silent.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_get_errors}
+
+fn bridge_expr_diag(src: text, name: text) -> bool:
+    val parsed = parse_full_frontend(src, "testdata/" + name + ".spl", name, Logger(level: 0))
+    val errs = parser_get_errors()
+    var found = false
+    var i = 0
+    while i < errs.len():
+        if errs[i].contains("flat AST bridge: unhandled expr node kind"):
+            found = true
+        i = i + 1
+    found
+
+describe "unsupported flat expr kinds raise a loud bridge diagnostic":
+    it "reports a `do:` block expression (EXPR_DO_BLOCK, tag 44)":
+        assert_true(bridge_expr_diag("fn boot() -> i64:\n    do:\n        1\n", "fixture_expr_do_block"))
+
+    it "does NOT fire on an ordinary call expression -- control, so the spec is not vacuous":
+        assert_false(bridge_expr_diag("fn identity(w: i64) -> i64:\n    w\n\nfn boot(w: i64):\n    identity(w)\n", "fixture_expr_control"))

@@ -25,7 +25,7 @@ val result = (\x: x + 10)(32)     # 42
 
 Common use cases:
 
-```text
+```simple
 val doubled = items.map(\x: x * 2)
 val evens = items.filter(\x: x % 2 == 0)
 val sum = items.reduce(\acc, x: acc + x, 0)
@@ -33,7 +33,7 @@ val sum = items.reduce(\acc, x: acc + x, 0)
 
 **Limitation:** Captured variables are read-only. Mutations inside lambdas do not propagate back to the outer scope.
 
-```text
+```simple
 # Wrong - sum stays 0
 var sum = 0
 items.each(\x: sum = sum + x)
@@ -48,7 +48,7 @@ val sum = items.reduce(\acc, x: acc + x, 0)
 
 Futures represent values that will be available later. `await` blocks until the future completes.
 
-```text
+```simple
 # Create deferred computations
 val fut1 = future(\: fetch_user())
 val fut2 = future(\: fetch_posts())
@@ -60,7 +60,7 @@ val posts = await fut2
 
 Error handling with Result:
 
-```text
+```simple
 async fn may_fail() -> Result<i64, Error>:
     if condition:
         Ok(42)
@@ -78,7 +78,7 @@ match await may_fail():
 
 Async functions return futures automatically and can use `await`.
 
-```text
+```simple
 async fn fetch_data() -> i64:
     val response = await http_get("https://api.example.com")
     response.parse_int()
@@ -135,7 +135,7 @@ for x in make_range(0, 10): print x    # Works (new generator)
 
 Actors are independent units of computation that communicate via messages.
 
-```text
+```simple
 actor Counter:
     var count: i64 = 0
 
@@ -154,7 +154,7 @@ val count = await counter.ask(GetCount())
 
 **Worker Pool:**
 
-```text
+```simple
 val workers = [for i in 0..10: spawn Worker()]
 for task in tasks:
     workers[task.id % 10].send(task)
@@ -162,7 +162,7 @@ for task in tasks:
 
 **Supervisor:**
 
-```text
+```simple
 actor Supervisor:
     var workers: List<Actor> = []
 
@@ -180,7 +180,7 @@ actor Supervisor:
 ### Task ID Allocation
 
 ```simple
-use std.nogc_async_mut.async_sffi.{task_alloc_id, NEXT_TASK_ID}
+use std.async_sffi (task_alloc_id, NEXT_TASK_ID)
 
 val id1 = task_alloc_id()
 val id2 = task_alloc_id()
@@ -190,7 +190,7 @@ print "IDs: {id1}, {id2}"
 ### Waker System
 
 ```simple
-use std.nogc_async_mut.async_sffi.{waker_signal, waker_check, waker_clear}
+use std.async_sffi (waker_signal, waker_check, waker_clear)
 
 waker_signal(0, 5)           # Signal task 5
 print waker_check(5)         # true
@@ -200,7 +200,7 @@ print waker_check(5)         # false
 
 ### Poll Type
 
-```text
+```simple
 enum Poll<T>:
     Ready(value: T)    # Completed
     Pending            # Not ready

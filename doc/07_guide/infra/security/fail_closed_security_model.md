@@ -15,7 +15,7 @@ error silently grants access.
 
 **Correct pattern:**
 
-```simple:skip
+```simple
 fn check_auth_before(ctx: JoinPointContext) -> Result<(), text>:
     val sec_ctx = resolve_security_context(ctx)
     if not sec_ctx.is_authenticated():
@@ -26,7 +26,7 @@ fn check_auth_before(ctx: JoinPointContext) -> Result<(), text>:
 
 **Wrong — void return means the weaver can never abort:**
 
-```simple:skip
+```simple
 fn check_auth_before(ctx: JoinPointContext):   # BAD: no Result
     ...
 ```
@@ -49,7 +49,7 @@ returns `Result<Capability, text>`. On any malformed or unrecognised input it
 returns `Err`. **Callers must treat `Err` as deny** — never fall back to a
 wildcard or permissive default.
 
-```simple:skip
+```simple
 val cap = parse_capability(raw_string)
 if cap.is_err():
     return Err("unknown capability — access denied")
@@ -76,7 +76,7 @@ future before accepting the grant.
 `path` starts with `scope + "/"`. A `/data` scope does **not** authorise a
 request to `/data-evil` — the separator makes the boundary unambiguous.
 
-```simple:skip
+```simple
 fn _capability_path_allowed(scope: text, path: text) -> bool:
     scope == "*" or path == scope or path.starts_with(scope + "/")
 ```

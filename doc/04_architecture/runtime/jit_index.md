@@ -107,7 +107,7 @@ test/
 
 ### Core Types
 
-```simple:skip
+```simple
 # Configuration
 JitInstantiatorConfig(update_smf, max_depth, enabled, verbose)
 
@@ -127,7 +127,7 @@ JitInstantiationResult:
 
 ### Key Operations
 
-```simple:skip
+```simple
 # Cache management
 cache.get(path)              # Load/get SMF file
 cache.prefetch(paths)        # Prefetch multiple files
@@ -195,7 +195,7 @@ See [Rust FFI Implementation Plan](plan/rust_ffi_implementation_plan.md) for:
 
 ### Basic JIT Compilation
 
-```simple:skip
+```simple
 use compiler.loader.jit_instantiator (JitInstantiator, JitInstantiatorConfig)
 
 # Configure
@@ -226,7 +226,7 @@ match result:
 
 ### File Caching
 
-```simple:skip
+```simple
 use compiler.loader.smf_cache (SmfCache)
 
 # Create cache

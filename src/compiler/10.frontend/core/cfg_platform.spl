@@ -4,14 +4,10 @@
 # variables. Used by both the parser (compile-time @cfg) and the interpreter
 # (runtime @when) conditional compilation systems.
 
-use std.nogc_sync_mut.io_runtime.{env_get, file_read, platform_name, host_arch}
+use std.nogc_sync_mut.io_runtime.{env_get, file_read, platform_name}
 
 fn cfg_env(key: text) -> text:
     env_get(key)
-
-# Process-lifetime cache for the host-arch probe (host_arch() shells out to
-# uname -m; the ambient @cfg evaluator runs per guarded declaration).
-var _cfg_host_arch_cache: text = ""
 
 fn cfg_strip_quotes(value: text) -> text:
     val trimmed = value.trim()
@@ -22,115 +18,106 @@ fn cfg_strip_quotes(value: text) -> text:
             return trimmed.slice(1, trimmed.len() - 1)
     trimmed
 
-# Environment / host spelling -> canonical cfg OS. This is the ONE fuzzy rule
-# shared with the seed (`cond_compile.rs` `normalize_host_os`): lowercase,
-# then the first matching substring in this order. `Windows_NT`, `darwin23`,
-# `linux-gnu`, `uname -s` output all resolve. Atom VALUES inside @when/@cfg
-# use the exact alias table in parser_preprocessor.spl instead.
 fn cfg_normalize_os(raw: text) -> text:
-    val value = cfg_strip_quotes(raw).trim().to_lower()
+    val value = cfg_strip_quotes(raw).trim()
     if value == "":
         return ""
-    if value == "win" or value.contains("windows"):
+
+    val is_win = value == "win" or value == "WIN"
+    val is_win2 = value == "windows" or value == "Windows"
+    val is_win3 = value == "Windows_NT" or value.contains("Windows")
+    if is_win or is_win2 or is_win3:
         return "windows"
-    if value.contains("linux"):
+
+    val is_linux = value == "linux" or value == "Linux"
+    val is_linux2 = value.contains("linux") or value.contains("Linux")
+    if is_linux or is_linux2:
         return "linux"
-    if value == "mac" or value.contains("macos") or value.contains("darwin") or value.contains("mac"):
+
+    val is_macos = value == "mac" or value == "macos"
+    val is_macos2 = value == "MacOS" or value == "darwin" or value == "Darwin"
+    val is_macos3 = value.contains("darwin") or value.contains("Darwin")
+    val is_macos4 = value.contains("macOS") or value.contains("Mac")
+    if is_macos or is_macos2 or is_macos3 or is_macos4:
         return "macos"
-    if value.contains("freebsd"):
+
+    val is_freebsd = value == "freebsd" or value == "FreeBSD"
+    val is_freebsd2 = value.contains("freebsd") or value.contains("FreeBSD")
+    if is_freebsd or is_freebsd2:
         return "freebsd"
-    if value.contains("openbsd"):
+
+    val is_openbsd = value == "openbsd" or value == "OpenBSD"
+    val is_openbsd2 = value.contains("openbsd") or value.contains("OpenBSD")
+    if is_openbsd or is_openbsd2:
         return "openbsd"
-    if value.contains("simpleos"):
+
+    val is_simpleos = value == "simpleos" or value == "SimpleOS"
+    val is_simpleos2 = value.contains("simpleos") or value.contains("SimpleOS")
+    if is_simpleos or is_simpleos2:
         return "simpleos"
-    if value.contains("netbsd"):
+
+    val is_netbsd = value == "netbsd" or value == "NetBSD"
+    val is_netbsd2 = value.contains("netbsd") or value.contains("NetBSD")
+    if is_netbsd or is_netbsd2:
         return "netbsd"
-    if value.contains("android"):
+
+    val is_android = value == "android" or value == "Android"
+    val is_android2 = value.contains("android") or value.contains("Android")
+    if is_android or is_android2:
         return "android"
-    if value.contains("unix"):
+
+    val is_unix = value == "unix" or value == "Unix"
+    val is_unix2 = value.contains("unix") or value.contains("Unix")
+    if is_unix or is_unix2:
         return "unix"
-    # Bare metal: SIMPLE_TARGET_OS=none selects the `none` target, never the
-    # host OS.
-    if value == "none" or value == "baremetal":
-        return "none"
+
     ""
 
-# Environment / host spelling -> canonical cfg arch; same shared fuzzy rule
-# as the seed's `normalize_host_arch` (`AMD64`, `x86_64-pc-linux-gnu`,
-# `riscv64gc`, `uname -m` output).
 fn cfg_normalize_arch(raw: text) -> text:
-    val value = cfg_strip_quotes(raw).trim().to_lower()
+    val value = cfg_strip_quotes(raw).trim()
     if value == "":
         return ""
-    if value == "x64" or value.contains("x86_64") or value.contains("amd64"):
+
+    val is_x64 = value == "x86_64" or value == "amd64" or value == "AMD64"
+    val is_x64_2 = value == "x64" or value == "X64"
+    val is_x64_3 = value.contains("x86_64") or value.contains("amd64") or value.contains("AMD64")
+    if is_x64 or is_x64_2 or is_x64_3:
         return "x86_64"
-    if value == "x86" or value.contains("i386") or value.contains("i686"):
+
+    val is_x86 = value == "x86" or value == "X86"
+    val is_x86_2 = value == "i386" or value == "i686"
+    val is_x86_3 = value.contains("i386") or value.contains("i686")
+    if is_x86 or is_x86_2 or is_x86_3:
         return "x86"
-    if value.contains("aarch64") or value.contains("arm64"):
+
+    val is_aarch64 = value == "aarch64" or value == "arm64" or value == "ARM64"
+    val is_aarch64_2 = value.contains("aarch64") or value.contains("arm64")
+    if is_aarch64 or is_aarch64_2:
         return "aarch64"
-    # Thumb-only Cortex-M targets keep their own cfg arch value (the strict
-    # target evaluator and frontend_cfg_target_from_triple_v1 use these names).
-    if value.starts_with("thumbv6m"):
-        return "thumbv6m"
-    if value.starts_with("thumbv7em"):
-        return "thumbv7em"
-    if value.starts_with("thumbv7m"):
-        return "thumbv7m"
-    if value == "arm" or value == "arm32" or value.contains("armv7") or value.contains("armv6"):
+
+    val is_arm = value == "arm" or value == "ARM"
+    val is_arm2 = value == "armv7" or value == "armv6"
+    val is_arm3 = value.contains("armv7") or value.contains("armv6")
+    if is_arm or is_arm2 or is_arm3:
         return "arm"
-    if value.contains("riscv64"):
+
+    val is_riscv64 = value == "riscv64" or value.contains("riscv64")
+    if is_riscv64:
         return "riscv64"
-    if value.contains("riscv32"):
+
+    val is_riscv32 = value == "riscv32" or value.contains("riscv32")
+    if is_riscv32:
         return "riscv32"
-    if value == "ppc64el" or value.contains("ppc64le") or value.contains("powerpc64le"):
+
+    val is_ppc64le = value == "ppc64le" or value == "ppc64el"
+    val is_ppc64le2 = value == "powerpc64le"
+    val is_ppc64le3 = value.contains("ppc64le") or value.contains("powerpc64le")
+    if is_ppc64le or is_ppc64le2 or is_ppc64le3:
         return "ppc64le"
+
     ""
-
-# OS set that the `unix` cfg predicate / `family = "unix"` key selects.
-fn cfg_os_is_unix(os: text) -> bool:
-    (os == "linux" or os == "macos" or os == "freebsd" or os == "openbsd" or
-        os == "netbsd" or os == "android" or os == "simpleos" or os == "unix")
-
-# cfg OS of a target triple ("x86_64-pc-windows-msvc" -> "windows",
-# "aarch64-unknown-none" -> "none"). "" when no component names an OS.
-fn cfg_triple_os(triple: text) -> text:
-    val parts = triple.trim().split("-")
-    var i = 1
-    while i < parts.len():
-        val part = parts[i]
-        if part == "none" or part == "baremetal":
-            return "none"
-        val os = if part == "win32": "windows" else: cfg_normalize_os(part)
-        if os != "" and os != "unix":
-            return os
-        i = i + 1
-    ""
-
-# cfg arch of a target triple ("riscv64gc-unknown-linux-gnu" -> "riscv64").
-fn cfg_triple_arch(triple: text) -> text:
-    val parts = triple.trim().split("-")
-    if parts.len() < 2:
-        return ""
-    cfg_normalize_arch(parts[0])
-
-# Conditional compilation selects for the TARGET being built. The native-build
-# and `compile --target` CLI paths export the requested triple as
-# SIMPLE_NATIVE_BUILD_TARGET for the whole build (closure scan, parse shards,
-# backend); without consulting it here every cross build evaluated @when/@cfg
-# against the host.
-#
-# ONE precedence rule, shared with the seed (cond_compile.rs default_target):
-#   1. the explicit build target: SIMPLE_NATIVE_BUILD_TARGET triple
-#   2. the manual override: SIMPLE_TARGET_OS / SIMPLE_TARGET_ARCH
-#   3. the host
-fn cfg_build_target_triple() -> text:
-    cfg_env("SIMPLE_NATIVE_BUILD_TARGET").trim()
 
 fn cfg_detect_os() -> text:
-    val from_target = cfg_triple_os(cfg_build_target_triple())
-    if from_target != "":
-        return from_target
-
     val forced = cfg_normalize_os(cfg_env("SIMPLE_TARGET_OS"))
     if forced != "":
         return forced
@@ -162,10 +149,6 @@ fn cfg_detect_os() -> text:
     "unknown"
 
 fn cfg_detect_arch() -> text:
-    val from_target = cfg_triple_arch(cfg_build_target_triple())
-    if from_target != "":
-        return from_target
-
     val forced = cfg_normalize_arch(cfg_env("SIMPLE_TARGET_ARCH"))
     if forced != "":
         return forced
@@ -195,20 +178,6 @@ fn cfg_detect_arch() -> text:
         if proc_arch != "":
             return proc_arch
 
-    # macOS/BSD hosts: the env-var probes above are unexported there and the
-    # /proc path is Linux-only, so without this cfg_detect_arch() returned
-    # "unknown" on Apple Silicon and EVERY @cfg(arch) guard evaluated false
-    # in the ambient preprocessing path — stripping active guarded
-    # declarations before parse and surfacing as phase-2 HIR "no exported
-    # item" failures (root-caused 2026-10-08; see doc/08_tracking/bug/
-    # phase2_cli_test_runner_build_hir_export_origin_failures_2026-10-07.md).
-    # host_arch() shells out to uname -m, so resolve it once per process.
-    if _cfg_host_arch_cache == "":
-        _cfg_host_arch_cache = host_arch()
-    val from_host = cfg_normalize_arch(_cfg_host_arch_cache)
-    if from_host != "":
-        return from_host
-
     "unknown"
 
 fn cfg_detect_cpu() -> text:
@@ -226,20 +195,25 @@ fn cfg_eval_key_value(key_raw: text, value_raw: text) -> bool:
     val key = cfg_strip_quotes(key_raw).trim()
     val value = cfg_strip_quotes(value_raw).trim()
 
-    if key == "os" or key == "platform" or key == "target_os":
-        if value == "none" or value == "baremetal":
-            return cfg_detect_os() == "none"
+    if key == "os":
         val expected = cfg_normalize_os(value)
         if expected == "unix":
-            return cfg_os_is_unix(cfg_detect_os())
+            val os = cfg_detect_os()
+            val is_unix = os == "linux" or os == "macos"
+            val is_unix2 = os == "freebsd" or os == "openbsd" or os == "simpleos"
+            val is_unix3 = os == "netbsd" or os == "android"
+            return is_unix or is_unix2 or is_unix3 or os == "unix"
         return expected != "" and cfg_detect_os() == expected
-    if key == "family" or key == "target_family":
-        if value == "unix":
-            return cfg_os_is_unix(cfg_detect_os())
-        if value == "windows":
-            return cfg_detect_os() == "windows"
-        return false
-    if key == "arch" or key == "target_arch":
+    if key == "platform":
+        val expected = cfg_normalize_os(value)
+        if expected == "unix":
+            val os = cfg_detect_os()
+            val is_unix = os == "linux" or os == "macos"
+            val is_unix2 = os == "freebsd" or os == "openbsd" or os == "simpleos"
+            val is_unix3 = os == "netbsd" or os == "android"
+            return is_unix or is_unix2 or is_unix3 or os == "unix"
+        return expected != "" and cfg_detect_os() == expected
+    if key == "arch":
         val expected = cfg_normalize_arch(value)
         return expected != "" and cfg_detect_arch() == expected
     if key == "cpu":

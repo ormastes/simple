@@ -83,25 +83,6 @@ expect(source).to_contain("fn val_equals(a: i64, b: i64) -> bool")
 
 </details>
 
-#### uses the canonical value-kind accessor in type checking
-
-The source helper reads `src/compiler/10.frontend/core/type_checker.spl`.
-The scenario requires the canonical arena import and actual accessor calls,
-and rejects obsolete `val_kind(` references.
-
-```simple
-val source = value_kind_consumers_source()
-expect(source).to_contain("use compiler.core.interpreter.value.{val_get_kind, val_get_int, val_get_float, val_get_text}")
-expect(source).to_contain("val kind = val_get_kind(value_id)")
-expect(source.contains("val_kind(")).to_equal(false)
-```
-
-Stage 1 diagnostic on release base `475c2f918db` executed all four examples:
-4 passed, 0 failed, 0 skipped, 0 dropped. The cached bootstrap producer SHA-256
-was `6b133a15211e2ffb7c8c289a151400dc9a173e70b72e1c9f2feb6589e5dd0e0e`.
-Pure Simple runtime qualification remains pending because the release binary
-is unavailable on this host. No compiler rebuild was performed.
-
 #### keeps struct and thunk value support available
 
 <details>

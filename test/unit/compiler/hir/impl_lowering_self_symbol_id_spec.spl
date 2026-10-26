@@ -1,0 +1,38 @@
+# Repro guard for doc/08_tracking/bug/hir_flat_ast_impl_lowering_lost_self_symbol_id_2026-08-11.md
+#
+# Commit 83d21f1808 deleted the save/set/restore triple of
+# `current_method_self_symbol_id` from the flat-AST impl-block lowering loop
+# in module_lowering.spl, while leaving the paired `current_method_self_type`
+# save/restore intact. That left `self.<field>` type resolution in
+# SIMPLE_BOOTSTRAP flat-AST lowering running with a stale or -1 owner symbol.
+#
+# The defect is only executable under a bootstrap deploy, so this spec pins
+# the SOURCE contract (repo pattern: hir_diagnostic_owner_reset_source_spec):
+# it FAILED against the regressed source (0 occurrences) and PASSES with the
+# restored triple (3 occurrences: save, set, restore).
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "flat-AST impl lowering self symbol id source contract":
+    it "saves, sets, and restores current_method_self_symbol_id around the impl loop":
+        val source = rt_file_read_text(
+            "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+
+        # save — captured alongside previous_impl_self_type
+        expect(source).to_contain("val previous_impl_self_symbol_id = self.current_method_self_symbol_id")
+        # set — owner id installed when the impl owner symbol resolves
+        expect(source).to_contain("self.current_method_self_symbol_id = impl_owner_symbol.id")
+        # restore — paired with the self-type restore so the two never disagree
+        expect(source).to_contain("self.current_method_self_symbol_id = previous_impl_self_symbol_id")
+
+    it "keeps the self-type and self-symbol-id save/restore paired":
+        val source = rt_file_read_text(
+            "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+
+        # The regression's signature: self_type still saved/restored while
+        # self_symbol_id vanished. Both halves must be present together.
+        expect(source).to_contain("val previous_impl_self_type = self.current_method_self_type")
+        expect(source).to_contain("self.current_method_self_type = previous_impl_self_type")
+        expect(source).to_contain("previous_impl_self_symbol_id")

@@ -352,7 +352,11 @@ pub(super) fn build_vreg_types(
                             types_map.insert(*d, ty);
                             continue;
                         }
-                        let base = super::calls::strip_call_module_prefix(target.name());
+                        let base = target
+                            .name()
+                            .rsplit_once("__")
+                            .map(|(_, tail)| tail)
+                            .unwrap_or(target.name());
                         let ty = match base {
                             "spl_load_i64" => Some(TypeId::I64),
                             "spl_load_u8" => Some(TypeId::U8),
@@ -386,7 +390,6 @@ pub(super) fn build_vreg_types(
                                 Some(TypeId::F64)
                             }
                             "rt_array_get_text" => Some(TypeId::STRING),
-                            "rt_typed_words_i64_at" => Some(TypeId::I64),
                             "rt_typed_bytes_u8_at" | "rt_typed_bytes_u8_data_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
                             "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {
                                 Some(TypeId::U32)
@@ -567,27 +570,12 @@ fn sync_vars_to_vregs(
     builder: &mut FunctionBuilder,
     vreg_values: &mut HashMap<VReg, cranelift_codegen::ir::Value>,
     vreg_vars: &HashMap<VReg, Variable>,
-    vreg_types: &HashMap<VReg, TypeId>,
 ) {
     let mut sorted: Vec<_> = vreg_vars.iter().collect();
     sorted.sort_by_key(|(v, _)| v.0);
     for (&vreg, &var) in sorted {
         let val = builder.use_var(var);
-        // A float vreg crosses blocks as the i64 bit pattern of its promoted
-        // f64 (`coerce_to_i64_typed`). Hand consumers the native float, exactly
-        // as they see it inside its defining block: a float->int `Cast`
-        // otherwise converted the BITS as an integer (`ireduce` of f64 bits),
-        // e.g. an inlined `half(-7.0) as i32` gave 0.
-        // doc/08_tracking/bug/jit_cross_block_float_cast_reads_f64_bits_as_int_2026-10-05.md
-        let decoded = match vreg_types.get(&vreg).copied() {
-            Some(TypeId::F64) => builder.ins().bitcast(types::F64, MemFlags::new(), val),
-            Some(TypeId::F32) => {
-                let wide = builder.ins().bitcast(types::F64, MemFlags::new(), val);
-                builder.ins().fdemote(types::F32, wide)
-            }
-            _ => val,
-        };
-        vreg_values.insert(vreg, decoded);
+        vreg_values.insert(vreg, val);
     }
 }
 
@@ -983,7 +971,7 @@ pub fn compile_function_body<M: Module>(
         if mir_block.id != func.entry_block {
             builder.switch_to_block(cl_block);
             // At block entry, populate vreg_values from Variables (SSA phi resolution)
-            sync_vars_to_vregs(&mut builder, &mut vreg_values, &vreg_vars, &vreg_types);
+            sync_vars_to_vregs(&mut builder, &mut vreg_values, &vreg_vars);
         }
 
         if let Some(resume_map) = generator_resume_map.as_ref() {

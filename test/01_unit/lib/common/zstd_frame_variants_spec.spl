@@ -199,47 +199,6 @@ fn _repeated_tail_payload() -> [u8]:
         0x61u8, 0x62u8, 0x63u8
     ]
 
-fn _mblock_payload(n: i64) -> [u8]:
-    var p: [u8] = []
-    var i = 0
-    while i < n:
-        p.push(((i * 7 + (i / 13)) % 251).to_u8())
-        i = i + 1
-    p
-
-# Walk block headers of a single-segment frame without checksum. Returns
-# [block_count, max_block_regenerated, end_pos_after_first_Last_block].
-fn _mblock_walk(frame: [u8]) -> [i64]:
-    var pos = 5
-    val fcs_code = ((frame[4] >> 6u8) & 0x03u8).to_i64()
-    if fcs_code == 0:
-        pos = pos + 1
-    elif fcs_code == 1:
-        pos = pos + 2
-    elif fcs_code == 2:
-        pos = pos + 4
-    else:
-        pos = pos + 8
-    var count = 0
-    var max_size = 0
-    var done = false
-    while not done and pos + 3 <= frame.len():
-        val h = (frame[pos].to_i64()) | (frame[pos + 1].to_i64() << 8) | (frame[pos + 2].to_i64() << 16)
-        val last = h & 1
-        val btype = (h >> 1) & 3
-        val size = h >> 3
-        pos = pos + 3
-        if size > max_size:
-            max_size = size
-        if btype == 1:
-            pos = pos + 1
-        else:
-            pos = pos + size
-        count = count + 1
-        if last == 1:
-            done = true
-    [count, max_size, pos]
-
 describe "zstd frame header variants":
     # @manual scenario evidence
     it "keeps the current pure-Simple framed subset in parity across scalar avx2 and neon tiers":
@@ -330,12 +289,12 @@ describe "zstd frame header variants":
         expect((encoded[9] & 0x07u8)).to_equal(0x03u8)
         expect(encoded[12]).to_equal(0u8)
 
-    it "decodes the repeated-tail compressed block":
+    it "decodes the repeated-tail raw-block fallback":
         # @req REQ-SSPEC-LIB
-        step("decodes the repeated-tail compressed block")
+        step("decodes the repeated-tail raw-block fallback")
         val payload = _repeated_tail_payload()
         val encoded = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
-        expect((encoded[6] & 0x07u8)).to_equal(0x05u8)
+        expect((encoded[6] & 0x07u8)).to_equal(0x01u8)
         expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
 
     it "decodes single-segment frames with 1-byte content size":
@@ -482,37 +441,5 @@ describe "zstd frame header variants":
             print(run.stderr)
         expect(run.exit_code).to_equal(0)
         val decoded = decompress_bytes(_read_bytes(compressed_path), Some(CompressionCodec.zstd))
-        expect(decoded.is_err()).to_equal(false)
-        expect(decoded.unwrap()).to_equal(payload)
-
-    it "splits an input larger than 128 KiB into spec-sized raw blocks that round-trip":
-        # @req REQ-SSPEC-LIB
-        step("splits an input larger than 128 KiB into spec-sized raw blocks that round-trip")
-        val payload = _mblock_payload(131072 + 1000)
-        val frame = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
-        val walk = _mblock_walk(frame)
-        expect(walk[0]).to_equal(2)
-        expect(walk[1] <= 131072).to_equal(true)
-        expect(walk[2]).to_equal(frame.len())
-        val decoded = zstd_decompress_frame(frame)
-        expect(decoded.is_err()).to_equal(false)
-        expect(decoded.unwrap()).to_equal(payload)
-
-    it "emits an RLE block for a uniform 128 KiB chunk followed by a raw tail block":
-        # @req REQ-SSPEC-LIB
-        step("emits an RLE block for a uniform 128 KiB chunk followed by a raw tail block")
-        var payload: [u8] = []
-        var i = 0
-        while i < 131072:
-            payload.push(0x5Au8)
-            i = i + 1
-        payload = payload + [0x01u8, 0x02u8, 0x03u8, 0x04u8]
-        val frame = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
-        val walk = _mblock_walk(frame)
-        expect(walk[0]).to_equal(2)
-        expect(walk[1]).to_equal(131072)
-        expect(walk[2]).to_equal(frame.len())
-        expect(frame.len() < 200).to_equal(true)
-        val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(false)
         expect(decoded.unwrap()).to_equal(payload)

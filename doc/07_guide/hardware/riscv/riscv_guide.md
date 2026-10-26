@@ -48,7 +48,7 @@ Supported ISA profiles:
 
 Two RISC-V presets are available via `preset_by_name()`:
 
-```simple:skip
+```spl
 use compiler.backend.target_presets.{preset_by_name, preset_riscv32_baremetal, preset_riscv64_linux}
 
 # Direct factory functions
@@ -76,7 +76,7 @@ Each `TargetPreset` carries:
 Target contracts provide the full codegen configuration. They are derived from
 presets and the portable numeric capability registry:
 
-```simple:skip
+```spl
 use compiler.backend.backend.riscv_target.{
     RiscvTargetContract,
     riscv_linux_target_contract,
@@ -165,8 +165,8 @@ All RISC-V instructions are 32-bit fixed-width, little-endian:
 
 The shared encoder functions in `riscv_encoding.spl` handle these formats:
 
-```simple:skip
-use compiler.backend.backend.native.riscv_encoding.{
+```spl
+use compiler.backend.native.riscv_encoding.{
     riscv_encode_r_type,
     riscv_encode_i_type,
     riscv_encode_s_type,
@@ -193,8 +193,8 @@ use compiler.backend.backend.native.riscv_encoding.{
 
 The `riscv_common` module provides width-agnostic abstractions:
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv_common.xlen.{Xlen, XlenConfig, xlen_config}
+```spl
+use std.baremetal.riscv_common.xlen.{Xlen, XlenConfig, xlen_config}
 
 # Get config for RV32
 val cfg32 = xlen_config(Xlen.Xlen32)
@@ -209,8 +209,8 @@ val cfg64 = xlen_config(Xlen.Xlen64)
 
 Define hardware platform parameters (memory map, UART address, etc.):
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv_common.platform.{
+```spl
+use std.baremetal.riscv_common.platform.{
     RiscvPlatform,
     PLATFORM_QEMU_VIRT,
     PLATFORM_SIFIVE_U
@@ -244,8 +244,8 @@ The startup module provides the machine-mode entry point:
 
 The CSR module provides typed addresses and read/write wrappers:
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv.csr (
+```spl
+use std.baremetal.riscv.csr (
     CSR_MSTATUS, CSR_MIE, CSR_MTVEC, CSR_MSCRATCH,
     CSR_MEPC, CSR_MCAUSE, CSR_MTVAL, CSR_MIP, CSR_MHARTID,
     MSTATUS_MIE, MSTATUS_MPIE,
@@ -269,8 +269,8 @@ CSR categories covered:
 
 The MMU module supports Sv32, Sv39, Sv48, and Sv57 virtual memory modes:
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv.mmu (
+```spl
+use std.baremetal.riscv.mmu (
     PRIV_USER, PRIV_SUPERVISOR, PRIV_MACHINE,
     SATP_MODE_BARE, SATP_MODE_SV39, SATP_MODE_SV48, SATP_MODE_SV57,
     SATP32_MODE_BARE, SATP32_MODE_SV32
@@ -286,8 +286,8 @@ SATP register layouts:
 
 The Platform-Level Interrupt Controller handles external device interrupts:
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv.plic (
+```spl
+use std.baremetal.riscv.plic (
     PlicContext, plic_init, plic_claim, plic_complete, handle_interrupt
 )
 ```
@@ -312,8 +312,8 @@ Memory-mapped registers (base `0x0C000000`):
 
 The Core Local Interruptor provides per-hart timers:
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv.clint (...)
+```spl
+use std.baremetal.riscv.clint (...)
 ```
 
 Registers (base `0x02000000` on QEMU virt):
@@ -328,8 +328,8 @@ Registers (base `0x02000000` on QEMU virt):
 
 The SBI module provides ecall-based services:
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv.sbi (...)
+```spl
+use std.baremetal.riscv.sbi (...)
 
 # SBI ecall convention:
 # a7 = extension ID (EID)
@@ -344,9 +344,9 @@ Supported extensions: IPI (inter-processor interrupt), Console I/O.
 
 Both RV32 and RV64 support semihosting for debugger-mediated I/O:
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv.semihost (...)    # RV64
-use std.nogc_async_mut_noalloc.baremetal.riscv32.semihost (...)  # RV32
+```spl
+use std.baremetal.riscv.semihost (...)    # RV64
+use std.baremetal.riscv32.semihost (...)  # RV32
 ```
 
 The semihosting mechanism uses a magic instruction sequence:
@@ -360,8 +360,8 @@ Supported debuggers: OpenOCD, SEGGER Ozone, Trace32.
 
 ### Cache Management (Zicbom/Zicboz/Zicbop)
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv.cmo (
+```spl
+use std.baremetal.riscv.cmo (
     fence_i, cbo_clean, cbo_inval, cbo_flush, cbo_zero,
     prefetch_r, prefetch_w, prefetch_i,
     CmoCapSnapshot
@@ -372,8 +372,8 @@ use std.nogc_async_mut_noalloc.baremetal.riscv.cmo (
 
 Parse FDT blobs to enumerate harts and capabilities:
 
-```simple:skip
-use std.nogc_async_mut_noalloc.baremetal.riscv.dtb_scan (
+```spl
+use std.baremetal.riscv.dtb_scan (
     dtb_scan_init_from_bytes,
     cached_cpu_count,
     cached_cbom_block_size,
@@ -403,7 +403,7 @@ The `riscv_common` module provides width-agnostic building blocks:
 
 The FPGA integration layer generates synthesis-ready artifacts for Xilinx boards:
 
-```simple:skip
+```spl
 use std.hardware.fpga_linux.riscv_fpga_linux (...)
 use std.hardware.fpga_linux.synthesis_wrapper (...)
 use std.hardware.fpga_linux.xdc_gen (...)
@@ -414,7 +414,7 @@ use std.hardware.fpga_linux.xdc_gen (...)
 Generates Vivado TCL scripts and project structure. This module does not call
 Vivado directly -- it produces the scripts that Vivado will consume:
 
-```simple:skip
+```spl
 use std.hardware.fpga_linux.synthesis_wrapper.{SynthesisProject}
 ```
 
@@ -422,7 +422,7 @@ use std.hardware.fpga_linux.synthesis_wrapper.{SynthesisProject}
 
 Pin assignments, clock definitions, I/O standards, and timing constraints:
 
-```simple:skip
+```spl
 use std.hardware.fpga_linux.xdc_gen.{PinAssignment, ClockConstraint, TimingConstraint}
 
 # Pin assignment
@@ -459,7 +459,7 @@ The `riscv_fpga_linux` module orchestrates dual-arch (RV32 + RV64) FPGA builds:
 The QEMU adapter launches `qemu-system-riscv32` or `qemu-system-riscv64` and
 connects via GDB-MI for execution control:
 
-```simple:skip
+```spl
 use std.nogc_sync_mut.debug.remote.exec.adapter_qemu_rv32.{QemuRv32Adapter}
 use std.nogc_sync_mut.debug.remote.exec.adapter_qemu_rv64.{QemuRv64Adapter}
 
@@ -479,7 +479,7 @@ Prerequisites:
 
 The GHDL adapter connects to a running GHDL simulation with a GDB remote stub:
 
-```simple:skip
+```spl
 use std.nogc_sync_mut.debug.remote.exec.adapter_ghdl_rv32.{GhdlRv32Adapter}
 
 # Connects to GHDL simulation via GDB remote protocol
@@ -527,8 +527,8 @@ bits[6:0]   = opcode 0x57
 
 Example (integer vector add):
 
-```simple:skip
-use compiler.backend.backend.native.encode_rvv_int.{emit_vadd_vv, emit_vsub_vv, emit_vmul_vv}
+```spl
+use compiler.backend.native.encode_rvv_int.{emit_vadd_vv, emit_vsub_vv, emit_vmul_vv}
 
 # Emit vadd.vv v1, v2, v3
 val bytes = emit_vadd_vv(1, 2, 3)
@@ -542,7 +542,7 @@ val bytes = emit_vadd_vv(1, 2, 3)
 The intrinsic lowering module maps high-level intrinsic names to native RISC-V
 instruction sequences:
 
-```simple:skip
+```spl
 use compiler.backend.lowering.intrinsic_lowering_riscv (...)
 ```
 
@@ -586,7 +586,7 @@ Lowering results indicate success or failure:
 
 Debug target definitions provide register layouts and calling convention info:
 
-```simple:skip
+```spl
 use std.nogc_sync_mut.debug.remote.target.riscv32.{RiscV32Target}
 use std.nogc_sync_mut.debug.remote.target.riscv64.{RiscV64Target}
 

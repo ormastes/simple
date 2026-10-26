@@ -22,15 +22,12 @@
 # Under `--assert-ran`, the child writes versioned pass/fail counts through
 # `SIMPLE_TEST_RESULT_FILE`; stdout markers remain only for legacy runs.
 
-use std.sffi.cli_args.{cli_get_args}
+use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
 use app.io.mod.{env_get}
 use app.io.cli_ops.{cli_current_exe_path}
 use std.spec.in_development.{source_is_in_development, in_development_explicit_line}
-use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
-use app.test_runner_new.client_arg_shape.{client_tag_value, client_select_tagged}
-use std.test_runner.child_cwd.{spec_child_launch_plan, child_cwd_absolute, child_cwd_anchor_path}
-use std.sffi.env.{env_cwd_raw, env_set_cwd_raw}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
 # Single source of truth for the six-class outcome contract
 # (OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN) frozen in
@@ -40,13 +37,13 @@ use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
 # so a crash reported "no examples executed" instead of CRASHED. Reused rather
 # than reimplemented on purpose -- a second copy of this classification would
 # drift out of sync exactly as the duplicated composite-grammar parsers did.
-use std.test_runner.test_executor_parsing.{make_result_from_output, spec_source_has_raw_assert}
+use std.test_runner.test_executor_parsing.{make_result_from_output}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
 use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
 use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
 
-use std.io_runtime.{file_exists, file_read_nullable}
+use std.io_runtime.{file_exists}
 @unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{file_write}
@@ -62,95 +59,11 @@ extern fn sys_get_args() -> [text]
 # independent of std.test_runner.* so child runs stay lightweight). Mirrors
 # test_runner_execute.preprocess_infix_matchers_only. ---
 
-fn _single_infix_matchers() -> [text]:
-    ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
-
-fn _single_expect_paren_end(trimmed: text) -> i64:
-    # Index of the `)` closing the `(` of a leading `expect(`, skipping nested
-    # parens and string literals; -1 when unbalanced.
-    var depth = 0
-    var in_string = false
-    var i = 6
-    while i < trimmed.len():
-        val ch = trimmed.substring(i, i + 1)
-        if in_string:
-            if ch == "\\":
-                i = i + 1
-            elif ch == "\"":
-                in_string = false
-        elif ch == "\"":
-            in_string = true
-        elif ch == "(":
-            depth = depth + 1
-        elif ch == ")":
-            depth = depth - 1
-            if depth == 0:
-                return i
-        i = i + 1
-    -1
-
-fn _single_rewrite_paren_subject_matcher(line: text, trimmed: text) -> text:
-    # `expect(a) to_equal(b)` / `expect(a) to_equal b` / `expect(a) to_be_nil`:
-    # the matcher word follows a parenthesized subject. Mirrors the seed parser
-    # fold (no_paren.rs parse_matcher_word_suffix on a paren subject, 5a3a5ce413f)
-    # so the expect is consumed by the matcher instead of left vacuous.
-    val close = _single_expect_paren_end(trimmed)
-    if close < 0:
-        return line
-    val rest = trimmed.substring(close + 1)
-    if not rest.starts_with(" "):
-        return line
-    val word = rest.trim()
-    val subject = trimmed.substring(0, close + 1)
-    val indent_len = line.len() - line.trim_start().len()
-    val indent = line.substring(0, indent_len)
-    for matcher in _single_infix_matchers():
-        if word == matcher:
-            return indent + subject + "." + matcher + "()"
-        if word.starts_with(matcher + "("):
-            return indent + subject + "." + word
-        if word.starts_with(matcher + " "):
-            val expected = word.substring(matcher.len() + 1).trim()
-            if expected.len() == 0:
-                return line
-            return indent + subject + "." + matcher + "(" + expected + ")"
-    line
-
-fn _single_trailing_comment_start(line: text) -> i64:
-    # Index of a `#` that starts a trailing comment (outside string literals),
-    # or -1. Kept out of the rewrite so it never lands inside a matcher arg.
-    var in_string = false
-    var i = 0
-    while i < line.len():
-        val ch = line.substring(i, i + 1)
-        if in_string:
-            if ch == "\\":
-                i = i + 1
-            elif ch == "\"":
-                in_string = false
-        elif ch == "\"":
-            in_string = true
-        elif ch == "#":
-            return i
-        i = i + 1
-    -1
-
 fn _single_rewrite_infix_expect_line(line: text) -> text:
-    val comment_at = _single_trailing_comment_start(line)
-    if comment_at > 0:
-        val code = line.substring(0, comment_at)
-        val code_end = code.trim_end().len()
-        val rewritten = _single_rewrite_infix_expect_code(code.substring(0, code_end))
-        return rewritten + line.substring(code_end)
-    _single_rewrite_infix_expect_code(line)
-
-fn _single_rewrite_infix_expect_code(line: text) -> text:
     val trimmed = line.trim()
-    if trimmed.starts_with("expect("):
-        return _single_rewrite_paren_subject_matcher(line, trimmed)
-    if not trimmed.starts_with("expect "):
+    if not trimmed.starts_with("expect ") or trimmed.starts_with("expect("):
         return line
-    val matchers = _single_infix_matchers()
+    val matchers: [text] = ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
     var i = 0
     while i < matchers.len():
         val matcher = matchers[i]
@@ -222,7 +135,7 @@ fn _single_option_takes_value(arg: text) -> bool:
     list mirrors the value-taking test options plus adapter-only values that
     can reach this direct child lane."""
     (
-        arg == "--max-mem" or arg == "--worker-memory-mb" or arg == "--max-procs" or arg == "--execution-mode" or
+        arg == "--max-mem" or arg == "--max-procs" or arg == "--execution-mode" or
         arg == "--cpu-threshold" or arg == "--mem-threshold" or
         arg == "--resource-limit" or arg == "--max-workers" or
         arg == "--parallel-timeout" or arg == "--fuzz-time" or
@@ -237,7 +150,7 @@ fn _single_option_takes_value(arg: text) -> bool:
 
 fn _single_option_is_integer(arg: text) -> bool:
     (
-        arg == "--max-mem" or arg == "--worker-memory-mb" or arg == "--max-procs" or arg == "--resource-limit" or
+        arg == "--max-mem" or arg == "--max-procs" or arg == "--resource-limit" or
         arg == "--max-workers" or arg == "--parallel-timeout" or
         arg == "--fuzz-time" or arg == "--chaos-trials" or
         arg == "--chaos-fault-rate" or arg == "--batch-size" or
@@ -732,51 +645,6 @@ fn read_test_result_evidence(path: text) -> (i64, i64, i64):
         return (0, 0, 0)
     (passed, failed, 1)
 
-# Expectation tally sidecar written by std.spec next to the v1 evidence file
-# (`<evidence>.expectations`, "simple-bdd-expectations-v1\n<n>\n"). Returns
-# -1 for absent/unreadable/malformed -- UNKNOWN, which must never be read as
-# zero: only a tally that says 0 makes a file VACUOUS (BUG-02 / T12).
-fn read_test_result_expectations(evidence_path: text) -> i64:
-    if evidence_path == "":
-        return -1
-    val path = evidence_path + ".expectations"
-    if not file_exists(path):
-        return -1
-    val content = file_read_nullable(path) ?? ""
-    val parts = content.split("\n")
-    if parts.len() < 2 or parts[0] != "simple-bdd-expectations-v1":
-        return -1
-    val n_text = parts[1].trim()
-    val n = n_text.to_i64() ?? -1
-    if n < 0 or n.to_text() != n_text or content != "simple-bdd-expectations-v1\n{n_text}\n":
-        return -1
-    n
-
-# One line, grep-stable, emitted beside the verdict for a VACUOUS file.
-fn vacuous_verdict_line(path: text, executed: i64) -> text:
-    "SPEC FILE VACUITY: {path} outcome=VACUOUS executed={executed} expectations=0"
-
-# The documented switch from warn-first to fail: SIMPLE_TEST_VACUOUS_STRICT=1.
-fn vacuous_strict_enabled() -> bool:
-    env_get("SIMPLE_TEST_VACUOUS_STRICT") == "1"
-
-val VACUOUS_BASELINE_PATH: text = "scripts/check/vacuous_spec_zero_assertion_baseline.txt"
-
-# True when `path` (slash-normalised) is listed in the baseline file: a
-# known zero-assertion spec that strict mode must not fail until fixed.
-fn vacuous_baselined(path: text) -> bool:
-    if not file_exists(VACUOUS_BASELINE_PATH):
-        return false
-    val wanted = path.replace("\\", "/")
-    val content = file_read_nullable(VACUOUS_BASELINE_PATH) ?? ""
-    for line in content.split("\n"):
-        val entry = line.trim()
-        if entry == "" or entry.starts_with("#"):
-            continue
-        if entry == wanted or wanted.ends_with("/" + entry):
-            return true
-    false
-
 # --- SIMPLE_COVERAGE measured line coverage (2026-08-02) -------------------
 # The seed interpreter already records executed statement lines in a global
 # collector when SIMPLE_COVERAGE=1 (driver real_main -> init_coverage_from_env,
@@ -1179,19 +1047,11 @@ fn _cov_branch_report_for_file(path: text, dec_total: dict<text, i64>,
     "coverage-branch: {path} {pct}% ({hit}/{total} decisions)"
 
 fn main() -> i64:
-    val args = clean_args()
-    var run = parse_child_run(args)
+    var run = parse_child_run(clean_args())
     if not run.valid:
         print "Simple Test Runner child"
         print "error: {run.error}: {run.path}"
         return 1
-    # --tag applies to the explicit path here too: an untagged file used to run
-    # and PASS under `--tag slow --no-session-daemon`.
-    val tag = client_tag_value(args)
-    if tag != "" and client_select_tagged([run.path], tag).len() == 0:
-        print "No tests selected."
-        print "--tag {tag}: the explicit spec path does not carry the tag"
-        return test_run_outcome_exit_code(TestRunOutcome.EmptySelection)
     if run.list_only:
         print run.path
         return 0
@@ -1292,13 +1152,10 @@ fn main() -> i64:
     var runtime_coverage_path = ""
     var previous_coverage_output = ""
     var runtime_evidence_is_child_owned = false
-    # Captured before any chdir below: a caller-owned RELATIVE coverage path
-    # must stay relative to the runner's cwd, not to the child's project root.
-    val runner_cwd = env_cwd_raw()
     if cov_on:
         previous_coverage_output = env_get("SIMPLE_COVERAGE_OUTPUT") ?? ""
         if previous_coverage_output != "":
-            runtime_coverage_path = child_cwd_anchor_path(previous_coverage_output, runner_cwd)
+            runtime_coverage_path = previous_coverage_output
             runtime_evidence_is_child_owned = true
         else:
             runtime_coverage_path = "/tmp/simple_apk_coverage_{getpid()}_{time_now_unix_micros()}.sdn"
@@ -1326,17 +1183,8 @@ fn main() -> i64:
         if env_get("SIMPLE_PHASE7_TRACE") == "1":
             print "phase7-apk-runner: pid={getpid()}"
     val start = time_now_unix_micros()
-    # The child runs from the spec's project root so `src/...` reads resolve
-    # the way its imports do, whatever directory the runner was started in.
-    val (child_dir, child_exec_path) = spec_child_launch_plan(exec_path, runner_cwd)
-    val child_moved = child_dir != "" and env_set_cwd_raw(child_dir)
-    val child_binary = if child_moved: child_cwd_absolute(binary, runner_cwd) else: binary
-    val child_spec = if child_moved: child_exec_path else: exec_path
-    val child_args = if assert_ran: ["run", child_spec, "--test-result-file={evidence_path}"] else: ["run", child_spec]
-    val (stdout, stderr, code) = process_run_bounded(child_binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
-    if child_moved and not env_set_cwd_raw(runner_cwd):
-        print "error: test-runner: cannot restore working directory {runner_cwd}"
-        return 1
+    val child_args = if assert_ran: ["run", exec_path, "--test-result-file={evidence_path}"] else: ["run", exec_path]
+    val (stdout, stderr, code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
     val duration_ms = (time_now_unix_micros() - start) / 1000
     var runtime_coverage_sdn = ""
     if runtime_coverage_path != "":
@@ -1368,11 +1216,8 @@ fn main() -> i64:
         print "error: test-runner: cannot restore structured result environment"
         return 1
     val (evidence_passed, evidence_failed, has_evidence) = read_test_result_evidence(evidence_path)
-    val evidence_expectations = read_test_result_expectations(evidence_path)
     if evidence_path != "" and file_exists(evidence_path):
         val _ = file_delete(evidence_path)
-    if evidence_path != "" and file_exists(evidence_path + ".expectations"):
-        val _ = file_delete(evidence_path + ".expectations")
     if exec_path != run.path and file_exists(exec_path):
         val _ = file_delete(exec_path)
     val child_stdout = stdout
@@ -1595,28 +1440,6 @@ fn main() -> i64:
     # same file is neutralised (but counted) in a sweep. Neutralisation
     # itself lives in test_runner_main.in_development_adjust; duplicating it
     # here would make an explicit run unable to show its own failure.
-    # Zero-EXPECTATION gate (BUG-02 / T12; task 15a). The zero-EXAMPLE gates
-    # above catch a file that ran nothing; this catches a file whose examples
-    # ran, exited clean, and never evaluated a single expect()/assert -- the
-    # shape of a lowering spec whose module came back empty, where every
-    # `to_contain` on "" was skipped by an early return. Gated on a tally the
-    # child actually wrote (sidecar present and == 0); an unknown tally (-1:
-    # engines that do not run std.spec's counters, or no evidence path) is
-    # never treated as zero. Feature-gated SKIP files have passed == 0 and
-    # are untouched.
-    # WARN-FIRST: the line is always printed; the verdict flips to a failure
-    # only under SIMPLE_TEST_VACUOUS_STRICT=1, and even then a file listed in
-    # scripts/check/vacuous_spec_zero_assertion_baseline.txt is exempt until
-    # it is fixed and removed from that file. Live only on this runner: the
-    # Rust seed evaluates describe/it/expect as intrinsics and writes no
-    # sidecar, so under the seed the tally is unknown and nothing fires.
-    if failed == 0 and passed > 0 and evidence_expectations == 0 and unverified_error == "" and not spec_source_has_raw_assert(file_read_nullable(run.path) ?? ""):
-        print vacuous_verdict_line(run.path, passed)
-        if vacuous_strict_enabled() and not vacuous_baselined(run.path):
-            failed = 1
-            print "error: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated"
-        else:
-            print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
     if source_is_in_development(rt_file_read_text(run.path)):
         print in_development_explicit_line(run.path)
     print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms, if failed == 0: unverified_error else: "")

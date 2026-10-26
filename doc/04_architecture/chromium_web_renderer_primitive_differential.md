@@ -47,7 +47,7 @@ into `NormalizedTrace`.
 The first implementation must use these exact fields/constructor order;
 additive changes require ABI/schema version review:
 
-```simple:skip
+```simple
 struct ChromiumOracleAbi:
     version: i64
     bridge_id: text
@@ -153,7 +153,7 @@ never a URL. `artifact_path` is human evidence only, not comparator input.
 
 Frozen helper signatures are:
 
-```simple:skip
+```simple
 fn make_chromium_primitive_fixture(
     fixture_id: text, viewport_width: i64, viewport_height: i64,
     html_css: text, event_script: text, requested_primitives: [text]

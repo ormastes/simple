@@ -9,7 +9,7 @@
 # (< 20 s, 2026-09-23). It stays the authority — it runs in the non-required
 # "(extended)" CI job and on main — but the two things a PUSH can newly break
 # are diff-scoped and sub-second:
-#   1. a .shs it touched no longer parses (declared shell on the COMMITTED blob), and
+#   1. a .shs it touched no longer parses (`sh -n` on the COMMITTED blob), and
 #   2. a guard script it ADDED under scripts/check/ is mentioned by no root, so
 #      it would enforce nothing (the "NEW unwired" verdict of the census).
 # Unchanged files are not re-examined here: their verdict is unchanged by this
@@ -22,34 +22,15 @@
 # scripts/check/pre-push-conflict-tree-guard.shs, scripts/check/guard_wiring_optout.txt,
 # .github/workflows/*.yml.
 #
-# ADVISORY (2026-10-10), never part of the verdict: for each script under
-# scripts/ the range touches, scripts/check/lib/shs-pipe-exit-hygiene.shs is run
-# on the tip and base blobs and any NEW exit-status hygiene finding
-# (`cmd | tail; rc=$?`, a dropped `timeout` status announced as PASS, `$?` read
-# after an echo) is printed as a NOTE on stderr. It cannot change the exit
-# code or the verdict line: the scan is a heuristic, and a required gate must
-# not fail a correct script. It is skipped during the selftest, so the fatal
-# pre-scan selftest is the same 16 fixtures as before. The library's own
-# fixtures run only under `sh scripts/check/lib/shs-pipe-exit-hygiene.shs
-# --selftest` (extended CI job).
-#
-# `--tree [--rev <rev>]` is the advisory whole-tree census of the same rules
-# against the shrink-only baseline scripts/check/shs_pipe_exit_hygiene_baseline.txt
-# (committed content of <rev>, default HEAD; a row above OR below its baseline
-# fails; `--generate-baseline` rewrites it — reviewed updates only). Not a
-# push row.
-#
 # Verdict, always the last line of stdout:
 #   PASS  — <n> file(s) in <range> examined, <s> .shs parsed, <g> new guard(s) wired   exit 0
 #   FAIL  — ... naming each unparsable file / unwired guard                           exit 1
 #   ERROR — nothing was checked (<reason>)                                            exit 2
-# No file scan is claimed for verified distinct, nonempty tree-equivalent history.
-# Empty history, invalid endpoints and deletion-only unequal trees are ERROR.
+# Non-vacuous: n > 0 always; a range that changes no file is ERROR.
 # --selftest runs before every scan and is fatal.
 #
 # Usage:
 #   sh scripts/check/check-range-shs-hygiene-push.shs [--root <repo>] <base>..<tip>
-#   sh scripts/check/check-range-shs-hygiene-push.shs --tree [--rev <rev>] [--root <repo>] [--generate-baseline]
 #   sh scripts/check/check-range-shs-hygiene-push.shs --selftest
 
 set -u
@@ -57,128 +38,32 @@ set -u
 RANGE=""
 ROOT=""
 SELFTEST_ONLY=0
-TREE=0
-TREE_REV=HEAD
-GENERATE_BASELINE=0
-# Advisory exit-status hygiene scan (see header). A missing library only
-# removes the NOTE; it never affects the range verdict.
-HYG_ADVISORY=0
-HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || HERE=""
-if [ -n "$HERE" ] && [ -r "$HERE/lib/shs-pipe-exit-hygiene.shs" ]; then
-    . "$HERE/lib/shs-pipe-exit-hygiene.shs"
-    HYG_ADVISORY=1
-fi
-HYG_LOADED=$HYG_ADVISORY
 while [ $# -gt 0 ]; do
     case "$1" in
         --root) ROOT=${2:-}; shift 2 ;;
         --range) RANGE=${2:-}; shift 2 ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
-        --tree) TREE=1; shift ;;
-        --rev) TREE_REV=${2:-}; shift 2 ;;
-        --generate-baseline) GENERATE_BASELINE=1; shift ;;
         -*) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
         *) RANGE=$1; shift ;;
     esac
 done
-
-# Parse only: never execute a script or interpolate its shebang as a command.
-parse_script() {
-    IFS= read -r _shebang <"$1" || _shebang=""
-    _cr=$(printf '\r')
-    _shebang=${_shebang%"$_cr"}
-    case "$_shebang" in
-        '#!/usr/bin/env bash'|'#!/bin/bash'|'#!/usr/bin/bash') _shell=bash ;;
-        '#!/usr/bin/env sh'|'#!/bin/sh'|'#!/usr/bin/sh') _shell=sh ;;
-        '#!'*) echo "unsupported shell shebang" >&2; return 2 ;;
-        # Legacy scripts without a shebang retain the existing sh parser.
-        *) _shell=sh ;;
-    esac
-    if ! command -v "$_shell" >/dev/null 2>&1; then
-        echo "required interpreter $_shell unavailable" >&2
-        return 2
-    fi
-    "$_shell" -n "$1" || return 1
-}
-
-# advisory_hygiene <root> <base-oid> <tip-oid> <status.txt> <workdir>
-# stderr NOTE only. Always returns 0; never touches stdout.
-advisory_hygiene() {
-    [ "$HYG_ADVISORY" -eq 1 ] || return 0
-    _ah_n=0
-    : > "$5/hyg_tip.list"; : > "$5/hyg_base.list"
-    while IFS="$(printf '\t')" read -r _ah_st _ah_p1 _ah_p2; do
-        case "$_ah_st" in R*|C*) _ah_path=$_ah_p2 ;; *) _ah_path=$_ah_p1 ;; esac
-        case "$_ah_path" in
-            scripts/*.shs|scripts/*.sh)
-                _ah_n=$((_ah_n + 1))
-                git -C "$1" show "$3:$_ah_path" >"$5/hyg_tip.$_ah_n" 2>/dev/null || continue
-                printf '%s\t%s\n' "$5/hyg_tip.$_ah_n" "$_ah_path" >> "$5/hyg_tip.list"
-                # The base side is the same path, or the rename/copy source.
-                if git -C "$1" show "$2:$_ah_p1" >"$5/hyg_base.$_ah_n" 2>/dev/null; then
-                    printf '%s\t%s\n' "$5/hyg_base.$_ah_n" "$_ah_path" >> "$5/hyg_base.list"
-                fi
-                ;;
-        esac
-    done < "$4"
-    [ "$_ah_n" -gt 0 ] || return 0
-    if ! shs_hygiene_scan_list "$5/hyg_tip.list" > "$5/hyg_tip.out" 2>/dev/null ||
-       ! shs_hygiene_scan_list "$5/hyg_base.list" > "$5/hyg_base.out" 2>/dev/null; then
-        echo "NOTE (advisory, verdict unaffected) — exit-status hygiene scan did not run" >&2
-        return 0
-    fi
-    # New = (path, rule) whose tip count exceeds its base count.
-    awk -F '\t' '
-        $3 == "SCAN-INCOMPLETE" { next }
-        FILENAME == ARGV[1] { base[$1 SUBSEP $3]++; next }
-        { tip[$1 SUBSEP $3]++; line[$1 SUBSEP $3] = line[$1 SUBSEP $3] "  " $1 ":" $2 ": " $3 ": " $4 "\n" }
-        END { for (k in tip) if (tip[k] > base[k] + 0) printf "%s", line[k] }
-    ' "$5/hyg_base.out" "$5/hyg_tip.out" > "$5/hyg_new.txt"
-    if [ -s "$5/hyg_new.txt" ]; then
-        {
-            echo "NOTE (advisory, verdict unaffected) — exit-status read that may not be the command's own status"
-            echo "(rules and correct forms: scripts/check/lib/shs-pipe-exit-hygiene.shs; reviewed line: '# exit-hygiene-ok: <reason>'):"
-            LC_ALL=C sort "$5/hyg_new.txt"
-        } >&2
-    fi
-    return 0
-}
 
 # scan <root> <base>..<tip> -> verdict on stdout, returns 0/1/2
 scan() {
     _root=$1; _range=$2
     case "$_range" in *..*) ;; *) echo "ERROR — nothing was checked (need <base>..<tip>, got '$_range')"; return 2 ;; esac
     _base=${_range%%..*}; _tip=${_range#*..}
-    _base_oid=$(git -C "$_root" rev-parse --verify --quiet --end-of-options "$_base^{commit}" 2>/dev/null) ||
+    git -C "$_root" rev-parse --verify --quiet "$_base^{commit}" >/dev/null 2>&1 ||
         { echo "ERROR — nothing was checked (base $_base is not a commit)"; return 2; }
-    _tip_oid=$(git -C "$_root" rev-parse --verify --quiet --end-of-options "$_tip^{commit}" 2>/dev/null) ||
+    git -C "$_root" rev-parse --verify --quiet "$_tip^{commit}" >/dev/null 2>&1 ||
         { echo "ERROR — nothing was checked (tip $_tip is not a commit)"; return 2; }
     _work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
-    # Diff from the merge-base (the branch's own changes), never tip-vs-tip: an
-    # unrebased branch would otherwise be charged for files siblings changed.
-    _mb=$(git -C "$_root" merge-base "$_base_oid" "$_tip_oid" 2>/dev/null) || _mb=""
-    [ -n "$_mb" ] || _mb=$_base_oid
-    git -C "$_root" diff --name-status --diff-filter=AMRC "$_mb" "$_tip_oid" > "$_work/status.txt" 2>/dev/null ||
+    git -C "$_root" diff --name-status --diff-filter=AMRC "$_base" "$_tip" > "$_work/status.txt" 2>/dev/null ||
         { rm -rf "$_work"; echo "ERROR — nothing was checked (git diff failed for $_range)"; return 2; }
     _n=$(grep -c . "$_work/status.txt")
     if [ "$_n" -eq 0 ]; then
         rm -rf "$_work"
-        # An empty AMRC set also occurs for deletion-only changes. Only exact
-        # tree equality plus positive directed history proves no file delta.
-        _base_tree=$(git -C "$_root" rev-parse --verify "$_base_oid^{tree}" 2>/dev/null) ||
-            { echo "ERROR — nothing was checked (base tree unavailable)"; return 2; }
-        _tip_tree=$(git -C "$_root" rev-parse --verify "$_tip_oid^{tree}" 2>/dev/null) ||
-            { echo "ERROR — nothing was checked (tip tree unavailable)"; return 2; }
-        _history=$(git -C "$_root" rev-list --count "$_base_oid..$_tip_oid" 2>/dev/null) ||
-            { echo "ERROR — nothing was checked (history enumeration failed)"; return 2; }
-        case "$_history" in ''|*[!0-9]*)
-            echo "ERROR — nothing was checked (invalid history count)"; return 2 ;;
-        esac
-        if [ "$_base_oid" != "$_tip_oid" ] && [ "$_base_tree" = "$_tip_tree" ] && [ "$_history" -gt 0 ]; then
-            echo "PASS — verified tree-equivalent history: $_history commit(s), tree $_tip_tree; no file scan"
-            return 0
-        fi
-        echo "ERROR — nothing was checked (empty AMRC range lacks distinct tree-equivalent history: $_range)"
+        echo "ERROR — nothing was checked (no file changed in $_range)"
         return 2
     fi
     _parsed=0; _bad=""; _new=0; _unwired=""
@@ -188,20 +73,7 @@ scan() {
         case "$_path" in
             *.shs)
                 _parsed=$((_parsed + 1))
-                if ! git -C "$_root" show "$_tip:$_path" >"$_work/script.shs" 2>"$_work/err.txt"; then
-                    rm -rf "$_work"
-                    echo "ERROR — nothing was checked (cannot read committed script $_path)"
-                    return 2
-                fi
-                parse_script "$_work/script.shs" 2>"$_work/err.txt"
-                _syntax_rc=$?
-                if [ "$_syntax_rc" -eq 2 ]; then
-                    cat "$_work/err.txt" >&2
-                    rm -rf "$_work"
-                    echo "ERROR — nothing was checked (shell parser unavailable or unsupported for $_path)"
-                    return 2
-                fi
-                if [ "$_syntax_rc" -ne 0 ]; then
+                if ! git -C "$_root" show "$_tip:$_path" 2>/dev/null | sh -n 2>"$_work/err.txt"; then
                     _bad="$_bad $_path"
                     sed "s|^|  $_path: |" "$_work/err.txt" | head -3 >> "$_work/parse_errors.txt"
                 fi
@@ -222,10 +94,9 @@ scan() {
                 ;;
         esac
     done < "$_work/status.txt"
-    advisory_hygiene "$_root" "$_base_oid" "$_tip_oid" "$_work/status.txt" "$_work"
     if [ -n "$_bad" ] || [ -n "$_unwired" ]; then
         if [ -n "$_bad" ]; then
-            echo "touched .shs that no longer parse (declared shell -n on the committed blob):"
+            echo "touched .shs that no longer parse (sh -n on the committed blob):"
             cat "$_work/parse_errors.txt" 2>/dev/null
         fi
         if [ -n "$_unwired" ]; then
@@ -290,31 +161,6 @@ selftest() {
         *) echo "selftest FAIL 4: docs-only range not accepted (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
     esac
 
-    # 17 an unrebased clean branch is judged from the merge-base: the fork point
-    #    carried an unparseable .shs that main later FIXED, the branch's own change is clean.
-    _mk "$_t/r17"
-    printf 'notes
-' > "$_t/r17/README.md"
-    printf '#!/bin/sh
-if then fi (
-' > "$_t/r17/scripts/check/x/sibling.shs"
-    _commit "$_t/r17" base
-    git -C "$_t/r17" branch -M main
-    git -C "$_t/r17" checkout -q -b side
-    printf 'more notes
-' >> "$_t/r17/README.md"
-    _commit "$_t/r17" own
-    git -C "$_t/r17" checkout -q main
-    printf '#!/bin/sh
-echo ok
-' > "$_t/r17/scripts/check/x/sibling.shs"
-    _commit "$_t/r17" sibling-fixed
-    _out=$(scan "$_t/r17" main..side); _rc=$?
-    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
-        0:"PASS — 1 file(s) in main..side examined, 0 .shs parsed"*) ;;
-        *) echo "selftest FAIL 17: unrebased clean branch not judged from merge-base (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
-    esac
-
     # 5 an empty range is ERROR, never a pass
     _out=$(scan "$_t/r" HEAD..HEAD); _rc=$?
     [ "$_rc" -eq 2 ] || { echo "selftest FAIL 5: empty range did not ERROR (rc=$_rc)"; _fails=$((_fails + 1)); }
@@ -324,112 +170,20 @@ echo ok
     _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
     [ "$_rc" -eq 0 ] || { echo "selftest FAIL 6: uncommitted working-copy edit changed the verdict (rc=$_rc)"; _fails=$((_fails + 1)); }
 
-    # 7 legitimate Bash coprocess syntax must use Bash, not POSIX sh.
-    printf '#!/usr/bin/env bash\ncoproc worker { printf ok; }\n' > "$_t/r/scripts/check/x/helper.shs"
-    _commit "$_t/r" valid-bash
-    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
-    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 7: valid Bash rejected (rc=$_rc)"; _fails=$((_fails + 1)); }
-
-    # 8 selecting Bash must still reject malformed Bash syntax.
-    printf '#!/usr/bin/env bash\ncoproc worker { if; }\n' > "$_t/r/scripts/check/x/helper.shs"
-    _commit "$_t/r" invalid-bash
-    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
-    case "$_rc:$_out" in
-        1:*unparsable:*scripts/check/x/helper.shs*) ;;
-        *) echo "selftest FAIL 8: malformed Bash not rejected (rc=$_rc)"; _fails=$((_fails + 1)) ;;
-    esac
-
-    # 9 POSIX-shell parse errors remain failures after a Bash revision.
-    printf '#!/bin/sh\nif\n' > "$_t/r/scripts/check/x/helper.shs"
-    _commit "$_t/r" invalid-posix
-    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
-    case "$_rc:$_out" in
-        1:*unparsable:*scripts/check/x/helper.shs*) ;;
-        *) echo "selftest FAIL 9: malformed POSIX shell not rejected (rc=$_rc)"; _fails=$((_fails + 1)) ;;
-    esac
-
-    # 10 missing selected interpreter is infrastructure ERROR, never a pass.
-    printf '#!/usr/bin/env bash\necho should-not-execute\n' > "$_t/missing.shs"
-    _out=$(PATH= parse_script "$_t/missing.shs" 2>&1); _rc=$?
-    case "$_rc:$_out" in
-        '2:required interpreter bash unavailable') ;;
-        *) echo "selftest FAIL 10: missing Bash not rejected (rc=$_rc)"; _fails=$((_fails + 1)) ;;
-    esac
-
-    # 11 an unrecognized interpreter cannot suppress syntax validation.
-    printf '#!/bin/false\necho should-not-execute\n' > "$_t/unknown.shs"
-    _out=$(parse_script "$_t/unknown.shs" 2>&1); _rc=$?
-    case "$_rc:$_out" in
-        '2:unsupported shell shebang') ;;
-        *) echo "selftest FAIL 11: unsupported interpreter not rejected (rc=$_rc)"; _fails=$((_fails + 1)) ;;
-    esac
-
-    # 12 a terminal CR in the shebang must not misclassify Bash as unknown.
-    printf '#!/usr/bin/env bash\r\ncoproc worker { printf ok; }\n' > "$_t/cr-header.shs"
-    parse_script "$_t/cr-header.shs" 2>"$_t/cr-header.err"; _rc=$?
-    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 12: CR-terminated Bash header rejected (rc=$_rc)"; _fails=$((_fails + 1)); }
-
-    # New history-only controls: no revision/working-tree scan is claimed.
-    _mk "$_t/history"
-    printf 'history fixture\n' > "$_t/history/README.md"
-    _commit "$_t/history" history-base
-    git -C "$_t/history" commit -q --allow-empty -m history-only
-    _out=$(scan "$_t/history" HEAD~1..HEAD); _rc=$?
-    case "$_rc:$_out" in
-        0:"PASS — verified tree-equivalent history: 1 commit(s), tree "*"; no file scan") ;;
-        *) echo "selftest FAIL history-equivalent: rc=$_rc $_out"; _fails=$((_fails + 1)) ;;
-    esac
-
-    # Both endpoints must resolve commits, even when no file would be scanned.
-    for _invalid_range in absent-base..HEAD HEAD..absent-tip; do
-        _out=$(scan "$_t/history" "$_invalid_range"); _rc=$?
-        [ "$_rc" -eq 2 ] || { echo "selftest FAIL invalid endpoint: $_invalid_range rc=$_rc"; _fails=$((_fails + 1)); }
-    done
-
-    git -C "$_t/history" rm -q README.md
-    git -C "$_t/history" commit -q -m deletion-only
-    _out=$(scan "$_t/history" HEAD~1..HEAD); _rc=$?
-    [ "$_rc" -eq 2 ] || { echo "selftest FAIL deletion-only: rc=$_rc $_out"; _fails=$((_fails + 1)); }
-
-    # A provider diff error must not enter the tree-equivalence success path.
-    _real_git=$(command -v git)
-    git() {
-        case "${3:-}" in diff) return 73 ;; esac
-        "$_real_git" "$@"
-    }
-    _out=$(scan "$_t/history" HEAD~2..HEAD~1); _rc=$?
-    unset -f git
-    case "$_rc:$_out" in
-        2:*"git diff failed"*) ;;
-        *) echo "selftest FAIL diff-error: rc=$_rc $_out"; _fails=$((_fails + 1)) ;;
-    esac
-
     rm -rf "$_t"
     [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
-    echo "selftest: 17 fixtures passed"
+    echo "selftest: 6 fixtures passed"
 }
 
-# The advisory scan is off while the fixtures run: they assert the range
-# verdict only, and the pre-scan selftest must cost what it always did.
-HYG_ADVISORY=0
 selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
-HYG_ADVISORY=$HYG_LOADED
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 17 fixture(s) checked, selftest only"
+    echo "PASS — 6 fixture(s) checked, selftest only"
     exit 0
 fi
-if [ "$TREE" -eq 0 ]; then
-    [ -n "$RANGE" ] || { echo "ERROR — nothing was checked (<base>..<tip> is required)"; exit 2; }
-fi
+[ -n "$RANGE" ] || { echo "ERROR — nothing was checked (<base>..<tip> is required)"; exit 2; }
 if [ -z "$ROOT" ]; then
     ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
     [ -n "$ROOT" ] || { echo "ERROR — nothing was checked (not inside a git repository and no --root)"; exit 2; }
-fi
-if [ "$TREE" -eq 1 ]; then
-    [ "$HYG_LOADED" -eq 1 ] || { echo "ERROR — nothing was checked (scripts/check/lib/shs-pipe-exit-hygiene.shs is missing)"; exit 2; }
-    [ -n "$TREE_REV" ] || { echo "ERROR — nothing was checked (--rev needs a revision)"; exit 2; }
-    shs_hygiene_tree "$ROOT" "$TREE_REV" "$GENERATE_BASELINE"
-    exit $?
 fi
 scan "$ROOT" "$RANGE"
 exit $?

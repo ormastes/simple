@@ -3,19 +3,11 @@
 # lowered functions and feeds it once per compilation.
 
 use compiler.hir.hir_types.*
-# Codec transport for the validation lane (cycle-78r3): HirModule is too large
-# for ANY element transport (dict reads, array rebinds all arrive erased); the
-# encoded-bytes round trip is the proven carrier.
-use compiler.hir.hir_codec.{hir_module_decode, hir_module_encode}
-# One scratch scope per decoded blob: the module and the canonical re-encode
-# die with the scope; only the small RT facts are promoted.
-use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 use compiler.hir.hir_definitions.*
 use compiler.semantics.effect_validation.{effect_block_loops, effect_block_callees}
-use compiler.semantics.effect_verifier.{LOOP_BOUND_NONE, LoopSite}
+use compiler.semantics.effect_verifier.{LOOP_BOUND_NONE}
 use compiler.semantics.rt_criticality.*
 use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_keys}
-use std.nogc_sync_mut.io_runtime.{env_get}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_path, rt_criticality_claim_fn}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_profile, rt_criticality_reason}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_bounds_for}
@@ -84,7 +76,6 @@ fn rt_expr_dispatches(expr: HirExpr, fn_names: Dict<i64, text>) -> bool:
     match expr.kind:
         case HirExprKind.IntLit(_, _): false
         case HirExprKind.FloatLit(_, _): false
-        case HirExprKind.FloatLexeme(_, _): false
         case HirExprKind.StringLit(_, interpolations):
             match interpolations:
                 Some(parts):
@@ -203,12 +194,8 @@ fn rt_expr_dispatches(expr: HirExpr, fn_names: Dict<i64, text>) -> bool:
                 nil: false
         case HirExprKind.Cast(value, _): rt_expr_dispatches(value, fn_names)
         case HirExprKind.As(value, _): rt_expr_dispatches(value, fn_names)
-        case HirExprKind.ConvertCall(value, _): rt_expr_dispatches(value, fn_names)
         case HirExprKind.Range(start, end, _, step):
-            if val value = start:
-                if rt_expr_dispatches(value, fn_names): return true
-            if val value = end:
-                if rt_expr_dispatches(value, fn_names): return true
+            if rt_expr_dispatches(start, fn_names) or rt_expr_dispatches(end, fn_names): return true
             match step:
                 Some(value): rt_expr_dispatches(value, fn_names)
                 nil: false
@@ -227,7 +214,6 @@ fn rt_expr_allocates(expr: HirExpr) -> bool:
     match expr.kind:
         case HirExprKind.IntLit(_, _): false
         case HirExprKind.FloatLit(_, _): false
-        case HirExprKind.FloatLexeme(_, _): false
         case HirExprKind.BoolLit(_): false
         case HirExprKind.CharLit(_): false
         case HirExprKind.UnitLit: false
@@ -332,12 +318,8 @@ fn rt_expr_allocates(expr: HirExpr) -> bool:
                 nil: false
         case HirExprKind.Cast(value, _): rt_expr_allocates(value)
         case HirExprKind.As(value, _): rt_expr_allocates(value)
-        case HirExprKind.ConvertCall(value, _): rt_expr_allocates(value)
         case HirExprKind.Range(start, end, _, step):
-            if val value = start:
-                if rt_expr_allocates(value): return true
-            if val value = end:
-                if rt_expr_allocates(value): return true
+            if rt_expr_allocates(start) or rt_expr_allocates(end): return true
             match step:
                 Some(value): rt_expr_allocates(value)
                 nil: false
@@ -352,7 +334,7 @@ fn rt_expr_allocates(expr: HirExpr) -> bool:
 fn rt_module_ids(modules: Dict<text, HirModule>) -> [text]:
     var ids: [text] = []
     for key in modules.keys():
-        val module: HirModule = modules[key]
+        val module = modules[key]
         if not ids.contains(key): ids.push(key)
         if module.path != "" and not ids.contains(module.path): ids.push(module.path)
         if module.name != "" and not ids.contains(module.name): ids.push(module.name)
@@ -365,38 +347,24 @@ fn rt_module_matches(module_key: text, module: HirModule, claim_path: text) -> b
     claim_path == module_key or claim_path == module.path or claim_path == module.name
 
 fn rt_unambiguous_symbol_names(modules: Dict<text, HirModule>) -> Dict<i64, text>:
-    var declarations: [RtCriticalFunctionDeclarationV1] = []
-    for module_key in modules.keys():
-        # ANY-transport: declaration structs cross a by-value return; rebind.
-        for raw_declaration in rt_module_function_declarations_v1(module_key, modules[module_key]):
-            val declaration: RtCriticalFunctionDeclarationV1 = raw_declaration
-            declarations.push(declaration)
-    rt_unambiguous_declaration_names_v1(declarations)
-
-pub fn rt_unambiguous_declaration_names_v1(
-        declarations: [RtCriticalFunctionDeclarationV1]) -> Dict<i64, text>:
     var names: Dict<i64, text> = {}
     var owners: Dict<i64, text> = {}
-    for raw_declaration in declarations:
-        val declaration: RtCriticalFunctionDeclarationV1 = raw_declaration
-        val id = declaration.symbol_id
-        if owners.contains_key(id) and owners[id] != declaration.module_key:
-            names[id] = "__rt_ambiguous_symbol__"
-        else:
-            owners[id] = declaration.module_key
-            names[id] = declaration.name
+    for module_key in modules.keys():
+        val module = modules[module_key]
+        for fn_ in module.functions.values():
+            val id = fn_.symbol.id
+            if owners.contains_key(id) and owners[id] != module_key:
+                names[id] = "__rt_ambiguous_symbol__"
+            else:
+                owners[id] = module_key
+                names[id] = fn_.name
     names
 
 fn rt_admit_with_manifest(root_id: text, facts: [RtCriticalFact]) -> [text]:
-    rt_admit_with_capabilities_v1(root_id, facts, rt_bound_manifest_capabilities())
-
-fn rt_admit_with_capabilities_v1(root_id: text, facts: [RtCriticalFact],
-        capabilities: [RtBoundCapability]) -> [text]:
     val digest = rt_closure_digest(root_id, facts)
+    val capabilities = rt_bound_manifest_capabilities()
     var adjusted: [RtCriticalFact] = []
-    for raw_fact in facts:
-        # ANY-transport: annotated rebind (cycle-71).
-        val fact: RtCriticalFact = raw_fact
+    for fact in facts:
         val reviewed = rt_reviewed_bound_mask(fact.name, digest,
             rt_fact_observed_units(fact), capabilities)
         adjusted.push(RtCriticalFact(name: fact.name,
@@ -410,9 +378,7 @@ fn rt_hal_facts_with_reviewed_intrinsic(root_id: text,
     facts: [RtCriticalFact]) -> [RtCriticalFact]:
     val intrinsic_id = root_id + "::__rt_hal_boundary_enqueue_intrinsic"
     var out: [RtCriticalFact] = []
-    for raw_fact in facts:
-        # ANY-transport: annotated rebind (cycle-71).
-        val fact: RtCriticalFact = raw_fact
+    for fact in facts:
         if fact.name == root_id:
             var callees = fact.callees
             callees.push(intrinsic_id)
@@ -452,569 +418,107 @@ fn rt_annotation_bound_diagnostic(fn_name: text, raw_bounds: text) -> text:
     "error[RT-E-BOUND-CAPABILITY-UNVERIFIED]: @rt declaration '" +
         fn_name + "' uses annotation bounds; provide a reviewed typed numeric capability bound to the function closure"
 
-fn rt_sort_criticality_diagnostics(items: [RtCriticalDiagnostic]) -> [RtCriticalDiagnostic]:
-    var out: [RtCriticalDiagnostic] = []
-    for item in items:
-        var at = out.len()
-        var i = 0
-        while i < out.len():
-            if item.message < out[i].message:
-                at = i
-                break
-            i = i + 1
-        out.push(item)
-        var j = out.len() - 1
-        while j > at:
-            out[j] = out[j - 1]
-            j = j - 1
-        out[at] = item
-    out
-
-struct RtCriticalFunctionDeclarationV1:
-    module_key: text
-    module_path: text
-    module_name: text
-    symbol_id: i64
-    name: text
-    is_rt_hal: bool
-    line: i64
-
-struct RtCriticalFunctionFactsV1:
-    declaration: RtCriticalFunctionDeclarationV1
-    own_effects: i64
-    effect_units: Dict<i64, i64>
-    raw_callees: [text]
-
-pub fn rt_module_function_declarations_v1(module_key: text,
-        module: HirModule) -> [RtCriticalFunctionDeclarationV1]:
-    var declarations: [RtCriticalFunctionDeclarationV1] = []
-    for dk_26 in module.functions.keys():
-        # ANY-transport: annotated rebind (cycle-70 sweep).
-        val fn_: HirFunction = module.functions[dk_26]
-        declarations.push(RtCriticalFunctionDeclarationV1(module_key: module_key,
-            module_path: module.path, module_name: module.name, symbol_id: fn_.symbol.id,
-            name: fn_.name, is_rt_hal: fn_.func_attr.is_rt_hal, line: fn_.span.line))
-    declarations
-
-pub fn rt_function_facts_v1(module_key: text, module: HirModule,
-        fn_: HirFunction, names: Dict<i64, text>) -> RtCriticalFunctionFactsV1:
-    var own = rt_name_effects(fn_.name)
-    var units = rt_observed_effect_units(own)
-    if rt_block_allocates(fn_.body):
-        own = own | RT_EFFECT_ALLOC
-        units[RT_EFFECT_ALLOC] = 1
-    if rt_block_dispatches(fn_.body, names):
-        own = own | RT_EFFECT_DISPATCH | RT_EFFECT_UNKNOWN
-        units[RT_EFFECT_DISPATCH] = 1
-    var unbounded_loop_count: i64 = 0
-    for raw_loop in effect_block_loops(fn_.body):
-        # ANY-transport: loop facts cross a by-value return; rebind before reads.
-        # LoopSite per effect_validation.spl:277.
-        val loop: LoopSite = raw_loop
-        if loop.bound_kind == LOOP_BOUND_NONE or loop.grows_container:
-            own = own | RT_EFFECT_LOOP
-            unbounded_loop_count = unbounded_loop_count + 1
-    if unbounded_loop_count > 0: units[RT_EFFECT_LOOP] = unbounded_loop_count
-    RtCriticalFunctionFactsV1(declaration: RtCriticalFunctionDeclarationV1(
-        module_key: module_key, module_path: module.path, module_name: module.name,
-        symbol_id: fn_.symbol.id, name: fn_.name,
-        is_rt_hal: fn_.func_attr.is_rt_hal, line: fn_.span.line),
-        own_effects: own, effect_units: units,
-        raw_callees: effect_block_callees(fn_.body, names))
-
-fn rt_declaration_matches_v1(declaration: RtCriticalFunctionDeclarationV1,
-        claim_path: text) -> bool:
-    claim_path == declaration.module_key or claim_path == declaration.module_path or
-        claim_path == declaration.module_name
-
-# Actual unchanged aggregate policy over scalar/text body facts. The caller
-# must retain original module/function order and replay editable facts against
-# complete admitted bodies before using them as driver admission evidence.
-pub fn validate_rt_criticality_facts_v1(module_ids: [text],
-        functions: [RtCriticalFunctionFactsV1]) -> [RtCriticalDiagnostic]:
-    # The retained owner consumes the actual one-compilation manifest once.
-    val diagnostics = validate_rt_criticality_facts_with_capabilities_v1(module_ids,
-        functions, rt_bound_manifest_capabilities())
-    rt_bound_manifest_clear()
-    diagnostics
-
-# Policy replay only. An explicit list is NOT capability admission; archive
-# publication must obtain it from the actual owner's immutable parent record.
-# Replay never installs a manifest or consumes a later compilation's grants.
-pub fn validate_rt_criticality_facts_with_capabilities_v1(module_ids: [text],
-        functions: [RtCriticalFunctionFactsV1],
-        capabilities: [RtBoundCapability]) -> [RtCriticalDiagnostic]:
-    validate_rt_criticality_claim_facts_v1(module_ids, functions, capabilities,
-        rt_critical_contract_claims_v1(), rt_implicit_profile_is_error())
-
-struct RtCriticalContractClaimV1:
-    registry_key: text
-    path: text
-    fn_name: text
-    profile: text
-    reason: text
-    raw_bounds: text
-    is_hal: bool
-
-pub fn rt_critical_contract_claims_v1() -> [RtCriticalContractClaimV1]:
-    var claims: [RtCriticalContractClaimV1] = []
-    for key in rt_criticality_claim_keys():
-        claims.push(RtCriticalContractClaimV1(registry_key: key, path: rt_criticality_claim_path(key),
-            fn_name: rt_criticality_claim_fn(key), profile: rt_criticality_profile(key),
-            reason: rt_criticality_reason(key), raw_bounds: rt_criticality_bounds_for(key),
-            is_hal: rt_criticality_is_hal(key)))
-    claims
-
-# Shared exact stable graph for both the actual validator and reviewed bound
-# capability inputs. This projection grants no admission by itself.
-pub fn rt_criticality_graph_facts_v1(functions: [RtCriticalFunctionFactsV1]) -> [RtCriticalFact]:
+fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
+    var diagnostics: [text] = []
+    val claims = rt_criticality_claim_keys()
+    var has_rt_hal = false
+    for module in modules.values():
+        for fn_ in module.functions.values():
+            if fn_.func_attr.is_rt_hal: has_rt_hal = true
+    if claims.len() == 0 and not has_rt_hal:
+        rt_bound_manifest_clear()
+        return diagnostics
+    val names = rt_unambiguous_symbol_names(modules)
+    val module_ids = rt_module_ids(modules)
     # Bare names are translated only when unique. Duplicate unqualified names
     # never alias silently: their edges become unknown and fail closed.
     var unique_ids: Dict<text, text> = {}
     var ambiguous: Dict<text, bool> = {}
-    for raw_fn in functions:
-        # ANY-transport: annotated rebind (cycle-71).
-        val fn_: RtCriticalFunctionFactsV1 = raw_fn
-        val declaration = fn_.declaration
-        val stable = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
-        if unique_ids.contains_key(declaration.name):
-            ambiguous[declaration.name] = true
-        else:
-            unique_ids[declaration.name] = stable
-    var facts: [RtCriticalFact] = []
-    for raw_fn in functions:
-        # ANY-transport: annotated rebind (cycle-71).
-        val fn_: RtCriticalFunctionFactsV1 = raw_fn
-        val declaration = fn_.declaration
-        var stable_callees: [text] = []
-        for raw_callee in fn_.raw_callees:
-            if unique_ids.contains_key(raw_callee) and not ambiguous.contains_key(raw_callee):
-                stable_callees.push(unique_ids[raw_callee])
+    for module_key in modules.keys():
+        val module = modules[module_key]
+        for fn_ in module.functions.values():
+            val stable = rt_stable_fn_id(module_key, fn_.symbol.id)
+            if unique_ids.contains_key(fn_.name):
+                ambiguous[fn_.name] = true
             else:
-                stable_callees.push("__rt_unknown_call__")
-        facts.push(RtCriticalFact(name: rt_stable_fn_id(declaration.module_key, declaration.symbol_id),
-            own_effects: fn_.own_effects, bounded_effects: 0, callees: stable_callees,
-            line: declaration.line, effect_units: fn_.effect_units))
-    facts
-
-# Replay reads no ambient claim/capability registry or severity switch. The
-# driver must bind every editable input to actual source/policy admission.
-pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
-        functions: [RtCriticalFunctionFactsV1], capabilities: [RtBoundCapability],
-        claims: [RtCriticalContractClaimV1], implicit_profile_error: bool) -> [RtCriticalDiagnostic]:
-    var diagnostics: [RtCriticalDiagnostic] = []
-    var has_rt_hal = false
-    for raw_fn in functions:
-        # ANY-transport: annotated rebind (cycle-71).
-        val fn_: RtCriticalFunctionFactsV1 = raw_fn
-        if fn_.declaration.is_rt_hal: has_rt_hal = true
-    if claims.len() == 0 and not has_rt_hal:
-        return diagnostics
-    val facts = rt_criticality_graph_facts_v1(functions)
-    # Resolve each claim once. Rank propagation then shares one scalar graph
-    # closure across all roots, including explicit lower-tier callers of a
-    # critical or verified dependency.
-    var claim_roots: Dict<text, text> = {}
-    var declared_ranks: Dict<text, i64> = {}
-    for raw_claim in claims:
-        # ANY-transport: annotated rebind (cycle-71).
-        val claim: RtCriticalContractClaimV1 = raw_claim
-        val key = claim.registry_key
-        if not module_ids.contains(claim.path): continue
-        val fn_name = claim.fn_name
-        val profile = claim.profile
-        var root_id = ""
-        for raw_fn in functions:
-            # ANY-transport: annotated rebind (cycle-71).
-            val fn_: RtCriticalFunctionFactsV1 = raw_fn
-            val declaration = fn_.declaration
-            if not rt_declaration_matches_v1(declaration, claim.path): continue
-            if declaration.name == fn_name:
-                if root_id != "": root_id = "__rt_ambiguous_root__"
-                else: root_id = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
-        claim_roots[key] = root_id
-        val rank = rt_profile_assurance_rank(profile)
-        if root_id != "" and rank > (declared_ranks[root_id] ?? 0):
-            declared_ranks[root_id] = rank
-    for raw_fn in functions:
-        # ANY-transport: annotated rebind (cycle-71).
-        val fn_: RtCriticalFunctionFactsV1 = raw_fn
-        val declaration = fn_.declaration
-        if declaration.is_rt_hal:
-            val root_id = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
-            if (declared_ranks[root_id] ?? 0) < 3:
-                declared_ranks[root_id] = 3
-    val effective_ranks = rt_effective_assurance_closure(facts, declared_ranks)
-    var fact_positions: Dict<text, i64> = {}
-    var fact_position = 0
-    while fact_position < facts.len():
-        fact_positions[facts[fact_position].name] = fact_position
-        fact_position = fact_position + 1
+                unique_ids[fn_.name] = stable
+    var facts: [RtCriticalFact] = []
+    for module_key in modules.keys():
+        val module = modules[module_key]
+        for fn_ in module.functions.values():
+            var own = rt_name_effects(fn_.name)
+            var units = rt_observed_effect_units(own)
+            if rt_block_allocates(fn_.body):
+                own = own | RT_EFFECT_ALLOC
+                units[RT_EFFECT_ALLOC] = 1
+            if rt_block_dispatches(fn_.body, names):
+                own = own | RT_EFFECT_DISPATCH | RT_EFFECT_UNKNOWN
+                units[RT_EFFECT_DISPATCH] = 1
+            var unbounded_loop_count: i64 = 0
+            for loop in effect_block_loops(fn_.body):
+                if loop.bound_kind == LOOP_BOUND_NONE or loop.grows_container:
+                    own = own | RT_EFFECT_LOOP
+                    unbounded_loop_count = unbounded_loop_count + 1
+            if unbounded_loop_count > 0: units[RT_EFFECT_LOOP] = unbounded_loop_count
+            var stable_callees: [text] = []
+            for raw_callee in effect_block_callees(fn_.body, names):
+                if unique_ids.contains_key(raw_callee) and not ambiguous.contains_key(raw_callee):
+                    stable_callees.push(unique_ids[raw_callee])
+                else:
+                    stable_callees.push("__rt_unknown_call__")
+            facts.push(RtCriticalFact(name: rt_stable_fn_id(module_key, fn_.symbol.id), own_effects: own,
+                bounded_effects: 0, callees: stable_callees,
+                line: fn_.span.line, effect_units: units))
     var admitted_roots: Dict<text, bool> = {}
-    for raw_claim in claims:
-        # ANY-transport: annotated rebind (cycle-71).
-        val claim: RtCriticalContractClaimV1 = raw_claim
-        val key = claim.registry_key
-        if not claim_roots.contains_key(key): continue
-        val fn_name = claim.fn_name
-        val profile = claim.profile
-        val root_id = claim_roots[key]
+    for key in claims:
+        if not module_ids.contains(rt_criticality_claim_path(key)): continue
+        val fn_name = rt_criticality_claim_fn(key)
+        val profile = rt_criticality_profile(key)
+        var root_id = ""
+        for module_key in modules.keys():
+            val module = modules[module_key]
+            if not rt_module_matches(module_key, module, rt_criticality_claim_path(key)): continue
+            for fn_ in module.functions.values():
+                if fn_.name == fn_name:
+                    if root_id != "": root_id = "__rt_ambiguous_root__"
+                    else: root_id = rt_stable_fn_id(module_key, fn_.symbol.id)
         # The parser exclusively owns the implicit warning/error, preventing a
         # warning+error pair at the promotion epoch. Semantics owns explicit
         # profile validity and lower-tier reasons.
         if profile != "":
             for d in rt_critical_profile_diagnostics(fn_name, profile,
-                claim.reason, implicit_profile_error):
-                if d.starts_with("error["):
-                    diagnostics.push(RtCriticalDiagnostic(
-                        severity: RtCriticalDiagnosticSeverity.Error, message: d))
+                rt_criticality_reason(key), rt_implicit_profile_is_error()):
+                if d.starts_with("error["): diagnostics.push(d)
         val raw_bound_error = rt_annotation_bound_diagnostic(fn_name,
-            claim.raw_bounds)
-        if raw_bound_error != "":
-            diagnostics.push(RtCriticalDiagnostic(
-                severity: RtCriticalDiagnosticSeverity.Error, message: raw_bound_error))
-        var effective_rank = rt_profile_assurance_rank(profile)
-        if fact_positions.contains_key(root_id):
-            effective_rank = effective_ranks[fact_positions[root_id]]
-        val unresolved = root_id == "" or root_id == "__rt_ambiguous_root__"
-        val admission_identity = if unresolved: "claim:" + key else: root_id
-        val admission_root = if unresolved: admission_identity else: root_id
-        if admitted_roots.contains_key(admission_identity): continue
-        if effective_rank >= 3:
-            if claim.is_hal:
+            rt_criticality_bounds_for(key))
+        if raw_bound_error != "": diagnostics.push(raw_bound_error)
+        if rt_critical_profile(profile):
+            if rt_criticality_is_hal(key):
                 val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
-                for d in rt_admit_with_capabilities_v1(root_id, hal_facts, capabilities):
-                    diagnostics.push(RtCriticalDiagnostic(
-                        severity: RtCriticalDiagnosticSeverity.Error, message: d))
+                for d in rt_admit_with_manifest(root_id, hal_facts): diagnostics.push(d)
             else:
-                # Ordinary roots retain the exact compiler fact graph used by
-                # the reviewed digest. A HAL-only synthetic edge would change
-                # that digest and silently discard valid allocation authority.
-                for d in rt_admit_with_capabilities_v1(admission_root, facts, capabilities):
-                    diagnostics.push(RtCriticalDiagnostic(
-                        severity: RtCriticalDiagnosticSeverity.Error, message: d))
-            admitted_roots[admission_identity] = true
-        elif fact_positions.contains_key(root_id):
-            for d in rt_admit_with_capabilities_v1(root_id, facts, capabilities):
-                if d.starts_with("error[RT-E-UNBOUNDED-ALLOCATION]"):
-                    val level = if implicit_profile_error: "error" else: "warning"
-                    val code = if implicit_profile_error:
-                        "RT-E-STEADY-ALLOCATION-001"
-                    else:
-                        "RT-W-STEADY-ALLOCATION-001"
-                    val severity = if implicit_profile_error:
-                        RtCriticalDiagnosticSeverity.Error
-                    else:
-                        RtCriticalDiagnosticSeverity.Warning
-                    diagnostics.push(RtCriticalDiagnostic(severity: severity,
-                        message: level + "[" + code + "]: explicit lower-tier RT closure '" +
-                            fn_name + "' contains unproved steady-state allocation"))
-            admitted_roots[admission_identity] = true
+                val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
+                for d in rt_admit_with_manifest(root_id, hal_facts): diagnostics.push(d)
+            admitted_roots[root_id] = true
     # Non-flat/full frontend routes preserve @rt(hal) directly in FunctionAttr
     # and do not emit the flat parser's inert criticality marker. Admit those
     # roots here with the same default critical closure, exactly once.
-    for raw_fn in functions:
-        # ANY-transport: annotated rebind (cycle-71).
-        val fn_: RtCriticalFunctionFactsV1 = raw_fn
-        val declaration = fn_.declaration
-        if not declaration.is_rt_hal: continue
-        val root_id = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
-        if admitted_roots.contains_key(root_id): continue
-        val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
-        for d in rt_admit_with_capabilities_v1(root_id, hal_facts, capabilities):
-            diagnostics.push(RtCriticalDiagnostic(
-                severity: RtCriticalDiagnosticSeverity.Error, message: d))
-        admitted_roots[root_id] = true
-    val ordered = rt_sort_criticality_diagnostics(diagnostics)
+    for module_key in modules.keys():
+        val module = modules[module_key]
+        for fn_ in module.functions.values():
+            if not fn_.func_attr.is_rt_hal: continue
+            val root_id = rt_stable_fn_id(module_key, fn_.symbol.id)
+            if admitted_roots.contains_key(root_id): continue
+            val hal_facts = rt_hal_facts_with_reviewed_intrinsic(root_id, facts)
+            for d in rt_admit_with_manifest(root_id, hal_facts): diagnostics.push(d)
+            admitted_roots[root_id] = true
+    val ordered = rt_sort_text(diagnostics)
+    # A config owner must seal a fresh manifest for every compilation. Never
+    # let reviewed authority leak into a later long-lived compiler request.
+    rt_bound_manifest_clear()
     ordered
 
-fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule],
-        has_rt_hal_flags: [bool] = [], claim_counts: [i64] = []) -> [RtCriticalDiagnostic]:
-    """Validate encoded modules and supplied inventory counts before RT policy.
-
-    Parallel scalar hints remain accepted for caller compatibility, but are
-    not bound to the encoded owners and cannot authorize a success shortcut.
-    A corrupt or noncanonical blob is refused by the codec selfcheck and is
-    never admitted, but the refusal is codec-class, not fatal: the module is
-    already lowered in memory, so the fallback array (the proven transport,
-    same as the empty-input contract) is validated instead and the build
-    proceeds UNCACHED. Only a codec refusal with no fallback modules left to
-    validate stays fatal. When both inventories are nonempty, fallback
-    supplies the required count under the driver's one-module/at-most-one-blob
-    contract, not identity proof.
-    """
-    if blobs.len() == 0:
-        return validate_rt_criticality_diagnostics_array(fallback)
-    # Streamed (bug stage3_rt_criticality_validation_memory_spike_2026_10_19):
-    # the old loop decoded every blob, re-encoded it and RETAINED every decoded
-    # HirModule (~30 MB each) plus the unscoped encoder working set, so the
-    # Stage-3 compiler grew 6.2 GB -> 42 GB over 1315 modules here. Pass 1
-    # decodes one blob per transient scope and keeps only the declaration
-    # census; pass 2 (claims/HAL only) decodes again per scope and keeps only
-    # the function facts. The policy input is identical to the array variant:
-    # one Dict<text, HirModule> keyed by module name (last owner wins, first
-    # insertion order), the same declaration names and the same facts.
-    var verified = 0
-    var codec_refusals: [text] = []
-    var verified_blob_indices: [i64] = []
-    var verified_names: [text] = []
-    var verified_paths: [text] = []
-    var verified_has_rt_hal: [bool] = []
-    var declarations: [RtCriticalFunctionDeclarationV1] = []
-    var declaration_owners: [i64] = []
-    var blob_index: i64 = 0
-    for raw_blob in blobs:
-        # [text] element: scalar transport; the census owns the decode scope.
-        val blob: text = raw_blob
-        val census: RtBlobDeclarationCensusV1 = rt_blob_declaration_census_v1(blob, blob_index)
-        if census.refusal != "":
-            # Codec-class refusal (decode failure or roundtrip-unstable encode
-            # read): the selfcheck still refuses the blob -- it is never
-            # admitted -- but the refusal is NOT a fatal build error. The
-            # module is already lowered in memory; the fallback array is the
-            # proven transport (the empty-blobs contract above). A codec
-            # refusal makes the build UNCACHED (slow), never wrong; only a
-            # refusal with no in-memory modules left to validate stays fatal.
-            codec_refusals.push(census.refusal)
-        else:
-            val owner = verified_blob_indices.len()
-            verified_blob_indices.push(blob_index)
-            verified_names.push(census.module_name)
-            verified_paths.push(census.module_path)
-            verified_has_rt_hal.push(census.has_rt_hal)
-            for raw_declaration in census.declarations:
-                val declaration: RtCriticalFunctionDeclarationV1 = raw_declaration
-                declarations.push(declaration)
-                declaration_owners.push(owner)
-            verified = verified + 1
-        blob_index = blob_index + 1
-    if codec_refusals.len() > 0:
-        for refusal in codec_refusals:
-            eprint("[hir-blob-refused] {refusal}; validating the in-memory module instead (codec-class refusal is non-fatal; the build proceeds UNCACHED)")
-        if fallback.len() == 0:
-            rt_bound_manifest_clear()
-            return [RtCriticalDiagnostic(severity: RtCriticalDiagnosticSeverity.Error,
-                message: "RT-E-HIR-BLOB-INVENTORY: {codec_refusals.len()} codec-refused blob(s) with no fallback modules left to validate")]
-        # Refused blobs are never validated from their (untrusted) bytes;
-        # the driver's fallback array carries every module, so RT policy
-        # still sees the full module set -- nothing is hidden from policy,
-        # and the previously fatal draw now degrades to UNCACHED.
-        var policy = validate_rt_criticality_diagnostics_array(fallback)
-        for refusal in codec_refusals:
-            policy.push(RtCriticalDiagnostic(severity: RtCriticalDiagnosticSeverity.Warning,
-                message: "{refusal} (codec-class refusal: non-fatal, build proceeds UNCACHED)"))
-        return policy
-    # The driver appends every module to fallback, and at most one blob for
-    # each module whose encoding succeeds. A nonempty partial blob inventory
-    # must not silently hide refused modules from RT policy. Check after codec
-    # verification so malformed/noncanonical blobs keep their own diagnostics.
-    if fallback.len() > 0 and verified != fallback.len():
-        rt_bound_manifest_clear()
-        return [RtCriticalDiagnostic(severity: RtCriticalDiagnosticSeverity.Error,
-            message: "RT-E-HIR-BLOB-INVENTORY: verified {verified} module blobs for {fallback.len()} fallback modules")]
-    if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
-        eprint("[enum-reg] rt-criticality blobs: decoded={blobs.len()} verified={verified}")
-    # Dict parity with validate_rt_criticality_diagnostics_array: modules are
-    # keyed by name, a later module with the same name replaces the earlier
-    # one, and keys keep their first insertion position.
-    var owner_by_name: Dict<text, i64> = {}
-    var name_order: [text] = []
-    var owner_index = 0
-    while owner_index < verified_names.len():
-        val module_name = verified_names[owner_index]
-        if not owner_by_name.contains_key(module_name): name_order.push(module_name)
-        owner_by_name[module_name] = owner_index
-        owner_index = owner_index + 1
-    var kept_owners: Dict<i64, bool> = {}
-    var has_rt_hal = false
-    for kept_name in name_order:
-        val kept_owner = owner_by_name[kept_name]
-        kept_owners[kept_owner] = true
-        if verified_has_rt_hal[kept_owner]: has_rt_hal = true
-    if rt_criticality_claim_keys().len() == 0 and not has_rt_hal:
-        rt_bound_manifest_clear()
-        return []
-    var kept_declarations: [RtCriticalFunctionDeclarationV1] = []
-    var declaration_index = 0
-    while declaration_index < declarations.len():
-        if kept_owners.contains_key(declaration_owners[declaration_index]):
-            val kept_declaration: RtCriticalFunctionDeclarationV1 = declarations[declaration_index]
-            kept_declarations.push(kept_declaration)
-        declaration_index = declaration_index + 1
-    val names = rt_unambiguous_declaration_names_v1(kept_declarations)
-    # rt_module_ids over that dict: key (== name), then path.
-    var module_ids: [text] = []
-    for id_name in name_order:
-        if not module_ids.contains(id_name): module_ids.push(id_name)
-        val id_path = verified_paths[owner_by_name[id_name]]
-        if id_path != "" and not module_ids.contains(id_path): module_ids.push(id_path)
-    var functions: [RtCriticalFunctionFactsV1] = []
-    for facts_name in name_order:
-        val facts_blob_index = verified_blob_indices[owner_by_name[facts_name]]
-        val facts_blob: text = blobs[facts_blob_index]
-        val facts: RtBlobFunctionFactsV1 = rt_blob_function_facts_v1(facts_blob, names)
-        if not facts.decoded:
-            # Pass 1 decoded this exact blob; a replay failure is a codec
-            # defect, never a policy result.
-            rt_bound_manifest_clear()
-            return [RtCriticalDiagnostic(severity: RtCriticalDiagnosticSeverity.Error,
-                message: "RT-E-HIR-BLOB-DECODE: module blob {facts_blob_index} could not be decoded on replay")]
-        for raw_facts in facts.functions:
-            val function_facts: RtCriticalFunctionFactsV1 = raw_facts
-            functions.push(function_facts)
-    validate_rt_criticality_facts_v1(module_ids, functions)
-
-# Pass-1 census of one encoded module: codec verdict, module identity, HAL
-# flag and the function declarations (RtCriticalFunctionDeclarationV1 is a
-# few words per function; the decoded HirModule is ~30 MB).
-struct RtBlobDeclarationCensusV1:
-    refusal: text
-    module_name: text
-    module_path: text
-    has_rt_hal: bool
-    declarations: [RtCriticalFunctionDeclarationV1]
-
-fn rt_blob_declaration_census_unscoped_v1(blob: text, blob_index: i64) -> RtBlobDeclarationCensusV1:
-    if val decoded = hir_module_decode(blob):
-        val restored: HirModule = decoded
-        if hir_module_encode(restored) != blob:
-            return RtBlobDeclarationCensusV1(
-                refusal: "RT-E-HIR-BLOB-NONCANONICAL: module blob {blob_index} failed roundtrip verification",
-                module_name: "", module_path: "", has_rt_hal: false, declarations: [])
-        var has_rt_hal = false
-        var declarations: [RtCriticalFunctionDeclarationV1] = []
-        for raw_declaration in rt_module_function_declarations_v1(restored.name, restored):
-            # ANY-transport: declaration structs cross a by-value return; rebind.
-            val declaration: RtCriticalFunctionDeclarationV1 = raw_declaration
-            if declaration.is_rt_hal: has_rt_hal = true
-            declarations.push(declaration)
-        return RtBlobDeclarationCensusV1(refusal: "", module_name: restored.name,
-            module_path: restored.path, has_rt_hal: has_rt_hal, declarations: declarations)
-    RtBlobDeclarationCensusV1(
-        refusal: "RT-E-HIR-BLOB-DECODE: module blob {blob_index} could not be decoded",
-        module_name: "", module_path: "", has_rt_hal: false, declarations: [])
-
-# Scoped census. The decode, the canonical re-encode and every intermediate
-# die with the scope; only the census is promoted. Same ownership discipline
-# as hir_module_encode_retained_v1 / hir_cache_load. When a scope is already
-# live (never on the driver's validation path) fall back to the unscoped walk
-# rather than borrow someone else's transaction.
-var _rt_blob_unscoped_noted: bool = false
-
-fn rt_blob_scope_unavailable_note_v1():
-    # Once per process: an unscoped walk is correct but retains every decoded
-    # module again, so the Stage-3 log must say so instead of hiding it.
-    if _rt_blob_unscoped_noted: return
-    _rt_blob_unscoped_noted = true
-    eprint("[rt-criticality] blob validation running without a transient scope (one already live); decoded modules are retained")
-
-fn rt_blob_declaration_census_v1(blob: text, blob_index: i64) -> RtBlobDeclarationCensusV1:
-    if not transient_scope_begin():
-        rt_blob_scope_unavailable_note_v1()
-        return rt_blob_declaration_census_unscoped_v1(blob, blob_index)
-    val census = rt_blob_declaration_census_unscoped_v1(blob, blob_index)
-    val paused = transient_scope_pause()
-    val promoted = paused and transient_promote(census)
-    val ended = transient_scope_end()
-    if not paused or not promoted or not ended:
-        panic("RT criticality blob census scope ownership failed")
-    census
-
-# Pass-2 facts of one encoded module against the cross-module name table.
-struct RtBlobFunctionFactsV1:
-    decoded: bool
-    functions: [RtCriticalFunctionFactsV1]
-
-fn rt_blob_function_facts_unscoped_v1(blob: text, names: Dict<i64, text>) -> RtBlobFunctionFactsV1:
-    if val decoded = hir_module_decode(blob):
-        val restored: HirModule = decoded
-        val module_key = restored.name
-        var functions: [RtCriticalFunctionFactsV1] = []
-        for fn_key in restored.functions.keys():
-            val fn_: HirFunction = restored.functions[fn_key]
-            functions.push(rt_function_facts_v1(module_key, restored, fn_, names))
-        return RtBlobFunctionFactsV1(decoded: true, functions: functions)
-    RtBlobFunctionFactsV1(decoded: false, functions: [])
-
-fn rt_blob_function_facts_v1(blob: text, names: Dict<i64, text>) -> RtBlobFunctionFactsV1:
-    if not transient_scope_begin():
-        rt_blob_scope_unavailable_note_v1()
-        return rt_blob_function_facts_unscoped_v1(blob, names)
-    val facts = rt_blob_function_facts_unscoped_v1(blob, names)
-    val paused = transient_scope_pause()
-    val promoted = paused and transient_promote(facts)
-    val ended = transient_scope_end()
-    if not paused or not promoted or not ended:
-        panic("RT criticality blob facts scope ownership failed")
-    facts
-
-fn validate_rt_criticality_diagnostics_array(modules_list: [HirModule]) -> [RtCriticalDiagnostic]:
-    """Array-handoff variant (cycle-76): Dict<text, HirModule> value reads
-    arrive erased through every read pattern (.values rebind, keys()+[]);
-    array element transports restore reliably. Same policy, iterated over the
-    array; module keys/ids are recovered from each module's own fields."""
-    var modules_keys: [text] = []
-    var modules_vals: [HirModule] = []
-    for raw_m in modules_list:
-        # array for-in rebinds ARE effective (rounds 1-3 evidence).
-        val m: HirModule = raw_m
-        modules_keys.push(m.name)
-        modules_vals.push(m)
-    var has_rt_hal = false
-    for module in modules_vals:
-        val m0: HirModule = module
-        for fn_key0 in m0.functions.keys():
-            val fn0: HirFunction = m0.functions[fn_key0]
-            if fn0.func_attr.is_rt_hal: has_rt_hal = true
-    if rt_criticality_claim_keys().len() == 0 and not has_rt_hal:
-        rt_bound_manifest_clear()
-        return []
-    # Rebuild the dict ONCE from the restored array elements; the rebuild's
-    # inserts carry genuinely-restored values.
-    var modules: Dict<text, HirModule> = {}
-    var ki = 0
-    while ki < modules_keys.len():
-        modules[modules_keys[ki]] = modules_vals[ki]
-        ki = ki + 1
-    validate_rt_criticality_diagnostics(modules)
-
-fn validate_rt_criticality_diagnostics(modules: Dict<text, HirModule>) -> [RtCriticalDiagnostic]:
-    """Validate RT roots while retaining warning/error severity for callers."""
-    var has_rt_hal = false
-    # ANY-transport (cycle-71): .values() element rebinds did NOT restore the
-    # erased HirModule words (same class as cycle-65's else_opt); the proven
-    # workaround is keys() + annotated dict extraction.
-    for module_key0 in modules.keys():
-        val module: HirModule = modules[module_key0]
-        for fn_key0 in module.functions.keys():
-            val fn_: HirFunction = module.functions[fn_key0]
-            if fn_.func_attr.is_rt_hal: has_rt_hal = true
-    if rt_criticality_claim_keys().len() == 0 and not has_rt_hal:
-        rt_bound_manifest_clear()
-        return []
-    val names = rt_unambiguous_symbol_names(modules)
-    var functions: [RtCriticalFunctionFactsV1] = []
-    for module_key in modules.keys():
-        val module: HirModule = modules[module_key]
-        for fn_key in module.functions.keys():
-            val fn_: HirFunction = module.functions[fn_key]
-            functions.push(rt_function_facts_v1(module_key, module, fn_, names))
-    validate_rt_criticality_facts_v1(rt_module_ids(modules), functions)
-
-fn validate_rt_criticality(modules: Dict<text, HirModule>) -> [text]:
-    """Preserve the existing error-only string adapter for compiler callers."""
-    var errors: [text] = []
-    for raw_diagnostic in validate_rt_criticality_diagnostics(modules):
-        # ANY-transport: the diagnostic struct crosses a by-value return.
-        val diagnostic: RtCriticalDiagnostic = raw_diagnostic
-        if diagnostic.severity == RtCriticalDiagnosticSeverity.Error:
-            errors.push(diagnostic.message)
-    errors
-
 export validate_rt_criticality, rt_name_effects
-export validate_rt_criticality_diagnostics
-export validate_rt_criticality_diagnostics_array
-export validate_rt_criticality_diagnostics_blobs
 export rt_expr_allocates, rt_block_allocates
 export rt_expr_dispatches, rt_block_dispatches
 export rt_direct_callee_dispatches
@@ -1023,8 +527,3 @@ export rt_unambiguous_symbol_names
 export rt_admit_with_manifest
 export rt_hal_facts_with_reviewed_intrinsic
 export rt_annotation_bound_diagnostic
-export RtCriticalFunctionDeclarationV1, RtCriticalFunctionFactsV1
-export rt_module_function_declarations_v1, rt_unambiguous_declaration_names_v1
-export rt_function_facts_v1, validate_rt_criticality_facts_v1
-export validate_rt_criticality_facts_with_capabilities_v1
-export RtCriticalContractClaimV1, rt_critical_contract_claims_v1, validate_rt_criticality_claim_facts_v1, rt_criticality_graph_facts_v1

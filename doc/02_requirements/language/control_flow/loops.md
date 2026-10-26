@@ -16,8 +16,6 @@ iterative expressions. All loops support break and continue flow control.
 ## Syntax
 
 ```simple
-val items = [3, 7, 9]
-
 # While loop (condition-based)
 var i = 0
 while i < 10:

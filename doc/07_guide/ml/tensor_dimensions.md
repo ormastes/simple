@@ -19,7 +19,7 @@ Tensor dimension inference provides compile-time shape verification for neural n
 
 ## Quick Start
 
-```simple:skip
+```simple
 fn main():
     let input = TensorShape(dims: [
         Dim.Named(name: "batch", lo: 1, hi: 32),
@@ -53,7 +53,7 @@ cp simple/std_lib/example/ml/tensor_dimensions_standalone_demo.spl my_program.sp
 
 Use `Dim.Literal(value: n)` for fixed sizes:
 
-```simple:skip
+```simple
 let image = TensorShape(dims: [
     Dim.Literal(value: 3),    # RGB channels
     Dim.Literal(value: 224),  # Height
@@ -66,7 +66,7 @@ let image = TensorShape(dims: [
 
 Use `Dim.Named(name, lo, hi)` for dynamic dimensions with constraints:
 
-```simple:skip
+```simple
 let batch_input = TensorShape(dims: [
     Dim.Named(name: "batch", lo: 1, hi: 128),
     Dim.Named(name: "seq", lo: 1, hi: 512),
@@ -79,7 +79,7 @@ let batch_input = TensorShape(dims: [
 
 Use `Dim.Unknown` when the dimension is completely unconstrained:
 
-```simple:skip
+```simple
 let variable = TensorShape(dims: [
     Dim.Literal(value: 10),
     Dim.Unknown
@@ -93,7 +93,7 @@ let variable = TensorShape(dims: [
 
 ### Matrix Multiplication
 
-```simple:skip
+```simple
 # [M, K] @ [K, N] -> [M, N]
 let a = TensorShape(dims: [Dim.Literal(value: 4), Dim.Literal(value: 8)])
 let b = TensorShape(dims: [Dim.Literal(value: 8), Dim.Literal(value: 16)])
@@ -104,7 +104,7 @@ let result = infer_matmul_shape(a, b)
 
 With named dimensions (preserved through operations):
 
-```simple:skip
+```simple
 let input = TensorShape(dims: [
     Dim.Named(name: "batch", lo: 1, hi: 64),
     Dim.Literal(value: 784)
@@ -120,7 +120,7 @@ let hidden = infer_matmul_shape(input, weight)
 
 ### Error Detection
 
-```simple:skip
+```simple
 let bad_weight = TensorShape(dims: [
     Dim.Literal(value: 512),  # Wrong! Should be 784
     Dim.Literal(value: 10)
@@ -132,7 +132,7 @@ let result = infer_matmul_shape(input, bad_weight)
 
 ### Reshape Validation
 
-```simple:skip
+```simple
 let original = TensorShape(dims: [
     Dim.Literal(value: 2),
     Dim.Literal(value: 3),
@@ -151,7 +151,7 @@ match verify_reshape(original, target):
 
 ### Broadcasting
 
-```simple:skip
+```simple
 let a = TensorShape(dims: [Dim.Literal(value: 3), Dim.Literal(value: 1)])
 let b = TensorShape(dims: [Dim.Literal(value: 1), Dim.Literal(value: 4)])
 
@@ -165,7 +165,7 @@ let result = infer_broadcast_shape(a, b)
 
 Validate an entire network's shape chain at once:
 
-```simple:skip
+```simple
 fn validate_network():
     let input = TensorShape(dims: [
         Dim.Named(name: "batch", lo: 1, hi: 128),
@@ -208,7 +208,7 @@ All layers validated
 
 Calculate memory bounds from dimension ranges:
 
-```simple:skip
+```simple
 fn estimate_memory(shape: TensorShape, elem_size: Int) -> (Int, Int):
     let mut min_elems = 1
     let mut max_elems = 1
@@ -246,7 +246,7 @@ print("Memory: {min_bytes / 1024 / 1024}-{max_bytes / 1024 / 1024} MB")
 
 Verify actual tensor shapes against expected specifications:
 
-```simple:skip
+```simple
 fn verify_runtime_shape(actual: List<Int>, expected: TensorShape) -> Bool:
     if actual.len() != expected.ndim():
         return false
@@ -394,7 +394,7 @@ Error E0510: Unresolved dimension variable
 
 ### Types
 
-```simple:skip
+```simple
 enum Dim:
     Literal(value: Int)                    # Fixed dimension
     Named(name: text, lo: Int, hi: Int)    # Named with range
@@ -420,7 +420,7 @@ enum ShapeError:
 
 ### Functions
 
-```simple:skip
+```simple
 fn infer_matmul_shape(a: TensorShape, b: TensorShape) -> ShapeResult
 fn infer_broadcast_shape(a: TensorShape, b: TensorShape) -> ShapeResult
 fn verify_reshape(input: TensorShape, output: TensorShape) -> ShapeResult

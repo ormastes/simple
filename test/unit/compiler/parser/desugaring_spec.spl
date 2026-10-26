@@ -1,0 +1,300 @@
+"""
+## Purpose and audience
+
+Executable specification for the frontend desugaring passes that lower
+async/await/spawn/actor surface syntax into the class/call form the rest of
+the compiler consumes. Maintained for compiler engineers changing
+`src/compiler/10.frontend/desugar/` and for operators confirming a build
+still lowers the covered constructs.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/unit/compiler/parser/desugaring_spec.spl`
+with a runnable seed and confirm the Results line reports 0 failed. Every
+scenario drives a real desugar entry point (`desugar_actor`,
+`desugar_await_expr`, `desugar_spawn_expr`, `desugar_module`,
+`desugar_async_function`) over a constructed input AST and asserts on the
+transform's output.
+
+## Compatibility and limitations
+
+Covers the four transform entry points above on the current toolchain; it
+does not cover HIR lowering of the desugared output, poll-function body
+shape, or the Rust seed's parser. Input ASTs are built with the same
+`parser_types` records the frontend produces; no fixture files are read.
+
+## Verification guidance and troubleshooting
+
+If a scenario fails, re-run this single file, read the first failing
+step line, and compare the reported transform output against the inline
+`# oracle:` comment before bisecting recent desugar changes. A failure in
+the await or spawn group indicates the callee-rewrite contract moved; a
+failure in the module group indicates actor collection or field
+preservation regressed.
+"""
+# Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ;
+# plan doc/03_plan/sspec_modernization_plan.md ;
+# architecture doc/04_architecture/sspec_documentization_maintenance.md ;
+# design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+use compiler.frontend.desugar.desugar_async.{desugar_actor, desugar_await_expr, desugar_spawn_expr, desugar_module, desugar_async_function}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.{ActorDef, ParserTypeParam, ParserFunction, ParserClass, ParserModule, parser_function_new, contract_block_empty}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, Stmt, StmtKind, Block, Type, TypeKind, CallArg}
+use compiler.frontend.block_types.{span_new}
+
+# ---- input builders (the same records the frontend parser produces) ----
+
+fn ident_expr(name: text) -> Expr:
+    Expr(kind: ExprKind.Ident(name), span: span_new(0, name.len(), 1, 1))
+
+fn call_expr(callee: Expr, args: [CallArg]) -> Expr:
+    Expr(kind: ExprKind.Call(callee, args), span: span_new(0, 8, 1, 1))
+
+fn callee_name_of(expr: Expr) -> text:
+    match expr_kind(expr):
+        case ExprKind.Call(fn_expr, _):
+            match expr_kind(fn_expr):
+                case ExprKind.Ident(n): n
+                case _: ""
+        case _: ""
+
+fn sole_arg_name_of(expr: Expr) -> text:
+    match expr_kind(expr):
+        case ExprKind.Call(_, args):
+            if args.len() > 0:
+                match expr_kind(args[0].value):
+                    case ExprKind.Ident(n): n
+                    case ExprKind.Call(inner_callee, _):
+                        match expr_kind(inner_callee):
+                            case ExprKind.Ident(n): n
+                            case _: ""
+                    case _: ""
+            else:
+                ""
+        case _: ""
+
+fn sole_arg_arity_of(expr: Expr) -> i64:
+    match expr_kind(expr):
+        case ExprKind.Call(_, args):
+            if args.len() > 0:
+                match expr_kind(args[0].value):
+                    case ExprKind.Call(_, inner_args): inner_args.len()
+                    case _: 0
+            else:
+                0
+        case _: 0
+
+fn sole_arg_is_await(expr: Expr) -> bool:
+    match expr_kind(expr):
+        case ExprKind.Call(_, args):
+            if args.len() > 0:
+                match expr_kind(args[0].value):
+                    case ExprKind.Await(_): true
+                    case _: false
+            else:
+                false
+        case _: false
+
+fn infer_type() -> Type:
+    Type(kind: TypeKind.Infer, span: span_new(0, 1, 1, 1))
+
+fn setup_counter_actor() -> ActorDef:
+    ActorDef(name: "Counter", type_params: [], fields: [], methods: {},
+        visibility: Visibility.Public, is_public: true, has_doc_comment: false,
+        doc_comment: "", attributes: [], span: span_new(0, 13, 1, 1))
+
+# ParserModule construction helpers: one Counter actor vs. an empty module.
+fn build_empty_module() -> ParserModule:
+    ParserModule(
+        name: "empty_mod",
+        imports: [], exports: [], domain_blocks: [],
+        functions: {}, function_headers: {}, function_order: [],
+        classes: {}, actors: {}, actor_order: [],
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+        type_aliases: {}, constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        tagged_layer: "", layer_dag_edges: "")
+
+fn build_module_with_counter() -> ParserModule:
+    ParserModule(
+        name: "counter_mod",
+        imports: [], exports: [], domain_blocks: [],
+        functions: {}, function_headers: {}, function_order: [],
+        classes: {}, actors: {"Counter": setup_counter_actor()}, actor_order: ["Counter"],
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+        type_aliases: {}, constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        tagged_layer: "", layer_dag_edges: "")
+
+fn setup_async_fetch_fn() -> ParserFunction:
+    val await_inner = Expr(kind: ExprKind.Ident("compute"), span: span_new(20, 27, 2, 5))
+    val await_expr = Expr(kind: ExprKind.Await(await_inner), span: span_new(15, 27, 2, 5))
+    val body = Block(stmts: [Stmt(kind: StmtKind.Val("result", nil, await_expr), span: span_new(11, 27, 2, 5))], span: span_new(0, 40, 1, 1))
+    parser_function_new("fetch", [], [], false, infer_type(), body,
+        Visibility.Private, true, false, false, false, false, false, false, false,
+        [], false, "", contract_block_empty(), span_new(0, 40, 1, 1))
+
+# @manual_section: desugaring-transforms
+describe "Desugaring - Actor to Class":
+    it "transforms simple actor to class":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): desugared class record for the Counter actor
+        step("Run desugar_actor over a Counter actor definition")
+        val as_class = desugar_actor(setup_counter_actor())
+        expect(as_class.name).to_equal("Counter")
+        expect(as_class.is_public).to_equal(true)
+
+    it "preserves actor type parameters into the class":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): copied type-parameter row for Worker<T>
+        step("Run desugar_actor over a Worker<T> actor definition")
+        val t_param = ParserTypeParam(name: "T", bounds: [], has_default: false, default: infer_type())
+        val worker = ActorDef(name: "Worker", type_params: [t_param], fields: [], methods: {},
+            visibility: Visibility.Private, is_public: false, has_doc_comment: false,
+            doc_comment: "", attributes: [], span: span_new(0, 16, 1, 1))
+        val as_class = desugar_actor(worker)
+        expect(as_class.type_params.len()).to_equal(1)  # oracle: the single <T> parameter must survive the actor-to-class copy
+        expect(as_class.type_params[0].name).to_equal("T")
+
+    it "preserves actor visibility flag without promotion":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): public and private actor visibility rows
+        step("Desugar one public and one private actor definition")
+        val public_class = desugar_actor(setup_counter_actor())
+        val private_actor = ActorDef(name: "Secret", type_params: [], fields: [], methods: {},
+            visibility: Visibility.Private, is_public: false, has_doc_comment: false,
+            doc_comment: "", attributes: [], span: span_new(0, 14, 1, 1))
+        val private_class = desugar_actor(private_actor)
+        expect(public_class.is_public).to_equal(true)
+        expect(private_class.is_public).to_equal(false)
+
+    it "preserves actor doc comment into the class record":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): doc-comment retention row for Counter
+        step("Desugar an actor that carries a doc comment")
+        val documented = ActorDef(name: "Counter", type_params: [], fields: [], methods: {},
+            visibility: Visibility.Public, is_public: true, has_doc_comment: true,
+            doc_comment: "Counts events.", attributes: [], span: span_new(0, 13, 1, 1))
+        val as_class = desugar_actor(documented)
+        expect(as_class.doc_comment).to_equal("Counts events.")  # oracle: the doc-comment text must be carried onto the class record
+
+# @manual_section: desugaring-transforms
+describe "Desugaring - Await Expressions":
+    it "transforms await to a block_on call":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): await-to-block_on callee rewrite row
+        step("Run desugar_await_expr over await future")
+        val await_expr = Expr(kind: ExprKind.Await(ident_expr("future")), span: span_new(0, 13, 1, 1))
+        val desugared = desugar_await_expr(await_expr)
+        expect(callee_name_of(desugared)).to_equal("block_on")
+
+    it "wraps only the outer level of nested await per pass":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): single-level rewrite row for await await x
+        step("Run desugar_await_expr over await await deepest")
+        val inner = Expr(kind: ExprKind.Await(ident_expr("deepest")), span: span_new(11, 20, 1, 12))
+        val outer = Expr(kind: ExprKind.Await(inner), span: span_new(0, 20, 1, 1))
+        val desugared = desugar_await_expr(outer)
+        expect(callee_name_of(desugared)).to_equal("block_on")
+        expect(sole_arg_is_await(desugared)).to_equal(true)  # oracle: one pass rewrites one level; the inner await stays for the next pass
+
+    it "leaves non-await expressions untouched":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): identity passthrough row for plain expressions
+        step("Run desugar_await_expr over a plain identifier expression")
+        val plain = ident_expr("plain")
+        val passthrough = desugar_await_expr(plain)
+        expect(callee_name_of(passthrough)).to_equal("")
+
+    it "rejects double-wrapping an already desugared await":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): idempotence row for repeated await desugar
+        step("Run desugar_await_expr twice over the same await")
+        val await_expr = Expr(kind: ExprKind.Await(ident_expr("future")), span: span_new(0, 13, 1, 1))
+        val once = desugar_await_expr(await_expr)
+        val twice = desugar_await_expr(once)
+        expect(callee_name_of(twice)).to_equal("block_on")
+        expect(sole_arg_name_of(twice)).to_equal("future")  # oracle: the awaited operand must survive unwrapped exactly once
+
+# @manual_section: desugaring-transforms
+describe "Desugaring - Spawn Expressions":
+    it "transforms spawn to a spawn_actor call":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): spawn-to-spawn_actor callee rewrite row
+        step("Run desugar_spawn_expr over spawn Worker")
+        val spawn_expr = Expr(kind: ExprKind.Spawn(ident_expr("Worker")), span: span_new(0, 13, 1, 1))
+        val desugared = desugar_spawn_expr(spawn_expr)
+        expect(callee_name_of(desugared)).to_equal("spawn_actor")
+
+    it "handles spawn with a constructor call":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): spawn Worker() constructor-preservation row
+        step("Run desugar_spawn_expr over spawn Worker()")
+        val ctor = call_expr(ident_expr("Worker"), [])
+        val spawn_expr = Expr(kind: ExprKind.Spawn(ctor), span: span_new(0, 15, 1, 1))
+        val desugared = desugar_spawn_expr(spawn_expr)
+        expect(callee_name_of(desugared)).to_equal("spawn_actor")
+        expect(sole_arg_name_of(desugared)).to_equal("Worker")  # oracle: the spawned constructor callee is preserved as the call argument
+
+    it "handles spawn with constructor arguments":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): spawn Worker(id: 7) argument-arity row
+        step("Run desugar_spawn_expr over spawn Worker(id: 7)")
+        val id_arg = CallArg(value: Expr(kind: ExprKind.IntLit(7), span: span_new(16, 17, 1, 17)), name: "id")
+        val ctor = call_expr(ident_expr("Worker"), [id_arg])
+        val spawn_expr = Expr(kind: ExprKind.Spawn(ctor), span: span_new(0, 18, 1, 1))
+        val desugared = desugar_spawn_expr(spawn_expr)
+        expect(sole_arg_arity_of(desugared)).to_equal(1)  # oracle: the constructor's single id argument must survive the spawn rewrite
+
+# @manual_section: desugaring-transforms
+describe "Desugaring - Module Level":
+    it "clears module.actors after transformation":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): module actor-collection rows before and after desugar
+        step("Run desugar_module over a module holding one actor")
+        val out = desugar_module(build_module_with_counter())
+        expect(out.actors.len()).to_equal(0)  # oracle: desugar_module must empty the actor table after conversion
+        expect(out.actor_order.len()).to_equal(0)  # oracle: the actor order list is emptied alongside the actor table
+        expect(out.classes.len()).to_equal(1)  # oracle: the converted Counter lands in the class table
+
+    it "preserves module structure through desugaring":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): module field-preservation rows (name, legacy class)
+        step("Desugar a module that also holds a plain class")
+        val legacy = ParserClass(name: "Legacy", type_params: [], fields: [], methods: {},
+            visibility: Visibility.Public, is_public: false, has_doc_comment: false,
+            doc_comment: "", attributes: [], span: span_new(0, 12, 1, 1))
+        val input = ParserModule(
+            name: "counter_mod",
+            imports: [], exports: [], domain_blocks: [],
+            functions: {}, function_headers: {}, function_order: [],
+            classes: {"Legacy": legacy}, actors: {"Counter": setup_counter_actor()}, actor_order: ["Counter"],
+            structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+            type_aliases: {}, constants: {}, static_asserts: [],
+            aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+            tagged_layer: "", layer_dag_edges: "")
+        val out = desugar_module(input)
+        expect(out.name).to_equal("counter_mod")  # oracle: the module identity must survive the rebuild desugar_module performs
+        expect(out.classes.len()).to_equal(2)  # oracle: the pre-existing Legacy class and the desugared Counter both remain
+
+    it "handles empty modules without adding items":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): empty-module passthrough row
+        step("Run desugar_module over a module with no transformable items")
+        val out = desugar_module(build_empty_module())
+        expect(out.actors.len()).to_equal(0)  # oracle: an empty module declares no actors, so none survive or are generated
+        expect(out.classes.len()).to_equal(0)  # oracle: with no actors, no actor-to-class conversions can appear
+        expect(out.function_order.len()).to_equal(0)  # oracle: no declared or generated functions exist for an empty module
+
+    it "generates state enum and poll function for async functions":
+        # @req REQ-UNIT-COMPILER-001
+        # @capture(bit_table): generated state-enum and poll-fn rows for fetch
+        step("Run desugar_async_function over an async fn with one await")
+        val out = desugar_async_function(setup_async_fetch_fn())
+        val generated_enums = out[1]
+        val generated_helpers = out[2]
+        expect(generated_enums.len()).to_equal(1)  # oracle: one suspension point yields exactly one state enum
+        expect(generated_helpers.len()).to_be_greater_than(0)
+        expect(generated_helpers[0].name).to_equal("poll_fetch")  # oracle: the poll helper is named after the owning function

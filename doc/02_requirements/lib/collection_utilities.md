@@ -21,11 +21,6 @@ Tests collection utility functions including:
 ## Array Utility Methods
 
 ```simple
-val arr = [3, 1, 2]
-val other = [4, 5]
-val value = 1
-val n = 2
-
 # Sorting (returns new array)
 val sorted = arr.sort()      # Returns new sorted array
 val sorted = arr.sorted()    # Alias for sort

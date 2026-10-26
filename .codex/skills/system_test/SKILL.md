@@ -10,27 +10,7 @@ description: "Codex system test design skill (Codex-specific strength). Step-bas
 
 Codex excels at systematic test generation with full requirement traceability. Use this skill for test-focused tasks.
 
-## Existing compiled test workflow
-
-For native test executables, first read the
-[Simple native test guide](../../../doc/07_guide/infra/testing/native_test_binary_workflow.md).
-Simple already builds/runs test binaries: use the existing
-`--native-backend=llvm|cranelift` route and repair it before proposing a new
-framework. "Like GoogleTest" describes behavior, not an external dependency.
-Preserve artifacts and actual build/run evidence. Source `--list` output is not
-a binary-owned case count; verify the executable's supported listing interface.
-
-## Navigation tools
-
-For bootstrap test execution, use the
-[full bootstrap collection graph](../../../doc/07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph).
-Phase 2 builds Simple aggregate compiler/interpreter/loader test binaries for
-LLVM and Cranelift (six total). Enumerate actual cases before running all
-runnable cases; preserve failed, blocked and unexecuted counts. Phase 1,
-Phase 3 and both Phase 4 producer cohorts need their whole inventories,
-including binary tools and libraries. Tests overlap independent builds after
-producer compile/run sanity. After three unresolved cycles, retain the bug
-and scoped workaround without presenting skipped or failed tests as passes.
+## Tools
 
 - **Simple MCP** — query codebase structure, existing tests
 - **Simple LSP MCP** — symbol lookup, type signatures for test targets

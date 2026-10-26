@@ -108,8 +108,9 @@ fn _aes_gcm_aes_sbox_table() -> [u8]:
     t.push(0xb0) t.push(0x54) t.push(0xbb) t.push(0x16)
     t
 
-fn _aes_sbox(tbl: [u8], index: i64) -> u8:
-    """Look up a byte in a prebuilt AES S-box table (build once per operation)."""
+fn _aes_sbox(index: i64) -> u8:
+    """Look up a byte in the AES S-box table."""
+    val tbl = _aes_gcm_aes_sbox_table()
     _u8_at(tbl, (index & 0xFF).to_u64())
 
 # AES Round Constants (RCON)
@@ -138,21 +139,21 @@ enum AesGcmResult:
 # AES Core Helpers (round-count agnostic — used for both 128 and 256)
 # ============================================================================
 
-fn _aes_sub_word_bytes(sb: [u8], b0: u8, b1: u8, b2: u8, b3: u8) -> [u8]:
+fn _aes_sub_word_bytes(b0: u8, b1: u8, b2: u8, b3: u8) -> [u8]:
     """Apply S-box to four bytes; return as [b0', b1', b2', b3']."""
     var r: [u8] = []
-    r.push(_aes_sbox(sb, b0.to_i64()))
-    r.push(_aes_sbox(sb, b1.to_i64()))
-    r.push(_aes_sbox(sb, b2.to_i64()))
-    r.push(_aes_sbox(sb, b3.to_i64()))
+    r.push(_aes_sbox(b0.to_i64()))
+    r.push(_aes_sbox(b1.to_i64()))
+    r.push(_aes_sbox(b2.to_i64()))
+    r.push(_aes_sbox(b3.to_i64()))
     r
 
-fn _aes_sub_bytes(sb: [u8], state: [u8]) -> [u8]:
+fn _aes_sub_bytes(state: [u8]) -> [u8]:
     """Apply S-box substitution to each byte of the 16-byte state."""
     var result: [u8] = []
     var i: u64 = 0
     while i < 16:
-        result.push(_aes_sbox(sb, _u8_at(state, i).to_i64()))
+        result.push(_aes_sbox(_u8_at(state, i).to_i64()))
         i = i + 1
     result
 
@@ -233,7 +234,6 @@ fn _aes_add_round_key(state: [u8], round_keys: [u8], round: u64) -> [u8]:
 
 fn aes128_key_expansion(key: [u8]) -> [u8]:
     """Expand 16-byte AES-128 key into 176 round-key bytes."""
-    val sb = _aes_gcm_aes_sbox_table()
     val nk: u64 = 4
     val total_words: u64 = 44
 
@@ -255,10 +255,10 @@ fn aes128_key_expansion(key: [u8]) -> [u8]:
         if (word_idx % nk) == 0:
             # RotWord + SubWord + Rcon
             # RotWord: [t0,t1,t2,t3] -> [t1,t2,t3,t0]
-            val r0 = _aes_sbox(sb, t1.to_i64())
-            val r1 = _aes_sbox(sb, t2.to_i64())
-            val r2 = _aes_sbox(sb, t3.to_i64())
-            val r3 = _aes_sbox(sb, t0.to_i64())
+            val r0 = _aes_sbox(t1.to_i64())
+            val r1 = _aes_sbox(t2.to_i64())
+            val r2 = _aes_sbox(t3.to_i64())
+            val r3 = _aes_sbox(t0.to_i64())
             # XOR Rcon into first byte only (Rcon word = [rcon_byte, 0, 0, 0])
             val rcon_b: i64 = _aes_rcon_byte(((word_idx / nk) - 1).to_i64())
             t0 = (r0.to_i64() ^ rcon_b).to_u8()
@@ -285,7 +285,6 @@ fn aes128_key_expansion(key: [u8]) -> [u8]:
 
 fn aes256_key_expansion(key: [u8]) -> [u8]:
     """Expand 32-byte AES-256 key into 240 round-key bytes (15 round keys)."""
-    val sb = _aes_gcm_aes_sbox_table()
     val nk: u64 = 8
     val total_words: u64 = 60
 
@@ -307,10 +306,10 @@ fn aes256_key_expansion(key: [u8]) -> [u8]:
         val m = word_idx % nk
         if m == 0:
             # RotWord + SubWord + Rcon
-            val r0 = _aes_sbox(sb, t1.to_i64())
-            val r1 = _aes_sbox(sb, t2.to_i64())
-            val r2 = _aes_sbox(sb, t3.to_i64())
-            val r3 = _aes_sbox(sb, t0.to_i64())
+            val r0 = _aes_sbox(t1.to_i64())
+            val r1 = _aes_sbox(t2.to_i64())
+            val r2 = _aes_sbox(t3.to_i64())
+            val r3 = _aes_sbox(t0.to_i64())
             val rcon_b: i64 = _aes_rcon_byte(((word_idx / nk) - 1).to_i64())
             t0 = (r0.to_i64() ^ rcon_b).to_u8()
             t1 = r1
@@ -319,57 +318,10 @@ fn aes256_key_expansion(key: [u8]) -> [u8]:
         else:
             if m == 4:
                 # AES-256-only: SubWord without RotWord, no Rcon
-                t0 = _aes_sbox(sb, t0.to_i64())
-                t1 = _aes_sbox(sb, t1.to_i64())
-                t2 = _aes_sbox(sb, t2.to_i64())
-                t3 = _aes_sbox(sb, t3.to_i64())
-
-        val prev_word_base = (word_idx - nk) * 4
-        expanded.push(_u8_at(expanded, prev_word_base) ^ t0)
-        expanded.push(_u8_at(expanded, prev_word_base + 1) ^ t1)
-        expanded.push(_u8_at(expanded, prev_word_base + 2) ^ t2)
-        expanded.push(_u8_at(expanded, prev_word_base + 3) ^ t3)
-        word_idx = word_idx + 1
-
-    expanded
-
-# ============================================================================
-# AES-192 Key Expansion (FIPS 197, Section 5.2)
-# Nk=6, Nr=12, total_words=52
-#   word_idx % 6 == 0: RotWord + SubWord + Rcon; otherwise normal XOR
-# ============================================================================
-
-fn aes192_key_expansion(key: [u8]) -> [u8]:
-    """Expand 24-byte AES-192 key into 208 round-key bytes (13 round keys)."""
-    val sb = _aes_gcm_aes_sbox_table()
-    val nk: u64 = 6
-    val total_words: u64 = 52
-
-    var expanded: [u8] = []
-
-    var i: u64 = 0
-    while i < 24:
-        expanded.push(_u8_at(key, i))
-        i = i + 1
-
-    var word_idx: u64 = nk
-    while word_idx < total_words:
-        val prev_base = (word_idx - 1) * 4
-        var t0 = _u8_at(expanded, prev_base)
-        var t1 = _u8_at(expanded, prev_base + 1)
-        var t2 = _u8_at(expanded, prev_base + 2)
-        var t3 = _u8_at(expanded, prev_base + 3)
-
-        if word_idx % nk == 0:
-            val r0 = _aes_sbox(sb, t1.to_i64())
-            val r1 = _aes_sbox(sb, t2.to_i64())
-            val r2 = _aes_sbox(sb, t3.to_i64())
-            val r3 = _aes_sbox(sb, t0.to_i64())
-            val rcon_b: i64 = _aes_rcon_byte(((word_idx / nk) - 1).to_i64())
-            t0 = (r0.to_i64() ^ rcon_b).to_u8()
-            t1 = r1
-            t2 = r2
-            t3 = r3
+                t0 = _aes_sbox(t0.to_i64())
+                t1 = _aes_sbox(t1.to_i64())
+                t2 = _aes_sbox(t2.to_i64())
+                t3 = _aes_sbox(t3.to_i64())
 
         val prev_word_base = (word_idx - nk) * 4
         expanded.push(_u8_at(expanded, prev_word_base) ^ t0)
@@ -387,33 +339,29 @@ fn aes192_key_expansion(key: [u8]) -> [u8]:
 # AES-256: pass round_keys from aes256_key_expansion (240 bytes), num_rounds=14
 # ============================================================================
 
-fn _aes_encrypt_block(sb: [u8], plaintext: [u8], round_keys: [u8], num_rounds: u64) -> [u8]:
-    """Encrypt one 16-byte block with the given round schedule and round count (sb = prebuilt S-box)."""
+fn _aes_encrypt_block(plaintext: [u8], round_keys: [u8], num_rounds: u64) -> [u8]:
+    """Encrypt one 16-byte block with the given round schedule and round count."""
     var state = _aes_add_round_key(plaintext, round_keys, 0)
 
     var round: u64 = 1
     while round < num_rounds:
-        state = _aes_sub_bytes(sb, state)
+        state = _aes_sub_bytes(state)
         state = _aes_shift_rows(state)
         state = _aes_mix_columns(state)
         state = _aes_add_round_key(state, round_keys, round)
         round = round + 1
 
-    state = _aes_sub_bytes(sb, state)
+    state = _aes_sub_bytes(state)
     state = _aes_shift_rows(state)
     _aes_add_round_key(state, round_keys, num_rounds)
 
 fn aes128_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
     """Encrypt one 16-byte block with AES-128 (pre-expanded 176-byte schedule)."""
-    _aes_encrypt_block(_aes_gcm_aes_sbox_table(), plaintext, round_keys, 10)
-
-fn aes192_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
-    """Encrypt one 16-byte block with AES-192 (pre-expanded 208-byte schedule)."""
-    _aes_encrypt_block(_aes_gcm_aes_sbox_table(), plaintext, round_keys, 12)
+    _aes_encrypt_block(plaintext, round_keys, 10)
 
 fn aes256_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
     """Encrypt one 16-byte block with AES-256 (pre-expanded 240-byte schedule)."""
-    _aes_encrypt_block(_aes_gcm_aes_sbox_table(), plaintext, round_keys, 14)
+    _aes_encrypt_block(plaintext, round_keys, 14)
 
 # ============================================================================
 # AES Inverse Cipher (FIPS 197, Section 5.3 / Figure 12)
@@ -510,16 +458,17 @@ fn _aes_gcm_aes_inv_sbox_table() -> [u8]:
     t.push(0x55) t.push(0x21) t.push(0x0c) t.push(0x7d)
     t
 
-fn _aes_inv_sbox(tbl: [u8], index: i64) -> u8:
-    """Look up a byte in a prebuilt AES inverse S-box table (build once per operation)."""
+fn _aes_inv_sbox(index: i64) -> u8:
+    """Look up a byte in the AES inverse S-box table."""
+    val tbl = _aes_gcm_aes_inv_sbox_table()
     _u8_at(tbl, (index & 0xFF).to_u64())
 
-fn _aes_inv_sub_bytes(isb: [u8], state: [u8]) -> [u8]:
+fn _aes_inv_sub_bytes(state: [u8]) -> [u8]:
     """InvSubBytes: apply the inverse S-box to each byte of the 16-byte state."""
     var result: [u8] = []
     var i: u64 = 0
     while i < 16:
-        result.push(_aes_inv_sbox(isb, _u8_at(state, i).to_i64()))
+        result.push(_aes_inv_sbox(_u8_at(state, i).to_i64()))
         i = i + 1
     result
 
@@ -566,7 +515,7 @@ fn _aes_inv_mix_columns(state: [u8]) -> [u8]:
         c = c + 1
     r
 
-fn _aes_decrypt_block(isb: [u8], ciphertext: [u8], round_keys: [u8], num_rounds: u64) -> [u8]:
+fn _aes_decrypt_block(ciphertext: [u8], round_keys: [u8], num_rounds: u64) -> [u8]:
     """InvCipher (FIPS 197 Figure 12) for one 16-byte block.
 
     Consumes the same forward round schedule in reverse round order:
@@ -580,26 +529,22 @@ fn _aes_decrypt_block(isb: [u8], ciphertext: [u8], round_keys: [u8], num_rounds:
     var round: u64 = num_rounds - 1
     while round >= 1:
         state = _aes_inv_shift_rows(state)
-        state = _aes_inv_sub_bytes(isb, state)
+        state = _aes_inv_sub_bytes(state)
         state = _aes_add_round_key(state, round_keys, round)
         state = _aes_inv_mix_columns(state)
         round = round - 1
 
     state = _aes_inv_shift_rows(state)
-    state = _aes_inv_sub_bytes(isb, state)
+    state = _aes_inv_sub_bytes(state)
     _aes_add_round_key(state, round_keys, 0)
 
 fn aes128_decrypt_block(ciphertext: [u8], round_keys: [u8]) -> [u8]:
     """Decrypt one 16-byte block with AES-128 (pre-expanded 176-byte schedule)."""
-    _aes_decrypt_block(_aes_gcm_aes_inv_sbox_table(), ciphertext, round_keys, 10)
-
-fn aes192_decrypt_block(ciphertext: [u8], round_keys: [u8]) -> [u8]:
-    """Decrypt one 16-byte block with AES-192 (pre-expanded 208-byte schedule)."""
-    _aes_decrypt_block(_aes_gcm_aes_inv_sbox_table(), ciphertext, round_keys, 12)
+    _aes_decrypt_block(ciphertext, round_keys, 10)
 
 fn aes256_decrypt_block(ciphertext: [u8], round_keys: [u8]) -> [u8]:
     """Decrypt one 16-byte block with AES-256 (pre-expanded 240-byte schedule)."""
-    _aes_decrypt_block(_aes_gcm_aes_inv_sbox_table(), ciphertext, round_keys, 14)
+    _aes_decrypt_block(ciphertext, round_keys, 14)
 
 # ============================================================================
 # GF(2^128) Multiplication for GHASH
@@ -780,15 +725,13 @@ fn _gctr(round_keys: [u8], icb: [u8], input: [u8], num_rounds: u64) -> [u8]:
     if input.len() == 0:
         return []
 
-    val sb = _aes_gcm_aes_sbox_table()
-
     var output: [u8] = []
     var cb = icb
     val num_full_blocks = input.len().to_u64() / 16
 
     var i: u64 = 0
     while i < num_full_blocks:
-        val enc_cb = _aes_encrypt_block(sb, cb, round_keys, num_rounds)
+        val enc_cb = _aes_encrypt_block(cb, round_keys, num_rounds)
         val offset = i * 16
         var j: u64 = 0
         while j < 16:
@@ -799,7 +742,7 @@ fn _gctr(round_keys: [u8], icb: [u8], input: [u8], num_rounds: u64) -> [u8]:
 
     val remaining = input.len().to_u64() % 16
     if remaining > 0:
-        val enc_cb = _aes_encrypt_block(sb, cb, round_keys, num_rounds)
+        val enc_cb = _aes_encrypt_block(cb, round_keys, num_rounds)
         val offset = num_full_blocks * 16
         var j: u64 = 0
         while j < remaining:
@@ -942,65 +885,6 @@ fn aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     AesGcmResult.Ok(data: _gctr(round_keys, icb, ciphertext, 14))
 
 # ============================================================================
-# AES-192-GCM Encryption / Decryption
-# ============================================================================
-
-fn aes192_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]:
-    """AES-192-GCM authenticated encryption.
-
-    Returns ciphertext || 16-byte authentication tag.
-    AES-192 block encryption uses pure scalar 12-round loop (no SIMD).
-    """
-    val round_keys = aes192_key_expansion(key)
-
-    var zero_block: [u8] = []
-    var i: u64 = 0
-    while i < 16:
-        zero_block.push(0x00u8)
-        i = i + 1
-    val h = aes192_encrypt_block(zero_block, round_keys)
-
-    val j0 = _aes_gcm_make_j0(nonce)
-    val icb = _aes_gcm_inc32(j0)
-    val ciphertext = _gctr(round_keys, icb, plaintext, 12)
-    val s = _aes_gcm_ghash(h, aad, ciphertext)
-    val tag = _gctr(round_keys, j0, s, 12)
-
-    _aesgcm_append_bytes(ciphertext, tag)
-
-fn aes192_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> AesGcmResult:
-    """AES-192-GCM authenticated decryption with constant-time tag comparison.
-
-    Returns AesGcmResult.Ok(plaintext) or AesGcmResult.Err on tag mismatch.
-    AES-192 block encryption uses pure scalar 12-round loop (no SIMD).
-    """
-    val round_keys = aes192_key_expansion(key)
-
-    var zero_block: [u8] = []
-    var i: u64 = 0
-    while i < 16:
-        zero_block.push(0x00u8)
-        i = i + 1
-    val h = aes192_encrypt_block(zero_block, round_keys)
-
-    val j0 = _aes_gcm_make_j0(nonce)
-    val s = _aes_gcm_ghash(h, aad, ciphertext)
-    val expected_tag = _gctr(round_keys, j0, s, 12)
-
-    # Constant-time tag comparison
-    var diff: u8 = 0x00
-    var i2: u64 = 0
-    while i2 < 16:
-        diff = diff | (_u8_at(expected_tag, i2) ^ _u8_at(tag, i2))
-        i2 = i2 + 1
-
-    if diff != 0:
-        return AesGcmResult.Err("authentication tag mismatch")
-
-    val icb = _aes_gcm_inc32(j0)
-    AesGcmResult.Ok(data: _gctr(round_keys, icb, ciphertext, 12))
-
-# ============================================================================
 # Exports
 # ============================================================================
 
@@ -1017,8 +901,3 @@ export aes128_decrypt_block
 export aes256_decrypt_block
 export aes256_gcm_encrypt
 export aes256_gcm_decrypt
-export aes192_key_expansion
-export aes192_encrypt_block
-export aes192_decrypt_block
-export aes192_gcm_encrypt
-export aes192_gcm_decrypt

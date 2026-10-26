@@ -48,7 +48,7 @@ warnings that follow are unrelated lint noise and do not fail the file).
   Expr)` (not desugared to a fill loop — kept as a first-class node so later HIR
   lowering can choose per-target codegen). `bin/simple check` is clean on
   `backend_metal.spl` and `window_scene_draw_ir.spl`. Regression:
-  `test/01_unit/compiler/parser_gap_array_repeat_mut_param_spec.spl` (7/7).
+  `test/unit/compiler/parser_gap_array_repeat_mut_param_spec.spl` (7/7).
 - **A2 LANDED, peek-guarded** — `mut` parameters (`fn f(mut buf: [u8], ...)`).
   Opus review of the first patch proved a hardening gap: `mut` lexes as a plain
   identifier (kind 6), not a reserved word, so `fn f(mut: i32)` (a param literally

@@ -281,58 +281,6 @@ bootstrap_stage3_verify_command_transcript() (
     return "$bootstrap_stage3_transcript_status"
 )
 
-# Frontend subprocesses each reconstruct a substantial source closure. Windows
-# bootstrap owners must not translate an 80-codegen request into 80 frontends.
-# Keep this policy in the transcribed environment; the RSS watchdog still owns
-# enforcement. A separate positive scheduling budget admits one frontend;
-# monitoring the RSS does not remove that scheduling budget.
-bootstrap_stage3_windows_frontend_policy() {
-    for bootstrap_stage3_policy_env in "$@"; do
-        [ "$bootstrap_stage3_policy_env" != -- ] || break
-        bootstrap_stage3_policy_name=${bootstrap_stage3_policy_env%%=*}
-        bootstrap_stage3_policy_name=$(printf '%s' "$bootstrap_stage3_policy_name" | tr '[:lower:]' '[:upper:]')
-        case "$bootstrap_stage3_policy_name" in
-            SIMPLE_SHARD_MEM_CLAMP|SIMPLE_PARSE_SHARD_MAX|SIMPLE_PARSE_SHARD_WORKER_KB|SIMPLE_HIR_SHARD_WORKER_KB)
-                echo 'bootstrap-transcript-error: reserved Windows frontend policy' >&2
-                return 1 ;;
-        esac
-    done
-    printf '%s\n' SIMPLE_SHARD_MEM_CLAMP=1 SIMPLE_PARSE_SHARD_MAX=1 \
-        SIMPLE_PARSE_SHARD_WORKER_KB=1650000 SIMPLE_HIR_SHARD_WORKER_KB=3000000
-}
-
-# Emit the same Windows scheduling share for every compiler process owner.
-# This is not a host reservation or an RSS limit: callers still own those.
-bootstrap_stage3_windows_frontend_environment() {
-    bootstrap_stage3_policy_cap=$1
-    bootstrap_stage3_policy_mode=$2
-    bootstrap_stage3_policy_budget=$3
-    # Optional 4th argument: the job-scaled hard ceiling the caller resolved
-    # through tree-rss-policy.shs. Absent, the static tree ceiling holds
-    # (BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB; measured compiler peak evidence).
-    bootstrap_stage3_policy_ceiling=${4:-8388608}
-    # Optional 5th argument: largest admissible frontend budget (default one
-    # 3 GB worker); product lanes on fanout hosts pass the enforced cap.
-    bootstrap_stage3_policy_budget_max=${5:-3000000}
-    case "$bootstrap_stage3_policy_cap:$bootstrap_stage3_policy_budget:$bootstrap_stage3_policy_ceiling" in
-        *[!0-9:]*|:*|*:|*::*) return 1 ;;
-    esac
-    [ "$bootstrap_stage3_policy_cap" -gt 0 ] &&
-        [ "$bootstrap_stage3_policy_cap" -le "$bootstrap_stage3_policy_ceiling" ] &&
-        [ "$bootstrap_stage3_policy_budget" -gt 0 ] &&
-        [ "$bootstrap_stage3_policy_budget" -le "$bootstrap_stage3_policy_budget_max" ] || return 1
-    case "$bootstrap_stage3_policy_mode" in
-        enforce)
-            if [ "$bootstrap_stage3_policy_cap" -lt "$bootstrap_stage3_policy_budget" ]; then
-                bootstrap_stage3_policy_budget=$bootstrap_stage3_policy_cap
-            fi ;;
-        monitor) ;;
-        *) return 1 ;;
-    esac
-    bootstrap_stage3_windows_frontend_policy || return 1
-    printf '%s\n' "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$bootstrap_stage3_policy_budget"
-}
-
 bootstrap_stage3_run_transcribed() {
     bootstrap_stage3_run_transcript=$1
     bootstrap_stage3_run_cwd=$2
@@ -341,107 +289,6 @@ bootstrap_stage3_run_transcribed() {
     bootstrap_stage3_run_tmpdir=$5
     bootstrap_stage3_run_path=$6
     shift 6
-    # A raised compiler ceiling is an explicit, hashed invocation input. The
-    # caller cannot substitute it, duplicate it, or hide it behind env -i.
-    bootstrap_stage3_run_ceiling_env=$(bootstrap_stage3_compiler_ceiling_environment) || {
-        echo 'bootstrap-transcript-error: invalid compiler RSS ceiling' >&2
-        return 1
-    }
-    bootstrap_stage3_run_ceiling_seen=0
-    for bootstrap_stage3_run_env in "$@"; do
-        [ "$bootstrap_stage3_run_env" != -- ] || break
-        bootstrap_stage3_run_env_name=${bootstrap_stage3_run_env%%=*}
-        bootstrap_stage3_run_env_upper=$(printf '%s' "$bootstrap_stage3_run_env_name" | tr '[:lower:]' '[:upper:]')
-        if [ "$bootstrap_stage3_run_env_upper" = SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB ]; then
-            [ "$bootstrap_stage3_run_ceiling_seen" = 0 ] &&
-                [ -n "$bootstrap_stage3_run_ceiling_env" ] &&
-                [ "$bootstrap_stage3_run_env" = "$bootstrap_stage3_run_ceiling_env" ] || {
-                echo 'bootstrap-transcript-error: conflicting or duplicate compiler RSS ceiling' >&2
-                return 1
-            }
-            bootstrap_stage3_run_ceiling_seen=1
-        fi
-    done
-    [ -z "$bootstrap_stage3_run_ceiling_env" ] || [ "$bootstrap_stage3_run_ceiling_seen" = 1 ] || {
-        echo 'bootstrap-transcript-error: compiler RSS ceiling missing from explicit environment' >&2
-        return 1
-    }
-    # The same finite cap feeds the watchdog and the child's shard admission.
-    # Carry it as explicit-env before freezing the transcript; do not widen the
-    # fixed host-env schema or allow a caller to substitute a different budget.
-    # The cap scales with the worker count of the command it governs (its own
-    # --threads), under a hard ceiling bounded by host RAM; policy and
-    # measurements: scripts/bootstrap/lib/tree-rss-policy.shs. A refusal used
-    # to be a bare `return 1`: no build log, no reason, and the caller's log
-    # reader then died on the missing file. Record why, where the stage
-    # diagnosis reads it.
-    . "$bootstrap_stage3_run_cwd/scripts/bootstrap/lib/tree-rss-policy.shs" || {
-        echo 'bootstrap-transcript-error: tree RSS policy is unavailable' >&2
-        return 1
-    }
-    bootstrap_stage3_run_rss_jobs=$(bootstrap_tree_rss_command_jobs "$@")
-    bootstrap_tree_rss_resolve "$bootstrap_stage3_run_rss_jobs" "$bootstrap_stage3_run_cwd" || {
-        {
-            printf 'error: pre-exec refusal: %s\n' "$bootstrap_tree_rss_refusal"
-            bootstrap_tree_rss_ceiling_metadata
-        } > "$bootstrap_stage3_run_log.refusal" || :
-        printf 'bootstrap-transcript-error: %s\n' "$bootstrap_tree_rss_refusal" >&2
-        bootstrap_tree_rss_ceiling_metadata >&2
-        return 1
-    }
-    bootstrap_stage3_run_rss_cap=$bootstrap_tree_rss_cap_kib
-    bootstrap_stage3_run_rss_ceiling=$bootstrap_tree_rss_ceiling_kib
-    bootstrap_stage3_run_rss_ceiling_arg=
-    if [ -n "$bootstrap_stage3_run_ceiling_env" ]; then
-        [ "$bootstrap_tree_rss_ceiling_request_kib" = "$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" ] || return 1
-        bootstrap_stage3_run_rss_ceiling_arg=--compiler-ceiling-kib=$bootstrap_tree_rss_ceiling_request_kib
-    fi
-    # Recorded in the watchdog receipt: which layer chose the cap, and which
-    # rule bounded it.
-    bootstrap_stage3_run_rss_source=$bootstrap_tree_rss_source
-    bootstrap_stage3_run_rss_bound=$bootstrap_tree_rss_bound
-    echo "  process-tree RSS policy: $bootstrap_tree_rss_summary" >&2
-    bootstrap_stage3_run_rss_jobs_arg=
-    [ "$bootstrap_stage3_run_rss_jobs" -eq 0 ] ||
-        bootstrap_stage3_run_rss_jobs_arg=--compiler-jobs=$bootstrap_stage3_run_rss_jobs
-    for bootstrap_stage3_run_env in "$@"; do
-        [ "$bootstrap_stage3_run_env" != -- ] || break
-        case "$bootstrap_stage3_run_env" in
-            [Ss][Ii][Mm][Pp][Ll][Ee]_[Ss][Hh][Aa][Rr][Dd]_[Tt][Rr][Ee][Ee]_[Mm][Ee][Mm][Oo][Rr][Yy]_[Bb][Uu][Dd][Gg][Ee][Tt]_[Kk][Ii][Bb]=*)
-                echo 'bootstrap-transcript-error: reserved shard budget' >&2
-                return 1 ;;
-        esac
-    done
-    bootstrap_stage3_run_shard_budget=0
-    if [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ]; then
-        bootstrap_stage3_run_shard_budget=$bootstrap_stage3_run_rss_cap
-    fi
-    case "$(uname -s 2>/dev/null || echo unknown)" in
-        MSYS*|MINGW*|CYGWIN*)
-            bootstrap_stage3_windows_frontend_policy "$@" >/dev/null || return 1
-            # This frontend share is distinct from the enclosing reservation
-            # and from RSS enforcement: leave room for the parent and tools.
-            # Owners may allocate a smaller share, never enlarge this default
-            # into CPU-count fanout. Record the effective share in explicit-env.
-            # The compiler has a one-worker floor: a smaller share is NOT an
-            # RSS limit. The enclosing owner must still admit one whole worker
-            # plus its parent, and the watchdog retains memory enforcement.
-            bootstrap_stage3_run_frontend_rows=$(bootstrap_stage3_windows_frontend_environment \
-                "$bootstrap_stage3_run_rss_cap" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-                "${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-3000000}" \
-                "$bootstrap_stage3_run_rss_ceiling") || return 1
-            while IFS= read -r bootstrap_stage3_run_frontend_row; do
-                case "$bootstrap_stage3_run_frontend_row" in
-                    SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=*)
-                        bootstrap_stage3_run_shard_budget=${bootstrap_stage3_run_frontend_row#*=} ;;
-                    *) set -- "$bootstrap_stage3_run_frontend_row" "$@" ;;
-                esac
-            done <<EOF
-$bootstrap_stage3_run_frontend_rows
-EOF
-            ;;
-    esac
-    set -- "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$bootstrap_stage3_run_shard_budget" "$@"
     for bootstrap_stage3_run_directory in "$bootstrap_stage3_run_home" \
         "$bootstrap_stage3_run_tmpdir"; do
         if [ ! -d "$bootstrap_stage3_run_directory" ] ||
@@ -490,25 +337,6 @@ ${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
 ${SystemDrive:-${SYSTEMDRIVE:-}}
                 bootstrap_stage3_run_program_data=\
 ${ProgramData:-${PROGRAMDATA:-}}
-                # Windows has a native Job Object RSS backend too. The guard
-                # must wrap env-i, as on POSIX, so each attempt publishes its
-                # own mandatory RSS receipt before a cache retry archives it.
-                bootstrap_stage3_rss_runner="$bootstrap_stage3_run_cwd/scripts/resource/process-tree-rss-watchdog.pl"
-                bootstrap_stage3_rss_session_mode=new
-                if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
-                    bootstrap_stage3_rss_session_mode=inherit
-                fi
-                PATH="$bootstrap_stage3_run_path" perl "$bootstrap_stage3_rss_runner" \
-                    --session-mode="$bootstrap_stage3_rss_session_mode" \
-                    --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-                    --max-rss-kib="$bootstrap_stage3_run_rss_cap" \
-                    $bootstrap_stage3_run_rss_jobs_arg \
-                    $bootstrap_stage3_run_rss_ceiling_arg \
-                    --cap-source="$bootstrap_stage3_run_rss_source" \
-                    --cap-bound="$bootstrap_stage3_run_rss_bound" \
-                    --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
-                    --timeout-seconds="${SIMPLE_BOOTSTRAP_NATIVE_BUILD_TIMEOUT_SECONDS:-0}" \
-                    --receipt="$bootstrap_stage3_run_log.rss.env" -- \
                 env -i "HOME=$bootstrap_stage3_run_home" \
                     "PATH=$bootstrap_stage3_run_path" \
                     "TMPDIR=$bootstrap_stage3_run_tmpdir" \
@@ -546,13 +374,8 @@ ${ProgramData:-${PROGRAMDATA:-}}
         perl "$bootstrap_stage3_rss_runner" \
             --session-mode="$bootstrap_stage3_rss_session_mode" \
             --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-            --max-rss-kib="$bootstrap_stage3_run_rss_cap" \
-            $bootstrap_stage3_run_rss_jobs_arg \
-            $bootstrap_stage3_run_rss_ceiling_arg \
-            --cap-source="$bootstrap_stage3_run_rss_source" \
-            --cap-bound="$bootstrap_stage3_run_rss_bound" \
+            --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
             --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
-            --timeout-seconds="${SIMPLE_BOOTSTRAP_NATIVE_BUILD_TIMEOUT_SECONDS:-0}" \
             --receipt="$bootstrap_stage3_run_log.rss.env" -- \
         /bin/sh -c '
             if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
@@ -681,7 +504,7 @@ bootstrap_stage3_source_snapshot_once() {
             return "/" . join("/", @normalized);
         }
         sub pruned_path {
-            return $_[0] =~ m{/(?:src/app/vscode_extension/(?:[.]vscode-test|node_modules)|src/compiler_rust/(?:vendor|target))(?:/|$)};
+            return $_[0] =~ m{/src/app/vscode_extension/(?:[.]vscode-test|node_modules)(?:/|$)};
         }
         sub canonical_missing {
             my ($path) = @_;
@@ -737,10 +560,6 @@ bootstrap_stage3_source_snapshot_once() {
         my %direct_hash;
         my %direct_identity;
         my @owned = map { "$root/$_" } @roots;
-        for my $required (qw(src/compiler src/app src/lib src/os src/runtime
-                src/package_ownership src/plugins src/compositions)) {
-            -d "$root/$required" or die "missing authority root\n";
-        }
         for my $relative_root (@roots) {
             my $authority = "$root/$relative_root";
             -d $authority or die "missing authority root\n";
@@ -782,7 +601,7 @@ bootstrap_stage3_source_snapshot_once() {
                             my $resolved = Cwd::abs_path($target_path);
                             defined($resolved) &&
                                 (-f $resolved || -d $resolved) &&
-                                !-l $resolved && !pruned_path($resolved)
+                                !-l $resolved
                                 or die "invalid authority symlink\n";
                             my $inside = 0;
                             for my $owned_root (@owned) {
@@ -878,9 +697,7 @@ bootstrap_stage3_source_snapshot_once() {
         }
         @records or die "empty authority\n";
         print join("\n", sort @records), "\n";
-    ' "$bootstrap_stage3_root" src examples/10_tooling \
-        scripts/bootstrap scripts/check/lib \
-        test/03_system/app/bootstrap_builder/feature test/fixtures/bootstrap_builder \
+    ' "$bootstrap_stage3_root" src/compiler src/app src/lib src/plugins src/compositions examples/10_tooling \
         >"$bootstrap_stage3_tmp" || {
         rm -f "$bootstrap_stage3_tmp"
         return 1

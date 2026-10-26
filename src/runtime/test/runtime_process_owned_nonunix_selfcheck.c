@@ -21,16 +21,6 @@ void* rt_alloc(int64_t size) { return calloc(1, (size_t)size); }
 void rt_free(void* ptr) { free(ptr); }
 void rt_array_free(SplArray* array) { free(array->items); free(array); }
 int64_t rt_free_deep(int64_t value) { (void)value; return 1; }
-/* Registered-tuple owner shape: the `*_value` capsules return a tuple handle. */
-int64_t rt_tuple_new(int64_t len) {
-    SplArray* tuple = rt_array_new(len); tuple->len = len; return (int64_t)(uintptr_t)tuple;
-}
-int8_t rt_tuple_set(int64_t tuple, int64_t idx, int64_t value) {
-    SplArray* array = (SplArray*)(uintptr_t)tuple;
-    if (!array || idx < 0 || idx >= array->len) return 0;
-    array->items[idx].as_int = value; return 1;
-}
-int64_t rt_tuple_get(int64_t tuple, int64_t idx) { return rt_array_get((SplArray*)(uintptr_t)tuple, idx); }
 
 /* Select the LAST branch of runtime_process_owned.c — the non-unix, non-Win32
  * fallback (baremetal / SimpleOS), whose contract is the ENOTSUP surface these
@@ -59,14 +49,14 @@ int main(void) {
     assert(observation.evidence_flags == 0 && observation.runtime_error == ENOTSUP);
     int64_t* tuple = rt_process_run_owned_bounded_value(NULL, 0, NULL, 0, 0);
     assert(tuple);
-    SplArray* receipt = (SplArray*)(uintptr_t)rt_tuple_get((int64_t)(uintptr_t)tuple, 2);
+    SplArray* receipt = (SplArray*)(uintptr_t)tuple[2];
     assert(rt_array_len(receipt) == 19);
     assert(rt_array_get(receipt, 0) == RT_OWNED_PROCESS_RECEIPT_VERSION);
     assert(rt_array_get(receipt, 10) == -1);
     assert(rt_array_get(receipt, 18) == ENOTSUP);
     int64_t* observed_tuple = rt_process_run_owned_observed_bounded_value(NULL, 0, NULL, 0, 0);
     assert(observed_tuple);
-    SplArray* observed_fields = (SplArray*)(uintptr_t)rt_tuple_get((int64_t)(uintptr_t)observed_tuple, 2);
+    SplArray* observed_fields = (SplArray*)(uintptr_t)observed_tuple[2];
     assert(rt_array_len(observed_fields) == 30);
     assert(rt_array_get(observed_fields, 19) == RT_OWNED_PROCESS_OBSERVATION_VERSION);
     assert(rt_array_get(observed_fields, 20) == 0);

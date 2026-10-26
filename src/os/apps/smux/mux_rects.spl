@@ -5,9 +5,12 @@
 # stays usable by any front end (cs, smux, a future TUI) that needs geometry without
 # dragging a terminal emulator in.
 #
-# Named layouts use gapless rectangle bands. tmux layout names describe how
-# panes are arranged: even-horizontal means side-by-side columns. This differs
-# from the service split direction vocabulary. No split-tree state is implied.
+# ponytail: v1 divides the window into N EVEN VERTICAL columns held in a flat list —
+# deliberately not a split tree. Upgrade path: introduce a recursive MuxLayoutNode
+# (leaf | split(direction, ratio, children)) and drive the 2-way ratio math from the
+# existing os.apps.smux.layout.smux_plan_split, which already models "horizontal"
+# (divide rows) vs "vertical" (divide cols). Every caller here consumes [MuxRect],
+# so that swap is internal to mux_even_columns.
 
 struct MuxRect:
     pane_id: text
@@ -38,7 +41,7 @@ fn mux_full_rect(pane_id: text, cols: i64, rows: i64) -> MuxRect:
 fn mux_even_columns(ids: [text], cols: i64, rows: i64) -> [MuxRect]:
     var out: [MuxRect] = []
     val n = ids.len()
-    if n <= 0 or cols < n or rows < 1:
+    if n <= 0:
         return out
     var total_cols = cols
     if total_cols < 1:
@@ -63,93 +66,4 @@ fn mux_even_columns(ids: [text], cols: i64, rows: i64) -> [MuxRect]:
         i = i + 1
     return out
 
-fn mux_layout_known(name: text) -> bool:
-    return name == "even-horizontal" or name == "even-vertical" or name == "main-horizontal" or name == "main-vertical" or name == "tiled"
-
-# Empty output means refusal for a nonempty pane list. Never manufacture a
-# positive-size rectangle outside the available window when panes cannot fit.
-fn mux_layout_rects(ids: [text], cols: i64, rows: i64, name: text) -> [MuxRect]:
-    var out: [MuxRect] = []
-    val n = ids.len()
-    if not mux_layout_known(name) or cols < 1 or rows < 1 or n == 0:
-        return out
-    if n == 1:
-        out.push(mux_full_rect(ids[0], cols, rows))
-        return out
-    if name == "even-horizontal":
-        return mux_even_columns(ids, cols, rows)
-    if name == "even-vertical":
-        if rows < n:
-            return out
-        val height = rows / n
-        var y = 0
-        var i = 0
-        while i < n:
-            val h = if i == n - 1: rows - y else: height
-            out.push(MuxRect(pane_id: ids[i], col: 0, row: y, cols: cols, rows: h))
-            y = y + h
-            i = i + 1
-        return out
-    if name == "main-horizontal":
-        if rows < 2 or cols < n - 1:
-            return out
-        val main_rows = rows / 2
-        out.push(MuxRect(pane_id: ids[0], col: 0, row: 0, cols: cols, rows: main_rows))
-        val width = cols / (n - 1)
-        var x = 0
-        var i = 1
-        while i < n:
-            val w = if i == n - 1: cols - x else: width
-            out.push(MuxRect(pane_id: ids[i], col: x, row: main_rows, cols: w, rows: rows - main_rows))
-            x = x + w
-            i = i + 1
-        return out
-    if name == "main-vertical":
-        if cols < 2 or rows < n - 1:
-            return out
-        val main_cols = cols / 2
-        out.push(MuxRect(pane_id: ids[0], col: 0, row: 0, cols: main_cols, rows: rows))
-        val height = rows / (n - 1)
-        var y = 0
-        var i = 1
-        while i < n:
-            val h = if i == n - 1: rows - y else: height
-            out.push(MuxRect(pane_id: ids[i], col: main_cols, row: y, cols: cols - main_cols, rows: h))
-            y = y + h
-            i = i + 1
-        return out
-    # Near-square rows, adjusted to use a narrow/tall or wide/short window.
-    var columns = 1
-    while columns * columns < n:
-        columns = columns + 1
-    if columns > cols:
-        columns = cols
-    while (n + columns - 1) / columns > rows and columns < cols and columns < n:
-        columns = columns + 1
-    val row_count = (n + columns - 1) / columns
-    if row_count > rows:
-        return out
-    val height = rows / row_count
-    var pane = 0
-    var band = 0
-    var y = 0
-    while band < row_count:
-        # Balance row occupancy, letting every row fill the available width.
-        val remaining_rows = row_count - band
-        val count = (n - pane + remaining_rows - 1) / remaining_rows
-        val width = cols / count
-        val h = if band == row_count - 1: rows - y else: height
-        var x = 0
-        var cell = 0
-        while cell < count:
-            val w = if cell == count - 1: cols - x else: width
-            out.push(MuxRect(pane_id: ids[pane], col: x, row: y, cols: w, rows: h))
-            pane = pane + 1
-            x = x + w
-            cell = cell + 1
-        y = y + h
-        band = band + 1
-    return out
-
 export MuxRect, mux_rect_to_text, mux_full_rect, mux_even_columns
-export mux_layout_known, mux_layout_rects

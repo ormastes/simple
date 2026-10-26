@@ -1,0 +1,144 @@
+# HKDF-SHA-256 Reference Vectors (RFC 5869 §A.1-§A.3)
+#
+# Tests the pure-Simple HKDF-SHA-256 implementation in
+# src/lib/common/crypto/hkdf.spl against RFC 5869 Appendix A.1-A.3.
+#
+# RFC 5869 Appendix A specifies three HKDF-SHA-256 test cases:
+#   A.1 — basic: salt+info, L=42
+#   A.2 — longer inputs: L=82
+#   A.3 — empty salt and info: L=42
+
+use std.spipe.*
+use std.crypto.hkdf.{hkdf_extract_sha256, hkdf_expand_sha256, hkdf_sha256}
+use std.crypto.types.{bytes_to_hex}
+
+# ============================================================================
+# Helpers — build inputs in module-level fns to avoid the it-block var
+# mutation interpreter quirk (feedback_it_block_var_mutation.md).
+# ============================================================================
+
+# 22 bytes of 0x0b — RFC 5869 §A.1 IKM
+fn _a1_ikm() -> list:
+    var out = []
+    var i = 0
+    while i < 22:
+        out.push(11)
+        i = i + 1
+    out
+
+# Bytes 0x00..0x0c (13 bytes) — RFC 5869 §A.1 salt
+fn _a1_salt() -> list:
+    var out = []
+    var i = 0
+    while i < 13:
+        out.push(i)
+        i = i + 1
+    out
+
+# Bytes 0xf0..0xf9 (10 bytes) — RFC 5869 §A.1 info
+fn _a1_info() -> list:
+    var out = []
+    var i = 0
+    while i < 10:
+        out.push(240 + i)
+        i = i + 1
+    out
+
+# Bytes 0x00..0x4f (80 bytes) — RFC 5869 §A.2 IKM
+fn _a2_ikm() -> list:
+    var out = []
+    var i = 0
+    while i < 80:
+        out.push(i)
+        i = i + 1
+    out
+
+# Bytes 0x60..0xaf (80 bytes) — RFC 5869 §A.2 salt
+fn _a2_salt() -> list:
+    var out = []
+    var i = 0
+    while i < 80:
+        out.push(96 + i)
+        i = i + 1
+    out
+
+# Bytes 0xb0..0xff (80 bytes) — RFC 5869 §A.2 info
+fn _a2_info() -> list:
+    var out = []
+    var i = 0
+    while i < 80:
+        out.push(176 + i)
+        i = i + 1
+    out
+
+# A.1 PRK as byte list (from RFC 5869 §A.1 PRK hex)
+fn _a1_prk() -> list:
+    var out: [i64] = [
+        7, 119, 9, 54, 44, 46, 50, 223, 13, 220, 63, 13, 196, 123, 186,
+        99, 144, 182, 199, 59, 181, 15, 156, 49, 34, 236, 132, 74, 215,
+        194, 179, 229
+    ]
+    out
+
+# Helper: repeat a value n times
+fn _repeat(value: i64, count: i64) -> list:
+    var out = []
+    var i = 0
+    while i < count:
+        out.push(value)
+        i = i + 1
+    out
+
+describe "HKDF-SHA-256 — RFC 5869 §A.1 (basic)":
+
+    it "Extract PRK matches RFC 5869 §A.1":
+        expect(bytes_to_hex(hkdf_extract_sha256(_a1_salt(), _a1_ikm()))).to_equal(
+            "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5")
+
+    it "Expand OKM(L=42) matches RFC 5869 §A.1":
+        expect(bytes_to_hex(hkdf_expand_sha256(_a1_prk(), _a1_info(), 42))).to_equal(
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+
+    it "One-shot hkdf_sha256 OKM(L=42) matches RFC 5869 §A.1":
+        expect(bytes_to_hex(hkdf_sha256(_a1_salt(), _a1_ikm(), _a1_info(), 42))).to_equal(
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+
+describe "HKDF-SHA-256 — RFC 5869 §A.2 (longer inputs)":
+
+    it "Extract PRK matches RFC 5869 §A.2":
+        expect(bytes_to_hex(hkdf_extract_sha256(_a2_salt(), _a2_ikm()))).to_equal(
+            "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244")
+
+    it "One-shot OKM(L=82) matches RFC 5869 §A.2":
+        expect(bytes_to_hex(hkdf_sha256(_a2_salt(), _a2_ikm(), _a2_info(), 82))).to_equal(
+            "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87")
+
+describe "HKDF-SHA-256 — RFC 5869 §A.3 (empty salt and info)":
+
+    it "Extract PRK with empty salt matches RFC 5869 §A.3":
+        expect(bytes_to_hex(hkdf_extract_sha256([], _a1_ikm()))).to_equal(
+            "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04")
+
+    it "One-shot OKM(L=42) with empty salt+info matches RFC 5869 §A.3":
+        expect(bytes_to_hex(hkdf_sha256([], _a1_ikm(), [], 42))).to_equal(
+            "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8")
+
+describe "HKDF-SHA-256 round-trip and boundaries":
+
+    it "PRK is exactly 32 bytes (SHA-256 HashLen)":
+        expect(hkdf_extract_sha256(_a1_salt(), _a1_ikm()).len()).to_equal(32)
+
+    it "Two-step (Extract then Expand) equals one-shot hkdf_sha256":
+        val prk  = hkdf_extract_sha256(_a1_salt(), _a1_ikm())
+        val okm1 = hkdf_expand_sha256(prk, _a1_info(), 42)
+        val okm2 = hkdf_sha256(_a1_salt(), _a1_ikm(), _a1_info(), 42)
+        expect(bytes_to_hex(okm1)).to_equal(bytes_to_hex(okm2))
+
+    it "L=0 returns empty list":
+        expect(hkdf_expand_sha256(_a1_prk(), _a1_info(), 0).len()).to_equal(0)
+
+    it "L=1 returns exactly 1 byte":
+        expect(hkdf_expand_sha256(_a1_prk(), _a1_info(), 1).len()).to_equal(1)
+
+    it "L exceeding 255*32 returns empty list":
+        expect(hkdf_expand_sha256(_a1_prk(), [], 255 * 32 + 1).len()).to_equal(0)

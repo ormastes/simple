@@ -1,26 +1,5 @@
 # Windows Phase 2 runtime capsules
 
-## Text hashing across runtime providers
-
-Typed `text.hash()` must target `rt_hash_text`, which accepts one tagged text
-handle and returns a raw signed 64-bit FNV-1a hash. The C, Rust, and pure-Simple
-implementations agree on that contract. C runtime `rt_str_hash` instead accepts
-a raw NUL-terminated pointer; its Rust and pure-Simple counterparts have different
-contracts. Do not rename that symbol globally or change raw-pointer callers to
-repair text-method lowering. Keep the receiver-type guard so user-defined
-`hash()` methods retain their dispatch.
-
-The native fixture `test/fixtures/compiler/native_text_hash_method_abi_main.spl`
-checks direct runtime, named receiver, and parameter forwarding against known
-values for empty text, ASCII, embedded NUL, and UTF-8, plus literal receivers
-and a user-defined method. Its summary is emitted only after all comparisons
-succeed. It is a standalone diagnostic executable, not an SSpec registry or a
-Phase4 admission receipt. Retain the exact rebuilt producer, runtime capsule,
-backend, command, exit status, and output for each LLVM/Cranelift execution.
-Source/MIR checks alone do not establish native behavior; neither does success
-on one provider qualify another. See the [hash ABI investigation](../../08_tracking/bug/windows_native_hash_runtime_disagreement_2026-10-02.md)
-for the candidate repair and remaining mixed-import and interpolation questions.
-
 After writing a successful Stage 2 admission, `bootstrap-from-scratch.sh` invokes
 `phase2-runtime-binding.shs publish` with that exact admitted compiler and runtime
 authority. The SHA-addressed capsule lives under the bootstrap output's

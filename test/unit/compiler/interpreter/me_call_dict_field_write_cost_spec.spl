@@ -1,0 +1,59 @@
+"""
+# `me` call on a class with a Dict field: cost is flat, not linear in the dict
+
+Reproduce for doc/08_tracking/bug/interpreter_me_call_dict_clone_2026-08-22.md.
+
+In the Rust seed interpreter every `obj.method(..)` on a value held in a variable
+(statement or expression context, and `obj.field.method(..)`) used to leave a
+CLONE of the receiver behind while the callee ran, so the receiver's field map
+had two owners and the first `self.dict[k] = v` in the method body deep-copied
+the whole dict. The write inside one call is free (`Arc::get_mut` succeeds from
+the second write on); it is the CALL boundary that forces the copy. Measured on
+the deployed seed (2026-08-22): 3000 `me` calls each inserting one key into a
+Dict field cost 535 ms, the same 3000 inserts inside ONE call cost 10 ms, and a
+block of 1000 calls grew from 33 ms to 155 ms as the dict grew. That is the
+2.4 ms -> 8 ms per-call growth of `SymbolTable.define` (three dict writes per
+call) behind 136 ms enum lowerings on the real compiler closure.
+
+The observable is the cost SHAPE: the fourth block of N calls must not cost
+materially more than the first. Linear-in-dict growth makes block 4 about 7x
+block 1; the fixed path keeps the ratio near 1. A ratio bound discriminates the
+algorithm rather than the machine, so a slow or loaded box cannot fail it and a
+fast box cannot pass the pre-fix shape.
+"""
+# @tag: unit, compiler, interpreter
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_time_now_monotonic_ms() -> i64
+
+class DictHolder:
+    entries: Dict<text, i64>
+    count: i64
+
+impl DictHolder:
+    me put(key: text, value: i64):
+        self.entries[key] = value
+        self.count = self.count + 1
+
+fn block_ms(holder: DictHolder, start: i64, n: i64) -> i64:
+    val t0 = rt_time_now_monotonic_ms()
+    var i = start
+    while i < start + n:
+        holder.put("k{i}", i)
+        i = i + 1
+    rt_time_now_monotonic_ms() - t0
+
+describe "me call with a Dict field write":
+    it "keeps the per-call cost flat as the dict grows (block 4 <= 3x block 1)":
+        var holder = DictHolder(entries: {}, count: 0)
+        val n = 2000
+        val first = block_ms(holder, 0, n)
+        block_ms(holder, n, n)
+        block_ms(holder, 2 * n, n)
+        val fourth = block_ms(holder, 3 * n, n)
+        expect(holder.count).to_equal(4 * n)
+        expect(holder.entries.len()).to_equal(4 * n)
+        # Guard against a sub-millisecond first block making the ratio noisy.
+        val baseline = if first < 5: 5 else: first
+        expect(fourth <= 3 * baseline).to_equal(true)

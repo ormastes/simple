@@ -42,9 +42,8 @@ pub fn compile_to_native_binary(
     let hir_module =
         hir::lower(&ast_module).map_err(|e| LinkerError::LinkFailed(format!("HIR lowering error: {}", e)))?;
 
-    // Freestanding and WASM runtimes do not define the `[i64]` word lane.
-    let signed_word_lane = !options.target.is_baremetal() && !options.target.is_wasm();
-    let mir_module = mir::lower_to_mir_with_word_lane(&hir_module, signed_word_lane).map_err(|e| LinkerError::LinkFailed(format!("MIR lowering error: {}", e)))?;
+    let mir_module =
+        mir::lower_to_mir(&hir_module).map_err(|e| LinkerError::LinkFailed(format!("MIR lowering error: {}", e)))?;
 
     let object_code = match options.backend.unwrap_or(default_native_codegen_backend()) {
         NativeCodegenBackend::Cranelift => {

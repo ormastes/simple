@@ -9,7 +9,6 @@ use app.io.env_ops (env_get, env_set)
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
     compiler_source_authority_inherit_v1, compiler_source_authority_publish_v1,
     compiler_source_authority_clear_v1}
-use app.compiler_entrypoint.derived_composition.{compiler_cuda_composition_root_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
 use app.io.time_ops (time_now_unix_micros)
@@ -18,13 +17,10 @@ use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_source_loading.{
-    _driver_text_bucket_set_new,
+    _driver_resolve_entry_import, _driver_text_bucket_set_new,
     _driver_cached_entry_source_scan, driver_closure_scan_phase_trace,
-    _driver_entry_import_dirname, _driver_physical_source_key,
-    driver_resolve_closure_import_v1, driver_closure_native_owner_v1,
-    driver_closure_import_specs_v1, driver_closure_importer_module_v1
+    _driver_entry_import_dirname
 }
-use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use std.scv.compile_snapshot.{
     scv_compile_snapshot_open_v1
 }
@@ -40,6 +36,38 @@ fn _nb_path_absolute_raw(path: text) -> text:
 
 fn _cli_eprint(message: text):
     eprint(message)
+
+fn _nb_dirname(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1:
+        return ""
+    parts.slice(0, parts.len() - 1).join("/")
+
+fn _nb_resolve_relative(mp: text, importer_file: text) -> text:
+    # `.sibling` / `..parent_pkg.mod` resolve against the importing FILE's
+    # directory, mirroring the driver's _driver_resolve_relative_entry_import.
+    # The dotted-segment resolver below cannot express these (leading dots
+    # split to empty segments), which silently dropped sibling modules from
+    # the --entry-closure worker input set ("unresolved name" storms in HIR).
+    var dots = 0
+    while dots < mp.len() and mp.substring(dots, dots + 1) == ".":
+        dots = dots + 1
+    if dots >= mp.len():
+        return ""
+    var base_dir = _nb_dirname(importer_file)
+    var up = 1
+    while up < dots and base_dir != "":
+        base_dir = _nb_dirname(base_dir)
+        up = up + 1
+    val rel = mp.substring(dots).replace(".", "/")
+    val base = if base_dir == "": rel else: "{base_dir}/{rel}"
+    if _nb_file_exists_raw("{base}.spl"):
+        return "{base}.spl"
+    if _nb_file_exists_raw("{base}/mod.spl"):
+        return "{base}/mod.spl"
+    if _nb_file_exists_raw("{base}/__init__.spl"):
+        return "{base}/__init__.spl"
+    ""
 
 fn _nb_basename(path: text) -> text:
     val parts = path.split("/")
@@ -64,63 +92,19 @@ fn _nb_source_dirs_cover_workspace(source_dirs: [text]) -> bool:
         if name == "compiler": compiler = true
     app and lib and compiler
 
+fn _nb_source_root_named(source_dirs: [text], name: text) -> text:
+    for source_dir in source_dirs:
+        val normalized = _nb_trim_trailing_slashes(source_dir)
+        if _nb_basename(normalized) == name:
+            return normalized
+    ""
+
 var _nb_scv_snapshot_key_v1: text = ""
 var _nb_scv_snapshot_root_v1: text = ""
 var _nb_scv_snapshot_revision_v1: text = ""
 var _nb_scv_snapshot_commit_v1: text = ""
 var _nb_scv_snapshot_tree_v1: text = ""
 var _nb_scv_snapshot_inventory_v1: text = ""
-# Set when the last freeze refused because the entry lies under no admitted
-# source root (an ad-hoc user script, e.g. /tmp/hello.spl). See
-# _native_build_entry_closure for the non-strict working-tree fallback.
-var _nb_scv_entry_outside_root_v1: bool = false
-# True when the last closure was computed from the working tree (either
-# fallback); its source roots are then handed off unmapped (driver: Ok([])).
-var _nb_scv_unfrozen_closure_v1: bool = false
-
-# Bootstrap lanes keep the frozen-entry contract strict. Mirrors the driver
-# cold-entry fallback in src/compiler/80.driver/driver_source_pipeline_loading.spl,
-# whose in-process admitted-task check has no CLI-side equivalent. An inherited
-# SIMPLE_SCV_SNAPSHOT_ROOT is NOT a strictness signal: the CLI publishes one for
-# every native-build before the closure runs.
-fn _nb_scv_strict_entry_v1() -> bool:
-    (env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" or
-        (env_get("SIMPLE_SCV_STRICT_COLD_ENTRY") ?? "") == "1"
-
-pub fn native_build_closure_snapshot_root_v1() -> text:
-    # Read only after _native_build_entry_closure has admitted its snapshot.
-    _nb_scv_snapshot_root_v1
-
-pub fn native_build_closure_source_roots_v1(entry: text, source_dirs: [text]) -> Result<[text], text>:
-    # Admission is established by _nb_scv_freeze_v1, not by path existence.
-    # Reuse its mapping for supported argv spellings and effective defaults.
-    if _nb_scv_unfrozen_closure_v1:
-        return Ok([])
-    if _nb_scv_snapshot_root_v1 == "":
-        return Err("SOURCE_ROOT_SNAPSHOT_MISSING")
-    val effective = native_build_snapshot_source_roots_v1(
-        _nb_scv_relative_path_v1(entry), source_dirs)
-    if effective.len() == 0:
-        return Err("SOURCE_ROOT_SELECTORS_MISSING")
-    val prefix = _nb_scv_snapshot_root_v1 + "/"
-    var selectors: [text] = []
-    for root in effective:
-        val mapped = _nb_scv_snapshot_path_v1(root)
-        if mapped == "" or not mapped.starts_with(prefix):
-            return Err("SOURCE_ROOT_MAPPING_MISSING: " + root)
-        selectors = selectors.push(mapped.substring(prefix.len()))
-    Ok(selectors)
-
-pub fn native_build_closure_release_snapshot_memo_v1():
-    # The parent request publisher owns a scratch walk. Its selected files and
-    # request are durable before it drops these process-local lookup hints.
-    # A later walk reopens and validates the same inherited authority.
-    _nb_scv_snapshot_key_v1 = ""
-    _nb_scv_snapshot_root_v1 = ""
-    _nb_scv_snapshot_revision_v1 = ""
-    _nb_scv_snapshot_commit_v1 = ""
-    _nb_scv_snapshot_tree_v1 = ""
-    _nb_scv_snapshot_inventory_v1 = ""
 
 fn _nb_scv_relative_path_v1(path: text) -> text:
     val root = _nb_trim_trailing_slashes(
@@ -145,12 +129,6 @@ fn _nb_scv_snapshot_path_v1(path: text) -> text:
     val relative = _nb_scv_relative_path_v1(path)
     if relative == "" or _nb_scv_snapshot_root_v1 == "":
         return ""
-    if relative.starts_with("build/"):
-        val checkout = _nb_trim_trailing_slashes(_nb_path_absolute_raw(".").replace("\\", "/"))
-        val derived = compiler_cuda_composition_root_v1(
-            checkout, _nb_scv_snapshot_root_v1, path, false)
-        if derived.is_err(): return ""
-        return _nb_scv_snapshot_root_v1 + "/" + derived.unwrap()
     _nb_scv_snapshot_root_v1 + "/" + relative
 
 fn _nb_scv_key_v1(entry: text, source_dirs: [text], revision: text) -> text:
@@ -166,10 +144,6 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
     val entry_relative = _nb_scv_relative_path_v1(entry)
     val effective_roots = native_build_snapshot_source_roots_v1(
         entry_relative, source_dirs)
-    # A root-level checkout entry keeps its explicit-roots refusal; only an
-    # entry under no root at all may take the user-entry fallback.
-    _nb_scv_entry_outside_root_v1 = effective_roots.len() == 0 and
-        not (entry_relative != "" and not entry_relative.contains("/"))
     if effective_roots.len() == 0:
         if entry_relative != "" and not entry_relative.contains("/"):
             _cli_eprint("SCV-E-ENTRY: root-level entry requires explicit finite --source roots; repository-wide admission is unsupported")
@@ -263,6 +237,67 @@ fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
         result = result.push(candidate)
     result
 
+fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
+    if segs.len() == 0:
+        return ""
+    val rel = _nb_join_segments(segs)
+    val p1 = "{root}/{rel}.spl"
+    if _nb_file_exists_raw(p1):
+        return p1
+    val p2 = "{root}/{rel}/mod.spl"
+    if _nb_file_exists_raw(p2):
+        return p2
+    val p3 = "{root}/{rel}/__init__.spl"
+    if _nb_file_exists_raw(p3):
+        return p3
+    ""
+
+fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
+    # Resolve a module segment list to an .spl file under a --source root.
+    # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
+    # the root's dir name. Returns "" if unresolved.
+    for root in source_dirs:
+        val dir_name = _nb_basename(root)
+        val public_lib_alias = dir_name == "lib" and segs.len() > 0 and segs[0] == "std"
+        if segs.len() > 0 and (segs[0] == dir_name or public_lib_alias):
+            var stripped: [text] = []
+            var si = 1
+            while si < segs.len():
+                stripped = stripped.push(segs[si])
+                si = si + 1
+            val stripped_path = _nb_resolve_under_root(root, stripped)
+            if stripped_path != "":
+                return stripped_path
+        val direct_path = _nb_resolve_under_root(root, segs)
+        if direct_path != "":
+            return direct_path
+    # Unprefixed tier-qualified paths (`nogc_sync_mut.io_runtime` from the
+    # std.io_runtime shim's `export use`; `common.ui.access_types`) live
+    # under src/lib but carry no std./lib. prefix — no root above matches.
+    val lib_root = _nb_source_root_named(source_dirs, "lib")
+    if lib_root != "":
+        val lib_direct = _nb_resolve_under_root(lib_root, segs)
+        if lib_direct != "":
+            return lib_direct
+    # `std.X` flattens the concurrency-tier directories: std.mcp_sdk.server.
+    # method_detect is physically src/lib/<tier>/mcp_sdk/server/method_detect
+    # .spl. Mirror the seed interpreter's family-fallback order.
+    if segs.len() > 1 and segs[0] == "std":
+        var tier_tail: [text] = []
+        var tier_ti = 1
+        while tier_ti < segs.len():
+            tier_tail = tier_tail.push(segs[tier_ti])
+            tier_ti = tier_ti + 1
+        if lib_root != "":
+            for tier in ["nogc_async_mut", "nogc_sync_mut", "nogc_async_immut", "common", "gc_async_mut", "nogc_async_mut_noalloc"]:
+                val tier_path = _nb_resolve_under_root(lib_root + "/" + tier, tier_tail)
+                if tier_path != "":
+                    return tier_path
+    ""
+
+fn _nb_join_segments(segs: [text]) -> text:
+    segs.join("/")
+
 pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # BFS the entry's import closure so --entry-closure compiles only reachable
     # modules (one `main`), not every file in the --source dirs. Over-approximates
@@ -297,13 +332,7 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # one-line notice when it takes effect.
     val frozen = _nb_scv_freeze_v1(entry, source_dirs)
     val freeze_fallback_enabled = (env_get("SIMPLE_SCV_FREEZE_FALLBACK") ?? "") == "1"
-    # A user entry outside every admitted root (`native-build /tmp/hello.spl`)
-    # has nothing to freeze against: the snapshot covers inventory families
-    # only. Outside bootstrap/admitted lanes it compiles from the working tree,
-    # like the explicit fallback, instead of refusing every ad-hoc script.
-    val user_entry_unfrozen = not frozen.0 and _nb_scv_entry_outside_root_v1 and
-        not _nb_scv_strict_entry_v1()
-    if not frozen.0 and not freeze_fallback_enabled and not user_entry_unfrozen:
+    if not frozen.0 and not freeze_fallback_enabled:
         _cli_eprint(
             "error: native-build: SCV freeze has no admitted source " +
             "inventory to freeze the entry closure against (see the " +
@@ -313,20 +342,13 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             "filesystem scan instead (weaker consistency guarantee), or " +
             "populate an admitted source inventory first (see " +
             "src/lib/scv/compile_source_inventory.spl).")
-        _nb_scv_unfrozen_closure_v1 = false
         return []
-    if not frozen.0 and user_entry_unfrozen and not freeze_fallback_enabled:
-        _cli_eprint(
-            "SCV-W-USER-ENTRY: entry is outside the admitted source roots; " +
-            "compiling it from the working tree (set SIMPLE_SCV_STRICT_COLD_ENTRY=1 " +
-            "to refuse instead)")
-    elif not frozen.0:
+    if not frozen.0:
         _cli_eprint(
             "SCV-W-FREEZE-FALLBACK: SIMPLE_SCV_FREEZE_FALLBACK=1 is set; " +
             "scanning the working tree directly instead of a frozen SCV " +
             "snapshot (weaker consistency guarantee: a concurrent edit is " +
             "not guaranteed to be seen atomically)")
-    _nb_scv_unfrozen_closure_v1 = not frozen.0
     val frozen_entry = if frozen.0: frozen.1 else: entry
     val frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
     val trace_closure = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
@@ -338,7 +360,7 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     val trace_timing = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING") ?? "") == "1"
     var queue: [text] = [frozen_entry]
     var discovered = _driver_text_bucket_set_new(512)
-    discovered[_driver_physical_source_key(frozen_entry)] = true
+    discovered[frozen_entry] = true
     var result: [text] = []
     var resolve_cache: Dict<text, text> = {}
     val closure_source_dirs = _nb_normalize_source_dirs(frozen_source_dirs)
@@ -357,42 +379,55 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if trace_closure and f == frozen_entry:
                 _cli_eprint("[native-build] closure entry missing {f}")
             continue
-        val (content, _, _, _) = _driver_cached_entry_source_scan(f)
+        val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)
         driver_closure_scan_phase_trace("closure_node:scanned", f)
         if trace_closure and f == frozen_entry:
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:
             _cli_eprint("[native-build] closure visited {result.len()} queued={queue.len()} file={f}")
-        # Import specs, resolution, and native-owner preference are the
-        # driver worker walk's own functions (driver_resolve_closure_import_v1):
-        # the two walks must bind every spelling to the same physical file.
-        val module_paths = driver_closure_import_specs_v1(f)
-        val importer_dir = _driver_entry_import_dirname(f)
-        val importer_module = driver_closure_importer_module_v1(f)
+        # The shared scanner skips comments, docstrings, and lazy imports
+        # without materializing every ordinary source line. Sibling `mod` and
+        # `export member.*` declarations use a separate guarded compatibility
+        # scan because they resolve relative to the declaring file.
+        var module_paths = imports
+        for sibling in siblings:
+            module_paths = module_paths.push(sibling)
         for mp in module_paths:
-            # Bare spellings bind importer-relative, so cache per directory.
-            val cache_key = importer_dir + "|" + mp
+            if mp.starts_with("."):
+                val rel_rp = _nb_resolve_relative(mp, f)
+                if rel_rp != "" and not discovered.contains_key(rel_rp):
+                    queue.append(rel_rp)
+                    discovered[rel_rp] = true
+                continue
+            val segs = mp.split(".")
+            val seg_key = _nb_join_segments(segs)
             var rp = ""
-            if resolve_cache.has(cache_key):
-                rp = resolve_cache[cache_key]
+            if resolve_cache.has(seg_key):
+                rp = resolve_cache[seg_key]
             else:
-                val selected = driver_resolve_closure_import_v1(mp, closure_source_dirs, importer_dir)
-                match selected:
-                    case SourceRootResolutionV1.Found(path):
-                        val spelling = if mp.starts_with(".") and not mp.starts_with(".."): importer_module + mp else: mp
-                        rp = driver_closure_native_owner_v1(path, spelling, importer_dir)
-                    case SourceRootResolutionV1.Missing: ()
-                    case SourceRootResolutionV1.Ambiguous(directory):
-                        _cli_eprint("SOURCE_ROOT_AMBIGUOUS: import '{mp}' has competing numbered directories under '{directory}'")
-                        return []
-                resolve_cache[cache_key] = rp
+                rp = _nb_resolve_segs(segs, closure_source_dirs)
+                resolve_cache[seg_key] = rp
             if trace_closure and f == frozen_entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
-            if rp != "":
-                val rp_key = _driver_physical_source_key(rp)
-                if not discovered.contains_key(rp_key):
-                    queue.append(rp)
-                    discovered[rp_key] = true
+            if rp != "" and not discovered.contains_key(rp):
+                queue.append(rp)
+                discovered[rp] = true
+            if rp == "" and segs.len() > 1:
+                var drop: [text] = []
+                var di = 0
+                while di < segs.len() - 1:
+                    drop = drop.push(segs[di])
+                    di = di + 1
+                val drop_key = _nb_join_segments(drop)
+                var drop_rp = ""
+                if resolve_cache.has(drop_key):
+                    drop_rp = resolve_cache[drop_key]
+                else:
+                    drop_rp = _nb_resolve_segs(drop, closure_source_dirs)
+                    resolve_cache[drop_key] = drop_rp
+                if drop_rp != "" and not discovered.contains_key(drop_rp):
+                    queue.append(drop_rp)
+                    discovered[drop_rp] = true
         if trace_timing:
             val elapsed_us = time_now_unix_micros() - timing_file_start_us
             _cli_eprint("[native-build] closure timing n={result.len()} queued={queue.len()} elapsed_us={elapsed_us} imports={module_paths.len()} content_len={content.len()} file={f}")

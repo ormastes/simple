@@ -319,7 +319,7 @@ impl Lowerer {
             Expr::Yield(value) => self.lower_yield(value.as_deref(), ctx),
             Expr::ContractResult => self.lower_contract_result(ctx),
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),
-            Expr::New { kind, expr, .. } => self.lower_new(kind, expr, ctx),
+            Expr::New { kind, expr } => self.lower_new(kind, expr, ctx),
             Expr::MethodCall {
                 receiver, method, args, ..
             } => self.lower_method_call(receiver, method, args, ctx),
@@ -670,14 +670,7 @@ impl Lowerer {
     /// `doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md`.
     fn import_alias_symbol(&self, name: &str) -> String {
         match self.resolve_function_alias(name) {
-            Some(original)
-                if original != name
-                    && (self.own_declared_function_names.contains(original)
-                        || self.qualified_import_functions.as_ref().is_some_and(|imports| imports.contains_key(name))) =>
-            {
-                // Native per-module imports are keyed by the authored alias.
-                // Erasing it loses the exact module owner and lets a same-named
-                // free function or unrelated method capture the call in mangle.
+            Some(original) if original != name && self.own_declared_function_names.contains(original) => {
                 name.to_string()
             }
             Some(original) => original.to_string(),
@@ -699,22 +692,11 @@ impl Lowerer {
 
         match self.globals.get(&target).copied() {
             Some(ty) if matches!(self.module.types.get(ty), Some(HirType::Function { .. })) => Some(ty),
-            _ => self.imported_function_value_types.get(&target).copied(),
+            _ => None,
         }
     }
 
     fn call_return_type(&self, callee: &Expr, fallback: TypeId) -> TypeId {
-        // An imported callee typed from `imported_function_value_types` keeps
-        // the bare-name return resolution it had before that map existed
-        // (`named_callable_return_type` follows the selected owner when two
-        // imports of the name disagree).
-        if let Expr::Identifier(name) = callee {
-            if self.imported_function_value_types.get(name) == Some(&fallback) {
-                if let Some(ret) = self.named_callable_return_type(name) {
-                    return ret;
-                }
-            }
-        }
         if let Some(HirType::Function { ret, .. }) = self.module.types.get(fallback) {
             return *ret;
         }
@@ -797,10 +779,6 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        // Same-named flattened struct/class: bind `Type.member` to the
-        // declaration the current owner sees (flatten_struct_owner.rs).
-        let scoped_type_name = self.module.types.scoped_name(type_name).to_string();
-        let type_name = scoped_type_name.as_str();
         if let Some(type_id) = self.static_enum_variant_type(type_name, member) {
             return self.lower_static_enum_variant_call(type_name, member, type_id, args, ctx);
         }
@@ -1080,10 +1058,13 @@ impl Lowerer {
         if args.iter().all(|arg| arg.name.is_none()) {
             if let Some(owner) = self.module.types.get_type_name(receiver_hir.ty) {
                 let key = format!("{}.{}", owner, method);
-                if let Some(params) = self.fn_param_defaults.get(&key)
-                    .or_else(|| self.global_method_param_defaults.as_ref().and_then(|defs| defs.get(&key)))
-                    .cloned() {
-                    self.fill_omitted_default_args(&key, &params, &mut hir_args, ctx)?;
+                if let Some(params) = self.fn_param_defaults.get(&key).cloned() {
+                    for default in params.iter().skip(hir_args.len()) {
+                        match default {
+                            Some(expr) if Self::is_constant_default(expr) => hir_args.push(self.lower_expr(expr, ctx)?),
+                            _ => break,
+                        }
+                    }
                 }
             }
         }
@@ -1160,39 +1141,6 @@ impl Lowerer {
             );
         }
         ret
-    }
-
-    /// The declared return type of `method` when every trait that declares it
-    /// (with a non-ANY, non-VOID return) agrees on that type. Trait-typed
-    /// receivers are ANY in HIR, so this is the only authoritative source for
-    /// their result type.
-    /// True when `arg` is a lambda or has a function/closure type.
-    fn is_callable_arg(&self, arg: &HirExpr) -> bool {
-        matches!(arg.kind, HirExprKind::Lambda { .. })
-            || matches!(self.module.types.get(arg.ty), Some(HirType::Function { .. }))
-    }
-
-    fn agreed_trait_method_return_type(&self, method: &str) -> Option<TypeId> {
-        let mut trait_return: Option<TypeId> = None;
-        for (lookup_name, trait_info) in &self.module.trait_infos {
-            // Alias keys remain available for direct MIR dispatch, but a
-            // stale alias snapshot is not another trait declaration.
-            if lookup_name != &trait_info.name {
-                continue;
-            }
-            let Some(sig) = trait_info.methods.get(method) else {
-                continue;
-            };
-            if sig.return_type == TypeId::ANY || sig.return_type == TypeId::VOID {
-                continue;
-            }
-            match trait_return {
-                None => trait_return = Some(sig.return_type),
-                Some(previous) if previous != sig.return_type => return None,
-                _ => {}
-            }
-        }
-        trait_return
     }
 
     /// Return one metadata record per declared trait, ordered by its canonical
@@ -1309,17 +1257,34 @@ impl Lowerer {
         // signatures agree.  This is especially important for `T?` returns:
         // losing `MouseEvent?` here makes `if val event = backend.poll_mouse()`
         // bind `event` as ANY and rejects every subsequent field access.
-        // A nullable trait receiver (`Provider?`, i.e. `Pointer { inner: ANY }`,
-        // as bound by `if val p = optional_provider:`) is the same erased
-        // trait value: without this, a trait with no implementor in the unit
-        // left exactly one unrelated `Other.resolve` in the suffix search
-        // below, and its return type (`WidgetNode`) won.
-        // doc/08_tracking/bug/jit_nullable_trait_receiver_method_typed_by_unrelated_struct_2026-10-05.md
-        let trait_like_receiver = recv_ty == TypeId::ANY
-            || matches!(self.module.types.get(recv_ty), Some(HirType::Pointer { inner, .. }) if *inner == TypeId::ANY);
-        if trait_like_receiver {
-            if let Some(return_type) = self.agreed_trait_method_return_type(method) {
-                return return_type;
+        if recv_ty == TypeId::ANY {
+            let mut trait_return: Option<TypeId> = None;
+            let mut traits_disagree = false;
+            for (lookup_name, trait_info) in &self.module.trait_infos {
+                // Alias keys remain available for direct MIR dispatch, but a
+                // stale alias snapshot is not another trait declaration.
+                if lookup_name != &trait_info.name {
+                    continue;
+                }
+                let Some(sig) = trait_info.methods.get(method) else {
+                    continue;
+                };
+                if sig.return_type == TypeId::ANY || sig.return_type == TypeId::VOID {
+                    continue;
+                }
+                match trait_return {
+                    None => trait_return = Some(sig.return_type),
+                    Some(previous) if previous != sig.return_type => {
+                        traits_disagree = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !traits_disagree {
+                if let Some(return_type) = trait_return {
+                    return return_type;
+                }
             }
         }
         // When the impl matches DISAGREE on the return type, the shortest-name
@@ -1989,11 +1954,7 @@ impl Lowerer {
                         Some(TypeId::ANY)
                     }
                 }
-                // `any`/`all` return the runtime's RAW 0/1 (rt_array_any /
-                // rt_array_all, both lanes), so they must be typed BOOL like
-                // `contains`; untyped, the raw word reached `print` as a
-                // RuntimeValue (`all` printed `0`, `any` printed `nil`).
-                "contains" | "is_empty" | "any" | "all" => Some(TypeId::BOOL),
+                "contains" | "is_empty" => Some(TypeId::BOOL),
                 // `[T].index_of(v)` returns a raw i64 position (-1 when absent),
                 // exactly like the string table's `index_of` above. This table
                 // omitting it is the SAME class of gap as `"length"`/`"bytes"`:
@@ -2158,29 +2119,6 @@ impl Lowerer {
                 "get" | "remove" | "get_or" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
                 "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
                 "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
-                // Same raw-result class on an untyped receiver: `any`/`all`
-                // return a raw 0/1 and `index_of` (rt_index_of, array or text)
-                // a raw i64 position, so they need the BOOL / BoxInt
-                // conversion. Left ANY, `<value:0x1>` / nil reached `print`.
-                // `any`/`all` only in the builtin shape (one callable
-                // predicate: a lambda, a named function or a closure value):
-                // a user class method named `any()` / `all(3)` reached through
-                // an untyped receiver keeps its own (dynamic) result.
-                "any" | "all" if hir_args.len() == 1 && self.is_callable_arg(&hir_args[0]) => Some(TypeId::BOOL),
-                "index_of" => Some(TypeId::I64),
-                // Text searches on an untyped receiver, same raw-result class.
-                // `starts_with`/`ends_with`/`rfind` exist only on text and the
-                // erased codegen path (codegen/instr/calls.rs) calls
-                // `rt_string_*`, which return a raw bool / raw i64. `find` is
-                // `rt_find`: a raw i64 position, EXCEPT for an array receiver
-                // with a closure argument (then the tagged element), so it is
-                // typed I64 only for a non-callable argument. Left ANY, an
-                // untyped `x.starts_with(p)` printed `nil` / `0`, `if` took the
-                // wrong branch and `x.rfind(p)` printed `<value:0x4>` under the
-                // JIT. Bug row: interp_option_unwrapped_text_starts_with_nil_2026_10_19.
-                "starts_with" | "ends_with" => Some(TypeId::BOOL),
-                "rfind" | "last_index_of" => Some(TypeId::I64),
-                "find" if hir_args.len() == 1 && !self.is_callable_arg(&hir_args[0]) => Some(TypeId::I64),
                 // "length" synonym — see the string-methods comment above.
                 "len" | "length" | "size" => Some(TypeId::I64),
                 "keys" => Some(match dict_kv {
@@ -2200,35 +2138,10 @@ impl Lowerer {
                 // Type conversion
                 "to_string" | "to_text" => Some(TypeId::STRING),
                 "to_int" | "to_i64" => Some(TypeId::I64),
-                // The narrower integer casts produce the same RAW native result
-                // as `to_i64` (codegen rt_any_to_int + narrow). Leaving them ANY
-                // made consumers disagree: a `[u8]` push took the word raw while
-                // `as i64` decoded it as tagged (`x.to_u8()` -> 64 / 8 for 104).
-                "to_i8" => Some(TypeId::I8),
-                "to_i16" => Some(TypeId::I16),
-                "to_i32" => Some(TypeId::I32),
-                "to_u8" => Some(TypeId::U8),
-                "to_u16" => Some(TypeId::U16),
-                "to_u32" => Some(TypeId::U32),
-                "to_u64" => Some(TypeId::U64),
                 "to_float" | "to_f64" => Some(TypeId::F64),
                 "parse_f64" | "parse_float" | "parse_f64_safe" => Some(TypeId::ANY),
                 "to_bool" => Some(TypeId::BOOL),
                 _ => None,
-            };
-            // A trait-typed receiver is ANY in HIR, and MIR lowers the call
-            // as a vtable dispatch whose result has the trait method's
-            // declared type. A trait method that merely shares a builtin
-            // collection name (`me size() -> (i32, i32)` on `ScreenHost`)
-            // must keep that type: typing it I64 here made
-            // `val (w, h) = host.size()` destructure tagged RuntimeValues
-            // as raw integers under the JIT (1280 read as 10240). A typed
-            // Dict receiver is never a trait object.
-            let result_ty = match result_ty {
-                Some(builtin_ty) if dict_kv.is_none() => {
-                    Some(self.agreed_trait_method_return_type(method).unwrap_or(builtin_ty))
-                }
-                other => other,
             };
 
             if let Some(ty) = result_ty {

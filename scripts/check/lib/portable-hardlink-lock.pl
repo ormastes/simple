@@ -88,7 +88,7 @@ sub ps_value {
     return length($lines[0]) ? $lines[0] : undef;
 }
 
-# Stable identity source on Linux, and fallback for MSYS / Git Bash.
+# Fallback identity source for hosts whose `ps` has no -o (MSYS / Git Bash).
 # /proc/<pid>/stat field 22 is starttime and field 5 is pgrp; MSYS provides
 # both. starttime is a strictly stronger PID-reuse discriminator than lstart
 # (clock ticks since boot, not whole seconds). comm (field 2) may contain
@@ -113,69 +113,6 @@ sub proc_stat_snapshot {
     return ($start, $pgid);
 }
 
-sub windows_mapping {
-    my ($pid) = @_;
-    my (undef, $pgid) = proc_stat_snapshot($pid);
-    return unless defined($pgid);
-    open(my $fh, '<', "/proc/$pid/winpid") or return;
-    my $winpid = <$fh>;
-    close($fh) or return;
-    return unless defined($winpid) && $winpid =~ /\A([1-9][0-9]*)\s*\z/;
-    return ($1, $pgid);
-}
-
-sub windows_identity {
-    my ($pid) = @_;
-    my ($winpid, $pgid) = windows_mapping($pid);
-    return unless defined($winpid);
-    require Cwd;
-    require File::Basename;
-    my $observer = Cwd::abs_path(File::Basename::dirname(__FILE__) .
-        '/../../resource/windows-process-observer.ps1');
-    return unless defined($observer);
-    my $native_path = eval { Cygwin::posix_to_win_path($observer, 1) };
-    return unless defined($native_path) && length($native_path);
-    my ($child, $pipe, $row);
-    my $ok = eval {
-        local $SIG{ALRM} = sub { die "Windows identity timeout\n" };
-        alarm 10;
-        $child = open($pipe, '-|');
-        defined($child) or die "Windows identity fork\n";
-        if (!$child) {
-            alarm 10;
-            exec 'powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive',
-                '-ExecutionPolicy', 'Bypass', '-File', $native_path,
-                '-IdentityPid', $winpid;
-            exit 127;
-        }
-        $row = '';
-        while (1) {
-            my $n = sysread($pipe, my $chunk, 256);
-            defined($n) or die "Windows identity read\n";
-            last unless $n;
-            $row .= $chunk;
-            length($row) <= 128 or die "Windows identity oversized\n";
-        }
-        my $closed = close($pipe);
-        $child = undef;
-        $closed or die "Windows identity exit\n";
-        alarm 0;
-        1;
-    };
-    alarm 0;
-    if (defined($child) && $child > 0) {
-        kill 'KILL', $child;
-        close($pipe);
-        waitpid($child, 0);
-    }
-    return unless $ok && $row =~ /\Awindows:\Q$winpid\E:([1-9][0-9]*)\r?\n\z/;
-    my $birth = $1;
-    my ($winpid_two, $pgid_two) = windows_mapping($pid);
-    return unless defined($winpid_two) && $winpid eq $winpid_two &&
-        $pgid eq $pgid_two;
-    return (unpack('H*', "windows:$winpid:$birth"), $pgid);
-}
-
 sub process_snapshot {
     my ($pid) = @_;
     return unless defined($pid) && $pid =~ /\A[1-9][0-9]*\z/;
@@ -188,24 +125,6 @@ sub process_snapshot {
         my ($birth_two) = darwin_identity($pid);
         return unless defined($birth_two) && $birth_one eq $birth_two;
         return (unpack('H*', $start), $pgid);
-    }
-    # Linux ps derives lstart from a wall-clock boot estimate, which can move
-    # after clock corrections (observed during WSL bootstrap). Kernel start
-    # ticks remain stable and still distinguish PID reuse. Fail closed if a
-    # Linux snapshot cannot be read consistently.
-    if ($^O eq 'linux') {
-        my ($start_one, $pgid_one) = proc_stat_snapshot($pid);
-        return unless defined($start_one) && defined($pgid_one) && $pgid_one > 0;
-        my ($start_two, $pgid_two) = proc_stat_snapshot($pid);
-        return unless defined($start_two) && defined($pgid_two) &&
-            $start_one eq $start_two && $pgid_one eq $pgid_two;
-        return (unpack('H*', $start_one), $pgid_one);
-    }
-    # MSYS/Cygwin start ticks subtract an emulated boot-time origin. That
-    # origin moved during a real bootstrap while the owner PID stayed live.
-    # Never fall back to that unstable identity when native observation fails.
-    if ($^O eq 'cygwin' || $^O eq 'msys') {
-        return windows_identity($pid);
     }
     my $start_one = ps_value('lstart', $pid);
     if (defined($start_one)) {
@@ -306,11 +225,6 @@ sub proc_table {
 # reported on stderr so an operator can act on a genuinely wedged group.
 sub refine_leader_group_state {
     my ($pgid, $expected_start_hex) = @_;
-    my $windows = $^O eq 'cygwin' || $^O eq 'msys';
-    # An old boot-relative claim cannot be compared with a native birth token.
-    # Preserve a live group's lock rather than infer that its owner was reused.
-    return 'live' if $windows &&
-        pack('H*', $expected_start_hex) !~ /\Awindows:[1-9][0-9]*:[1-9][0-9]*\z/;
     my @rows = proc_table();
     return 'live' unless @rows;
     my %row_by_pid;
@@ -334,11 +248,6 @@ sub refine_leader_group_state {
         return 'live';
     }
     my $leader_start_hex = unpack('H*', $leader->[3]);
-    if ($windows) {
-        my ($native_start, $native_pgid) = process_snapshot($pgid);
-        return 'live' unless defined($native_start) && $native_pgid == $pgid;
-        $leader_start_hex = $native_start;
-    }
     return 'live' if $leader_start_hex eq $expected_start_hex;
     my %impostor = ($pgid => 1);
     for my $member (@members) {
@@ -367,15 +276,9 @@ sub refine_leader_group_state {
             "the recycled leader; keeping the lock held (fail closed)\n";
         return 'live';
     }
-    if ($windows) {
-        my ($native_again, $native_pgid_again) = process_snapshot($pgid);
-        return 'live' unless defined($native_again) &&
-            $native_again eq $leader_start_hex && $native_pgid_again == $pgid;
-    } else {
-        my ($leader_start_again) = proc_stat_snapshot($pgid);
-        return 'live' unless defined($leader_start_again) &&
-            unpack('H*', $leader_start_again) eq $leader_start_hex;
-    }
+    my ($leader_start_again) = proc_stat_snapshot($pgid);
+    return 'live' unless defined($leader_start_again) &&
+        unpack('H*', $leader_start_again) eq $leader_start_hex;
     print STDERR "portable-lock: recorded pgid $pgid was recycled by an " .
         "unrelated process (start-time mismatch); the recorded owner group " .
         "is positively absent, allowing stale-lock reclaim\n";

@@ -7,6 +7,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 use crate::hir::TypeId;
 use crate::mir::VReg;
 
+use super::super::shared::platform_call_conv;
 use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, create_string_constant,
@@ -26,15 +27,9 @@ fn resolve_unique_module_qualified_func<M: Module>(ctx: &InstrContext<'_, M>, na
         // dynamic dispatch (SIGSEGV: test_config `.index_of` bound to
         // devhub__cmd_storage___index_of). Require the candidate's own tail
         // (after its LAST `__`) to equal the probed tail exactly.
-        //
-        // A flatten-owner identity (`__spl_flat_<owner>__Type.method`, one of
-        // two same-named structs of a flattened unit) is not a module
-        // qualifier: the bare `Type.method` is the OTHER owner's body, so it
-        // must never win by suffix over that exact name.
         if candidate
             .strip_suffix(&suffix)
             .is_some_and(|prefix| !prefix.is_empty() && !prefix.ends_with('_'))
-            && !candidate.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX)
             && !ids.contains(id)
         {
             ids.push(*id);
@@ -164,22 +159,6 @@ pub(crate) fn strip_erased_receiver_qualifier(lookup_name: &str) -> &str {
         Some(("void", method)) if !method.contains('.') => method,
         _ => lookup_name,
     }
-}
-
-/// Match the complete owner component, never a substring such as Read in
-/// ShbReader. Exact import aliases are resolved before this suffix fallback.
-fn qualified_method_owner_matches(owner: &str, candidate: &str, method: &str) -> bool {
-    let normalized = candidate.replace("_dot_", ".");
-    let Some((candidate_owner, candidate_method)) = normalized.rsplit_once('.') else {
-        return false;
-    };
-    // A flatten-owner identity (`__spl_flat_<owner>__Type`) is a DIFFERENT
-    // type from the bare `Type` of a flattened unit, never a module qualifier.
-    let flatten_identity = |name: &str| name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX);
-    candidate_method == method
-        && (candidate_owner == owner
-            || (candidate_owner.ends_with(&format!("__{owner}"))
-                && flatten_identity(candidate_owner) == flatten_identity(owner)))
 }
 
 // `pub(crate)` so `mir/lower/lowering_expr_method.rs` can reuse the exact
@@ -390,7 +369,7 @@ pub(crate) fn compile_closure_create<M: Module>(
                 std::borrow::Cow::Borrowed(resolved)
             };
             // Declare as import with a generic i64 → i64 signature (closure body)
-            let call_conv = ctx.module.isa().default_call_conv();
+            let call_conv = platform_call_conv();
             let mut sig = Signature::new(call_conv);
             sig.params.push(AbiParam::new(types::I64)); // closure pointer
             sig.returns.push(AbiParam::new(types::I64));
@@ -460,7 +439,7 @@ pub(crate) fn compile_indirect_call<M: Module>(
     let closure_ptr = get_vreg_or_default(ctx, builder, &callee);
     let fn_ptr = call_runtime_1(ctx, builder, "rt_closure_func_ptr", closure_ptr);
 
-    let mut sig = Signature::new(ctx.module.isa().default_call_conv());
+    let mut sig = Signature::new(platform_call_conv());
     sig.params.push(AbiParam::new(types::I64));
     for _ in param_types {
         sig.params.push(AbiParam::new(types::I64));
@@ -1057,30 +1036,14 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         && !ks.ends_with(&current_fn_tail_sanitized)
                 })
                 .collect();
-            // A same-named method whose declared parameter count cannot accept
-            // this call (receiver + args) can never be the target, so it must
-            // not make an otherwise-decidable call ambiguous: `d.dispatch(req)`
-            // on a FetchDispatch was refused because VulkanFfi also has a
-            // 4-argument `dispatch` (2026-10-05). Only applied when at least one
-            // candidate DOES fit, so a call no candidate fits keeps today's path.
-            let candidates: Vec<_> = if candidates.len() > 1 {
-                let wanted = args.len() + 1;
-                let fits = |id: &FuncId| ctx.module.declarations().get_function_decl(*id).signature.params.len() == wanted;
-                if candidates.iter().any(|(_, id)| fits(id)) {
-                    candidates.into_iter().filter(|(_, id)| fits(id)).collect()
-                } else {
-                    candidates
-                }
-            } else {
-                candidates
-            };
 
             if let Some(tq) = type_qualifier {
-                // A trait name is not proof that an arbitrary implementation
-                // owns the receiver (Read must not select ShbReader).
+                // Prefer candidate whose name contains the type qualifier
+                let tq_dot = format!("{}_dot_", tq);
+                let tq_dunder = format!("__{}", tq);
                 if let Some((_, &v)) = candidates
                     .iter()
-                    .find(|(k, _)| qualified_method_owner_matches(tq, k, method_part))
+                    .find(|(k, _)| k.contains(&tq_dot) || k.contains(&tq_dunder) || k.contains(tq))
                 {
                     return Some(v);
                 }
@@ -1310,9 +1273,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // One predicate for all the unqualified rebinding scans below: either
         // family is a name whose qualifier must not be discarded.
         let no_rebind = enum_helper || bare_builtin_collision;
-        // Once a scan proves ambiguity, a lossy bare-name map must not undo
-        // that refusal later in this resolution chain.
-        let mut ambiguous_unqualified = false;
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
         //
         // AMBIGUITY IS REFUSAL, NOT A COIN FLIP (2026-09-13). These scans used
@@ -1337,7 +1297,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     hits.push(mangled.as_str());
                 }
             }
-            ambiguous_unqualified |= hits.len() > 1;
             resolved_name = unique_unqualified_rebind(&hits, lookup_name, "use_map");
         }
         // Also check import_map for qualified entries where type is imported
@@ -1352,14 +1311,11 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     }
                 }
             }
-            ambiguous_unqualified |= hits.len() > 1;
             resolved_name = unique_unqualified_rebind(&hits, lookup_name, "import_map");
         }
         // Final fallback: import_map bare name (may pick wrong overload)
         if resolved_name.is_none() && !no_rebind {
-            if !ambiguous_unqualified {
-                resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
-            }
+            resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
         }
 
         // If not found and func_name contains '.', try additional name variants.
@@ -1400,8 +1356,16 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         .map(|s| s.as_str());
                 }
 
-                // Never discard an unresolved receiver qualifier: a trait
-                // Read.read_all cannot select a concrete ShbReader.read_all.
+                // Last resort: bare method name. Never for the enum helpers --
+                // discarding the qualifier here is exactly how a qualified
+                // `T.unwrap` reached an unrelated type's `unwrap` (2026-09-13).
+                if resolved_name.is_none() && !enum_helper {
+                    resolved_name = ctx
+                        .use_map
+                        .get(method)
+                        .or_else(|| ctx.import_map.get(method))
+                        .map(|s| s.as_str());
+                }
             }
         }
 
@@ -1421,14 +1385,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
 
         let suffix_resolved_storage;
-        if resolved_name.is_none() && !ambiguous_unqualified {
+        if resolved_name.is_none() {
             suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name);
             resolved_name = suffix_resolved_storage.as_deref();
         }
-
-        // The same bare-name recursion guard must cover cross-module aliases.
-        // Delegating self.inner.read_all() is not recursion on self.
-        resolved_name = resolved_name.filter(|name| !ambiguous_unqualified && !is_self(name));
 
         // The cross-module branch binds by NAME ALONE, exactly like the
         // `func_ids` suffix scan on the other branch — but until 2026-09-13 only
@@ -1462,7 +1422,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             let fid = resolve_unique_module_qualified_func(ctx, resolved.as_ref())
                 .or_else(|| ctx.func_ids.get(resolved.as_ref()).copied())
                 .unwrap_or_else(|| {
-                    let call_conv = ctx.module.isa().default_call_conv();
+                    let call_conv = platform_call_conv();
                     let mut sig = Signature::new(call_conv);
                     let param_count = if is_free_fn { args.len() } else { args.len() + 1 };
                     for _ in 0..param_count {
@@ -1541,15 +1501,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn qualified_receiver_matches_complete_owner_not_trait_substring() {
-        assert!(qualified_method_owner_matches("Reader", "module__Reader_dot_read_all", "read_all"));
-        assert!(qualified_method_owner_matches("Reader", "Reader.read_all", "read_all"));
-        assert!(!qualified_method_owner_matches("Read", "module__ShbReader_dot_read_all", "read_all"));
-        assert!(!qualified_method_owner_matches("Write", "module__SmfWriter_dot_write", "write"));
-        assert!(!qualified_method_owner_matches("Reader", "module__Reader_dot_read_exact", "read_all"));
-    }
 
     #[test]
     fn erased_receiver_ambiguity_falls_through() {
@@ -1951,9 +1902,6 @@ fn try_compile_builtin_method_call<M: Module>(
 ) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
     let receiver_val = get_vreg_or_default(ctx, builder, &receiver);
 
-    // A BARE (unqualified) name is only emitted for an erased receiver, whose
-    // value is a tagged RuntimeValue (see compile_method_call_static).
-    let erased_receiver = !method.contains('.');
     // Extract plain method name from qualified name (e.g., "text.len" -> "len")
     let method = method.rsplit('.').next().unwrap_or(method);
 
@@ -2039,7 +1987,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_int") {
                 fid
             } else {
-                let mut sig = cranelift_codegen::ir::Signature::new(ctx.module.isa().default_call_conv());
+                let mut sig = cranelift_codegen::ir::Signature::new(platform_call_conv());
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 let fid = ctx
@@ -2062,31 +2010,6 @@ fn try_compile_builtin_method_call<M: Module>(
             return Ok(Some(converted));
         }
 
-        // Erased receiver (`list` element, `[Any]` slot): the value is TAGGED,
-        // and HIR types every integer cast on an ANY receiver as its RAW
-        // target type (hir/lower/expr/mod.rs). `rt_to_int_dynamic`'s verbatim
-        // non-text answer is `n << 3`, and the narrow casts reduced that tagged
-        // word. Decode it (text still parses), then narrow. Under the JIT the
-        // inflate decoder's `data[byte_pos].to_i64()` read every byte 8x too
-        // large and `symbol.to_u8()` pushed the low byte of the tag word.
-        let recv_ty_known = ctx.vreg_types.get(&receiver).copied();
-        if erased_receiver && to_is_int && matches!(recv_ty_known, None | Some(TypeId::ANY)) {
-            let decoded = call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val);
-            let converted = match to_ty {
-                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, decoded),
-                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, decoded),
-                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, decoded),
-                _ => decoded,
-            };
-            return Ok(Some(converted));
-        }
-
-        // `??` can leave a text handle typed as Pointer<text> in MIR.
-        // Dispatch opaque receivers by runtime type before an i64 call.
-        if matches!(method, "to_i64" | "to_int") && super::int_cast_needs_runtime_dispatch(from_ty) {
-            return Ok(Some(call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val)));
-        }
-
         // Mirrors the STRING->int branch just above: without this, a STRING
         // receiver falls into the generic from/to conversion below, which
         // assumes `receiver_val` is already a raw numeric register and emits
@@ -2102,7 +2025,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_float") {
                 fid
             } else {
-                let mut sig = cranelift_codegen::ir::Signature::new(ctx.module.isa().default_call_conv());
+                let mut sig = cranelift_codegen::ir::Signature::new(platform_call_conv());
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 let fid = ctx
@@ -2118,7 +2041,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let unbox_func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_value_as_float") {
                 fid
             } else {
-                let mut sig = cranelift_codegen::ir::Signature::new(ctx.module.isa().default_call_conv());
+                let mut sig = cranelift_codegen::ir::Signature::new(platform_call_conv());
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::F64));
                 let fid = ctx
@@ -2222,7 +2145,7 @@ fn try_compile_builtin_method_call<M: Module>(
     }
 
     // FR-COMPILER-012: scalar float intrinsics via MethodCallStatic path
-    if (crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round")) {
+    if matches!(method, "sqrt" | "abs" | "floor" | "ceil" | "round") {
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {
@@ -2231,6 +2154,7 @@ fn try_compile_builtin_method_call<M: Module>(
                 "abs" => builder.ins().fabs(receiver_val),
                 "floor" => builder.ins().floor(receiver_val),
                 "ceil" => builder.ins().ceil(receiver_val),
+                "round" => builder.ins().nearest(receiver_val),
                 _ => unreachable!(),
             };
             return Ok(Some(result_val));
@@ -2265,8 +2189,31 @@ fn try_compile_builtin_method_call<M: Module>(
     // `codegen/instr/methods.rs::compile_builtin_method`.
     // See doc/08_tracking/bug/float_and_int_math_methods_missing_on_numeric_receivers_2026-08-10.md.
     {
-        let unary_rt_name = crate::codegen::scalar_float_methods::rt_math_unary(method);
-        let binary_rt_name = crate::codegen::scalar_float_methods::rt_math_binary(method);
+        let unary_rt_name = match method {
+            "sin" => Some("rt_math_sin"),
+            "cos" => Some("rt_math_cos"),
+            "tan" => Some("rt_math_tan"),
+            "asin" => Some("rt_math_asin"),
+            "acos" => Some("rt_math_acos"),
+            "atan" => Some("rt_math_atan"),
+            "sinh" => Some("rt_math_sinh"),
+            "cosh" => Some("rt_math_cosh"),
+            "tanh" => Some("rt_math_tanh"),
+            "exp" => Some("rt_math_exp"),
+            "ln" => Some("rt_math_log"),
+            "log2" => Some("rt_math_log2"),
+            "log10" => Some("rt_math_log10"),
+            "cbrt" => Some("rt_math_cbrt"),
+            _ => None,
+        };
+        let binary_rt_name = match method {
+            "pow" | "powf" => Some("rt_math_pow"),
+            "max" => Some("rt_math_max"),
+            "min" => Some("rt_math_min"),
+            "atan2" => Some("rt_math_atan2"),
+            "hypot" => Some("rt_math_hypot"),
+            _ => None,
+        };
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {
@@ -2410,7 +2357,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_expect_or_trap") {
                 fid
             } else {
-                let call_conv = ctx.module.isa().default_call_conv();
+                let call_conv = crate::codegen::shared::platform_call_conv();
                 let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
@@ -2498,7 +2445,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let fid = if let Some(&existing) = ctx.func_ids.get("rt_char_from_code") {
                 existing
             } else {
-                let mut sig = Signature::new(ctx.module.isa().default_call_conv());
+                let mut sig = Signature::new(platform_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
                 match ctx.module.declare_function("rt_char_from_code", Linkage::Import, &sig) {
@@ -2683,7 +2630,7 @@ fn try_compile_builtin_method_call<M: Module>(
     let func_id = if let Some(&fid) = ctx.runtime_funcs.get(runtime_func) {
         fid
     } else {
-        let call_conv = ctx.module.isa().default_call_conv();
+        let call_conv = crate::codegen::shared::platform_call_conv();
         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         for _ in 0..(args.len() + 1) {
             sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
@@ -2811,14 +2758,6 @@ fn try_compile_builtin_method_call<M: Module>(
         Ok(Some(receiver_val))
     } else if results.is_empty() {
         Ok(Some(builder.ins().iconst(types::I64, 0)))
-    } else if runtime_func == "rt_array_write_span" {
-        // The runtimes return the RAW i64 count (C twin, pure-Simple lowering and
-        // the seed runtime agree); `write_span` is typed `Any` here, so the
-        // result is consumed as a tagged value. Tag it: `(v << 3) | INT(0)`,
-        // exactly `rt_value_int(v)`.
-        // doc/08_tracking/bug/native_write_span_return_count_decoded_as_tagged_2026-10-05.md
-        let count = super::helpers::safe_extend_to_i64(builder, results[0]);
-        Ok(Some(builder.ins().ishl_imm(count, 3)))
     } else {
         let result = results[0];
         // Extend smaller return types (e.g., I8 from rt_contains) to I64
@@ -2880,7 +2819,7 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     let slot_offset = (vtable_slot as i32) * 8;
     let method_ptr = builder.ins().load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
 
-    let mut sig = Signature::new(ctx.module.isa().default_call_conv());
+    let mut sig = Signature::new(platform_call_conv());
     sig.params.push(AbiParam::new(types::I64));
     for param_ty in param_types {
         sig.params.push(AbiParam::new(type_id_to_cranelift(*param_ty)));
@@ -2970,13 +2909,6 @@ fn try_emit_vtable_type_switch<M: Module>(
         arms.push((data_id, *func_id));
     }
     if arms.is_empty() {
-        return Ok(false);
-    }
-    // The miss arm below calls rt_method_not_found. Runtime functions are
-    // declared per MIR-instruction family (common_backend.rs), so refuse the
-    // switch -- before emitting any IR -- rather than panicking on a missing
-    // map entry; the caller then takes its ordinary dispatch path.
-    if !ctx.runtime_funcs.contains_key("rt_method_not_found") {
         return Ok(false);
     }
 

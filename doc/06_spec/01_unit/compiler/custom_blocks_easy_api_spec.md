@@ -2,13 +2,9 @@
 
 > Tests covering Custom Blocks Easy API, block() - Minimal API, block_with_validation(), const_block() - Compile-time evaluation, BlockBuilder - Fluent API, BlockBuilder - Feature Presets, BlockBuilder - Smart Defaults, compiler.blocks.utils - Pre-built Parsers, compiler.blocks.utils - Pre-built Validators, compiler.blocks.utils - Syntax Highlighting, compiler.blocks.utils - Error Helpers, compiler.blocks.utils - Common Patterns, Block Registration, Recipe: Simple Text Block, Recipe: DSL with Validation, Recipe: Math-Like Syntax, Recipe: Compile-Time Constant, Recipe: IDE-Friendly Block, Performance, Edge Cases, Documentation Examples.
 
-**Source:** `test/01_unit/compiler/custom_blocks_easy_api_spec.spl`
-
-**Evidence scope:** The table counts authored scenarios, not a complete execution receipt. The unchanged suite contains local block API doubles. This repair verifies the actual production `strip_indent` owner in one original failed scenario and four new boundary scenarios; it does not certify the other block APIs or their performance. The original 46 passing scenarios were not rerun.
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 51 | 51 | 0 | 0 |
+| 47 | 47 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -23,13 +19,18 @@
 
 #### creates simple heredoc block with raw text
 
+- creates simple heredoc block with raw text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates simple heredoc block with raw text")
 val block = create_simple_text_block("hello\nworld")
 check_text(block.kind, "raw")
 check_text(block.raw_text, "hello\nworld")
@@ -39,13 +40,18 @@ check_text(block.raw_text, "hello\nworld")
 
 #### creates comment block that processes lines
 
+- creates comment block that processes lines
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates comment block that processes lines")
 val block = create_simple_text_block("line 1\n# line 2")
 check(block.raw_text.contains("# line 2"))
 ```
@@ -54,13 +60,18 @@ check(block.raw_text.contains("# line 2"))
 
 #### returns error for invalid syntax
 
+- returns error for invalid syntax
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns error for invalid syntax")
 val error = error_at_offset(3)
 check_text(error, "error-at-3")
 ```
@@ -71,13 +82,18 @@ check_text(error, "error-at-3")
 
 #### validates block value after parsing
 
+- validates block value after parsing
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates block value after parsing")
 val block = create_validated_sql_block("select * from users")
 check_text(block.validator_name, "simple_validator")
 check(validate_sql_with_dialect(block.raw_text, "sqlite"))
@@ -89,13 +105,18 @@ check(validate_sql_with_dialect(block.raw_text, "sqlite"))
 
 #### evaluates regex at compile time
 
+- evaluates regex at compile time
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("evaluates regex at compile time")
 val block = create_regex_block("/[a-z]+/")
 check_text(block.validator_name, "regex")
 check(validate_regex_pattern(block.raw_text))
@@ -107,13 +128,18 @@ check(validate_regex_pattern(block.raw_text))
 
 #### creates block with chained methods
 
+- creates block with chained methods
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates block with chained methods")
 val builder = BlockBuilder.create()
 builder.raw_text = "alpha"
 builder.set_validator("simple_validator")
@@ -126,13 +152,18 @@ check_text(block.validator_name, "simple_validator")
 
 #### enables math features for tensor block
 
+- enables math features for tensor block
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables math features for tensor block")
 val block = create_tensor_block("tensor block")
 check_text(block.kind, "math")
 ```
@@ -141,13 +172,18 @@ check_text(block.kind, "math")
 
 #### adds validation with simple_validator
 
+- adds validation with simple_validator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds validation with simple_validator")
 val builder = BlockBuilder.create()
 builder.raw_text = "json"
 builder.set_validator("simple_validator")
@@ -159,13 +195,18 @@ check_text(block.validator_name, "simple_validator")
 
 #### provides IDE support with highlighter
 
+- provides IDE support with highlighter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("provides IDE support with highlighter")
 val block = create_ide_block("highlight me")
 check(block.highlight_enabled)
 ```
@@ -176,13 +217,18 @@ check(block.highlight_enabled)
 
 #### enables all math features with preset
 
+- enables all math features with preset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables all math features with preset")
 val builder = BlockBuilder.create()
 builder.enable_math_features()
 val block = builder.build()
@@ -193,13 +239,18 @@ check_text(block.kind, "math")
 
 #### enables pipeline operators with preset
 
+- enables pipeline operators with preset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables pipeline operators with preset")
 val builder = BlockBuilder.create()
 builder.enable_pipeline_operators()
 val block = builder.build()
@@ -212,13 +263,18 @@ check_text(block.kind, "pipeline")
 
 #### uses raw text mode by default
 
+- uses raw text mode by default
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses raw text mode by default")
 val block = BlockBuilder.create().build()
 check_text(block.kind, "raw")
 ```
@@ -227,13 +283,18 @@ check_text(block.kind, "raw")
 
 #### has no syntax features enabled by default
 
+- has no syntax features enabled by default
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has no syntax features enabled by default")
 val block = BlockBuilder.create().build()
 check(block.features.len() >= 1)
 ```
@@ -242,13 +303,18 @@ check(block.features.len() >= 1)
 
 #### provides pass-through validator by default
 
+- provides pass-through validator by default
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("provides pass-through validator by default")
 val block = BlockBuilder.create().build()
 check_text(block.validator_name, "")
 ```
@@ -259,13 +325,18 @@ check_text(block.validator_name, "")
 
 #### parses JSON with utility function
 
+- parses JSON with utility function
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses JSON with utility function")
 check(parse_json_like("{\"name\": \"Alice\"}"))
 ```
 
@@ -273,13 +344,18 @@ check(parse_json_like("{\"name\": \"Alice\"}"))
 
 #### parses YAML with utility function
 
+- parses YAML with utility function
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses YAML with utility function")
 check(parse_yaml_like("name: Alice\nage: 30"))
 ```
 
@@ -287,13 +363,18 @@ check(parse_yaml_like("name: Alice\nage: 30"))
 
 #### parses TOML with utility function
 
+- parses TOML with utility function
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses TOML with utility function")
 check(parse_toml_like("name = \"Alice\""))
 ```
 
@@ -301,13 +382,18 @@ check(parse_toml_like("name = \"Alice\""))
 
 #### parses CSV with utility function
 
+- parses CSV with utility function
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses CSV with utility function")
 check(parse_csv_like("a,b,c"))
 ```
 
@@ -317,13 +403,18 @@ check(parse_csv_like("a,b,c"))
 
 #### validates JSON structure
 
+- validates JSON structure
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates JSON structure")
 check(validate_json_structure("{\"name\": \"Alice\"}"))
 ```
 
@@ -331,13 +422,18 @@ check(validate_json_structure("{\"name\": \"Alice\"}"))
 
 #### validates regex pattern
 
+- validates regex pattern
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates regex pattern")
 check(validate_regex_pattern("/abc/"))
 ```
 
@@ -345,13 +441,18 @@ check(validate_regex_pattern("/abc/"))
 
 #### validates SQL with dialect
 
+- validates SQL with dialect
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates SQL with dialect")
 check(validate_sql_with_dialect("select * from users", "postgres"))
 ```
 
@@ -361,13 +462,18 @@ check(validate_sql_with_dialect("select * from users", "postgres"))
 
 #### highlights keywords in text
 
+- highlights keywords in text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("highlights keywords in text")
 check(highlight_keywords("block builder validator") >= 3)
 ```
 
@@ -375,13 +481,18 @@ check(highlight_keywords("block builder validator") >= 3)
 
 #### highlights strings in text
 
+- highlights strings in text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("highlights strings in text")
 check(highlight_strings("value = \"text\""))
 ```
 
@@ -389,13 +500,18 @@ check(highlight_strings("value = \"text\""))
 
 #### highlights comments in text
 
+- highlights comments in text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("highlights comments in text")
 check(highlight_comments("# comment"))
 ```
 
@@ -403,13 +519,18 @@ check(highlight_comments("# comment"))
 
 #### highlights numbers in text
 
+- highlights numbers in text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("highlights numbers in text")
 check(highlight_numbers("1 2 3"))
 ```
 
@@ -419,13 +540,18 @@ check(highlight_numbers("1 2 3"))
 
 #### creates error at specific offset
 
+- creates error at specific offset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates error at specific offset")
 check_text(error_at_offset(12), "error-at-12")
 ```
 
@@ -433,13 +559,18 @@ check_text(error_at_offset(12), "error-at-12")
 
 #### creates error with span
 
+- creates error with span
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates error with span")
 check_text(error_with_span("block.spl", 3, 8), "block.spl:3:8")
 ```
 
@@ -447,13 +578,18 @@ check_text(error_with_span("block.spl", 3, 8), "block.spl:3:8")
 
 #### converts string errors to BlockError array
 
+- converts string errors to BlockError array
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts string errors to BlockError array")
 val errors = string_errors_to_array("first\nsecond")
 check(errors.len() == 2)
 ```
@@ -464,13 +600,18 @@ check(errors.len() == 2)
 
 #### interpolates variables in text
 
+- interpolates variables in text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("interpolates variables in text")
 check_text(interpolate_variables("Ada"), "Hello, Ada")
 ```
 
@@ -478,84 +619,37 @@ check_text(interpolate_variables("Ada"), "Hello, Ada")
 
 #### strips common indentation
 
+- strips common indentation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("strips common indentation")
 check_text(strip_common_indentation("  one\n  two"), "one\ntwo")
-```
-
-</details>
-
-#### preserves relative indentation with a later smaller minimum
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check_text(strip_common_indentation("    deep\n  shallow"), "  deep\nshallow")
-```
-
-</details>
-
-#### preserves blank lines and trailing spaces
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check_text(strip_common_indentation("\n  one  \n    two\n"), "\none  \n  two\n")
-```
-
-</details>
-
-#### preserves Unicode payload and leaves zero-indented content intact
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check_text(strip_common_indentation("  λ\n  한글"), "λ\n한글")
-check_text(strip_common_indentation("one\n  two"), "one\n  two")
-```
-
-</details>
-
-#### preserves empty content
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check_text(strip_common_indentation(""), "")
 ```
 
 </details>
 
 #### normalizes line endings
 
+- normalizes line endings
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("normalizes line endings")
 check_text(normalize_line_endings("line1\r\nline2"), "normalized-line-endings")
 ```
 
@@ -565,13 +659,18 @@ check_text(normalize_line_endings("line1\r\nline2"), "normalized-line-endings")
 
 #### registers and unregisters blocks
 
+- registers and unregisters blocks
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("registers and unregisters blocks")
 clear_registered_blocks()
 register_block("alpha")
 register_block("beta")
@@ -585,13 +684,18 @@ check_text(names[0], "beta")
 
 #### lists all registered blocks
 
+- lists all registered blocks
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("lists all registered blocks")
 clear_registered_blocks()
 register_block("one")
 register_block("two")
@@ -603,13 +707,18 @@ check(names.len() == 2)
 
 #### provides scoped registration for testing
 
+- provides scoped registration for testing
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("provides scoped registration for testing")
 clear_registered_blocks()
 register_block("scoped")
 check(list_registered_blocks().contains("scoped"))
@@ -623,13 +732,18 @@ check(list_registered_blocks().len() == 0)
 
 #### creates heredoc with trimming
 
+- creates heredoc with trimming
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates heredoc with trimming")
 val block = create_simple_text_block("  line  ")
 check(block.raw_text.starts_with("  "))
 ```
@@ -640,13 +754,18 @@ check(block.raw_text.starts_with("  "))
 
 #### creates validated SQL block
 
+- creates validated SQL block
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates validated SQL block")
 val block = create_validated_sql_block("select id from users")
 check_text(block.validator_name, "simple_validator")
 ```
@@ -657,13 +776,18 @@ check_text(block.validator_name, "simple_validator")
 
 #### creates tensor block with math operators
 
+- creates tensor block with math operators
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates tensor block with math operators")
 val block = create_tensor_block("x + y")
 check_text(block.kind, "math")
 ```
@@ -674,13 +798,18 @@ check_text(block.kind, "math")
 
 #### compiles regex at compile time
 
+- compiles regex at compile time
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compiles regex at compile time")
 val block = create_regex_block("/[0-9]+/")
 check(block.raw_text.contains("0"))
 ```
@@ -691,13 +820,18 @@ check(block.raw_text.contains("0"))
 
 #### provides full IDE support
 
+- provides full IDE support
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("provides full IDE support")
 val block = create_ide_block("suggestions")
 check(block.highlight_enabled)
 ```
@@ -708,13 +842,18 @@ check(block.highlight_enabled)
 
 #### builder compiles away at build time
 
+- builder compiles away at build time
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builder compiles away at build time")
 val builder = BlockBuilder.create()
 val block = builder.build()
 check_text(block.kind, "raw")
@@ -724,13 +863,18 @@ check_text(block.kind, "raw")
 
 #### simple_parser unwraps to full signature
 
+- simple_parser unwraps to full signature
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("simple_parser unwraps to full signature")
 val builder = BlockBuilder.create()
 builder.raw_text = "signature"
 builder.set_validator("pass_through")
@@ -744,13 +888,18 @@ check_text(block.validator_name, "pass_through")
 
 #### handles empty payload
 
+- handles empty payload
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles empty payload")
 val block = create_simple_text_block("")
 check_text(block.raw_text, "")
 ```
@@ -759,13 +908,18 @@ check_text(block.raw_text, "")
 
 #### handles unicode in payload
 
+- handles unicode in payload
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles unicode in payload")
 val block = create_simple_text_block("héllo")
 check(block.raw_text.contains("é"))
 ```
@@ -774,13 +928,18 @@ check(block.raw_text.contains("é"))
 
 #### handles nested braces in raw mode
 
+- handles nested braces in raw mode
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles nested braces in raw mode")
 val block = create_simple_text_block("{{value}}")
 check(block.raw_text.contains("{{"))
 ```
@@ -791,13 +950,18 @@ check(block.raw_text.contains("{{"))
 
 #### minimal example from README
 
+- minimal example from README
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("minimal example from README")
 val block = create_simple_text_block("readme example")
 check_text(block.kind, "raw")
 ```
@@ -806,13 +970,18 @@ check_text(block.kind, "raw")
 
 #### builder example from README
 
+- builder example from README
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builder example from README")
 val builder = BlockBuilder.create()
 builder.raw_text = "builder example"
 builder.enable_math_features()
@@ -824,13 +993,18 @@ check_text(block.kind, "math")
 
 #### feature preset example from README
 
+- feature preset example from README
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("feature preset example from README")
 val builder = BlockBuilder.create()
 builder.enable_pipeline_operators()
 val block = builder.build()
@@ -843,10 +1017,10 @@ check_text(block.kind, "pipeline")
 
 | Field | Value |
 |-------|-------|
-| Category | Other |
+| Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/custom_blocks_easy_api_spec.spl` |
-| Updated | 2026-10-10 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -878,8 +1052,8 @@ Tests covering Custom Blocks Easy API, block() - Minimal API, block_with_validat
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 51 |
-| Active scenarios | 51 |
+| Total scenarios | 47 |
+| Active scenarios | 47 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -887,6 +1061,50 @@ Tests covering Custom Blocks Easy API, block() - Minimal API, block_with_validat
 
 </details>
 
-## Indentation setup ownership
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-The helper `strip_common_indentation` delegates to `compiler.blocks.blocks.text_transforms.strip_indent`. It does not implement a separate local dedent algorithm.
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8f1d7c2d2f2e3c2fabfe7e98ea68cb3260282cca403714627358c9aedd05d13d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8f1d7c2d2f2e3c2fabfe7e98ea68cb3260282cca403714627358c9aedd05d13d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8f1d7c2d2f2e3c2fabfe7e98ea68cb3260282cca403714627358c9aedd05d13d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/compiler/custom_blocks_easy_api_spec.spl
+mirror: doc/06_spec/01_unit/compiler/custom_blocks_easy_api_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/compiler/custom_blocks_easy_api_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/compiler/custom_blocks_easy_api_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/compiler/custom_blocks_easy_api_spec.spl:180:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates simple heredoc block with raw text' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/custom_blocks_easy_api_spec.spl:187:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates comment block that processes lines' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/custom_blocks_easy_api_spec.spl:193:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns error for invalid syntax' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

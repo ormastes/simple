@@ -1,0 +1,41 @@
+"""
+# Interpreter: a user `fn generator(...)` shadows the lambda-based builtin
+
+**Category:** Semantics / builtin dispatch
+**Bug:** doc/08_tracking/bug/generator_identifier_collides_with_builtin_construct_name_2026-08-11.md
+
+## Overview
+
+The interpreter's builtin dispatch runs before user-function lookup, so any
+call named `generator` hit the builtin `generator(lambda)` even when the
+program (or the stdlib module `std.generator`) defines its own
+`fn generator(initial, step_fn)`. The first argument is then not a lambda and
+the call failed with `semantic: generator expects a lambda` — breaking the
+exact usage documented in `src/lib/nogc_async_mut/generator.spl`.
+
+The fix makes the builtin defer to a user-defined `generator` function; the
+stdlib import pattern from the bug report is the repro, and a locally defined
+`fn generator` is the generalization probe.
+"""
+
+use std.spec
+use std.generator.{generator, generate_range, generate_repeat, take}
+
+describe("user-defined generator shadows the builtin"):
+    it("std.generator.generate_range and take work as documented"):
+        val g = generate_range(0, 5)
+        val xs = take(g, 3)
+        assert_equal(xs.len(), 3)
+        assert_equal(xs[0], 0)
+        assert_equal(xs[2], 2)
+
+    it("calls the user-defined generator function directly with a non-lambda first arg"):
+        val counter = generator(10, fn(n): (n + 1, n < 13))
+        val ys = take(counter, 3)
+        assert_equal(ys.len(), 3)
+        assert_equal(ys[0], 10)
+
+    it("generate_repeat also routes through the user-defined generator"):
+        val ones = take(generate_repeat(1), 4)
+        assert_equal(ones.len(), 4)
+        assert_equal(ones[3], 1)

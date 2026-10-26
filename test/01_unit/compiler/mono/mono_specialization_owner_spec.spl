@@ -10,7 +10,6 @@ use std.spec.step
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics, MonomorphizationPass}
-use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 
 
 fn mk_span() -> Span:
@@ -190,6 +189,30 @@ describe "generic specialization target names use the emitted owner":
     it "preserves bare same-owner calls":
         verify_owner("owner", "owner", "identity", mk_type(HirTypeKind.Str), "identity$str", "identity$str")
 
+    it "rejects a missing owner map entry":
+        val modules = make_modules("owner", "main", "identity", mk_type(HirTypeKind.Str))
+        var mono = MonomorphizationPass.create()
+        val first = mono.process_modules(modules)
+        expect(mono.diagnostics.len()).to_equal(0)
+        mono.spec_module = {}
+        mono.current_module = "main"
+        val original: HirFunction = modules["main"].functions[SymbolId(id: 2)]
+        val rewritten = mono.rewrite_function(original)
+        expect(mono.diagnostics.len()).to_equal(1)
+        expect(mono.diagnostics[0]).to_contain("E-MONO-034")
+
+    it "rejects an empty owner map entry":
+        val modules = make_modules("owner", "main", "identity", mk_type(HirTypeKind.Str))
+        var mono = MonomorphizationPass.create()
+        val first = mono.process_modules(modules)
+        expect(mono.diagnostics.len()).to_equal(0)
+        mono.spec_module["identity$str"] = ""
+        mono.current_module = "main"
+        val original: HirFunction = modules["main"].functions[SymbolId(id: 2)]
+        val rewritten = mono.rewrite_function(original)
+        expect(mono.diagnostics.len()).to_equal(1)
+        expect(mono.diagnostics[0]).to_contain("E-MONO-034")
+
 describe "generic targets preserve canonical provider linkage":
     it "normalizes source-path ownership into the emitted logical module":
         verify_owner("src/lib/nested/provider.spl", "main", "identity", mk_type(HirTypeKind.Str), "identity$str", "lib.nested.provider.identity$str")
@@ -217,119 +240,3 @@ describe "generic targets preserve canonical provider linkage":
         val (result, stats, diags) = run_monomorphization_with_diagnostics(modules)
         expect(diags.len()).to_equal(0)
         expect(named_call(result["main"])).to_equal("identity$str")
-
-describe "fixed-point specialization inventory placement":
-    it "includes a specialization discovered only while draining the worklist":
-        step("make the first generic body request a second generic instance")
-        var modules = make_modules("owner", "caller", "identity", mk_type(HirTypeKind.Int(64, true)))
-        var owner: HirModule = modules["owner"]
-        val owner_functions: [HirFunction] = owner.functions.values()
-        var outer: HirFunction = owner_functions[0]
-        expect(outer.name).to_equal("identity")
-        var deferred = outer
-        deferred.name = "deferred"
-        deferred.symbol = SymbolId(id: 3)
-        val generic_type = mk_type(HirTypeKind.TypeParam("T", []))
-        val argument = HirExpr(kind: HirExprKind.Var(SymbolId(id: 91)), has_type_: true, type_: generic_type, span: mk_span())
-        val call = mk_expr(HirExprKind.Call(
-            mk_expr(HirExprKind.NamedVar(deferred.symbol, "deferred")),
-            [HirCallArg(has_name: false, name: "", value: argument, span: mk_span())],
-            [generic_type]))
-        outer.body = mk_block([HirStmt(kind: HirStmtKind.Expr(call), span: mk_span())])
-        owner.functions[outer.symbol] = outer
-        owner.functions[deferred.symbol] = deferred
-        modules["owner"] = owner
-        var pass_ = MonomorphizationPass.create()
-        val output = pass_.process_modules(modules)
-        expect(pass_.diagnostics.len()).to_equal(0)
-        expect(pass_.stats.specializations_created).to_equal(2)
-        expect(pass_.spec_queue).to_equal(["identity$i64", "deferred$i64"])
-        expect(output["owner"].functions.len()).to_equal(2)
-        for mangled in pass_.spec_queue:
-            val spec: HirFunction = pass_.specialized_functions[mangled]
-            expect(output["owner"].functions.has(spec.symbol)).to_equal(true)
-
-    it "preserves module and specialization order across owners and aliases":
-        step("request two concrete instances and retain two logical aliases of one provider")
-        var modules = make_modules("pkg.provider", "text_caller", "identity", mk_type(HirTypeKind.Str))
-        val integer_modules = make_modules("pkg.provider", "integer_caller", "identity", mk_type(HirTypeKind.Int(64, true)))
-        modules["integer_caller"] = integer_modules["integer_caller"]
-        modules["provider_alias"] = modules["pkg.provider"]
-        var unrelated: HirModule = modules["pkg.provider"]
-        unrelated.name = "unrelated"
-        unrelated.functions = {}
-        modules["unrelated"] = unrelated
-        var anonymous = unrelated
-        anonymous.name = ""
-        modules["anonymous"] = anonymous
-        val input_keys = modules.keys()
-        var pass_ = MonomorphizationPass.create()
-        val output = pass_.process_modules(modules)
-        expect(pass_.diagnostics.len()).to_equal(0)
-        expect(pass_.stats.specializations_created).to_equal(2)
-        expect(output.keys()).to_equal(input_keys)
-        val keys = pass_.specialized_functions.keys()
-        expect(keys.len()).to_equal(2)
-        expect(keys).to_equal(["identity$str", "identity$i64"])
-        expect(named_call(output["text_caller"])).to_end_with("identity$str")
-        expect(named_call(output["integer_caller"])).to_end_with("identity$i64")
-        step("check exact placement order, preserved callable rows, and consumed-template pruning")
-        for name in input_keys:
-            val module: HirModule = output[name]
-            var expected: [text] = []
-            for mangled in keys:
-                val owner: text = pass_.spec_module[mangled]
-                val physical = hir_symbol_owner_module(module.name)
-                val owner_module: HirModule = modules[owner]
-                if owner == name or (physical != "" and hir_symbol_owner_module(owner_module.name) == physical):
-                    expected.push(mangled)
-                    val spec: HirFunction = pass_.specialized_functions[mangled]
-                    expect(module.functions.has(spec.symbol)).to_equal(true)
-                    var found_row = false
-                    if val row = module.symbols.get_symbol_raw(spec.symbol.id):
-                        found_row = true
-                        expect(row.name).to_equal(mangled)
-                        expect(row.defining_module).to_equal(name)
-                    expect(found_row).to_equal(true)
-            var actual: [text] = []
-            for symbol in module.functions.keys():
-                val function: HirFunction = module.functions[symbol]
-                if pass_.specialized_functions.has(function.name):
-                    actual.push(function.name)
-                expect(function.name == "identity").to_equal(false)
-            expect(actual).to_equal(expected)
-            if name == "pkg.provider" or name == "provider_alias":
-                expect(actual).to_equal(["identity$str", "identity$i64"])
-            else:
-                expect(actual.len()).to_equal(0)
-            if expected.len() > 0:
-                expect(module.symbols.next_symbol_id).to_equal(pass_.next_symbol)
-        expect(output["pkg.provider"].functions.len()).to_equal(2)
-        expect(output["provider_alias"].functions.len()).to_equal(2)
-        expect(output["unrelated"].functions.len()).to_equal(0)
-        expect(output["anonymous"].functions.len()).to_equal(0)
-
-    it "retains unconsumed templates when no specialization was requested":
-        step("run the placement loop with a generic definition and no roots")
-        var modules = make_modules("owner", "caller", "identity", mk_type(HirTypeKind.Str))
-        var caller: HirModule = modules["caller"]
-        caller.functions = {}
-        modules["caller"] = caller
-        var pass_ = MonomorphizationPass.create()
-        val output = pass_.process_modules(modules)
-        expect(pass_.specialized_functions.len()).to_equal(0)
-        expect(output.keys()).to_equal(modules.keys())
-        expect(output["owner"].functions.len()).to_equal(1)
-        val templates: [HirFunction] = output["owner"].functions.values()
-        val template: HirFunction = templates[0]
-        expect(template.name).to_equal("identity")
-        expect(template.type_params.len()).to_equal(1)
-        expect(output["caller"].functions.len()).to_equal(0)
-
-    it "preserves the empty module inventory":
-        step("run the real pass with no modules")
-        var pass_ = MonomorphizationPass.create()
-        val modules: Dict<text, HirModule> = {}
-        val output = pass_.process_modules(modules)
-        expect(output.len()).to_equal(0)
-        expect(pass_.specialized_functions.len()).to_equal(0)

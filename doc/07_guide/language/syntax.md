@@ -6,7 +6,7 @@ This guide covers core syntax elements: constructors, methods, lambdas, collecti
 
 ## Variables and Bindings
 
-```text
+```simple
 val name = "Alice"                    # Immutable (preferred)
 name := "Alice"                       # Walrus operator (:= is val synonym)
 var count = 0                         # Mutable
@@ -37,7 +37,7 @@ This works immediately without any `impl` block. Use named parameters for clarit
 
 Add `fn new()` or other factory methods when you need validation, defaults, or custom logic:
 
-```simple:skip
+```simple
 impl Point:
     fn new(x: i64, y: i64) -> Point:
         return Point(abs(x), abs(y))
@@ -58,7 +58,7 @@ val o = Point.origin()               # (0, 0)
 
 You can also use explicit `static fn` for maximum clarity:
 
-```simple:skip
+```simple
 impl Point:
     static fn new(x: i64, y: i64) -> Point:
         return Point(x, y)
@@ -140,7 +140,7 @@ val o = Point.origin()
 
 Implicit `self` parameter with read-only access:
 
-```simple:skip
+```simple
 impl Point:
     fn distance_from_origin() -> f64:
         return sqrt(self.x * self.x + self.y * self.y)
@@ -150,7 +150,7 @@ impl Point:
 
 Use `me` keyword to declare methods that modify `self`:
 
-```simple:skip
+```simple
 impl Point:
     me move_by(dx: i64, dy: i64):
         self.x = self.x + dx
@@ -171,7 +171,7 @@ p.move_by(1, 2)                       # Mutable method
 
 ## Functions
 
-```simple:skip
+```simple
 fn square(x: i64) -> i64:
     x * x                             # Implicit return (last expression)
 
@@ -199,14 +199,14 @@ Simple supports three equivalent lambda syntaxes:
 Use `\_:` as the canonical compact callback form when the argument is ignored
 but the higher-order call still needs a function:
 
-```text
+```simple
 val separators = headers.map(\_: "---")
 val no_op = future.then(\_: ())
 ```
 
 ### fn() Syntax
 
-```simple:skip
+```simple
 val doubled = numbers.map(fn(x): x * 2)
 val evens = numbers.filter(fn(x): x % 2 == 0)
 
@@ -222,14 +222,14 @@ val transform = fn(x):
 
 ### Backslash Syntax
 
-```text
+```simple
 val doubled = numbers.map(\x: x * 2)
 val add = \x, y: x + y
 ```
 
 ### Placeholder Syntax
 
-```text
+```simple
 items.map(_ * 2)                      # Single parameter
 items.map(_1 + _2)                    # Numbered placeholders
 words.map(&:len)                      # Method reference
@@ -249,7 +249,7 @@ val result = add_5(3)                 # 8
 
 ## String Interpolation
 
-```text
+```simple
 print "Hello, {name}!"               # Default: interpolated
 print r"raw: \d+"                     # Raw string (no interpolation)
 ```
@@ -275,7 +275,7 @@ must not first create an eagerly interpolated `text`.
 
 ## Pattern Matching
 
-```simple:skip
+```simple
 match value:
     Some(x): process(x)
     nil: handle_missing()
@@ -289,7 +289,7 @@ match shape:
 
 ## Optional Chaining and Coalescing
 
-```simple:skip
+```simple
 user?.name                            # Optional chaining
 user?.profile?.email                  # Chained navigation
 name ?? "Anonymous"                   # Nil coalescing
@@ -300,7 +300,7 @@ user?.name ?? "Unknown"               # Combined
 
 ## Comprehensions
 
-```text
+```simple
 [for x in 0..10 if x % 2 == 0: x]           # List comprehension
 [for x in items: x * 2]                      # Map-style
 [for x in items if x > 0: x]                 # Filter-style
@@ -338,7 +338,7 @@ val data = {"key": "value", "count": 42}
 
 ### Sets
 
-```text
+```simple
 val nums = s{1, 2, 3}               # Set<i64>
 val words = s{"hello", "world"}      # Set<text>
 val empty: Set<i64> = s{}            # Empty set (type annotation required)
@@ -346,13 +346,13 @@ val empty: Set<i64> = s{}            # Empty set (type annotation required)
 
 Sets automatically deduplicate elements:
 
-```text
+```simple
 val nums = s{1, 2, 2, 3}            # Only {1, 2, 3}
 ```
 
 #### Set Operations
 
-```text
+```simple
 val a = s{1, 2, 3}
 val b = s{2, 3, 4}
 
@@ -387,7 +387,7 @@ val str_box = Container.new("hello") # T inferred as text
 Use angle brackets `<>` for generic type parameters. Use `[]` for array types
 and literals:
 
-```text
+```simple
 List<i64>                            # Correct
 Option<text>                         # Correct
 [i64]                                # Correct array type
@@ -411,7 +411,7 @@ val none = nil
 
 ## Traits
 
-```simple:skip
+```simple
 trait Serializable:
     fn serialize() -> text
 
@@ -429,7 +429,7 @@ fn process<T: Serializable & Comparable>(item: T):
 
 Embed Lean 4 formal proofs directly in Simple source:
 
-```text
+```simple
 lean{
 theorem add_comm : forall a b : Nat, a + b = b + a := by
     omega
@@ -441,13 +441,13 @@ fn add(a: i64, b: i64) -> i64:
 
 Import external Lean files:
 
-```text
+```simple
 lean import "proofs/math_lemmas.lean"
 ```
 
 Contracts on `@verify` functions are automatically converted to Lean theorems:
 
-```text
+```simple
 @verify
 fn divide(a: i64, b: i64) -> i64:
     in: b != 0
@@ -459,7 +459,7 @@ fn divide(a: i64, b: i64) -> i64:
 
 ## Special Markers
 
-```text
+```simple
 pass_todo                             # Marks unimplemented code
 pass_do_nothing                       # Intentional no-op
 pass_dn                               # Alias for pass_do_nothing
@@ -469,7 +469,7 @@ pass_dn                               # Alias for pass_do_nothing
 
 ## Struct, Class, and Type Aliases
 
-```simple:skip
+```simple
 struct Point:                         # Value type
     x: i64
     y: i64
@@ -492,7 +492,7 @@ Phase 3 of the typed-core RFC (`doc/05_design/ui_typed_core_rfc.md`) adds 26 flu
 
 ### Panel construction example
 
-```simple:skip
+```simple
 use std.ui.{WidgetNode, WidgetKind, LayoutKind, Spacing, SurfaceRole, ThemeRegistry, ThemeId}
 
 fn build_settings_panel(theme: ThemeRegistry) -> WidgetNode:
@@ -518,7 +518,7 @@ Each `node = node.method(...)` line reassigns the local `var` — the pattern is
 
 ### Responsive layout (Phase 6)
 
-```simple:skip
+```simple
 use std.ui.{SizeClass, Orientation}
 
 var node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Row)
@@ -531,7 +531,7 @@ node = node.show_when_at_least(SizeClass.Compact)
 
 Once `doc/05_design/compiler_rfc_method_chain_fix.md` lands, the following will compile:
 
-```simple:skip
+```simple
 # Future only — not available yet
 val node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
     .width(400)

@@ -1,6 +1,5 @@
 # LLVM inline assembly dialect false success
 
-Status: open; source workaround active, permanent compiler repair pending.
 Bug ID: `llvm_inline_asm_dialect_false_green_2026_10_12`. Status: verified source workaround; permanent compiler repair and authoritative bug DB reconciliation pending.
 
 The private Phase1 producer `d95807daf8725254e6737f12b0a81965ac5ae0a9236b19eedac94940bd9867f1` with matching LLVM 23.1.1 reports errors for bare Intel port instructions, returns successful native-build status, and publishes objects without those instructions. A minimal probe emitted `xor eax,eax; ret` instead of the requested port operations. Process exit and object existence cannot prove correct code generation.
@@ -16,12 +15,3 @@ Recovery reference: `b8b0962d41b54d951cf625b0dc64a6c05fdc22c6`, original owner i
 Permanent repair must propagate assembly dialect correctly and fail object publication/cache admission when LLVM reports assembly errors. Prevention cases must include invalid assembly returning nonzero without a usable artifact, valid AT&T, explicit Intel syntax, each operand width, and adjacent assembly after dialect restoration. Check both Rust seed and pure-Simple emission: the reviewed pure-Simple emitter already transports explicit `intel_syntax`; it must not be changed merely because the seed fails.
 
 Remove only the tagged workaround after applying the permanent repair and verifying the original instruction-byte reproducer. Fetching a repair alone is insufficient. These checks do not qualify privileged hardware execution, universal memory/performance behavior, test products, or full Phase3.
-
-## release_phase3 port linkage (2026-10-19)
-
-The original recovery reference `b8b0962d41b` and workaround commit `0f4d5081cee`
-exist only in a local worktree. On the release_phase3 port (PR #3803) the
-workaround commit is `ef00661e2e38368279179acdfeb5fb4424514dba`, and the source tags
-now use `recover=5c225cff453d79a5a1c8b172d5bda6f0215f86f7`, its parent on that
-branch, which still has the original port instructions. A row was added to
-`bug_db.sdn` by hand; qualified bug-database reconciliation remains pending.

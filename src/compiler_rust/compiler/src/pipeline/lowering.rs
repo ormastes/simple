@@ -211,11 +211,6 @@ fn handle_lenient_type_check_error(e: impl std::fmt::Debug) -> Result<(), Compil
     if message.contains("Undefined(\"undefined identifier:") {
         return Err(CompileError::Semantic(message));
     }
-    // No-GC ownership-sigil violations are only produced under the opt-in
-    // `@no_gc(strict)` / SIMPLE_NOGC_STRICT=1 mode, and are always fatal there.
-    if message.starts_with("Ownership(") {
-        return Err(CompileError::Semantic(message));
-    }
     eprintln!("warning: type check: {} (continuing)", message);
     Ok(())
 }
@@ -1742,13 +1737,12 @@ impl CompilerPipeline {
         let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
         let coverage_enabled = self.coverage_enabled || crate::coverage::is_coverage_enabled();
         let file_for_coverage = source_file.map(|p| p.display().to_string());
-        let mut mir_module = mir::lower_to_mir_full_with_file_and_word_lane(
+        let mut mir_module = mir::lower_to_mir_full_with_file(
             &hir_module,
             self.contract_mode,
             di_config,
             coverage_enabled,
             file_for_coverage,
-            self.signed_word_lane,
         )
         .map_err(|e| crate::error::factory::mir_lowering_failed(&e))?;
 

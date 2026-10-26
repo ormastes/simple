@@ -19,32 +19,37 @@
 # returns `text`, which is lossy for binary pack bytes), so an aligned mmap
 # window IS the pread here: map, read out, unmap.
 
-# The raw descriptor family owns the tokens consumed by rt_mmap_raw on both
-# Unix and Windows. The positioned-read fast path uses its separate
-# rt_io_file_* owner; the cached Windows interpreter returns -1 from its
-# unsupported open provider, so that case uses the aligned-window owner.
-# Tokens never cross provider families. Only requested bytes are copied,
-# with no readahead hint.
+# NOTE ON EXTERN CHOICE. Three families were tried against the runtime's
+# extern registry, and only one is universally available:
+#   - rt_open_fd / rt_page_size (declared in 99.loader/loader/smf_mmap_native.spl)
+#     are NOT registered at all -- "unknown extern function".
+#   - rt_mmap / rt_munmap / rt_madvise (the path-based std.io family) are
+#     registered for native codegen but NOT in the interpreter, which is the
+#     engine `bin/simple test` runs on.
+#   - rt_io_file_open / _seek / _read / _close ARE registered in both. They give
+#     a genuine positioned byte read -- a real pread, with no page-alignment
+#     constraint at all -- which is the primary mechanism §15 asks for
+#     ("Map or `pread` only the uncompressed pack directory").
+# rt_mmap_raw / rt_munmap_raw / rt_ptr_read_u8 are also registered in both, so
+# the aligned-window mmap path is kept for callers that want a large range
+# resident without copying it. mmap DOES require an aligned offset, which is
+# what _apkio_page_size and the delta arithmetic below exist for.
 use std.nogc_sync_mut.io_runtime.{file_size_signed}
-use .smf_mmap_native.{native_mmap_read_bytes}
 
 @unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
-extern fn rt_open_fd(path: text, flags: i64, mode: i64) -> i64
-@unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
-extern fn rt_close_fd(fd: i64) -> i64
-@unsafe(reason: "positioned file descriptor provider boundary", capabilities: [ffi])
 extern fn rt_io_file_open(path: text, mode: i64) -> i64
-@unsafe(reason: "positioned file descriptor provider boundary", capabilities: [ffi])
+@unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
 extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
-@unsafe(reason: "positioned file descriptor provider boundary", capabilities: [ffi])
+@unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
 extern fn rt_io_file_read(fd: i64, size: i64) -> [u8]
-@unsafe(reason: "positioned file descriptor provider boundary", capabilities: [ffi])
+@unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
 extern fn rt_io_file_close(fd: i64) -> bool
 @unsafe(reason: "raw borrowed file mapping and pointer result", capabilities: [ffi, raw_ptr])
 extern fn rt_mmap_raw(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
 @unsafe(reason: "raw mapped-pointer extent release", capabilities: [ffi, raw_ptr])
 extern fn rt_munmap_raw(addr: i64, length: i64) -> i64
-val APKIO_OPEN_READ_ONLY: i64 = 0
+@unsafe(reason: "nonnull raw read; aspect-pack allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
 val APKIO_MODE_READ: i64 = 0
 val APKIO_SEEK_SET: i64 = 0
 val APKIO_PROT_READ: i64 = 0x1
@@ -122,14 +127,14 @@ fn pack_window_map(path: text, want_offset: i64, want_length: i64) -> PackWindow
 
     var fd: i64 = -1
     unsafe(capabilities: [ffi]):
-        fd = rt_open_fd(path, APKIO_OPEN_READ_ONLY, 0)
+        fd = rt_io_file_open(path, APKIO_MODE_READ)
     if fd < 0:
         return _apkio_window_error("APKIO_OPEN_FAILED", "cannot open {path}")
     var addr: i64 = APKIO_MAP_FAILED
     unsafe(capabilities: [ffi, raw_ptr]):
         addr = rt_mmap_raw(0, map_length, APKIO_PROT_READ, APKIO_MAP_PRIVATE, fd, aligned_base)
     unsafe(capabilities: [ffi]):
-        _ = rt_close_fd(fd)
+        _ = rt_io_file_close(fd)
     if addr == APKIO_MAP_FAILED or addr == 0:
         return _apkio_window_error("APKIO_MMAP_FAILED",
             "mmap of {map_length} bytes at aligned offset {aligned_base} failed")
@@ -139,17 +144,17 @@ fn pack_window_map(path: text, want_offset: i64, want_length: i64) -> PackWindow
 
 fn pack_window_bytes(w: PackWindow) -> [u8]:
     """Exactly want_length bytes of the requested range, alignment handled."""
-    if not w.ok or w.address <= 0 or w.data_offset < 0 or w.want_length <= 0:
+    if not w.ok or w.address == 0:
         return []
-    if w.want_length > APKIO_MAX_RANGE_BYTES or w.want_length > w.map_length or
-            w.data_offset > w.map_length - w.want_length:
-        return []
-    if w.address > 9223372036854775807 - w.data_offset:
-        return []
-    # One borrowed-range copy through the existing native owner; no per-byte
-    # FFI calls on the index-cache path. The caller retains the live window.
-    unsafe(capabilities: [raw_ptr]):
-        native_mmap_read_bytes(w.address, w.data_offset, w.want_length)
+    var out: [u8] = []
+    var i = 0
+    while i < w.want_length:
+        var byte: i64 = 0
+        unsafe(capabilities: [ffi, raw_ptr]):
+            byte = rt_ptr_read_u8(w.address, w.data_offset + i)
+        out.push((byte & 0xFF).to_u8())
+        i = i + 1
+    out
 
 fn pack_window_unmap(w: PackWindow) -> bool:
     if w.address == 0 or w.map_length <= 0:
@@ -168,13 +173,18 @@ fn pack_window_unmap(w: PackWindow) -> bool:
 # whole-file MADV_SEQUENTIAL readahead can be issued on a pack.
 
 fn pack_read_range(path: text, offset: i64, length: i64) -> [u8]:
-    """Read exactly the requested range through its available provider owner.
+    """Positioned read of exactly [offset, offset+length) -- a real pread.
 
-    Keep the positioned bulk path when supported, and fall back to a bounded
-    aligned-window bulk copy when its open provider is unavailable. Adjacent
-    mapped bytes are never read. Declaration and EOF guards run before either
-    path. Returns [] on failure."""
-    if offset < 0 or length <= 0 or length > APKIO_MAX_RANGE_BYTES:
+    This is the PRIMARY §15 mechanism and is what the index path uses: no
+    page-alignment constraint, no mapping, and no readahead of any kind. A
+    short read is a failure, not a truncated success: returning fewer bytes
+    than asked for would hand the caller a silently wrong directory.
+
+    Returns [] on any failure -- callers that need the reason should use
+    pack_window_map, which reports an error_code."""
+    if offset < 0 or length <= 0:
+        return []
+    if length > APKIO_MAX_RANGE_BYTES:
         return []
     val fsize = file_size_signed(path)
     if fsize <= 0 or length > fsize or offset > fsize - length:
@@ -182,27 +192,20 @@ fn pack_read_range(path: text, offset: i64, length: i64) -> [u8]:
     var fd: i64 = -1
     unsafe(capabilities: [ffi]):
         fd = rt_io_file_open(path, APKIO_MODE_READ)
-    if fd >= 0:
-        var positioned: i64 = -1
-        unsafe(capabilities: [ffi]):
-            positioned = rt_io_file_seek(fd, offset, APKIO_SEEK_SET)
-        if positioned != offset:
-            unsafe(capabilities: [ffi]):
-                _ = rt_io_file_close(fd)
-            return []
-        var bytes: [u8] = []
-        unsafe(capabilities: [ffi]):
-            bytes = rt_io_file_read(fd, length)
-            _ = rt_io_file_close(fd)
-        if bytes.len() != length:
-            return []
-        return bytes
-    val window = pack_window_map(path, offset, length)
-    if not window.ok:
+    if fd < 0:
         return []
-    val bytes = pack_window_bytes(window)
-    val released = pack_window_unmap(window)
-    if not released or bytes.len() != length:
+    var positioned: i64 = -1
+    unsafe(capabilities: [ffi]):
+        positioned = rt_io_file_seek(fd, offset, APKIO_SEEK_SET)
+    if positioned != offset:
+        unsafe(capabilities: [ffi]):
+            _ = rt_io_file_close(fd)
+        return []
+    var bytes: [u8] = []
+    unsafe(capabilities: [ffi]):
+        bytes = rt_io_file_read(fd, length)
+        _ = rt_io_file_close(fd)
+    if bytes.len() != length:
         return []
     bytes
 

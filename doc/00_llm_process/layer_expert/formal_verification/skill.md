@@ -52,19 +52,3 @@ Coordinate target-local changes with the MIR-lowering, backend, compiler-driver,
 bootstrap, or hardware-RTL layer expert as appropriate. The FV2 merge owner
 resolves cross-layer interface changes; the independent final reviewer accepts
 done marks.
-
-When reviewing generic proofs, verify that manual constraints are actual Lake
-build targets. The `GenericsConstraints` target covers reduced-model closed
-substitution and nominal constructor laws; it does not close the compiler or
-bootstrap artifact refinement arrows above.
-
-The separate `GenericSubstModel` target adds arbitrary-arity MType applications,
-unknown exclusion and conditional substitution proofs. Review its explicit
-Dict/array, by-symbol, HIR metadata and executable-refinement obligations before
-using its laws. Its proof build is not full generic implementation verification,
-and its structural correspondence is not a discharged refinement theorem.
-
-`MonoBoundaryModel` (manual default target, 2026-10-19) models variant
-shadowing of type bindings, the E-MONO-041 owner proof and E-MONO-033
-boundary soundness. Its boundary theorem assumes `DiagComplete`; the real
-pass's diagnostic coverage is open (plan §12, O-12.1). Not kernel-built yet.

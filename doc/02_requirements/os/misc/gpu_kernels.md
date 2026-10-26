@@ -14,7 +14,7 @@ and asynchronous execution with proper synchronization.
 
 ## Syntax
 
-```simple:skip
+```simple
 # GPU kernel declaration
 kernel matrix_multiply(a: Matrix, b: Matrix) -> Matrix:
     # GPU-compiled code
@@ -58,7 +58,7 @@ GPU kernel support requires:
 
 ## Examples
 
-```simple:skip
+```simple
 # Simple GPU kernel
 kernel vector_add(a: Vector, b: Vector) -> Vector:
     # Parallel vector addition

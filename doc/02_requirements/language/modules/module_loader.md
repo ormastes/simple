@@ -37,7 +37,7 @@ Simple Module Format (SMF) is the binary module format:
 
 ## Syntax
 
-```simple:skip
+```simple
 # Load a module
 val module = loader.load("path/to/module.smf")
 

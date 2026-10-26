@@ -1,0 +1,37 @@
+# Production routing contract for the internal x86-64/ARM64 SimpleOS linker.
+
+use std.spec.*
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text
+
+val SOURCE = "src/compiler/70.backend/backend/simpleos_native_linkers.spl"
+
+describe "SimpleOS production internal-link routing":
+    it "routes all supported production branches before their external fallback":
+        step("Inspect ARM64, x86-64 userspace, and x86-64 kernel branches")
+        val source = rt_file_read_text(SOURCE) ?? ""
+        expect(source.split("if _simpleos_internal_requested():").len() - 1).to_equal(3)
+        expect(source.split("val internal = _simpleos_internal_link(").len() - 1).to_equal(3)
+
+        val arm = source.split("fn link_simpleos_arm64")[1].split(
+            "fn compile_simpleos_x86_64_asm")[0]
+        expect(arm.index_of("_simpleos_internal_link") ?? -1).to_be_less_than(
+            arm.index_of("process_run(\"ld.lld\"") ?? -1)
+        expect(arm).to_contain("\"simpleos-aarch64\"")
+
+    it "preserves x86 userspace archives, wrapping, and legacy kernel inputs":
+        step("Verify exact production inputs cross the internal facade")
+        val source = rt_file_read_text(SOURCE) ?? ""
+        val x86 = source.split("fn link_simpleos_x86_64(")[1].split(
+            "pub fn link_simpleos_x86_64_external")[0]
+        expect(x86).to_contain("internal_objects, [support[1], support[2]], output")
+        expect(x86).to_contain("--wrap=__simple_call_module_inits")
+        expect(x86).to_contain("crt_o, stubs_o, service_owners_o, registry_o, type_o, auto_o, init_o")
+        expect(x86.split("_simpleos_internal_link(").len() - 1).to_equal(2)
+
+    it "keeps the default external linker path available":
+        step("Internal selection is explicit and does not replace default ld.lld behavior")
+        val source = rt_file_read_text(SOURCE) ?? ""
+        expect(source).to_contain("process_run(\"ld.lld\", args)")
+        expect(source).to_contain("val (_user_out, user_err, user_code) = process_run(linker, user_args)")

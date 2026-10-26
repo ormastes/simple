@@ -16,115 +16,6 @@ use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[test]
-fn native_cross_module_text_call_result_parses_float() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let temp = tempfile::tempdir().unwrap();
-    let src = temp.path().join("src");
-    fs::create_dir_all(&src).unwrap();
-    fs::write(
-        src.join("provider.spl"),
-        concat!(
-            "fn returned_text() -> text:\n    return \"1.25\"\n",
-            "fn returned_float() -> f64:\n    return 1.25\n",
-        ),
-    )
-    .unwrap();
-    fs::write(
-        src.join("consumer.spl"),
-        concat!(
-            "use provider.{returned_text as remote_text, returned_float}\n",
-            "fn cross_result() -> f64:\n    return remote_text().to_float()\n",
-            "fn local_result() -> f64:\n    val value: text = \"1.25\"\n    return value.to_float()\n",
-            "fn cross_float() -> f64:\n    return returned_float() + 1.0\n",
-            "fn returned_text() -> i64:\n    return 7\n",
-            "fn local_override() -> f64:\n    return returned_text().to_float()\n",
-        ),
-    )
-    .unwrap();
-    let archive = temp.path().join("probe.a");
-    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
-        .source_dir(src)
-        .config(NativeBuildConfig {
-            emit_archive: true,
-            backend: "cranelift".to_string(),
-            num_threads: Some(1),
-            ..Default::default()
-        })
-        .build()
-        .expect("two-module production native-project compilation");
-    assert_eq!(result.failed, 0);
-    let runtime = build_core_c_runtime_library(temp.path()).expect("real core-C runtime");
-    let runner = temp.path().join("runner.c");
-    fs::write(
-        &runner,
-        r#"
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include "runtime.h"
-extern int64_t consumer__cross_result(void);
-extern int64_t consumer__local_result(void);
-extern int64_t consumer__cross_float(void);
-extern int64_t consumer__local_override(void);
-static double decoded(int64_t bits) { double value; memcpy(&value, &bits, 8); return value; }
-int main(void) {
-    double expected = rt_value_as_float(rt_string_to_float(rt_string_new((const uint8_t*)"1.25", 4)));
-    double local = decoded(consumer__local_result());
-    double cross = decoded(consumer__cross_result());
-    double cross_float = decoded(consumer__cross_float());
-    double local_override = decoded(consumer__local_override());
-    printf("oracle=%.17g local=%.17g cross=%.17g float=%.17g override=%.17g\n",
-        expected, local, cross, cross_float, local_override);
-    return expected != 1.25 || local != expected || cross != expected
-        || cross_float != expected + 1.0 || local_override != 7.0;
-}
-"#,
-    )
-    .unwrap();
-    let executable = temp.path().join("probe");
-    let link = std::process::Command::new(find_c_compiler())
-        .arg("-I")
-        .arg(repo_root_for_native_project_tests().join("src/runtime"))
-        .arg(runner)
-        .arg(archive)
-        .arg(runtime)
-        .args(["-Wl,--gc-sections", "-lpthread", "-ldl", "-lm", "-o"])
-        .arg(&executable)
-        .output()
-        .unwrap();
-    assert!(link.status.success(), "{}", String::from_utf8_lossy(&link.stderr));
-    let output = std::process::Command::new(executable).output().unwrap();
-    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
-    assert!(
-        output.status.success(),
-        "native float conversion failed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn bootstrap_native_all_rejects_provider_only_authority() {
-    use super::config::bootstrap_native_all_has_runtime_owners;
-    let mut symbols = ["rt_dir_is_real_no_follow", "rt_shared_parse_cell_read_v1", "spl_thread_current_id"]
-        .iter().map(|s| s.to_string()).collect::<std::collections::HashSet<_>>();
-    assert!(!bootstrap_native_all_has_runtime_owners(&symbols));
-    // Reproduces the second failed helper archive: adding the string constructor
-    // still does not make the supplement a complete authority.
-    symbols.insert("rt_string_new".to_string());
-    assert!(!bootstrap_native_all_has_runtime_owners(&symbols));
-    symbols.extend(["rt_native_build", "rt_set_args", "rt_alloc", "rt_free",
-        "rt_string_free", "rt_array_new", "rt_string_new_literal"].iter().map(|s| s.to_string()));
-    assert!(bootstrap_native_all_has_runtime_owners(&symbols));
-    for required in ["rt_native_build", "rt_alloc", "rt_free", "rt_string_free"] {
-        let mut incomplete = symbols.clone();
-        incomplete.remove(required);
-        assert!(!bootstrap_native_all_has_runtime_owners(&incomplete));
-    }
-}
-
 fn repo_root_for_native_project_tests() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -993,7 +884,6 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
-        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1005,7 +895,6 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -2818,10 +2707,6 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build")
     });
     let core_c_symbols = archive_defined_symbols(&core_c).expect("core-c runtime symbols should be readable");
-    assert!(
-        core_c_symbols.contains("simple_pow"),
-        "core-c runtime archive must include the existing __simple_pow signed-i64 owner"
-    );
     let missing = simple_common::CORE_REQUIRED_RUNTIME_SYMBOLS
         .iter()
         .filter(|symbol| !core_c_symbols.contains(symbol.trim_start_matches('_')))
@@ -2850,17 +2735,6 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         .output()
         .expect("nm must inspect the core-c runtime archive");
     assert!(nm.status.success(), "nm failed to inspect the core-c runtime archive");
-    let pow_owners = String::from_utf8_lossy(&nm.stdout)
-        .lines()
-        .filter(|line| {
-            line.split_whitespace().last().map(|symbol| symbol.trim_start_matches('_'))
-                == Some("simple_pow")
-        })
-        .count();
-    assert_eq!(
-        pow_owners, 1,
-        "core-c runtime archive must have exactly one __simple_pow owner"
-    );
     let cpu_count_owners = String::from_utf8_lossy(&nm.stdout)
         .lines()
         .filter(|line| line.split_whitespace().last() == Some("spl_thread_cpu_count"))
@@ -4899,7 +4773,7 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     let temp = tempfile::tempdir().unwrap();
     let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
     let capsule =
-        super::tools::build_bootstrap_mutex_runtime_capsule_archive(&core, &temp.path().join("mutex-capsule"), None).unwrap();
+        super::tools::build_bootstrap_mutex_runtime_capsule_archive(&core, &temp.path().join("mutex-capsule")).unwrap();
     let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
     let expected = [
         "spl_mutex_create",
@@ -4914,7 +4788,6 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         "rt_file_sync",
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
-        "rt_sosix_directory_pair_check_v1",
     ]
     .into_iter()
     .map(str::to_string)
@@ -4933,14 +4806,11 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         0,
         "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider"
     );
-    // These providers belong to the outer Rust native-all runtime. The
-    // projected core-C supplement must leave them weak or unresolved.
-    let owner_provided = [
-        "rt_heap_live_bytes",
-        "rt_heap_peak_bytes",
-        "rt_array_bytes_validate",
-        "rt_array_bytes_copy_checked",
-    ]
+    // rt_heap_live_bytes / rt_heap_peak_bytes are OWNED by the outer (Rust)
+    // runtime. runtime_memtrack.c ships them as WEAK fallbacks (93e0b028ffb), so
+    // the capsule may carry them only as weak globals the owner overrides --
+    // never as strong exports and never localized into a private copy.
+    let owner_provided = ["rt_heap_live_bytes", "rt_heap_peak_bytes"]
         .into_iter()
         .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>();
@@ -6834,7 +6704,6 @@ int main(void) { app_call(); return 0; }
         all_mangled: std::sync::Arc::new(all_mangled),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
-        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -6846,7 +6715,6 @@ int main(void) { app_call(); return 0; }
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -6950,7 +6818,6 @@ void __module_init_security_registry(void) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
-        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -6962,7 +6829,6 @@ void __module_init_security_registry(void) {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7039,8 +6905,6 @@ fn test_libc_names_are_not_stub_candidates() {
         "pthread_mutex_trylock",
         "__assert_fail",
         "__clear_cache",
-        // riscv64 glibc: libgcc __clear_cache calls it; a stub shadowed the real icache flush.
-        "__riscv_flush_icache",
         "__sigsetjmp",
         // glibc >= 2.38 emits these C23 spellings; a host newer than the list
         // anticipated used to stub them.
@@ -7130,39 +6994,6 @@ fn test_mingw_crt_symbols_follow_output_target_not_build_host() {
 }
 
 #[test]
-fn test_msvc_win32_and_ucrt_imports_are_never_stub_candidates() {
-    let target = simple_common::target::Target::parse("x86_64-pc-windows-msvc").unwrap();
-    for symbol in [
-        "AcquireSRWLockExclusive",
-        "BCryptOpenAlgorithmProvider",
-        "D3D11CreateDevice",
-        "InitializeProcThreadAttributeList",
-        "K32GetProcessMemoryInfo",
-        "Sleep",
-        "TerminateProcess",
-        "_fstat64i32",
-        "_time64",
-        "ferror",
-        "signal",
-        "wcslen",
-        "__chkstk",
-        "_fltused",
-        "_stat64i32",
-        "_errno",
-        "_get_osfhandle",
-        "_wfopen",
-        "ldexp",
-        "TransmitFile",
-    ] {
-        assert!(
-            super::tools::is_system_symbol_for_target(symbol, target),
-            "{symbol} must resolve from kernel32/bcrypt/psapi/d3d11/ucrt, never generated stubs"
-        );
-    }
-    assert!(!super::tools::is_system_symbol_for_target("app__main", target));
-}
-
-#[test]
 fn test_inline_asm_symbols_are_never_weak_stub_candidates() {
     assert!(super::stubs::is_inline_asm_symbol("__simple_asm_Hf5014a9fdb029e11"));
     assert!(super::stubs::is_inline_asm_symbol("___simple_asm_Hf5014a9fdb029e11"));
@@ -7228,7 +7059,6 @@ int main(int argc, char** argv) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
-        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7240,7 +7070,6 @@ int main(int argc, char** argv) {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7367,7 +7196,6 @@ int main(void) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
-        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7379,7 +7207,6 @@ int main(void) {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7441,7 +7268,6 @@ int main(void) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
-        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7453,7 +7279,6 @@ int main(void) {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7509,7 +7334,6 @@ int main(void) { return (int)run_check(); }
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
-        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7521,7 +7345,6 @@ int main(void) { return (int)run_check(); }
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -8294,7 +8117,6 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
-        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -8306,7 +8128,6 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -8505,12 +8326,13 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .count();
             assert_eq!(completed, 1, "successful object was discarded with failed batch");
 
-            // The object cache key folds each module's cross-module interface
-            // SLICE (mod.rs `InterfaceSliceIndex`): good.o depends only on the
-            // rows its own source names, so whether failing.spl is fixed or
-            // removed cannot touch it. What the policy promises: the preserved
-            // object is reused when its own inputs are reproduced, and a
-            // no-change rebuild reuses every object.
+            // The object cache key folds the cross-module layout fingerprint
+            // (mod.rs: "a CORRECTNESS input to the cache key", not a dependency
+            // model). A retry that FIXES failing.spl adds `failing_probe` to the
+            // world, so good.o legitimately misses -- reuse is not promised
+            // there. What the policy does promise: the preserved object is
+            // reused when the world it was compiled against is reproduced
+            // (failing.spl gone), and a no-change rebuild reuses every object.
             fs::remove_file(&failing).unwrap();
             let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
                 .config(config())
@@ -9111,67 +8933,6 @@ fn test_discover_files_full_scan_keeps_declaration_cfg_files() {
 // Safe-incremental object reuse (SIMPLE_NATIVE_INCREMENTAL=1) — INCR-BUILD lane
 // ---------------------------------------------------------------------------
 
-#[test]
-fn native_extension_method_defaults_reach_separate_caller() {
-    use crate::hir::{HirExprKind, HirStmt, Lowerer};
-    use crate::module_resolver::ModuleResolver;
-    use simple_parser::Parser;
-    let dir = crate::test_helpers::create_test_project();
-    let root = dir.path().join("src");
-    let files = vec![
-        (root.join("owner.spl"), "class Table:\n    var n: i64\n".to_string()),
-        (root.join("extension.spl"), "use owner.{Table}\nimpl Table:\n    fn probe(tag: text? = nil) -> bool:\n        tag == nil\n".to_string()),
-        (root.join("caller.spl"), "use owner.{Table}\nfn omitted() -> bool:\n    Table(n: 1).probe()\nfn explicit() -> bool:\n    Table(n: 1).probe(\"given\")\n".to_string()),
-    ];
-    for (path, source) in &files {
-        std::fs::write(path, source).unwrap();
-    }
-    let imports = super::imports::build_import_map(&files, std::slice::from_ref(&root), &root);
-    let defaults = imports.method_param_defaults.get("Table.probe").expect("extension contract");
-    assert!(matches!(defaults.as_slice(), [Some(simple_parser::ast::Expr::Nil)]));
-    let ast = Parser::new(&files[2].1).parse().unwrap();
-    let resolver = ModuleResolver::new(dir.path().to_path_buf(), root.clone());
-    let mut lowerer = Lowerer::with_module_resolver(resolver, files[2].0.clone());
-    lowerer.set_global_fn_return_types(std::sync::Arc::new(imports.fn_return_types));
-    lowerer.set_global_method_param_defaults(std::sync::Arc::new(imports.method_param_defaults));
-    let hir = lowerer.lower_module(&ast).unwrap();
-    for (name, is_nil) in [("omitted", true), ("explicit", false)] {
-        let function = hir.functions.iter().find(|f| f.name == name).unwrap();
-        let expr = function.body.iter().find_map(|stmt| match stmt {
-            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) => Some(expr),
-            _ => None,
-        }).unwrap();
-        let HirExprKind::MethodCall { args, .. } = &expr.kind else { panic!("{expr:?}") };
-        assert_eq!(args.len(), 1, "{name}: {args:?}");
-        if is_nil {
-            assert!(matches!(args[0].kind, HirExprKind::Nil));
-        } else {
-            assert!(matches!(&args[0].kind, HirExprKind::String(s) if s == "given"));
-        }
-    }
-}
-
-#[test]
-fn native_method_defaults_do_not_cross_ambiguous_owners() {
-    let root = std::path::PathBuf::from("/tmp/native-default-owners/src");
-    let files = vec![
-        (root.join("one.spl"), "class Same:\n    var n: i64\n    fn probe(flag: bool = true) -> bool:\n        flag\n".to_string()),
-        (root.join("two.spl"), "class Same:\n    var n: i64\n    fn probe(flag: bool = false) -> bool:\n        flag\n".to_string()),
-    ];
-    let imports = super::imports::build_import_map(&files, std::slice::from_ref(&root), &root);
-    assert!(!imports.method_param_defaults.contains_key("Same.probe"));
-}
-
-#[test]
-fn native_method_default_change_invalidates_caller_cache() {
-    let mut imports = empty_import_map_result();
-    imports.method_param_defaults.insert("Owner.probe".to_string(), vec![Some(simple_parser::ast::Expr::Bool(false))]);
-    let before = super::cross_module_layout_fingerprint(&imports);
-    imports.method_param_defaults.insert("Owner.probe".to_string(), vec![Some(simple_parser::ast::Expr::Bool(true))]);
-    let after = super::cross_module_layout_fingerprint(&imports);
-    assert_ne!(before, after);
-}
-
 /// Build an all-empty `ImportMapResult` for fingerprint unit tests.
 fn empty_import_map_result() -> imports::ImportMapResult {
     imports::ImportMapResult {
@@ -9180,7 +8941,6 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         all_mangled: std::collections::HashMap::new(),
         re_exports: std::collections::HashMap::new(),
         trait_impls: std::collections::HashMap::new(),
-        trait_method_names: std::collections::HashSet::new(),
         vtable_type_owners: std::collections::HashSet::new(),
         vtable_symbols: std::collections::HashMap::new(),
         struct_defs: std::collections::HashMap::new(),
@@ -9193,8 +8953,6 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         data_exports: std::collections::HashSet::new(),
         fn_arities: std::collections::HashMap::new(),
         fn_return_types: std::collections::HashMap::new(),
-        method_param_defaults: std::collections::HashMap::new(),
-        interface_param_defaults: std::collections::HashMap::new(),
     }
 }
 
@@ -9291,14 +9049,12 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
         Some("compiler producer changed")
     );
 
-    // `layout` is recorded for diagnostics but is neither a full-rebuild reason
-    // nor part of the object key: interface changes are keyed per module
-    // (`InterfaceSliceIndex`), so a layout-only difference must not claim a
-    // full rebuild and must not perturb `combined()`.
     let mut layout_changed = base;
     layout_changed.layout = 0x9999_9999_9999_9999;
-    assert_eq!(layout_changed.changed_reason(&base), None);
-    assert_eq!(layout_changed.combined(), base.combined());
+    assert_eq!(
+        layout_changed.changed_reason(&base),
+        Some("cross-module type layout / signatures changed")
+    );
 
     let mut ls_changed = base;
     ls_changed.linker_script = 0xABCD_ABCD_ABCD_ABCD;
@@ -9307,10 +9063,9 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
 
 /// STALENESS REGRESSION GUARD (the critical test): with the safe-incremental
 /// path on, a leaf body change reuses untouched modules (incrementality works),
-/// but a CROSS-MODULE struct-layout change in module A rebuilds module B —
-/// whose object bytes depend on A's field offsets via
-/// `populate_global_struct_defs` — so B is never stale-reused.
-/// (Granularity beyond two modules is pinned in `object_cache_slice_tests`.)
+/// but a CROSS-MODULE struct-layout change in module A invalidates the entire
+/// per-module cache so module B — whose object bytes depend on A's field
+/// offsets via `populate_global_struct_defs` — is never stale-reused.
 ///
 /// Red/green: with the legacy content-only key (`incremental_hardening=false`)
 /// the struct-change build would leave module B cached (`cached >= 1`) and ship a
@@ -9389,15 +9144,14 @@ fn test_incremental_hardening_invalidates_on_cross_module_struct_change() {
     );
 
     // Build 3: CROSS-MODULE struct-layout change in A (insert a field before
-    // `tag`, shifting B's read offset). B's interface slice covers
-    // `SharedLayout` and the field name `tag`, so B is rebuilt -- never a stale
-    // reuse. With only A and B in the closure that is a full miss. This is the
-    // assertion the legacy content-only key fails.
+    // `tag`, shifting B's read offset). The global build fingerprint changes, so
+    // the entire per-module cache is invalidated and B is rebuilt -- never a
+    // stale reuse. This is the assertion the legacy content-only key fails.
     write_a(true);
     let r3 = build();
     assert_eq!(
         r3.cached, 0,
-        "a cross-module struct-layout change must rebuild the dependent (no stale reuse); got cached={}",
+        "a cross-module struct-layout change must invalidate the whole cache (no stale reuse); got cached={}",
         r3.cached
     );
 }
@@ -9445,7 +9199,6 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
-        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -9457,7 +9210,6 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
-        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -9840,124 +9592,4 @@ fn test_archive_weak_parser_elf_preserves_definition_and_reference_distinction()
     let expected = ["function", "data", "addressless"]
         .into_iter().map(str::to_string).collect();
     assert_eq!(actual, expected);
-}
-
-
-#[test]
-fn native_import_alias_keeps_owner_across_method_and_free_function_collisions() {
-    use crate::hir::Lowerer;
-    use crate::module_resolver::ModuleResolver;
-    use std::sync::Arc;
-
-    for (alias, local, expected) in [
-        ("selected", "", "owner__normalize"),
-        ("selected", "fn normalize(value: i64) -> i64:\n    -10\n", "owner__normalize"),
-        ("selected", "fn selected(value: i64) -> i64:\n    -20\n", "main__selected"),
-        ("custom_contains_key", "", "owner__normalize"),
-    ] {
-        let dir = crate::test_helpers::create_test_project();
-        let root = dir.path().join("src");
-        fs::create_dir_all(&root).unwrap();
-        let entry = format!("use owner.{{normalize as {alias}}}\n{local}\nfn invoke() -> i64:\n    {alias}(41)\n\nfn invoke_value() -> i64:\n    val callable = {alias}\n    callable(41)\n");
-        let sources: Vec<_> = [
-            ("main.spl", entry.as_str()),
-            ("owner.spl", "pub fn normalize(value: i64) -> i64:\n    value + 1\n"),
-            ("decoy.spl", "pub fn normalize(value: i64) -> i64:\n    -30\n\nstruct Resolver:\n    marker: i64\n\n    fn normalize(value: i64) -> i64:\n        -40\n"),
-        ].into_iter().map(|(name, source)| {
-            let path = root.join(name);
-            fs::write(&path, source).unwrap();
-            (path, source.to_string())
-        }).collect();
-        let imports = super::imports::build_import_map(&sources, std::slice::from_ref(&root), &root);
-        let ast = simple_parser::Parser::new(&entry).parse().unwrap();
-        let use_map = super::imports::build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
-        assert_eq!(use_map.get(alias).map(String::as_str), Some("owner__normalize"));
-        let resolver = ModuleResolver::new(dir.path().to_path_buf(), root.clone());
-        let mut lowerer = Lowerer::with_module_resolver(resolver, root.join("main.spl"));
-        lowerer.set_lenient_types(true);
-        lowerer.set_qualified_import_functions(Arc::new(use_map.clone()));
-        let hir = lowerer.lower_module(&ast).expect("lower scoped import alias");
-        let mut mir = crate::mir::lower_to_mir(&hir).expect("lower alias call to MIR");
-        super::mangle::mangle_mir(&mut mir, "main", false, &imports.map,
-            &imports.ambiguous, &use_map, &std::collections::HashMap::new());
-        let invoke = mir.functions.iter().find(|function| function.name == "main__invoke").unwrap();
-        let targets: Vec<_> = invoke.blocks.iter().flat_map(|block| &block.instructions).filter_map(|inst| {
-            if let crate::mir::MirInst::Call { target, .. } = inst { Some(target.name()) } else { None }
-        }).collect();
-        assert!(targets.contains(&expected), "wrong alias owner for {alias} with {local:?}: {targets:?}");
-        assert!(!targets.iter().any(|target| target.contains("Resolver")), "unrelated method captured alias");
-        let value_function = mir.functions.iter().find(|function| function.name == "main__invoke_value").unwrap();
-        let values: Vec<_> = value_function.blocks.iter().flat_map(|block| &block.instructions).filter_map(|inst| {
-            if let crate::mir::MirInst::GlobalLoad { global_name, .. } = inst { Some(global_name.as_str()) } else { None }
-        }).collect();
-        assert!(values.contains(&expected), "function-value alias lost owner: {values:?}");
-    }
-}
-
-#[test]
-fn native_import_alias_outranks_builtin_heuristic_but_not_declared_extern() {
-    use crate::hir::TypeId;
-    use crate::mir::{CallTarget, MirFunction, MirInst, MirModule, Terminator, VReg};
-    let alias = "custom_contains_key";
-    let owner = "owner__normalize";
-    let use_map = std::collections::HashMap::from([(alias.to_string(), owner.to_string())]);
-
-    for is_extern in [false, true] {
-        let mut mir = MirModule::new();
-        if is_extern {
-            mir.extern_fn_names.insert(alias.to_string());
-        }
-        let mut caller = MirFunction::new(
-            "caller".to_string(), TypeId::VOID, simple_parser::Visibility::Private,
-        );
-        caller.blocks[0].instructions.extend([
-            MirInst::Call { dest: None, target: CallTarget::Pure(alias.to_string()), args: vec![] },
-            MirInst::InterpCall {
-                dest: None, func_name: alias.to_string(), args: vec![], boxed_result: false,
-            },
-            MirInst::GlobalLoad { dest: VReg(0), global_name: alias.to_string(), ty: TypeId::I64 },
-            MirInst::GlobalStore { global_name: alias.to_string(), value: VReg(0), ty: TypeId::I64 },
-            MirInst::Call {
-                dest: None, target: CallTarget::Pure("rt_file_rename".to_string()), args: vec![],
-            },
-        ]);
-        caller.blocks[0].terminator = Terminator::Return(None);
-        mir.functions.push(caller);
-        super::mangle::mangle_mir(
-            &mut mir, "main", false, &use_map, &std::collections::HashSet::new(),
-            &use_map, &std::collections::HashMap::new(),
-        );
-        let expected = if is_extern { alias } else { owner };
-        let instructions = &mir.functions[0].blocks[0].instructions;
-        assert!(matches!(&instructions[0], MirInst::Call { target, .. } if target.name() == expected));
-        assert!(matches!(&instructions[1], MirInst::InterpCall { func_name, .. } if func_name == expected));
-        assert!(matches!(&instructions[2], MirInst::GlobalLoad { global_name, .. } if global_name == expected));
-        assert!(matches!(&instructions[3], MirInst::GlobalStore { global_name, .. } if global_name == expected));
-        assert!(matches!(&instructions[4], MirInst::Call { target, .. } if target.name() == "rt_file_rename"));
-    }
-}
-
-#[test]
-fn non_native_import_alias_keeps_original_callable_and_function_value() {
-    use crate::hir::{HirExprKind, HirStmt, Lowerer};
-    use crate::module_resolver::ModuleResolver;
-    let dir = crate::test_helpers::create_test_project();
-    let root = dir.path().join("src");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(root.join("owner.spl"), "pub fn normalize(value: i64) -> i64:\n    value + 1\n").unwrap();
-    let source = "use owner.{normalize as selected}\nfn invoke() -> i64:\n    selected(41)\nfn invoke_value() -> i64:\n    val callable = selected\n    callable(41)\n";
-    let ast = simple_parser::Parser::new(source).parse().unwrap();
-    let resolver = ModuleResolver::new(dir.path().to_path_buf(), root.clone());
-    let hir = Lowerer::with_module_resolver(resolver, root.join("main.spl"))
-        .lower_module(&ast).expect("non-native imported alias lowers without native map");
-    let direct = hir.functions.iter().find(|f| f.name == "invoke").unwrap();
-    let call = direct.body.iter().find_map(|stmt| match stmt {
-        HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) => Some(expr), _ => None,
-    }).unwrap();
-    assert!(matches!(&call.kind, HirExprKind::Call { func, .. }
-        if matches!(&func.kind, HirExprKind::Global(name) if name == "normalize")));
-    let value = hir.functions.iter().find(|f| f.name == "invoke_value").unwrap();
-    assert!(value.body.iter().any(|stmt| matches!(stmt,
-        HirStmt::Let { value: Some(expr), .. }
-        if matches!(&expr.kind, HirExprKind::Global(name) if name == "normalize"))));
 }

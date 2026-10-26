@@ -11,7 +11,7 @@ SIMD types, unit types, typed strings, and array types.
 
 ## Type Syntax
 
-```simple:skip
+```simple
 # SIMD vectors
 let v: vec[4, f32] = simd_vec
 

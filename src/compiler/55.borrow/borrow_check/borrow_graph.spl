@@ -257,19 +257,11 @@ pub fn place_static_var(name: text) -> Place:
         Place(base: PlaceBase.Static(name), projections: [])
 
 
-fn place_append_projection(projections: [PlaceElem], projection: PlaceElem) -> [PlaceElem]:
-        """Append through a fresh array so derived places cannot mutate parents."""
-        var copied: [PlaceElem] = []
-        for item in projections:
-            copied = copied.push(item)
-        copied.push(projection)
-
-
 pub fn place_deref(self: Place) -> Place:
         """Add dereference projection."""
         Place(
             base: self.base,
-            projections: place_append_projection(self.projections, PlaceElem.Deref)
+            projections: self.projections.push(PlaceElem.Deref)
         )
 
 
@@ -277,7 +269,7 @@ pub fn place_field(self: Place, idx: i64) -> Place:
         """Add field projection."""
         Place(
             base: self.base,
-            projections: place_append_projection(self.projections, PlaceElem.Field(idx))
+            projections: self.projections.push(PlaceElem.Field(idx))
         )
 
 
@@ -285,7 +277,7 @@ pub fn place_index(self: Place, local: i64) -> Place:
         """Add index projection."""
         Place(
             base: self.base,
-            projections: place_append_projection(self.projections, PlaceElem.Index(local))
+            projections: self.projections.push(PlaceElem.Index(local))
         )
 
 
@@ -513,56 +505,51 @@ pub fn borrowerror_borrow_of_moved(place: Place, point: i64) -> BorrowError:
         )
 
 
-pub struct LoanAlias:
-    """A reference-bearing place, including a field inside an aggregate."""
-    loan_id: i64
-    place: Place
-    # Inherited lifetime origin; the immediate view supplies the call footprint.
-    origin_only: bool = false
-
-pub fn loan_alias_append(aliases: [LoanAlias], alias: LoanAlias) -> [LoanAlias]:
-    var result: [LoanAlias] = []
-    for current in aliases:
-        if current.loan_id == alias.loan_id and current.origin_only == alias.origin_only and place_equals(current.place, alias.place):
-            return aliases
-        result = result.push(current)
-    result.push(alias)
-
-fn loan_place_overwritten(destination: Place, alias: Place) -> bool:
-    if not place_base_equals(destination.base, alias.base): return false
-    if destination.projections.len() > alias.projections.len(): return false
-    var i = 0
-    while i < destination.projections.len():
-        match destination.projections[i]:
-            case PlaceElem.Index(_): return false
-            case _: pass
-        if not place_elem_equals(destination.projections[i], alias.projections[i]): return false
-        i = i + 1
-    true
-
 pub class BorrowGraph:
     """Graph tracking borrows throughout a function.
 
     Nodes are program points, edges represent borrow flow.
     """
+    # Borrows active at each program point
     point_borrows: Dict<i64, BorrowSet>
     next_borrow_id: i64
 
-    # Original reference destination plus per-point aliases and loan metadata.
+    # Reference local a borrow was materialized INTO (borrow_id -> dest local).
+    # `MirInstKind.Ref(dest, kind, place)` names both the borrowed place and the
+    # reference temp that receives it; only `place` was ever recorded, so the
+    # checker could not tell whether a borrow's REFERENCE outlives the function.
+    # See `returned_locals` below for what this is used for.
     borrow_dest: Dict<i64, i64>
-    loan_definitions: Dict<i64, Borrow>
-    loan_aliases: Dict<i64, [LoanAlias]>
 
-    # Legacy direct-return API. CFG callers use record_loan_escape instead.
+    # Locals named by a `Ret` terminator's operand anywhere in this function.
+    # A borrow can only be "still active at return" if its REFERENCE escapes,
+    # and the only escape route a Ref temp has in MIR is being returned.
     returned_locals: [i64]
 
     # Places that have been moved AT a given point (per-point gen record)
     moved_places: Dict<i64, [Place]>
 
-    # Legacy linear move state; NLL uses its CFG OwnershipFlow solver.
+    # Forward-propagated moved state (SF1 fix, 2026-07-28): the running
+    # union of all moves recorded so far on the analysis walk, minus places
+    # revived by a later reassignment (kill-on-reassign). The old design
+    # only consulted moved_places[point] at the SAME point, so a move at
+    # pt3 + use at pt7 was undetectable by construction.
+    #
+    # CFG note: mod.spl's analyze_mir_borrows records instructions in
+    # program order with monotonically increasing points, so this linear
+    # forward union is a conservative superset of the CFG may-move union
+    # (a move inside one branch is also considered moved while walking the
+    # sibling branch, not just after the join). That over-approximation is
+    # acceptable: Move instructions only enter MIR from explicit move
+    # sites, which Simple's surface language does not produce today
+    # (assignment is copy for value types, reference-share for classes;
+    # `iso` move-only transfer is planned but erased at HIR type lowering).
     moved_now: [Place]
 
+    # Accumulated errors
     errors: [BorrowError]
+
+    # Lifetime environment
     lifetimes: LifetimeEnv
 
     static fn create() -> BorrowGraph:
@@ -570,8 +557,6 @@ pub class BorrowGraph:
             point_borrows: {},
             next_borrow_id: 0,
             borrow_dest: {},
-            loan_definitions: {},
-            loan_aliases: {},
             returned_locals: [],
             moved_places: {},
             moved_now: [],
@@ -624,7 +609,7 @@ pub class BorrowGraph:
         self.next_borrow_id = self.next_borrow_id + 1
         borrow_set.borrows[borrow.id] = borrow
         self.point_borrows[point] = borrow_set
-        self.loan_definitions[borrow.id] = borrow
+
         borrow
 
     me record_use(point: i64, place: Place):
@@ -692,70 +677,18 @@ pub class BorrowGraph:
         # Find conflicting borrows
         val conflicts = borrow_set.borrows_of(place)
         for borrow in conflicts:
-            self.errors = self.errors.push(BorrowError(
-                message: "Assignment while borrowed: {place_to_text(place)}",
-                has_borrow: true,
-                borrow: borrow,
-                point: point
-            ))
+            if kind_is_mutable(borrow.kind):
+                self.errors = self.errors.push(BorrowError(
+                    message: "Assignment while mutably borrowed: {place_to_text(place)}",
+                    # # DESUGARED: borrow: Some(borrow)
+            borrow: borrow,
+                    conflicting: nil,
+                    point: point
+                ))
 
     me note_borrow_dest(borrow_id: i64, dest_local: i64):
         """Record the reference temp a borrow was materialized into."""
         self.borrow_dest[borrow_id] = dest_local
-        if self.loan_definitions.contains_key(borrow_id):
-            val loan: Borrow = self.loan_definitions[borrow_id]
-            val alias = LoanAlias(loan_id: borrow_id, place: place_local(dest_local))
-            self.loan_aliases[loan.borrow_point] = loan_alias_append(self.aliases_at(loan.borrow_point), alias)
-
-    fn aliases_at(point: i64) -> [LoanAlias]:
-        if self.loan_aliases.contains_key(point): return self.loan_aliases[point]
-        []
-
-    me record_loan_copy(point: i64, source: Place, destination: Place):
-        """Copy reference provenance, preserving aggregate projection suffixes.
-
-        CFG callers replay this against their incoming point state. A definite
-        overwrite kills the destination's old payload; a symbolic index cannot.
-        """
-        val incoming: [LoanAlias] = self.aliases_at(point)
-        var result: [LoanAlias] = []
-        for alias in incoming:
-            if not loan_place_overwritten(destination, alias.place):
-                result = loan_alias_append(result, alias)
-        for alias in incoming:
-            if place_conflicts_with(source, alias.place):
-                var projected: [PlaceElem] = []
-                for item in destination.projections:
-                    projected = place_append_projection(projected, item)
-                var i = source.projections.len()
-                while i < alias.place.projections.len():
-                    val item: PlaceElem = alias.place.projections[i]
-                    projected = place_append_projection(projected, item)
-                    i = i + 1
-                val target = Place(base: destination.base, projections: projected)
-                result = loan_alias_append(result, LoanAlias(loan_id: alias.loan_id, place: target, origin_only: alias.origin_only))
-        self.loan_aliases[point] = result
-
-    me record_loan_escape(point: i64, source: Place, reason: text):
-        """Reject a returned, retained or stored reference-bearing payload."""
-        var reported: [i64] = []
-        for alias in self.aliases_at(point):
-            if place_conflicts_with(source, alias.place) and not reported.contains(alias.loan_id):
-                if self.loan_definitions.contains_key(alias.loan_id):
-                    val loan: Borrow = self.loan_definitions[alias.loan_id]
-                    self.errors = self.errors.push(BorrowError(
-                        message: "short borrow escapes: {reason}",
-                        has_borrow: true, borrow: loan, point: point))
-                    reported = reported.push(alias.loan_id)
-
-    me record_suspend(point: i64, reason: text):
-        """Reject live short loans at a suspension or asynchronous boundary."""
-        val active: BorrowSet = self.get_or_create_borrows(point)
-        for id in active.borrows.keys():
-            val loan: Borrow = active.borrows[id]
-            self.errors = self.errors.push(BorrowError(
-                message: "short borrow crosses suspension: {reason}",
-                has_borrow: true, borrow: loan, point: point))
 
     me note_returned_local(local_id: i64):
         """Record that `local_id` is named by a `Ret` operand in this function."""
@@ -763,8 +696,26 @@ pub class BorrowGraph:
             self.returned_locals.push(local_id)
 
     fn borrow_reference_escapes(borrow_id: i64) -> bool:
-        """Legacy direct-return predicate; not the CFG escape proof boundary."""
+        """Does this borrow's REFERENCE outlive the function via the return value?
+
+        A `Ref` temp is only reachable outside the function body if it is
+        returned, so a borrow whose dest is never named by a `Ret` operand
+        cannot still be active at a return.
+
+        Accepted under-approximation, stated rather than hidden (same spirit as
+        the `Drop`/`Move` over-approximation notes in mod.spl): escape through a
+        GLOBAL or a field store is not modelled, and neither is copy-propagation
+        (`val r = ref_temp` then `return r` names a different local). Both make
+        this UNDER-report. That is deliberate: the previous behaviour was to
+        report unconditionally, which fired on every function containing any
+        `Ref` at all and therefore discriminated nothing -- an out-parameter
+        borrow like `f(pid, &mut status)`, whose reference is consumed by the
+        call and never escapes, was rejected at every `return` in the function.
+        doc/08_tracking/bug/io_runtime_import_borrow_local13_native_build_2026-08-24.md
+        """
         if not self.borrow_dest.contains_key(borrow_id):
+            # No dest recorded: the borrow did not come from a `Ref`
+            # instruction, so there is no reference temp to escape.
             return false
         return self.returned_locals.contains(self.borrow_dest[borrow_id])
 
@@ -786,10 +737,6 @@ pub class BorrowGraph:
             to_set.borrows[borrow.id] = borrow
 
         self.point_borrows[to_point] = to_set
-        var aliases: [LoanAlias] = self.aliases_at(to_point)
-        for alias in self.aliases_at(from_point):
-            aliases = loan_alias_append(aliases, alias)
-        self.loan_aliases[to_point] = aliases
 
     fn get_errors() -> [BorrowError]:
         """Get all borrow errors."""

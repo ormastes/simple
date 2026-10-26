@@ -15,7 +15,7 @@ parameterized type shortcuts.
 
 ## Syntax
 
-```simple:skip
+```simple
 type UserId = i64
 type IntList = [i64]
 type StringMap = {str: str}

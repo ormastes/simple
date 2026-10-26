@@ -113,21 +113,22 @@ fn userns_nesting() -> (bool, text):
 fn subid_mapping() -> bool:
     engine_present("newuidmap")
 
-# Probe the Linux native-container lane, preferring podman.
+# Probe the native-container lane, preferring podman.
 #
 # Reports the engine it would use AND whether that lane would be rootless or
 # root, because those are independent: an available engine says nothing about
-# the privilege the launch requires. Other hosts are refused because this
-# runner has no non-Linux native-container provider (see the module header).
+# the privilege the launch requires. Windows is refused outright for podman —
+# podman there is a Linux VM, not a Windows container (see the module header).
 pub fn probe_container_lane() -> ProbeV1:
     val os = host_os()
-    # The only wired provider is LinuxOciRuntimeProviderV1. An engine client on
-    # another host cannot establish that this runner can launch its containers.
-    if os != "linux":
-        return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
-            reason: "native-container-provider-unavailable-on-host: " + os)
 
     if engine_present(ENGINE_PODMAN):
+        if os == "windows":
+            # Deliberately not "available with a caveat": a VM-backed engine
+            # cannot satisfy a native-container request.
+            return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
+                reason: "podman-on-windows-is-a-vm: podman machine runs a Linux guest and has no " +
+                        "Windows-container backend; use containerd+runhcs or docker's Windows backend")
         val nest = userns_nesting()
         if nest.0 and subid_mapping():
             return ProbeV1(available: true, engine: ENGINE_PODMAN, privilege: PRIVILEGE_ROOTLESS,
@@ -143,15 +144,12 @@ pub fn probe_container_lane() -> ProbeV1:
     if engine_present(ENGINE_DOCKER):
         # Docker's engine runs as root and the client needs socket access; a
         # successful `--version` is the CLIENT only, so reach the daemon.
-        val info = process_run_timeout(ENGINE_DOCKER, ["info", "--format", "{{.OSType}}"], 15000)
+        val info = process_run_timeout(ENGINE_DOCKER, ["info", "--format", "ok"], 15000)
         if info.2.to_i64() != 0:
             return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
                 reason: "docker-daemon-unreachable: " + info.1.trim())
-        if info.0.trim().lower() != "linux":
-            return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
-                reason: "docker-daemon-os-not-linux: " + info.0.trim())
         return ProbeV1(available: true, engine: ENGINE_DOCKER, privilege: PRIVILEGE_ROOT,
-            reason: "Linux docker daemon reachable; this lane is root-privileged")
+            reason: "docker daemon reachable; this lane is root-privileged")
 
     ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
         reason: "no-qualified-container-engine: podman or docker did not answer a positive probe")
@@ -161,23 +159,6 @@ fn job_shape_error(spec: PodSpecV1) -> text:
     if spec.containers.len() != 1:
         return "this runner executes single-container jobs; found " + spec.containers.len().to_text()
     ""
-
-# Admission is separate from decoding: a valid portable Job can still request
-# an OS or isolation class this particular worker cannot provide.
-pub fn job_runtime_admission_error(spec: PodSpecV1, host: text) -> text:
-    if not ["linux", "windows", "macos", "freebsd", "simpleos"].contains(host):
-        return "unsupported-host-os: " + host
-    if spec.os_name != host:
-        return "job-os-mismatch: requested " + spec.os_name + ", host " + host
-    if spec.runtime_class == "native-process":
-        return ""
-    if spec.runtime_class == "native-container":
-        if host == "linux":
-            return ""
-        return "native-container-provider-unavailable-on-host: " + host
-    if spec.runtime_class == "native-sandbox":
-        return "native-sandbox-provider-unavailable-on-host: " + host
-    "unsupported-runtime-class: " + spec.runtime_class
 
 # Execute one job's single container on the host process lane.
 fn run_process_job(name: text, spec: PodSpecV1, boot: text) -> JobReceiptV1:
@@ -370,13 +351,7 @@ pub fn run_pipeline(p: PipelineV1, templates: Dict<text, JobV1>, run_id: text) -
         case Ok(o): ordered = o
 
     val boot = node_boot_id()
-    val host = host_os()
-    # A process-only pipeline must not spend time probing Podman/Docker. Cache
-    # one positive/negative observation for all eligible container jobs in this
-    # run, after OS/runtime admission has ruled out unsupported requests.
-    var container_probe_ready = false
-    var container_probe = ProbeV1(available: false, engine: "",
-        privilege: PRIVILEGE_UNKNOWN, reason: "container-probe-not-requested")
+    val probe = probe_container_lane()
     var receipts: [JobReceiptV1] = []
 
     for entry in ordered:
@@ -399,22 +374,13 @@ pub fn run_pipeline(p: PipelineV1, templates: Dict<text, JobV1>, run_id: text) -
             receipts.push(blocked_receipt(name, spec, "unsupported-job-shape: " + shape, boot))
             continue
 
-        val admission_error = job_runtime_admission_error(spec, host)
-        if admission_error != "":
-            receipts.push(blocked_receipt(name, spec, admission_error, boot))
-            continue
-
         if spec.runtime_class == "native-container":
-            if not container_probe_ready:
-                container_probe = probe_container_lane()
-                container_probe_ready = true
-            if not container_probe.available:
-                receipts.push(blocked_receipt(name, spec, container_probe.reason, boot))
+            if not probe.available:
+                receipts.push(blocked_receipt(name, spec, probe.reason, boot))
                 continue
-            receipts.push(run_container_job(name, spec, boot, container_probe, run_id))
+            receipts.push(run_container_job(name, spec, boot, probe, run_id))
             continue
 
-        # Admission above permits only native-process to reach this path.
         receipts.push(run_process_job(name, spec, boot))
 
     var run_verdict = VERDICT_PASS

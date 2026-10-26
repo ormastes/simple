@@ -3,13 +3,9 @@
 
 use app.io
 use app.doc.spec_gen.types (SpecFile, TestCase)
-use app.doc.spec_gen.symbols.{extract_symbols_from_docstring}
-use compiler.frontend.core.source_facts.{simple_string_continuation_lines, simple_string_byte_ranges}
-use app.spipe_docgen.parser.{count_leading_indent, find_scenario_body_end}
-use app.spipe_docgen.common.{spec_kw_line}
 
 
-fn parse_spec_file(filepath: text, semantic_links: bool = false) -> SpecFile:
+fn parse_spec_file(filepath: text) -> SpecFile:
     """Parse a _spec.spl file and extract documentation"""
     if not file_exists(filepath):
         return SpecFile(
@@ -26,7 +22,7 @@ fn parse_spec_file(filepath: text, semantic_links: bool = false) -> SpecFile:
     val metadata = parse_metadata(header)
 
     # Extract test cases
-    val test_cases = extract_test_cases(content, semantic_links)
+    val test_cases = extract_test_cases(content)
 
     SpecFile(
         path: filepath,
@@ -91,81 +87,17 @@ fn parse_metadata(docstring: text) -> [(text, text)]:
 
     metadata
 
-fn extract_modern_semantic_test_cases_v1(lines: [text], continuation: [bool], string_ranges: [[i64]]) -> [TestCase]:
-    """Read actual markerless it/test bodies with lexer-owned string boundaries.
-
-    A quoted fixture containing an apparent scenario is not a declaration. Use
-    the existing SPipe body-boundary owner, including dedented string payloads.
-    Only a leading scenario docstring supplies explicit Links metadata.
-    """
-    var cases: [TestCase] = []
-    var position = 0
-    while position < lines.len():
-        val trimmed = lines[position].trim()
-        if not continuation[position] and (spec_kw_line(trimmed, "it") or spec_kw_line(trimmed, "test")):
-            val end = find_scenario_body_end(lines, continuation, position + 1, count_leading_indent(lines[position]))
-            var body: [text] = []
-            for row in position + 1..end:
-                body.push(lines[row])
-            var code = body.join("\n")
-            var first = position + 1
-            while first < end and (lines[first].trim() == "" or lines[first].trim().starts_with("#")):
-                first = first + 1
-            var docstring = ""
-            if first < end and lines[first].trim().starts_with("\"\"\""):
-                # `first` is the actual located opener. Quote examples in
-                # skipped comments must never open/close metadata. Reuse the
-                # lexer's byte ranges, including escaped quotes and comments
-                # after a real closing delimiter, rather than searching code.
-                var pieces: [text] = []
-                var row = first
-                var closed = false
-                var valid = true
-                while row < end:
-                    val ranges = string_ranges[row]
-                    val expected_start = if row == first: count_leading_indent(lines[row]) else: 0
-                    if ranges.len() < 2 or ranges[0] != expected_start:
-                        valid = false
-                        break
-                    val token_end = ranges[1]
-                    closed = token_end < lines[row].len() or row + 1 >= lines.len() or not continuation[row + 1]
-                    val begin = expected_start + (if row == first: 3 else: 0)
-                    val finish = token_end - (if closed: 3 else: 0)
-                    if begin < 0 or finish < begin or finish > lines[row].len():
-                        valid = false
-                        break
-                    pieces.push(lines[row].substring(begin, finish))
-                    if closed:
-                        break
-                    row = row + 1
-                if valid and closed:
-                    docstring = pieces.join("\n").trim()
-                else:
-                    # Keep the discovered case but refuse its unproven body at
-                    # the existing semantic CLI extraction gate. No empty URI
-                    # batch may turn a missing token receipt into success.
-                    code = ""
-            cases.push(TestCase(name: extract_test_name(lines[position]), section: "Scenario", line_number: position + 1,
-                docstring: docstring, code: code, symbols: extract_symbols_from_docstring(docstring), related_tests: []))
-            position = end
-        else:
-            position = position + 1
-    cases
-
-fn extract_test_cases(content: text, semantic_links: bool = false) -> [TestCase]:
+fn extract_test_cases(content: text) -> [TestCase]:
     """Extract all test cases from the file"""
     var cases = []
     val lines = content.split("\n")
-    val continuation: [bool] = if semantic_links: simple_string_continuation_lines(content) else: []
-    val string_ranges: [[i64]] = if semantic_links: simple_string_byte_ranges(content) else: []
-    val modern: [TestCase] = if semantic_links: extract_modern_semantic_test_cases_v1(lines, continuation, string_ranges) else: []
 
     var i = 0
     while i < lines.len():
         val line = lines[i]
 
         # Look for ## Test: markers
-        if line.trim().starts_with("## Test:") and (not semantic_links or not continuation[i]):
+        if line.trim().starts_with("## Test:"):
             val section = line.trim().substring(8, line.trim().len()).trim()
 
             # Extract line number if present
@@ -200,15 +132,13 @@ fn extract_test_cases(content: text, semantic_links: bool = false) -> [TestCase]
                     continue
 
                 # Look for test or function definition
-                if (not semantic_links or not continuation[j]) and (stripped.starts_with("test \"") or stripped.starts_with("fn ") or (semantic_links and stripped.starts_with("it \""))):
+                if stripped.starts_with("test \"") or stripped.starts_with("fn "):
                     test_name = extract_test_name(lines[j])
-                    if semantic_links:
-                        line_num = j + 1
 
                     # Extract code until next ## Test: or end
                     val code_start = j
                     j = j + 1
-                    while j < lines.len() and (not lines[j].trim().starts_with("## Test:") or (semantic_links and continuation[j])):
+                    while j < lines.len() and not lines[j].trim().starts_with("## Test:"):
                         test_code_lines = test_code_lines + [lines[j]]
                         j = j + 1
 
@@ -230,7 +160,7 @@ fn extract_test_cases(content: text, semantic_links: bool = false) -> [TestCase]
                     line_number: line_num,
                     docstring: test_docstring,
                     code: code,
-                    symbols: if semantic_links: extract_symbols_from_docstring(test_docstring) else: [],
+                    symbols: [],
                     related_tests: []
                 )
                 cases = cases + [tc]
@@ -238,40 +168,14 @@ fn extract_test_cases(content: text, semantic_links: bool = false) -> [TestCase]
 
         i = i + 1
 
-    if semantic_links:
-        return merge_semantic_test_cases_v1(cases, modern)
     cases
-
-fn merge_semantic_test_cases_v1(legacy: [TestCase], modern: [TestCase]) -> [TestCase]:
-    # Both producers walk source order. Merge by actual declaration line,
-    # retaining legacy metadata and modern leading-docstring Links together.
-    # No name-only de-duplication can hide a second same-named scenario.
-    var merged: [TestCase] = []
-    var left = 0
-    var right = 0
-    while left < legacy.len() or right < modern.len():
-        if left < legacy.len() and right < modern.len() and legacy[left].line_number == modern[right].line_number:
-            val old = legacy[left]
-            val current = modern[right]
-            merged.push(TestCase(name: current.name, section: old.section, line_number: current.line_number,
-                docstring: old.docstring + "\n" + current.docstring, code: if current.code == "": "" else: old.code,
-                symbols: old.symbols.merge(current.symbols), related_tests: old.related_tests))
-            left = left + 1
-            right = right + 1
-        elif right >= modern.len() or (left < legacy.len() and legacy[left].line_number < modern[right].line_number):
-            merged.push(legacy[left])
-            left = left + 1
-        else:
-            merged.push(modern[right])
-            right = right + 1
-    merged
 
 fn extract_test_name(line: text) -> text:
     """Extract test name from test or function definition"""
     val trimmed = line.trim()
 
     # test "name":
-    if trimmed.starts_with("test \"") or trimmed.starts_with("it \""):
+    if trimmed.starts_with("test \""):
         val start = trimmed.find("\"")
         val after = trimmed.substring(start + 1, trimmed.len())
         val end = after.find("\"")

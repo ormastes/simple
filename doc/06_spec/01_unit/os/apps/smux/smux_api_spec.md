@@ -1,11 +1,5 @@
 # Smux Api Specification
 
-Continuation review note (2026-10-16): the deferred-feature scenario now expects
-`copy-mode` to be implemented by the hosted interactive client, with mouse and
-tmux key-table compatibility still deferred. This changed assertion and its
-manual regeneration/maintenance remain **TEST_BLOCKED**. The historical
-generated body below does not establish execution of that change.
-
 > 1. smux reset for test
 
 <!-- sdn-diagram:id=smux_api_spec.arch -->

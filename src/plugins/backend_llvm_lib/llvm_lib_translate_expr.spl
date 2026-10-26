@@ -15,9 +15,9 @@ use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
 extern fn rt_array_push_i64_raw(values: [i64], value: i64) -> i8
 
 @unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
-extern fn rt_enum_payload<T>(value: T) -> i64
+extern fn rt_enum_payload(value: Any) -> i64
 @unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant<T>(value: T) -> i64
+extern fn rt_enum_discriminant(value: Any) -> i64
 @unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 extern fn rt_env_get(key: text) -> text?
@@ -29,17 +29,17 @@ fn _sffi_array_push_i64_raw(values: [i64], value: i64):
             panic("compile error: LLVM translation argument-vector append failed")
 
 @always_inline
-fn _sffi_enum_payload<T>(value: T) -> i64:
+fn _sffi_enum_payload(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_payload(value)
 
 @always_inline
-fn _sffi_enum_discriminant<T>(value: T) -> i64:
+fn _sffi_enum_discriminant(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
 @always_inline
-fn _sffi_tuple_get_i64(tuple: i64, index: i64) -> i64:
+fn _sffi_tuple_get(tuple: i64, index: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_tuple_get(tuple, index)
 
@@ -61,32 +61,32 @@ fn translate_instruction(
 ) -> {i64: i64}:
     var local_value_map: Dict<i64, i64> = value_map
     val inst_kind = inst.kind
-    val inst_disc = _sffi_enum_discriminant<MirInstKind>(inst_kind)
+    val inst_disc = _sffi_enum_discriminant(inst_kind)
 
     # Native bootstrap can treat variant names that collide with in-scope type
     # names as struct patterns. Pre-dispatch the hot affected variants by
     # their stable runtime discriminants before entering the source match.
     if inst_disc == 0x0b55abba:  # hash("Const")
-        val payload = _sffi_enum_payload<MirInstKind>(inst_kind)
-        val dest: LocalId = _sffi_tuple_get_i64(payload, 0)
+        val payload = _sffi_enum_payload(inst_kind)
+        val dest: LocalId = _sffi_tuple_get(payload, 0)
         return translate_const(
             ctx, mod_, builder, tm, dest.id,
-            _sffi_tuple_get_i64(payload, 1), _sffi_tuple_get_i64(payload, 2),
+            _sffi_tuple_get(payload, 1), _sffi_tuple_get(payload, 2),
             local_value_map, local_types
         )
     if inst_disc == 0x3d5f86a0:  # hash("BinOp")
-        val payload = _sffi_enum_payload<MirInstKind>(inst_kind)
-        val dest: LocalId = _sffi_tuple_get_i64(payload, 0)
+        val payload = _sffi_enum_payload(inst_kind)
+        val dest: LocalId = _sffi_tuple_get(payload, 0)
         return translate_binop_llvm(
             ctx, mod_, builder, tm, dest.id,
-            _sffi_tuple_get_i64(payload, 1), _sffi_tuple_get_i64(payload, 2), _sffi_tuple_get_i64(payload, 3),
+            _sffi_tuple_get(payload, 1), _sffi_tuple_get(payload, 2), _sffi_tuple_get(payload, 3),
             local_value_map, local_types, local_unsigned, func_map
         )
     if inst_disc == 0x311b931f:  # hash("Call")
-        val payload = _sffi_enum_payload<MirInstKind>(inst_kind)
+        val payload = _sffi_enum_payload(inst_kind)
         return translate_call(
             ctx, mod_, builder, tm,
-            _sffi_tuple_get_i64(payload, 0), _sffi_tuple_get_i64(payload, 1), _sffi_tuple_get_i64(payload, 2),
+            _sffi_tuple_get(payload, 0), _sffi_tuple_get(payload, 1), _sffi_tuple_get(payload, 2),
             local_value_map, local_types, func_map
         )
 
@@ -94,34 +94,34 @@ fn translate_instruction(
         case Const(_, _, _):
             # Native bootstrap matches the discriminant correctly, but can bind
             # a multi-field enum arm from the enum header instead of its payload.
-            val payload = _sffi_enum_payload<MirInstKind>(inst.kind)
-            val dest: LocalId = _sffi_tuple_get_i64(payload, 0)
+            val payload = _sffi_enum_payload(inst.kind)
+            val dest: LocalId = _sffi_tuple_get(payload, 0)
             local_value_map = translate_const(
                 ctx, mod_, builder, tm, dest.id,
-                _sffi_tuple_get_i64(payload, 1), _sffi_tuple_get_i64(payload, 2),
+                _sffi_tuple_get(payload, 1), _sffi_tuple_get(payload, 2),
                 local_value_map, local_types
             )
 
         case Copy(_, _):
-            val payload = _sffi_enum_payload<MirInstKind>(inst.kind)
-            val dest: LocalId = _sffi_tuple_get_i64(payload, 0)
-            val src: LocalId = _sffi_tuple_get_i64(payload, 1)
+            val payload = _sffi_enum_payload(inst.kind)
+            val dest: LocalId = _sffi_tuple_get(payload, 0)
+            val src: LocalId = _sffi_tuple_get(payload, 1)
             val src_val = get_value(local_value_map, src.id)
             set_raw_handle(local_value_map, dest.id, src_val)
 
         case Move(_, _):
-            val payload = _sffi_enum_payload<MirInstKind>(inst.kind)
-            val dest: LocalId = _sffi_tuple_get_i64(payload, 0)
-            val src: LocalId = _sffi_tuple_get_i64(payload, 1)
+            val payload = _sffi_enum_payload(inst.kind)
+            val dest: LocalId = _sffi_tuple_get(payload, 0)
+            val src: LocalId = _sffi_tuple_get(payload, 1)
             val src_val = get_value(local_value_map, src.id)
             set_raw_handle(local_value_map, dest.id, src_val)
 
         case BinOp(_, _, _, _):
-            val payload = _sffi_enum_payload<MirInstKind>(inst.kind)
-            val dest: LocalId = _sffi_tuple_get_i64(payload, 0)
+            val payload = _sffi_enum_payload(inst.kind)
+            val dest: LocalId = _sffi_tuple_get(payload, 0)
             local_value_map = translate_binop_llvm(
                 ctx, mod_, builder, tm, dest.id,
-                _sffi_tuple_get_i64(payload, 1), _sffi_tuple_get_i64(payload, 2), _sffi_tuple_get_i64(payload, 3),
+                _sffi_tuple_get(payload, 1), _sffi_tuple_get(payload, 2), _sffi_tuple_get(payload, 3),
                 local_value_map, local_types, local_unsigned, func_map
             )
 
@@ -182,20 +182,20 @@ fn translate_instruction(
 
         case CheckedBinOp(_, _, _, _):
             # Treat as unchecked BinOp for bootstrap (overflow traps not needed)
-            val payload = _sffi_enum_payload<MirInstKind>(inst.kind)
-            val dest: LocalId = _sffi_tuple_get_i64(payload, 0)
+            val payload = _sffi_enum_payload(inst.kind)
+            val dest: LocalId = _sffi_tuple_get(payload, 0)
             local_value_map = translate_binop_llvm(
                 ctx, mod_, builder, tm, dest.id,
-                _sffi_tuple_get_i64(payload, 1), _sffi_tuple_get_i64(payload, 2), _sffi_tuple_get_i64(payload, 3),
+                _sffi_tuple_get(payload, 1), _sffi_tuple_get(payload, 2), _sffi_tuple_get(payload, 3),
                 local_value_map, local_types, local_unsigned, func_map
             )
 
         case PipeForward(_, _, _):
             # |> operator: call func(value)
-            val payload = _sffi_enum_payload<MirInstKind>(inst.kind)
-            val dest: LocalId = _sffi_tuple_get_i64(payload, 0)
-            val value: MirOperand = _sffi_tuple_get_i64(payload, 1)
-            val func: MirOperand = _sffi_tuple_get_i64(payload, 2)
+            val payload = _sffi_enum_payload(inst.kind)
+            val dest: LocalId = _sffi_tuple_get(payload, 0)
+            val value: MirOperand = _sffi_tuple_get(payload, 1)
+            val func: MirOperand = _sffi_tuple_get(payload, 2)
             val dest_opt: LocalId? = Some(dest)
             val call_args: [MirOperand] = [value]
             local_value_map = translate_call(
@@ -204,10 +204,10 @@ fn translate_instruction(
             )
 
         case Call(_, _, _):
-            val payload = _sffi_enum_payload<MirInstKind>(inst.kind)
+            val payload = _sffi_enum_payload(inst.kind)
             local_value_map = translate_call(
                 ctx, mod_, builder, tm,
-                _sffi_tuple_get_i64(payload, 0), _sffi_tuple_get_i64(payload, 1), _sffi_tuple_get_i64(payload, 2),
+                _sffi_tuple_get(payload, 0), _sffi_tuple_get(payload, 1), _sffi_tuple_get(payload, 2),
                 local_value_map, local_types, func_map
             )
 
@@ -232,10 +232,10 @@ fn translate_instruction(
             panic("compile error: unlowered ConditionProbe '{semantic_id}' reached llvm-lib instruction translation")
 
         # Pipeline operators — partially supported (PipeForward handled above)
-        case Compose(dest, _, _, _):
+        case Compose(dest, _, _):
             print "[llvm-lib] warning: Compose (>>) not yet supported, producing zero"
             set_raw_handle(local_value_map, dest.id, llvm_const_null(get_local_type(local_types, tm, dest.id)))
-        case Parallel(dest, _):
+        case Parallel(dest, _, _):
             print "[llvm-lib] warning: Parallel (//) not yet supported, producing zero"
             set_raw_handle(local_value_map, dest.id, llvm_const_null(get_local_type(local_types, tm, dest.id)))
         case LayerConnect(dest, _, _):
@@ -619,8 +619,8 @@ fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
     var local_value_map: Dict<i64, i64> = value_map
     var has_dest = false
     var dest_id = 0
-    if _sffi_enum_discriminant<LocalId>(raw_dest) == 0xf1987159:  # hash("Some")
-        val dest_local: LocalId = _sffi_enum_payload<LocalId>(raw_dest)
+    if _sffi_enum_discriminant(raw_dest) == 0xf1987159:  # hash("Some")
+        val dest_local: LocalId = _sffi_enum_payload(raw_dest)
         dest_id = dest_local.id
         has_dest = true
     val func: MirOperand = raw_func
@@ -629,11 +629,11 @@ fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
     var func_ref = 0
     var fn_name = ""
     val func_kind = func.kind
-    if _sffi_enum_discriminant<MirOperandKind>(func_kind) == 0x0b55abba:  # hash("Const")
-        val const_payload = _sffi_enum_payload<MirOperandKind>(func_kind)
-        val raw_value = _sffi_tuple_get_i64(const_payload, 0)
-        if _sffi_enum_discriminant<text>(raw_value) == 0xd43c7eb8:  # hash("Str")
-            val name: text = _sffi_enum_payload<text>(raw_value)
+    if _sffi_enum_discriminant(func_kind) == 0x0b55abba:  # hash("Const")
+        val const_payload = _sffi_enum_payload(func_kind)
+        val raw_value = _sffi_tuple_get(const_payload, 0)
+        if _sffi_enum_discriminant(raw_value) == 0xd43c7eb8:  # hash("Str")
+            val name: text = _sffi_enum_payload(raw_value)
             fn_name = if name == "main": "__simple_main" elif name == "get_args" or name == "get_cli_args" or name == "sys_get_args": "rt_get_args" elif name == "print": "rt_println" else: name
             func_ref = llvm_get_named_function(mod_, fn_name)
     else:
@@ -835,15 +835,15 @@ fn translate_operand_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapp
                      operand: MirOperand, value_map: {i64: i64},
                      local_types: {i64: i64}, func_map: {text: i64}) -> i64:
     val operand_kind = operand.kind
-    val operand_disc = _sffi_enum_discriminant<MirOperandKind>(operand_kind)
+    val operand_disc = _sffi_enum_discriminant(operand_kind)
     if operand_disc == 0x40dd4f6f:  # hash("Copy")
         return get_value(value_map, operand_local_id(operand_kind))
     if operand_disc == 0x23191922:  # hash("Move")
         return get_value(value_map, operand_local_id(operand_kind))
     if operand_disc == 0x0b55abba:  # hash("Const")
-        val payload = _sffi_enum_payload<MirOperandKind>(operand_kind)
-        val value: MirConstValue = _sffi_tuple_get_i64(payload, 0)
-        val const_type: MirType = _sffi_tuple_get_i64(payload, 1)
+        val payload = _sffi_enum_payload(operand_kind)
+        val value: MirConstValue = _sffi_tuple_get(payload, 0)
+        val const_type: MirType = _sffi_tuple_get(payload, 1)
         return translate_const_value_llvm(ctx, mod_, builder, tm, value, const_type)
 
     eprint("[llvm-lib] ERROR: invalid MIR operand discriminant " + operand_disc.to_text())
@@ -894,7 +894,7 @@ fn translate_const_value_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibType
 # ============================================================================
 
 fn operand_local_id(operand_kind: MirOperandKind) -> i64:
-    val payload = _sffi_enum_payload<MirOperandKind>(operand_kind)
+    val payload = _sffi_enum_payload(operand_kind)
     # Native lowering normally carries LocalId as a tagged heap struct. The
     # all-zero newtype edge case can remain scalar zero instead.
     if payload >= 4096 and (payload & 7) == 1:
@@ -951,7 +951,7 @@ fn get_operand_unsigned(operand: MirOperand, local_unsigned: {i64: bool}) -> boo
         case Move(local): (if local_unsigned.contains_key(local.id): local_unsigned[local.id] else: false)
         case Const(_, type_):
             match type_.kind:
-                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
+                case U8 | U16 | U32 | U64: true
                 case _: false
 
 fn is_float_type_ref(ctx: i64, ty: i64) -> bool:

@@ -63,7 +63,6 @@ set -o pipefail
 approve_conversion=0
 strict_missing=0
 receipt_path=""
-allow_receipt_roots=""
 repo_root=""
 undo_mode=0
 selftest_mode=0
@@ -73,12 +72,6 @@ while [ $# -gt 0 ]; do
         --strict-missing) strict_missing=1; shift ;;
         --undo|--dematerialize) undo_mode=1; shift ;;
         --selftest) selftest_mode=1; shift ;;
-        --allow-receipt-root)
-            [ "$#" -ge 2 ] || { echo "$SELF: --allow-receipt-root requires an absolute path" >&2; exit 2; }
-            case "$2" in *[[:cntrl:]]*) echo "$SELF: invalid allowed receipt root" >&2; exit 2 ;; esac
-            allow_receipt_roots="${allow_receipt_roots} ${2}"
-            shift 2
-            ;;
         --receipt)
             [ "$#" -ge 2 ] || { echo "$SELF: --receipt requires an absolute path" >&2; exit 2; }
             receipt_path=$2
@@ -421,26 +414,12 @@ trap 'exit 143' HUP TERM
 : >"$manifest_tmp" || exit 1
 if [ -n "$receipt_path" ]; then
     case "$receipt_path" in *[[:cntrl:]]*) echo "$SELF: invalid receipt path" >&2; exit 2 ;; esac
-    # Receipts are evidence: they must live under a dedicated output root,
-    # never at an arbitrary path inside the source tree. The dedicated roots
-    # are the legacy repo-root build/bootstrap output, the system temp dirs,
-    # any absolute path OUTSIDE the repo root, plus caller-authorized output
-    # roots (e.g. the centralized-storage bootstrap output root, which lives
-    # under <repo>/.simple/storage/build/bootstrap on in-repo storage).
-    receipt_allowed=0
-    for allowed_root in "$repo_root/build/bootstrap" /tmp /var/tmp $allow_receipt_roots; do
-        [ -n "$allowed_root" ] || continue
-        case "$receipt_path" in "$allowed_root"/*) receipt_allowed=1; break ;; esac
-    done
-    if [ "$receipt_allowed" -eq 0 ]; then
-        case "$receipt_path" in
-            /*) ;;
-            *) echo "$SELF: invalid receipt path" >&2; exit 2 ;;
-        esac
-        case "$receipt_path" in
-            "$repo_root"/*) echo "$SELF: receipt must use the dedicated bootstrap output root" >&2; exit 2 ;;
-        esac
-    fi
+    case "$receipt_path" in
+        "$repo_root/build/bootstrap"/*|/tmp/*|/var/tmp/*) ;;
+        "$repo_root"/*) echo "$SELF: receipt must use the dedicated bootstrap output root" >&2; exit 2 ;;
+        /*) ;;
+        *) echo "$SELF: invalid receipt path" >&2; exit 2 ;;
+    esac
     [ ! -e "$receipt_path" ] && [ ! -L "$receipt_path" ] || {
         echo "$SELF: receipt path already exists: $receipt_path" >&2
         exit 1
@@ -541,7 +520,25 @@ public static class MaterializerApi {
     static string PolicyHash;
     public static void Initialize() {
         string tree = new UTF8Encoding(false,true).GetString(File.ReadAllBytes(Environment.GetEnvironmentVariable("MATERIALIZER_TREE")));
-        IndexTrackedTree(tree, Environment.GetEnvironmentVariable("MATERIALIZER_LINKS"));
+        // Select links during the existing bound-HEAD inventory pass. The shell
+        // consumes this NUL list only after Initialize has returned READY.
+        using (var links = new StreamWriter(Environment.GetEnvironmentVariable("MATERIALIZER_LIST"), false, new UTF8Encoding(false, true))) {
+            string[] rows = tree.Split('\0');
+            for (int index = 0; index < rows.Length; index++) {
+                string row = rows[index];
+                if (row.Length == 0) continue;
+                int first = row.IndexOf(' '), second = row.IndexOf(' ', first + 1);
+                if (first < 0 || second < 0) throw new IOException("tree.fields");
+                string path = row.Substring(second + 1);
+                Tracked.Add(path);
+                // Bash read -d NUL ignores an unterminated final record.
+                if (index == rows.Length - 1) continue;
+                if (first != 6 || String.CompareOrdinal(row, 0, "120000", 0, 6) != 0) continue;
+                if (path.StartsWith("target/", StringComparison.Ordinal) || path.IndexOf("/target/", StringComparison.Ordinal) >= 0) continue;
+                links.Write(path); links.Write('\0');
+                links.Write(row.Substring(first + 1, second - first - 1)); links.Write('\0');
+            }
+        }
         PolicyBytes = File.ReadAllBytes(Environment.GetEnvironmentVariable("MATERIALIZER_POLICY"));
         using (var hash = System.Security.Cryptography.SHA256.Create())
             PolicyHash = BitConverter.ToString(hash.ComputeHash(PolicyBytes)).Replace("-", "").ToLowerInvariant();
@@ -560,25 +557,6 @@ public static class MaterializerApi {
         Git = System.Diagnostics.Process.Start(start);
         Stream errorStream = Git.StandardError.BaseStream;
         System.Threading.ThreadPool.QueueUserWorkItem(_ => DrainGitError(errorStream));
-    }
-    // Reuse the already required strict UTF-8 tree pass. The previous Bash
-    // pass visited every tracked entry again and cost ~60s on Windows.
-    // Stream only mode-120000 records; no extra full-tree collection is kept.
-    public static void IndexTrackedTree(string tree, string linksPath) {
-        using (var links = new StreamWriter(linksPath, false, new UTF8Encoding(false, true))) {
-            foreach (string row in tree.Split('\0')) {
-                if (row.Length == 0) continue;
-                int first = row.IndexOf(' '), second = row.IndexOf(' ', first + 1);
-                if (first < 0 || second < 0) throw new IOException("tree.fields");
-                string path = row.Substring(second + 1);
-                Tracked.Add(path);
-                if (row.Substring(0, first) != "120000" ||
-                    path.StartsWith("target/", StringComparison.Ordinal) ||
-                    path.IndexOf("/target/", StringComparison.Ordinal) >= 0) continue;
-                links.Write(path); links.Write('\0');
-                links.Write(row.Substring(first + 1, second - first - 1)); links.Write('\0');
-            }
-        }
     }
     static void DrainGitError(Stream errorStream) {
         var chunk = new byte[512];
@@ -1277,7 +1255,7 @@ start_native_batch() {
     export MATERIALIZER_JOURNAL="$(to_win_path "$work_dir/journal")" MATERIALIZER_BLOB="$(to_win_path "$blob_file")"
     export MATERIALIZER_POLICY="$(to_win_path "$policy_path")" MATERIALIZER_ROOT="$(to_win_path "$repo_root")"
     export MATERIALIZER_TREE="$(to_win_path "$raw_links_list")" MATERIALIZER_APPROVE_CONVERSION="$approve_conversion"
-    export MATERIALIZER_LINKS="$(to_win_path "$links_list")"
+    export MATERIALIZER_LIST="$(to_win_path "$links_list")"
     export MATERIALIZER_HEAD="$head_sha" MATERIALIZER_ROOT_POSIX_B64="$(printf '%s' "$repo_root" | base64 -w0)"
     export MATERIALIZER_PRODUCER_SHA256="$producer_sha256" MATERIALIZER_POLICY_SHA256="$policy_sha256"
     # Add-Type needs a writable compiler temp directory. Native PowerShell can
@@ -1348,15 +1326,12 @@ receipt_to_win_path() {
         case "$receipt_part" in
             ''|.|..|*[.\ ]|*'"'*|*'<'*|*'>'*|*'|'*|*'?'*|*'*'*) return 1 ;;
         esac
-        # Reserved names are ASCII-insensitive (plus the Windows superscript
-        # digits). Match directly instead of forking tr for every component.
-        case "$receipt_part" in
-            [cC][oO][nN]|[cC][oO][nN].*|[pP][rR][nN]|[pP][rR][nN].*|[aA][uU][xX]|[aA][uU][xX].*|[nN][uU][lL]|[nN][uU][lL].*|[cC][oO][mM][1-9]|[cC][oO][mM][1-9].*|[lL][pP][tT][1-9]|[lL][pP][tT][1-9].*) return 1 ;;
-            # Literal UTF-8 alternatives also match in the byte-oriented C locale.
-            [cC][oO][mM]¹|[cC][oO][mM]¹.*|[cC][oO][mM]²|[cC][oO][mM]².*|[cC][oO][mM]³|[cC][oO][mM]³.*|[lL][pP][tT]¹|[lL][pP][tT]¹.*|[lL][pP][tT]²|[lL][pP][tT]².*|[lL][pP][tT]³|[lL][pP][tT]³.*) return 1 ;;
+        receipt_upper=$(printf '%s' "$receipt_part" | tr '[:lower:]' '[:upper:]') || return 1
+        case "$receipt_upper" in
+            CON|CON.*|PRN|PRN.*|AUX|AUX.*|NUL|NUL.*|COM[1-9]|COM[1-9].*|LPT[1-9]|LPT[1-9].*|COM¹|COM¹.*|COM²|COM².*|COM³|COM³.*|LPT¹|LPT¹.*|LPT²|LPT².*|LPT³|LPT³.*) return 1 ;;
         esac
     done
-    receipt_drive_upper=${receipt_drive^^}
+    receipt_drive_upper=$(printf '%s' "$receipt_drive" | tr '[:lower:]' '[:upper:]') || return 1
     receipt_native="$receipt_drive_upper:"
     for receipt_part do receipt_native="${receipt_native}\\${receipt_part}"; done
     printf '%s' "$receipt_native"
@@ -1416,7 +1391,9 @@ if [ -n "$receipt_path" ]; then
         materializer_fail "receipt ancestor/destination precondition"
 fi
 
-# The native batch emits the filtered list before READY; startup failure aborts.
+# The native Initialize pass already emitted the ordered symlink list.
+
+
 while IFS= read -r -d '' path && IFS= read -r -d '' oid; do
     [ -n "$path" ] || continue
     tracked_count=$((tracked_count + 1))

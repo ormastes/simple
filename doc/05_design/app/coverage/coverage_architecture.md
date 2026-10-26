@@ -135,19 +135,6 @@ Maps AST nodes to their source locations:
 
 ### Decision Coverage
 
-> **Current (2026-10-19):** probes are `record_decision_site(line, column, sub, result)`
-> and `eval_decision_cond(...)` in `interpreter/coverage_helpers.rs`. A site is
-> (file, anchor line, anchor column, sub): `if`/`while` use their span; `elif` #i
-> the parent `if` span + i; a match guard its arm span (unguarded arms are not
-> decisions); if-expressions and standalone `and`/`or` the enclosing function
-> span + a hash of the expression. Conditions are the atomic operands of
-> `and`/`or` trees, recorded via the runtime condition store; short-circuited
-> operands record nothing. `interpreter/coverage_sites.rs` registers every site
-> at module load. With coverage off each probe is one enabled check. The
-> description below (`<source>`, line offsets, eager both-operand recording)
-> is the pre-2026-10-19 design. See `doc/07_guide/infra/testing/coverage.md`.
-
-
 **Implementation**: Control flow statements in `src/rust/compiler/src/interpreter_control.rs`
 
 1. **If Statements** (`exec_if()` line ~100)
@@ -310,10 +297,10 @@ Coverage records:
 
 ### Implementation Details
 
-- **Recording**: `eval_decision_cond()` in coverage_helpers.rs walks the `and`/`or` tree with a `CondProbe`, recording each evaluated leaf via the runtime condition store
-- **Location**: decision sites (if/elif/while/guard/if-expression) call it directly; a standalone `and`/`or` reaches it from `interpreter/expr/ops.rs` through `eval_and_or_decision`
-- **ID Generation**: condition id = pre-order leaf index within its decision; the decision id is a hash of (file, anchor line, anchor column, sub)
-- **Short-Circuit**: an operand that is not evaluated records nothing
+- **Recording**: `record_condition_coverage()` in coverage_helpers.rs
+- **Location**: Evaluated in `interpreter/expr/ops.rs` when processing Binary operators
+- **ID Generation**: Uses hash of (base_id * 31 + condition_index) for uniqueness
+- **Short-Circuit**: Both operands recorded even when right side not evaluated
 
 ### Supported Operators
 

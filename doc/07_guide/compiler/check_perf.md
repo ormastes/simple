@@ -387,7 +387,7 @@ Measures: binary size only (Qt minimal widget vs Simple web artifact).
 
 ### Benchmark template (pure Simple)
 
-```simple:skip
+```simple
 use std.nogc_sync_mut.src.testing.benchmark.{BenchSuite}
 
 fn main():

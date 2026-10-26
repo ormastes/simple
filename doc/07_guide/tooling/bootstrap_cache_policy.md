@@ -6,33 +6,6 @@ Compiler rebuilds, one-binary mode, successful Phase 2 completion and cache age
 never authorize deletion. Failed attempts retain completed native objects,
 frontend records, runtime objects and logs.
 
-Full bootstrap combines this cache default with go-to-end collection on hosts
-and CI. A retry or later bootstrap phase does not imply a clean build. Use an
-explicit clean/invalidation option only for the requested scope, and preserve
-other valid entries. See [failure collection](bootstrap_failure_collection.md)
-for continuing independent work and recording temporary diagnostic exceptions.
-
-### Release branch adaptation
-
-Release runs Stage 2 and Stage 3 inline. Its command hashes and recovery replay
-use those actual vectors. ABI/plugin/K1 options absent from the stripped child
-environment are recorded as absent; the wrapper does not invent main-branch
-policy selections. Inherited tool environments distinguish absent and empty
-values. The native driver separately binds its complete checked environment
-snapshot, refusing reuse when that snapshot fails.
-
-Release source refresh pins the reviewed Rust source owner SHA-256
-`51febe82933b423cdcb113e1b36e9d2bdfe73b2f166076af718629c7dc2bc2db`.
-Its object/global dependency-key region matches the reviewed main source,
-including full module content and unconditional structural dependencies. The
-actual release producer must still match its seed; main binary cache evidence
-does not qualify a release binary.
-
-Prior sealed authority directories retain their parent and enter the immutable
-attempt through `attempt-directories.tsv`. Mutable HOME/TMP directories receive
-unique sibling names, recorded in `mutable-working-state-locations.tsv`; that
-record proves placement, without making an admission claim about their contents.
-
 ## Commands
 
 | Command | Scope |
@@ -70,9 +43,8 @@ changed binding refuses default reuse with an actionable diagnostic and keeps
 the old files. It never rewrites a producer identity or stamp to admit old
 objects. The phase binding records schema, phase, exact producer SHA-256, entry,
 and a digest of source identity/content, backend/mode, runtime and resolved tool
-snapshots and actual ABI/plugin/K1/coverage/link option presence. Release Stage 3
-binds its inline persistence controls; its stripped child has no extra main
-assurance selection. Later tool entries use the
+snapshots, ABI/plugin/K1/coverage/link options. Stage 3 additionally binds its
+actual assurance profile and warning policy. Later tool entries use the
 compiler's canonical semantic environment field list, after their actual
 forced overrides, including CPU, linker, MIR bulk operations and safety profile.
 The full CLI records its actual one-binary mode. Phase 3 additionally binds the
@@ -173,14 +145,6 @@ Windows/Linux bootstraps; no running cache is cleaned by the contract fixtures.
 
 ## Bug-linked source workarounds
 
-For per-file MIR/object continuation and early manual linking, follow
-[cached object continuation](bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
-Minimize compiler rebuilds: an existing producer may build a tagged source
-workaround while its permanent repair is developed separately. Reuse only
-normally validated entries, report actual reused/rebuilt counts, and retain
-dependency invalidation when the producer, ABI or inputs change. A request to
-recompile failed files does not authorize stale dependent objects.
-
 Follow [bug-linked workarounds](bug_linked_workarounds.md) when a temporary
 source change avoids a compiler/runtime bug (accepted contract; runtime
 qualification pending). Place `@workaround bug=<canonical-id>` immediately
@@ -201,11 +165,3 @@ exists while earlier admission continues. Freeze producer bytes, isolate
 writable caches/outputs, and budget CPU and memory across Windows/Linux lanes.
 Diagnostic scheduling does not change receipt-bound cache admission or permit
 promotion before the required verification succeeds.
-
-## Lexical cache parent and native staging
-
-The [native staging guide](bootstrap_native_staging.md#choose-staging-from-the-actual-producer-path)
-describes a scoped Linux/WSL producer whose object directory follows the lexical
-cache parent, not TMPDIR alone. A reviewed RAM-parent alias may retain the same
-physical cache; it must preserve all normal fingerprints and single-writer
-authority. Storage indirection is not forced cache admission.

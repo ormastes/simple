@@ -6,7 +6,7 @@ For library modules, `use std.X` and `use lib.X` both resolve from `src/lib/`; p
 
 ## TL;DR - Common Patterns
 
-```text
+```simple
 # ✅ CORRECT - Explicit import (recommended)
 use app.io.{file_exists, file_write, file_read}
 
@@ -27,7 +27,7 @@ import std.spec  # Use 'use' instead
 
 ### I/O Operations (`app.io`)
 
-```text
+```simple
 # File operations
 use app.io.{file_exists, file_read, file_write, file_delete, file_copy}
 use app.io.{file_append, file_atomic_write, file_size, file_hash_sha256}
@@ -50,7 +50,7 @@ use app.io.{rt_timestamp_now, current_time_ms, time_now_unix_micros}
 
 ### Testing (`std.spec`)
 
-```text
+```simple
 # Basic test functions
 use std.spec.{describe, it, expect, context}
 
@@ -63,7 +63,7 @@ use std.spec.*
 
 ### Database (`lib.database`)
 
-```text
+```simple
 # Core types
 use lib.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
 
@@ -87,7 +87,7 @@ Error: function 'file_write' not found
 ```
 
 **Fix:**
-```text
+```simple
 # Add explicit import:
 use app.io.{file_write}
 ```
@@ -98,13 +98,13 @@ use app.io.{file_write}
 ```
 Error: variable 'sp' not found
 ```
-```text
+```simple
 use std.spec as sp  # This doesn't work!
 sp.describe(...)    # ERROR: sp not found
 ```
 
 **Fix:**
-```text
+```simple
 # Import functions directly:
 use std.spec.{describe, it, expect}
 describe "test":
@@ -121,7 +121,7 @@ Use 'use' instead of 'import'
 ```
 
 **Fix:**
-```text
+```simple
 # Change:
 import std.spec
 
@@ -154,7 +154,7 @@ use lib.database.core.{StringInterner}
 
 ### Mistake 1: Bare Module Import
 
-```text
+```simple
 # ❌ WRONG
 use app.io
 file_write("test.txt", "data")  # ERROR: function not found
@@ -166,7 +166,7 @@ file_write("test.txt", "data")
 
 ### Mistake 2: Forgetting to Import
 
-```text
+```simple
 # ❌ WRONG
 describe "test":  # ERROR: describe not found
     it "works":
@@ -181,7 +181,7 @@ describe "test":
 
 ### Mistake 3: Import Without Export
 
-```text
+```simple
 # In module.spl:
 fn my_function():
     print "hello"
@@ -193,7 +193,7 @@ use module.{my_function}  # ERROR: my_function not exported
 ```
 
 **Fix:** Add export to module
-```text
+```simple
 # In module.spl:
 fn my_function():
     print "hello"
@@ -203,7 +203,7 @@ export my_function  # ✅ Now it's available
 
 ### Mistake 4: Wildcard on Directory Module
 
-```text
+```simple
 # ❌ WRONG (may not import submodules)
 use lib.database.*
 StringInterner(...)  # May not work
@@ -217,7 +217,7 @@ StringInterner(...)
 
 ### Style 1: Grouped by Category (Recommended)
 
-```text
+```simple
 # Testing framework
 use std.spec.{describe, it, expect, check}
 
@@ -231,7 +231,7 @@ use lib.database.bug.{BugDatabase}
 
 ### Style 2: One Import Per Line
 
-```text
+```simple
 use std.spec.{describe}
 use std.spec.{it}
 use std.spec.{expect}
@@ -239,7 +239,7 @@ use std.spec.{expect}
 
 ### Style 3: Wildcard (Use Sparingly)
 
-```text
+```simple
 # Only for small modules with clear namespace
 use std.spec.*
 use app.io.*  # Imports many functions - can cause conflicts
@@ -285,7 +285,7 @@ Simple searches for modules in these directories:
 4. Application directory: `./src/app`
 
 Example:
-```text
+```simple
 use lib.database.core     # Looks for: ./src/lib/database/core.spl
 use app.io                # Looks for: ./src/app/io/mod.spl
 use std.spec              # Looks for: ./src/lib/src/spec.spl
@@ -300,7 +300,7 @@ src/app/io/mod.spl
 ```
 
 Import as:
-```text
+```simple
 use app.io.{function_name}
 ```
 
@@ -314,7 +314,7 @@ src/lib/database/
 ```
 
 Import as:
-```text
+```simple
 use lib.database.{something_from_mod}        # From mod.spl
 use lib.database.core.{StringInterner}       # From core.spl
 use lib.database.bug.{BugDatabase}           # From bug.spl
@@ -322,7 +322,7 @@ use lib.database.bug.{BugDatabase}           # From bug.spl
 
 ### Relative Imports
 
-```text
+```simple
 # In src/app/cli/main.spl:
 use .utils.{helper_function}  # Looks for: src/app/cli/utils.spl
 
@@ -372,12 +372,3 @@ ls -R src/path/to/module/
 - **Language Guide:** `doc/07_guide/quick_reference/syntax_quick_reference.md`
 - **Memory Notes:** `.claude/memory/MEMORY.md` (section: Module Import Bugs)
 - **CLAUDE.md:** Project instructions (section: Critical Prohibitions)
-
-## Doctest Sanity Block
-
-The snippets above are import-pattern references (several intentionally show
-wrong forms); the block below exists so this file keeps one runnable doctest.
-
-```simple
-val import_guide_sanity_ok = (1 + 1) == 2
-```

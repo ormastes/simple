@@ -1,0 +1,62 @@
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl
+# Regression for doc/08_tracking/bug/hir_enum_payload_blockvalue_unresolved_2026-08-21.md
+#
+# Shape reproduced: an enum payload type is DECLARED by module `pv.value`,
+# imported by the enum's OWNER (`pv.defs`) through a plain, non-exporting
+# `use pv.value.{Payload}`, and the enum is consumed by a third module. The
+# owner therefore neither declares the payload nor re-exports it, so the two
+# original steps of `resolve_materialized_enum_payload_origin` (own
+# declarations, one `find_reexport_source` hop) both miss, and the origin came
+# back not-found. `register_materialized_payload_named_dependency` then
+# returned SILENTLY, and the failure resurfaced later as a hard
+# `unresolved type: Payload` blamed on an importing module that never names it
+# (the real symptom was `unresolved type: BlockValue` reported against
+# `hir_lowering/module_surface.spl`).
+
+use std.spec
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, ModuleSurfaceEnum}
+use compiler.frontend.parser_types.{ParserImport, ImportItem, Variant, VariantKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+fn payload_surface() -> ModuleSurface:
+    var s = ModuleSurface.empty("pv.value")
+    s.physical_index = 0
+    s.preferred_registry_name = "pv.value"
+    s.enums["Payload"] = ModuleSurfaceEnum(
+        name: "Payload", type_params: [],
+        variants: [Variant(name: "Zero", kind: VariantKind.Tuple([]), span: Span.new(0, 0, 1, 1))],
+        visibility: Visibility.Public, is_public: true, span: Span.new(0, 0, 1, 1))
+    s.enum_names = ["Payload"]
+    s
+
+fn owner_surface() -> ModuleSurface:
+    # Plain `use pv.value.{Payload}` -- NOT an `export use`.
+    var s = ModuleSurface.empty("pv.defs")
+    s.physical_index = 1
+    s.preferred_registry_name = "pv.defs"
+    s.imports = [ParserImport(
+        module: "pv.value",
+        items: [ImportItem(name: "Payload", has_alias: false, alias: "")],
+        is_lazy: false, span: Span.new(0, 0, 1, 1))]
+    s.import_target_indices = [0]
+    s.import_target_names = ["pv.value"]
+    s
+
+describe "enum payload origin through a plain `use` in the owner":
+    it "resolves the payload to its declaring module":
+        var lowering = HirLowering.new()
+        var registry = ModuleSurfacesByName.empty()
+        registry.surfaces = [payload_surface(), owner_surface()]
+        registry.index_by_name = {"pv.value": 0, "pv.defs": 1}
+        registry.ordered_names = ["pv.value", "pv.defs"]
+        registry.ordered_indices = [0, 1]
+        lowering.module_surfaces = registry
+        val origin = lowering.resolve_materialized_enum_payload_origin(
+            registry.surfaces[1], "pv.defs", "Payload")
+        expect(origin.found).to_be_true()
+        expect(origin.module_name).to_equal("pv.value")
+        expect(origin.item_name).to_equal("Payload")
+        expect(origin.item_kind).to_equal("enum")

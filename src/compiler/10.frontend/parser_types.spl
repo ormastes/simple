@@ -8,14 +8,10 @@
 
 use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.core.lexer_types.{Token}
-use compiler.frontend.core.lexer.{Lexer}
-use compiler.frontend.treesitter_types.{ParseError}
-use compiler.blocks.value.{ResolvedBlock}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_utils.*
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.dynamic_identity.closure.{Closure}
-use compiler.common.assurance.representation_manifest_v1.{RepresentationDeclarationV1}
 use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 
 fn _parser_type_trace_enabled() -> bool:
@@ -72,11 +68,6 @@ struct ParserModule:
     # metadata, not executable parser state, and must survive every AST rebuild.
     friends: [text] = []
     internal_exports: [text] = []
-    # `@no_gc(strict)`: opt-in no-GC ownership-sigil mode for this module
-    # (doc/05_design/language/misc/memory.md). Set by the flat bridge from the
-    # module marker; HIR lowering keeps `&T`/`*T`/`-T` distinct only when set.
-    # Defaulted without shifting preceding declaration metadata.
-    nogc_strict: bool = false
     # FR-DRIVER-0001 NOTE: module-level attributes like @driver(...) /
     # @native_lib(...) are stored on the owning declaration (fn/impl/class),
     # not on the ParserModule itself. If a future FR needs bare-module attribute
@@ -84,12 +75,10 @@ struct ParserModule:
     # `ParserModule(...)` constructor sites across the self-hosted codebase.
     #
     # `extend <Enum>:` sections declared in this module, in source order. MUST
-    # stay append-only (partial named constructions are filled POSITIONALLY
-    # by older bootstrap engines), and carries a default so the existing
+    # stay the LAST field (partial named constructions are filled POSITIONALLY
+    # by the Rust seed), and carries a default so the existing
     # `ParserModule(...)` sites keep compiling unchanged.
     extend_enums: [ParserExtendEnum] = []
-    # Source facts only. Admissions are rebuilt under resolved caller policy.
-    representation_declarations: [RepresentationDeclarationV1] = []
 
 struct DomainBlock:
     """Raw top-level domain block captured at module scope."""
@@ -448,11 +437,6 @@ enum VariantKind:
 extern fn rt_enum_payload(value: VariantKind) -> i64
 extern fn rt_enum_discriminant(value: VariantKind) -> i64
 
-fn parser_field_list_named_dependencies_into(fields: [ParserField], mut names: [text]):
-    """Keep the decoded field array behind its concrete parameter ABI."""
-    for field in fields:
-        parser_type_named_dependencies_into(field.type_, names)
-
 fn parser_variant_named_dependencies(variant: Variant) -> [text]:
     """Collect named dependencies using VariantKind's typed owner ABI."""
     val kind = variant.kind
@@ -462,14 +446,18 @@ fn parser_variant_named_dependencies(variant: Variant) -> [text]:
         if payload == nil: return []
         val types: [Type] = payload
         var names: [text] = []
-        parser_type_list_named_dependencies_into(types, names)
+        for type_ in types:
+            for nested in parser_type_named_dependencies(type_):
+                names = names.push(nested)
         return names
     if disc == rt_enum_discriminant(VariantKind.Struct([])):
         val payload = rt_enum_payload(kind)
         if payload == nil: return []
         val fields: [ParserField] = payload
         var names: [text] = []
-        parser_field_list_named_dependencies_into(fields, names)
+        for field in fields:
+            for nested in parser_type_named_dependencies(field.type_):
+                names = names.push(nested)
         return names
     []
 
@@ -587,10 +575,6 @@ struct Impl:
     # # DESUGARED: trait_: Type
     has_trait_: bool
     trait_: Type
-    # `class X with Trait:` (exactly one name): `trait_` names the candidate
-    # and `has_trait_` stays false; HIR lower_impl makes it a trait impl only
-    # when the name is a trait whose required methods X all defines.
-    with_trait_candidate: bool
     type_params: [ParserTypeParam]    # Generic parameters (impl<T>)
     where_clause: [TraitBound]  # Where T: ParserTrait constraints
     methods: Dict<text, ParserFunction>
@@ -726,14 +710,14 @@ fn parser_module_new(
 struct Parser:
     """Full AST parser using TreeSitter outline."""
     source: text
-    lexer: Lexer
+    lexer: Any
     current: Token
     previous: Token
-    errors: [ParseError]
-    # Block resolver output; concrete resolver
+    errors: [Any]
+    # Block resolver payload is intentionally opaque here; concrete resolver
     # modules live outside the frontend parser type layer.
     has_resolved_blocks: bool
-    resolved_blocks: [ResolvedBlock]
+    resolved_blocks: Any
 
 # ============================================================================
 # Exports

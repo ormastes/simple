@@ -1,0 +1,52 @@
+"""
+# And/Or Operands Route Through lower_cond_expr, Not Raw lower_expr
+
+Regression guard for a bug in `lower_binary_expr`'s `case And | Or:` arm in
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`: both operands of a
+logical `and`/`or` are used purely as branch conditions, so they must be
+lowered via `lower_cond_expr` -- the same condition-normalizing entry point
+`if`/`while` use -- not the raw value dispatcher `lower_expr`.
+
+`lower_cond_expr`'s own docstring
+(`src/compiler/50.mir/mir_lowering_stmts.spl:1836-1837`) already ASSERTS that
+`and`/`or` funnel their operands back through the condition path via their
+own lowering -- but until this fix the arm called `lower_expr` directly, so
+that invariant was false in the actual code.
+
+Consequence: `RT_NIL` is the runtime's NON-ZERO nil sentinel (the integer
+`3`), so a `.?`/bare-Optional operand of `and`/`or`, branched on via raw
+`lower_expr` instead of the condition-normalizing `lower_cond_expr`, tested
+truthy REGARDLESS of its actual nilness -- e.g. `(x == nil) and rhs()` or
+`opt.? or fallback()` would take the wrong branch whenever the left operand's
+nil-check outcome should have controlled short-circuiting. Same defect class
+as `bare_optional_in_condition_position_wrong_branch_2026-08-01`, which fixed
+`if`/`while` but left `and`/`or` behind.
+
+This is a source-content guard, not a runtime execution spec: the fix lives
+in the pure-Simple self-hosted compiler
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`), which the
+currently deployed `bin/simple` (a Rust bootstrap seed, see `bin/simple
+--version`) does not execute -- the seed has its own independent Rust MIR
+lowering and never reads this file's compiled behavior. A true end-to-end
+runtime check requires a self-hosted binary built via full bootstrap (T3),
+out of scope for an ordinary spec run. This spec instead asserts the exact
+fix shape is present in source, which is real, sabotage-provable evidence
+today (revert the fix -> this spec goes RED; restore it -> GREEN).
+"""
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "And/Or logical operands in MIR lowering (lower_binary_expr)":
+    it "routes both the left and right operand through lower_cond_expr, not lower_expr":
+        val source = rt_file_read_text(
+            "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        expect(source).to_contain("case And | Or:")
+        expect(source).to_contain("val left_local = self.lower_cond_expr(left)")
+        expect(source).to_contain("val right_local = self.lower_cond_expr(right)")
+        # Sabotage guard: the old (buggy) call shape must NOT be the one that
+        # actually feeds left_local/right_local for the And|Or arm. We can't
+        # assert global absence of "lower_expr(left)" (it's legitimately used
+        # elsewhere, e.g. the `case _:` binary-op fallthrough), so we instead
+        # pin the exact fixed lines above as the ones present -- if this file
+        # is reverted to `val left_local = self.lower_expr(left)` right after
+        # `case And | Or:`, the two to_contain checks above fail.

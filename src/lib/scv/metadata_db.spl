@@ -32,10 +32,6 @@ use std.scv.identity.{scv_identity_rows_path, scv_identity_edges_path}
 
 val SCV_METADB_SCHEMA_VERSION = "scv-metadb-1"
 
-struct ScvMetaInsert:
-    table: text
-    values: [text]
-
 fn scv_metadb_path(root: text) -> text:
     "{scv_meta_dir(root)}/metadata.sdn"
 
@@ -111,14 +107,13 @@ class ScvMetaDb:
         val cols = scv_metadb_columns(table)
         if cols.len() == 0 or values.len() != cols.len():
             return false
-        if not self.db.get_table(table).?:
-            return false
         var row = SdnRow.empty()
         var i = 0
         while i < cols.len():
             row.set(cols[i], values[i])
             i = i + 1
-        val entry = WalEntry(sequence: 0, entry_type: WalEntryType.Insert, table_name: table, row_key: values[0], data: row_to_wal_payload(row, cols), timestamp: 0)
+        self.seq = self.seq + 1
+        val entry = WalEntry(sequence: self.seq, entry_type: WalEntryType.Insert, table_name: table, row_key: values[0], data: row_to_wal_payload(row, cols), timestamp: 0)
         # TODO(perf): this read-modify-write copies the whole SdnDatabase per
         # insert — the COW-alias O(n)-per-write class (.claude/rules/code-style.md).
         # Correct-first; batch APIs should land before this table grows large.
@@ -126,63 +121,11 @@ class ScvMetaDb:
         # read-modify-write the fields back explicitly (same pattern as
         # SdnDatabase.save's WAL checkpoint).
         var w = self.wal
-        if not w.append(entry):
-            return false
+        w.append(entry)
         self.wal = w
         var d = self.db
         d.add_row_to_table(table, row)
         self.db = d
-        self.seq = w.sequence_counter
-        true
-
-    me insert_batch(batch: [ScvMetaInsert]) -> bool:
-        """Preflight every row, persist one WAL suffix, then publish all rows.
-
-        Serialized owner API, bounded to 4096 rows and 1 MiB of WAL encoding.
-        This retains schema v1 and its canonical codec; it grants no source
-        revision or freshness receipt. Schema v2 migration remains required.
-        """
-        if batch.len() == 0:
-            return true
-        if batch.len() > 4096:
-            return false
-        var rows: [SdnRow] = []
-        var entries: [WalEntry] = []
-        var remaining = 1048576
-        for item in batch:
-            val columns = scv_metadb_columns(item.table)
-            if columns.len() == 0 or item.values.len() != columns.len():
-                return false
-            if not self.db.get_table(item.table).?:
-                return false
-            var row = SdnRow.empty()
-            var index = 0
-            for value in item.values:
-                if value.len() > remaining or value.contains("\n") or value.contains("\r"):
-                    return false
-                remaining = remaining - value.len()
-                row.set(columns[index], value)
-                index = index + 1
-            if item.values[0] == "" or item.values[0].contains("|"):
-                return false
-            rows.push(row)
-            entries.push(WalEntry(
-                sequence: 0, entry_type: WalEntryType.Insert,
-                table_name: item.table, row_key: item.values[0],
-                data: row_to_wal_payload(row, columns), timestamp: 0
-            ))
-        var w = self.wal
-        if not w.append_batch(entries):
-            return false
-        self.wal = w
-        # One database value copy for the whole batch, rather than per row.
-        var d = self.db
-        var index = 0
-        for item in batch:
-            d.add_row_to_table(item.table, rows[index])
-            index = index + 1
-        self.db = d
-        self.seq = w.sequence_counter
         true
 
     # Next synthetic key for a table, "<prefix>_<n>" over current row count.
@@ -207,9 +150,8 @@ class ScvMetaDb:
         # load, doubling every row.
         if ok:
             var w = self.wal
-            val checkpoint_ok = w.checkpoint()
+            w.checkpoint()
             self.wal = w
-            return checkpoint_ok
         ok
 
 # Open (or create) the metadata DB at .scv/meta/metadata.sdn, ensuring every
@@ -274,6 +216,5 @@ fn scv_metadb_migrate_identity(root: text, meta: ScvMetaDb) -> text:
 
 export SCV_METADB_SCHEMA_VERSION
 export ScvMetaDb
-export ScvMetaInsert
 export scv_metadb_path, scv_metadb_tables, scv_metadb_columns
 export scv_metadb_open, scv_metadb_migrate_identity

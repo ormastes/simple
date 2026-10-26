@@ -26,19 +26,6 @@ struct NativeModuleConfigFactV1:
     target_identity: text
     options_identity: text
     provider_identity: text
-    # Emitter scheme tag (H2, 2026-10-17): the cross-module symbol-mangling
-    # scheme the producing compiler's LLVM emitter used. Objects produced
-    # under a different scheme are link-incompatible even when every content
-    # fact matches: the Rust seed mangles `lib.x.y__fn` while the pure-Simple
-    # emitter mangles `lib.x.y.fn` (dots), and a link mixing both spellings
-    # fails on the references into foreign-scheme objects (measured: stage3
-    # link, 36 undefined symbols whose underscore twins existed in the reused
-    # seed-built cache -- site-19, emission divergence 2026-10-17). Folding
-    # the scheme into the config fingerprint makes the witness mismatch
-    # automatically; a witness recorded without the tag (every seed-built and
-    # pre-H2 object) can never match a tagged expected witness, which is the
-    # required fail-closed rule: unknown emitter = foreign.
-    emitter_scheme: text
 
 struct NativeModuleCacheWitnessV1:
     schema_version: i64
@@ -82,7 +69,7 @@ fn native_module_cache_witness_v1(
     layouts: [NativeModuleLayoutFactV1],
     config: NativeModuleConfigFactV1 = NativeModuleConfigFactV1(
         compiler_identity: "", target_identity: "", options_identity: "",
-        provider_identity: "", emitter_scheme: "")
+        provider_identity: "")
 ) -> NativeModuleCacheWitnessV1:
     if module_id == "":
         return native_module_cache_witness_invalid_v1("missing-module-id")
@@ -91,11 +78,6 @@ fn native_module_cache_witness_v1(
     if config.compiler_identity == "" or config.target_identity == "" or
        config.options_identity == "" or config.provider_identity == "":
         return native_module_cache_witness_invalid_v1("missing-config-fact")
-    # Fail-closed: a witness production site that does not declare its emitter
-    # scheme produces an invalid witness (no cache reuse) instead of an
-    # untagged one (which a future gate change could accidentally admit).
-    if config.emitter_scheme == "":
-        return native_module_cache_witness_invalid_v1("missing-emitter-scheme")
 
     var dependency_rows: [text] = []
     var dependency_ids: [text] = []
@@ -155,17 +137,9 @@ fn native_module_cache_witness_v1(
                 canon_field("target", canon_str(config.target_identity)),
                 canon_field("options", canon_str(config.options_identity)),
                 canon_field("provider", canon_str(config.provider_identity)),
-                canon_field("emitter", canon_str(config.emitter_scheme)),
             ]))),
         valid: true, reason: "ok")
 
-# The pure-Simple compiler's cross-module symbol scheme (dotted qualified
-# names, `mir_provider_callable_identity` / the MirToLlvm qualifier). Any
-# producer with a different scheme (the Rust seed's `__` mangling, a future
-# renamed scheme) must not share native-cache objects with this compiler.
-val NATIVE_CACHE_EMITTER_SCHEME_V1: text = "pure-simple-dotted-v1"
-
-export NATIVE_CACHE_EMITTER_SCHEME_V1
 export NativeModuleResolutionFactV1, NativeModuleLayoutFactV1
 export NativeModuleConfigFactV1
 export NativeModuleCacheWitnessV1, native_module_cache_witness_invalid_v1

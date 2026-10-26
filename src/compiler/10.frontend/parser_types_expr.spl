@@ -31,7 +31,7 @@ use std.nogc_sync_mut.io_runtime.{env_get_opt}
 # parser_types_expr, so a package-mediated import from 10.frontend could close a
 # cycle back into this file. `_FlatAstBridge/convert_nodes.spl:47` already uses
 # this same file-direct spelling from inside 10.frontend.
-use compiler.blocks.value.{BlockValue}
+use compiler.blocks.blocks.value.{BlockValue}
 
 extern fn rt_enum_payload(value: TypeKind) -> i64
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
@@ -71,11 +71,8 @@ enum TypeKind:
     Infer
     Error
     # Appended to preserve all existing enum discriminants.
-    Pointer(Type, bool)         # raw *const T (false) / *mut T (true)
+    Pointer(Type, bool)         # *T / *const T, *mut T
     Weak(Type)                  # -T (weak reference, resource-ownership sigil)
-    # memory.md no-GC ownership sigils (appended: discriminants preserved).
-    Unique(Type)                # &T  unique owner (move-only)
-    Shared(Type)                # *T  shared (Rc) owner
 
 # Keep multi-field TypeKind extraction beside its owner.  Consumers that also
 # import HirTypeKind have a colliding Named variant on stage4.
@@ -105,8 +102,7 @@ fn parser_type_kind_array_discriminant() -> i64:
     `Named`/`Tuple` decoders above build their own comparison values.
     """
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    val unsized: Expr? = None
-    rt_enum_discriminant(TypeKind.Array(placeholder, unsized))
+    rt_enum_discriminant(TypeKind.Array(placeholder, nil))
 
 fn parser_type_kind_array_element(kind: TypeKind, fallback: Type) -> Type:
     # Decode slot 0 ONLY for a real `Array` payload.  Every other variant
@@ -156,19 +152,6 @@ fn parser_type_kind_tuple_elements(kind: TypeKind) -> [Type]:
         case TypeKind.Tuple(elements): elements
         case _: []
 
-fn parser_type_kind_optional_inner(kind: TypeKind, fallback: Type) -> Type:
-    """Inner type of `T?`; `fallback` when `kind` is not Optional."""
-    val placeholder = Type(kind: TypeKind.Infer, span: fallback.span)
-    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Optional(placeholder)):
-        return fallback
-    match kind:
-        case TypeKind.Optional(inner): inner
-        case _: fallback
-
-fn parser_type_kind_is_optional(kind: TypeKind) -> bool:
-    val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Optional(placeholder))
-
 fn parser_type_kind_pointer_inner(kind: TypeKind, fallback: Type) -> Type:
     val placeholder = Type(kind: TypeKind.Infer, span: fallback.span)
     if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
@@ -194,80 +177,6 @@ fn parser_type_kind_pointer_is_mutable(kind: TypeKind) -> bool:
 fn parser_type_kind_is_pointer(kind: TypeKind) -> bool:
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
     rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Pointer(placeholder, false))
-
-fn parser_type_kind_is_reference(kind: TypeKind) -> bool:
-    val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Reference(placeholder, false))
-
-fn parser_type_kind_reference_inner(kind: TypeKind, fallback: Type) -> Type:
-    if not parser_type_kind_is_reference(kind):
-        return fallback
-    val payload = rt_enum_payload(kind)
-    if payload == nil:
-        return fallback
-    val inner: Type = rt_tuple_get(payload, 0)
-    if inner == nil:
-        return fallback
-    inner
-
-fn parser_type_kind_reference_is_mutable(kind: TypeKind) -> bool:
-    if not parser_type_kind_is_reference(kind):
-        return false
-    val payload = rt_enum_payload(kind)
-    if payload == nil:
-        return false
-    val mutable: bool = rt_tuple_get(payload, 1)
-    mutable
-
-fn parser_type_kind_is_unique(kind: TypeKind) -> bool:
-    val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Unique(placeholder))
-
-fn parser_type_kind_is_shared(kind: TypeKind) -> bool:
-    val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Shared(placeholder))
-
-fn parser_type_kind_is_weak(kind: TypeKind) -> bool:
-    val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Weak(placeholder))
-
-# Pointee of `&T` / `*T` / `-T`; `fallback` for any other kind.
-fn parser_type_kind_ownership_inner(kind: TypeKind, fallback: Type) -> Type:
-    if not (parser_type_kind_is_unique(kind) or parser_type_kind_is_shared(kind) or parser_type_kind_is_weak(kind)):
-        return fallback
-    val payload = rt_enum_payload(kind)
-    if payload == nil:
-        return fallback
-    val inner: Type = payload
-    inner
-
-# Ownership/pointer reading of a type annotation, for diagnostics and specs:
-# "unique" (&T), "shared" (*T), "weak" (-T), "borrow_mut" (&mut T / mut T),
-# "raw_const" (*const T), "raw_mut" (*mut T), "atomic" (@T), else "".
-fn parser_type_kind_ownership_name(kind: TypeKind) -> text:
-    if parser_type_kind_is_unique(kind): return "unique"
-    if parser_type_kind_is_shared(kind): return "shared"
-    if parser_type_kind_is_weak(kind): return "weak"
-    if parser_type_kind_is_reference(kind):
-        return if parser_type_kind_reference_is_mutable(kind): "borrow_mut" else: "borrow"
-    if parser_type_kind_is_pointer(kind):
-        return if parser_type_kind_pointer_is_mutable(kind): "raw_mut" else: "raw_const"
-    val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    if rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Atomic(placeholder)): return "atomic"
-    ""
-
-fn parser_new_kind_name(code: i64) -> text:
-    if code == 1: return "unique"
-    if code == 2: return "shared"
-    if code == 3: return "weak"
-    if code == 4: return "handle"
-    "default"
-
-# Kind of a `new` expression ("" when `expr` is not a `new`).
-fn parser_expr_new_kind_name(expr: Expr) -> text:
-    match expr.kind:
-        case ExprKind.New(code, _): parser_new_kind_name(code)
-        case _: ""
 
 fn parser_type_kind_union_members(kind: TypeKind) -> [Type]:
     if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Union([])):
@@ -302,11 +211,6 @@ fn parser_type_kind_function_return(kind: TypeKind, fallback: Type) -> Type:
         return fallback
     ret
 
-fn parser_type_list_named_dependencies_into(types: [Type], mut names: [text]):
-    """Recover the array element ABI at a typed parameter boundary."""
-    for type_ in types:
-        parser_type_named_dependencies_into(type_, names)
-
 fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
     """Append named types from one parser-owned type to ``names``.
 
@@ -331,8 +235,7 @@ fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
         return
 
     val placeholder = Type(kind: TypeKind.Infer, span: type_.span)
-    val unsized: Expr? = None
-    if disc == rt_enum_discriminant(TypeKind.Array(placeholder, unsized)):
+    if disc == rt_enum_discriminant(TypeKind.Array(placeholder, nil)):
         parser_type_named_dependencies_into(
             parser_type_kind_array_element(kind, placeholder), names)
         return
@@ -365,13 +268,10 @@ fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
         val inner: Type = payload
         parser_type_named_dependencies_into(inner, names)
         return
-    if disc == rt_enum_discriminant(TypeKind.Unique(placeholder)) or disc == rt_enum_discriminant(TypeKind.Shared(placeholder)):
-        val inner: Type = payload
-        parser_type_named_dependencies_into(inner, names)
-        return
     if disc == rt_enum_discriminant(TypeKind.Union([])):
         val members: [Type] = payload
-        parser_type_list_named_dependencies_into(members, names)
+        for member in members:
+            parser_type_named_dependencies_into(member, names)
         return
     if disc == rt_enum_discriminant(TypeKind.Projection(placeholder, "")):
         val base: Type = rt_tuple_get(payload, 0)
@@ -510,8 +410,6 @@ struct Expr:
     """Expression."""
     kind: ExprKind
     span: Span
-    # Explicit direct-call arguments; empty for inference and other node kinds.
-    explicit_call_types: [Type] = []
 
 """Expression kind."""
 enum ExprKind:
@@ -602,11 +500,6 @@ enum ExprKind:
 
     # Error recovery
     Error
-    FloatLexeme(text)
-    # `new(&) X` / `new& X` etc. (memory.md). Appended: discriminants
-    # preserved. Payload: kind code (0 bare, 1 unique, 2 shared, 3 weak,
-    # 4 handle -- same order as the Rust seed's PointerKind for `new`), inner.
-    New(i64, Expr)
 
 """GPU intrinsic function kinds."""
 enum GpuIntrinsicKind:
@@ -760,9 +653,6 @@ struct Stmt:
     """Statement."""
     kind: StmtKind
     span: Span
-    # Only parser if-val/while-val bindings unwrap a present optional value.
-    # Keep this provenance distinct from an ordinary val initialized by .?.
-    bind_optional_payload: bool = false
 
 fn expr_kind(expr: Expr) -> ExprKind:
     expr.kind
@@ -789,7 +679,6 @@ enum StmtKind:
     With([WithItem], Block)         # with statement - context managers
     AsmAssert(AsmTargetSpec)        # asm assert [spec] - compile-time target guard
     GpuLaunch(GpuLaunchConfig, Block)  # gpu_launch(grid: (...), block: (...)): body
-    Import(text, [text], bool)       # lexical use: path, name[:alias] items, lazy
 
 """Assignment operator."""
 enum AssignOp:

@@ -287,17 +287,12 @@ pub struct MirLowerer<'a> {
     /// Trait parameters alias to `Any`, but native dispatch still needs the
     /// declared trait owner to select its vtable slot.
     pub(super) local_type_name_hints: HashMap<usize, String>,
-    pub(super) local_trait_dispatch: HashMap<usize, crate::hir::HirTraitDispatch>,
     /// F1/S5 — declaration kind per type name, carried from HIR by S3.
     /// `Some(true)` = declared `struct` (value semantics), `Some(false)` =
     /// declared `class`/`actor` (identity semantics), absent = UNKNOWN.
     /// Absence must never be read as "value type": copying an identity type
     /// converts the class defect into its struct sibling.
     pub(super) type_value_kinds: HashMap<String, bool>,
-    /// Array copy sites that may move a provably dead, uniquely owned source
-    /// instead of copying it; recomputed per function by
-    /// `array_move::compute_array_move_sites`.
-    pub(super) array_move_sites: super::array_move::ArrayMoveSites,
     /// Reference to trait infos for vtable slot resolution (static polymorphism)
     pub(super) trait_infos: Option<&'a std::collections::HashMap<String, crate::hir::HirTraitInfo>>,
     /// Project-wide trait implementations for cross-module vtable dispatch.
@@ -353,10 +348,6 @@ pub struct MirLowerer<'a> {
     pub(super) current_file: Option<String>,
     /// Last expression value for implicit returns (non-void functions)
     pub(super) last_expr_value: Option<super::super::instructions::VReg>,
-    /// `(function name, type)` while lowering a block EXPRESSION in that function:
-    /// its tail `HirStmt::Expr` is the block's value, so it is coerced to the
-    /// block's type rather than to the function's return type.
-    pub(super) block_expr_tail: Option<(String, crate::hir::TypeId)>,
     /// (line, column) of the decision currently being lowered — set around
     /// `lower_expr(condition)` for `if`/`while`/`assert`/`assume` so nested
     /// `and`/`or` sub-condition probes (emitted deep inside `lower_binary_expr`,
@@ -380,9 +371,6 @@ pub struct MirLowerer<'a> {
     pub(super) active_array_append_ptrs: Vec<ArrayAppendPtrs>,
     /// Hoisted array data pointers for read-only loops with active length proofs.
     pub(super) active_array_data_ptrs: Vec<(usize, VReg)>,
-    /// Hoisted `[u8]` read pointers: the data pointer with bit 0 set when the
-    /// array is NOT byte-packed (slot layout), computed once per loop entry.
-    pub(super) active_array_u8_data_ptrs: Vec<(usize, VReg)>,
     /// Array locals allocated only to receive ignored appends.
     pub(super) dead_append_array_locals: HashSet<usize>,
     /// True when the compilation target's `rt_array_push` returns the
@@ -393,10 +381,6 @@ pub struct MirLowerer<'a> {
     /// or a grow loop keeps re-pushing the stale pre-grow block
     /// (doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
     pub(super) array_push_returns_header: bool,
-    /// Lower statically typed `[i64]` element reads/writes/pushes through the
-    /// layout-aware `rt_typed_words_i64_*` lane (default on; off for freestanding
-    /// runtimes that do not define it).
-    pub(super) signed_word_lane: bool,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -408,9 +392,7 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
-            local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
-            array_move_sites: Default::default(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -432,7 +414,6 @@ impl<'a> MirLowerer<'a> {
             path_counter: 0,
             current_file: None,
             last_expr_value: None,
-            block_expr_tail: None,
             current_decision_span: None,
             tagged_vregs: std::collections::HashSet::new(),
             tagged_locals: std::collections::HashSet::new(),
@@ -442,10 +423,8 @@ impl<'a> MirLowerer<'a> {
             active_array_append_bounds: Vec::new(),
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
-            active_array_u8_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
-            signed_word_lane: true,
         }
     }
 
@@ -458,9 +437,7 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
-            local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
-            array_move_sites: Default::default(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -485,16 +462,13 @@ impl<'a> MirLowerer<'a> {
             active_array_append_bounds: Vec::new(),
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
-            active_array_u8_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
-            signed_word_lane: true,
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,
             current_file: None,
             last_expr_value: None,
-            block_expr_tail: None,
             current_decision_span: None,
         }
     }
@@ -631,17 +605,6 @@ impl<'a> MirLowerer<'a> {
         }
         let array_local_index = Self::local_index_for_expr(receiver)?;
         self.active_array_data_ptrs
-            .iter()
-            .rev()
-            .find_map(|(idx, ptr)| (*idx == array_local_index).then_some(*ptr))
-    }
-
-    pub(super) fn active_array_u8_data_ptr(&self, receiver: &HirExpr, index: &HirExpr) -> Option<VReg> {
-        if !self.index_has_active_len_bound(receiver, index) {
-            return None;
-        }
-        let array_local_index = Self::local_index_for_expr(receiver)?;
-        self.active_array_u8_data_ptrs
             .iter()
             .rev()
             .find_map(|(idx, ptr)| (*idx == array_local_index).then_some(*ptr))
@@ -1165,17 +1128,8 @@ impl<'a> MirLowerer<'a> {
     /// so push emissions must capture the call result as the post-grow array
     /// value. Defaults to false (canonical hosted bool-return, stable-header
     /// push ABI).
-    pub fn with_signed_word_lane(mut self, enabled: bool) -> Self {
-        self.signed_word_lane = enabled;
-        self
-    }
-
     pub fn with_array_push_returns_header(mut self, returns_header: bool) -> Self {
         self.array_push_returns_header = returns_header;
-        // FAM freestanding runtimes do not define the `[i64]` word lane.
-        if returns_header {
-            self.signed_word_lane = false;
-        }
         self
     }
 
@@ -1641,33 +1595,6 @@ impl<'a> MirLowerer<'a> {
     /// same array was fine, which is exactly why this class reads as a silently
     /// wrong number rather than a crash.
     /// Bug: `doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md`.
-    /// The slot type an expression statement's value flows into if it is a
-    /// tail: the enclosing block EXPRESSION's type when one is being lowered
-    /// in the current function, otherwise the function's return type.
-    pub(super) fn expr_stmt_tail_ty(&mut self) -> MirLowerResult<TypeId> {
-        let (name, ret) = self.with_func(|func, _| (func.name.clone(), func.return_type))?;
-        Ok(match &self.block_expr_tail {
-            Some((owner, ty)) if *owner == name => *ty,
-            _ => ret,
-        })
-    }
-
-    /// Lower a branch/logical condition to a RAW truth word (zero = false).
-    ///
-    /// `Branch`, `and`/`or` and `not` test the machine word directly. An
-    /// `ANY`-typed condition — e.g. a generic field `Pair<_, bool>.second` —
-    /// holds a TAGGED value, where `false` and `nil` are non-zero words, so
-    /// `if pair.second:` was always taken under the JIT while the interpreter
-    /// read it as false (h1_client's `read.second or ...` broke every https
-    /// fetch). Decode through `rt_value_truthy`, the interpreter's semantics.
-    pub(super) fn lower_condition_expr(&mut self, condition: &HirExpr) -> MirLowerResult<VReg> {
-        let reg = self.lower_expr(condition)?;
-        if condition.ty != TypeId::ANY {
-            return Ok(reg);
-        }
-        self.unbox_scalar_for_raw_slot(TypeId::BOOL, TypeId::ANY, reg)
-    }
-
     pub(super) fn unbox_scalar_for_raw_slot(
         &mut self,
         declared_ty: TypeId,
@@ -1677,21 +1604,9 @@ impl<'a> MirLowerer<'a> {
         if !self.slot_holds_tagged_value(value_ty) {
             return Ok(value);
         }
+        // Bool is deliberately excluded: it is tagged through `rt_value_bool`,
+        // not `BoxInt`, so `UnboxInt` is not its inverse.
         match declared_ty {
-            // Bool is tagged through `rt_value_bool`, not `BoxInt`, so
-            // `UnboxInt` is not its inverse. Without this arm a tagged FALSE
-            // (a non-zero word) flowed raw into a `-> bool` return / bool local
-            // and read as true under the JIT: `fn f(v: any) -> bool: v` with
-            // `v = false` returned true (llm_caret claude_cli `_json_bool`).
-            TypeId::BOOL => self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
-                func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
-                    dest: Some(dest),
-                    target: CallTarget::from_name("rt_value_truthy"),
-                    args: vec![value],
-                });
-                dest
-            }),
             TypeId::U64 => self.unbox_u64_runtime_value(value),
             TypeId::F32 | TypeId::F64 => self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
@@ -2210,22 +2125,12 @@ impl<'a> MirLowerer<'a> {
         // recomputed (not accumulated) or one function's locals would be read
         // as another's.
         self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
-        self.array_move_sites =
-            super::array_move::compute_array_move_sites(
-                func,
-                self.type_registry,
-                &self.type_value_kinds,
-                &self.inject_functions,
-            );
         self.local_type_name_hints = func
             .params
             .iter()
             .chain(func.locals.iter())
             .enumerate()
             .filter_map(|(index, local)| local.type_name_hint.clone().map(|name| (index, name)))
-            .collect();
-        self.local_trait_dispatch = func.params.iter().chain(func.locals.iter()).enumerate()
-            .filter_map(|(index, local)| local.trait_dispatch_owner.clone().map(|info| (index, info)))
             .collect();
 
         let mut mir_func = MirFunction::new(func.name.clone(), func.return_type, func.visibility);
@@ -2376,8 +2281,6 @@ impl<'a> MirLowerer<'a> {
                 | "rt_typed_words_u64_store_known_data_at"
                 | "rt_typed_words_u32_set"
                 | "rt_typed_words_u64_set"
-                | "rt_typed_words_i64_push"
-                | "rt_typed_words_i64_set"
         )
     }
 }

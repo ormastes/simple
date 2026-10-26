@@ -23,7 +23,6 @@ bootstrap_resume_verdict_written=0
 bootstrap_resume_stage=init
 bootstrap_resume_log=
 bootstrap_resume_release_lock=1
-bootstrap_resume_lock_owned=0
 stage3_guard_unit=
 stage3_guard_evidence=
 stage3_containment_backend=systemd
@@ -36,7 +35,7 @@ bootstrap_resume_verdict() {
   fi
 }
 bootstrap_resume_trap() {
-  status=${2:-$?}
+  status=$?
   sig=${1:-none}
   if [ "$stage3_containment_backend" = cgroupfs ] &&
      [ -n "${stage3_guard_unit:-}" ]; then
@@ -57,11 +56,19 @@ bootstrap_resume_trap() {
   if [ "${bootstrap_resume_verdict_written}" -eq 0 ]; then
     bootstrap_resume_verdict "ABORTED: stage=${bootstrap_resume_stage} exit=${status} signal=${sig} reason=${bootstrap_resume_stage}"
   fi
-  if [ "${bootstrap_resume_lock_owned:-0}" -eq 1 ] &&
-     [ "${bootstrap_resume_release_lock:-1}" -eq 1 ]; then
-    rm -rf -- "$lock"
-  elif [ "${bootstrap_resume_lock_owned:-0}" -eq 1 ] &&
-       [ -n "${lock:-}" ] && { [ -e "$lock" ] || [ -L "$lock" ]; }; then
+  if [ "${bootstrap_resume_release_lock:-1}" -eq 1 ]; then
+    bootstrap_cache_release_all
+    if [ -n "${archive:-}" ] && [ -d "$archive" ]; then
+      for terminal in "${stage3_log:-}" "${stage3_transcript:-}" "${stage3_status:-}" "${stage3_sanity:-}" "${manifest:-}"; do
+        [ ! -f "$terminal" ] || cp -p "$terminal" "$archive/terminal.$(basename "$terminal")"
+      done
+      if ! bootstrap_cache_freeze_attempt "$archive"; then
+        echo "bootstrap-evidence-error: could not freeze attempt $archive" >&2
+        [ "$status" -ne 0 ] || status=1
+      fi
+    fi
+    rm -rf "${lock:-}"
+  elif [ -n "${lock:-}" ] && { [ -e "$lock" ] || [ -L "$lock" ]; }; then
     echo "ERROR: retaining ${lock:-output lock}: Stage 3 descendants were not proven stopped" >&2
   fi
   [ "$sig" = none ] || exit "$status"
@@ -71,37 +78,10 @@ trap 'bootstrap_resume_trap HUP' HUP
 trap 'bootstrap_resume_trap INT' INT
 trap 'bootstrap_resume_trap TERM' TERM
 
-# systemd user services do not inherit the launcher's environment. Transfer
-# this reserved watchdog policy as a typed worker argument, never command-env.
-stage3_rss_cap_mode=${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}
-case "$stage3_rss_cap_mode" in enforce|monitor) ;; *)
-  bootstrap_stage3_error 'invalid Stage 3 RSS cap mode' ;;
-esac
-
-# Transport this finite watchdog bound explicitly: systemd services do not
-# inherit the controller environment. It is supervision metadata, not a
-# compiler environment input or a change to historical parent transcripts.
-# Match the watchdog's host-based defaults ($^O), not the compiler target.
-stage3_observation_host=$(uname -s) || bootstrap_stage3_error 'cannot identify observation host'
-case "$stage3_observation_host" in FreeBSD) stage3_observation_default_ms=5000 ;; *) stage3_observation_default_ms=1000 ;; esac
-stage3_observation_budget_ms=${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS-$stage3_observation_default_ms}
-case "$stage3_observation_budget_ms" in
-  ''|0*|*[!0-9]*) bootstrap_stage3_error 'invalid Stage 3 observation budget' ;;
-esac
-[ "${#stage3_observation_budget_ms}" -le 5 ] &&
-  [ "$stage3_observation_budget_ms" -ge 1000 ] &&
-  [ "$stage3_observation_budget_ms" -le 60000 ] ||
-  bootstrap_stage3_error 'Stage 3 observation budget must be 1000..60000 ms'
-SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=$stage3_observation_budget_ms
-export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
-
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
-. "$root/scripts/bootstrap/bootstrap-cache-release-vector.shs"
-. "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
-BOOTSTRAP_CACHE_PROCESS_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
 bootstrap_stage3_resume_output_path "$source_output" "$root" \
@@ -117,28 +97,47 @@ bootstrap_planner_v2_verify "$planner_admission" "$root" || exit 64
   //bootstrap:stage3 ] || exit 64
 
 platform=$(bootstrap_stage3_host_platform)
-exe_suffix=
-archive_prefix=lib
-archive_suffix=.a
-case "$platform" in
-  *-pc-windows-msvc) exe_suffix=.exe; archive_prefix=; archive_suffix=.lib ;;
-  *-pc-windows-gnu) exe_suffix=.exe ;;
-esac
 stage3="$output/stage3/$platform"
-stage2="$output/stage2/$platform/simple$exe_suffix"
-admitted="$stage3/stage2-admitted/simple$exe_suffix"
+# Windows artifact naming.  bootstrap-from-scratch.sh already derives these
+# (exe_suffix at :870/:877, archive_prefix/archive_suffix at :871/:872 and
+# :902-906) and every Stage-2 artifact on disk is named accordingly:
+#   simple.exe, simple.exe.inputs.sha256, simple_native_all.lib,
+#   simple_compiler_backfill.lib
+# This script hardcoded the POSIX names, so on Windows its very first
+# fail-closed input check aborted with (measured 2026-09-03, MSVC lane):
+#   ERROR - nothing was checked (required Stage-2 input missing or is a
+#   symlink: .../stage2-runtime-authority/simple.inputs.sha256)
+# i.e. Stage 3 resume had never been runnable on Windows at all.  The stage2
+# transcript confirms the convention is a full path INCLUDING the suffix:
+# `-o /d/.../build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe`.
+#
+# CROSS-PLATFORM IMPACT: none.  A non-Windows $platform (e.g.
+# x86_64-unknown-linux-gnu) matches no case arm, so the suffix stays empty and
+# the prefix/suffix stay lib/.a -- every variable below expands to the exact
+# string it had before.
+bootstrap_stage3_exe=''
+bootstrap_stage3_arpre=lib
+bootstrap_stage3_arsuf=.a
+case "$platform" in
+    *-windows-*) bootstrap_stage3_exe=.exe ;;
+esac
+case "$platform" in
+    *-windows-msvc) bootstrap_stage3_arpre=''; bootstrap_stage3_arsuf=.lib ;;
+esac
+stage2="$output/stage2/$platform/simple$bootstrap_stage3_exe"
+admitted="$stage3/stage2-admitted/simple$bootstrap_stage3_exe"
 stage2_admission="$stage3/stage2-admitted/admission.env"
 runtime="$stage3/stage2-runtime-authority"
-seed="$runtime/simple$exe_suffix"
+seed="$runtime/simple$bootstrap_stage3_exe"
 stamp="$seed.inputs.sha256"
-native_all="$runtime/${archive_prefix}simple_native_all${archive_suffix}"
-backfill="$runtime/${archive_prefix}simple_compiler_backfill${archive_suffix}"
+native_all="$runtime/${bootstrap_stage3_arpre}simple_native_all${bootstrap_stage3_arsuf}"
+backfill="$runtime/${bootstrap_stage3_arpre}simple_compiler_backfill${bootstrap_stage3_arsuf}"
 stage2_sanity="$stage3/stage2-sanity.env"
 stage2_receiver="$stage3/stage2-receiver.env"
 stage2_receiver_log="$stage3/stage2-receiver.log"
 stage2_transcript="$stage3/stage2-command.transcript"
 stage2_log="$output/logs/$platform/stage2-native-build.log"
-candidate="$stage3/simple$exe_suffix"
+candidate="$stage3/simple$bootstrap_stage3_exe"
 manifest="$stage3/provenance.env"
 stage3_transcript="$stage3/stage3-command.transcript"
 stage3_log="$output/logs/$platform/stage3-native-build.log"
@@ -165,7 +164,7 @@ runtime_origin_after="$stage3/runtime-origin-after.txt"
 runtime_admitted="$stage3/runtime-admitted.txt"
 lock="$output.lock"
 archive="$stage3/attempts/recovery-threads1-$(date -u '+%Y%m%dT%H%M%S')-$$"
-mkdir -p -- "$(dirname "$archive")" || bootstrap_stage3_error "could not create recovery attempts directory"
+mkdir -p "$stage3/attempts"
 if [ -e "$archive" ] || [ -L "$archive" ]; then
   [ -d "$archive" ] && [ ! -L "$archive" ] ||
     bootstrap_stage3_error "recovery-threads1 must be a real directory: $archive"
@@ -175,24 +174,6 @@ else
 fi
 [ "$(bootstrap_stage3_canonical_path "$archive")" = "$archive" ] ||
   bootstrap_stage3_error "recovery-threads1 is not canonical: $archive"
-
-# Seal the selected supervision setting in this invocation's immutable archive.
-# The compiler argv/env digest remains unchanged: the watchdog reads this value
-# before env-i constructs the admitted compiler environment.
-stage3_observation_receipt="$archive/observation-budget.env"
-[ ! -e "$stage3_observation_receipt" ] && [ ! -L "$stage3_observation_receipt" ] ||
-  bootstrap_stage3_error 'observation budget receipt already exists'
-{
-  echo 'schema=simple-stage3-observation-budget-v1'
-  echo 'status=selected-not-executed'
-  echo "observation_budget_ms=$stage3_observation_budget_ms"
-  echo 'transport=worker-positional-31'
-  echo 'failure_mode=enforce'
-} >"$stage3_observation_receipt" || bootstrap_stage3_error 'cannot record observation budget'
-chmod 0400 "$stage3_observation_receipt" || bootstrap_stage3_error 'cannot seal observation budget'
-bootstrap_stage3_hash_file "$stage3_observation_receipt" >"$archive/observation-budget.sha256" ||
-  bootstrap_stage3_error 'cannot hash observation budget'
-chmod 0400 "$archive/observation-budget.sha256" || bootstrap_stage3_error 'cannot seal observation budget hash'
 
 # A self-hosted native-build controller can contain a crashed worker, print the
 # worker's unsigned exit code, and still return shell status 0.  The recovery
@@ -458,6 +439,16 @@ stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value \
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
+bootstrap_preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
+bootstrap_preflight_expected_config="platform=${platform};backend=${stage2_backend};mode=dynload;lane=full-bootstrap"
+sh "$root/scripts/check/check-bootstrap-preflight.shs" \
+  --seed="$seed" --expect-config="$bootstrap_preflight_expected_config" \
+  --verify-receipt="$bootstrap_preflight_receipt" || {
+  echo "bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence" >&2
+  exit 64
+}
+SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=$bootstrap_preflight_receipt
+export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
 # The Stage-2 build-args vector is reconstructed from the RECORDED transcript --
 # every env VALUE and the argv verbatim -- not from a hand-written copy of
 # bootstrap-from-scratch.sh:2827. The hand-written copy was stale in both halves
@@ -494,14 +485,6 @@ done <"$stage2_transcript"
 stage2_env_value() {
   bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
 }
-stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$stage2_transcript") || \
-  bootstrap_stage3_error 'recorded Stage 2 SCV cold-init control is invalid'
-stage2_preflight_context=$(bootstrap_stage3_stage2_transcript_preflight_context "$stage2_transcript") || \
-  bootstrap_stage3_error 'recorded Stage 2 preflight context is invalid'
-stage2_recorded_compiler_ceiling=$(bootstrap_stage3_transcript_compiler_ceiling "$stage2_transcript") || \
-  bootstrap_stage3_error 'recorded Stage 2 compiler RSS ceiling is invalid'
-stage2_recorded_diagnostics=$(bootstrap_stage3_stage2_transcript_diagnostics "$stage2_transcript") || \
-  bootstrap_stage3_error 'recorded Stage 2 diagnostics are invalid'
 # Preserve the original Stage 2 vector. Legacy admitted transcripts had no HIR
 # controls; newer transcripts must carry the complete pair in the same order.
 bootstrap_stage2_hir_env=
@@ -580,10 +563,6 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
   "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
-  ${stage2_recorded_cold_init:+"SIMPLE_SCV_INVENTORY_COLD_INIT=$stage2_recorded_cold_init"} \
-  ${stage2_recorded_compiler_ceiling:+"SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$stage2_recorded_compiler_ceiling"} \
-  ${stage2_preflight_context:+"SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=$stage2_preflight_context"} \
-  ${stage2_recorded_diagnostics} \
   "$@") || exit 1
 bootstrap_stage3_verify_sanity_evidence_receipt \
   "$stage2_sanity" "$stage2_sanity" "$(dirname -- "$stage2_sanity")" \
@@ -599,40 +578,6 @@ bootstrap_stage3_verify_stage2_admission_receipt \
   "$(dirname -- "$stage2_sanity")" "$stage2_receiver" "$stage2_receiver" \
   "$stage2_receiver_log" "$stage2_receiver_log" "$root"
 resume_abi_receipt_sha=$(bootstrap_stage3_hash_file "$stage2_admission") || exit 1
-# Parent admission authenticated the in-memory Stage 2 argv above. Transfer
-# only its ordered sources and closure policy; never rediscover current policy.
-. "$root/scripts/bootstrap/lib/stage3-source-policy.shs"
-stage3_source_policy=$(bootstrap_stage3_source_policy stage2 "$@") ||
-  bootstrap_stage3_error 'authenticated Stage 2 source policy is missing or malformed'
-set --
-while IFS= read -r stage3_policy_arg; do
-  set -- "$@" "$stage3_policy_arg"
-done <<EOF_STAGE3_SOURCE_POLICY
-$stage3_source_policy
-EOF_STAGE3_SOURCE_POLICY
-# Parent admission above authenticates the context as part of build_args_sha256.
-# Cargo feature selection cannot be inferred from backend or the current shell.
-bootstrap_preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
-if [ -n "$stage2_preflight_context" ]; then
-  . "$root/scripts/bootstrap/lib/preflight-configuration.shs"
-  bootstrap_preflight_expected_config=$(bootstrap_preflight_configuration_from_parent_v1 \
-    "$stage2_preflight_context" "$platform" "$stage2_backend" dynload) || {
-    echo 'bootstrap-policy-error: admitted Stage 2 preflight context is incompatible' >&2
-    exit 64
-  }
-else
-  # Legacy parents contain no authenticated Cargo dimensions. Retain their
-  # existing exact base-config contract; never adopt richer receipt bytes.
-  bootstrap_preflight_expected_config="platform=${platform};backend=${stage2_backend};mode=dynload;lane=full-bootstrap"
-fi
-sh "$root/scripts/check/check-bootstrap-preflight.shs" \
-  --seed="$seed" --expect-config="$bootstrap_preflight_expected_config" \
-  --verify-receipt="$bootstrap_preflight_receipt" || {
-  echo 'bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence' >&2
-  exit 64
-}
-SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=$bootstrap_preflight_receipt
-export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
 path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)
 cmp -s "$runtime_origin_before" "$runtime_origin_after"
 cmp -s "$runtime_origin_after" "$runtime_admitted"
@@ -681,20 +626,8 @@ if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest \
   exit 1
 fi
 mkdir "$lock" || { echo "error: bootstrap output is locked: $lock" >&2; exit 1; }
-bootstrap_resume_lock_owned=1
 printf '%s\n' "$$" >"$lock/pid"
 bootstrap_resume_stage=stage3-build
-bootstrap_release_resume_cleanup() {
-  resume_status=$?
-  bootstrap_cache_release_all || resume_status=1
-  for terminal in "$stage3_log" "$stage3_transcript" "$stage3_status" "$stage3_sanity" "$manifest"; do
-    [ ! -f "$terminal" ] || cp -p "$terminal" "$archive/terminal.${terminal##*/}"
-  done
-  bootstrap_cache_freeze_attempt "$archive" || resume_status=1
-  bootstrap_resume_trap none "$resume_status"
-  exit "$resume_status"
-}
-trap bootstrap_release_resume_cleanup EXIT
 
 for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$stage3_sanity" "$manifest"; do
   if [ -e "$old" ]; then cp -p "$old" "$archive/$(basename "$old").before-resume"; fi
@@ -721,12 +654,15 @@ bootstrap_stage3_git_state "$root" "$git_before"
 bootstrap_stage3_tool_authority_snapshot "$tool_before" "$path" "$root"
 resume_cache_action=${RESUME_STAGE3_CACHE_ACTION:-reuse}
 [ "${RESUME_STAGE3_FRESH_CACHE:-0}" != 1 ] || resume_cache_action=clean
-resume_cache_options=$(bootstrap_cache_release_options_v1 stripped '' absent) || exit 1
-resume_cache_persistence=$(bootstrap_cache_persistence_policy) || exit 1
+resume_cache_options=$(bootstrap_cache_explicit_options \
+  "$(stage2_env_value SIMPLE_ABI_POLICY)" "$(stage2_env_value SIMPLE_PLUGIN_MANIFEST_POLICY)" \
+  "$(stage2_env_value SIMPLE_KERNEL_K1_POLICY)" "$(stage2_env_value SIMPLE_COVERAGE_CUTOVER_STATE)" \
+  "$(stage2_env_value SIMPLE_K1_COMPOSITION_SHA256_BEFORE)" "$stage2_library_path" "$stage2_link_compat") || exit 1
+resume_cache_assurance=$(bootstrap_cache_stage3_assurance) || exit 1
 resume_cache_admission=$(bootstrap_cache_abi_admission_options \
   "$stage2_admission" "$resume_abi_policy") || exit 1
 resume_cache_options="$resume_cache_options
-$resume_cache_persistence
+$resume_cache_assurance
 $resume_cache_admission"
 resume_cache_payload=$(bootstrap_cache_phase_inputs "$root" "$platform" "$stage2_backend" \
   dynload "$source_before" "$runtime_admitted" "$tool_before" "$resume_cache_options") ||
@@ -756,10 +692,6 @@ evidence_run_id="stage3-${platform}-$$"
 # working set and reject native-build/QEMU overlap before starting the runner.
 : "${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB:=49152}"
 export SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB
-# HEADROOM stays the launch floor; MemoryHigh and the live reserve default to
-# it and can be set separately (memory-admission.shs).
-bootstrap_stage3_memory_split_headroom ||
-  bootstrap_stage3_error "invalid Stage 3 headroom, MemoryHigh or reserve MiB"
 # This is deliberately distinct from required free host headroom.  It is a
 # race-resistant per-process virtual-memory ceiling: even if a peer starts
 # after the final process scan, this compiler cannot consume the whole user
@@ -770,13 +702,9 @@ case "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" in
   ''|*[!0-9]*|0) bootstrap_stage3_error "invalid Stage 3 process max MiB" ;;
 esac
 stage3_process_max_kib=$((SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB * 1024))
-# MemoryHigh above MemoryMax never throttles (earlier configurations relied
-# on that, so warn rather than refuse).
-[ "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" -le "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" ] ||
-  echo "warning: Stage 3 MemoryHigh ${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB} MiB exceeds MemoryMax ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB} MiB; it will not throttle" >&2
 bootstrap_stage3_memory_admission_preflight "$memory_admission" ||
   bootstrap_stage3_error "Stage 3 memory headroom admission refused; see $memory_admission"
-bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" "$stage3_process_max_kib" ||
+bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" ||
   bootstrap_stage3_error "concurrent heavy process admission refused; see $memory_admission"
 stage3_guard_watch=disabled-platform
 case "$platform" in
@@ -817,7 +745,7 @@ case "$platform" in
           "$stage3_cgroupfs_python_sha" ] || return 125
         "$stage3_cgroupfs_python" -I "$stage3_cgroupfs_helper" "$1" \
           --group "$stage3_guard_unit" \
-          --high "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
+          --high "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
           --maximum "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB"
       }
       bootstrap_stage3_cgroupfs_call validate >>"$memory_admission" ||
@@ -859,8 +787,6 @@ case "$platform" in
 esac
 {
   echo "required_host_headroom_mib=$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB"
-  echo "memory_high_mib=$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB"
-  echo "runtime_reserve_mib=$SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB"
   echo "process_virtual_memory_max_mib=$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB"
   echo "runtime_headroom_watch=$stage3_guard_watch"
 } >>"$memory_admission"
@@ -925,25 +851,13 @@ case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
   1) stage3_cold_init_env="SIMPLE_SCV_INVENTORY_COLD_INIT=1" ;;
   *) echo "error: SIMPLE_SCV_INVENTORY_COLD_INIT must be unset or exactly 1" >&2; exit 1 ;;
 esac
-stage3_compiler_ceiling_env=$(bootstrap_stage3_compiler_ceiling_environment) || \
-  bootstrap_stage3_error 'invalid new Stage 3 compiler RSS ceiling'
-stage3_compiler_cap=
-if [ -n "$stage3_compiler_ceiling_env" ]; then
-  # systemd user services do not inherit the invoking shell. Admit the
-  # caller's mode/fixture/cap here, then transport its exact cap separately
-  # from the ceiling. The worker re-probes live headroom before execution.
-  . "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
-  bootstrap_tree_rss_resolve "$stage3_threads" "$root" || \
-    bootstrap_stage3_error "$bootstrap_tree_rss_refusal"
-  stage3_compiler_cap=$bootstrap_tree_rss_cap_kib
-fi
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" \
   "SIMPLE_ABI_POLICY=$resume_abi_policy" \
   "SIMPLE_ABI_ADMISSION_RECEIPT=$stage2_admission" \
   "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_STAGE3_STREAMING_SURFACES=0" \
+  "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
   "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route" \
   "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=$stage3_fallback_route" \
   "SIMPLE_FRONTEND_CACHE=1" "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
@@ -962,12 +876,11 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" "SIMPLE_RUNTIME_PATH=$runtime" \
   "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" "SIMPLE_BINARY=$admitted" \
   ${stage3_diagnostic_env} \
-  ${stage3_compiler_ceiling_env:+"$stage3_compiler_ceiling_env"} \
   native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --threads "$stage3_threads" \
   ${stage3_timeout_args} --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
-  "$@" src/app/cli/bootstrap_main.spl)
+  src/app/cli/bootstrap_main.spl)
 
 bootstrap_planner_v2_verify_parent_compiler_binding \
   "$planner_admission" "$stage2" "$admitted" || exit 64
@@ -982,7 +895,7 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     bootstrap_stage3_error 'cgroupfs authority changed before launch'
   "$stage3_cgroupfs_python" -I "$stage3_cgroupfs_helper" join \
     --group "$stage3_guard_unit" \
-    --high "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
+    --high "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
     --maximum "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" -- \
     "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -990,12 +903,12 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
 elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
   systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
     --property=KillMode=control-group \
-    --property="MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB}M" \
+    --property="MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB}M" \
     --property="MemoryMax=${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB}M" \
     "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -1003,8 +916,8 @@ elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
 elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
   # The watchdog must honor a Stage 3 process cap configured below the tree
@@ -1021,7 +934,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   stage3_darwin_rss_session_mode=$(bootstrap_stage3_memory_darwin_session_mode)
   perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
     --session-mode="$stage3_darwin_rss_session_mode" \
-    --rss-cap-mode="$stage3_rss_cap_mode" \
+    --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
     --max-rss-kib="$stage3_darwin_rss_cap_kib" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="$stage3_log.rss.env" -- \
@@ -1031,8 +944,8 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
 else
   "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -1040,12 +953,12 @@ else
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
 fi
 stage3_guard_pid=$!
 stage3_guard_tripped=0
-stage3_guard_reserve_kib=$((SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB * 1024))
+stage3_guard_reserve_kib=$((SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB * 1024))
 while [ "$stage3_guard_watch" = linux-proc-memavailable ] && kill -0 "$stage3_guard_pid" 2>/dev/null; do
   stage3_guard_available_kib=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)
   case "$stage3_guard_available_kib" in
@@ -1137,7 +1050,6 @@ if [ "$effective_status" -ne 0 ]; then
   echo "error: Stage 3 native-build failed (shell=$status worker=$worker_status effective=$effective_status class=$diagnostic_class signal=$signal_identity route=$stage3_requested_route fallback=$stage3_fallback_route)" >&2
   exit "$effective_status"
 fi
-bootstrap_cache_report_log "$stage3_log"
 ! grep -qE '^(Build complete: [0-9]+ compiled|Linked: .* via clang)' "$stage3_log" || exit 1
 [ "$(bootstrap_stage3_hash_file "$admitted")" = "$admitted_sha" ] || exit 1
 runtime_check="$archive/runtime-after.$$"
@@ -1162,20 +1074,11 @@ bootstrap_stage_sanity() (
   # Validate before any candidate execution, and preserve presence (including
   # malformed/empty contracts) rather than silently falling back to standalone.
   if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
-    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0)
-      echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-session-id raw_status=125' >&2
-      return 125 ;; esac
-    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *)
-      echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-session-helper raw_status=125' >&2
-      return 125 ;; esac
-    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || {
-      echo 'bootstrap-sanity-error: phase=session-validation reason=session-check-failed raw_status=125' >&2
-      return 125
-    }
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0) return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || return 125
   fi
-  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *)
-    echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-rss-cap-mode raw_status=125' >&2
-    return 125 ;; esac
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *) return 125 ;; esac
   for name in $(env | sed 's/=.*//'); do
     case "$name" in
       SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
@@ -1191,11 +1094,7 @@ bootstrap_stage_sanity() (
   frontend0_receipt="$evidence.frontend-bootstrap-0.status.env"
   frontend1_log="$evidence.frontend-bootstrap-1.log"
   frontend1_receipt="$evidence.frontend-bootstrap-1.status.env"
-  candidate_frontend_capture_setup "${frontend0_log%/*}" || {
-    sanity_capture_status=$?
-    echo "bootstrap-sanity-error: phase=frontend-capture reason=capture-setup-failed raw_status=${sanity_capture_status}" >&2
-    return "${sanity_capture_status}"
-  }
+  candidate_frontend_capture_setup "${frontend0_log%/*}" || return 1
   frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
   rm -f "$frontend_log" "$frontend0_log" "$frontend0_receipt" \
@@ -1262,8 +1161,7 @@ bootstrap_stage_sanity() (
     echo candidate_sha256_after="$after"; } >"$evidence_tmp"
   mv "$evidence_tmp" "$evidence"; [ "$sanity_status" = pass ]
 )
-SIMPLE_RT_OBJ_CACHE_DIR="$stage3_cache/rt-obj" \
-  bootstrap_stage_sanity "$candidate" "$stage3_sanity" "$home" "$tmp" "$path"
+bootstrap_stage_sanity "$candidate" "$stage3_sanity" "$home" "$tmp" "$path"
 bootstrap_stage3_source_snapshot "$source_after" "$root"
 bootstrap_stage3_git_state "$root" "$git_after"
 bootstrap_stage3_tool_authority_snapshot "$tool_after" "$path" "$root"

@@ -17,7 +17,7 @@ Tests advanced generic features including:
 
 ## Syntax
 
-```simple:skip
+```simple
 # Const generics
 struct Array<T, const N: usize>:
     data: T

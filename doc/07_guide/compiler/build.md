@@ -2,11 +2,6 @@
 
 This guide covers the Simple build system, project configuration, build commands, and the bootstrap process for building Simple from source.
 
-For native output, Simple uses external mold/LLD or the admitted platform
-linker route while its mold-like internal Simple linker is being stabilized.
-See [linker selection and cutover](linker_selection.md) for target boundaries,
-`SIMPLE_LINKER` overrides and the evidence required before changing defaults.
-
 ---
 
 ## Overview
@@ -584,11 +579,3 @@ Its ordinary HIR codec is `spl-hircodec-v3`, canonical codec is
 `spl-hircodec-canonical-v2`, and older cache identities are invalidated. See
 [the item 3 evidence](../../03_plan/evidence/seven_plans/windows/item3_builtin_identity_2026-09-29.md)
 before using this development branch; no optimizer/fusion capability is claimed.
-
-## Native staging and terminal evidence
-
-For the investigated Linux/WSL bootstrap path, see
-[native staging and terminal evidence](../tooling/bootstrap_native_staging.md):
-one-thread crash diagnosis, host-local CUDA configuration, cache-parent staging,
-owned-child cleanup, final receipt publication and full-CLI qualification. These
-are scoped workflow lessons, not new compiler defaults or completed build claims.

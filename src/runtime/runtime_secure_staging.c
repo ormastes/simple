@@ -19,7 +19,7 @@
 #endif
 #endif
 
-#include "runtime_shared_parse_cell_private.h"
+#define RT_SECURE_PATH_MAX 4096
 
 /* These four functions are needed by bootstrap_main but their historical
  * owners (runtime.c/runtime_native.c) cannot be compiled into native_all:
@@ -33,30 +33,15 @@ int64_t rt_simple_abi_version_deferred(void) {
     return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
 }
 
+static int secure_copy_path(const uint8_t* ptr, uint64_t len, char* out, size_t cap) {
+    if (!ptr || !out || len == 0 || len >= cap || memchr(ptr, 0, (size_t)len)) return 0;
+    memcpy(out, ptr, (size_t)len); out[len] = 0; return 1;
+}
 
 #if defined(_WIN32)
-
-/* The full C runtime exports this in runtime_native.c. Linux Stage2 has the
- * narrow bootstrap_linux provider; Windows Stage2 needs the same real owner
- * here because its Rust archive cannot include the full C runtime. */
-int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_SECURE_PATH_MAX];
-    wchar_t wide_path[32768];
-    if (!secure_copy_path(path_ptr, path_len, path, sizeof(path)) ||
-        !spl_secure_widen_long_path(path, wide_path)) return 0;
-    DWORD attrs = GetFileAttributesW(wide_path);
-    return attrs != INVALID_FILE_ATTRIBUTES &&
-        (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-}
-
-/* Same narrow-provider gap for the thread id: runtime_thread.c owns it in the
- * full C runtime, and runtime_bootstrap_linux_provider.c on hosted Unix. With
- * neither in the Windows seed, the stage1 link stubbed it and `--version`
- * aborted (release run 39723083883). */
-int64_t spl_thread_current_id(void) {
-    return (int64_t)GetCurrentThreadId();
-}
+/* Forward declaration -- defined below, ahead of its other two call sites.
+ * rt_file_create_excl needs it too: see the call site for why. */
+static int spl_secure_widen_long_path(const char* path, wchar_t* out);
 #endif
 
 int rt_file_create_excl(const char* path_ptr, int64_t path_len,
@@ -114,7 +99,6 @@ int rt_file_create_excl(const char* path_ptr, int64_t path_len,
 #endif
 }
 
-
 int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_SECURE_PATH_MAX];
     if (!secure_copy_path(path_ptr, path_len, path, sizeof(path))) return 0;
@@ -153,6 +137,44 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
 }
 
 #if defined(_WIN32)
+/* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
+ * leaves it long, add the extended-length ("\\?\") prefix so a WIDE Win32
+ * call is not itself capped at MAX_PATH (a wide call is not exempt on its
+ * own -- only the prefix lifts the ceiling, to ~32767). `out` must hold at
+ * least 32768 wchar_t. Returns 0 (leaving `out` untouched) when the path
+ * cannot be widened/qualified at all, so callers fall back to the ANSI call
+ * for a normal-length or otherwise-unrepresentable path. Named without the
+ * rt_ prefix (unlike its Simple-facing siblings in this file) because it is
+ * a pure file-local helper with no runtime-API surface of its own -- see
+ * scripts/check/check-rt-dual-implementation-ratchet.shs, which treats any
+ * new rt_-prefixed definition as a fresh single-lane primitive requiring a
+ * Simple twin. The path separator and prefix are built from the numeric
+ * code point (92) rather than written literally, purely to keep this source
+ * free of escape sequences. */
+static int spl_secure_widen_long_path(const char* path, wchar_t* out) {
+    static const wchar_t sep = (wchar_t)92;
+    wchar_t wide[32768], full[32768];
+    wchar_t* scan;
+    DWORD n;
+    size_t len;
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wide,
+                            (int)(sizeof(wide) / sizeof(wide[0]))) == 0) {
+        return 0;
+    }
+    for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+    n = GetFullPathNameW(wide, (DWORD)(sizeof(full) / sizeof(full[0])), full, NULL);
+    if (n == 0 || n >= sizeof(full) / sizeof(full[0])) return 0;
+    /* Already extended-length, or a UNC path: hand it over unchanged. */
+    if (full[0] == sep && full[1] == sep) {
+        memcpy(out, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        return 1;
+    }
+    len = wcslen(full);
+    if (len + 5 >= 32768) return 0;
+    out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+    memcpy(out + 4, full, (len + 1) * sizeof(wchar_t));
+    return 1;
+}
 
 /* Create a directory without the MAX_PATH ceiling. See the call site for why. */
 static BOOL rt_secure_create_directory_long(const char* path,

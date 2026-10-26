@@ -1,0 +1,32 @@
+# Regression pin for
+# doc/08_tracking/bug/standalone_hir_lowering_aborts_on_real_compiler_files_2026-08-21.md
+#
+# `parse_full_frontend` + `HirLowering.lower_module` outside the driver used to
+# ABORT THE PROCESS on real compiler sources:
+#   error: semantic: method `split` not found on type `i64` (receiver value: 32)
+# It killed the Any-escape census, which needs typed HIR one file at a time.
+#
+# The abort is a process abort, not an exception, so the assertions below are
+# secondary: the spec's real signal is that it runs to completion at all.
+use compiler.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_types.{HirModule}
+
+fn lower_file(path: text) -> i64:
+    val content = rt_file_read_text(path) ?? ""
+    val pm = parse_full_frontend(content, path, "spec_probe", Logger(level: 0))
+    var lowering = hirlowering_for_module("", ModuleSurfacesByName.empty())
+    val hm: HirModule = lowering.lower_module(pm)
+    hm.functions.len()
+
+describe "Standalone HIR lowering of real compiler sources":
+    context "00.common/assurance":
+        it "lowers a file with no type declarations":
+            expect(lower_file("src/compiler/00.common/assurance/policy_names.spl") > 0).to_equal(true)
+
+        it "lowers a file that declares an enum":
+            # The historical trigger. Same-content copies at other paths always
+            # worked; this exact path did not.
+            expect(lower_file("src/compiler/00.common/assurance/unsafe_capabilities.spl") > 0).to_equal(true)

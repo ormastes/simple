@@ -11,7 +11,7 @@ preconditions, postconditions, invariants, and old() capture.
 
 ## Contract Syntax
 
-```simple:skip
+```simple
 fn transfer(from: i64, to: i64, amount: i64) -> (i64, i64):
     in:
         amount > 0

@@ -500,11 +500,6 @@ impl Lowerer {
     /// This is used for static polymorphism support - when a trait method is
     /// called via dynamic dispatch, we need to know the vtable slot index.
     pub(crate) fn register_trait(&mut self, t: &ast::TraitDef) -> LowerResult<()> {
-        let file = self.current_file.clone();
-        self.register_trait_in_file(t, file.as_deref())
-    }
-
-    pub(super) fn register_trait_in_file(&mut self, t: &ast::TraitDef, file: Option<&std::path::Path>) -> LowerResult<()> {
         let mut trait_info = HirTraitInfo::new(t.name.clone());
         trait_info.generic_params = t.generic_params.clone();
         let previous_class_type = self.current_class_type;
@@ -533,10 +528,6 @@ impl Lowerer {
         result?;
 
         // Store trait info in module
-        let owner = Self::flatten_owner_of(t.methods.iter().flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())))
-            .or_else(|| file.map(|p| crate::interpreter::normalize_path_key(p).to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "<local-module>".to_string());
-        self.trait_declared_owners.entry(std::path::PathBuf::from(&owner)).or_default().insert(t.name.clone(), std::sync::Arc::new(crate::hir::HirTraitDeclarationOwner { owner: format!("{}::{}", owner, t.name), source_file: std::path::PathBuf::from(owner), info: trait_info.clone(), declaration: t.clone() }));
         self.module.trait_infos.insert(t.name.clone(), trait_info);
 
         // Also register the trait name as a type alias to ANY

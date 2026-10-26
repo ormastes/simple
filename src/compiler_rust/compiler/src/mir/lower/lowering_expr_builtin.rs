@@ -280,34 +280,6 @@ impl<'a> MirLowerer<'a> {
             return result;
         }
 
-        // Optional bool payloads use rt_value_bool, not BoxInt. After HIR
-        // peels bool? for an if-val binding, decode the tagged payload into
-        // a native bool. Do not use rt_is_some: Some(false) is present.
-        if name == "rt_unwrap_or_self"
-            && args.len() == 1
-            && expr_ty == TypeId::BOOL
-            && args[0].ty != TypeId::ANY
-            && self.slot_holds_tagged_value(args[0].ty)
-        {
-            let arg_reg = self.lower_expr(&args[0])?;
-            return self.with_func(|func, current_block| {
-                let payload = func.new_vreg();
-                let boolean = func.new_vreg();
-                let block = func.block_mut(current_block).unwrap();
-                block.instructions.push(MirInst::Call {
-                    dest: Some(payload),
-                    target: CallTarget::from_name("rt_unwrap_or_self"),
-                    args: vec![arg_reg],
-                });
-                block.instructions.push(MirInst::Call {
-                    dest: Some(boolean),
-                    target: CallTarget::from_name("rt_value_as_bool"),
-                    args: vec![payload],
-                });
-                boolean
-            });
-        }
-
         // `rt_unwrap_or_self` returns a tagged RuntimeValue. When the HIR site
         // typed the RESULT as a BoxInt-family scalar while the ARGUMENT is a
         // tagged optional slot (`T?` over a scalar — never plain ANY, whose
@@ -370,31 +342,6 @@ impl<'a> MirLowerer<'a> {
                     unboxed
                 }
             });
-        }
-
-        // Same contract for the non-BoxInt scalars a `T?` can hold: `bool?`
-        // is tagged through `rt_value_bool` and `f64?` through
-        // `rt_value_float`, so the decoders are `rt_value_truthy` and
-        // `UnboxFloat` (exactly what `unbox_scalar_for_raw_slot` uses for a
-        // raw bool/float local). Producer: `??` on `bool?`/`f32?`/`f64?`
-        // (hir lower_coalesce), whose result is typed as the raw scalar.
-        if name == "rt_unwrap_or_self"
-            && args.len() == 1
-            && args[0].ty != TypeId::ANY
-            && self.slot_holds_tagged_value(args[0].ty)
-            && matches!(expr_ty, TypeId::BOOL | TypeId::F32 | TypeId::F64)
-        {
-            let arg_reg = self.lower_expr(&args[0])?;
-            let raw_result = self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
-                func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
-                    dest: Some(dest),
-                    target: CallTarget::from_name("rt_unwrap_or_self"),
-                    args: vec![arg_reg],
-                });
-                dest
-            })?;
-            return self.unbox_scalar_for_raw_slot(expr_ty, args[0].ty, raw_result);
         }
 
         // Both enum payload readers and checked unwrap return the payload in

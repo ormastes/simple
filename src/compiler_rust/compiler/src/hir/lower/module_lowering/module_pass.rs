@@ -445,18 +445,6 @@ fn is_domain_block_kind(kind: &str) -> bool {
 }
 
 impl Lowerer {
-    /// Function type of a module-level initializer that names a free function
-    /// (`val G = f`), declared in this unit or imported; `None` otherwise.
-    fn function_value_init_type(&self, value: &Expr) -> Option<TypeId> {
-        let Expr::Identifier(name) = value else {
-            return None;
-        };
-        self.declared_function_value_types
-            .get(name)
-            .or_else(|| self.imported_function_value_types.get(name))
-            .copied()
-    }
-
     /// Helper: Register type and function declarations from an AST node
     fn register_declarations_from_node(&mut self, item: &Node) -> LowerResult<()> {
         match item {
@@ -480,18 +468,6 @@ impl Lowerer {
                 let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
                 self.globals.insert(symbol.clone(), ret_ty);
                 self.local_globals.insert(symbol.clone());
-                if owner.is_none() && f.generic_params.is_empty() {
-                    let params: Vec<TypeId> = f
-                        .params
-                        .iter()
-                        .map(|p| match &p.ty {
-                            Some(t) => self.resolve_type(t).unwrap_or(TypeId::ANY),
-                            None => TypeId::ANY,
-                        })
-                        .collect();
-                    let fn_ty = self.module.types.register(HirType::Function { params, ret: ret_ty });
-                    self.declared_function_value_types.insert(f.name.clone(), fn_ty);
-                }
                 // Track pure functions for CTR-030-032
                 if f.is_pure() {
                     self.pure_functions.insert(symbol.clone());
@@ -906,12 +882,6 @@ impl Lowerer {
                         } else {
                             TypeId::ANY
                         }
-                    } else if let Some(fn_ty) = l.value.as_ref().and_then(|v| self.function_value_init_type(v)) {
-                        // `val G = f`: G holds a function VALUE. Typed ANY, a
-                        // call `G(x)` lowered as a direct call to a function
-                        // named `G` (a data symbol) and the initializer was
-                        // never recorded in `global_init_functions`.
-                        fn_ty
                     } else if let Some(inferred) = l
                         .value
                         .as_ref()
@@ -1536,192 +1506,7 @@ impl Lowerer {
         Some(module)
     }
 
-    /// Rename colliding flattened struct/class declarations to owner-exact
-    /// symbols and record the census the type-scope overlay consults;
-    /// `None` = no collision.
-    fn qualify_flattened_structs(&mut self, ast_module: &Module) -> LowerResult<Option<Module>> {
-        self.flatten_struct_owners.clear();
-        self.flatten_struct_scopes.clear();
-        let qualified = super::flatten_struct_owner::module_with_owner_qualified_structs(
-            ast_module,
-            &self.flatten_owner_import_bindings,
-        )
-        .map_err(|alias| {
-            LowerError::Unsupported(format!(
-                "type alias `{alias}` names a struct/class declared with different layouts by several \
-                 flattened modules; the alias has no owner to resolve it through"
-            ))
-        })?;
-        let Some((module, owners)) = qualified else {
-            return Ok(None);
-        };
-        self.flatten_struct_owners = owners;
-        Ok(Some(module))
-    }
-
-    /// Number of dynamic global initializers lowered into one init function.
-    ///
-    /// A large flattened program (the browser: ~10k globals) used to get ONE
-    /// `__module_init_dynamic` of 151k MIR instructions in 17 blocks; Cranelift
-    /// spent 674 s on that single function. Bounded chunks keep every init
-    /// function small. Small modules (one chunk) are emitted exactly as before.
-    pub(crate) const DYNAMIC_INIT_CHUNK: usize = 64;
-
-    /// Synthesize the module-init dynamic pass: for every module-level
-    /// val/var/const global whose initializer needs genuine runtime evaluation
-    /// (a function call, or an expression referencing another global) rather
-    /// than one of the five const-foldable shapes (global_init_values/
-    /// strings/arrays/functions/structs), assign the global from its lowered
-    /// initializer expression, in source declaration order. This reuses the
-    /// ordinary expression-lowering path instead of adding a sixth hardcoded
-    /// literal shape -- see doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md.
-    ///
-    /// Declaration order is sufficient, not a topological sort: a
-    /// const-foldable global is already resident in static .data before any
-    /// code runs, and a dynamic initializer that reads ANOTHER dynamic
-    /// initializer's global is correct when the source declares the producer
-    /// first -- the bounded case this pass covers.
-    ///
-    /// Initializers are split into chunks of [`Self::DYNAMIC_INIT_CHUNK`]. With
-    /// one chunk the result is the historical single `__module_init_dynamic`.
-    /// With more, each chunk becomes `__dyninit_part_<i>` (its own locals) and
-    /// `__module_init_dynamic` calls the parts in order, one after another, so
-    /// global initialization order is exactly the source declaration order.
-    /// The part names deliberately do NOT start with `__module_init_`: every
-    /// init-root scan (codegen `find_dynamic_init_func_ids`, the native linker's
-    /// constructor scan) must still see only the root, or a part would run twice.
-    fn lower_dynamic_module_init(&mut self, ast_module: &Module) -> LowerResult<()> {
-        let mut chunks: Vec<(FunctionContext, Vec<HirStmt>)> = Vec::new();
-        let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
-        let mut dyn_body: Vec<HirStmt> = Vec::new();
-        for item in &ast_module.items {
-            let (name, value): (String, &Expr) = match item {
-                Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
-                    (Some(n), Some(v)) => (n, v),
-                    _ => continue,
-                },
-                Node::Static(s) => (s.name.clone(), &s.value),
-                Node::Const(c) => (c.name.clone(), &c.value),
-                _ => continue,
-            };
-            // Design A.5 raw data items are placed byte images, never
-            // runtime-initialized Simple globals.
-            if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
-                continue;
-            }
-            let has_static_init = self.global_init_values.contains_key(&name)
-                || self.global_init_strings.contains_key(&name)
-                || self.global_init_arrays.contains_key(&name)
-                || self.global_init_functions.contains_key(&name)
-                || self.global_init_structs.contains_key(&name);
-            if has_static_init {
-                continue;
-            }
-            let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
-            // Resolve the initializer's own references through the owner
-            // of the global it initializes (flattened same-name globals).
-            let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
-            let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
-            let previous_type_scope = self.enter_flatten_struct_scope();
-            let hir_val = self.lower_expr(value, &mut dyn_ctx);
-            self.module.types.replace_scope_aliases(previous_type_scope);
-            self.current_function_owner = previous_owner;
-            let hir_val = hir_val?;
-            // Codegen decides whether a global's backing data is writable
-            // by consulting `dynamic_init_globals` (mirrors the same
-            // check for global_init_strings/arrays/functions/structs) --
-            // a `val`-declared global with no other recognized init shape
-            // otherwise gets emitted as read-only data, and the store
-            // below would fault at runtime.
-            self.module.dynamic_init_globals.insert(name.clone());
-            dyn_body.push(HirStmt::Assign {
-                target: HirExpr {
-                    kind: HirExprKind::Global(name),
-                    ty: global_ty,
-                },
-                value: hir_val,
-            });
-            if dyn_body.len() >= Self::DYNAMIC_INIT_CHUNK {
-                let full_ctx = std::mem::replace(&mut dyn_ctx, FunctionContext::new(TypeId::VOID));
-                chunks.push((full_ctx, std::mem::take(&mut dyn_body)));
-            }
-        }
-        if !dyn_body.is_empty() {
-            chunks.push((dyn_ctx, dyn_body));
-        }
-        if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
-            let total: usize = chunks.iter().map(|(_, body)| body.len()).sum();
-            eprintln!("[writefix] dyn_body.len()={} chunks={}", total, chunks.len());
-        }
-        if chunks.is_empty() {
-            return Ok(());
-        }
-        if chunks.len() == 1 {
-            let (ctx, mut body) = chunks.pop().expect("one chunk");
-            body.push(HirStmt::Return(None));
-            let init = self.dynamic_init_function("__module_init_dynamic".to_string(), ctx.locals, body);
-            self.module.functions.push(init);
-            return Ok(());
-        }
-        let mut root_body: Vec<HirStmt> = Vec::with_capacity(chunks.len() + 1);
-        for (index, (ctx, mut body)) in chunks.into_iter().enumerate() {
-            let part_name = format!("__dyninit_part_{index}");
-            body.push(HirStmt::Return(None));
-            let part = self.dynamic_init_function(part_name.clone(), ctx.locals, body);
-            self.module.functions.push(part);
-            root_body.push(HirStmt::Expr(HirExpr {
-                kind: HirExprKind::Call {
-                    func: Box::new(HirExpr {
-                        kind: HirExprKind::Global(part_name),
-                        ty: TypeId::ANY,
-                    }),
-                    args: Vec::new(),
-                },
-                ty: TypeId::VOID,
-            }));
-        }
-        root_body.push(HirStmt::Return(None));
-        let root = self.dynamic_init_function("__module_init_dynamic".to_string(), Vec::new(), root_body);
-        self.module.functions.push(root);
-        Ok(())
-    }
-
-    fn dynamic_init_function(&self, name: String, locals: Vec<crate::hir::LocalVar>, body: Vec<HirStmt>) -> HirFunction {
-        HirFunction {
-            name,
-            span: None,
-            params: Vec::new(),
-            locals,
-            return_type: TypeId::VOID,
-            body,
-            visibility: ast::Visibility::Internal,
-            contract: None,
-            is_pure: false,
-            inject: false,
-            concurrency_mode: ConcurrencyMode::Actor,
-            module_path: self.module.name.clone().unwrap_or_default(),
-            attributes: Vec::new(),
-            effects: Vec::new(),
-            layout_hint: None,
-            verification_mode: VerificationMode::Unverified,
-            is_ghost: false,
-            is_sync: true,
-            has_suspension: false,
-        }
-    }
-
-    pub fn lower_module(self, ast_module: &Module) -> LowerResult<HirModule> {
-        self.lower_module_with_return_types(ast_module)
-            .map(|(module, _)| module)
-    }
-
-    /// Preserve resolved callable result types for separately compiled modules.
-    /// These TypeIds belong to the returned module's registry; re-resolving the
-    /// project AST annotations in codegen would lose aliases and owner identity.
-    pub(crate) fn lower_module_with_return_types(
-        mut self,
-        ast_module: &Module,
-    ) -> LowerResult<(HirModule, HashMap<String, TypeId>)> {
+    pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         // Hoist nested type definitions (e.g. `class Foo:` defined inside an
         // SPipe `it` block) to module scope so the rest of the lowering
         // pipeline registers them as if they were authored at the top level.
@@ -1738,10 +1523,6 @@ impl Lowerer {
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
-        // Same-named structs/classes of different flattened modules get
-        // owner-exact identities (needs the import bindings collected above).
-        let qualified_structs = self.qualify_flattened_structs(ast_module)?;
-        let ast_module: &Module = qualified_structs.as_ref().unwrap_or(ast_module);
         self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
 
@@ -1963,10 +1744,6 @@ impl Lowerer {
                 Node::Function(f) => {
                     let ret_ty = self.resolve_type_opt(&f.return_type).unwrap_or(TypeId::ANY);
                     self.method_return_types.insert(f.name.clone(), ret_ty);
-                    // Local declarations override imported/global names, including
-                    // unannotated returns (Any must not inherit a trait owner).
-                    let dispatch = f.return_type.as_ref().and_then(|t| self.declared_trait_dispatch(t));
-                    self.declared_function_returns.insert(f.name.clone(), dispatch);
                 }
                 Node::Class(c) => {
                     for method in &c.methods {
@@ -2027,15 +1804,17 @@ impl Lowerer {
                         // trait default methods, so calls to them resolve their real
                         // return type instead of falling back to ANY.
                         if let Some(ref trait_name) = impl_block.trait_name {
-                            if let Some(trait_def) =
-                                select_impl_trait(
-                                    &ast_module.items,
-                                    trait_name,
-                                    &impl_method_names,
-                                    methods_owner(&impl_block.methods).as_deref(),
-                                    &self.flatten_owner_import_bindings,
-                                )
-                            {
+                            if let Some(trait_def) = ast_module.items.iter().find_map(|item| {
+                                if let Node::Trait(t) = item {
+                                    if &t.name == trait_name {
+                                        Some(t)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            }) {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
                                         || impl_method_names.contains(default_method.name.as_str())
@@ -2090,7 +1869,6 @@ impl Lowerer {
                             }
                         }
                     }
-                    self.record_class_with_trait_impls(c, &ast_module.items)?;
                 }
                 Node::Struct(s) => {
                     // Lower struct methods with type invariant injection
@@ -2109,57 +1887,19 @@ impl Lowerer {
                             .resolve_type(&simple_parser::ast::Type::Simple(s.name.clone()))
                             .unwrap_or(TypeId::ANY);
                         let mut methods_map = HashMap::new();
-                        let implementation_methods = implicit_struct_trait_methods(
-                            s, &ast_module.items, &self.flatten_owner_import_bindings)?;
-                        let own: std::collections::HashSet<&str> = implementation_methods
-                            .iter().map(|(m, _)| m.name.as_str()).collect();
-                        for (method, symbol) in &implementation_methods {
-                            methods_map.insert(method.name.clone(), symbol.clone());
+                        let own: std::collections::HashSet<&str> = s.methods.iter().map(|m| m.name.as_str()).collect();
+                        for method in &s.methods {
+                            methods_map.insert(method.name.clone(), format!("{}.{}", s.name, method.name));
                         }
-                        {
-                            let struct_owner = declaration_owner(&s.attributes, &s.methods);
-                            let selected_ast_trait = select_implicit_struct_trait(
-                                &ast_module.items, &trait_name,
-                                struct_owner.as_deref(),
-                                &self.flatten_owner_import_bindings,
-                            );
-                            // Per-file native lowering loads imported declarations through
-                            // the resolver without copying Node::Trait into this AST. Use
-                            // the SAME retained declaration/alias authority as dispatch.
-                            // Never let that fallback override a local/flattened ambiguity.
-                            let imported_trait = if selected_ast_trait.is_none()
-                                && struct_owner.is_none()
-                                && !ast_module.items.iter().any(|item|
-                                    matches!(item, Node::Trait(t) if t.name == trait_name))
-                            {
-                                self.trait_declaration_for_current_owner(&trait_name)
-                            } else { None };
-                            let trait_def = selected_ast_trait.cloned()
-                                .or_else(|| imported_trait.as_ref().map(|t| t.declaration.clone()))
-                                .ok_or_else(|| LowerError::Unsupported(format!(
-                                "implicit trait implementation {} for {} has missing or ambiguous trait owner",
-                                trait_name, s.name)))?;
-                            // Keep the existing register_trait direct-slot contract here.
-                            // Inherited-slot publication is a separate owner limitation;
-                            // this repair must not reject previously accepted supertraits.
-                            for required in &trait_def.methods {
-                                if required.is_abstract && !own.contains(required.name.as_str()) {
-                                    return Err(LowerError::Unsupported(format!(
-                                        "implicit trait implementation {} for {} lacks required method {}",
-                                        trait_name, s.name, required.name)));
-                                }
-                            }
+                        if let Some(trait_def) = ast_module.items.iter().find_map(|item| match item {
+                            Node::Trait(t) if t.name == trait_name => Some(t),
+                            _ => None,
+                        }) {
                             for default_method in &trait_def.methods {
                                 if default_method.is_abstract || own.contains(default_method.name.as_str()) {
                                     continue;
                                 }
-                                let previous_file = self.current_file.clone();
-                                if let Some(declaration) = &imported_trait {
-                                    self.current_file = Some(declaration.source_file.clone());
-                                }
-                                let lowered = self.lower_function(default_method, Some(&s.name));
-                                self.current_file = previous_file;
-                                let hir_func = lowered?;
+                                let hir_func = self.lower_function(default_method, Some(&s.name))?;
                                 self.module.functions.push(hir_func);
                                 methods_map.insert(
                                     default_method.name.clone(),
@@ -2226,15 +1966,17 @@ impl Lowerer {
                             // memory as a function pointer (crash) instead of dispatching to
                             // the default body. Each default is lowered fresh per-impl so
                             // `self` resolves against this impl's concrete type.
-                            if let Some(trait_def) =
-                                select_impl_trait(
-                                    &ast_module.items,
-                                    trait_name,
-                                    &impl_method_names,
-                                    methods_owner(&impl_block.methods).as_deref(),
-                                    &self.flatten_owner_import_bindings,
-                                )
-                            {
+                            if let Some(trait_def) = ast_module.items.iter().find_map(|item| {
+                                if let Node::Trait(t) = item {
+                                    if &t.name == trait_name {
+                                        Some(t)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            }) {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
                                         || impl_method_names.contains(default_method.name.as_str())
@@ -2288,8 +2030,103 @@ impl Lowerer {
         self.module.extern_fn_names = self.extern_fn_names.clone();
         self.module.imported_function_names = self.imported_function_names.clone();
 
-        // Module-init dynamic pass (chunked; see lower_dynamic_module_init).
-        self.lower_dynamic_module_init(ast_module)?;
+        // Module-init dynamic pass: for every module-level val/var/const global
+        // whose initializer needs genuine runtime evaluation (a function call,
+        // or an expression referencing another global) rather than one of the
+        // five const-foldable shapes handled above (global_init_values/
+        // strings/arrays/functions/structs), synthesize a
+        // `__module_init_dynamic` function whose body assigns each such
+        // global from its lowered initializer expression, in source
+        // declaration order. This reuses the ordinary expression-lowering
+        // path (the same `lower_expr` every real function body uses) instead
+        // of adding a sixth hardcoded literal shape -- see
+        // doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md.
+        //
+        // Declaration order is sufficient here, not a topological sort: a
+        // const-foldable global (BASE in `val BASE = 10; val DERIVED = BASE +
+        // 5`) is already resident in static .data before any code runs, so a
+        // dynamic initializer that reads it needs no ordering help. A
+        // dynamic initializer that reads ANOTHER dynamic initializer's global
+        // is only correct if the source declares the producer first -- that
+        // is the bounded case this pass covers, not general dependency
+        // analysis.
+        {
+            let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
+            let mut dyn_body: Vec<HirStmt> = Vec::new();
+            for item in &ast_module.items {
+                let (name, value): (String, &Expr) = match item {
+                    Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
+                        (Some(n), Some(v)) => (n, v),
+                        _ => continue,
+                    },
+                    Node::Static(s) => (s.name.clone(), &s.value),
+                    Node::Const(c) => (c.name.clone(), &c.value),
+                    _ => continue,
+                };
+                // Design A.5 raw data items are placed byte images, never
+                // runtime-initialized Simple globals.
+                if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
+                    continue;
+                }
+                let has_static_init = self.global_init_values.contains_key(&name)
+                    || self.global_init_strings.contains_key(&name)
+                    || self.global_init_arrays.contains_key(&name)
+                    || self.global_init_functions.contains_key(&name)
+                    || self.global_init_structs.contains_key(&name);
+                if has_static_init {
+                    continue;
+                }
+                let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
+                // Resolve the initializer's own references through the owner
+                // of the global it initializes (flattened same-name globals).
+                let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+                let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
+                let hir_val = self.lower_expr(value, &mut dyn_ctx);
+                self.current_function_owner = previous_owner;
+                let hir_val = hir_val?;
+                // Codegen decides whether a global's backing data is writable
+                // by consulting `dynamic_init_globals` (mirrors the same
+                // check for global_init_strings/arrays/functions/structs) --
+                // a `val`-declared global with no other recognized init shape
+                // otherwise gets emitted as read-only data, and the store
+                // below would fault at runtime.
+                self.module.dynamic_init_globals.insert(name.clone());
+                dyn_body.push(HirStmt::Assign {
+                    target: HirExpr {
+                        kind: HirExprKind::Global(name),
+                        ty: global_ty,
+                    },
+                    value: hir_val,
+                });
+            }
+            if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
+                eprintln!("[writefix] dyn_body.len()={}", dyn_body.len());
+            }
+            if !dyn_body.is_empty() {
+                dyn_body.push(HirStmt::Return(None));
+                self.module.functions.push(HirFunction {
+                    name: "__module_init_dynamic".to_string(),
+                    span: None,
+                    params: Vec::new(),
+                    locals: dyn_ctx.locals,
+                    return_type: TypeId::VOID,
+                    body: dyn_body,
+                    visibility: ast::Visibility::Internal,
+                    contract: None,
+                    is_pure: false,
+                    inject: false,
+                    concurrency_mode: ConcurrencyMode::Actor,
+                    module_path: self.module.name.clone().unwrap_or_default(),
+                    attributes: Vec::new(),
+                    effects: Vec::new(),
+                    layout_hint: None,
+                    verification_mode: VerificationMode::Unverified,
+                    is_ghost: false,
+                    is_sync: true,
+                    has_suspension: false,
+                });
+            }
+        }
 
         // Third pass: lower AOP constructs (#1000-1050)
         self.lower_aop_constructs(ast_module)?;
@@ -2361,10 +2198,7 @@ impl Lowerer {
             });
         }
 
-        // Absence keeps codegen's existing builtin inference available; ANY
-        // placeholders are not authoritative result-type declarations.
-        self.method_return_types.retain(|_, ty| *ty != TypeId::ANY);
-        Ok((self.module, self.method_return_types))
+        Ok(self.module)
     }
 
     /// Lower an AST module to HIR and return warnings along with the module
@@ -2383,10 +2217,6 @@ impl Lowerer {
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
-        // Same-named structs/classes of different flattened modules get
-        // owner-exact identities (needs the import bindings collected above).
-        let qualified_structs = self.qualify_flattened_structs(ast_module)?;
-        let ast_module: &Module = qualified_structs.as_ref().unwrap_or(ast_module);
         self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
 
@@ -2565,8 +2395,103 @@ impl Lowerer {
             }
         }
 
-        // Module-init dynamic pass (chunked; see lower_dynamic_module_init).
-        self.lower_dynamic_module_init(ast_module)?;
+        // Module-init dynamic pass: for every module-level val/var/const global
+        // whose initializer needs genuine runtime evaluation (a function call,
+        // or an expression referencing another global) rather than one of the
+        // five const-foldable shapes handled above (global_init_values/
+        // strings/arrays/functions/structs), synthesize a
+        // `__module_init_dynamic` function whose body assigns each such
+        // global from its lowered initializer expression, in source
+        // declaration order. This reuses the ordinary expression-lowering
+        // path (the same `lower_expr` every real function body uses) instead
+        // of adding a sixth hardcoded literal shape -- see
+        // doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md.
+        //
+        // Declaration order is sufficient here, not a topological sort: a
+        // const-foldable global (BASE in `val BASE = 10; val DERIVED = BASE +
+        // 5`) is already resident in static .data before any code runs, so a
+        // dynamic initializer that reads it needs no ordering help. A
+        // dynamic initializer that reads ANOTHER dynamic initializer's global
+        // is only correct if the source declares the producer first -- that
+        // is the bounded case this pass covers, not general dependency
+        // analysis.
+        {
+            let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
+            let mut dyn_body: Vec<HirStmt> = Vec::new();
+            for item in &ast_module.items {
+                let (name, value): (String, &Expr) = match item {
+                    Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
+                        (Some(n), Some(v)) => (n, v),
+                        _ => continue,
+                    },
+                    Node::Static(s) => (s.name.clone(), &s.value),
+                    Node::Const(c) => (c.name.clone(), &c.value),
+                    _ => continue,
+                };
+                // Design A.5 raw data items are placed byte images, never
+                // runtime-initialized Simple globals.
+                if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
+                    continue;
+                }
+                let has_static_init = self.global_init_values.contains_key(&name)
+                    || self.global_init_strings.contains_key(&name)
+                    || self.global_init_arrays.contains_key(&name)
+                    || self.global_init_functions.contains_key(&name)
+                    || self.global_init_structs.contains_key(&name);
+                if has_static_init {
+                    continue;
+                }
+                let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
+                // Resolve the initializer's own references through the owner
+                // of the global it initializes (flattened same-name globals).
+                let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+                let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
+                let hir_val = self.lower_expr(value, &mut dyn_ctx);
+                self.current_function_owner = previous_owner;
+                let hir_val = hir_val?;
+                // Codegen decides whether a global's backing data is writable
+                // by consulting `dynamic_init_globals` (mirrors the same
+                // check for global_init_strings/arrays/functions/structs) --
+                // a `val`-declared global with no other recognized init shape
+                // otherwise gets emitted as read-only data, and the store
+                // below would fault at runtime.
+                self.module.dynamic_init_globals.insert(name.clone());
+                dyn_body.push(HirStmt::Assign {
+                    target: HirExpr {
+                        kind: HirExprKind::Global(name),
+                        ty: global_ty,
+                    },
+                    value: hir_val,
+                });
+            }
+            if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
+                eprintln!("[writefix] dyn_body.len()={}", dyn_body.len());
+            }
+            if !dyn_body.is_empty() {
+                dyn_body.push(HirStmt::Return(None));
+                self.module.functions.push(HirFunction {
+                    name: "__module_init_dynamic".to_string(),
+                    span: None,
+                    params: Vec::new(),
+                    locals: dyn_ctx.locals,
+                    return_type: TypeId::VOID,
+                    body: dyn_body,
+                    visibility: ast::Visibility::Internal,
+                    contract: None,
+                    is_pure: false,
+                    inject: false,
+                    concurrency_mode: ConcurrencyMode::Actor,
+                    module_path: self.module.name.clone().unwrap_or_default(),
+                    attributes: Vec::new(),
+                    effects: Vec::new(),
+                    layout_hint: None,
+                    verification_mode: VerificationMode::Unverified,
+                    is_ghost: false,
+                    is_sync: true,
+                    has_suspension: false,
+                });
+            }
+        }
 
         // Third pass: lower AOP constructs
         self.lower_aop_constructs(ast_module)?;
@@ -2720,198 +2645,8 @@ mod scalar_const_eval_tests {
     }
 }
 
-/// The trait definition an impl (or `struct Name(Trait):`) refers to.
-///
-/// The JIT flattens every import into one bare-name namespace, so several
-/// unrelated traits can share a name (`RenderBackend` is declared in three
-/// stdlib modules). Taking the first match bound `impl RenderBackend for
-/// VulkanBackend` to a trait that lacks `read_pixels_damaged` /
-/// `invalidate_damage_mirror`, so those defaults were never materialised for
-/// the impl and the call `VulkanBackend.invalidate_damage_mirror` panicked in
-/// codegen (whole module dropped to the interpreter) or crashed with SIGBUS.
-/// Resolution follows the module system first, using the owner tags the
-/// flattener puts on every method (`FLATTEN_MODULE_OWNER_ATTR_PREFIX`) and its
-/// import-binding markers:
-///   1. a single candidate is the trait;
-///   2. a trait declared in the impl's own module;
-///   3. the trait the impl's module imports under that name
-///      (`flatten_owner_import_bindings[owner][name]` -> source owner).
-/// Only when none of these resolves (no owner tags, a re-export facade, an
-/// aliased import) does the overlap heuristic below decide: the candidate
-/// declaring the most of the impl's own method names, and on a tie one whose
-/// method set strictly contains the current pick's (the two engine2d
-/// `RenderBackend`s differ only by three added defaults); any other tie keeps
-/// the first, i.e. the pre-2026-10-04 behaviour.
-fn select_impl_trait<'a>(
-    items: &'a [Node],
-    trait_name: &str,
-    impl_method_names: &std::collections::HashSet<&str>,
-    impl_owner: Option<&str>,
-    import_bindings: &HashMap<String, HashMap<String, (String, String)>>,
-) -> Option<&'a simple_parser::ast::TraitDef> {
-    let candidates: Vec<&'a simple_parser::ast::TraitDef> = items
-        .iter()
-        .filter_map(|item| match item {
-            Node::Trait(t) if t.name == trait_name => Some(t),
-            _ => None,
-        })
-        .collect();
-    if candidates.len() <= 1 {
-        return candidates.first().copied();
-    }
-    let trait_owner = |t: &simple_parser::ast::TraitDef| -> Option<String> {
-        Lowerer::flatten_owner_of(
-            t.methods
-                .iter()
-                .flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())),
-        )
-    };
-    let unique_owned_by = |owner: &str| -> Option<&'a simple_parser::ast::TraitDef> {
-        let mut found = candidates.iter().copied().filter(|t| trait_owner(t).as_deref() == Some(owner));
-        let first = found.next()?;
-        if found.next().is_some() {
-            return None;
-        }
-        Some(first)
-    };
-    if let Some(owner) = impl_owner {
-        if let Some(own) = unique_owned_by(owner) {
-            return Some(own);
-        }
-        if let Some((source_owner, _source_name)) = import_bindings.get(owner).and_then(|b| b.get(trait_name)) {
-            if let Some(imported) = unique_owned_by(source_owner) {
-                return Some(imported);
-            }
-        }
-    }
-    select_impl_trait_by_overlap(&candidates, impl_method_names)
-}
-
-/// Owning module of a flattened impl/struct/trait, read from the owner tag the
-/// flattener puts on each of its methods. None outside the flattened lane.
-fn methods_owner(methods: &[simple_parser::ast::FunctionDef]) -> Option<String> {
-    Lowerer::flatten_owner_of(methods.iter().flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())))
-}
-
-fn select_impl_trait_by_overlap<'a>(
-    candidates: &[&'a simple_parser::ast::TraitDef],
-    impl_method_names: &std::collections::HashSet<&str>,
-) -> Option<&'a simple_parser::ast::TraitDef> {
-    let mut best: Option<(&'a simple_parser::ast::TraitDef, usize)> = None;
-    for t in candidates.iter().copied() {
-        let overlap = t
-            .methods
-            .iter()
-            .filter(|m| impl_method_names.contains(m.name.as_str()))
-            .count();
-        let replace = match best {
-            None => true,
-            Some((_, best_overlap)) if overlap > best_overlap => true,
-            Some((current, best_overlap)) if overlap == best_overlap => {
-                current.methods.len() < t.methods.len()
-                    && current
-                        .methods
-                        .iter()
-                        .all(|m| t.methods.iter().any(|n| n.name == m.name))
-            }
-            _ => false,
-        };
-        if replace {
-            best = Some((t, overlap));
-        }
-    }
-    best.map(|(t, _)| t)
-}
-
 /// The trait named by `struct Name(Trait):`, carried by the parser as a
 /// synthetic `implements(Trait)` attribute (parser/src/types_def/mod.rs).
-impl Lowerer {
-    /// `class Name with Trait:` names a TRAIT in its `with` clause (the parser
-    /// stores every `with` entry in `mixins`). Before this, only a real `mixin`
-    /// declaration was honoured, so a trait listed there was dropped: no
-    /// HirImpl, no vtable, the trait looked impl-less, and every call through a
-    /// trait-typed receiver became a bare-name call that native codegen bound
-    /// to the FIRST same-named method in the link (or a nil stub). Record the
-    /// implementation exactly as `impl Trait for Name` would.
-    /// doc/08_tracking/bug/trait_receiver_cross_unit_bare_call_stubbed_2026-10-20.md
-    ///
-    /// A class that does not define every abstract trait method keeps the old
-    /// (duck-typed) behaviour instead of becoming a new lowering error.
-    fn record_class_with_trait_impls(&mut self, c: &ast::ClassDef, items: &[Node]) -> LowerResult<()> {
-        // An object carries ONE vtable header and `MethodCallVirtual` carries
-        // only a slot number, so a class conforming to two traits would index
-        // the first trait's vtable with the second trait's slots. Publish an
-        // impl only for a class whose `with` clause names exactly one
-        // non-mixin entry and that has no explicit `impl Trait for` block;
-        // imports.rs applies the same rule.
-        let candidates: Vec<_> = c.mixins.iter()
-            .filter(|mixin_ref| !items.iter().any(|item| matches!(item, Node::Mixin(m) if m.name == mixin_ref.name)))
-            .collect();
-        let has_explicit_trait_impl = items.iter().any(|item| matches!(item, Node::Impl(imp)
-            if imp.trait_name.is_some()
-                && matches!(&imp.target_type, ast::Type::Simple(n) | ast::Type::Generic { name: n, .. } if *n == c.name)));
-        if candidates.len() != 1 || has_explicit_trait_impl {
-            return Ok(());
-        }
-        for mixin_ref in candidates {
-            let trait_name = &mixin_ref.name;
-            let owner = declaration_owner(&c.attributes, &c.methods);
-            let local_trait = select_implicit_struct_trait(
-                items, trait_name, owner.as_deref(), &self.flatten_owner_import_bindings,
-            );
-            let imported_trait = if local_trait.is_none()
-                && owner.is_none()
-                && !items.iter().any(|item| matches!(item, Node::Trait(t) if &t.name == trait_name))
-            {
-                self.trait_declaration_for_current_owner(trait_name)
-            } else {
-                None
-            };
-            let Some(trait_def) = local_trait.cloned().or_else(|| imported_trait.as_ref().map(|t| t.declaration.clone()))
-            else {
-                continue;
-            };
-            // An aliased import (`use m.{Ident as Id}`) is invisible to the
-            // project-wide imports.rs scan, which keys traits by declared
-            // name; recording it here would leave the object header-less.
-            if trait_def.name != *trait_name {
-                continue;
-            }
-            let own: std::collections::HashSet<&str> = c.methods.iter().map(|m| m.name.as_str()).collect();
-            if trait_def.methods.iter().any(|m| m.is_abstract && !own.contains(m.name.as_str())) {
-                continue;
-            }
-            let mut methods_map: HashMap<String, String> = c.methods.iter()
-                .map(|m| (m.name.clone(), format!("{}.{}", c.name, m.name)))
-                .collect();
-            for default_method in &trait_def.methods {
-                if default_method.is_abstract || own.contains(default_method.name.as_str()) {
-                    continue;
-                }
-                let previous_file = self.current_file.clone();
-                if let Some(declaration) = &imported_trait {
-                    self.current_file = Some(declaration.source_file.clone());
-                }
-                let lowered = self.lower_function(default_method, Some(&c.name));
-                self.current_file = previous_file;
-                self.module.functions.push(lowered?);
-                methods_map.insert(default_method.name.clone(), format!("{}.{}", c.name, default_method.name));
-            }
-            let type_id = self
-                .resolve_type(&simple_parser::ast::Type::Simple(c.name.clone()))
-                .unwrap_or(TypeId::ANY);
-            self.module.impls.push(crate::hir::HirImpl {
-                type_id,
-                trait_id: None,
-                trait_name: Some(trait_name.clone()),
-                type_name: c.name.clone(),
-                methods: methods_map,
-            });
-        }
-        Ok(())
-    }
-}
-
 fn struct_implements_trait(s: &simple_parser::ast::StructDef) -> Option<String> {
     s.attributes.iter().find(|a| a.name == "implements").and_then(|a| {
         a.args.as_ref()?.first().and_then(|e| match e {
@@ -2919,100 +2654,4 @@ fn struct_implements_trait(s: &simple_parser::ast::StructDef) -> Option<String> 
             _ => None,
         })
     })
-}
-
-// Use the same flattener identity as methods; do not infer an empty struct's
-// owner from a same-spelled implementation in an unrelated imported module.
-fn declaration_owner(attributes: &[ast::Attribute], methods: &[ast::FunctionDef]) -> Option<String> {
-    Lowerer::flatten_owner_of(attributes.iter().map(|a| a.name.as_str()))
-        .or_else(|| methods_owner(methods))
-}
-
-fn implicit_struct_trait_methods<'a>(
-    structure: &'a ast::StructDef,
-    items: &'a [Node],
-    bindings: &HashMap<String, HashMap<String, (String, String)>>,
-) -> LowerResult<Vec<(&'a ast::FunctionDef, String)>> {
-    let owner = declaration_owner(&structure.attributes, &structure.methods);
-    let mut methods: Vec<_> = structure.methods.iter()
-        .map(|m| (m, format!("{}.{}", structure.name, m.name))).collect();
-    let mut names: std::collections::HashSet<_> = methods.iter().map(|(m, _)| m.name.as_str()).collect();
-    for item in items {
-        let Node::Impl(implementation) = item else { continue };
-        if implementation.trait_name.is_some() { continue; }
-        let target = match &implementation.target_type {
-            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
-            _ => continue,
-        };
-        let impl_owner = declaration_owner(&implementation.attributes, &implementation.methods);
-        let imported = impl_owner.as_ref().and_then(|o| bindings.get(o)).and_then(|b| b.get(target));
-        let matches = if let Some((source_owner, source_name)) = imported {
-            owner.as_ref() == Some(source_owner) && structure.name == *source_name
-        } else {
-            owner == impl_owner && structure.name == *target
-        };
-        if !matches { continue; }
-        for method in &implementation.methods {
-            if !names.insert(method.name.as_str()) {
-                return Err(LowerError::Unsupported(format!(
-                    "duplicate implicit trait implementation method {}.{}", structure.name, method.name)));
-            }
-            // Match Node::Impl's lower_function(method, Some(target)) exactly.
-            methods.push((method, format!("{}.{}", target, method.name)));
-        }
-    }
-    Ok(methods)
-}
-
-
-// Implicit implementation publication must not use method-overlap heuristics
-// to pick among unrelated flattened trait declarations.
-fn select_implicit_struct_trait<'a>(
-    items: &'a [Node], name: &str, owner: Option<&str>,
-    bindings: &HashMap<String, HashMap<String, (String, String)>>,
-) -> Option<&'a ast::TraitDef> {
-    let imported = owner.and_then(|o| bindings.get(o)).and_then(|b| b.get(name));
-    let wanted_name = imported.map(|(_, n)| n.as_str()).unwrap_or(name);
-    let wanted_owner = imported.map(|(o, _)| o.as_str()).or(owner);
-    let candidates: Vec<_> = items.iter().filter_map(|item| match item {
-        Node::Trait(t) if t.name == wanted_name => Some(t),
-        _ => None,
-    }).collect();
-    let mut exact = candidates.iter().copied().filter(|t|
-        methods_owner(&t.methods).as_deref() == wanted_owner);
-    let first = exact.next();
-    if exact.next().is_some() { return None; }
-    if first.is_some() { return first; }
-    // An unflattened native-project owner can materialize one imported trait
-    // without tags. Accept only a unique declaration, never an ambiguous name.
-    if owner.is_none() && imported.is_none() && candidates.len() == 1 {
-        return candidates.first().copied();
-    }
-    None
-}
-
-#[cfg(test)]
-mod implicit_trait_owner_tests {
-    use super::*;
-    #[test]
-    fn empty_struct_does_not_take_same_named_foreign_impl() {
-        let mut parsed = simple_parser::Parser::new(
-            "trait Probe:\n    fn read() -> i64\n\nstruct Device(Probe):\n    pass\n\nimpl Device:\n    fn read() -> i64:\n        37\n").parse().unwrap();
-        let mut structure = match parsed.items.remove(1) { Node::Struct(s) => s, _ => panic!("struct") };
-        let mut local = match parsed.items.pop().unwrap() { Node::Impl(i) => i, _ => panic!("impl") };
-        let tag = |span, owner: &str| ast::Attribute { span,
-            name: format!("{}{}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX, owner),
-            value: None, args: None, named_args: None };
-        structure.attributes.push(tag(structure.span, "/a.spl"));
-        local.attributes.push(tag(local.span, "/a.spl"));
-        let mut foreign = local.clone();
-        foreign.attributes = vec![tag(foreign.span, "/b.spl")];
-        foreign.methods[0].name = "foreign_only".into();
-        let items = vec![Node::Impl(foreign), Node::Impl(local)];
-        let selected = implicit_struct_trait_methods(&structure, &items, &HashMap::new()).unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].0.name, "read");
-        let wrong_only = &items[..1];
-        assert!(implicit_struct_trait_methods(&structure, wrong_only, &HashMap::new()).unwrap().is_empty());
-    }
 }

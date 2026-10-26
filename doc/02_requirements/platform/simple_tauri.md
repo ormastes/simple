@@ -44,7 +44,7 @@ Build a **pure-Simple desktop application framework** inspired by Tauri, using t
 
 ### Example 1: Minimal App (HTML frontend)
 
-```simple:skip
+```simple
 use std.tauri.app
 
 fn main():
@@ -65,7 +65,7 @@ fn main():
 
 ### Example 2: Multi-window with Events
 
-```simple:skip
+```simple
 use std.tauri.app
 use std.tauri.window
 
@@ -101,7 +101,7 @@ fn main():
 
 ### Example 3: Native UI Mode (no HTML)
 
-```simple:skip
+```simple
 use std.tauri.app
 use std.tauri.native_ui
 
@@ -123,7 +123,7 @@ fn main():
 
 ### Example 4: File Explorer Plugin
 
-```simple:skip
+```simple
 use std.tauri.app
 use std.tauri.plugin.fs
 

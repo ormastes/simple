@@ -15,7 +15,7 @@ expressions that can match function executions, types, and attributes.
 
 ## Syntax
 
-```simple:skip
+```simple
 # Before advice - runs before target function
 on pc{ execution(* target_func(..)) } use advice_func before priority 10
 

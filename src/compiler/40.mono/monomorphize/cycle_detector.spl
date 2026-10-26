@@ -12,10 +12,6 @@
 use .note_sdn (NoteSdnMetadata, DependencyEdge, DependencyKind)
 use .note_sdn (CircularError, CircularWarning)
 
-# text values are immutable (the common text contract); retaining a node or
-# cycle-path value does not alias mutable Rust String storage. Array/metadata
-# containers still require independent copies when snapshotting.
-
 # ============================================================================
 # Cycle Detection Result
 # ============================================================================
@@ -69,13 +65,13 @@ fn detect_cycles(metadata: NoteSdnMetadata) -> CycleDetectionResult:
 
         if is_hard_cycle(cycle, soft_edges):
             result.errors.push(CircularError(
-                cycle_path: cycle_path,
+                cycle_path: cycle_path.clone(),
                 error_code: "E0420"
             ))
         else:
             result.warnings.push(CircularWarning(
-                cycle_path: cycle_path,
-                severity: "warning"
+                cycle_path: cycle_path.clone(),
+                warning_code: "W0420"
             ))
 
         result.all_cycles.push(cycle)
@@ -99,7 +95,7 @@ fn build_graph(dependencies: [DependencyEdge]) -> {text: [text]}:
 
         # ADR-004: dict-index mutation needs write-back.
         var bucket = graph[dep.from_inst]
-        bucket.push(dep.to_inst)
+        bucket.push(dep.to_inst.clone())
         graph[dep.from_inst] = bucket
 
     graph
@@ -152,11 +148,9 @@ fn find_cycles_dfs(
     """
     visited[node] = true
     rec_stack[node] = true
-    path.push(node)
+    path.push(node.clone())
 
-    # @workaround bug=2998 reason=retain array type across optional dictionary lookup
-    if graph.contains_key(node):
-        val neighbors: [text] = graph[node]
+    if val neighbors = graph.get(node):
         for neighbor in neighbors:
             val neighbor_visited = if visited.contains_key(neighbor): visited[neighbor] else: false
             val neighbor_in_stack = if rec_stack.contains_key(neighbor): rec_stack[neighbor] else: false
@@ -174,8 +168,8 @@ fn find_cycles_dfs(
                 # Extract cycle from path[cycle_start..]
                 var cycle: [text] = []
                 for i in cycle_start..path.len():
-                    cycle.push(path[i])
-                cycle.push(neighbor)  # Complete the cycle
+                    cycle.push(path[i].clone())
+                cycle.push(neighbor.clone())  # Complete the cycle
 
                 cycles.push(cycle)
 
@@ -259,7 +253,7 @@ fn detect_type_inference_cycles(inference_deps: [(text, text)]) -> [CircularErro
         if not graph.contains_key(from):
             graph[from] = []
         var bucket = graph[from]
-        bucket.push(to)
+        bucket.push(to.clone())
         graph[from] = bucket
 
     # Find cycles
@@ -320,12 +314,12 @@ fn would_create_cycle(metadata: NoteSdnMetadata, new_from: text, new_to: text) -
     if not graph.contains_key(new_from):
         graph[new_from] = []
     var bucket = graph[new_from]
-    bucket.push(new_to)
+    bucket.push(new_to.clone())
     graph[new_from] = bucket
 
     # Check for path from new_to back to new_from (which would create cycle)
     var visited: {text: bool} = {}
-    var path = [new_to]
+    var path = [new_to.clone()]
 
     if has_path_dfs(new_to, new_from, graph, visited, path):
         path
@@ -352,11 +346,9 @@ fn has_path_dfs(
 
     visited[current] = true
 
-    # @workaround bug=2998 reason=retain array type across optional dictionary lookup
-    if graph.contains_key(current):
-        val neighbors: [text] = graph[current]
+    if val neighbors = graph.get(current):
         for neighbor in neighbors:
-            path.push(neighbor)
+            path.push(neighbor.clone())
             if has_path_dfs(neighbor, target, graph, visited, path):
                 return true
             path.pop()
@@ -404,7 +396,7 @@ fn topological_sort(metadata: NoteSdnMetadata) -> [text]?:
     for node in in_degree.keys():
         val deg = in_degree[node]
         if deg == 0:
-            queue.push(node)
+            queue.push(node.clone())
 
     var result: [text] = []
 
@@ -414,16 +406,14 @@ fn topological_sort(metadata: NoteSdnMetadata) -> [text]?:
                 value
             None:
                 break
-        result.push(node)
+        result.push(node.clone())
 
-        # @workaround bug=2998 reason=retain array type across optional dictionary lookup
-        if graph.contains_key(node):
-            val neighbors: [text] = graph[node]
+        if val neighbors = graph.get(node):
             for neighbor in neighbors:
                 if val deg = in_degree.get(neighbor):
                     in_degree[neighbor] = deg - 1
                     if deg - 1 == 0:
-                        queue.push(neighbor)
+                        queue.push(neighbor.clone())
 
     # If we processed all nodes, no cycle exists
     if result.len() == all_nodes.keys().len():

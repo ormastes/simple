@@ -8,14 +8,12 @@ use compiler.common.attributes.{parse_layout_attrs, parse_export_attrs, parse_pl
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_lowering._Items.lowering_helpers.{PlatformAttrFields, platform_attr_fields_for}
+use compiler.hir.hir_lowering._Items.lowering_helpers.{PlatformAttrFields}
 
 impl HirLowering:
-    me lower_param(p: Param, inferred_callable: HirType? = nil, declared_receiver: HirType? = nil) -> HirParam:
-        # An unannotated fn parameter (`fn format_table_row(cells, widths, ...)`,
-        # std.common.format_utils) is dynamic in the seed/interpreter. Lowering
-        # it to Infer left an inference variable nothing resolves, and MIR
-        # failed closed on it ([infer-arm]). Publish `any`, the erased type.
+    me lower_param(p: Param) -> HirParam:
+        val type_ = self.lower_type(p.type_)
+        val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
         val default_ = if p.has_default:
             self.lower_hir_expr(p.default)
         else:
@@ -25,32 +23,6 @@ impl HirLowering:
                 type_: HirType(kind: HirTypeKind.Unit, span: p.span),
                 span: p.span
             )
-        # An explicit untyped `self`/`me` keeps its existing receiver typing.
-        # An untyped param WITH a default (`fn f(x = 5)`) takes the default's
-        # type, as in the seed; `any` only when that cannot be settled.
-        var type_ = HirType(kind: HirTypeKind.Any, span: p.span)
-        if p.has_type_:
-            type_ = self.lower_type(p.type_)
-        elif val receiver_type = declared_receiver:
-            # Supplied only for the first unannotated receiver of its owning
-            # nonstatic method. Never manufacture a type for an unknown owner.
-            match receiver_type.kind:
-                case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
-                    self.error("unresolved declared method receiver owner", p.span)
-                    type_ = HirType(kind: HirTypeKind.Error, span: p.span)
-                case _: type_ = receiver_type
-        elif p.name == "self" or p.name == "me":
-            type_ = self.lower_type(p.type_)
-        elif p.has_default:
-            val default_type = self.lowered_const_value_type(default_, p.span)
-            match default_type.kind:
-                case HirTypeKind.Infer(_, _): ()
-                case _: type_ = default_type
-        if not p.has_type_ and not p.has_default:
-            if not declared_receiver.is_some():
-                if val callable_type = inferred_callable:
-                    type_ = callable_type
-        val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
 
         HirParam(
             symbol: symbol,
@@ -132,16 +104,9 @@ impl HirLowering:
         val layout: LayoutAttr = parse_layout_attrs(class_attributes)
         val has_layout = layout.layout_kind != TypeLayoutKind.Simple or layout.has_explicit_align or layout.is_packed
         val parsed_export_attr: ExportAttr? = parse_export_attrs(class_attributes)
-        # Match lower_function's native-safe presence contract. An omitted
-        # desugared bool can become a truthy nil sentinel in a seed-built HIR.
-        var has_parsed_export_attr = false
-        if val export_attr = parsed_export_attr:
-            has_parsed_export_attr = true
         val platform: PlatformParseResult = parse_platform_attrs(class_attributes)
         val platform_fields: PlatformAttrFields = platform_attr_fields_for(platform)
 
-        # Pass every desugared presence flag in declaration order; no optional
-        # payload may advertise presence unless its matching value exists.
         HirClass(
             symbol: symbol,
             name: class_name,
@@ -150,12 +115,10 @@ impl HirLowering:
             methods: methods,
             visibility: effective_visibility,
             is_public: class_is_public,
-            has_doc_comment: class_.has_doc_comment,
             doc_comment: class_doc_comment,
             span: class_span,
             has_layout_attr: has_layout,
             layout_attr: layout,
-            has_export_attr: has_parsed_export_attr,
             export_attr: parsed_export_attr,
             has_platform_attr: platform_fields.has_platform,
             platform_has_error: platform_fields.has_error,
@@ -173,7 +136,6 @@ impl HirLowering:
             # prerequisite for 40.mono consuming the template, and restores
             # defence in depth meanwhile.
             is_generic_template: class_type_params.len() > 0,
-            has_specialization_of: false,
             specialization_of: nil,
             type_bindings: {}
         )

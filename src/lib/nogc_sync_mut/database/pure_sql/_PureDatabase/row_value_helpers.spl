@@ -219,9 +219,7 @@ fn _pdb_v2_decimal_length(value: text) -> i32?:
         val code = value.char_code_at(i)
         if code < 48 or code > 57: return nil
         i = i + 1
-    # bug=pure_database_total_conversion_as_optional_2026_10_11
-    # Lengths require a strict, fallible parse before the i32 bounds check.
-    val parsed = value.parse_int()
+    val parsed = value.to_int()
     match parsed:
         case Some(length):
             if length < 0 or length > 2147483647: nil
@@ -247,9 +245,9 @@ fn _deserialize_row_v2(data: text) -> [DbValue]?:
         cursor = cursor + payload_length
         if kind == "I":
             if not _is_numeric_text(payload): return nil
-            result.push(DbValue.Integer(value: payload.to_int()))
+            result.push(DbValue.Integer(value: payload.to_int() ?? 0))
         elif kind == "R":
-            match payload.parse_f64():
+            match payload.to_float():
                 case Some(value): result.push(DbValue.Real(value: value))
                 case nil: return nil
         elif kind == "T":
@@ -291,11 +289,11 @@ fn _pdb_v3_row_encoding_is_canonical(data: text) -> bool:
         val payload = data.slice(cursor, cursor + payload_length)
         cursor = cursor + payload_length
         if kind == "I":
-            val parsed = payload.parse_int()
+            val parsed = payload.to_int()
             if parsed.is_none() or parsed.unwrap().to_text() != payload:
                 return false
         elif kind == "R":
-            val parsed = payload.parse_f64()
+            val parsed = payload.to_float()
             if parsed.is_none() or parsed.unwrap().to_text() != payload:
                 return false
         elif kind == "T":
@@ -321,12 +319,11 @@ fn _deserialize_row(data: text) -> [DbValue]:
         val p = parts[i]
         if p.starts_with("I:"):
             val ns = p.slice(2, p.len())
-            # V1 compatibility deliberately keeps the total conversion.
-            val n = ns.to_int()
+            val n = ns.to_int() ?? 0
             result.push(DbValue.Integer(value: n))
         elif p.starts_with("R:"):
             val fs = p.slice(2, p.len())
-            result.push(DbValue.Real(value: fs.to_float()))
+            result.push(DbValue.Real(value: fs.to_float() ?? 0.0))
         elif p.starts_with("T:"):
             val txt = p.slice(2, p.len())
             result.push(DbValue.Text(value: txt))
@@ -345,17 +342,17 @@ fn _deserialize_row(data: text) -> [DbValue]:
 fn _parse_literal(v: text) -> DbValue:
     if v == "NULL" or v == "null":
         return DbValue.Null
-    # Check spelling before the total conversion; to_int returns a number,
-    # not an Option. Keep the established literal conversion semantics.
+    # Check if the value looks numeric before calling to_int
+    # (to_int returns Some(0) for non-numeric strings in interpreter mode)
     if _is_numeric_text(v):
-        val n = v.to_int()
+        val n = v.to_int() ?? 0
         return DbValue.Integer(value: n)
     # A decimal literal such as 2.5 is a REAL, not a string. _is_numeric_text
     # accepts only [-]?[0-9]+, so without this branch every REAL literal was
     # stored as TEXT and all numeric comparisons on it degraded to
     # lexicographic string ordering.
     if _is_real_text(v):
-        return DbValue.Real(value: v.to_float())
+        return DbValue.Real(value: v.to_float() ?? 0.0)
     DbValue.Text(value: v)
 
 # Accepts [-]?<digits>.<digits> — a decimal literal with digits on both sides.
@@ -488,7 +485,7 @@ fn _resolve_int_literal(expr: SqlExpr) -> [i64]:
     if expr.kind == SqlExprKind.Literal:
         if not _is_numeric_text(expr.value):
             return []
-        val v = expr.value.to_int()
+        val v = expr.value.to_int() ?? 0
         var result: [i64] = []
         result.push(v as i64)
         return result

@@ -1,0 +1,63 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-B-03 — the dual-byte content model:
+WorktreeContentId (bytes as they sit in the worktree) vs RepositoryContentId
+(bytes after the repository transform), tied together by a TransformId for
+EOL/filter/attribute policies. The native default is the identity transform,
+under which both ids carry the same payload hash; an unknown TransformId is
+an honest ERROR, never a silent identity.
+Audience: Maintainers of the SCV native backend.
+"""
+# @req: REQ-SCV-DUAL-BYTE-001
+use std.spec.{describe, it, expect, step}
+use std.scv.dual_byte.{scv_transform_default, scv_transform_valid, scv_apply_transform, scv_worktree_content_id, scv_repository_content_id, scv_dual_byte_record}
+
+describe "scv dual-byte content model (B-03)":
+    it "defaults to the identity transform natively":
+        expect(scv_transform_default()).to_be("identity")
+        expect(scv_transform_valid("identity")).to_be(true)
+
+    it "knows the EOL policy transforms and rejects unknown ones":
+        expect(scv_transform_valid("eol-lf")).to_be(true)
+        expect(scv_transform_valid("eol-crlf")).to_be(true)
+        expect(scv_transform_valid("")).to_be(false)
+        expect(scv_transform_valid("smudge-magic")).to_be(false)
+
+    it "identity transform leaves bytes untouched":
+        val content = "a\r\nb\nc"
+        expect(scv_apply_transform("identity", content)).to_be(content)
+
+    it "eol-lf normalises CRLF to LF; eol-crlf expands LF to CRLF":
+        expect(scv_apply_transform("eol-lf", "a\r\nb\r\n")).to_be("a\nb\n")
+        expect(scv_apply_transform("eol-lf", "a\nb\n")).to_be("a\nb\n")
+        expect(scv_apply_transform("eol-crlf", "a\nb\n")).to_be("a\r\nb\r\n")
+        step("eol-crlf does not double-expand an already-CRLF stream")
+        expect(scv_apply_transform("eol-crlf", "a\r\nb\r\n")).to_be("a\r\nb\r\n")
+
+    it "errors on an unknown transform instead of silently passing through":
+        val out = scv_apply_transform("smudge-magic", "abc")
+        expect(out.starts_with("ERROR")).to_be(true)
+
+    it "keeps worktree and repository ids in distinct namespaces":
+        val wt = scv_worktree_content_id("hello\n")
+        val repo = scv_repository_content_id("identity", "hello\n")
+        expect(wt.starts_with("wct_")).to_be(true)
+        expect(repo.starts_with("rep_")).to_be(true)
+        step("Under identity the payload hash is shared, only the prefix differs")
+        expect(wt[4:]).to_be(repo[4:])
+
+    it "diverges the two ids exactly when the transform changes bytes":
+        val crlf = "a\r\nb\r\n"
+        val wt = scv_worktree_content_id(crlf)
+        val repo = scv_repository_content_id("eol-lf", crlf)
+        expect(wt[4:] == repo[4:]).to_be(false)
+        step("The repository id equals the id of the transformed bytes")
+        expect(repo[4:]).to_be(scv_repository_content_id("identity", "a\nb\n")[4:])
+
+    it "records the full dual-byte triple with an honest transform id":
+        val rec = scv_dual_byte_record("eol-lf", "x\r\n")
+        expect(rec).to_contain("transform: eol-lf")
+        expect(rec).to_contain("worktree: wct_")
+        expect(rec).to_contain("repository: rep_")
+        val bad = scv_dual_byte_record("smudge-magic", "x")
+        expect(bad.starts_with("ERROR")).to_be(true)

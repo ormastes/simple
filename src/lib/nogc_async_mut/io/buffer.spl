@@ -62,11 +62,6 @@ class AsyncBufferedReader with AsyncRead, AsyncClose:
         val line = await reader.read_line()?
     """
     inner: AsyncRead
-    # The source's AsyncClose view when it has one (`new_closing`); a plain
-    # `AsyncRead` source has none and close()/is_open() then report Ok/open.
-    # A trait value is never re-cast to another trait at runtime
-    # (bug: as_cast_trait_to_trait_unsupported_natively_2026-10-19).
-    closer: AsyncClose?
     buf: [u8]
     buf_size: i64
     pos: i64
@@ -83,21 +78,6 @@ class AsyncBufferedReader with AsyncRead, AsyncClose:
         """
         AsyncBufferedReader(
             inner: inner,
-            closer: nil,
-            buf: [],
-            buf_size: DEFAULT_BUF_SIZE,
-            pos: 0,
-            filled: 0
-        )
-
-    static fn new_closing(inner: AsyncRead, closer: AsyncClose) -> AsyncBufferedReader:
-        """Create async buffered reader whose close()/is_open() forward to
-        `closer` -- the same object as `inner` viewed through AsyncClose
-        (e.g. an AsyncTcpStream, which implements both).
-        """
-        AsyncBufferedReader(
-            inner: inner,
-            closer: closer,
             buf: [],
             buf_size: DEFAULT_BUF_SIZE,
             pos: 0,
@@ -116,7 +96,6 @@ class AsyncBufferedReader with AsyncRead, AsyncClose:
         """
         AsyncBufferedReader(
             inner: inner,
-            closer: nil,
             buf: [],
             buf_size: cap,
             pos: 0,
@@ -210,14 +189,14 @@ class AsyncBufferedReader with AsyncRead, AsyncClose:
 
     me close() -> Future<Result<(), IoError>>:
         """Close underlying reader."""
-        if val close_inner = self.closer:
+        if val close_inner = self.inner as AsyncClose:
             close_inner.close()
         else:
             Future.from_value(Ok(()))
 
     fn is_open() -> bool:
         """Check if underlying reader is open."""
-        if val close_inner = self.closer:
+        if val close_inner = self.inner as AsyncClose:
             close_inner.is_open()
         else:
             true
@@ -239,9 +218,6 @@ class AsyncBufferedWriter with AsyncWrite, AsyncClose:
         await writer.close()?
     """
     inner: AsyncWrite
-    # The destination's AsyncClose view when it has one (`new_closing`); see
-    # AsyncBufferedReader.closer.
-    closer: AsyncClose?
     buf: [u8]
     buf_size: i64
     pos: i64
@@ -257,20 +233,6 @@ class AsyncBufferedWriter with AsyncWrite, AsyncClose:
         """
         AsyncBufferedWriter(
             inner: inner,
-            closer: nil,
-            buf: [],
-            buf_size: DEFAULT_BUF_SIZE,
-            pos: 0
-        )
-
-    static fn new_closing(inner: AsyncWrite, closer: AsyncClose) -> AsyncBufferedWriter:
-        """Create async buffered writer whose close() flushes and then
-        forwards to `closer` -- the same object as `inner` viewed through
-        AsyncClose (e.g. an AsyncTcpStream, which implements both).
-        """
-        AsyncBufferedWriter(
-            inner: inner,
-            closer: closer,
             buf: [],
             buf_size: DEFAULT_BUF_SIZE,
             pos: 0
@@ -288,7 +250,6 @@ class AsyncBufferedWriter with AsyncWrite, AsyncClose:
         """
         AsyncBufferedWriter(
             inner: inner,
-            closer: nil,
             buf: [],
             buf_size: cap,
             pos: 0
@@ -372,7 +333,7 @@ class AsyncBufferedWriter with AsyncWrite, AsyncClose:
         self.flush().then(\result:
             match result:
                 case Ok(_):
-                    if val close_inner = self.closer:
+                    if val close_inner = self.inner as AsyncClose:
                         close_inner.close()
                     else:
                         Future.from_value(Ok(()))
@@ -382,7 +343,7 @@ class AsyncBufferedWriter with AsyncWrite, AsyncClose:
 
     fn is_open() -> bool:
         """Check if underlying writer is open."""
-        if val close_inner = self.closer:
+        if val close_inner = self.inner as AsyncClose:
             close_inner.is_open()
         else:
             true

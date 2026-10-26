@@ -8,13 +8,9 @@ impl<'a> super::Lexer<'a> {
         let start_line = self.line;
 
         // Count leading spaces/tabs
-        let mut indent: usize = 0;
+        let mut indent = 0;
         let mut pending_token: Option<Token> = None;
-        loop {
-            if self.column == 1 {
-                self.skip_masked_lines();
-            }
-            let Some(ch) = self.peek() else { break };
+        while let Some(ch) = self.peek() {
             match ch {
                 ' ' => {
                     indent += 1;
@@ -213,6 +209,7 @@ impl<'a> super::Lexer<'a> {
                 _ => break,
             }
         }
+
         if let Some(token) = pending_token {
             let current_indent = *self.indent_stack.last().unwrap_or(&0);
             if indent > current_indent {

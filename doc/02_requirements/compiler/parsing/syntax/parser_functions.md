@@ -11,7 +11,7 @@ parameters, return types, generics, where clauses, and various function forms.
 
 ## Syntax
 
-```simple:skip
+```simple
 fn name(params) -> ReturnType:
     body
 

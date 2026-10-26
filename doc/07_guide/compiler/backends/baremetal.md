@@ -123,16 +123,16 @@ Simple provides a unified QEMU library for programmatic control:
 
 ### API
 
-```text
-use std.nogc_async_mut_noalloc.qemu.mod.{QemuArch, QemuConfig, QemuInstance}
+```simple
+use std.qemu.{QemuArch, QemuConfig, QemuInstance}
 
 # Configure QEMU instance
 val config = QemuConfig(
     arch: QemuArch.RiscV32,
     machine: "virt",
-    binary_path: "my_program.elf",
+    binary: "my_program.elf",
     memory: "128M",
-    serial_stdio: true,
+    semihosting: true,
     gdb_port: nil
 )
 
@@ -144,7 +144,7 @@ instance.stop()
 
 ### Supported Architectures
 
-```text
+```simple
 enum QemuArch:
     Arm           # ARM Cortex-A/R/M
     AArch64       # ARM 64-bit
@@ -167,7 +167,7 @@ enum QemuArch:
 
 QEMU exit codes encode the program's actual exit status:
 
-```text
+```simple
 fn interpret_exit(qemu_code: i32, arch: QemuArch) -> i32:
     match arch:
         QemuArch.RiscV32:
@@ -180,7 +180,7 @@ fn interpret_exit(qemu_code: i32, arch: QemuArch) -> i32:
 
 ### Toolchain Detection
 
-```text
+```simple
 use std.qemu.{detect_toolchain}
 
 val toolchain = detect_toolchain(QemuArch.RiscV32)?
@@ -297,8 +297,8 @@ qemu-system-riscv32 -M virt -kernel hello.elf \
 
 ### SemihostExecutor API
 
-```text
-use std.nogc_async_mut_noalloc.execution.semihost_capture.{SemihostExecutor, SemihostResult}
+```simple
+use std.execution.semihost_capture.{SemihostExecutor, SemihostResult}
 
 # Create executor for target architecture
 SemihostExecutor.riscv32(binary: text, output_file: text) -> Result<SemihostExecutor, text>
@@ -309,7 +309,7 @@ SemihostExecutor.x86_64(binary: text, output_file: text) -> Result<SemihostExecu
 
 ### SemihostResult
 
-```text
+```simple
 class SemihostResult:
     exit_code: i32      # Program exit code
     stdout: text        # Captured output
@@ -320,9 +320,9 @@ class SemihostResult:
 
 ### Test Example
 
-```text
+```simple
 use std.spec.{describe, it, expect}
-use std.nogc_async_mut_noalloc.execution.semihost_capture.{SemihostExecutor}
+use std.execution.semihost_capture.{SemihostExecutor}
 
 describe "RISC-V 32 Semihosting":
     it "prints hello world message":
@@ -341,7 +341,7 @@ describe "RISC-V 32 Semihosting":
 
 ### Multiple Tests with Cleanup
 
-```text
+```simple
 describe "Calculator Tests":
     var executor: SemihostExecutor? = nil
 
@@ -471,7 +471,7 @@ This is the repo-managed starting point for harmonizing:
 ```
 
 **Startup Code:**
-```text
+```simple
 # ARM Cortex-M startup
 @section(".vectors")
 val vector_table = [

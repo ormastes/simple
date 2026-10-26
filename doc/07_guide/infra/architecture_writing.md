@@ -17,7 +17,7 @@ Skeleton Types  -->  Lean Verify  -->  SPipe Tests  -->  Diagram Generation
 
 Create minimal type definitions — no business logic yet.
 
-```simple:skip
+```simple
 @verify(types)
 @architectural
 struct User:
@@ -64,7 +64,7 @@ cd src/verification/type_inference_compile && lake build  # Run proofs
 
 ## 3. Tests with Architecture Annotations
 
-```simple:skip
+```simple
 import std.spec
 
 describe "User":
@@ -89,7 +89,7 @@ simple test user_spec.spl --diagram-all --diagram-output doc/diagrams/
 
 ### Architectural Layers
 
-```simple:skip
+```simple
 @architectural_layer(Presentation)    # UI, API controllers
 @architectural_layer(Application)     # Use cases, services
 @architectural_layer(Domain)          # Business entities

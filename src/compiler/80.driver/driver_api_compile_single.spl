@@ -2,32 +2,12 @@
 #
 # Dependency rules:
 #   - May import from: driver_api_types (Tier 0), driver_api_interpret (Tier 1),
-#     driver_core_types and the leaf cache compile-options hash owner
+#     driver_core_types
 #   - Must NOT import from Tier 3+ files
 #   - Uses `use lazy` for CompilerDriver
 
-use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, compileoptions_effective_mir_opt_level, driver_output_format_smf)
-use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute}
+use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_smf)
 use lazy compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
-use compiler.common.assurance.representation_context_v1.{representation_context_from_project_v1, representation_source_context_v1}
-use compiler.common.module_path_naming.{module_logical_name_from_path}
-use std.common.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.io_runtime.{file_read}
-
-# Actual compile/check entry for an explicitly selected project configuration.
-# Only this exact input is admitted to that owner; imports require their own
-# source-resolution context rather than inheriting the root namespace.
-pub fn compile_file_with_representation_project_v1(path: text,
-        selected_manifest_path: text, manifest_source: text,
-        mode: CompileMode = CompileMode.Check) -> CompileResult:
-    val project = representation_context_from_project_v1(manifest_source, selected_manifest_path)
-    var options = driver_core_compile_options_default()
-    options.input_files = [path]
-    options.mode = mode
-    options.representation_sources = [representation_source_context_v1(project,
-        module_logical_name_from_path(path), sha256_text(file_read(path)))]
-    val driver = compiler_driver_create(options)
-    compiler_driver_run_compile(driver)
 
 pub fn compile_file(path: text) -> CompileResult:
     var options = driver_core_compile_options_default()
@@ -72,12 +52,7 @@ pub fn compile_to_smf(path: text, output: text) -> Result<text, text>:
                 "Compilation failed"
             Err(error_msg)
 
-# Existing daemon fields are line-based. Reject lossy values, never trim or
-# infer a host target. Backend target recognition remains the backend's job.
-pub fn smf_native_target_wire_valid(target: text) -> bool:
-    target == target.trim() and not target.contains("\n") and not target.contains("\r")
-
-pub fn smf_compile_options(
+pub fn compile_to_smf_with_options(
     path: text,
     output: text,
     backend: text,
@@ -86,11 +61,8 @@ pub fn smf_compile_options(
     debug_info: bool,
     gc_off: bool,
     profile: text,
-    allowed_families: [text],
-    native_target: text = ""
-) -> Result<CompileOptions, text>:
-    if not smf_native_target_wire_valid(native_target):
-        return Err("SMF native target cannot contain line breaks or surrounding whitespace")
+    allowed_families: [text]
+) -> Result<text, text>:
     var options = driver_core_compile_options_default()
     options.input_files = [path]
     options.output_file = output
@@ -103,45 +75,7 @@ pub fn smf_compile_options(
     options.gc_off = gc_off
     options.profile = profile
     options.allowed_families = allowed_families
-    options.native_target = native_target
-    Ok(compileoptions_normalize_mir_optimization(options))
-
-
-# Validation and compilation must derive identity from the same normalized
-# options. In particular opt_level > 0 sets release even when the request does
-# not. Paths do not participate in this hash; no source or output is accessed.
-pub fn smf_expected_compile_options_hash(
-    backend: text,
-    opt_level: i64,
-    release: bool,
-    debug_info: bool,
-    gc_off: bool,
-    profile: text,
-    allowed_families: [text],
-    native_target: text = ""
-) -> Result<CompileOptionsHash, text>:
-    val opts = smf_compile_options("", "", backend, opt_level, release,
-        debug_info, gc_off, profile, allowed_families, native_target)?
-    Ok(compile_options_hash_compute(opts.backend, compileoptions_effective_mir_opt_level(opts),
-        opts.release, opts.debug_info, opts.gc_off, opts.profile, opts.allowed_families,
-        opts.native_libraries, opts.native_library_paths, opts.native_linker_flags,
-        opts.collection_policy, opts.collection_memory_budget_bytes, opts.native_target))
-
-
-pub fn compile_to_smf_with_options(
-    path: text,
-    output: text,
-    backend: text,
-    opt_level: i64,
-    release: bool,
-    debug_info: bool,
-    gc_off: bool,
-    profile: text,
-    allowed_families: [text],
-    native_target: text = ""
-) -> Result<text, text>:
-    val options = smf_compile_options(path, output, backend, opt_level, release,
-        debug_info, gc_off, profile, allowed_families, native_target)?
+    val options = compileoptions_normalize_mir_optimization(options)
 
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)

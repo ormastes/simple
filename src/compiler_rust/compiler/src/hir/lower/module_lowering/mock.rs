@@ -31,7 +31,6 @@ impl Lowerer {
                 name: param.name.clone(),
                 ty,
                 type_name_hint: param.ty.as_ref().and_then(type_name_hint),
-                trait_dispatch_owner: None,
                 mutability: param.mutability,
                 inject: param.inject,
                 is_ghost: false,

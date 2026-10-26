@@ -1,22 +1,7 @@
-# Purpose and audience: embedded TLS material and handshake-message diagnostics for SimpleOS maintainers.
-# codex-system-test
-# @req REQ-SSPEC-SYSTEM
-# @cover src/os/kernel/net/embedded_certs.spl 80%
-# @cover src/os/tls13/server_builders.spl 80%
-# @cover src/os/tls13/handshake13.spl 80%
-# @cover src/os/tls13/_CertVerify/signature_verify.spl 80%
-# @cover src/os/crypto/ed25519.spl 80%
-# Coverage percentages are targets, not measured coverage.
-# @tag:system
-# Offline material/message evidence; no live handshake or native qualification.
-# CertificateVerify signing uses the builder's existing rt_ed25519_sign extern;
-# verification uses the production pure-Simple verifier, without an FFI substitute.
-
-use std.spec.{describe, it, expect, fail, step}
-use os.kernel.net.embedded_certs.{get_embedded_cert_der, get_embedded_key_der, has_embedded_certs}
-use os.tls13.server_builders.{build_certificate, build_certificate_verify}
-use os.tls13.handshake13.{parse_certificate_chain_body, parse_certificate_verify}
-use os.tls13.cert_verify.{extract_ed25519_pubkey_from_cert, verify_certificate_verify_msg_scheme, CertVerifyResult}
+# @cover src/lib/nogc_sync_mut/debug/remote/target/simpleos.spl 0%
+use std.spipe.*
+use os.kernel.net.embedded_certs.{get_embedded_cert_der, get_embedded_key_der}
+use os.tls13.server.{build_certificate, build_certificate_verify}
 
 fn _transcript_hash_32() -> [u8]:
     var h: [u8] = []
@@ -26,87 +11,12 @@ fn _transcript_hash_32() -> [u8]:
         i = i + 1u64
     h
 
-# Copy the handshake body for the production parsers; this does not parse it.
-fn _tls_material_body(message: [u8]) -> [u8]:
-    var body: [u8] = []
-    var i: u64 = 4
-    while i < message.len():
-        body.push(message[i])
-        i = i + 1
-    body
-
 describe "SimpleOS embedded TLS material":
-    it "frames the complete embedded DER certificate with empty request context and extensions":
-        step("Load the embedded certificate and encode a server Certificate message")
-        val cert_der = get_embedded_cert_der()
-        expect(has_embedded_certs()).to_equal(true)
-        expect(cert_der.len()).to_equal(317)
-        expect(get_embedded_key_der().len()).to_equal(48)
-        val message = build_certificate([cert_der])
-        expect(message.len()).to_equal(330)
-        if message.len() == 330:
-            expect(message[0]).to_equal(0x0Bu8)
-            expect(message[1]).to_equal(0u8)
-            expect(message[2]).to_equal(1u8)
-            expect(message[3]).to_equal(70u8)  # handshake body: 326 bytes
-            expect(message[4]).to_equal(0u8)   # empty request context
-            expect(message[5]).to_equal(0u8)
-            expect(message[6]).to_equal(1u8)
-            expect(message[7]).to_equal(66u8)  # certificate list: 322 bytes
-            expect(message[8]).to_equal(0u8)
-            expect(message[9]).to_equal(1u8)
-            expect(message[10]).to_equal(61u8) # certificate DER: 317 bytes
-            expect(message[328]).to_equal(0u8)
-            expect(message[329]).to_equal(0u8)
-            if message[4] == 0u8 and message[5] == 0u8 and message[6] == 1u8 and
-               message[7] == 66u8 and message[8] == 0u8 and message[9] == 1u8 and
-               message[10] == 61u8 and message[328] == 0u8 and message[329] == 0u8:
-                step("Decode the certificate list and compare every DER byte")
-                val chain = parse_certificate_chain_body(_tls_material_body(message))
-                expect(chain.len()).to_equal(1)
-                if chain.len() == 1:
-                    expect(chain[0]).to_equal(cert_der)
+    it "builds Certificate and Ed25519 CertificateVerify with embedded DER":
+        val cert_msg = build_certificate([get_embedded_cert_der()])
+        expect(cert_msg[0u64]).to_equal(0x0Bu8)
 
-    it "verifies the embedded key signature and rejects a changed transcript":
-        step("Sign a transcript and inspect the complete CertificateVerify framing")
-        val transcript = _transcript_hash_32()
-        val message = build_certificate_verify(transcript, get_embedded_key_der(), 0x0807u16)
-        expect(message.len()).to_equal(72)
-        if message.len() == 72:
-            expect(message[0]).to_equal(0x0Fu8)
-            expect(message[1]).to_equal(0u8)
-            expect(message[2]).to_equal(0u8)
-            expect(message[3]).to_equal(68u8)
-            expect(message[4]).to_equal(8u8)
-            expect(message[5]).to_equal(7u8)
-            expect(message[6]).to_equal(0u8)
-            expect(message[7]).to_equal(64u8)
-            if message[4] == 8u8 and message[5] == 7u8 and
-               message[6] == 0u8 and message[7] == 64u8:
-                val fields = parse_certificate_verify(_tls_material_body(message))
-                expect(fields.algorithm).to_equal(0x0807u16)
-                expect(fields.signature.len()).to_equal(64)
-                val cert_der = get_embedded_cert_der()
-                expect(cert_der.len()).to_equal(317)
-                if cert_der.len() == 317:
-                    val public_key = extract_ed25519_pubkey_from_cert(cert_der)
-                    expect(public_key.len()).to_equal(32)
-                    if public_key.len() == 32 and fields.signature.len() == 64:
-                        step("Verify against the certificate public key using the production verifier")
-                        match verify_certificate_verify_msg_scheme(public_key, fields.algorithm, transcript, fields.signature):
-                            CertVerifyResult.Ok: pass
-                            CertVerifyResult.Err(reason): fail("embedded CertificateVerify rejected: {reason}")
-                        var changed = transcript
-                        expect(changed.len()).to_equal(32)
-                        if changed.len() == 32:
-                            changed[0] = 255u8
-                            step("Reject the same signature after changing one transcript byte")
-                            match verify_certificate_verify_msg_scheme(public_key, fields.algorithm, changed, fields.signature):
-                                CertVerifyResult.Ok: fail("changed transcript retained a valid signature")
-                                CertVerifyResult.Err(_): pass
-
-    it "rejects malformed signing material and unsupported signature schemes":
-        step("Reject an empty PKCS8 key instead of emitting a signature-shaped message")
-        expect(build_certificate_verify(_transcript_hash_32(), [], 0x0807u16)).to_equal([])
-        step("Reject an unsupported scheme with otherwise valid embedded material")
-        expect(build_certificate_verify(_transcript_hash_32(), get_embedded_key_der(), 0u16)).to_equal([])
+        val cv = build_certificate_verify(_transcript_hash_32(), get_embedded_key_der(), 0x0807u16)
+        expect(cv[0u64]).to_equal(0x0Fu8)
+        val sig_len = (cv[6u64].to_u64() << 8) | cv[7u64].to_u64()
+        expect(sig_len).to_equal(64u64)

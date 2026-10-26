@@ -171,7 +171,7 @@ impl<'a> MirLowerer<'a> {
         let expr_ty = expr.ty;
 
         match &expr.kind {
-            HirExprKind::Integer(n) => self.lower_typed_integer_expr(*n, expr_ty),
+            HirExprKind::Integer(n) => self.lower_integer_expr(*n),
             HirExprKind::Float(f) => self.lower_float_expr(*f),
             HirExprKind::Bool(b) => self.lower_bool_expr(*b),
             HirExprKind::String(s) => self.lower_string_expr(s.clone()),
@@ -230,8 +230,8 @@ impl<'a> MirLowerer<'a> {
                 then_branch,
                 else_branch,
             } => self.lower_if_expr(condition, then_branch, else_branch, expr_ty),
-            HirExprKind::Block(stmts) => self.lower_block_expr(stmts, expr_ty),
-            HirExprKind::UnsafeBlock { statements, .. } => self.lower_block_expr(statements, expr_ty),
+            HirExprKind::Block(stmts) => self.lower_block_expr(stmts),
+            HirExprKind::UnsafeBlock { statements, .. } => self.lower_block_expr(statements),
             HirExprKind::LetIn { local_idx, value, body } => self.lower_let_in_expr(*local_idx, value, body),
         }
     }

@@ -454,12 +454,6 @@ struct ApkFacetLoadV1:
     # apk_loader_generation); a successful one always does, exactly once.
     generation: i64
 
-# A validated payload and its canonical identity, owned by one activation
-# call until commit. It is deliberately absent from the public binding index.
-struct _ApkPreparedBindingV1:
-    result: ApkFacetLoadV1
-    module_identity: text
-
 # design §14.1 FacetBindingRegistry key: (concrete_type_id, facet_interface_id,
 # generation). facet_key is already "{concrete_type_id}/{facet_interface_id}"
 # by convention (see every catalog entry in this module's specs), so the
@@ -1998,8 +1992,8 @@ fn apk_loader_is_operational_sealed(ld: i64) -> bool:
     _ld_operational_sealed[ld]
 
 fn apk_loader_generation(ld: i64) -> i64:
-    """design §5.7: the loader's activation epoch. Each ordinary acquisition
-    or nonempty startup batch advances once; failed binds never advance it."""
+    """design §5.7: the loader's activation epoch — the number of facets
+    successfully published so far. Never advances on a failed bind."""
     _ld_generation[ld]
 
 fn apk_loader_set_expected_core_abi(ld: i64, expected_core_public_abi_hash: text):
@@ -2285,56 +2279,45 @@ fn apk_load_aspect_manual(ld: i64, catalog: [u8], facet_key: text) -> ApkFacetLo
 
 fn apk_activate_startup(ld: i64, catalog: [u8]) -> i64:
     """Bind every `startup` route before the application publishes itself
-    (design §9.4). Prepare every new binding before the callback-free commit.
-    Failure discards local preparations without exposing bindings or changing
-    the epoch. Resident bindings retain their payload, pins and generation.
-    This is the existing synchronous single-owner contract, not cross-thread
-    serialization. Fatal allocation failure has no recoverable loader API."""
+    (design §9.4). Publication is transactional: only bindings created by this
+    call are recorded, and the first failure releases them in reverse order
+    and restores the pre-call activation epoch.  Already-resident bindings are
+    never claimed by or rolled back with this transaction."""
     _ld_last_error[ld] = ""
     val cat = apk_open_catalog_v1(catalog)
     if not cat.ok:
         _ld_last_error[ld] = cat.error_message
         return 0
     val keys = apk_catalog_startup_keys_v1(catalog, cat)
-    var pending: [_ApkPreparedBindingV1] = []
-    var pending_keys: Dict<text, bool> = {}
+    val generation_before = _ld_generation[ld]
+    var published_keys: [text] = []
     var bound = 0
     var i = 0
     while i < keys.len():
-        val key = keys[i]
-        # A repeated catalog key has the same success-count semantics as the
-        # formerly cached second acquisition, without preparing a second row.
-        if not pending_keys.contains_key(key):
-            if val cached = _apk_acquire_facet_preflight(ld, key, true):
-                if not cached.ok or not cached.found:
-                    return 0
+        val got = _apk_acquire_facet(ld, catalog, keys[i], true)
+        if not got.ok or not got.found:
+            val activation_error = if _ld_last_error[ld] != "":
+                _ld_last_error[ld]
             else:
-                if not apk_activation_stack_enter_v1(ld, key):
-                    return 0
-                val prepared = _apk_prepare_facet_body_opened_v1(
-                    ld, catalog, cat, key, true, nil)
-                apk_activation_stack_exit_v1(ld, key)
-                match prepared:
-                    Ok(ready):
-                        pending.push(ready)
-                        pending_keys[key] = true
-                    Err(failure):
-                        if _ld_last_error[ld] == "":
-                            _ld_last_error[ld] = "startup route did not resolve a facet: " + key
-                        return 0
-        else:
-            _ld_cache_hits[ld] = _ld_cache_hits[ld] + 1
-            _ld_last_error[ld] = ""
+                "startup route did not resolve a facet: " + keys[i]
+            var rollback_error = ""
+            var rollback = published_keys.len()
+            while rollback > 0:
+                rollback = rollback - 1
+                val released = apk_unload_facet_v1(ld, published_keys[rollback])
+                if (not released.ok or not released.released) and rollback_error == "":
+                    rollback_error = "startup rollback could not release " +
+                        published_keys[rollback]
+            if rollback_error == "":
+                _ld_generation[ld] = generation_before
+                _ld_last_error[ld] = activation_error
+            else:
+                _ld_last_error[ld] = activation_error + "; " + rollback_error
+            return 0
+        if got.found and not got.from_cache:
+            published_keys.push(keys[i])
         bound = bound + 1
         i = i + 1
-    if pending.len() > 0:
-        # All fallible checks and payload preparation precede publication.
-        # The single-owner commit invokes no callbacks and cannot return a
-        # recoverable failure after the first registry write.
-        val generation = pending[0].result.generation
-        for ready in pending:
-            _apk_publish_prepared_binding_v1(ld, ready, generation)
-        _ld_generation[ld] = generation
     bound
 
 fn _apk_acquire_facet(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -> ApkFacetLoadV1:
@@ -2400,25 +2383,13 @@ fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bo
 fn _apk_acquire_facet_body_opened(ld: i64, catalog: [u8],
         cat: ApkCatalogHandleV1, facet_key: text, explicit: bool,
         catalog_index: _ApkCatalogIndexV1?) -> ApkFacetLoadV1:
-    match _apk_prepare_facet_body_opened_v1(
-            ld, catalog, cat, facet_key, explicit, catalog_index):
-        Err(failure): failure
-        Ok(ready):
-            val generation = ready.result.generation
-            _apk_publish_prepared_binding_v1(ld, ready, generation)
-            _ld_generation[ld] = generation
-            ready.result
-
-fn _apk_prepare_facet_body_opened_v1(ld: i64, catalog: [u8],
-        cat: ApkCatalogHandleV1, facet_key: text, explicit: bool,
-        catalog_index: _ApkCatalogIndexV1?) -> Result<_ApkPreparedBindingV1, ApkFacetLoadV1>:
     # design §14.7 step 2: while a binding is quiescing, NEW acquisitions are
     # refused. Existing pinned references stay valid; this is what makes an
     # unload ordered rather than a race.
     val resident_index = _apk_fc_index(ld, facet_key)
     if resident_index >= 0 and _fc_state[resident_index] == APK_FC_QUIESCING:
         _ld_last_error[ld] = "aspect is quiescing and cannot be re-acquired: {facet_key}"
-        return Err(_apk_facet_error("APK_ASPECT_QUIESCING", "aspect is quiescing and cannot be re-acquired: {facet_key}"))
+        return _apk_facet_error("APK_ASPECT_QUIESCING", "aspect is quiescing and cannot be re-acquired: {facet_key}")
     var route = _apk_catalog_route_miss(facet_key, APK_ENTRY_FACET)
     if val index = catalog_index:
         route = _apk_catalog_route_kind_indexed_v1(
@@ -2432,40 +2403,40 @@ fn _apk_prepare_facet_body_opened_v1(ld: i64, catalog: [u8],
         route = apk_catalog_route_v1(catalog, cat, facet_key)
     if not route.ok:
         _ld_last_error[ld] = route.error_message
-        return Err(_apk_facet_error(route.error_code, route.error_message))
+        return _apk_facet_error(route.error_code, route.error_message)
     if not route.found:
         _ld_last_error[ld] = ""
-        return Err(_apk_facet_miss(facet_key))
+        return _apk_facet_miss(facet_key)
 
     # activation policy (design §9.4) — decided from the catalog alone, so a
     # refused aspect costs no pack open and no decompression at all.
     if route.activation == APK_ACT_OFF:
         _ld_last_error[ld] = "aspect is excluded from this image: {facet_key}"
-        return Err(_apk_facet_error("APK_ASPECT_EXCLUDED", "aspect is excluded from this image: {facet_key}"))
+        return _apk_facet_error("APK_ASPECT_EXCLUDED", "aspect is excluded from this image: {facet_key}")
     if route.activation == APK_ACT_MANUAL and not explicit:
         _ld_last_error[ld] = "manual aspect requires an explicit load: {facet_key}"
-        return Err(_apk_facet_error("APK_ASPECT_MANUAL", "manual aspect requires an explicit load: {facet_key}"))
+        return _apk_facet_error("APK_ASPECT_MANUAL", "manual aspect requires an explicit load: {facet_key}")
 
     # Locate the routed pack by exact path. The per-loader Dict avoids a scan
     # across this loader's packs and every other loader's packs.
     val packs = _ld_packs[ld]
     if not packs.contains_key(route.pack_path):
         _ld_last_error[ld] = "routed pack is not deployed: {route.pack_path}"
-        return Err(_apk_facet_error("APK_PACK_MISSING", "routed pack is not deployed: {route.pack_path}"))
+        return _apk_facet_error("APK_PACK_MISSING", "routed pack is not deployed: {route.pack_path}")
     val pack = packs[route.pack_path]
 
     _ld_packs_opened[ld] = _ld_packs_opened[ld] + 1
     val handle = apk_open_pack_v1(pack)
     if not handle.ok:
         _ld_last_error[ld] = handle.error_message
-        return Err(_apk_facet_error(handle.error_code, handle.error_message))
+        return _apk_facet_error(handle.error_code, handle.error_message)
     val load = apk_load_module_v1(pack, handle, route.module_id)
     if not load.ok:
         _ld_last_error[ld] = load.error_message
-        return Err(_apk_facet_error(load.error_code, load.error_message))
+        return _apk_facet_error(load.error_code, load.error_message)
     if not load.found:
         _ld_last_error[ld] = "catalog routed to a module absent from its pack: {route.module_id}"
-        return Err(_apk_facet_error("APK_ROUTE_DANGLING", "catalog routed to a module absent from its pack: {route.module_id}"))
+        return _apk_facet_error("APK_ROUTE_DANGLING", "catalog routed to a module absent from its pack: {route.module_id}")
     # design §17: the route promises a facet contract ABI; the module states
     # its own. A mismatch is a load failure, never a best-effort bind. An
     # empty promise means the route declares no ABI and nothing is checked.
@@ -2481,27 +2452,27 @@ fn _apk_prepare_facet_body_opened_v1(ld: i64, catalog: [u8],
     val abi_mismatch = route.abi_hash != "" and route.abi_hash != load.module_abi_hash
     if abi_mismatch and not _apk_host_diverged_from_catalog_v1(ld, route.facet_key, route.abi_hash):
         _ld_last_error[ld] = "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"
-        return Err(_apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"))
+        return _apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}")
     val plugin_verdict = apk_negotiate_module_v1(ld, route.facet_key, load)
     if not plugin_verdict.accepted():
         val code = plugin_verdict.code()
         _ld_last_error[ld] = "{code}: aspect-pack negotiation refused {facet_key}"
-        return Err(_apk_facet_error(code, _ld_last_error[ld]))
+        return _apk_facet_error(code, _ld_last_error[ld])
     if abi_mismatch:
         _ld_last_error[ld] = "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"
-        return Err(_apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"))
+        return _apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}")
     # Legacy core/layout/variant checks remain additive while callers migrate
     # their identities into HostOfferV1. Interface negotiation above is never
     # skipped and always runs before publication or handle return.
     if _ld_expected_core_abi[ld] != "" and _ld_expected_core_abi[ld] != load.required_core_public_abi_hash:
         _ld_last_error[ld] = "core public ABI mismatch for {facet_key}: expected {_ld_expected_core_abi[ld]} vs module {load.required_core_public_abi_hash}"
-        return Err(_apk_facet_error("APK_CORE_ABI_MISMATCH", "core public ABI mismatch for {facet_key}: expected {_ld_expected_core_abi[ld]} vs module {load.required_core_public_abi_hash}"))
+        return _apk_facet_error("APK_CORE_ABI_MISMATCH", "core public ABI mismatch for {facet_key}: expected {_ld_expected_core_abi[ld]} vs module {load.required_core_public_abi_hash}")
     if _ld_expected_core_layout[ld] != "" and _ld_expected_core_layout[ld] != load.required_core_layout_hash:
         _ld_last_error[ld] = "core layout hash mismatch for {facet_key}: expected {_ld_expected_core_layout[ld]} vs module {load.required_core_layout_hash}"
-        return Err(_apk_facet_error("APK_CORE_LAYOUT_MISMATCH", "core layout hash mismatch for {facet_key}: expected {_ld_expected_core_layout[ld]} vs module {load.required_core_layout_hash}"))
+        return _apk_facet_error("APK_CORE_LAYOUT_MISMATCH", "core layout hash mismatch for {facet_key}: expected {_ld_expected_core_layout[ld]} vs module {load.required_core_layout_hash}")
     if _ld_expected_variant_fingerprint[ld] != "" and _ld_expected_variant_fingerprint[ld] != load.variant_fingerprint:
         _ld_last_error[ld] = "variant fingerprint mismatch for {facet_key}: expected {_ld_expected_variant_fingerprint[ld]} vs module {load.variant_fingerprint}"
-        return Err(_apk_facet_error("APK_VARIANT_MISMATCH", "variant fingerprint mismatch for {facet_key}: expected {_ld_expected_variant_fingerprint[ld]} vs module {load.variant_fingerprint}"))
+        return _apk_facet_error("APK_VARIANT_MISMATCH", "variant fingerprint mismatch for {facet_key}: expected {_ld_expected_variant_fingerprint[ld]} vs module {load.variant_fingerprint}")
     _ld_modules_decompressed[ld] = _ld_modules_decompressed[ld] + load.modules_decompressed
     _ld_bytes_decompressed[ld] = _ld_bytes_decompressed[ld] + load.bytes_decompressed
     _ld_last_error[ld] = ""
@@ -2513,53 +2484,45 @@ fn _apk_prepare_facet_body_opened_v1(ld: i64, catalog: [u8],
         load.required_core_layout_hash, load.variant_fingerprint)
 
     # Under this module's current single-owner loader contract, prepare the
-    # next §5.7 activation epoch without publishing a row or index entry.
-    # Cross-thread first-use serialization is
+    # next §5.7 activation epoch, publish the row plus index entry, and advance
+    # only after publication succeeds. Cross-thread first-use serialization is
     # outside this container; within one owner, a duplicate loader/key entry is
     # an integrity failure, never a silent overwrite.
     if module_identity == "":
         _ld_last_error[ld] = "module identity is missing for facet: {facet_key}"
-        return Err(_apk_facet_error("APK_BINDING_IDENTITY_MISSING", _ld_last_error[ld]))
-    val binding_index = _ld_binding_index[ld]
+        return _apk_facet_error("APK_BINDING_IDENTITY_MISSING", _ld_last_error[ld])
+    var binding_index = _ld_binding_index[ld]
     if binding_index.contains_key(facet_key):
         _ld_last_error[ld] = "facet binding already published: {facet_key}"
-        return Err(_apk_facet_error("APK_BINDING_DUPLICATE", _ld_last_error[ld]))
+        return _apk_facet_error("APK_BINDING_DUPLICATE", _ld_last_error[ld])
     val gen = apk_binding_checked_next_generation_v2(_ld_generation[ld])
     if gen == 0:
         _ld_last_error[ld] = "facet binding generation is exhausted"
-        return Err(_apk_facet_error("APK_BINDING_GENERATION_EXHAUSTED",
-            _ld_last_error[ld]))
-    Ok(_ApkPreparedBindingV1(
-        result: ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
-            facet_key: facet_key, pack_path: route.pack_path, module_id: load.module_id,
-            aspect_id: load.aspect_id, activation: route.activation, from_cache: false,
-            payload: load.payload, generation: gen),
-        module_identity: module_identity))
-
-fn _apk_publish_prepared_binding_v1(ld: i64, prepared: _ApkPreparedBindingV1,
-        generation: i64):
-    # Caller owns validation and the publication epoch. No callback, I/O,
-    # validation failure or user code is allowed in this single-owner commit.
-    val binding = prepared.result
-    var binding_index = _ld_binding_index[ld]
+        return _apk_facet_error("APK_BINDING_GENERATION_EXHAUSTED",
+            _ld_last_error[ld])
     val row = _fc_ld.len()
     _fc_ld = _fc_ld.push(ld)
-    _fc_key = _fc_key.push(binding.facet_key)
-    _fc_module = _fc_module.push(binding.module_id)
-    _fc_aspect = _fc_aspect.push(binding.aspect_id)
-    _fc_activation = _fc_activation.push(binding.activation)
-    _fc_pack = _fc_pack.push(binding.pack_path)
-    _fc_payload = _fc_payload.push(binding.payload)
-    _fc_module_identity = _fc_module_identity.push(prepared.module_identity)
-    _fc_generation = _fc_generation.push(generation)
+    _fc_key = _fc_key.push(facet_key)
+    _fc_module = _fc_module.push(load.module_id)
+    _fc_aspect = _fc_aspect.push(load.aspect_id)
+    _fc_activation = _fc_activation.push(route.activation)
+    _fc_pack = _fc_pack.push(route.pack_path)
+    _fc_payload = _fc_payload.push(load.payload)
+    _fc_module_identity = _fc_module_identity.push(module_identity)
+    _fc_generation = _fc_generation.push(gen)
     _fc_state = _fc_state.push(APK_FC_BOUND)
     _fc_refs = _fc_refs.push(0)
     _fc_final_reservation_id_v2 = _fc_final_reservation_id_v2.push(0)
     _fc_final_reserved_pin_v2 = _fc_final_reserved_pin_v2.push(false)
     _fc_final_release_started_v2 = _fc_final_release_started_v2.push(false)
-    binding_index[binding.facet_key] = row
+    binding_index[facet_key] = row
     _ld_binding_index[ld] = binding_index
     _ld_binding_counts[ld] = _ld_binding_counts[ld] + 1
+    _ld_generation[ld] = gen
+    ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
+        facet_key: facet_key, pack_path: route.pack_path, module_id: load.module_id,
+        aspect_id: load.aspect_id, activation: route.activation, from_cache: false,
+        payload: load.payload, generation: gen)
 
 # ---------------------------------------------------------------- unload
 #

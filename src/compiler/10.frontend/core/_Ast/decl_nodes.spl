@@ -760,9 +760,6 @@ fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64]
     idx
 
 fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i64:
-    decl_impl_block_typed(target_name, method_decl_ids, span_id, -1)
-
-fn decl_impl_block_typed(target_name: text, method_decl_ids: [i64], span_id: i64, target_type: i64) -> i64:
     val idx = decl_alloc(DECL_IMPL, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "9")
@@ -770,12 +767,7 @@ fn decl_impl_block_typed(target_name: text, method_decl_ids: [i64], span_id: i64
         ast_decl_direct_set(ast_decl_name_key(idx), target_name)
         ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
         ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
-        ast_decl_i64_set(idx, "RET", target_type)
-        ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(target_type))
     decl_name[idx] = target_name
-    # Impl declarations have no return type. Reuse the existing serialized
-    # type slot for composite targets instead of discarding their parsed tag.
-    decl_ret_type[idx] = target_type
     decl_body_stmts[idx] = method_decl_ids
     decl_body_stmts_flat[idx] = ast_i64_list_join(method_decl_ids)
     idx
@@ -789,27 +781,7 @@ fn decl_set_impl_trait(idx: i64, trait_name: text):
     if not ast_decl_prefer_arena():
         ast_decl_text_set(idx, "IMPL_TRAIT", trait_name)
 
-# `class X with Trait:` candidate (see parse_struct_or_trait_decl). Stored in
-# the IMPL_TRAIT slot with a `with:` prefix so the flat-pool layout is
-# unchanged; decl_get_impl_trait never reports it as an `impl Trait for`.
-val DECL_IMPL_WITH_PREFIX = "with:"
-
-fn decl_set_impl_with_trait(idx: i64, trait_name: text):
-    decl_set_impl_trait(idx, DECL_IMPL_WITH_PREFIX + trait_name)
-
-fn decl_get_impl_with_trait(idx: i64) -> text:
-    val stored = decl_get_impl_trait_raw(idx)
-    if stored.starts_with(DECL_IMPL_WITH_PREFIX):
-        return stored.substring(DECL_IMPL_WITH_PREFIX.len(), stored.len())
-    ""
-
 fn decl_get_impl_trait(idx: i64) -> text:
-    val stored = decl_get_impl_trait_raw(idx)
-    if stored.starts_with(DECL_IMPL_WITH_PREFIX):
-        return ""
-    stored
-
-fn decl_get_impl_trait_raw(idx: i64) -> text:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_impl_trait.len():
             return decl_impl_trait[idx]
@@ -941,11 +913,6 @@ fn decl_get_span(idx: i64) -> i64:
     if idx >= decl_span.len():
         return 0
     decl_span[idx]
-
-fn decl_set_span(idx: i64, span_id: i64):
-    decl_span[idx] = span_id
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "SPAN", span_id)
 
 fn decl_get_name(idx: i64) -> text:
     if ast_decl_prefer_arena():
@@ -1556,12 +1523,6 @@ fn ast_decl_env_mirror_clear():
         _env_remove_required(ast_decl_tag_key(i))
         _env_remove_required(ast_decl_name_key(i))
         _env_remove_required(ast_decl_ret_key(i))
-        # These direct keys use FIELD_index, unlike the generic index_FIELD
-        # mirrors above, and their readers consult them before restored pools.
-        _env_remove_required(ast_decl_body_key(i))
-        _env_remove_required(ast_decl_field_names_key(i))
-        _env_remove_required(ast_decl_field_types_key(i))
-        _env_remove_required(ast_decl_imports_key(i))
         i = i + 1
     ast_decl_mirror_high_slot[0] = 0
     val mod_upto = ast_module_decl_mirror_high_slot[0]
@@ -1680,10 +1641,10 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     arm_guard = flat_pool_dec_i64_into(arm_guard, r)
     arm_pattern = flat_pool_dec_i64_into(arm_pattern, r)
     arm_rationale = flat_pool_dec_text_into(arm_rationale, r)
-    ast_decl_count_slot = flat_pool_dec_i64_into(ast_decl_count_slot, r)
-    ast_decl_mirror_high_slot = flat_pool_dec_i64_into(ast_decl_mirror_high_slot, r)
-    ast_module_decl_count_slot = flat_pool_dec_i64_into(ast_module_decl_count_slot, r)
-    ast_module_decl_mirror_high_slot = flat_pool_dec_i64_into(ast_module_decl_mirror_high_slot, r)
+    ast_decl_count_slot = flat_pool_dec_i64(r)
+    ast_decl_mirror_high_slot = flat_pool_dec_i64(r)
+    ast_module_decl_count_slot = flat_pool_dec_i64(r)
+    ast_module_decl_mirror_high_slot = flat_pool_dec_i64(r)
     decl_asm_placement = flat_pool_dec_text_into(decl_asm_placement, r)
     decl_body_stmts = flat_pool_dec_i64_list_into(decl_body_stmts, r)
     decl_body_stmts_flat = flat_pool_dec_text_into(decl_body_stmts_flat, r)
@@ -1729,11 +1690,11 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     elif_body = flat_pool_dec_i64_list(r)
     elif_cond = flat_pool_dec_i64(r)
     elif_else = flat_pool_dec_i64_list(r)
-    lexer_state_core_line_slot = flat_pool_dec_text_into(lexer_state_core_line_slot, r)
-    lexer_state_core_pos_slot = flat_pool_dec_text_into(lexer_state_core_pos_slot, r)
+    lexer_state_core_line_slot = flat_pool_dec_text(r)
+    lexer_state_core_pos_slot = flat_pool_dec_text(r)
     module_decl_slots = flat_pool_dec_i64(r)
     module_decls = flat_pool_dec_i64_into(module_decls, r)
-    module_path_slot = flat_pool_dec_text_into(module_path_slot, r)
+    module_path_slot = flat_pool_dec_text(r)
     r.ok
 
 export flat_decl_pools_dump, flat_decl_pools_restore

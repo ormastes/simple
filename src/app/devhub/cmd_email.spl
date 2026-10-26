@@ -37,6 +37,7 @@ use app.io.process_ops.{process_run_inherit}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{time_now_unix_micros}
+use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_object_keys, json_to_string, json_get_type, json_serialize, json_object, json_string, json_array, json_boolean, json_pretty}
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
 use app.devhub.output.{print_error, print_success, print_warning, wants_json, print_table_dynamic}
 use app.devhub.email_translate.{
@@ -67,12 +68,6 @@ fn _unknown_provider_error(account: EmailAccount) -> i64:
     1
 
 
-fn _is_email_action(action: text) -> bool:
-    action == "auth" or action == "inbox" or action == "read" or action == "send" or
-        action == "reply" or action == "forward" or action == "search" or action == "label" or
-        action == "star" or action == "archive" or action == "draft"
-
-
 fn handle_email(args: [text]) -> i64:
     """Dispatch devhub email subcommands: inbox|read|send|reply|forward|
     search|label|star|archive|draft. Returns the exit code."""
@@ -84,11 +79,6 @@ fn handle_email(args: [text]) -> i64:
     if action == "-h" or action == "--help" or action == "help":
         _print_email_help()
         return 0
-
-    if not _is_email_action(action):
-        print_error("unknown email command: {action}")
-        _print_email_help()
-        return 1
 
     val raw_action_args = if args.len() > 1: args[1:] else: []
     # This boolean must not be consumed as a value-taking flag by positional parsing.
@@ -126,16 +116,7 @@ fn handle_email(args: [text]) -> i64:
         # Account setup reads several fields: inherit the terminal so prompts
         # are visible immediately and input remains interactive.
         return process_run_inherit(_resolve_mail_bin(), email_mail_process_args(login_args))
-    var config = EmailConfig.default()
-    match load_email_config_checked(selected_path):
-        case Ok(loaded):
-            config = loaded
-        case Err(code):
-            if code == "MAIL_CONFIG_MISSING":
-                print_error("no email account configured. Run devhub email auth login --protocol pop3 --account NAME to create ~/.config/devhub/email.sdn.")
-                return 1
-            print_error(code)
-            return 2
+    val config = load_email_config_from(selected_path)
     val requested_account = _extract_flag(action_args, "--account", "")
     val (found, selected_account) = resolve_email_account(config, requested_account)
     if not found:

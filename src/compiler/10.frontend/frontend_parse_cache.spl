@@ -42,31 +42,14 @@ use std.io_runtime.{
 }
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
-use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Entry format version. Bumping this invalidates every stored entry without
 # anyone having to delete a directory: an old entry's first line no longer
 # matches and is a miss.
-# v3 (task 8a): a `C <sha256 of blob>` line follows the header; load verifies
-# it before handing the blob to the pool decoder, so a truncated or bit-flipped
-# entry is a counted miss, never a partial pool restore.
-val FRONTEND_CACHE_ENTRY_VERSION: text = "spl-fecache-v3"
-val FRONTEND_CACHE_CHECKSUM_PREFIX: text = "C "
-
-use compiler.frontend.frontend_cache_root_admission_v1.{frontend_cache_root_admission_v1}
+val FRONTEND_CACHE_ENTRY_VERSION: text = "spl-fecache-v1"
 
 var _fe_cache_scope_memo: text = "@@unset@@"
-var _fe_cache_scope_needs_promotion: bool = false
-extern fn rt_transient_heap_promote<T>(value: T) -> bool
-
-# Called only by a paused parser-scope owner. The immutable memo is walked
-# once after publication, not once for every subsequent module.
-pub fn frontend_parse_cache_promote_transient_owner() -> bool:
-    if not _fe_cache_scope_needs_promotion: return true
-    if not rt_transient_heap_promote(_fe_cache_scope_memo): return false
-    _fe_cache_scope_needs_promotion = false
-    true
 var _fe_cache_hits: i64 = 0
 var _fe_cache_misses: i64 = 0
 # Counts SUCCESSFUL stores. A module must be written exactly once per process:
@@ -88,13 +71,10 @@ pub fn frontend_parse_cache_scope() -> text:
     # doc/08_tracking/bug/frontend_parse_cache_scope_memo_latches_off_2026-08-23.md.
     if published != "":
         _fe_cache_scope_memo = published
-        _fe_cache_scope_needs_promotion = true
     published
 
 pub fn frontend_parse_cache_enabled() -> bool:
-    if frontend_parse_cache_scope() == "": return false
-    frontend_cache_root_admission_v1(
-        env_get_opt("SIMPLE_SHARED_PARSE_CAS_ROOT") ?? "", frontend_parse_cache_dir())
+    frontend_parse_cache_scope() != ""
 
 # One directory per scope, so a cross-scope lookup cannot even NAME an
 # out-of-scope entry -- the same partitioning the object cache uses. The
@@ -107,17 +87,13 @@ pub fn frontend_parse_cache_dir() -> text:
     val lane_name = if lane == "": "default" else: lane
     "build/bootstrap/native_cache/{lane_name}/frontend"
 
-# The key is the module's own content hash (32-hex XXH3-128, the same key
-# frontend.spl derives from un-preprocessed source); the scope rides in the
-# entry header and in the directory, not in the filename, so a scope mismatch
-# is a loud version mismatch rather than a silent miss on a differently-named
-# file. Unreadable or missing source is "" (a miss).
+# The key is the module's own content hash; the scope rides in the entry
+# header and in the directory, not in the filename, so a scope mismatch is a
+# loud version mismatch rather than a silent miss on a differently-named file.
 pub fn frontend_parse_cache_key(file_path: text) -> text:
     if not file_exists(file_path):
         return ""
-    match file_read_result(file_path):
-        case Ok(content): xxh3_128_text(content)
-        case Err(_): ""
+    file_hash_sha256_or_empty(file_path)
 
 fn frontend_parse_cache_path(key: text) -> text:
     frontend_parse_cache_dir() + "/" + key + ".fpc"
@@ -145,27 +121,7 @@ pub fn frontend_parse_cache_load(key: text) -> text:
     val header = raw.substring(0, nl)
     if header != frontend_parse_cache_header():
         return ""
-    frontend_parse_cache_entry_blob(raw.substring(nl + 1, raw.len()))
-
-# Pure: the part of an entry after the header line -> the verified blob, or
-# "" when the checksum line is missing, malformed, or does not match the
-# bytes under it (checksum mismatch counted by the caller as a miss).
-pub fn frontend_parse_cache_entry_blob(after_header: text) -> text:
-    val c_end = after_header.index_of("\n")
-    if c_end < 0:
-        return ""
-    val line = after_header.substring(0, c_end)
-    if not line.starts_with(FRONTEND_CACHE_CHECKSUM_PREFIX) or line.len() != FRONTEND_CACHE_CHECKSUM_PREFIX.len() + 64:
-        return ""
-    val blob = after_header.substring(c_end + 1, after_header.len())
-    if blob == "" or sha256_text(blob) != line.substring(FRONTEND_CACHE_CHECKSUM_PREFIX.len(), line.len()):
-        return ""
-    blob
-
-# Pure: header + checksum line + blob, exactly what frontend_parse_cache_load
-# accepts back.
-pub fn frontend_parse_cache_entry_encode(header: text, blob: text) -> text:
-    header + "\n" + FRONTEND_CACHE_CHECKSUM_PREFIX + sha256_text(blob) + "\n" + blob
+    raw.substring(nl + 1, raw.len())
 
 # Written via a pid-unique temp file then renamed, so a concurrent reader (the
 # shard workers of step 4 run in parallel processes over one cache dir) can
@@ -178,7 +134,7 @@ pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
     val made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
     val tmp = final_path + ".{getpid()}.tmp"
-    if not file_write_exact(tmp, frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob)):
+    if not file_write_exact(tmp, frontend_parse_cache_header() + "\n" + blob):
         frontend_parse_cache_note_store_failure(dir, made)
         return false
     if file_move_cross_device(tmp, final_path):
@@ -207,7 +163,7 @@ pub fn frontend_parse_cache_store_phase3_immutable_v1(key: text, blob: text) -> 
     val dir = frontend_parse_cache_dir()
     val _made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
-    val encoded = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob)
+    val encoded = frontend_parse_cache_header() + "\n" + blob
     if not file_create_excl(final_path, encoded):
         return false
     if file_hash_sha256_or_empty(final_path) != sha256_text(encoded):
@@ -231,18 +187,10 @@ pub fn frontend_parse_cache_stores() -> i64:
 pub fn frontend_parse_cache_misses() -> i64:
     _fe_cache_misses
 
-# Driver-owned M3 admission validates phase-2 frontend artifacts through this
-# canonical header check before parsing their identity/payload frames.
-pub fn frontend_parse_cache_record_header_valid_v2(record: text) -> bool:
-    val nl = record.index_of("\n")
-    nl > 0 and record.substring(0, nl) == frontend_parse_cache_header()
-
-export FRONTEND_CACHE_ENTRY_VERSION, FRONTEND_CACHE_CHECKSUM_PREFIX
-export frontend_parse_cache_entry_blob, frontend_parse_cache_entry_encode
+export FRONTEND_CACHE_ENTRY_VERSION
 export frontend_parse_cache_scope, frontend_parse_cache_enabled
 export frontend_parse_cache_dir, frontend_parse_cache_key
 export frontend_parse_cache_load, frontend_parse_cache_store
 export frontend_parse_cache_store_phase3_immutable_v1
-export frontend_parse_cache_record_header_valid_v2
 export frontend_parse_cache_note_hit, frontend_parse_cache_note_miss
 export frontend_parse_cache_hits, frontend_parse_cache_misses

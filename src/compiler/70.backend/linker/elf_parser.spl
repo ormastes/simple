@@ -13,7 +13,7 @@ use compiler.backend.linker.elf_inspect.{
     ET_NONE, ET_REL, ET_EXEC, ET_DYN,
     EM_X86_64, EM_ARM, EM_AARCH64, EM_RISCV
 }
-use std.common.text_bytes.{bytes_to_text}
+use std.string_core.{char_from_code}
 
 # ============================================================================
 # Additional ELF Constants
@@ -110,8 +110,12 @@ fn elf_parse_string_table(bytes: [u8], section: ElfSectionHeader) -> ElfStringTa
         val empty_data: [u8] = []
         return ElfStringTable(data: empty_data, offset: sh_offset)
 
-    # One native slice: per-byte copying here dominated large links.
-    val data: [u8] = bytes[sh_offset:end]
+    var data: [u8] = []
+    var i: i64 = sh_offset
+    while i < end:
+        data = data.push(bytes[i])
+        i = i + 1
+
     ElfStringTable(data: data, offset: sh_offset)
 
 fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
@@ -122,20 +126,17 @@ fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
     if index < 0 or index >= strtab.data.len():
         return ""
 
-    # Find the NUL with native searches over growing windows, then convert
-    # the name bytes once. Building names one character at a time dominated
-    # links with millions of symbols.
+    var result: text = ""
+    var i: i64 = index
     val len = strtab.data.len()
-    var window: i64 = 64
-    while true:
-        val stop = if index + window < len: index + window else: len
-        val nul = strtab.data[index:stop].index_of(0u8)
-        if nul >= 0:
-            return bytes_to_text(strtab.data[index:index + nul])
-        if stop == len:
-            return bytes_to_text(strtab.data[index:len])
-        window = window * 4
-    ""
+    while i < len:
+        val b = strtab.data[i]
+        if b == 0:
+            return result
+        result = result + char_from_code(b as i64)
+        i = i + 1
+
+    result
 
 # ============================================================================
 # Symbol Helpers
@@ -279,8 +280,8 @@ fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfS
         val base = sec_offset + i * entry_size
 
         val st_name = elf_read_u32_le(bytes, base)
-        val st_info = if entry_size == ELF32_SYM_SIZE: (bytes[base + 12] as i64) else: (bytes[base + 4] as i64)
-        val st_other = if entry_size == ELF32_SYM_SIZE: (bytes[base + 13] as i64) else: (bytes[base + 5] as i64)
+        val st_info = if entry_size == ELF32_SYM_SIZE: bytes[base + 12] as i64 else: bytes[base + 4] as i64
+        val st_other = if entry_size == ELF32_SYM_SIZE: bytes[base + 13] as i64 else: bytes[base + 5] as i64
         val st_shndx = if entry_size == ELF32_SYM_SIZE: elf_read_u16_le(bytes, base + 14) else: elf_read_u16_le(bytes, base + 6)
         val st_value = if entry_size == ELF32_SYM_SIZE: elf_read_u32_le(bytes, base + 4) else: elf_read_u64_le(bytes, base + 8)
         val st_size = if entry_size == ELF32_SYM_SIZE: elf_read_u32_le(bytes, base + 8) else: elf_read_u64_le(bytes, base + 16)
@@ -438,10 +439,8 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
 
     val elf32 = elf_is_32(bytes)
     val shdr_size = if elf32: ELF32_SHDR_SIZE else: ELF64_SHDR_SIZE
-    # Subtractive bounds avoid wrapping an untrusted ELF64 offset on addition.
-    if shoff > bytes.len():
-        return Err("Section header table extends beyond file end")
-    if shnum > (bytes.len() - shoff) / shdr_size:
+    val table_end = shoff + shnum * shdr_size
+    if table_end > bytes.len():
         return Err("Section header table extends beyond file end")
 
     # Collect full section metadata (including sh_offset) directly from raw bytes
@@ -457,15 +456,6 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
         val sh_off = if elf32: elf_read_u32_le(bytes, base + 16) else: elf_read_u64_le(bytes, base + 24)
         val sh_size = if elf32: elf_read_u32_le(bytes, base + 20) else: elf_read_u64_le(bytes, base + 32)
         val sh_info = if elf32: elf_read_u32_le(bytes, base + 28) else: elf_read_u32_le(bytes, base + 44)
-
-        if sh_size < 0:
-            return Err("section {i}: invalid section size")
-        # NOBITS describes memory without file contents; NULL has no payload.
-        if sh_type != SHT_NOBITS and sh_type != SHT_NULL:
-            if sh_off < 0 or sh_off > bytes.len():
-                return Err("section {i}: section data extends beyond file end")
-            if sh_size > bytes.len() - sh_off:
-                return Err("section {i}: section data extends beyond file end")
 
         # We store sh_off in the sh_addr field since ElfSectionHeader has no sh_offset field.
         # All callers in elf_parser use sh_addr as the file offset for data sections.

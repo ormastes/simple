@@ -1,0 +1,136 @@
+# @cover src/compiler/00.common/transition/coverage_state.spl 80%
+"""
+# CoverageState — the four checked-in transition states
+
+**Category:** Compiler / completeness proofs
+**Plan:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md section 11.3
+
+## Purpose
+
+A stage boundary declares a TOTAL relation over its producer's variants. Every
+declared row carries exactly one of four states: `Implemented`, `Normalized`,
+`Unsupported`, `NotApplicable`.
+
+The load-bearing property is a NEGATIVE one: there is no `Missing` variant. A
+boundary must not be able to write its own hole down and stay green — `Missing`
+exists only as the set-subtraction result in the validator, and it fails the
+build. This spec pins that the constructor refuses any tag it does not know,
+including the literal string `missing`.
+
+## Scope
+
+Construction from SDN field text, the handled/not-handled split, and the
+required-field rules: `normalized` without a target, `unsupported` without a
+reason, and `not_applicable` without a reason are all errors, not
+silently-accepted empty strings. `issue` is the one optional field — plan 11.3
+types it `text?` — so a boundary whose holes share one header-level tracking
+record is not forced to repeat it on every row.
+
+Both spellings that appear in checked-in tables are accepted: the plain tag
+with sibling fields, and the constructor form `Normalized(target)` that mirrors
+the enum declaration. A tag the loader does not recognise is always an error,
+never a silently-dropped row.
+"""
+
+use std.spec
+use compiler.common.transition.coverage_state.{
+    CoverageState, coverage_state_tag, coverage_state_is_handled,
+    coverage_state_describe, coverage_state_from_fields, split_state_payload
+}
+
+fn tag_of(t: text, to_target: text, reason: text, issue: text) -> text:
+    match coverage_state_from_fields(t, to_target, reason, issue):
+        case Ok(state): coverage_state_tag(state)
+        case Err(_): "<error>"
+
+fn state_of(t: text, to_target: text, reason: text, issue: text) -> CoverageState:
+    match coverage_state_from_fields(t, to_target, reason, issue):
+        case Ok(state): state
+        case Err(msg):
+            fail("expected a state, got: {msg}")
+            CoverageState.Implemented
+
+fn error_of(t: text, to_target: text, reason: text, issue: text) -> text:
+    match coverage_state_from_fields(t, to_target, reason, issue):
+        case Ok(_): "<accepted>"
+        case Err(msg): msg
+
+describe "CoverageState":
+    it "round-trips each of the four states through its SDN tag":
+        step("Build every state from well-formed fields")
+        expect(tag_of("implemented", "", "", "")).to_equal("implemented")
+        expect(tag_of("normalized", "MirTypeKind.I64", "", "")).to_equal("normalized")
+        expect(tag_of("unsupported", "", "no arm", "doc/x.md")).to_equal("unsupported")
+        expect(tag_of("not_applicable", "", "cannot occur", "")).to_equal("not_applicable")
+
+    it "has no Missing state — the tag is rejected like any other unknown":
+        step("Try to declare a hole directly")
+        expect(tag_of("missing", "", "", "")).to_equal("<error>")
+        step("The rejection names the four legal tags")
+        expect(error_of("missing", "", "", "").contains("not_applicable")).to_equal(true)
+        step("An arbitrary unknown tag is rejected the same way")
+        expect(tag_of("probably_fine", "", "", "")).to_equal("<error>")
+
+    it "splits states into handled and unhandled":
+        step("Implemented and Normalized mean the consumer really runs code")
+        expect(coverage_state_is_handled(CoverageState.Implemented)).to_equal(true)
+        expect(coverage_state_is_handled(CoverageState.Normalized(target: "X"))).to_equal(true)
+        step("Unsupported and NotApplicable are declared, covered, and NOT handled")
+        expect(coverage_state_is_handled(
+            CoverageState.Unsupported(reason: "r", issue: "i"))).to_equal(false)
+        expect(coverage_state_is_handled(
+            CoverageState.NotApplicable(reason: "r"))).to_equal(false)
+
+    it "rejects a normalized row with no target":
+        step("A normalization that does not say what it normalizes TO is unverifiable")
+        expect(tag_of("normalized", "", "", "")).to_equal("<error>")
+        expect(error_of("normalized", "", "", "").contains("to:")).to_equal(true)
+
+    it "rejects an unsupported row with no reason":
+        step("A hole that does not say what happens today is unauditable")
+        expect(tag_of("unsupported", "", "", "doc/x.md")).to_equal("<error>")
+        expect(error_of("unsupported", "", "", "doc/x.md").contains("reason")).to_equal(true)
+        step("The issue is optional — plan 11.3 types it `text?` — so a boundary covered by one header-level record still parses")
+        expect(tag_of("unsupported", "", "no arm", "")).to_equal("unsupported")
+
+    it "accepts the constructor spelling that mirrors the enum declaration":
+        step("Plan 11.3 writes states as `Normalized(target)` / `Unsupported(reason, issue)`; lane C2's censuses emit exactly that")
+        expect(split_state_payload("Normalized(ExprKind.Call)").0).to_equal("Normalized")
+        expect(split_state_payload("Normalized(ExprKind.Call)").1).to_equal("ExprKind.Call")
+        expect(split_state_payload("implemented").1).to_equal("")
+        step("The inline payload fills the fields a plain tag would take from siblings")
+        expect(coverage_state_describe(
+            state_of("Normalized(ExprKind.Call)", "", "", ""))).to_equal("normalized -> ExprKind.Call")
+        expect(coverage_state_describe(
+            state_of("Unsupported(no arm, doc/x.md)", "", "", ""))).to_equal(
+            "unsupported (no arm) [doc/x.md]")
+        expect(coverage_state_describe(
+            state_of("NotApplicable(never allocated)", "", "", ""))).to_equal(
+            "not_applicable (never allocated)")
+        step("An explicit sibling field WINS over the inline payload")
+        expect(coverage_state_describe(
+            state_of("Normalized(stale)", "ExprKind.Real", "", ""))).to_equal(
+            "normalized -> ExprKind.Real")
+
+    it "accepts the capitalized tags generated tables use":
+        step("Several lanes emit `Implemented` / `NotApplicable`; they are the same states")
+        expect(tag_of("Implemented", "", "", "")).to_equal("implemented")
+        expect(tag_of("NotApplicable", "", "cannot occur", "")).to_equal("not_applicable")
+        expect(tag_of("Normalized", "X", "", "")).to_equal("normalized")
+
+    it "rejects a not_applicable row with no reason":
+        step("Claiming a variant cannot occur requires saying why")
+        expect(tag_of("not_applicable", "", "", "")).to_equal("<error>")
+
+    it "describes a state with its payload, so a report can name the hole":
+        step("Rendering carries the target, reason and issue through")
+        expect(coverage_state_describe(
+            CoverageState.Normalized(target: "MirTypeKind.I64"))).to_equal(
+            "normalized -> MirTypeKind.I64")
+        expect(coverage_state_describe(
+            CoverageState.Unsupported(reason: "no arm", issue: "doc/x.md"))).to_equal(
+            "unsupported (no arm) [doc/x.md]")
+        expect(coverage_state_describe(
+            CoverageState.NotApplicable(reason: "downstream only"))).to_equal(
+            "not_applicable (downstream only)")
+        expect(coverage_state_describe(CoverageState.Implemented)).to_equal("implemented")

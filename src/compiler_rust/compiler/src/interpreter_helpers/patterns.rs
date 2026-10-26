@@ -427,11 +427,6 @@ pub(crate) fn try_field_array_mutation_in_place(
 enum PlaceMutation {
     /// `[T]` leaf reached by an `ARRAY_MUTATING_METHODS` method.
     Array,
-    /// `[T]` leaf reached by `write_span(src, dst_off, src_off, count)`, the
-    /// four-operand bulk span copy whose expression result is the COUNT.
-    WriteSpan,
-    /// Packed `[u8]` leaf reached by `push`/`append` (`self.buf.push(b)`).
-    BytePush,
     /// `{K: V}` leaf reached by a `DICT_MUTATING_METHODS` method.
     Dict,
     /// Object leaf whose class (carried here) defines the method, together
@@ -519,9 +514,9 @@ pub(crate) fn try_place_mutation_in_place(
     // a copy-on-write isolation on the way in.
     let kind = match place::place_slot_ref(env, &target) {
         // `write_span` takes four operands and has its own path.
-        Some(Value::Array(_) | Value::ByteArray(_)) if method == "write_span" => PlaceMutation::WriteSpan,
-        Some(Value::Array(_)) if ARRAY_MUTATING_METHODS.contains(&method) => PlaceMutation::Array,
-        Some(Value::ByteArray(_)) if matches!(method, "push" | "append") => PlaceMutation::BytePush,
+        Some(Value::Array(_)) if method != "write_span" && ARRAY_MUTATING_METHODS.contains(&method) => {
+            PlaceMutation::Array
+        }
         Some(Value::Dict(_)) if DICT_MUTATING_METHODS.contains(&method) => PlaceMutation::Dict,
         // The class name IS needed past the borrow here — the slot is re-read
         // after argument evaluation and must still hold an object of the same
@@ -555,101 +550,6 @@ pub(crate) fn try_place_mutation_in_place(
             // ELEMENT.
             let new_array_val = Value::Array(Arc::clone(arc));
             popped.unwrap_or(new_array_val)
-        }
-        PlaceMutation::WriteSpan => {
-            // Operands are evaluated once, in order, before the leaf is re-read
-            // -- the same discipline as the local-identifier `write_span` path
-            // (`handle_method_call_with_self_update`). The functional fallback
-            // this replaces deep-copied the WHOLE destination twice per call
-            // (`arr.to_vec()` in the collections arm, then `arr.clone()` in the
-            // self-update tail): 2 x 506 MB per scanline for a 3840x2160
-            // framebuffer. `Arc::make_mut` mutates in place when the leaf is
-            // uniquely owned and clones otherwise -- including a same-array
-            // `xs.write_span(xs, ...)`, whose src operand holds a second strong
-            // ref -- so the memmove-style overlap semantics are unchanged.
-            // `array_write_span` validates every operand before it writes, so a
-            // rejected call leaves the destination's contents untouched.
-            let src = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let mut ints = [-1i64, -1, 0];
-            for (slot, (arg_i, dflt)) in ints.iter_mut().zip([(1usize, -1i64), (2, -1), (3, 0)]) {
-                *slot = match args.get(arg_i) {
-                    Some(a) => evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?
-                        .as_int()
-                        .unwrap_or(dflt),
-                    None => dflt,
-                };
-            }
-            match place::place_slot_mut(env, &target) {
-                Some(Value::Array(arc)) => {
-                    note_place_mutation(arc.len(), Arc::strong_count(arc));
-                    let written = super::super::interpreter_method::collections::array_write_span(
-                        Arc::make_mut(arc),
-                        &src,
-                        ints[0],
-                        ints[1],
-                        ints[2],
-                    )?;
-                    Value::Int(written)
-                }
-                // Packed `[u8]` leaf (`self.scratch.write_span(...)`): written in
-                // place, or widened to boxed values when the source span holds a
-                // non-`u8` element -- the same elements a boxed leaf would hold.
-                Some(slot @ Value::ByteArray(_)) => {
-                    let Value::ByteArray(arc) = slot else { unreachable!("matched ByteArray") };
-                    note_place_mutation(arc.len(), Arc::strong_count(arc));
-                    let written = super::super::interpreter_method::collections::byte_array_write_span(
-                        Arc::make_mut(arc),
-                        &src,
-                        ints[0],
-                        ints[1],
-                        ints[2],
-                    )?;
-                    match written {
-                        super::super::interpreter_method::collections::ByteSpanWrite::InPlace(count) => Value::Int(count),
-                        super::super::interpreter_method::collections::ByteSpanWrite::Widened(values, count) => {
-                            *slot = Value::array(values);
-                            Value::Int(count)
-                        }
-                    }
-                }
-                _ => return Ok(None),
-            }
-        }
-        PlaceMutation::BytePush => {
-            // `[u8]`-typed bindings are packed, so a builder stored in a field
-            // reaches this leaf. Without this arm every push widened the whole
-            // buffer to boxed values and repacked it: O(n) per push. Push in
-            // place (copy-on-write when shared); a value that is not a byte
-            // widens the leaf exactly as the functional path would.
-            let item = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let Some(slot @ Value::ByteArray(_)) = place::place_slot_mut(env, &target) else {
-                return Ok(None);
-            };
-            let byte = match &item {
-                Value::UInt { value, .. } => u8::try_from(*value).ok(),
-                Value::Int(value) => u8::try_from(*value).ok(),
-                _ => None,
-            };
-            let Value::ByteArray(arc) = slot else { unreachable!("matched ByteArray") };
-            note_place_mutation(arc.len(), Arc::strong_count(arc));
-            match byte {
-                Some(byte) => {
-                    Arc::make_mut(arc).push(byte);
-                    Value::ByteArray(Arc::clone(arc))
-                }
-                None => {
-                    let mut values: Vec<Value> = arc
-                        .iter()
-                        .map(|b| Value::UInt {
-                            value: u64::from(*b),
-                            width: 8,
-                        })
-                        .collect();
-                    values.push(item);
-                    *slot = Value::array(values);
-                    slot.clone()
-                }
-            }
         }
         PlaceMutation::Dict => {
             // Every operand is evaluated AND validated before the leaf is re-read,
@@ -709,7 +609,7 @@ pub(crate) fn try_place_mutation_in_place(
                         impl_methods,
                     )?;
                     match arg0 {
-                        Value::Dict(map) => (None, None, Some(crate::interpreter::module_dict_flat(&map).unwrap_or(map))),
+                        Value::Dict(map) => (None, None, Some(map)),
                         _ => {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::TYPE_MISMATCH)
@@ -824,14 +724,6 @@ pub(crate) fn handle_method_call_with_self_update(
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
     let out = handle_method_call_with_self_update_inner(value_expr, env, functions, classes, enums, impl_methods)?;
-    // A bare `expect <subject>` statement (no matcher chained, so it is a plain
-    // Call, not a MethodCall): outside any `it` there is no example end to judge
-    // its provisional failure, so a falsy subject is fatal here.
-    if let Expr::Call { callee, .. } = value_expr {
-        if matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect") {
-            crate::interpreter::interpreter_call::finish_bare_expect_statement()?;
-        }
-    }
     // A mutating method call on a MODULE-GLOBAL receiver (`g.push(x)`) only ever
     // produced a `(name, new_value)` update for the caller to write into `env`.
     // But identifier READS of a non-local name prefer MODULE_GLOBALS over `env`
@@ -873,7 +765,7 @@ pub(crate) fn handle_method_call_with_self_update(
 /// name. Both stores are kept in step so a later rebuild cannot resurrect the
 /// pre-write value. When the executing module is unknown there is no owner to
 /// key a patch on, so that path keeps the blunt invalidation.
-pub(crate) fn sync_flat_global(name: &str, value: &Value) {
+fn sync_flat_global(name: &str, value: &Value) {
     let present = crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
     if !present {
         return;
@@ -1313,7 +1205,7 @@ fn handle_method_call_with_self_update_inner(
                     let len = arr.len() as i64;
                     let real_idx = if idx < 0 { len + idx } else { idx };
                     if real_idx >= 0 && real_idx < len {
-                        let elem = arr.get_value(real_idx as usize).expect("index checked against len");
+                        let elem = arr[real_idx as usize].clone();
                         match elem {
                             Value::Object {
                                 class: obj_class,
@@ -1333,7 +1225,7 @@ fn handle_method_call_with_self_update_inner(
                                     // Write updated element back into the array.
                                     let mut new_arr = (*arr).clone();
                                     new_arr[real_idx as usize] = updated_elem;
-                                    let new_arr_val = Value::array(new_arr);
+                                    let new_arr_val = Value::Array(Arc::new(new_arr));
                                     // Update local env.
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     // Sync to MODULE_GLOBALS if this variable lives there.
@@ -1365,7 +1257,7 @@ fn handle_method_call_with_self_update_inner(
                                 if let Some((_, updated_elem)) = updated_elem_opt {
                                     let mut new_arr = (*arr).clone();
                                     new_arr[real_idx as usize] = updated_elem;
-                                    let new_arr_val = Value::array(new_arr);
+                                    let new_arr_val = Value::Array(Arc::new(new_arr));
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     sync_flat_global(arr_name.as_ref(), &new_arr_val);
                                     return Ok((result, Some((arr_name.clone(), new_arr_val))));
@@ -1814,42 +1706,6 @@ fn handle_method_call_with_self_update_inner(
                         ));
                     }
 
-                    // `write_span` on a packed binding: same operand order and
-                    // ownership-gated `Arc::make_mut` discipline as the boxed
-                    // identifier path above. It used to fall through to the
-                    // generic arms below, which do not know `write_span`, so the
-                    // call returned the unchanged array and wrote nothing.
-                    if method.as_str() == "write_span" {
-                        let src = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-                        let mut ints = [-1i64, -1, 0];
-                        for (slot, (arg_i, dflt)) in ints.iter_mut().zip([(1usize, -1i64), (2, -1), (3, 0)]) {
-                            *slot = match args.get(arg_i) {
-                                Some(a) => evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?
-                                    .as_int()
-                                    .unwrap_or(dflt),
-                                None => dflt,
-                            };
-                        }
-                        if let Some(Value::ByteArray(arc)) = env.get_mut(obj_name) {
-                            let written = super::super::interpreter_method::collections::byte_array_write_span(
-                                Arc::make_mut(arc),
-                                &src,
-                                ints[0],
-                                ints[1],
-                                ints[2],
-                            )?;
-                            let (new_value, count) = match written {
-                                super::super::interpreter_method::collections::ByteSpanWrite::InPlace(count) => {
-                                    (Value::ByteArray(Arc::clone(arc)), count)
-                                }
-                                super::super::interpreter_method::collections::ByteSpanWrite::Widened(values, count) => {
-                                    (Value::array(values), count)
-                                }
-                            };
-                            return Ok((Value::Int(count), Some((obj_name.clone(), new_value))));
-                        }
-                    }
-
                     let m = method.as_str();
                     let item = match m {
                         "push" | "append" => Some(eval_arg(
@@ -2172,7 +2028,7 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
 fn for_loop_tuple_elements(value: Value, arity: usize) -> Vec<Value> {
     let mut values: Vec<Value> = match value {
         Value::Tuple(vals) => vals,
-        Value::Array(vals) | Value::FrozenArray(vals) => vals.to_vec(),
+        Value::Array(vals) | Value::FrozenArray(vals) => (*vals).clone(),
         _ => Vec::new(),
     };
     values.truncate(arity);
@@ -2221,14 +2077,14 @@ pub(crate) fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, en
             // Allow tuple pattern to match both Tuple and Array
             let values: Vec<Value> = match val {
                 Value::Tuple(v) => v,
-                Value::Array(v) => v.to_vec(),
+                Value::Array(v) => (*v).clone(),
                 _ => Vec::new(),
             };
             bind_collection_pattern(patterns, values, is_mutable, env);
         }
         Pattern::Array(patterns) => {
             if let Value::Array(values) = val {
-                bind_collection_pattern(patterns, values.to_vec(), is_mutable, env);
+                bind_collection_pattern(patterns, (*values).clone(), is_mutable, env);
             }
         }
         _ => bind_let_pattern_element(pat, val, is_mutable, env),
@@ -2399,218 +2255,6 @@ mod cow_alias_mechanism_tests {
             arr_ptr(env.get("b").expect("b")),
             "the aliased array must have been isolated by copy-on-write"
         );
-    }
-
-    fn box_with_xs(xs: Vec<Value>) -> Value {
-        let mut fields: HashMap<String, Value> = HashMap::new();
-        fields.insert("xs".to_string(), Value::array(xs));
-        Value::Object {
-            class: "Box".to_string(),
-            fields: Arc::new(fields),
-        }
-    }
-
-    fn write_span_call(receiver: Expr, src: &str, dst_off: i64, src_off: i64, count: i64) -> Expr {
-        Expr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "write_span".to_string(),
-            args: vec![
-                arg(ident(src)),
-                arg(Expr::Integer(dst_off)),
-                arg(Expr::Integer(src_off)),
-                arg(Expr::Integer(count)),
-            ],
-            generic_args: vec![],
-        }
-    }
-
-    fn ints(v: &Value) -> Vec<i64> {
-        match v {
-            Value::Array(a) => a.iter().map(|x| x.as_int().expect("int element")).collect(),
-            other => panic!("expected array, got {:?}", other),
-        }
-    }
-
-    fn o_xs() -> Expr {
-        Expr::FieldAccess {
-            receiver: Box::new(ident("o")),
-            field: "xs".to_string(),
-        }
-    }
-
-    #[test]
-    fn field_array_write_span_mutates_the_single_owner_in_place() {
-        // `self.buf.write_span(row, off, 0, n)` is the software framebuffer's
-        // span fill. Pre-fix it deep-copied the whole destination TWICE per
-        // call (506 MB each at 3840x2160).
-        let mut env = Env::new();
-        env.insert("o".to_string(), box_with_xs((0..8).map(|_| Value::Int(0)).collect()));
-        env.insert("row".to_string(), Value::array(vec![Value::Int(7); 3]));
-        let before = arr_ptr(field_of(&env, "o", "xs"));
-        let (result, update) = run(&write_span_call(o_xs(), "row", 2, 0, 3), &mut env);
-        if let Some((name, val)) = update {
-            env.insert(name, val);
-        }
-        assert_eq!(result.as_int().expect("count"), 3, "write_span yields the count written");
-        assert_eq!(ints(field_of(&env, "o", "xs")), vec![0, 0, 7, 7, 7, 0, 0, 0]);
-        assert_eq!(
-            arr_ptr(field_of(&env, "o", "xs")),
-            before,
-            "a uniquely-owned field array must be written in place, not copied"
-        );
-    }
-
-    #[test]
-    fn aliased_field_array_write_span_still_copies_on_write() {
-        let mut env = Env::new();
-        env.insert("o".to_string(), box_with_xs((0..5).map(Value::Int).collect()));
-        let alias = field_of(&env, "o", "xs").clone();
-        env.insert("alias".to_string(), alias);
-        env.insert("row".to_string(), Value::array(vec![Value::Int(9); 2]));
-        let (_, update) = run(&write_span_call(o_xs(), "row", 0, 0, 2), &mut env);
-        if let Some((name, val)) = update {
-            env.insert(name, val);
-        }
-        assert_eq!(ints(field_of(&env, "o", "xs")), vec![9, 9, 2, 3, 4]);
-        assert_eq!(ints(env.get("alias").expect("alias")), vec![0, 1, 2, 3, 4], "the alias must be unchanged");
-    }
-
-    #[test]
-    fn field_array_write_span_out_of_range_is_an_error_and_leaves_contents() {
-        let mut env = Env::new();
-        env.insert("o".to_string(), box_with_xs((0..3).map(Value::Int).collect()));
-        env.insert("row".to_string(), Value::array(vec![Value::Int(9); 5]));
-        let err = handle_method_call_with_self_update(
-            &write_span_call(o_xs(), "row", 2, 0, 5),
-            &mut env,
-            &mut HashMap::new(),
-            &mut HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .expect_err("out-of-range write_span must fail");
-        assert!(err.to_string().contains("write_span out of range"), "got: {err}");
-        assert_eq!(ints(field_of(&env, "o", "xs")), vec![0, 1, 2]);
-    }
-
-    fn packed(v: &Value) -> Vec<u8> {
-        match v {
-            Value::ByteArray(b) => b.as_ref().clone(),
-            other => panic!("expected packed bytes, got {:?}", other),
-        }
-    }
-
-    fn packed_ptr(v: &Value) -> usize {
-        match v {
-            Value::ByteArray(b) => b.as_ptr() as usize,
-            other => panic!("expected packed bytes, got {:?}", other),
-        }
-    }
-
-    fn box_with_bytes(bytes: Vec<u8>) -> Value {
-        let mut fields: HashMap<String, Value> = HashMap::new();
-        fields.insert("xs".to_string(), Value::byte_array(bytes));
-        Value::Object {
-            class: "Box".to_string(),
-            fields: Arc::new(fields),
-        }
-    }
-
-    fn u8v(b: u8) -> Value {
-        Value::UInt {
-            value: u64::from(b),
-            width: 8,
-        }
-    }
-
-    fn run_update(call: &Expr, env: &mut Env) -> Value {
-        let (result, update) = run(call, env);
-        if let Some((name, val)) = update {
-            env.insert(name, val);
-        }
-        result
-    }
-
-    #[test]
-    fn packed_field_write_span_writes_in_place() {
-        let mut env = Env::new();
-        env.insert("o".to_string(), box_with_bytes(vec![0; 6]));
-        env.insert("row".to_string(), Value::byte_array(vec![7, 8]));
-        let before = packed_ptr(field_of(&env, "o", "xs"));
-        let result = run_update(&write_span_call(o_xs(), "row", 3, 0, 2), &mut env);
-        assert_eq!(result.as_int().expect("count"), 2);
-        assert_eq!(packed(field_of(&env, "o", "xs")), vec![0, 0, 0, 7, 8, 0]);
-        assert_eq!(packed_ptr(field_of(&env, "o", "xs")), before, "a uniquely-owned packed field is written in place");
-    }
-
-    #[test]
-    fn packed_local_write_span_writes_and_returns_the_count() {
-        let mut env = Env::new();
-        env.insert("dst".to_string(), Value::byte_array(vec![1; 4]));
-        env.insert("row".to_string(), Value::array(vec![u8v(5), u8v(6)]));
-        let result = run_update(&write_span_call(ident("dst"), "row", 0, 0, 2), &mut env);
-        assert_eq!(result.as_int().expect("count"), 2);
-        assert_eq!(packed(env.get("dst").expect("dst")), vec![5, 6, 1, 1]);
-    }
-
-    #[test]
-    fn aliased_packed_field_write_span_copies_on_write() {
-        let mut env = Env::new();
-        env.insert("o".to_string(), box_with_bytes(vec![0, 1, 2]));
-        let alias = field_of(&env, "o", "xs").clone();
-        env.insert("alias".to_string(), alias);
-        env.insert("row".to_string(), Value::byte_array(vec![9]));
-        run_update(&write_span_call(o_xs(), "row", 0, 0, 1), &mut env);
-        assert_eq!(packed(field_of(&env, "o", "xs")), vec![9, 1, 2]);
-        assert_eq!(packed(env.get("alias").expect("alias")), vec![0, 1, 2], "the alias must be unchanged");
-    }
-
-    #[test]
-    fn packed_write_span_with_a_non_u8_source_element_widens_like_a_boxed_destination() {
-        let mut env = Env::new();
-        env.insert("o".to_string(), box_with_bytes(vec![0, 0, 0]));
-        env.insert("row".to_string(), Value::array(vec![Value::Int(300), u8v(7)]));
-        run_update(&write_span_call(o_xs(), "row", 1, 0, 2), &mut env);
-        // Exactly the elements a boxed [u8] destination would now hold.
-        let expected = vec![u8v(0), Value::Int(300), u8v(7)];
-        match field_of(&env, "o", "xs") {
-            Value::Array(values) => assert_eq!(values.as_slice(), expected.as_slice()),
-            other => panic!("expected widened boxed array, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn packed_field_write_span_out_of_range_is_an_error_and_leaves_contents() {
-        let mut env = Env::new();
-        env.insert("o".to_string(), box_with_bytes(vec![0, 1, 2]));
-        env.insert("row".to_string(), Value::byte_array(vec![9; 5]));
-        let err = handle_method_call_with_self_update(
-            &write_span_call(o_xs(), "row", 2, 0, 5),
-            &mut env,
-            &mut HashMap::new(),
-            &mut HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .expect_err("out-of-range write_span must fail");
-        assert!(
-            err.to_string()
-                .contains("write_span out of range: dst_off=2 src_off=0 count=5 dst_len=3 src_len=5"),
-            "got: {err}"
-        );
-        assert_eq!(packed(field_of(&env, "o", "xs")), vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn boxed_destination_accepts_a_packed_source() {
-        let mut env = Env::new();
-        env.insert("o".to_string(), box_with_xs((0..3).map(Value::Int).collect()));
-        env.insert("row".to_string(), Value::byte_array(vec![4, 5]));
-        run_update(&write_span_call(o_xs(), "row", 1, 0, 2), &mut env);
-        match field_of(&env, "o", "xs") {
-            Value::Array(values) => assert_eq!(values.as_slice(), &[Value::Int(0), u8v(4), u8v(5)]),
-            other => panic!("expected boxed array, got {:?}", other),
-        }
     }
 
     fn dict_len(v: &Value) -> usize {

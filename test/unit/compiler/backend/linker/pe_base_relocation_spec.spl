@@ -1,0 +1,26 @@
+use std.spec.*
+use compiler.backend.linker.coff.pe_base_relocation.{pe_build_amd64_base_relocations}
+
+fn _pbr_u16(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+
+fn _pbr_u32(bytes: [u8], offset: i64) -> i64:
+    _pbr_u16(bytes, offset) | (_pbr_u16(bytes, offset + 2) << 16)
+
+describe "PE32+ base-relocation builder":
+    it "sorts, deduplicates, groups by page, and pads blocks to four bytes":
+        val built = pe_build_amd64_base_relocations([
+            0x2345, 0x1010, 0x1010, 0x1020]).unwrap()
+        expect(built.len()).to_equal(24)
+        expect(_pbr_u32(built, 0)).to_equal(0x1000)
+        expect(_pbr_u32(built, 4)).to_equal(12)
+        expect(_pbr_u16(built, 8)).to_equal(0xa010)
+        expect(_pbr_u16(built, 10)).to_equal(0xa020)
+        expect(_pbr_u32(built, 12)).to_equal(0x2000)
+        expect(_pbr_u32(built, 16)).to_equal(12)
+        expect(_pbr_u16(built, 20)).to_equal(0xa345)
+        expect(_pbr_u16(built, 22)).to_equal(0)
+
+    it "rejects RVAs outside the PE32+ range":
+        expect(pe_build_amd64_base_relocations([-1]).is_err()).to_equal(true)
+        expect(pe_build_amd64_base_relocations([4294967296]).is_err()).to_equal(true)

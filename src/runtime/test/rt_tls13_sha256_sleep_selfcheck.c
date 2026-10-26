@@ -36,74 +36,6 @@ static void check_digest(const uint8_t* input, size_t input_len,
     }
 }
 
-/* SHA-384/512 (rt_sha384_digest / rt_sha512_digest) against FIPS 180-4
- * vectors. The 896-bit message is exactly 112 bytes, which takes the
- * two-block final padding path; one million 'a' (1000000 % 128 == 64) takes
- * the one-block path after 7812 full blocks. */
-static int hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    return c - 'a' + 10;
-}
-
-static void check_sha2_512_family(int64_t (*digest_fn)(int64_t),
-                                  const uint8_t* input, size_t input_len,
-                                  const char* expected_hex) {
-    size_t out_len = strlen(expected_hex) / 2u;
-    SplArray* bytes = rt_byte_array_new_len((uint64_t)input_len);
-    for (size_t i = 0; i < input_len; i++) {
-        if (!rt_bytes_u8_set(bytes, (int64_t)i, (int64_t)input[i])) {
-            failures++;
-            return;
-        }
-    }
-    SplArray* digest = (SplArray*)(uintptr_t)digest_fn((int64_t)(uintptr_t)bytes);
-    if (rt_array_len(digest) != (int64_t)out_len) {
-        failures++;
-        return;
-    }
-    for (size_t i = 0; i < out_len; i++) {
-        int64_t expected = (int64_t)((hex_nibble(expected_hex[2u * i]) << 4) |
-                                     hex_nibble(expected_hex[2u * i + 1u]));
-        if (rt_bytes_u8_at(digest, (int64_t)i) != expected) {
-            failures++;
-            return;
-        }
-    }
-}
-
-static void check_sha2_512_family_vectors(void) {
-    static const char msg896[] =
-        "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
-        "ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
-    static uint8_t million_a[1000000];
-    memset(million_a, 'a', sizeof(million_a));
-
-    check_sha2_512_family(rt_sha512_digest, NULL, 0,
-        "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
-        "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e");
-    check_sha2_512_family(rt_sha512_digest, (const uint8_t*)"abc", 3,
-        "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
-        "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
-    check_sha2_512_family(rt_sha512_digest, (const uint8_t*)msg896, 112,
-        "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018"
-        "501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909");
-    check_sha2_512_family(rt_sha512_digest, million_a, sizeof(million_a),
-        "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973eb"
-        "de0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b");
-    check_sha2_512_family(rt_sha384_digest, NULL, 0,
-        "38b060a751ac96384cd9327eb1b1e36a21fdb71114be0743"
-        "4c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b");
-    check_sha2_512_family(rt_sha384_digest, (const uint8_t*)"abc", 3,
-        "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded163"
-        "1a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7");
-    check_sha2_512_family(rt_sha384_digest, (const uint8_t*)msg896, 112,
-        "09330c33f71147e83d192fc782cd1b4753111b173b3b05d2"
-        "2fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039");
-    check_sha2_512_family(rt_sha384_digest, million_a, sizeof(million_a),
-        "9d0e1809716474cb086e834e310a4a1ced149e9c00f24852"
-        "7972cec5704c2a5b07b8b3dc38ecc4ebae97ddd87f3d8985");
-}
-
 int main(void) {
     static const uint8_t empty_digest[32] = {
         0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
@@ -121,7 +53,6 @@ int main(void) {
 
     check_digest(NULL, 0, empty_digest);
     check_digest(abc, sizeof(abc), abc_digest);
-    check_sha2_512_family_vectors();
 
 #if defined(_WIN32)
     /* Windows has no clock_gettime/CLOCK_MONOTONIC; QueryPerformanceCounter is

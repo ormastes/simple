@@ -3,7 +3,6 @@ use std.spec.step
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
-use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 
 fn lower_source_function(src: text, target_name: text) -> text:
@@ -84,38 +83,3 @@ describe "MIR block terminator lowering", tag: ["only-compiled"]:
         expect(mir.contains("Map.values")).to_equal(false)
         expect(mir.contains("Dict.values")).to_equal(false)
         expect(mir.contains("MethodCallStatic")).to_equal(false)
-
-    it "preserves initialized return operands before an unreachable conditional":
-        val prefix = "fn check(flag: bool) -> i64:\n    val answer = 37\n    return answer\n"
-        val expected = lower_source_function(prefix, "check")
-        val actual = lower_source_function("{prefix}    if flag:\n        return 99\n    101\n", "check")
-
-        expect(expected).to_contain("\"terminator\":{\"Return\"")
-        expect(actual).to_equal(expected)
-
-    it "retains a struct initializer call and excludes the entire dead suffix":
-        val declarations = "struct PreservedValue:\n    number: i64\n\nfn make_value() -> PreservedValue:\n    PreservedValue(number: 37)\n\n"
-        val prefix = "{declarations}fn check(flag: bool) -> PreservedValue:\n    val result = make_value()\n    return result\n"
-        val expected = lower_source_function(prefix, "check")
-        val actual = lower_source_function("{prefix}    if flag:\n        return result\n    make_value()\n", "check")
-
-        expect(expected).to_contain("make_value")
-        expect(expected).to_contain("\"terminator\":{\"Return\"")
-        expect(actual).to_equal(expected)
-
-    it "preserves the reachable sibling path after a conditional return":
-        val prefix = "fn check(flag: bool) -> i64:\n    if flag:\n        return 11\n    val answer = 23\n    return answer\n"
-        val expected = lower_source_function(prefix, "check")
-        val actual = lower_source_function("{prefix}    if flag:\n        return 99\n    101\n", "check")
-
-        expect(expected).to_contain("\"terminator\":{\"If\"")
-        expect(expected.split("\"terminator\":{\"Return\"").len()).to_equal(3)
-        expect(actual).to_equal(expected)
-
-    it "does not lower an unreachable tail after a void return":
-        val prefix = "fn check():\n    return\n"
-        val expected = lower_source_function(prefix, "check")
-        val actual = lower_source_function("{prefix}    101\n", "check")
-
-        expect(expected).to_contain("\"terminator\":{\"Return\":null}")
-        expect(actual).to_equal(expected)

@@ -128,56 +128,6 @@ fn _append_bytes_v1(buffer: [u8], values: [u8]) -> [u8]:
         i = i + 1
     out
 
-# Array range indexing has no native lowering yet. Keep the checked half-open
-# interval semantics with an explicit value copy after the caller's bounds
-# preflight.
-# @workaround bug=native_deferred_range_index_2026_10_11 reason=preserve validated half-open byte ranges until native range lowering exists
-fn _copy_u8_range_v1(values: [u8], start: i64, end: i64) -> [u8]:
-    var out: [u8] = []
-    if start < 0 or end < start or end > values.len(): return out
-    var index = start
-    while index < end:
-        out.push(values[index])
-        index = index + 1
-    out
-
-# @workaround bug=native_deferred_range_index_2026_10_11 reason=preserve validated dependency page ranges with a typed value copy
-fn _copy_cache_dependencies_v1(values: [CacheObjectDependencyV1],
-        start: i64, end: i64) -> [CacheObjectDependencyV1]:
-    var out: [CacheObjectDependencyV1] = []
-    if start < 0 or end < start or end > values.len(): return out
-    var index = start
-    while index < end:
-        out.push(values[index])
-        index = index + 1
-    out
-
-# @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=preserve independent array copy for canonical sorting without unsupported copy receiver
-fn _copy_semantic_read_entries_v1(values: [SemanticReadEntryV1]) -> [SemanticReadEntryV1]:
-    var out: [SemanticReadEntryV1] = []
-    var index = 0
-    while index < values.len():
-        out.push(values[index])
-        index = index + 1
-    out
-
-# @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=preserve independent summary sorting copy without unsupported copy receiver
-fn _copy_public_summary_entries_v1(values: [PublicSummaryEntryV1]) -> [PublicSummaryEntryV1]:
-    var out: [PublicSummaryEntryV1] = []
-    var index = 0
-    while index < values.len():
-        out.push(values[index])
-        index = index + 1
-    out
-
-# @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=retain scalar equality owner at decoded envelope fields
-fn _i64_equal_v1(left: i64, right: i64) -> bool:
-    left == right
-
-fn _envelope_kind_schema_matches_v1(kind: i64, schema: i64,
-        expected_kind: i64) -> bool:
-    _i64_equal_v1(kind, expected_kind) and _i64_equal_v1(schema, 1)
-
 pub fn canonical_cache_encode_envelope_v1(kind: i64, schema: i64, payload: [u8]) -> [u8]:
     var buffer: [u8] = []
     if kind < 0 or kind > 65535 or schema < 0 or schema > 65535:
@@ -226,7 +176,7 @@ pub fn canonical_cache_decode_envelope_bounded_v1(bytes: [u8],
         return _decode_failure_v1("truncated_payload")
     if payload_len != bytes.len() - header:
         return _decode_failure_v1("trailing_bytes")
-    val payload = _copy_u8_range_v1(bytes, header, bytes.len())
+    val payload = bytes[header..bytes.len()]
     val expected = _raw_digest_to_hex_v1(bytes, 24)
     val actual = _canonical_sha256_u8_hex_v1(payload)
     if expected != actual: return _decode_failure_v1("payload_digest_mismatch")
@@ -378,8 +328,7 @@ pub fn canonical_source_blob_decode_bounded_v1(bytes: [u8],
     val envelope = match decoded.value:
         case Some(value): value
         case nil: return _source_blob_decode_failure_v1("missing_source_envelope")
-    if not _envelope_kind_schema_matches_v1(envelope.kind, envelope.schema,
-            canonical_cache_kind_source_blob_v1()):
+    if envelope.kind != canonical_cache_kind_source_blob_v1() or envelope.schema != 1:
         return _source_blob_decode_failure_v1("source_blob_schema_mismatch")
     val cursor = _bounded_cursor_v1(envelope.payload, max_items, max_text_bytes)
     val path = _bounded_path_v1(cursor)
@@ -723,8 +672,7 @@ pub fn canonical_compile_snapshot_decode_bounded_v1(bytes: [u8],
     val envelope = match decoded.value:
         case Some(value): value
         case nil: return _snapshot_decode_failure_v1("missing_snapshot_envelope")
-    if not _envelope_kind_schema_matches_v1(envelope.kind, envelope.schema,
-            canonical_cache_kind_compile_snapshot_v1()):
+    if envelope.kind != canonical_cache_kind_compile_snapshot_v1() or envelope.schema != 1:
         return _snapshot_decode_failure_v1("compile_snapshot_schema_mismatch")
     val cursor = _bounded_cursor_v1(envelope.payload, max_items, max_text_bytes)
     val schema = cursor.read_u64()
@@ -939,8 +887,7 @@ pub fn verified_object_dependencies_v1(view: CacheVerifiedObjectViewV1,
         return CacheDependencyPageV1(ok: false, dependencies: [], next_cursor: cursor,
             complete: false, error: "invalid_dependency_page")
     val end = (cursor + maximum).min(view.dependencies.len())
-    CacheDependencyPageV1(ok: true,
-        dependencies: _copy_cache_dependencies_v1(view.dependencies, cursor, end),
+    CacheDependencyPageV1(ok: true, dependencies: view.dependencies[cursor..end],
         next_cursor: end, complete: end == view.dependencies.len(), error: "")
 
 pub fn canonical_file_ast_payload_v1(ast: FileAstV1) -> [u8]:
@@ -1044,7 +991,7 @@ fn _read_entry_key_v1(entry: SemanticReadEntryV1) -> text:
     _effect_tag_v1(entry.effect_kind).to_text() + "\u0000" + entry.logical_name
 
 pub fn canonical_semantic_read_set_payload_v1(read_set: SemanticReadSetV1) -> [u8]:
-    var entries = _copy_semantic_read_entries_v1(read_set.entries)
+    var entries = read_set.entries.copy()
     var i = 1
     while i < entries.len():
         val held = entries[i]
@@ -1183,8 +1130,7 @@ class _CanonicalCursorV1:
         if self.position > self.bytes.len() - count:
             self.failed = true
             return ""
-        val value = bytes_to_text(_copy_u8_range_v1(self.bytes, self.position,
-            self.position + count))
+        val value = bytes_to_text(self.bytes[self.position..(self.position + count)])
         self.position = self.position + count
         value
 
@@ -1254,7 +1200,7 @@ class _CanonicalBoundedCursorV1:
                 self.position > self.bytes.len() - count:
             self.failed = true
             return ""
-        val raw = _copy_u8_range_v1(self.bytes, self.position, self.position + count)
+        val raw = self.bytes[self.position..(self.position + count)]
         val value = match validated_utf8_bytes_to_text_linear(raw):
             case Ok(decoded): decoded
             case Err(_):
@@ -1277,7 +1223,7 @@ class _CanonicalBoundedCursorV1:
         if count < 0 or count > maximum or self.position > self.bytes.len() - count:
             self.failed = true
             return []
-        val value = _copy_u8_range_v1(self.bytes, self.position, self.position + count)
+        val value = self.bytes[self.position..(self.position + count)]
         self.position = self.position + count
         value
 
@@ -1286,7 +1232,7 @@ class _CanonicalBoundedCursorV1:
         if count < 0 or count > maximum or self.position > self.bytes.len() - count:
             self.failed = true
             return []
-        val value = _copy_u8_range_v1(self.bytes, self.position, self.position + count)
+        val value = self.bytes[self.position..(self.position + count)]
         if validated_utf8_bytes_to_text_linear(value).is_err():
             self.failed = true
             return []
@@ -1380,7 +1326,7 @@ fn _summary_entry_less_v1(a: PublicSummaryEntryV1, b: PublicSummaryEntryV1) -> b
     a.stable_symbol_id < b.stable_symbol_id or (a.stable_symbol_id == b.stable_symbol_id and a.canonical_bytes < b.canonical_bytes)
 
 fn _summary_entries_sorted_v1(entries: [PublicSummaryEntryV1]) -> [PublicSummaryEntryV1]:
-    var sorted = _copy_public_summary_entries_v1(entries)
+    var sorted = entries.copy()
     var i = 1
     while i < sorted.len():
         val held = sorted[i]

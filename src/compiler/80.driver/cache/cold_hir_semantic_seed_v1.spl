@@ -5,10 +5,7 @@
 # occurs in this owner.
 
 use compiler.hir.hir_types.{HirModule}
-# Cycle-83: the codec-hosted twin. abi_interface's own hir_abi_interface_parts_v1
-# draw faults in the shard-stage2 binary (dict-walk codegen defect); the codec
-# unit's walk pool is proven clean. Output is byte-identical.
-use compiler.hir.hir_codec.{hir_codec_abi_interface_encoded_v1}
+use compiler.hir.abi_interface.{hir_abi_interface_encoded_v1}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.scv.compile_source_inventory_core.{
     CompileSourceInventoryV1, CompileSourceInventoryEntryV1,
@@ -18,8 +15,6 @@ use std.scv.compile_source_inventory_core.{
     compile_source_inventory_find_v1
 }
 use std.common.crypto.sha256.{sha256_text}
-use compiler.driver.cache.cold_hir_source_inventory_admission_v1.{
-    cold_hir_source_inventory_admit_v1, cold_hir_source_inventory_row_v1}
 
 struct ColdHirSemanticSeedV1:
     module_identity: text
@@ -34,46 +29,11 @@ struct ColdHirSemanticSeedV1:
 struct ColdHirTypedReceiptV1:
     seed: ColdHirSemanticSeedV1
     abi_payload: text
-    # One module-level symbol whose semantic identity is the complete typed
-    # public HIR ABI. The cold archive publisher may retain this compact row
-    # after HIR is evicted; it must still bind a real compiled action later.
-    interface_content: text = ""
 
 struct ColdHirSemanticInputV1:
     module: HirModule
     source_identity: text
     source_content: text
-
-fn cold_hir_source_mismatch_evidence_v1(
-    source_root: text, source_paths: [text], source_module_names: [text],
-    hir_modules: Dict<text, HirModule>
-) -> text:
-    val root = source_root.replace("\\", "/")
-    var produced: Dict<text, bool> = {}
-    var index = 0
-    while index < source_paths.len():
-        val source = source_paths[index].replace("\\", "/")
-        # Receipt capture validates each physical source once. A later alias
-        # need not have its own retained HIR map entry.
-        if source.starts_with(root + "/") and produced.has(source):
-            index = index + 1
-            continue
-        val name = if index < source_module_names.len(): source_module_names[index] else: ""
-        var actual = ""
-        var module_name_empty = false
-        if name != "" and hir_modules.has(name):
-            val module = hir_modules[name]
-            actual = module.path.replace("\\", "/")
-            module_name_empty = module.name == ""
-        if not source.starts_with(root + "/") or actual != source or module_name_empty:
-            val shown_root = if root.len() > 256: root[:256] else: root
-            val shown_source = if source.len() > 256: source[:256] else: source
-            val shown_name = if name.len() > 256: name[:256] else: name
-            val shown_actual = if actual.len() > 256: actual[:256] else: actual
-            return "cold HIR path evidence: index={index} root='{shown_root}' source='{shown_source}' module='{shown_name}' hir='{shown_actual}'"
-        produced[source] = true
-        index = index + 1
-    "cold HIR path evidence: no mismatched lowered source located"
 
 fn _cold_hir_source_path_error_v1(
     module: HirModule, source_root: text, source_identity: text
@@ -90,7 +50,7 @@ fn _cold_hir_source_path_error_v1(
     ""
 
 fn _cold_hir_receipt_from_entry_v1(
-    module: HirModule, module_identity: text,
+    module: HirModule,
     source_identity: text,
     source_digest: text,
     source_byte_count: i64,
@@ -102,9 +62,9 @@ fn _cold_hir_receipt_from_entry_v1(
             source.content_digest != source_digest or
             source.byte_count != source_byte_count:
         return Err("cold-hir-source-content-mismatch")
-    val abi = hir_codec_abi_interface_encoded_v1(module)
+    val abi = hir_abi_interface_encoded_v1(module)
     if abi.is_err():
-        return Err("cold-hir-abi-unresolved:{abi.unwrap_err()}:module={module_identity}:source={source_identity}")
+        return Err("cold-hir-abi-unresolved:{abi.unwrap_err()}")
     var imports: [text] = []
     for imported in module.imports:
         val module_path = imported.module_path
@@ -120,14 +80,9 @@ fn _cold_hir_receipt_from_entry_v1(
             unique_imports.push(module_path)
     val payload = abi.unwrap()
     val seed = ColdHirSemanticSeedV1(
-        module_identity, source_identity, source.content_digest,
+        module.name, source_identity, source.content_digest,
         inventory_digest, sha256_text(payload), unique_imports)
-    if module_identity == "" or module_identity.contains("|") or
-            module_identity.contains("\n") or module_identity.contains("\r"):
-        return Err("cold-hir-module-identity-invalid")
-    val interface_content =
-        "symbol|{module_identity}|module|{seed.abi_digest}|{seed.abi_digest}"
-    Ok(ColdHirTypedReceiptV1(seed, payload, interface_content))
+    Ok(ColdHirTypedReceiptV1(seed, payload))
 
 fn cold_hir_typed_receipt_from_admitted_entry_v1(
     module: HirModule, source_root: text, source_identity: text,
@@ -140,27 +95,23 @@ fn cold_hir_typed_receipt_from_admitted_entry_v1(
         return Err(path_error)
     if admitted_inventory_digest.len() != 64:
         return Err("cold-hir-inventory-mismatch")
-    _cold_hir_receipt_from_entry_v1(module, module.name, source_identity,
+    _cold_hir_receipt_from_entry_v1(module, source_identity,
         sha256_text(source_content), source_content.len(),
         admitted_inventory_digest, source)
 
 # Phase-1 source owners retain SHA-256 and byte count after low-memory source
 # eviction. HIR can be paired with that receipt without reopening the snapshot.
 fn cold_hir_typed_receipt_from_admitted_digest_v1(
-    module: HirModule, module_identity: text,
-    source_root: text, source_identity: text,
+    module: HirModule, source_root: text, source_identity: text,
     source_digest: text, source_byte_count: i64,
     admitted_inventory_digest: text, source: CompileSourceInventoryEntryV1
 ) -> Result<ColdHirTypedReceiptV1, text>:
-    if module_identity == "" or module_identity.contains("|") or
-            module_identity.contains("\n") or module_identity.contains("\r"):
-        return Err("cold-hir-module-identity-invalid")
     val path_error = _cold_hir_source_path_error_v1(
         module, source_root, source_identity)
     if path_error != "": return Err(path_error)
     if admitted_inventory_digest.len() != 64:
         return Err("cold-hir-inventory-mismatch")
-    _cold_hir_receipt_from_entry_v1(module, module_identity, source_identity, source_digest,
+    _cold_hir_receipt_from_entry_v1(module, source_identity, source_digest,
         source_byte_count, admitted_inventory_digest, source)
 
 fn cold_hir_semantic_seed_from_admitted_entry_v1(
@@ -239,59 +190,58 @@ fn cold_hir_semantic_seeds_v1(
 # inventory may contain the whole checkout, so requiring every inventory row
 # here would turn an entry build into a full-tree compile. Physical aliases
 # share one receipt, while each supplied source still proves its frozen bytes.
-fn cold_hir_inventory_generation_binding_reason_v1(
-    expected_generation: i64, actual_generation: i64
-) -> text:
-    if expected_generation < 0 or actual_generation != expected_generation:
-        return "cold-hir-inventory-generation-mismatch"
-    "ok"
-
 fn cold_hir_typed_receipts_from_lowered_sources_v1(
-    source_root: text, expected_source_inventory_digest: text,
+    source_root: text, expected_inventory_digest: text,
     inventory: CompileSourceInventoryV1,
-    snapshot_inventory: text, expected_snapshot_inventory_digest: text,
     source_paths: [text], source_digests: [text],
     source_byte_counts: [i64],
     source_module_names: [text], hir_modules: Dict<text, HirModule>
 ) -> Result<[ColdHirTypedReceiptV1], text>:
-    # The structured CURRENT generation and the selected snapshot rows have
-    # different canonical encodings. Admit both, then bind every snapshot row
-    # to the typed source inventory before using its digest in package receipts.
-    val admission = cold_hir_source_inventory_admit_v1(source_root,
-        expected_source_inventory_digest, inventory, snapshot_inventory,
-        expected_snapshot_inventory_digest, source_paths.len(), source_digests.len(),
-        source_byte_counts.len(), source_module_names.len())?
+    if source_paths.len() != source_digests.len() or
+            source_paths.len() != source_byte_counts.len() or
+            source_paths.len() != source_module_names.len():
+        return Err("cold-hir-source-owner-alignment")
+    val inventory_digest = compile_source_inventory_digest_v1(inventory)
+    if inventory_digest == "" or inventory_digest != expected_inventory_digest:
+        return Err("cold-hir-inventory-mismatch")
+    val normalized_root = source_root.replace("\\", "/")
+    if normalized_root == "" or normalized_root.ends_with("/"):
+        return Err("cold-hir-source-root-invalid")
+    var source_indices: Dict<text, i64> = {}
+    var inventory_index = 0
+    while inventory_index < inventory.entries.len():
+        source_indices[inventory.entries[inventory_index].source_identity] = inventory_index
+        inventory_index = inventory_index + 1
     var receipts: [ColdHirTypedReceiptV1] = []
-    var receipt_errors: [text] = []
     var produced: Dict<text, bool> = {}
     var source_index = 0
     while source_index < source_paths.len():
+        val path = source_paths[source_index].replace("\\", "/")
+        if not path.starts_with(normalized_root + "/"):
+            return Err("cold-hir-module-source-mismatch")
+        val identity = path.substring(normalized_root.len() + 1, path.len())
+        if not compile_source_inventory_path_valid_v1(identity):
+            return Err("cold-hir-source-identity-invalid")
+        if not source_indices.has(identity):
+            return Err("cold-hir-source-absent")
+        val entry = inventory.entries[source_indices[identity]]
         val source_digest = source_digests[source_index]
         val source_byte_count = source_byte_counts[source_index]
-        val row = cold_hir_source_inventory_row_v1(admission, inventory, source_index,
-            source_paths[source_index], source_digest, source_byte_count,
-            source_module_names[source_index])?
-        val identity = row.source_identity
-        val entry = row.inventory_entry
+        if entry.content_digest != source_digest or
+                entry.byte_count != source_byte_count:
+            return Err("cold-hir-source-content-mismatch")
         if not produced.has(identity):
             val module_name = source_module_names[source_index]
             if not hir_modules.has(module_name):
                 return Err("cold-hir-lowered-module-missing:{module_name}")
             match cold_hir_typed_receipt_from_admitted_digest_v1(
-                    hir_modules[module_name], module_name, admission.normalized_root, identity,
-                    source_digest, source_byte_count, expected_snapshot_inventory_digest, entry):
-                case Err(reason):
-                    if not reason.starts_with("cold-hir-abi-unresolved:"):
-                        return Err(reason)
-                    receipt_errors.push(reason)
+                    hir_modules[module_name], normalized_root, identity,
+                    source_digest, source_byte_count, inventory_digest, entry):
+                case Err(reason): return Err(reason)
                 case Ok(receipt):
                     receipts.push(receipt)
-            # Each admitted source is visited once, including failed sources.
-            # Collect independent ABI failures without publishing partial receipts.
-            produced[identity] = true
+                    produced[identity] = true
         source_index = source_index + 1
-    if receipt_errors.len() > 0:
-        return Err(receipt_errors.join("\n"))
     Ok(receipts)
 
 export ColdHirSemanticSeedV1, ColdHirSemanticInputV1
@@ -300,5 +250,3 @@ export cold_hir_typed_receipt_from_admitted_digest_v1
 export cold_hir_semantic_seed_v1, cold_hir_semantic_seeds_v1
 export cold_hir_semantic_seed_from_admitted_entry_v1
 export cold_hir_typed_receipts_from_lowered_sources_v1
-export cold_hir_inventory_generation_binding_reason_v1
-export cold_hir_source_mismatch_evidence_v1

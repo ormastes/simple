@@ -1,333 +1,491 @@
 # Replay Semantic Trace Specification
 
-Status: **bounded Phase1 diagnostic repair passed**. The decoder rejects negative offsets before length subtraction or primitive reads, preserving nonnegative decoding and existing short-buffer errors. The final one-case diagnostic passed; the 27 previously passing cases were retained without rerunning them. This is a source-synchronized manual candidate with admitted Phase1 seed diagnostics, not docgen, native or release evidence. No complete 28-case run of the final source is claimed.
+> <details>
 
-Canonical executable: `test/03_system/tools/replay_semantic_trace_spec.spl`.
-Requirement: `REQ-SSPEC-SYSTEM`. Evidence class: **host-fixture**. All 22 existing enum, event, writer and object-identity scenarios remain; six production decoder scenarios bring the authored inventory to **28 cases**. Runtime counts and source revisions are qualified separately below; no native binary inventory was obtained.
+<!-- sdn-diagram:id=replay_semantic_trace_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
 
-## Bounded diagnostic results
+```sdn id=replay_semantic_trace_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
 
-| Cycle | Executed | Passed | Failed | Time | Interpretation |
-|---|---:|---:|---:|---:|---|
-| One | 28 | 23 | 5 | 273 ms | New helper used unavailable `assert`; five cases stopped before decoder checks. |
-| Two | 5 | 4 | 1 | 313 ms | Replaced helper with a standard matcher plus explicit caller bounds guards. The remaining failure reported an accepted offset -68 with fabricated sequence 0. |
-| Three | 1 | 1 | 0 | 282 ms | After the production guard, the original negative-offset scenario rejected both -1 and -68. Exit status 0. |
+replay_semantic_trace_spec -> std
+```
 
-All cycles reported zero skipped cases. Cycle-three RSS receipt reports `status=complete`, exit 0 and peak tree RSS **204480 KiB**. The coordinator checked all 12 final manifest inputs before and after execution. Previously green cases were not rerun; the two-line production change preserves their nonnegative decoder paths.
+</details>
 
-Evidence paths are under `build/phase-one-storage-gui-diagnostic/`: `replay_semantic_trace_spec/cycle-one.log`, `cycle-two-failed-cases_spec/cycle-two.log`, and `cycle-three-negative-offset_spec/cycle-three.{log,rss.env,exit}`. Final input manifest: `semantic-trace-cycle-three-inputs.sdn`. Exact derivative mappings: `replay_semantic_trace_spec/cycle-two-derivative-map.sdn` and `replay_semantic_trace_spec/cycle-three-derivative-map.sdn`.
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
 
-Final canonical source SHA-256: `e4849c6f279c724f12e6f1575f9ac217909ce7cfa683186816260c7cb1c6fe8a`.
-Final decoder SHA-256: `e671b7db45e5cbde99eeb3b1db3421ab04286d6b39e5517ed4729acf7209014b`.
+```ascii generated-from=replay_semantic_trace_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
 
-## Scope and owners
+</details>
+<!-- sdn-diagram:end -->
 
-The spec deliberately imports the `std.nogc_sync_mut.replay.semantic` implementations of `trace_events`, `trace_writer`, `trace_reader` and `object_identity`; writer/reader use `src/lib/nogc_sync_mut/replay/codec.spl`. The five `@cover` percentages are targets, not measured coverage. Configured resolver parity is not established by these explicit owner imports.
-
-This gate exercises production in-memory `TraceWriter.emit` and `decode_semantic_event`, along with real enum and object registry behavior. It does not qualify file persistence, `flush`, `finalize`, shell execution, live guests, native compilation or whole-replay acceptance. Capacity is exactly 136 bytes for two 68-byte records, so emitting these records never invokes the writer's file flush path.
-
-## Manual flow
-
-1. Emit two distinguishable records with multibyte nonzero values and intentionally non-sequential input IDs. Require exactly 136 output bytes before any decoder or prefix indexing proceeds.
-2. Decode complete records at offsets 0 and 68. Compare all eleven fields, including the writer-assigned sequence IDs 0 and 1. Check event count, next sequence and write position.
-3. Reject offsets -1 and -68 against valid emitted bytes. Returning an invented `Ok` event fails explicitly.
-4. Reject an empty buffer and every nonempty one-through-67-byte prefix of a production record.
-5. Reject offset 69, where only 67 bytes remain after the last complete record start.
-6. Reject offsets 136, 137 and the maximum signed 64-bit offset. Every rejected result must identify its requested offset.
-7. Retain the previous semantic kind, event construction, writer state and object identity assertions.
-
-Decoder errors on complete records and successful decodes on invalid ranges both fail explicitly. No source-string assertions substitute for codec behavior. Signed payload encodings and arbitrary event-kind validation remain outside this bounds repair.
-
-Legacy `test/system/replay_semantic_trace_spec.spl` was removed only after `cmp` proved full-file byte identity with the pre-edit canonical source. Both original files had SHA-256 `09689e5b6d23a30799ee0e3f36f120724269acc99f8f1ce3acfe867aaf0c5980`.
-
-## Complete executable source
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 22 | 22 | 0 | 0 |
 
 <details>
-<summary>Executable SSpec, including setup and assertion helpers</summary>
+<summary>Full Scenario Manual</summary>
+
+# Replay Semantic Trace Specification
+
+## Scenarios
+
+### SemanticEventKind to_i32
+
+#### returns expected ordinals for core kinds
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# codex-system-test
-# @req REQ-SSPEC-SYSTEM
-# @tag:system
-# @cover src/lib/nogc_sync_mut/replay/semantic/trace_events.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/semantic/trace_writer.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/semantic/trace_reader.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/semantic/object_identity.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/codec.spl 80%
-# Coverage percentages are targets, not measured coverage.
-# Evidence class: host-fixture; production in-memory records and object state.
-# Explicit family imports select the actual codec owners for this regression.
-# No persistence, flush, finalize, shell, native, or live-guest claim.
-
-use std.spec
-use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEventKind, SemanticEvent, SEMANTIC_EVENT_SIZE}
-use std.nogc_sync_mut.replay.semantic.trace_writer.TraceWriter
-use std.nogc_sync_mut.replay.semantic.trace_reader.decode_semantic_event
-use std.nogc_sync_mut.replay.semantic.object_identity.{ObjectId, ObjectRegistry}
-
-fn semantic_trace_first_event() -> SemanticEvent:
-    SemanticEvent(
-        seq: 999, thread_id: 4294967297, kind: 5,
-        timestamp_ns: 1099511628033, source_file_id: 257,
-        source_line: 65537, source_column: 513, name_id: 1025,
-        object_id: 281474976710913, payload_a: 72057594037927937,
-        payload_b: 4294967554
-    )
-
-fn semantic_trace_second_event() -> SemanticEvent:
-    SemanticEvent(
-        seq: 888, thread_id: 8589934595, kind: 10,
-        timestamp_ns: 2199023256067, source_file_id: 514,
-        source_line: 131075, source_column: 1027, name_id: 2051,
-        object_id: 562949953421827, payload_a: 144115188075855875,
-        payload_b: 8589935107
-    )
-
-fn semantic_trace_two_record_writer() -> TraceWriter:
-    var writer = TraceWriter.create("/tmp/semantic-in-memory-unused.sst", 136)
-    writer.emit(semantic_trace_first_event())
-    writer.emit(semantic_trace_second_event())
-    # Matchers record nonfatal failures; callers guard before decoding/indexing.
-    expect(writer.buffer.len()).to_equal(136)
-    writer
-
-fn expect_semantic_record(bytes: [i32], offset: i64, expected: SemanticEvent, assigned_seq: i64):
-    match decode_semantic_event(bytes, offset):
-        case Ok(actual):
-            expect(actual.seq).to_equal(assigned_seq)
-            expect(actual.thread_id).to_equal(expected.thread_id)
-            expect(actual.kind).to_equal(expected.kind)
-            expect(actual.timestamp_ns).to_equal(expected.timestamp_ns)
-            expect(actual.source_file_id).to_equal(expected.source_file_id)
-            expect(actual.source_line).to_equal(expected.source_line)
-            expect(actual.source_column).to_equal(expected.source_column)
-            expect(actual.name_id).to_equal(expected.name_id)
-            expect(actual.object_id).to_equal(expected.object_id)
-            expect(actual.payload_a).to_equal(expected.payload_a)
-            expect(actual.payload_b).to_equal(expected.payload_b)
-        case Err(message):
-            fail("complete semantic record rejected at offset {offset}: {message}")
-
-fn expect_semantic_decode_error(bytes: [i32], offset: i64):
-    match decode_semantic_event(bytes, offset):
-        case Err(message):
-            expect(message).to_contain("offset {offset}")
-        case Ok(actual):
-            fail("invalid semantic record accepted at offset {offset}, seq {actual.seq}")
-
-# ============================================================================
-# SemanticEventKind round-trips
-# ============================================================================
-
-describe "SemanticEventKind to_i32":
-    it "returns expected ordinals for core kinds":
-        expect(SemanticEventKind.FunctionEnter.to_i32()).to_equal(0)
-        expect(SemanticEventKind.FunctionExit.to_i32()).to_equal(1)
-        expect(SemanticEventKind.VariableWrite.to_i32()).to_equal(2)
-        expect(SemanticEventKind.ObjectAlloc.to_i32()).to_equal(3)
-
-    it "returns expected ordinals for ownership kinds":
-        expect(SemanticEventKind.ObjectDrop.to_i32()).to_equal(4)
-        expect(SemanticEventKind.OwnershipTransfer.to_i32()).to_equal(5)
-        expect(SemanticEventKind.BorrowStart.to_i32()).to_equal(6)
-        expect(SemanticEventKind.BorrowEnd.to_i32()).to_equal(7)
-
-describe "SemanticEventKind from_i32":
-    it "round-trips ownership transfer":
-        val kind = SemanticEventKind.from_i32(5)
-        expect(kind.to_i32()).to_equal(5)
-        expect(kind.to_text()).to_equal("OwnershipTransfer")
-
-    it "round-trips async spawn":
-        val spawn_kind = SemanticEventKind.from_i32(8)
-        expect(spawn_kind.to_text()).to_equal("AsyncSpawn")
-
-    it "round-trips async yield and resume":
-        val yield_kind = SemanticEventKind.from_i32(9)
-        expect(yield_kind.to_text()).to_equal("AsyncYield")
-        val resume_kind = SemanticEventKind.from_i32(10)
-        expect(resume_kind.to_text()).to_equal("AsyncResume")
-
-    it "defaults to FunctionEnter for unknown values":
-        val kind = SemanticEventKind.from_i32(999)
-        expect(kind.to_i32()).to_equal(0)
-
-describe "SemanticEventKind to_text":
-    it "returns readable names for borrow kinds":
-        expect(SemanticEventKind.BorrowStart.to_text()).to_equal("BorrowStart")
-        expect(SemanticEventKind.BorrowEnd.to_text()).to_equal("BorrowEnd")
-
-    it "returns readable names for object kinds":
-        expect(SemanticEventKind.ObjectAlloc.to_text()).to_equal("ObjectAlloc")
-        expect(SemanticEventKind.ObjectDrop.to_text()).to_equal("ObjectDrop")
-
-# ============================================================================
-# SemanticEvent construction
-# ============================================================================
-
-describe "SemanticEvent construction":
-    it "create sets kind and zeroes other fields":
-        val ev = SemanticEvent.create(SemanticEventKind.ObjectAlloc)
-        expect(ev.kind).to_equal(3)
-        expect(ev.seq).to_equal(0)
-        expect(ev.thread_id).to_equal(0)
-        expect(ev.object_id).to_equal(0)
-
-    it "event_kind returns the enum from kind field":
-        val ev = SemanticEvent.create(SemanticEventKind.AsyncYield)
-        val kind = ev.event_kind()
-        expect(kind.to_text()).to_equal("AsyncYield")
-
-    it "SEMANTIC_EVENT_SIZE is 68":
-        expect(SEMANTIC_EVENT_SIZE).to_equal(68)
-
-    it "create with FunctionEnter sets kind 0":
-        val ev = SemanticEvent.create(SemanticEventKind.FunctionEnter)
-        expect(ev.kind).to_equal(0)
-        expect(ev.payload_a).to_equal(0)
-        expect(ev.payload_b).to_equal(0)
-
-# ============================================================================
-# TraceWriter creation and emit
-# ============================================================================
-
-describe "TraceWriter creation":
-    it "create initializes empty state":
-        val writer = TraceWriter.create("/tmp/test.sst", 1000000)
-        expect(writer.event_count).to_equal(0)
-        expect(writer.next_seq).to_equal(0)
-        expect(writer.buffer.len()).to_equal(0)
-        expect(writer.output_path).to_equal("/tmp/test.sst")
-
-    it "create stores buffer capacity":
-        val writer = TraceWriter.create("/tmp/test2.sst", 500000)
-        expect(writer.buffer_capacity).to_equal(500000)
-        expect(writer.write_pos).to_equal(0)
-
-describe "TraceWriter emit":
-    it "emit increments event_count and next_seq":
-        var writer = TraceWriter.create("/tmp/test3.sst", 1000000)
-        val ev = SemanticEvent.create(SemanticEventKind.FunctionEnter)
-        writer.emit(ev)
-        expect(writer.event_count).to_equal(1)
-        expect(writer.next_seq).to_equal(1)
-
-    it "emit appends bytes to buffer":
-        var writer = TraceWriter.create("/tmp/test4.sst", 1000000)
-        val ev = SemanticEvent.create(SemanticEventKind.ObjectAlloc)
-        writer.emit(ev)
-        expect(writer.buffer.len()).to_equal(68)
-
-# ============================================================================
-# Production semantic wire round-trip and bounds
-# ============================================================================
-
-describe "Semantic trace in-memory production codec":
-    it "should recover every field from two distinct records and assign sequence IDs":
-        step("Emit two distinct records into the production writer without flushing")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        expect(writer.event_count).to_equal(2)
-        expect(writer.next_seq).to_equal(2)
-        expect(writer.write_pos).to_equal(136)
-        step("Decode offsets zero and 68 and compare all eleven fields")
-        expect_semantic_record(writer.buffer, 0, semantic_trace_first_event(), 0)
-        expect_semantic_record(writer.buffer, 68, semantic_trace_second_event(), 1)
-
-    it "should reject negative offsets before decoding fields":
-        step("Emit valid records and request offsets before the first byte")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        expect_semantic_decode_error(writer.buffer, -1)
-        expect_semantic_decode_error(writer.buffer, -68)
-
-    it "should reject an empty input buffer":
-        step("Request a record from an empty byte buffer")
-        val bytes: [i32] = []
-        expect_semantic_decode_error(bytes, 0)
-
-    it "should reject every nonempty truncated record prefix":
-        step("Take each one through 67 byte prefix of a production record")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        var prefix: [i32] = []
-        var length = 1
-        while length < 68:
-            prefix.push(writer.buffer[length - 1])
-            expect_semantic_decode_error(prefix, 0)
-            length = length + 1
-        expect(prefix.len()).to_equal(67)
-
-    it "should reject the incomplete tail after the last complete start offset":
-        step("Request a record one byte beyond the second record start")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        expect_semantic_decode_error(writer.buffer, 69)
-
-    it "should reject offsets at and beyond the buffer end":
-        step("Request a record at the end and beyond the production buffer")
-        val writer = semantic_trace_two_record_writer()
-        if writer.buffer.len() != 136:
-            return
-        expect_semantic_decode_error(writer.buffer, 136)
-        expect_semantic_decode_error(writer.buffer, 137)
-        expect_semantic_decode_error(writer.buffer, 9223372036854775807)
-
-# ============================================================================
-# ObjectId construction
-# ============================================================================
-
-describe "ObjectId":
-    it "stores type and alloc site":
-        val obj = ObjectId(id: 1, type_name_id: 10, alloc_site_file: 5, alloc_site_line: 42, dropped: false)
-        expect(obj.id).to_equal(1)
-        expect(obj.type_name_id).to_equal(10)
-        expect(obj.alloc_site_file).to_equal(5)
-        expect(obj.alloc_site_line).to_equal(42)
-        expect(obj.dropped).to_equal(false)
-
-    it "to_text includes id and type":
-        val obj = ObjectId(id: 7, type_name_id: 3, alloc_site_file: 1, alloc_site_line: 99, dropped: false)
-        val s = obj.to_text()
-        expect(s).to_contain("7")
-        expect(s).to_contain("type=3")
-
-describe "ObjectRegistry creation":
-    it "create starts with next_id 1 and empty entries":
-        val reg = ObjectRegistry.create()
-        expect(reg.next_id).to_equal(1)
-        expect(reg.entries.len()).to_equal(0)
-
-describe "ObjectRegistry register and lookup":
-    it "register returns incrementing IDs":
-        var reg = ObjectRegistry.create()
-        val id1 = reg.register(10, 1, 42)
-        val id2 = reg.register(20, 2, 99)
-        expect(id1).to_equal(1)
-        expect(id2).to_equal(2)
-        expect(reg.entries.len()).to_equal(2)
-
-    it "mark_dropped sets dropped flag":
-        var reg = ObjectRegistry.create()
-        val id1 = reg.register(10, 1, 42)
-        reg.mark_dropped(id1)
-        match reg.lookup(id1):
-            case Some(obj):
-                expect(obj.dropped).to_equal(true)
-            case None:
-                expect("should find object").to_equal("")
-
-    it "active_count excludes dropped objects":
-        var reg = ObjectRegistry.create()
-        val id1 = reg.register(10, 1, 1)
-        val id2 = reg.register(20, 1, 2)
-        val id3 = reg.register(30, 1, 3)
-        reg.mark_dropped(id2)
-        expect(reg.active_count()).to_equal(2)
+expect(SemanticEventKind.FunctionEnter.to_i32()).to_equal(0)
+expect(SemanticEventKind.FunctionExit.to_i32()).to_equal(1)
+expect(SemanticEventKind.VariableWrite.to_i32()).to_equal(2)
+expect(SemanticEventKind.ObjectAlloc.to_i32()).to_equal(3)
 ```
+
+</details>
+
+#### returns expected ordinals for ownership kinds
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(SemanticEventKind.ObjectDrop.to_i32()).to_equal(4)
+expect(SemanticEventKind.OwnershipTransfer.to_i32()).to_equal(5)
+expect(SemanticEventKind.BorrowStart.to_i32()).to_equal(6)
+expect(SemanticEventKind.BorrowEnd.to_i32()).to_equal(7)
+```
+
+</details>
+
+### SemanticEventKind from_i32
+
+#### round-trips ownership transfer
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val kind = SemanticEventKind.from_i32(5)
+expect(kind.to_i32()).to_equal(5)
+expect(kind.to_text()).to_equal("OwnershipTransfer")
+```
+
+</details>
+
+#### round-trips async spawn
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val spawn_kind = SemanticEventKind.from_i32(8)
+expect(spawn_kind.to_text()).to_equal("AsyncSpawn")
+```
+
+</details>
+
+#### round-trips async yield and resume
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val yield_kind = SemanticEventKind.from_i32(9)
+expect(yield_kind.to_text()).to_equal("AsyncYield")
+val resume_kind = SemanticEventKind.from_i32(10)
+expect(resume_kind.to_text()).to_equal("AsyncResume")
+```
+
+</details>
+
+#### defaults to FunctionEnter for unknown values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val kind = SemanticEventKind.from_i32(999)
+expect(kind.to_i32()).to_equal(0)
+```
+
+</details>
+
+### SemanticEventKind to_text
+
+#### returns readable names for borrow kinds
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(SemanticEventKind.BorrowStart.to_text()).to_equal("BorrowStart")
+expect(SemanticEventKind.BorrowEnd.to_text()).to_equal("BorrowEnd")
+```
+
+</details>
+
+#### returns readable names for object kinds
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(SemanticEventKind.ObjectAlloc.to_text()).to_equal("ObjectAlloc")
+expect(SemanticEventKind.ObjectDrop.to_text()).to_equal("ObjectDrop")
+```
+
+</details>
+
+### SemanticEvent construction
+
+#### create sets kind and zeroes other fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ev = SemanticEvent.create(SemanticEventKind.ObjectAlloc)
+expect(ev.kind).to_equal(3)
+expect(ev.seq).to_equal(0)
+expect(ev.thread_id).to_equal(0)
+expect(ev.object_id).to_equal(0)
+```
+
+</details>
+
+#### event_kind returns the enum from kind field
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ev = SemanticEvent.create(SemanticEventKind.AsyncYield)
+val kind = ev.event_kind()
+expect(kind.to_text()).to_equal("AsyncYield")
+```
+
+</details>
+
+#### SEMANTIC_EVENT_SIZE is 68
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(SEMANTIC_EVENT_SIZE).to_equal(68)
+```
+
+</details>
+
+#### create with FunctionEnter sets kind 0
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ev = SemanticEvent.create(SemanticEventKind.FunctionEnter)
+expect(ev.kind).to_equal(0)
+expect(ev.payload_a).to_equal(0)
+expect(ev.payload_b).to_equal(0)
+```
+
+</details>
+
+### TraceWriter creation
+
+#### create initializes empty state
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val writer = TraceWriter.create("/tmp/test.sst", 1000000)
+expect(writer.event_count).to_equal(0)
+expect(writer.next_seq).to_equal(0)
+expect(writer.buffer.len()).to_equal(0)
+expect(writer.output_path).to_equal("/tmp/test.sst")
+```
+
+</details>
+
+#### create stores buffer capacity
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val writer = TraceWriter.create("/tmp/test2.sst", 500000)
+expect(writer.buffer_capacity).to_equal(500000)
+expect(writer.write_pos).to_equal(0)
+```
+
+</details>
+
+### TraceWriter emit
+
+#### emit increments event_count and next_seq
+
+1. var writer = TraceWriter create
+2. writer emit
+   - Expected: writer.event_count equals `1`
+   - Expected: writer.next_seq equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var writer = TraceWriter.create("/tmp/test3.sst", 1000000)
+val ev = SemanticEvent.create(SemanticEventKind.FunctionEnter)
+writer.emit(ev)
+expect(writer.event_count).to_equal(1)
+expect(writer.next_seq).to_equal(1)
+```
+
+</details>
+
+#### emit appends bytes to buffer
+
+1. var writer = TraceWriter create
+2. writer emit
+   - Expected: writer.buffer.len() equals `68`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var writer = TraceWriter.create("/tmp/test4.sst", 1000000)
+val ev = SemanticEvent.create(SemanticEventKind.ObjectAlloc)
+writer.emit(ev)
+expect(writer.buffer.len()).to_equal(68)
+```
+
+</details>
+
+### ObjectId
+
+#### stores type and alloc site
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val obj = ObjectId(id: 1, type_name_id: 10, alloc_site_file: 5, alloc_site_line: 42, dropped: false)
+expect(obj.id).to_equal(1)
+expect(obj.type_name_id).to_equal(10)
+expect(obj.alloc_site_file).to_equal(5)
+expect(obj.alloc_site_line).to_equal(42)
+expect(obj.dropped).to_equal(false)
+```
+
+</details>
+
+#### to_text includes id and type
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val obj = ObjectId(id: 7, type_name_id: 3, alloc_site_file: 1, alloc_site_line: 99, dropped: false)
+val s = obj.to_text()
+expect(s).to_contain("7")
+expect(s).to_contain("type=3")
+```
+
+</details>
+
+### ObjectRegistry creation
+
+#### create starts with next_id 1 and empty entries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val reg = ObjectRegistry.create()
+expect(reg.next_id).to_equal(1)
+expect(reg.entries.len()).to_equal(0)
+```
+
+</details>
+
+### ObjectRegistry register and lookup
+
+#### register returns incrementing IDs
+
+1. var reg = ObjectRegistry create
+   - Expected: id1 equals `1`
+   - Expected: id2 equals `2`
+   - Expected: reg.entries.len() equals `2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var reg = ObjectRegistry.create()
+val id1 = reg.register(10, 1, 42)
+val id2 = reg.register(20, 2, 99)
+expect(id1).to_equal(1)
+expect(id2).to_equal(2)
+expect(reg.entries.len()).to_equal(2)
+```
+
+</details>
+
+#### mark_dropped sets dropped flag
+
+1. var reg = ObjectRegistry create
+2. reg mark dropped
+   - Expected: obj.dropped is true
+   - Expected: "should find object" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var reg = ObjectRegistry.create()
+val id1 = reg.register(10, 1, 42)
+reg.mark_dropped(id1)
+match reg.lookup(id1):
+    case Some(obj):
+        expect(obj.dropped).to_equal(true)
+    case None:
+        expect("should find object").to_equal("")
+```
+
+</details>
+
+#### active_count excludes dropped objects
+
+1. var reg = ObjectRegistry create
+2. reg mark dropped
+   - Expected: reg.active_count() equals `2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var reg = ObjectRegistry.create()
+val id1 = reg.register(10, 1, 1)
+val id2 = reg.register(20, 1, 2)
+val id3 = reg.register(30, 1, 3)
+reg.mark_dropped(id2)
+expect(reg.active_count()).to_equal(2)
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/tools/replay_semantic_trace_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- SemanticEventKind to_i32
+- SemanticEventKind from_i32
+- SemanticEventKind to_text
+- SemanticEvent construction
+- TraceWriter creation
+- TraceWriter emit
+- ObjectId
+- ObjectRegistry creation
+- ObjectRegistry register and lookup
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 22 |
+| Active scenarios | 22 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
 
 </details>

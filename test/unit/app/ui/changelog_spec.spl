@@ -1,0 +1,73 @@
+# ChangeLog Specification
+#
+# Tests ChangeLog creation, push/retrieval, bounded capacity (drop oldest),
+# recent N events, human-readable descriptions, clear, push_all, and
+# edge case when recent count exceeds size.
+
+use std.spec.{describe, it, expect}
+use common.ui.lifecycle.{LifecycleEvent, describe_lifecycle_event}
+use common.ui.changelog.{ChangeLog, new_changelog, default_changelog}
+
+describe "ChangeLog":
+    it "creates empty changelog":
+        val log = new_changelog(10)
+        expect log.size() to_equal 0
+        expect log.is_empty() to_equal true
+
+    it "pushes and retrieves events":
+        val log = new_changelog(10)
+        log.push(LifecycleEvent.Mount(widget_id: "w1"))
+        log.push(LifecycleEvent.Focus(widget_id: "w1"))
+        expect log.size() to_equal 2
+        expect log.is_empty() to_equal false
+
+    it "drops oldest when at capacity":
+        val log = new_changelog(3)
+        log.push(LifecycleEvent.Mount(widget_id: "w1"))
+        log.push(LifecycleEvent.Mount(widget_id: "w2"))
+        log.push(LifecycleEvent.Mount(widget_id: "w3"))
+        log.push(LifecycleEvent.Mount(widget_id: "w4"))
+        expect log.size() to_equal 3
+        val events = log.all()
+        # w1 should have been dropped
+        val first_desc = describe_lifecycle_event(events[0])
+        expect first_desc to_equal "mount:w2"
+
+    it "returns recent N events":
+        val log = new_changelog(10)
+        log.push(LifecycleEvent.Mount(widget_id: "w1"))
+        log.push(LifecycleEvent.Focus(widget_id: "w2"))
+        log.push(LifecycleEvent.Blur(widget_id: "w3"))
+        val recent = log.recent(2)
+        expect recent.len() to_equal 2
+        val first_desc = describe_lifecycle_event(recent[0])
+        expect first_desc to_equal "focus:w2"
+
+    it "returns human-readable descriptions":
+        val log = new_changelog(10)
+        log.push(LifecycleEvent.Mount(widget_id: "btn1"))
+        log.push(LifecycleEvent.Update(widget_id: "btn1", prop_key: "text", prop_value: "Click"))
+        val descs = log.recent_descriptions(2)
+        expect descs[0] to_equal "mount:btn1"
+        expect descs[1] to_equal "update:btn1.text=Click"
+
+    it "clears all events":
+        val log = new_changelog(10)
+        log.push(LifecycleEvent.Mount(widget_id: "w1"))
+        log.clear()
+        expect log.size() to_equal 0
+
+    it "push_all adds multiple events":
+        val log = new_changelog(10)
+        val events: [LifecycleEvent] = [
+            LifecycleEvent.Mount(widget_id: "a"),
+            LifecycleEvent.Mount(widget_id: "b")
+        ]
+        log.push_all(events)
+        expect log.size() to_equal 2
+
+    it "returns all when recent count exceeds size":
+        val log = new_changelog(10)
+        log.push(LifecycleEvent.Mount(widget_id: "w1"))
+        val recent = log.recent(100)
+        expect recent.len() to_equal 1

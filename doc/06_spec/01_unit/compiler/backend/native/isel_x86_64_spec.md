@@ -293,8 +293,3 @@ test/01_unit/compiler/backend/native/isel_x86_64_spec.spl:230:1: warning SSDOC-E
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
-
-## Fixture restoration evidence (2026-10-11)
-
-Restored build_abort_module verbatim from pre-transplant ae55a746719. Both retained missing-helper Abort scenarios pass in a focused source-inline current-owner Stage 1 diagnostic; their INT3 and non-NOP assertions are unchanged. Other scenarios were not replayed.
-The source-inline diagnostic is provisional: admitted self-hosted import closure/native execution and required compiler/core/MCP/LSP gates remain outstanding. Evidence: build/phase1-backend-fixtures-20261011/x86-abort2.

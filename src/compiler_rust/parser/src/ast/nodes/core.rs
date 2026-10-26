@@ -638,10 +638,6 @@ pub enum Expr {
     New {
         kind: PointerKind,
         expr: Box<Expr>,
-        /// True when the source named the pointer kind (`new(&)`, `new*`,
-        /// `new()`, `new(alloc)`); false for bare `new X`, whose kind
-        /// depends on the memory mode (memory.md: bare `T` is `&T` under no-GC).
-        explicit_sigil: bool,
     },
     /// Type cast expression: expr as Type
     Cast {

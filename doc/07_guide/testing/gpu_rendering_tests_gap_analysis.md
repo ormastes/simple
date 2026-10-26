@@ -187,7 +187,7 @@ These tests **validate the test infrastructure itself**, not the rendering:
 - Each event type should trigger render loop and capture pixels
 
 **Example test gap:**
-```simple:skip
+```spl
 # NOT IMPLEMENTED
 describe "Event Handling":
     it "button click updates rendering":
@@ -242,7 +242,7 @@ describe "Event Handling":
 - Missing: Direct in-spec RenderDoc capture/trace extraction API
 
 **What's needed:**
-```simple:skip
+```spl
 # NOT IMPLEMENTED
 describe "RenderDoc Vulkan Capture":
     it "captures Simple rendering and compares to Chrome":
@@ -271,7 +271,7 @@ describe "RenderDoc Vulkan Capture":
 - CPU vs Metal alignment validation
 
 **Example missing:**
-```simple:skip
+```spl
 # NOT IMPLEMENTED
 describe "Metal Rendering (macOS)":
     it "logs Metal render operations":
@@ -301,7 +301,7 @@ describe "Metal Rendering (macOS)":
 - Test must cover all GUI item types, not just one scene
 
 **Example missing:**
-```simple:skip
+```spl
 # NOT IMPLEMENTED
 describe "Cross-Backend Rendering Alignment":
     it "renders same HTML identically on CPU and Vulkan":

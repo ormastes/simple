@@ -317,7 +317,6 @@ fn main():
 ## Pattern Matching and Error Handling
 
 ```simple
-use std.io_runtime.{file_exists, read_file}
 fn find_user(id: i64) -> Option<text>:
     if id == 1:
         return Some("Alice")
@@ -364,11 +363,11 @@ Create your own modules:
 
 ```simple
 # math_utils.spl
-fn double(x: i64) -> i64:
+export fn double(x: i64) -> i64:
     x * 2
 ```
 
-```text
+```simple
 # main.spl
 use math_utils.{double}
 fn main():

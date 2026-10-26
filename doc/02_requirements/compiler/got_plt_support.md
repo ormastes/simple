@@ -60,7 +60,7 @@ nop padding         # 4 bytes: 0f 1f 40 00
 
 ## Usage Example
 
-```simple:skip
+```simple
 use compiler.backend.native.got_plt_builder.{GotPltBuilder}
 use compiler.backend.native.elf_writer.{elf_writer_x86_64, elf_add_section, new_got_section, new_plt_section}
 

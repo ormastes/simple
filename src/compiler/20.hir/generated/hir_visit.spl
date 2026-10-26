@@ -24,6 +24,7 @@ fn unreachable_hir_variant(kind: text, where_: text) -> text:
     """A variant no generated arm names. Fail closed, never ignore."""
     print "[hir-visit] unhandled {kind} variant at {where_}"
     exit(1)
+    "unhandled {kind} variant at {where_}: regenerate src/compiler/20.hir/generated"
 
 fn hir_expr_kind_name(node: HirExpr) -> text:
     """Variant name of one HirExprKind, for logs and hashing."""
@@ -78,7 +79,6 @@ fn hir_expr_kind_name(node: HirExpr) -> text:
         case EnumLit(_, _, _): name = "EnumLit"
         case Cast(_, _): name = "Cast"
         case As(_, _): name = "As"
-        case ConvertCall(_, _): name = "ConvertCall"
         case Range(_, _, _, _): name = "Range"
         case Comprehension(_, _, _): name = "Comprehension"
         case CustomBlock(_, _): name = "CustomBlock"
@@ -90,7 +90,6 @@ fn hir_expr_kind_name(node: HirExpr) -> text:
         case Error: name = "Error"
         case TypeTest(_, _): name = "TypeTest"
         case TryCatch(_, _, _): name = "TryCatch"
-        case FloatLexeme(_, _): name = "FloatLexeme"
         case _: name = unreachable_hir_variant("HirExprKind", "hir_expr_kind_name")
     name
 
@@ -141,9 +140,6 @@ fn hir_gen_type_kind_name(node: HirType) -> text:
         case Any: name = "Any"
         case Tensor(_, _, _): name = "Tensor"
         case Layer(_, _): name = "Layer"
-        case Unique(_): name = "Unique"
-        case Shared(_): name = "Shared"
-        case Weak(_): name = "Weak"
         case _: name = unreachable_hir_variant("HirTypeKind", "hir_gen_type_kind_name")
     name
 
@@ -208,11 +204,8 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
         case FloatLit(_, _):
             hir_visit_nothing()
         case StringLit(_, b_interpolations):
-            match b_interpolations:
-                case Some(opt1):
-                    for it1 in opt1:
-                        hir_visit_interpolation(it1, visitor)
-                case nil: pass
+            for it1 in b_interpolations:
+                hir_visit_interpolation(it1, visitor)
         case BoolLit(_):
             hir_visit_nothing()
         case CharLit(_):
@@ -224,17 +217,11 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
         case ArrayLit(b_elements, b_type_):
             for it0 in b_elements:
                 hir_visit_expr(it0, visitor)
-            match b_type_:
-                case Some(opt1):
-                    hir_visit_type(opt1, visitor)
-                case nil: pass
+            hir_visit_type(b_type_, visitor)
         case ArrayRepeat(b_value, b_count, b_elem_type):
             hir_visit_expr(b_value, visitor)
             hir_visit_expr(b_count, visitor)
-            match b_elem_type:
-                case Some(opt2):
-                    hir_visit_type(opt2, visitor)
-                case nil: pass
+            hir_visit_type(b_elem_type, visitor)
         case TupleLit(b_elements):
             for it0 in b_elements:
                 hir_visit_expr(it0, visitor)
@@ -243,17 +230,11 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
                 hir_visit_expr(ka0, visitor)
                 hir_visit_expr(kb0, visitor)
             hir_visit_type(b_key_type, visitor)
-            match b_value_type:
-                case Some(opt2):
-                    hir_visit_type(opt2, visitor)
-                case nil: pass
+            hir_visit_type(b_value_type, visitor)
         case SetLit(b_elements, b_elem_type):
             for it0 in b_elements:
                 hir_visit_expr(it0, visitor)
-            match b_elem_type:
-                case Some(opt1):
-                    hir_visit_type(opt1, visitor)
-                case nil: pass
+            hir_visit_type(b_elem_type, visitor)
         case Var(_):
             hir_visit_nothing()
         case NamedVar(_, _):
@@ -296,17 +277,11 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
         case If(b_cond, b_then_, b_else_):
             hir_visit_expr(b_cond, visitor)
             hir_visit_block(b_then_, visitor)
-            match b_else_:
-                case Some(opt2):
-                    hir_visit_block(opt2, visitor)
-                case nil: pass
+            hir_visit_block(b_else_, visitor)
         case IfChain(b_arms, b_else_):
             for it0 in b_arms:
                 hir_visit_if_arm(it0, visitor)
-            match b_else_:
-                case Some(opt1):
-                    hir_visit_block(opt1, visitor)
-                case nil: pass
+            hir_visit_block(b_else_, visitor)
         case MatchCase(b_scrutinee, b_arms):
             hir_visit_expr(b_scrutinee, visitor)
             for it1 in b_arms:
@@ -333,15 +308,9 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
             hir_visit_expr(b_marker, visitor)
             hir_visit_block(b_body, visitor)
         case Return(b_value):
-            match b_value:
-                case Some(opt0):
-                    hir_visit_expr(opt0, visitor)
-                case nil: pass
+            hir_visit_expr(b_value, visitor)
         case Break(_, b_value):
-            match b_value:
-                case Some(opt1):
-                    hir_visit_expr(opt1, visitor)
-                case nil: pass
+            hir_visit_expr(b_value, visitor)
         case Continue(_):
             hir_visit_nothing()
         case Throw(b_value):
@@ -351,42 +320,24 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
         case Await(b_expr):
             hir_visit_expr(b_expr, visitor)
         case Yield(b_value):
-            match b_value:
-                case Some(opt0):
-                    hir_visit_expr(opt0, visitor)
-                case nil: pass
+            hir_visit_expr(b_value, visitor)
         case StructLit(b_type_, b_fields):
             hir_visit_type(b_type_, visitor)
             for (ka1, kb1) in b_fields:
                 hir_visit_expr(kb1, visitor)
         case EnumLit(b_type_, _, b_payload):
             hir_visit_type(b_type_, visitor)
-            match b_payload:
-                case Some(opt2):
-                    hir_visit_enum_payload(opt2, visitor)
-                case nil: pass
+            hir_visit_enum_payload(b_payload, visitor)
         case Cast(b_expr, b_target):
             hir_visit_expr(b_expr, visitor)
             hir_visit_type(b_target, visitor)
         case As(b_expr, b_target):
             hir_visit_expr(b_expr, visitor)
             hir_visit_type(b_target, visitor)
-        case ConvertCall(b_expr, b_target):
-            hir_visit_expr(b_expr, visitor)
-            hir_visit_type(b_target, visitor)
         case Range(b_start, b_end, _, b_step):
-            match b_start:
-                case Some(opt0):
-                    hir_visit_expr(opt0, visitor)
-                case nil: pass
-            match b_end:
-                case Some(opt1):
-                    hir_visit_expr(opt1, visitor)
-                case nil: pass
-            match b_step:
-                case Some(opt3):
-                    hir_visit_expr(opt3, visitor)
-                case nil: pass
+            hir_visit_expr(b_start, visitor)
+            hir_visit_expr(b_end, visitor)
+            hir_visit_expr(b_step, visitor)
         case Comprehension(b_kind, b_expr, b_clauses):
             hir_visit_comprehension_kind(b_kind, visitor)
             hir_visit_expr(b_expr, visitor)
@@ -413,12 +364,7 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
             hir_visit_block(b_body, visitor)
             for it1 in b_clauses:
                 hir_visit_catch_clause(it1, visitor)
-            match b_finally_:
-                case Some(opt2):
-                    hir_visit_block(opt2, visitor)
-                case nil: pass
-        case FloatLexeme(_, _):
-            hir_visit_nothing()
+            hir_visit_block(b_finally_, visitor)
         case _: unreachable_hir_variant("HirExprKind", "hir_visit_expr")
 
 fn hir_visit_stmt(node: HirStmt, visitor: HirVisitor):
@@ -514,12 +460,6 @@ fn hir_visit_type(node: HirType, visitor: HirVisitor):
                 hir_visit_dim_expr(it0, visitor)
             for it1 in b_output:
                 hir_visit_dim_expr(it1, visitor)
-        case Unique(b_inner):
-            hir_visit_type(b_inner, visitor)
-        case Shared(b_inner):
-            hir_visit_type(b_inner, visitor)
-        case Weak(b_inner):
-            hir_visit_type(b_inner, visitor)
         case _: unreachable_hir_variant("HirTypeKind", "hir_visit_type")
 
 fn hir_visit_pattern(node: HirPattern, visitor: HirVisitor):
@@ -547,10 +487,7 @@ fn hir_visit_pattern(node: HirPattern, visitor: HirVisitor):
                 hir_visit_pattern(kb1, visitor)
         case Enum(b_type_, _, b_payload):
             hir_visit_type(b_type_, visitor)
-            match b_payload:
-                case Some(opt2):
-                    hir_visit_pattern_payload(opt2, visitor)
-                case nil: pass
+            hir_visit_pattern_payload(b_payload, visitor)
         case Or(b_patterns):
             for it0 in b_patterns:
                 hir_visit_pattern(it0, visitor)
@@ -634,10 +571,7 @@ fn hir_visit_asm_constraint(node: HirAsmConstraint, visitor: HirVisitor):
     if node == nil:
         return
     hir_visit_expr(node.value, visitor)
-    match node.output_value:
-        case Some(opt1):
-            hir_visit_expr(opt1, visitor)
-        case nil: pass
+    hir_visit_expr(node.output_value, visitor)
 
 fn hir_visit_asm_match_arm(node: HirAsmMatchArm, visitor: HirVisitor):
     if node == nil:

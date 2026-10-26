@@ -159,14 +159,6 @@ fn effective_sysroot(config_sysroot: text, target: text) -> text:
         return IN_GUEST_SYSROOT
     config_sysroot
 
-fn default_sysroot_for_target(target: text) -> text:
-    """Return the architecture-owned SimpleOS sysroot directory."""
-    if target.starts_with("aarch64"):
-        return "build/os/sysroot-aarch64"
-    if target.starts_with("riscv64"):
-        return "build/os/sysroot-riscv64"
-    DEFAULT_SYSROOT
-
 # Subtrees dropped from `--source` when cross-building for `-simpleos` targets.
 # These modules are dominated by host-only externs (GPU, TLS, CUDA, Torch) with
 # no SimpleOS implementation, producing the bulk of ~2367 auto-stubs at link
@@ -377,7 +369,6 @@ fn parse_args(args: [text]) -> CrossConfig:
     var config = CrossConfig.default()
     var show_status = false
     var show_help = false
-    var sysroot_explicit = false
 
     var i = 0
     while i < args.len():
@@ -398,10 +389,8 @@ fn parse_args(args: [text]) -> CrossConfig:
             i = i + 1
             if i < args.len():
                 config.sysroot_dir = args[i]
-                sysroot_explicit = true
         else if arg.starts_with("--sysroot="):
             config.sysroot_dir = arg.slice(10, arg.len())
-            sysroot_explicit = true
         else if arg == "--jobs" or arg == "-j":
             i = i + 1
             if i < args.len():
@@ -432,6 +421,10 @@ fn parse_args(args: [text]) -> CrossConfig:
         print_usage()
         rt_exit(0)
 
+    if show_status:
+        print_status(config)
+        rt_exit(0)
+
     # Validate target
     if not is_recognized_target(config.target):
         print "ERROR: Unsupported target '{config.target}'"
@@ -445,12 +438,6 @@ fn parse_args(args: [text]) -> CrossConfig:
         rt_exit(1)
 
     config.target = normalize_target_selector(config.target)
-    if not sysroot_explicit:
-        config.sysroot_dir = default_sysroot_for_target(config.target)
-
-    if show_status:
-        print_status(config)
-        rt_exit(0)
     config
 
 # ============================================================================
@@ -484,7 +471,7 @@ fn print_status(config: CrossConfig):
         print ""
 
     # Sysroot
-    print "  sysroot ({config.sysroot_dir}):"
+    print "  sysroot:"
     print "    libc:     {if path_exists(\"{config.sysroot_dir}/lib/libsimpleos_c.a\"): \"READY\" else: \"not built\"}"
     print "    headers:  {if path_is_dir(\"{config.sysroot_dir}/include\"): \"READY\" else: \"not installed\"}"
     print "    crt0:     {if path_exists(\"{config.sysroot_dir}/lib/crt0.o\"): \"READY\" else: \"not built\"}"
@@ -511,12 +498,7 @@ fn ensure_sysroot(config: CrossConfig) -> bool:
         return true
 
     print "[sysroot] Building SimpleOS sysroot..."
-    val result =
-        if config.target.starts_with("riscv64"):
-            process.run("sh", ["scripts/os/simpleos-sysroot-riscv64.shs"])
-        else:
-            val target = rust_target_spec_name(config.target)
-            process.run("sh", ["-c", "SIMPLEOS_TARGET_TRIPLE={target} sh src/os/port/llvm/sysroot.shs"])
+    val result = process.run("sh", ["src/os/port/llvm/sysroot.shs"])
     if result.exit_code != 0:
         print "[sysroot] Build failed:"
         print result.stderr

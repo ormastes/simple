@@ -14,7 +14,7 @@
 # RUNTIME COMPATIBILITY: Uses nil-check error pattern instead of Result<T,E>
 
 
-use .deferred_subst (deferred_set_error, deferred_last_error)
+use .deferred_subst (deferred_set_error)
 use compiler.frontend.ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
 use std.string_core.{char_from_code}
 
@@ -44,27 +44,11 @@ fn read_text_field(data: [u8], offset: i64) -> (text, i64)?:
     if pos + text_len > data.len():
         deferred_set_error("Unexpected end of data reading text at offset {pos}")
         return nil
-    val text_value_opt = deferred_utf8_bytes_to_text(deferred_text_field_bytes(data, pos, pos + text_len))
+    val text_value_opt = deferred_utf8_bytes_to_text(data[pos..(pos + text_len)])
     if text_value_opt == nil:
         return nil
     val text_value = text_value_opt!
     (text_value, pos + text_len)
-
-# @workaround bug=native_deferred_range_index_2026_10_11 reason=preserve byte-array range semantics with a checked typed copy until native range lowering exists
-fn deferred_text_field_bytes(data: [u8], start: i64, end: i64) -> [u8]:
-    # Temporary native range-index workaround (#3014). Preserve half-open
-    # array slicing, including negative bounds and empty/reversed intervals.
-    val size = data.len()
-    var first = if start < 0: size + start else: start
-    var limit = if end < 0: size + end else: end
-    if first < 0: first = 0
-    if limit < 0: limit = 0
-    if limit > size: limit = size
-    var bytes: [u8] = []
-    while first < limit:
-        bytes.push(data[first])
-        first = first + 1
-    bytes
 
 fn deferred_utf8_bytes_to_text(text_bytes: [u8]) -> text?:
     if not deferred_is_valid_utf8(text_bytes):
@@ -146,11 +130,8 @@ fn read_optional_text_field(data: [u8], offset: i64) -> (text?, i64)?:
             return nil
         val result = result_opt!
         (result.0, result.1)
-    elif tag == 0x00:
-        (nil, offset + 1)
     else:
-        deferred_set_error("Invalid optional text tag at offset {offset}: {tag}")
-        nil
+        (nil, offset + 1)
 
 fn read_text_list(data: [u8], offset: i64) -> ([text], i64)?:
     """Read a list of length-prefixed text items. Returns (list, new_offset)."""
@@ -324,12 +305,10 @@ fn deserialize_function_def(data: [u8], offset: i64) -> (FunctionDef, i64)?:
         name: name,
         generic_params: generic_params,
         params: params,
-        has_return_type: return_type != nil,
-        return_type: return_type ?? "",
+        return_type: return_type,
         body: body,
         is_generic_template: is_generic,
-        has_specialization_of: specialization_of != nil,
-        specialization_of: specialization_of ?? "",
+        specialization_of: specialization_of,
         type_bindings: type_bindings
     )
     (func_def, pos)
@@ -376,8 +355,7 @@ fn deserialize_struct_def(data: [u8], offset: i64) -> (StructDef, i64)?:
         generic_params: generic_params,
         fields: fields,
         is_generic_template: is_generic,
-        has_specialization_of: specialization_of != nil,
-        specialization_of: specialization_of ?? "",
+        specialization_of: specialization_of,
         type_bindings: type_bindings
     )
     (struct_def, pos)
@@ -434,8 +412,7 @@ fn deserialize_class_def(data: [u8], offset: i64) -> (ClassDef, i64)?:
         fields: fields,
         methods: methods,
         is_generic_template: is_generic,
-        has_specialization_of: specialization_of != nil,
-        specialization_of: specialization_of ?? "",
+        specialization_of: specialization_of,
         type_bindings: type_bindings
     )
     (class_def, pos)
@@ -628,8 +605,7 @@ fn deserialize_enum_def(data: [u8], offset: i64) -> (EnumDef, i64)?:
         generic_params: generic_params,
         variants: variants,
         is_generic_template: is_generic,
-        has_specialization_of: specialization_of != nil,
-        specialization_of: specialization_of ?? "",
+        specialization_of: specialization_of,
         type_bindings: type_bindings,
         variant_payload_counts: counts_r.0,
         variant_payload_kinds: kinds_r.0,

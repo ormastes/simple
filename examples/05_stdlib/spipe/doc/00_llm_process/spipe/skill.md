@@ -49,7 +49,7 @@ What this feature does and why.
 
 ### 2. Test Groups with Docstrings
 
-```text
+```simple
 describe "MyFeature":
     """## Basic Usage -- description."""
     context "when condition":
@@ -68,7 +68,7 @@ System test files (`test/03_system/**`) MUST include `# @cover` annotations at t
 
 ### Hooks
 
-```text
+```simple
 context "with setup":
     before_each:
         setup()

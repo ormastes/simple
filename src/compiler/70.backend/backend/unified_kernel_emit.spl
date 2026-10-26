@@ -7,7 +7,7 @@
 # There is exactly ONE MirFunction here. It is built once, wrapped in one
 # MirModule, and handed unchanged to the three real sibling backends:
 #
-#   PTX    -> admitted CUDA BackendPortV1 from the selected composition
+#   PTX    -> compiler.backend.cuda_backend.CudaBackend.compile(...).ptx
 #   OpenCL -> compiler.backend.opencl_backend.OpenClBackend.compile_module_to_opencl_source(...)
 #   VHDL   -> compiler.backend.vhdl.vhdl_kernel_entity.emit_vhdl_kernel_entity(...)
 #
@@ -26,12 +26,7 @@ use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
-use compiler.backend.static_backend_registry.{
-    active_static_backend_table_v1, select_static_backend_v1}
-use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
-use compiler.backend.backend_port.{codegen_params_v1}
-use compiler.common.cuda_backend_policy.{installed_cuda_backend_mode_v1,
-    cuda_backend_request_error_v1}
+use compiler.backend.cuda_backend.{CudaBackend}
 use compiler.backend.opencl_backend.{OpenClBackend}
 use compiler.backend.vhdl.vhdl_kernel_entity.{emit_vhdl_kernel_entity, vhdl_kernel_accepts}
 
@@ -83,7 +78,7 @@ fn unified_vector_add_block() -> MirBlock:
             MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 6), MirOperand.copy(LocalId(id: 2)), [MirOperand.copy(LocalId(id: 3))]), span: nil),
             MirInst(kind: MirInstKind.Store(MirOperand.copy(LocalId(id: 6)), MirOperand.copy(LocalId(id: 9))), span: nil)
         ],
-        terminator: MirTerminator.Ret(None)
+        terminator: MirTerminator.Ret(nil)
     )
 
 fn unified_vector_add_function() -> MirFunction:
@@ -171,17 +166,11 @@ fn emit_kernel_all_backends(kernel_name: text) -> UnifiedKernelEmission:
 
     var ptx_out = ""
     var ptx_diag = ""
-    ptx_diag = cuda_backend_request_error_v1(installed_cuda_backend_mode_v1(), "cuda", "")
-    if ptx_diag == "":
-        match select_static_backend_v1("cuda", active_static_backend_table_v1()):
-            case Err(selection_error):
-                ptx_diag = "{selection_error.code()}: CUDA PTX provider is unavailable in this composition"
-            case Ok(entry):
-                var options = compileoptions_default_options()
-                options.target = CodegenTarget.CudaPtx
-                match entry.plugin.run(codegen_params_v1("cuda-ptx", "configured", "sm_86", options), module):
-                    case Ok(output): ptx_out = output.text_output
-                    case Err(error): ptx_diag = error.message
+    val ptx_result = CudaBackend.create((8, 6)).compile(module)
+    if ptx_result.is_ok():
+        ptx_out = ptx_result.unwrap().ptx
+    else:
+        ptx_diag = ptx_result.unwrap_err().message
 
     var opencl_out = ""
     var opencl_diag = ""

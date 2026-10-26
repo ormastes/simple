@@ -456,42 +456,10 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
         }
         Value::Nil => false,
         // Interpreter composites are Arc/owned Rust values, not allocations in
-        // the runtime transient scope, so they are already retained. The
-        // protocol still matches the C and Rust runtimes: promotion succeeds
-        // only inside a paused scope, so a caller that promotes outside one
-        // fails here exactly as it would natively.
-        _ => simple_runtime::value::transient_heap_scope_paused(),
+        // the runtime transient scope, so they are already retained.
+        _ => true,
     };
     Ok(Value::Bool(promoted))
-}
-
-pub fn rt_transient_heap_promote_share_begin(args: &[Value]) -> Result<Value, CompileError> {
-    if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_transient_heap_promote_share_begin requires 0 arguments",
-        ));
-    }
-    Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_begin()))
-}
-
-pub fn rt_transient_heap_promote_share_end(args: &[Value]) -> Result<Value, CompileError> {
-    if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_transient_heap_promote_share_end requires 0 arguments",
-        ));
-    }
-    Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_end()))
-}
-
-/// Observe this thread's transient parser-array scope without mutating it:
-/// 0 = no scope, 1 = active, 2 = paused (the Rust runtime's own state).
-pub fn rt_transient_array_scope_state_v1(args: &[Value]) -> Result<Value, CompileError> {
-    if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_transient_array_scope_state_v1 requires 0 arguments",
-        ));
-    }
-    Ok(Value::Int(simple_runtime::value::rt_transient_array_scope_state_v1()))
 }
 
 pub fn rt_transient_array_scope_end(args: &[Value]) -> Result<Value, CompileError> {
@@ -1882,163 +1850,20 @@ pub fn rt_ptr_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Data pointer of a packed byte array.
+/// Data pointer of a packed byte array, or 0 when there is none.
 ///
 /// Callable from Simple as: `rt_array_data_ptr(arr: [u8]) -> i64`
-///
-/// Return contract:
-/// - `ByteArray`/`FrozenByteArray` (packed `[u8]`, which every `[u8]`-typed
-///   binding now uses — see `coerce_to_declared_type`): the real data pointer,
-///   valid while the caller retains the array and does not grow it. An EMPTY
-///   packed array still answers non-zero, like the C and Rust runtimes (whose
-///   data block always exists): `text_byte_buffer` reads 0 as allocation
-///   failure. `Vec::as_ptr` is non-null even with no elements.
-/// - Any boxed `Array` (an untyped `[]` that was never bound as `[u8]`, a
-///   bare literal argument, or a non-`u8` array passed through a generic
-///   declaration): 0, meaning INVALID — "no contiguous byte storage in this
-///   engine". It is not an address, and it is not "empty". Callers MUST treat
-///   it as a failure or take a per-byte path (`text_byte_extraction_checked`
-///   reports `AllocationFailed`; `smf_mmap_native` copies byte-wise). Every
-///   `[u8]`-typed binding is packed, so a live `[u8]` held in a typed
-///   `val`/`var` never reaches this case.
-/// Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
+/// Only `ByteArray`/`FrozenByteArray` have contiguous byte storage; a boxed
+/// `Array` has no byte data pointer, so this returns 0 and callers MUST fall
+/// back to a per-byte path rather than treating 0 as an address.
 pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_array_data_ptr requires 1 argument (array)"));
     }
     Ok(Value::Int(match &args[0] {
-        Value::ByteArray(v) | Value::FrozenByteArray(v) => v.as_ptr() as i64,
+        Value::ByteArray(v) | Value::FrozenByteArray(v) if !v.is_empty() => v.as_ptr() as i64,
         _ => 0,
     }))
-}
-
-/// Bytes-basis length (interpreter twin of runtime_native.c): the logical byte
-/// count of packed `[u8]` storage, or -1 when the backing is a boxed array.
-pub fn rt_array_bytes_basis_len(args: &[Value]) -> Result<Value, CompileError> {
-    let arg = args
-        .first()
-        .ok_or_else(|| CompileError::runtime("rt_array_bytes_basis_len requires 1 argument (array)"))?;
-    Ok(Value::Int(match arg {
-        Value::ByteArray(v) | Value::FrozenByteArray(v) => v.len() as i64,
-        _ => -1,
-    }))
-}
-
-/// Bytes-basis address (interpreter twin of runtime_native.c): the data
-/// pointer of non-empty packed `[u8]` storage, or 0. The pointer stays valid
-/// while the caller retains the array value, as the native contract requires.
-pub fn rt_array_bytes_basis_ptr(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Err(CompileError::runtime("rt_array_bytes_basis_ptr requires 1 argument (array)"));
-    }
-    rt_array_data_ptr(args)
-}
-
-/// Shared element validation for the `[u8]` twins below: the logical byte
-/// count of either native representation, or -22 (matching the runtimes'
-/// `-EINVAL`) when the value is not an array, holds a non-int element, or
-/// holds an element outside `0..=255`.
-fn byte_array_validate_len(arg: &Value) -> i64 {
-    match arg {
-        Value::ByteArray(v) | Value::FrozenByteArray(v) => v.len() as i64,
-        Value::Array(items) | Value::FrozenArray(items) => {
-            for item in items.iter() {
-                match item {
-                    Value::Int(byte) if (0..=255).contains(byte) => {}
-                    _ => return -22,
-                }
-            }
-            items.len() as i64
-        }
-        Value::FixedSizeArray { data, .. } => {
-            for item in data.iter() {
-                match item {
-                    Value::Int(byte) if (0..=255).contains(byte) => {}
-                    _ => return -22,
-                }
-            }
-            data.len() as i64
-        }
-        _ => -22,
-    }
-}
-
-/// Bytes-validate (interpreter twin of runtime_native.c:9132 /
-/// runtime collections.rs): the logical byte count of a packed or boxed
-/// `[u8]`, or -22. `std.nogc_sync_mut.sffi.file_bytes` calls this on `Any`
-/// handles, so the raw-i64 generic dynamic-SFFI marshalling cannot see the
-/// value; without this registration the call died with either
-/// "unknown extern function" or "no compiler-owned ABI contract".
-pub fn rt_array_bytes_validate(args: &[Value]) -> Result<Value, CompileError> {
-    let arg = args
-        .first()
-        .ok_or_else(|| CompileError::runtime("rt_array_bytes_validate requires 1 argument (array)"))?;
-    Ok(Value::Int(byte_array_validate_len(arg)))
-}
-
-/// Checked copy (interpreter twin of runtime_native.c:9147): validates the
-/// source, refuses a short/NULL destination, then copies into the
-/// caller-owned packed storage whose pointer `rt_array_bytes_basis_ptr`
-/// handed out (a real in-process buffer hosted), returning the length.
-pub fn rt_array_bytes_copy_checked(args: &[Value]) -> Result<Value, CompileError> {
-    let source = args
-        .first()
-        .ok_or_else(|| CompileError::runtime("rt_array_bytes_copy_checked requires 3 arguments (array, out, capacity)"))?;
-    let out = args
-        .get(1)
-        .and_then(|value| value.as_int().ok())
-        .ok_or_else(|| CompileError::runtime("rt_array_bytes_copy_checked requires an integer out pointer"))?;
-    let capacity = args
-        .get(2)
-        .and_then(|value| value.as_int().ok())
-        .ok_or_else(|| CompileError::runtime("rt_array_bytes_copy_checked requires an integer capacity"))?;
-    let length = byte_array_validate_len(source);
-    if length < 0 || capacity < length || (length > 0 && out == 0) {
-        return Ok(Value::Int(-22));
-    }
-    let destination = out as usize as *mut u8;
-    match source {
-        Value::ByteArray(v) | Value::FrozenByteArray(v) => {
-            // Safety: `out` came from `rt_array_bytes_basis_ptr` for a packed
-            // buffer of `capacity >= length` bytes in this process.
-            unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), destination, length as usize) };
-        }
-        Value::Array(items) | Value::FrozenArray(items) => {
-            for (index, item) in items.iter().enumerate() {
-                // Safety: same destination contract as above; elements were
-                // range-checked by byte_array_validate_len.
-                unsafe { destination.add(index).write(item.as_int().unwrap_or_default() as u8) };
-            }
-        }
-        Value::FixedSizeArray { data, .. } => {
-            for (index, item) in data.iter().enumerate() {
-                unsafe { destination.add(index).write(item.as_int().unwrap_or_default() as u8) };
-            }
-        }
-        _ => return Ok(Value::Int(-22)),
-    }
-    Ok(Value::Int(length))
-}
-
-/// Element-agnostic alias of `rt_array_data_ptr` — the interpreter twin of a
-/// symbol BOTH runtimes already export as a direct call to their own
-/// `rt_array_data_ptr`: `src/runtime/runtime_native.c` and
-/// `src/compiler_rust/runtime/src/value/collections.rs`. Only this registry
-/// lacked the twin, so every `[u8]` caller — `src/lib/common/crypto/secure_memory.spl`,
-/// `src/lib/nogc_sync_mut/io/tcp_read_span.spl` and the two gpu SFFI modules —
-/// died with `semantic: unknown extern function: rt_array_data_ptr_text` under
-/// the interpreter (and therefore under `bin/simple test`) while the identical
-/// code worked under JIT and native. The alias carries no separate contract:
-/// see `rt_array_data_ptr`'s doc comment for the packed-vs-boxed return rule,
-/// including that a boxed array answers 0 meaning INVALID, not "empty".
-/// Bug: doc/08_tracking/bug/secure_memory_u8_zeroize_unregistered_extern_2026-10-22.md
-pub fn rt_array_data_ptr_text(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_array_data_ptr_text requires 1 argument (array)",
-        ));
-    }
-    rt_array_data_ptr(args)
 }
 
 /// Hosted `unsafe_addr_of(ref: any) -> u64` — baremetal SimpleOS code (e.g.
@@ -2288,91 +2113,6 @@ mod tests {
     }
 
     #[test]
-    fn rt_array_bytes_validate_accepts_packed_and_boxed_and_rejects_bad_elements() {
-        let packed = Value::byte_array(vec![0, 127, 255]);
-        assert_eq!(rt_array_bytes_validate(&[packed]).unwrap(), Value::Int(3));
-
-        let boxed = Value::array(vec![Value::Int(1), Value::Int(255)]);
-        assert_eq!(rt_array_bytes_validate(&[boxed]).unwrap(), Value::Int(2));
-
-        let fixed = Value::fixed_size_array(2, vec![Value::Int(7), Value::Int(8)]).unwrap();
-        assert_eq!(rt_array_bytes_validate(&[fixed]).unwrap(), Value::Int(2));
-
-        let out_of_range = Value::array(vec![Value::Int(256)]);
-        assert_eq!(rt_array_bytes_validate(&[out_of_range]).unwrap(), Value::Int(-22));
-
-        let non_int = Value::array(vec![Value::Str("x".to_string().into())]);
-        assert_eq!(rt_array_bytes_validate(&[non_int]).unwrap(), Value::Int(-22));
-
-        assert_eq!(rt_array_bytes_validate(&[Value::Int(9)]).unwrap(), Value::Int(-22));
-        assert!(rt_array_bytes_validate(&[]).is_err());
-    }
-
-    #[test]
-    fn rt_array_bytes_copy_checked_copies_and_refuses_short_or_null_destinations() {
-        let mut destination = vec![0u8; 4];
-        // The buffer never reallocates, so this one-time raw pointer stays valid.
-        let destination_ptr = destination.as_mut_ptr() as i64;
-
-        let packed = Value::byte_array(vec![9, 8, 7]);
-        let copied = rt_array_bytes_copy_checked(&[packed, Value::Int(destination_ptr), Value::Int(4)]).unwrap();
-        assert_eq!(copied, Value::Int(3));
-        assert_eq!(destination[..3], [9, 8, 7]);
-
-        let short_capacity = rt_array_bytes_copy_checked(&[
-            Value::byte_array(vec![1, 2, 3]),
-            Value::Int(destination_ptr),
-            Value::Int(2),
-        ])
-        .unwrap();
-        assert_eq!(short_capacity, Value::Int(-22), "capacity < length refuses");
-
-        let null_out = rt_array_bytes_copy_checked(&[
-            Value::byte_array(vec![1]),
-            Value::Int(0),
-            Value::Int(1),
-        ])
-        .unwrap();
-        assert_eq!(null_out, Value::Int(-22), "NULL destination with len > 0 refuses");
-
-        let invalid_source = rt_array_bytes_copy_checked(&[
-            Value::array(vec![Value::Int(-1)]),
-            Value::Int(destination_ptr),
-            Value::Int(4),
-        ])
-        .unwrap();
-        assert_eq!(invalid_source, Value::Int(-22), "unvalidated source refuses");
-    }
-
-    #[test]
-    fn transient_promote_of_composite_requires_paused_scope() {
-        // Same protocol as the C/Rust runtimes: false outside a paused scope.
-        let composite = Value::array(vec![Value::Int(1)]);
-        let promote = |v: &Value| rt_transient_heap_promote(&[v.clone()]).unwrap();
-        assert_eq!(promote(&composite), Value::Bool(false), "no scope open");
-        assert_eq!(rt_transient_array_scope_begin(&[]).unwrap(), Value::Bool(true));
-        assert_eq!(promote(&composite), Value::Bool(false), "scope open but not paused");
-        assert_eq!(rt_transient_array_scope_pause(&[]).unwrap(), Value::Bool(true));
-        assert_eq!(promote(&composite), Value::Bool(true), "paused scope");
-        assert_eq!(promote(&Value::Nil), Value::Bool(false), "nil never promotes");
-        assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
-        assert_eq!(promote(&composite), Value::Bool(false), "scope ended");
-    }
-
-    #[test]
-    fn transient_array_scope_state_v1_tracks_begin_pause_end() {
-        let state = || rt_transient_array_scope_state_v1(&[]).unwrap();
-        assert_eq!(state(), Value::Int(0), "no scope open");
-        assert_eq!(rt_transient_array_scope_begin(&[]).unwrap(), Value::Bool(true));
-        assert_eq!(state(), Value::Int(1), "active");
-        assert_eq!(rt_transient_array_scope_pause(&[]).unwrap(), Value::Bool(true));
-        assert_eq!(state(), Value::Int(2), "paused");
-        assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
-        assert_eq!(state(), Value::Int(0), "ended");
-        assert!(rt_transient_array_scope_state_v1(&[Value::Int(1)]).is_err());
-    }
-
-    #[test]
     fn rt_alloc_records_size_metadata() {
         let ptr = alloc(64);
         assert_ne!(ptr, 0, "rt_alloc(64) must not fail");
@@ -2450,13 +2190,8 @@ mod tests {
 
     #[test]
     fn transient_heap_promote_accepts_interpreter_owned_graphs() {
-        // Interpreter-owned graphs are accepted inside a paused scope, the
-        // only state in which the runtimes allow promotion at all.
-        let graph = Value::array(vec![Value::Int(1)]);
-        assert!(matches!(rt_transient_array_scope_begin(&[]), Ok(Value::Bool(true))));
-        assert!(matches!(rt_transient_array_scope_pause(&[]), Ok(Value::Bool(true))));
+        let graph = Value::Array(std::sync::Arc::new(vec![Value::Int(1)]));
         assert!(matches!(rt_transient_heap_promote(&[graph]), Ok(Value::Bool(true))));
-        assert!(matches!(rt_transient_array_scope_end(&[]), Ok(Value::Bool(true))));
         assert!(matches!(
             rt_transient_heap_promote(&[Value::Int(0)]),
             Ok(Value::Bool(false))

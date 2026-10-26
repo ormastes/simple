@@ -25,21 +25,6 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 
-fn tco_parameter_local_id_v1(func: MirFunction, argument_index: i64) -> i64:
-    # Signature params are TYPES. Argument storage belongs to MirLocal.Arg.
-    var found = -1
-    var index = 0
-    while index < func.locals.len():
-        val local: MirLocal = func.locals[index]
-        match local.kind:
-            case LocalKind.Arg(actual_index):
-                if actual_index == argument_index:
-                    if found >= 0 or local.id.id < 0: return -1
-                    found = local.id.id
-            case _: ()
-        index = index + 1
-    found
-
 # ============================================================================
 # Tail Call Optimization Pass
 # ============================================================================
@@ -106,10 +91,7 @@ impl TailCallOptimization:
             if self.is_tail_call_block(block, func_name):
                 val transformed = self.transform_tail_call(block, func)
                 new_blocks = new_blocks.push(transformed)
-                match transformed.terminator:
-                    case MirTerminator.Goto(_):
-                        self.optimized_calls = self.optimized_calls + 1
-                    case _: ()
+                self.optimized_calls = self.optimized_calls + 1
             else:
                 new_blocks = new_blocks.push(block)
 
@@ -122,19 +104,17 @@ impl TailCallOptimization:
             return false
 
         # Last instruction must be a Call
-        # @workaround bug=mir_tco_parameter_local_identity_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=retain indexed instruction declaration before enum dispatch
-        val last_inst: MirInst = insts[insts.len() - 1]
+        val last_inst = insts[insts.len() - 1]
         match last_inst.kind:
-            case MirInstKind.Call(dest, func_op, args):
+            case Call(dest, func_op, args):
                 # Check if call target is self (by function name match)
                 if not self.is_self_call(func_op, func_name):
                     return false
                 # Terminator must be Return of call result
                 match block.terminator:
-                    case MirTerminator.Ret(ret_op):
+                    case Ret(ret_op):
                         if val returned = ret_op:
-                            if val destination = dest:
-                                return self.operand_refers_to(returned, destination)
+                            return self.operand_refers_to(returned, dest)
                         false
                     case _:
                         false
@@ -179,41 +159,8 @@ impl TailCallOptimization:
         Replaces:  %r = Call(self, a1, a2) ; Return(%r)
         With:      %p0 = a1 ; %p1 = a2 ; Goto(entry_block)
         """
-        if not self.is_tail_call_block(block, func.name): return block
         val insts = block.instructions
-        # @workaround bug=mir_tco_parameter_local_identity_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=retain indexed instruction declaration before enum dispatch
-        val last_inst: MirInst = insts[insts.len() - 1]
-
-        var targets: [i64] = []
-        var sources: [i64] = []
-        match last_inst.kind:
-            case MirInstKind.Call(_, _, args):
-                if args.len() != func.signature.params.len(): return block
-                var argument_index = 0
-                while argument_index < args.len():
-                    val target = tco_parameter_local_id_v1(func, argument_index)
-                    if target < 0: return block
-                    val argument: MirOperand = args[argument_index]
-                    match argument.kind:
-                        case MirOperandKind.Copy(source):
-                            targets.push(target)
-                            sources.push(source.id)
-                        # Preserve calls whose move/constant semantics require
-                        # a different instruction or parallel-copy lowering.
-                        case _: return block
-                    argument_index = argument_index + 1
-            case _: return block
-
-        # Sequential assignments cannot implement a parameter permutation.
-        # Leave those calls intact until a parallel-copy pass supplies temps.
-        var source_index = 0
-        while source_index < sources.len():
-            var target_index = 0
-            while target_index < targets.len():
-                if source_index != target_index and sources[source_index] == targets[target_index]:
-                    return block
-                target_index = target_index + 1
-            source_index = source_index + 1
+        val last_inst = insts[insts.len() - 1]
 
         # Build new instructions: keep all except the last Call
         var new_insts: [MirInst] = []
@@ -222,14 +169,27 @@ impl TailCallOptimization:
             new_insts = new_insts.push(insts[i])
             i = i + 1
 
-        var param_idx = 0
-        while param_idx < targets.len():
-            val assign_inst = MirInst(
-                kind: MirInstKind.Copy(LocalId(id: targets[param_idx]), LocalId(id: sources[param_idx])),
-                span: last_inst.span
-            )
-            new_insts = new_insts.push(assign_inst)
-            param_idx = param_idx + 1
+        # Extract call args and generate parameter reassignment
+        match last_inst.kind:
+            case Call(dest, func_op, args):
+                # Assign each arg to the corresponding parameter local
+                var param_idx = 0
+                while param_idx < args.len() and param_idx < func.signature.params.len():
+                    val param_local = func.signature.params[param_idx]
+                    val arg = args[param_idx]
+                    val arg_local_opt: LocalId? = self.operand_to_local(arg)
+                    if val arg_local = arg_local_opt:
+                        # Copy arg value to parameter local
+                        val assign_inst = MirInst(
+                            kind: MirInstKind.Copy(param_local, arg_local),
+                            span: last_inst.span
+                        )
+                        new_insts = new_insts.push(assign_inst)
+                    else:
+                        return block
+                    param_idx = param_idx + 1
+            case _:
+                pass_do_nothing
 
         # Replace terminator: Return -> Goto(entry)
         MirBlock(

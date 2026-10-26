@@ -4,8 +4,7 @@ set -eu
 # Internal worker for resume-stage3-from-admitted.sh.  The launcher runs this
 # file in a dedicated systemd user-service cgroup so every descendant remains
 # kernel-owned even after double-fork/reparenting.
-worker_arg_count=$#
-[ "$#" -eq 28 ] || [ "$#" -eq 30 ] || [ "$#" -eq 31 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
+[ "$#" -eq 28 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
 transcript=$1 root=$2 log=$3 worker_home=$4 worker_tmp=$5 worker_path=$6
 admitted=$7 platform=$8 backend=$9
 shift 9
@@ -16,60 +15,11 @@ requested_route=$1 fallback_route=$2 process_max_kib=$3 mc_env=$4 cold_env=$5
 diagnostic_env=$6
 memory_high_mib=$7
 abi_policy=$8 abi_receipt=$9 abi_receipt_sha=${10}
-compiler_ceiling_env=${11:-}
-compiler_cap=${12:-}
-
-# The new positional value is the controller authority, including across a
-# systemd manager that drops or supplies stale ambient environment. Legacy
-# 28/30-argument callers retain only the historical host-platform default.
-if [ "$worker_arg_count" -eq 31 ]; then
-  observation_budget_ms=${13}
-else
-  observation_host=$(uname -s) || { echo 'stage3 worker: cannot identify observation host' >&2; exit 64; }
-  case "$observation_host" in FreeBSD) observation_budget_ms=5000 ;; *) observation_budget_ms=1000 ;; esac
-  [ "${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS-$observation_budget_ms}" = "$observation_budget_ms" ] || {
-    echo 'stage3 worker: unrecorded observation budget' >&2; exit 64;
-  }
-fi
-case "$observation_budget_ms" in
-  ''|0*|*[!0-9]*) echo 'stage3 worker: invalid observation budget' >&2; exit 64 ;;
-esac
-[ "${#observation_budget_ms}" -le 5 ] &&
-  [ "$observation_budget_ms" -ge 1000 ] &&
-  [ "$observation_budget_ms" -le 60000 ] || {
-    echo 'stage3 worker: observation budget must be 1000..60000 ms' >&2; exit 64;
-  }
-SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=$observation_budget_ms
-export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
 
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
-
-# This optional transport is separate from the admitted parent's historical
-# transcript. It belongs only to this newly hashed compiler invocation.
-case "$compiler_ceiling_env" in
-  '')
-    [ -z "$compiler_cap" ] && [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" != x ] || {
-      echo 'stage3 worker: unrecorded ambient compiler RSS ceiling' >&2; exit 64;
-    } ;;
-  SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=*)
-    compiler_ceiling=${compiler_ceiling_env#*=}
-    bootstrap_stage3_compiler_ceiling_valid "$compiler_ceiling" &&
-      bootstrap_stage3_compiler_ceiling_valid "$compiler_cap" &&
-      [ "$compiler_cap" -le "$compiler_ceiling" ] &&
-      [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB-$compiler_ceiling}" = "$compiler_ceiling" ] || {
-      echo 'stage3 worker: invalid or conflicting compiler RSS ceiling' >&2; exit 64;
-    }
-    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$compiler_ceiling
-    [ "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB-$compiler_cap}" = "$compiler_cap" ] || {
-      echo 'stage3 worker: conflicting compiler RSS cap' >&2; exit 64;
-    }
-    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$compiler_cap
-    export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB ;;
-  *) echo 'stage3 worker: invalid compiler RSS ceiling binding' >&2; exit 64 ;;
-esac
 
 # The caller fully verified admission. Refuse a missing or changed transfer
 # before env-i can erase its policy, or before the compiler can use its bytes.
@@ -122,7 +72,7 @@ bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   "$worker_home" "$worker_tmp" "$worker_path" RUST_LOG=error LIBRARY_PATH= \
   SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP=1 \
   SIMPLE_ABI_POLICY="$abi_policy" SIMPLE_ABI_ADMISSION_RECEIPT="$abi_receipt" \
-  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=0 \
+  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=1 \
   SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$requested_route" \
   SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$fallback_route" \
   SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" \
@@ -138,7 +88,7 @@ bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS="$threads" \
   SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache" SIMPLE_RUNTIME_PATH="$runtime" \
   SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_BINARY="$admitted" \
-  ${diagnostic_env} ${compiler_ceiling_env:+"$compiler_ceiling_env"} -- "$admitted" native-build --target "$platform" \
+  ${diagnostic_env} -- "$admitted" native-build --target "$platform" \
   --backend "$backend" --runtime-bundle core-c-bootstrap --threads "$threads" \
   ${timeout_args} --cache-dir "$cache" --mode dynload --runtime-path "$runtime" \
   -o "$candidate" src/app/cli/bootstrap_main.spl

@@ -6,9 +6,8 @@
 # built-in functions. Cell-reference resolution is depth-bounded so
 # circular references resolve to an error instead of overflowing the stack.
 
-use app.office.sheets.ascii_width.{asc_text, jis_text}
-use app.office.sheets.cell.{Cell, CellValue, CellRef, parse_cell_ref, cell_ref_to_string, cell_display_text, col_to_letter}
-use app.office.sheets.cell_ref.{CellRange, parse_range, expand_range_refs}
+use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_string}
+use app.office.sheets.cell_ref.{parse_range, expand_range_refs}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.function_registry.{sheet_function_registry_has, sheet_function_registry_evaluate}
 use std.editor.extensions.host.{extension_host_ensure_command_activated}
@@ -1194,9 +1193,9 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
     if name == "CLEAN":
         return CellValue.TextVal(value: _clean_text(s))
     if name == "ASC":
-        return CellValue.TextVal(value: asc_text(s))
+        return CellValue.TextVal(value: _asc_text(s))
     if name == "JIS" or name == "DBCS":
-        return CellValue.TextVal(value: jis_text(s))
+        return CellValue.TextVal(value: _jis_text(s))
     if name == "BAHTTEXT":
         val num = s.to_f64()
         return CellValue.TextVal(value: _bahttext_convert(num))
@@ -1289,6 +1288,61 @@ fn _text_cp_len(s: text) -> i32:
             return n
         n = n + 1
     n
+
+fn _asc_text(s: text) -> text:
+    """Convert full-width (zenkaku) ASCII U+FF01–U+FF5E to half-width
+    U+0021–U+007E by subtracting 0xFEE0. Full-width space U+3000 becomes
+    half-width space. Katakana conversion NOT modeled; other chars pass
+    through unchanged. Codepoint-safe: i64.chr() builds Unicode chars
+    (char_from_code is ASCII-only)."""
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch.len() == 0:
+            # Past the last codepoint (byte-based loop bound): done.
+            i = s.len()
+        else:
+            val code = ch.char_code_at(0)
+            if code >= 0xFF01 and code <= 0xFF5E:
+                # Full-width ASCII: subtract 0xFEE0 to get half-width
+                val hc = code - 0xFEE0
+                out = "{out}{hc.chr()}"
+            elif code == 0x3000:
+                # Full-width space to half-width space
+                out = "{out} "
+            else:
+                # All other characters pass through unchanged
+                out = "{out}{ch}"
+            i = i + 1
+    out
+
+fn _jis_text(s: text) -> text:
+    """Convert half-width ASCII U+0021–U+007E to full-width (zenkaku) by
+    adding 0xFEE0. Half-width space becomes U+3000. Katakana conversion NOT
+    modeled; other chars pass through unchanged. Codepoint-safe via
+    i64.chr()."""
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch.len() == 0:
+            i = s.len()
+        else:
+            val code = ch.char_code_at(0)
+            if code >= 0x0021 and code <= 0x007E:
+                # Half-width ASCII: add 0xFEE0 to get full-width
+                val fc = code + 0xFEE0
+                out = "{out}{fc.chr()}"
+            elif code == 0x0020:
+                # Half-width space to full-width space (U+3000)
+                val fsp = 0x3000
+                out = "{out}{fsp.chr()}"
+            else:
+                # All other characters pass through unchanged
+                out = "{out}{ch}"
+            i = i + 1
+    out
 
 fn _bahttext_convert(amount: f64) -> text:
     """Convert a number to Thai text representation in baht and satang.
@@ -5527,7 +5581,7 @@ fn _dispatch_function_3(name: text, args: [[f64]], flat: [f64], sheet: Sheet) ->
                 return CellValue.NumberVal(value: exp_f64(0.0 - z * z / 2.0) / sqrt_f64(2.0 * MATH_PI))
             return CellValue.ErrorVal(message: "PHI requires z")
         "NOW":
-            val now_micros = time_now_unix_micros()
+            val now_micros = rt_time_now_unix_micros()
             val day_part = (now_micros / 86400000000).to_f64()
             val frac = (now_micros % 86400000000).to_f64() / 86400000000.0
             return CellValue.NumberVal(value: day_part + 25569.0 + frac)
@@ -6537,7 +6591,7 @@ fn _dispatch_function_5(name: text, args: [[f64]], flat: [f64], sheet: Sheet) ->
             return CellValue.ErrorVal(message: "HYPGEOMDIST requires sample_s, number_sample, population_s, number_pop")
         "TODAY":
             # UTC day; local-timezone offset is a recorded ceiling
-            val micros = time_now_unix_micros()
+            val micros = rt_time_now_unix_micros()
             return Some(CellValue.NumberVal(value: (micros / 86400000000 + 25569).to_f64()))
         "MONTH":
             if flat.len() > 0:

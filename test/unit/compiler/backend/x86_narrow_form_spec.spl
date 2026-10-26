@@ -1,0 +1,337 @@
+# x86-64 Narrow-Form Legality — Golden Tests
+#
+# Feature ID: #COMPILER-BACKEND-X86-NARROW-FORM
+# Category:   Compiler | Backend | x86-64 Narrow Form Selection
+# Status:     Active
+#
+# Tests Task 3: legality predicates for 32-bit-form selection in x86 isel/encoder.
+# Covers:
+#   - value fitting predicates (signed/unsigned 32-bit)
+#   - per-op semantics preservation predicates
+#   - prohibited ops that must never use narrow form
+#   - combined legality decision (x86_narrow_form_legal)
+#   - i386 SysV ABI constants (Task 4 scaffolding)
+#   - benchmark gate (Task 6 scaffolding)
+#
+# Interpreter-mode note: assertions not executed in interpreter mode.
+
+use compiler.backend.lowering.x86_narrow_form.{
+    value_fits_in_i32,
+    value_fits_in_u32,
+    value_fits_in_32,
+    imm_fits_sign_extended_32,
+    imm_fits_in_i8,
+    op_preserves_semantics_at_32,
+    op_prohibited_from_narrow,
+    x86_narrow_form_legal,
+    x86_narrow_reg_form_legal,
+    i386_sysv_stack_align,
+    i386_sysv_arg_slot_bytes,
+    i386_sysv_return_reg,
+    i386_sysv_return_hi_reg,
+    i386_sysv_arg_on_stack,
+    i386_sysv_arg_offset,
+    i386_sysv_caller_saved_count,
+    i386_sysv_callee_saved_count,
+    bench_add_r64_bytes,
+    bench_add_r32_bytes,
+    narrow_form_is_same_or_shorter,
+    bench_narrow_gate_passes
+}
+
+# ============================================================================
+# value_fits_in_i32 — signed 32-bit range
+# ============================================================================
+
+describe "x86 narrow-form — value_fits_in_i32":
+    it "0 fits in i32":
+        expect(value_fits_in_i32(0)).to_equal(true)
+
+    it "2147483647 (INT32_MAX) fits in i32":
+        expect(value_fits_in_i32(2147483647)).to_equal(true)
+
+    it "-2147483648 (INT32_MIN) fits in i32":
+        expect(value_fits_in_i32(-2147483648)).to_equal(true)
+
+    it "2147483648 (INT32_MAX + 1) does not fit in i32":
+        expect(value_fits_in_i32(2147483648)).to_equal(false)
+
+    it "-2147483649 (INT32_MIN - 1) does not fit in i32":
+        expect(value_fits_in_i32(-2147483649)).to_equal(false)
+
+    it "large positive value 9999999999 does not fit in i32":
+        expect(value_fits_in_i32(9999999999)).to_equal(false)
+
+# ============================================================================
+# value_fits_in_u32 — unsigned 32-bit range
+# ============================================================================
+
+describe "x86 narrow-form — value_fits_in_u32":
+    it "0 fits in u32":
+        expect(value_fits_in_u32(0)).to_equal(true)
+
+    it "4294967295 (UINT32_MAX) fits in u32":
+        expect(value_fits_in_u32(4294967295)).to_equal(true)
+
+    it "4294967296 (UINT32_MAX + 1) does not fit in u32":
+        expect(value_fits_in_u32(4294967296)).to_equal(false)
+
+    it "negative values do not fit in u32":
+        expect(value_fits_in_u32(-1)).to_equal(false)
+
+# ============================================================================
+# value_fits_in_32 — union of signed + unsigned 32-bit
+# ============================================================================
+
+describe "x86 narrow-form — value_fits_in_32":
+    it "0 fits":
+        expect(value_fits_in_32(0)).to_equal(true)
+
+    it "INT32_MAX fits":
+        expect(value_fits_in_32(2147483647)).to_equal(true)
+
+    it "UINT32_MAX fits (via unsigned path)":
+        expect(value_fits_in_32(4294967295)).to_equal(true)
+
+    it "UINT32_MAX + 1 does not fit":
+        expect(value_fits_in_32(4294967296)).to_equal(false)
+
+    it "INT32_MIN fits":
+        expect(value_fits_in_32(-2147483648)).to_equal(true)
+
+    it "INT32_MIN - 1 does not fit":
+        expect(value_fits_in_32(-2147483649)).to_equal(false)
+
+# ============================================================================
+# imm_fits_sign_extended_32
+# ============================================================================
+
+describe "x86 narrow-form — imm_fits_sign_extended_32":
+    it "0 fits":
+        expect(imm_fits_sign_extended_32(0)).to_equal(true)
+
+    it "INT32_MAX fits":
+        expect(imm_fits_sign_extended_32(2147483647)).to_equal(true)
+
+    it "INT32_MAX + 1 does not fit (cannot sign-extend into 64 bits as imm32)":
+        expect(imm_fits_sign_extended_32(2147483648)).to_equal(false)
+
+# ============================================================================
+# imm_fits_in_i8
+# ============================================================================
+
+describe "x86 narrow-form — imm_fits_in_i8":
+    it "0 fits in i8":
+        expect(imm_fits_in_i8(0)).to_equal(true)
+
+    it "127 fits in i8":
+        expect(imm_fits_in_i8(127)).to_equal(true)
+
+    it "-128 fits in i8":
+        expect(imm_fits_in_i8(-128)).to_equal(true)
+
+    it "128 does not fit in i8":
+        expect(imm_fits_in_i8(128)).to_equal(false)
+
+    it "-129 does not fit in i8":
+        expect(imm_fits_in_i8(-129)).to_equal(false)
+
+# ============================================================================
+# op_preserves_semantics_at_32 — approved ops (safe rewrites)
+# ============================================================================
+
+describe "x86 narrow-form — op_preserves_semantics_at_32 approved ops":
+    it "add is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("add")).to_equal(true)
+
+    it "sub is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("sub")).to_equal(true)
+
+    it "and is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("and")).to_equal(true)
+
+    it "or is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("or")).to_equal(true)
+
+    it "xor is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("xor")).to_equal(true)
+
+    it "mov is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("mov")).to_equal(true)
+
+    it "shl is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("shl")).to_equal(true)
+
+    it "shr is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("shr")).to_equal(true)
+
+    it "sar is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("sar")).to_equal(true)
+
+    it "not is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("not")).to_equal(true)
+
+    it "neg is safe at 32-bit":
+        expect(op_preserves_semantics_at_32("neg")).to_equal(true)
+
+    it "imul3 is safe at 32-bit (3-operand low-result)":
+        expect(op_preserves_semantics_at_32("imul3")).to_equal(true)
+
+# ============================================================================
+# op_preserves_semantics_at_32 — rejected ops (unsafe rewrites)
+# ============================================================================
+
+describe "x86 narrow-form — op_preserves_semantics_at_32 rejected ops":
+    it "mul is not safe (unsigned wide result RDX:RAX)":
+        expect(op_preserves_semantics_at_32("mul")).to_equal(false)
+
+    it "div is not safe (uses RDX:RAX)":
+        expect(op_preserves_semantics_at_32("div")).to_equal(false)
+
+    it "idiv is not safe (signed wide operands)":
+        expect(op_preserves_semantics_at_32("idiv")).to_equal(false)
+
+    it "unknown_op is not safe":
+        expect(op_preserves_semantics_at_32("unknown_op")).to_equal(false)
+
+# ============================================================================
+# op_prohibited_from_narrow — prohibited ops golden list
+# ============================================================================
+
+describe "x86 narrow-form — op_prohibited_from_narrow":
+    it "mul is prohibited":
+        expect(op_prohibited_from_narrow("mul")).to_equal(true)
+
+    it "div is prohibited":
+        expect(op_prohibited_from_narrow("div")).to_equal(true)
+
+    it "idiv is prohibited":
+        expect(op_prohibited_from_narrow("idiv")).to_equal(true)
+
+    it "rdtsc is prohibited":
+        expect(op_prohibited_from_narrow("rdtsc")).to_equal(true)
+
+    it "syscall is prohibited":
+        expect(op_prohibited_from_narrow("syscall")).to_equal(true)
+
+    it "add is not prohibited":
+        expect(op_prohibited_from_narrow("add")).to_equal(false)
+
+    it "mov is not prohibited":
+        expect(op_prohibited_from_narrow("mov")).to_equal(false)
+
+    it "xor is not prohibited":
+        expect(op_prohibited_from_narrow("xor")).to_equal(false)
+
+# ============================================================================
+# x86_narrow_form_legal — combined decision (golden tests)
+# ============================================================================
+
+describe "x86 narrow-form — x86_narrow_form_legal safe rewrites":
+    it "add with value 42 is legal":
+        expect(x86_narrow_form_legal("add", 42)).to_equal(true)
+
+    it "xor with value 0 is legal":
+        expect(x86_narrow_form_legal("xor", 0)).to_equal(true)
+
+    it "mov with UINT32_MAX is legal":
+        expect(x86_narrow_form_legal("mov", 4294967295)).to_equal(true)
+
+    it "and with INT32_MIN is legal":
+        expect(x86_narrow_form_legal("and", -2147483648)).to_equal(true)
+
+    it "sub with small negative is legal":
+        expect(x86_narrow_form_legal("sub", -100)).to_equal(true)
+
+describe "x86 narrow-form — x86_narrow_form_legal rejected rewrites":
+    it "add with value exceeding UINT32_MAX is illegal":
+        expect(x86_narrow_form_legal("add", 4294967296)).to_equal(false)
+
+    it "mul is always illegal regardless of value":
+        expect(x86_narrow_form_legal("mul", 1)).to_equal(false)
+
+    it "div is always illegal":
+        expect(x86_narrow_form_legal("div", 1)).to_equal(false)
+
+    it "rdtsc is always illegal":
+        expect(x86_narrow_form_legal("rdtsc", 0)).to_equal(false)
+
+    it "mov with value INT32_MIN - 1 is illegal":
+        expect(x86_narrow_form_legal("mov", -2147483649)).to_equal(false)
+
+# ============================================================================
+# x86_narrow_reg_form_legal — register-register form
+# ============================================================================
+
+describe "x86 narrow-form — x86_narrow_reg_form_legal":
+    it "add with 32-bit src and dst is legal":
+        expect(x86_narrow_reg_form_legal("add", 32, 32)).to_equal(true)
+
+    it "mov with 16-bit src and 32-bit dst is legal":
+        expect(x86_narrow_reg_form_legal("mov", 16, 32)).to_equal(true)
+
+    it "add with 64-bit src is illegal":
+        expect(x86_narrow_reg_form_legal("add", 64, 32)).to_equal(false)
+
+    it "add with 64-bit dst is illegal":
+        expect(x86_narrow_reg_form_legal("add", 32, 64)).to_equal(false)
+
+    it "mul with 32-bit regs is illegal (prohibited op)":
+        expect(x86_narrow_reg_form_legal("mul", 32, 32)).to_equal(false)
+
+# ============================================================================
+# Task 4 — i386 SysV ABI constants
+# ============================================================================
+
+describe "x86 narrow-form — i386 SysV ABI constants":
+    it "stack alignment is 16 bytes":
+        expect(i386_sysv_stack_align()).to_equal(16)
+
+    it "argument slot is 4 bytes":
+        expect(i386_sysv_arg_slot_bytes()).to_equal(4)
+
+    it "return register is EAX (register 0)":
+        expect(i386_sysv_return_reg()).to_equal(0)
+
+    it "high return register is EDX (register 2) for 64-bit values":
+        expect(i386_sysv_return_hi_reg()).to_equal(2)
+
+    it "all arguments are passed on stack":
+        expect(i386_sysv_arg_on_stack(0)).to_equal(true)
+        expect(i386_sysv_arg_on_stack(5)).to_equal(true)
+
+    it "arg0 is at EBP+8":
+        expect(i386_sysv_arg_offset(0)).to_equal(8)
+
+    it "arg1 is at EBP+12":
+        expect(i386_sysv_arg_offset(1)).to_equal(12)
+
+    it "arg4 is at EBP+24":
+        expect(i386_sysv_arg_offset(4)).to_equal(24)
+
+    it "caller-saved count is 3 (EAX, ECX, EDX)":
+        expect(i386_sysv_caller_saved_count()).to_equal(3)
+
+    it "callee-saved count is 4 (EBX, ESI, EDI, EBP)":
+        expect(i386_sysv_callee_saved_count()).to_equal(4)
+
+# ============================================================================
+# Task 6 — Benchmark gate skeleton
+# ============================================================================
+
+describe "x86 narrow-form — benchmark gate":
+    it "r32 add encoding is shorter than r64 add":
+        expect(bench_add_r32_bytes()).to_be_less_than(bench_add_r64_bytes())
+
+    it "narrow_form_is_same_or_shorter passes when narrow <= wide":
+        expect(narrow_form_is_same_or_shorter(4, 2)).to_equal(true)
+        expect(narrow_form_is_same_or_shorter(4, 4)).to_equal(true)
+
+    it "narrow_form_is_same_or_shorter fails when narrow > wide":
+        expect(narrow_form_is_same_or_shorter(2, 4)).to_equal(false)
+
+    it "bench_narrow_gate_passes for legal add with small value":
+        expect(bench_narrow_gate_passes("add", 100)).to_equal(true)
+
+    it "bench_narrow_gate_passes returns false for prohibited ops":
+        expect(bench_narrow_gate_passes("mul", 1)).to_equal(false)

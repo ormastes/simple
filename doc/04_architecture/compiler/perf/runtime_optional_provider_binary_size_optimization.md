@@ -1,16 +1,5 @@
 # Runtime Optional Provider and Binary-Size Optimization Architecture
 
-## 2026-10-09 release compatibility and shared owners
-
-The [shared provider interface handoff](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md)
-maps this design to release `59499d74697`, separates production contracts from
-planned type names, and records the unlanded compiler/app integrations. Reuse
-the existing provider-query, metadata-admission, loader/session and environment
-owners. CPU and GPU providers share policy and evidence responsibilities while
-retaining their distinct operation ABI and lifetime rules. The core type list
-below is architectural intent, not an implementation inventory. This dated
-update preserves the selected requirements and adds no runtime completion claim.
-
 ## Decision
 
 Use a minimal base runtime plus sealed demand-loaded provider capsules. Provider registration is metadata-only. The linker consumes an exact reachability manifest, and the loader consumes a separate capability-admission manifest. Pure-Simple and foreign implementations coexist behind one typed provider slot until the pure-Simple implementation satisfies promotion gates.
@@ -65,12 +54,3 @@ The [dynamic runtime/kernel provider composition design](../dynamic_runtime_kern
 joins this selected policy to bootstrap cdylib authority, sole-owner Cocoa
 exports, existing SCI/KPF interfaces and aspect mapping/lifecycle evidence.
 It preserves the requirements above and adds no completion claim.
-
-## 2026-10-02 current-source activation and closure update
-
-The [item 5 activation and closure architecture](item5_provider_activation_and_closure_2026-10-02.md)
-defines ownership, startup/request paths, cache keys and invalidation against
-current source. Reuse the existing SMF provider loader; metadata admission and
-a call permit do not prove actual activation. The named historical exact
-closure implementation is absent in the inspected baseline. These are open
-implementation/evidence obligations, not architecture scope reductions.

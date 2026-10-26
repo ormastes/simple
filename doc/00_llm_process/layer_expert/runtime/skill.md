@@ -22,12 +22,6 @@ Maintain process knowledge for the `runtime` layer: owned source, architecture l
 
 ## Boundary Rules
 
-- [Text-hash provider ABI](../../../07_guide/tooling/windows_phase2_runtime_capsule.md#text-hashing-across-runtime-providers):
-  `rt_hash_text` consumes a tagged handle and hashes all bytes, including embedded
-  NUL. C `rt_str_hash` consumes a raw C string; the same symbol is not ABI-uniform
-  across providers. Preserve raw callers and verify repaired typed calls with
-  the exact runtime/producer pair before claiming native parity.
-
 - Pure Simple first: never a C implementation where pure Simple can do it; the C runtime is a boundary, not a place for logic. Bootstrap-required C keeps a pure-Simple twin (`scripts/check/check-dual-run-shadow.shs`). HAL code minimizes inline asm (typed register views > optimization-restraining tags > intrinsics > asm for irreplaceable ops only). Full policy: [pure_simple_hal.md](../../../07_guide/os/hal/pure_simple_hal.md).
 
 - Every `rt_*` symbol is expected in BOTH lanes (Rust runtime and C runtime); `scripts/check/check-rt-dual-implementation-ratchet.shs` freezes the single-lane set and blocks pushes that add one. It matches C definitions per line via `rt_NAME(...) {`, so a wrapped C signature is invisible (why `rt_mem_snapshot_record`, defined at `src/runtime/runtime.c:2078`, is baselined as rust-only). Write single-line C signatures, and define strong symbols after the `#undef SPL_HOSTED_UNAVAILABLE_WEAK` at `src/runtime/runtime_native.c:675`. Details: [binary_runtime_hardening](../../feature_expert/binary_runtime_hardening/skill.md) § rt_* dual-lane ratchet landmines.

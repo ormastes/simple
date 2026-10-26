@@ -1,4 +1,3 @@
-use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
 # SMF File Cache with mmap
 #
 # Memory-mapped file cache for efficient SMF file loading.
@@ -17,8 +16,8 @@ use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
 # - Reads template bytes directly from mapped memory
 
 use compiler.monomorphize.note_sdn (NoteSdnMetadata, PossibleInstantiationEntry, InstantiationEntry, InstantiationStatus)
-use compiler.backend.linker.smf_reader (SmfReaderImpl, SmfReaderHeader, SmfFlags)
-use compiler.backend.linker.smf_header (SMF_HEADER_SIZE)
+use ..linker.smf_reader (SmfReaderImpl, SmfReaderHeader, SmfFlags)
+use ..linker.smf_header (SMF_HEADER_SIZE)
 use .smf_mmap_native.{native_mmap_file, native_munmap, native_mmap_read_bytes, native_mmap_read_string, native_madvise}
 use std.sdn.parser (parse)
 use std.sdn.value (SdnValue)
@@ -394,6 +393,7 @@ fn parse_header_minimal(bytes: [u8]) -> SmfReaderHeader:
 
     ROBUSTNESS: Falls back to safe defaults if bytes are too short.
     """
+    use ..linker.smf_enums (Platform, Arch, CompressionType)
 
     if bytes.len() < 128:
         # Insufficient data - return minimal defaults
@@ -641,22 +641,20 @@ fn smf_semantic_text_hash(input: text) -> text:
 # Validated SMF Loading
 # ============================================================================
 
-use compiler.driver.cache.compile_options_hash.{
-    CompileOptionsHash,
-    compile_options_hash_from_bytes, compile_options_hash_validate
-}
-use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
-use compiler.driver.cache.cache_validator.{SmfValidationSnapshot}
-use compiler.driver.driver_api_compile_single.{smf_expected_compile_options_hash}
-
-fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text], native_target: text = "") -> Result<MappedSmf, text>:
+fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> Result<MappedSmf, text>:
     """Load an SMF file with backend/options validation.
 
     Checks that the cached SMF was compiled with matching options.
     On mismatch, prints a WARNING and returns Err so caller can recompile.
     """
+    use compiler.driver.cache.compile_options_hash.{
+        CompileOptionsHash, compile_options_hash_compute,
+        compile_options_hash_from_bytes, compile_options_hash_validate
+    }
+    use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
+
     # Compute current options hash
-    val current_hash = smf_expected_compile_options_hash(backend, opt_level, release, debug_info, gc_off, profile, allowed_families, native_target)?
+    val current_hash = compile_options_hash_compute(backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
 
     # Open the SMF file
     val mapped_result = MappedSmf.open(smf_path)
@@ -667,18 +665,7 @@ fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_leve
             return mapped_result
 
     # Read compile options hash from header reserved bytes
-    # SmfReaderHeader is compact metadata and has no options-byte accessor.
-    # Reuse the canonical snapshot extractor on this same mapping's fixed-size
-    # trailer; do not reopen a replaceable path or copy the whole artifact.
-    if mapped.size < SMF_HEADER_SIZE:
-        val _ = mapped.close()
-        return Err("SMF mapped header is truncated")
-    val trailer = mmap_read_bytes(mapped.address, mapped.size - SMF_HEADER_SIZE, SMF_HEADER_SIZE)
-    if trailer.len() != SMF_HEADER_SIZE:
-        val _ = mapped.close()
-        return Err("SMF mapped header could not be read")
-    val snapshot = SmfValidationSnapshot(data: trailer)
-    val reserved_bytes = snapshot.reserved_bytes()
+    val reserved_bytes = mapped.header.get_compile_options_bytes()
     val stored_hash = compile_options_hash_from_bytes(reserved_bytes)
 
     # NOTE: a zero stored hash (old-format SMF) is NOT accepted — validate
@@ -695,9 +682,9 @@ fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_leve
 
     Ok(mapped)
 
-fn validated_smf_load_with_semantics(smf_path: text, source_path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text], expected_semantics: SmfSemanticFingerprint, native_target: text = "") -> Result<MappedSmf, text>:
+fn validated_smf_load_with_semantics(smf_path: text, source_path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text], expected_semantics: SmfSemanticFingerprint) -> Result<MappedSmf, text>:
     """Load an SMF and fail closed on public ABI/accessor/field-wrapper mismatch."""
-    val mapped = validated_smf_load(smf_path, source_path, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, native_target)?
+    val mapped = validated_smf_load(smf_path, source_path, backend, opt_level, release, debug_info, gc_off, profile, allowed_families)?
     val stored_semantics_result = mapped.read_semantic_fingerprint()
     val stored_semantics = match stored_semantics_result:
         case Ok(value):

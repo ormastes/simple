@@ -22,7 +22,7 @@
 
 ### Lane 1 — 2D drawing (Simple2D / Engine2D)
 
-```simple:skip
+```simple
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
 # Auto-detect the best backend:
@@ -41,7 +41,7 @@ free by naming `"metal"`; do not hand-construct `MetalBackend`.
 
 ### Lane 2 — HTML → pixels (WebRenderer)
 
-```simple:skip
+```simple
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend}
 
 # engine = "pure_simple" (native Engine2D layout/paint) or "chromium" (real Electron OSR)

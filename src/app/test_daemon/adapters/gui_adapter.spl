@@ -5,7 +5,7 @@
 
 use app.test_daemon.session_types.{
     SessionKey, SessionDescriptor, SessionLease, TestSessionMeta,
-    session_key_to_id, session_lease_new, session_descriptor_instance_id, session_lease_from_descriptor
+    session_key_to_id, session_lease_new
 }
 use app.test_daemon.{
     SESSION_KIND_GUI, SESSION_KIND_BROWSER, LEASE_IDLE, LEASE_ACTIVE,
@@ -129,9 +129,7 @@ impl GuiAdapter:
         - headless: launches with virtual framebuffer (Xvfb)
         - container: launches inside a container with Xvfb
         """
-        var lease = session_lease_from_descriptor(desc)
-        if lease.session_id == "":
-            return lease
+        var lease = session_lease_new(desc.key)
 
         if self.mode == "headless":
             return self.start_headless(desc)
@@ -215,13 +213,11 @@ impl GuiAdapter:
         """
         Starts Xvfb virtual framebuffer, then launches the GUI app.
         """
-        if session_descriptor_instance_id(desc) == "":
-            return session_lease_from_descriptor(desc)
         val xvfb_env: {text: text} = {}
         val xvfb_pid = process_spawn_async_env("Xvfb", [":99", "-screen", "0", "1280x1024x24"], xvfb_env)
 
         if xvfb_pid <= 0:
-            return session_lease_from_descriptor(desc)
+            return session_lease_new(desc.key)
 
         thread_sleep(500)
 
@@ -244,7 +240,7 @@ impl GuiAdapter:
         val effective_pid = if app_pid > 0: app_pid else: xvfb_pid
         val now = time_now_unix_micros()
         SessionLease(
-            session_id: session_descriptor_instance_id(desc),
+            session_id: session_key_to_id(desc.key),
             key: desc.key,
             pid: effective_pid,
             qmp_socket: "{xvfb_pid}",
@@ -259,10 +255,6 @@ impl GuiAdapter:
         """
         Starts a container with Xvfb for isolated GUI testing.
         """
-        if session_descriptor_instance_id(desc) == "":
-            return session_lease_from_descriptor(desc)
-        # Resource naming/lifecycle remains legacy here; this mode is excluded
-        # from the descriptor-based external-instance identity qualification.
         val image = desc.config["container_image"] ?? "simple-gui-test:latest"
         val container_env: {text: text} = {}
         val pid = process_spawn_async_env(
@@ -294,11 +286,9 @@ impl GuiAdapter:
         """
         Launches the GUI application directly on the current display.
         """
-        if session_descriptor_instance_id(desc) == "":
-            return session_lease_from_descriptor(desc)
         val app_cmd = desc.config["startup_cmd"] ?? ""
         if app_cmd == "":
-            return session_lease_from_descriptor(desc)
+            return session_lease_new(desc.key)
 
         val parts = app_cmd.split(" ")
         val cmd = parts[0]
@@ -312,13 +302,13 @@ impl GuiAdapter:
         val pid = process_spawn_async_env(cmd, args, env)
 
         if pid <= 0:
-            return session_lease_from_descriptor(desc)
+            return session_lease_new(desc.key)
 
         thread_sleep(500)
 
         val now = time_now_unix_micros()
         SessionLease(
-            session_id: session_descriptor_instance_id(desc),
+            session_id: session_key_to_id(desc.key),
             key: desc.key,
             pid: pid,
             qmp_socket: "",

@@ -26,9 +26,7 @@ use std.test_runner.test_runner_types.{TestExecutionMode, TestLevel, TestOptions
 use compiler.common.assurance.policy_names.{normalize_profile_name, valid_profile_names_help}
 
 use std.io_runtime.{file_exists}
-use std.common.convert.{try_parse_in_range}
 use std.nogc_sync_mut.test_runner.resource_policy.{test_default_max_procs, test_max_procs_value_valid}
-use std.test_runner.native_compile_contract.{native_test_source_roots_error}
 
 # =========================================================================
 # Mode String Parsing
@@ -78,7 +76,7 @@ fn parse_mode_str(m: text) -> TestExecutionMode:
 
 fn _test_arg_is_numeric_option(arg: text) -> bool:
     (
-        arg == "--max-mem" or arg == "--worker-memory-mb" or arg == "--max-procs" or arg == "--cpu-threshold" or arg == "--mem-threshold" or
+        arg == "--max-mem" or arg == "--max-procs" or arg == "--cpu-threshold" or arg == "--mem-threshold" or
         arg == "--resource-limit" or arg == "--max-workers" or
         arg == "--parallel-timeout" or arg == "--fuzz-time" or
         arg == "--chaos-trials" or arg == "--chaos-fault-rate" or
@@ -91,7 +89,7 @@ fn _test_arg_is_signed_number(value: text) -> bool:
 
 fn _test_arg_has_empty_equals_value(arg: text) -> bool:
     (
-        arg == "--max-mem=" or arg == "--worker-memory-mb=" or arg == "--max-procs=" or arg == "--execution-mode=" or
+        arg == "--max-mem=" or arg == "--max-procs=" or arg == "--execution-mode=" or
         arg == "--cpu-threshold=" or arg == "--mem-threshold=" or
         arg == "--resource-limit=" or arg == "--max-workers=" or
         arg == "--parallel-timeout=" or arg == "--fuzz-time=" or
@@ -101,17 +99,15 @@ fn _test_arg_has_empty_equals_value(arg: text) -> bool:
         arg == "--batch-result=" or arg == "--session-kind=" or
         arg == "--max-sessions=" or arg == "--session-reset=" or
         arg == "--sdoctest-env=" or arg == "--mode=" or
-        arg == "--native-backend=" or arg == "--native-source=" or
         arg == "--timeout=" or arg == "--seed=" or arg == "--format="
     )
 
 fn test_args_validation_error(args: [text]) -> text:
     var i = 0
-    var native_source_roots: [text] = []
     while i < args.len():
         val arg = args[i]
         val needs_value = (
-            arg == "--max-mem" or arg == "--worker-memory-mb" or arg == "--max-procs" or arg == "--execution-mode" or
+            arg == "--max-mem" or arg == "--max-procs" or arg == "--execution-mode" or
             arg == "--cpu-threshold" or arg == "--mem-threshold" or
             arg == "--resource-limit" or arg == "--max-workers" or
             arg == "--parallel-timeout" or arg == "--fuzz-time" or
@@ -120,8 +116,7 @@ fn test_args_validation_error(args: [text]) -> text:
             arg == "--batch-size" or arg == "--session-kind" or
             arg == "--max-sessions" or arg == "--session-reset" or
             arg == "--sdoctest-env" or arg == "--tag" or arg == "--format" or
-            arg == "--mode" or arg == "--native-backend" or arg == "--native-source" or
-            arg == "--timeout" or arg == "--seed" or
+            arg == "--mode" or arg == "--timeout" or arg == "--seed" or
             arg == "--profile"
         )
         if needs_value:
@@ -131,28 +126,13 @@ fn test_args_validation_error(args: [text]) -> text:
             if value == "" or (value.starts_with("-") and
                 (not _test_arg_is_numeric_option(arg) or not _test_arg_is_signed_number(value))):
                 return "missing value for {arg}"
-            if arg == "--format" and value == "json":
-                return "JSON test output is retired; use --format sdn"
-            if arg == "--format" and value != "text" and value != "sdn" and value != "doc":
+            if arg == "--format" and value != "text" and value != "json" and value != "doc":
                 return "invalid value for --format: {value}"
-            if arg == "--worker-memory-mb" and (try_parse_in_range(value, 1, 1048576) == nil):
-                return "invalid value for --worker-memory-mb: {value} (expected 1..1048576 MiB)"
             if arg == "--max-procs" and not test_max_procs_value_valid(value):
                 return "invalid value for --max-procs: {value} (expected a nonnegative integer)"
             if arg == "--profile" and normalize_profile_name(value) == "":
                 return "invalid value for --profile: {value} (valid: {valid_profile_names_help()})"
-            if arg == "--native-backend" and value != "llvm" and value != "cranelift":
-                return "invalid value for --native-backend: {value} (expected llvm or cranelift)"
-            if arg == "--native-source":
-                native_source_roots.push(value)
             i = i + 2
-            continue
-
-        if arg.starts_with("--worker-memory-mb="):
-            val value = arg.substring(19)
-            if try_parse_in_range(value, 1, 1048576) == nil:
-                return "invalid value for --worker-memory-mb: {value} (expected 1..1048576 MiB)"
-            i = i + 1
             continue
 
         if arg.starts_with("--max-procs="):
@@ -169,23 +149,9 @@ fn test_args_validation_error(args: [text]) -> text:
             i = i + 1
             continue
 
-        if arg.starts_with("--native-backend=") and arg != "--native-backend=":
-            val value = arg.substring(17)
-            if value != "llvm" and value != "cranelift":
-                return "invalid value for --native-backend: {value} (expected llvm or cranelift)"
-            i = i + 1
-            continue
-
-        if arg.starts_with("--native-source=") and arg != "--native-source=":
-            native_source_roots.push(arg.substring(16))
-            i = i + 1
-            continue
-
         if arg.starts_with("--format=") and arg != "--format=":
             val fmt_value = arg.substring(9)
-            if fmt_value == "json":
-                return "JSON test output is retired; use --format=sdn"
-            if fmt_value != "text" and fmt_value != "sdn" and fmt_value != "doc":
+            if fmt_value != "text" and fmt_value != "json" and fmt_value != "doc":
                 return "invalid value for --format: {fmt_value}"
             i = i + 1
             continue
@@ -218,7 +184,6 @@ fn test_args_validation_error(args: [text]) -> text:
             arg == "--no-session-daemon" or arg == "--session-debug" or
             arg == "--sdoctest" or arg == "--sdoctest-force" or arg == "--doc" or
             arg == "--compile" or arg.starts_with("--max-mem=") or
-            arg.starts_with("--native-backend=") or arg.starts_with("--native-source=") or
             arg.starts_with("--execution-mode=") or arg.starts_with("--cpu-threshold=") or
             arg.starts_with("--mem-threshold=") or arg.starts_with("--resource-limit=") or
             arg.starts_with("--max-workers=") or arg.starts_with("--parallel-timeout=") or
@@ -236,7 +201,7 @@ fn test_args_validation_error(args: [text]) -> text:
         if _test_arg_has_empty_equals_value(arg):
             return "missing value for {arg.substring(0, arg.len() - 1)}"
         i = i + 1
-    native_test_source_roots_error(native_source_roots)
+    ""
 
 fn parse_test_args(args: [text]) -> TestOptions:
     var path = ""
@@ -249,8 +214,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var tag = ""
     var fail_fast = false
     var mode = TestExecutionMode.Interpreter
-    var native_backend = ""
-    var native_source_roots: [text] = []
     var timeout = 120
     var list = false
     var list_ignored = false
@@ -265,7 +228,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var force_rebuild = false
     var keep_artifacts = false
     var run_all = false
-    var whole = false
     # --unstable / --no-unstable: run each unit in its own process and continue
     # to the end of the list, classifying outcomes (OK/ERROR/CRASHED/
     # TERMINATED/TIMEOUT/NOT_RUN). Default: ON for the bootstrap path, OFF for
@@ -317,7 +279,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var mem_check = false
     var fork_mode = false
     var resource_limit_pct = 75
-    var worker_memory_mb = 0
     var no_cache = false
     var refresh_manifest = false
     var manifest_status = false
@@ -377,7 +338,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
             unstable_mode = false
             unstable_mode_set = true
         elif arg == "--whole":
-            whole = true
             run_all = true
             sdoctest = true
             spl_doctest = true
@@ -389,12 +349,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
             planned_only = true
         elif arg == "--no-limits":
             no_limits = true
-        elif arg == "--worker-memory-mb":
-            i = i + 1
-            if i < args.len(): worker_memory_mb = try_parse_in_range(args[i], 1, 1048576) ?? 0
-        elif arg.starts_with("--worker-memory-mb="):
-            val memory_value = arg.substring(19)
-            worker_memory_mb = try_parse_in_range(memory_value, 1, 1048576) ?? 0
         elif arg == "--max-mem":
             i = i + 1
             if i < args.len():
@@ -599,11 +553,11 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--format":
             i = i + 1
             if i < args.len():
-                if args[i] == "text" or args[i] == "sdn" or args[i] == "doc":
+                if args[i] == "text" or args[i] == "json" or args[i] == "doc":
                     format = args[i]
         elif arg.starts_with("--format="):
             val fmt = arg.substring(9)
-            if fmt == "text" or fmt == "sdn" or fmt == "doc":
+            if fmt == "text" or fmt == "json" or fmt == "doc":
                 format = fmt
         elif arg == "--compile":
             mode = TestExecutionMode.Compile
@@ -614,17 +568,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg.starts_with("--mode="):
             val m = arg.replace("--mode=", "")
             mode = parse_mode_str(m)
-        elif arg == "--native-backend":
-            i = i + 1
-            if i < args.len():
-                native_backend = args[i]
-        elif arg.starts_with("--native-backend="):
-            native_backend = arg.substring(17)
-        elif arg == "--native-source":
-            i = i + 1
-            if i < args.len(): native_source_roots.push(args[i])
-        elif arg.starts_with("--native-source="):
-            native_source_roots.push(arg.substring(16))
         elif arg == "--timeout":
             i = i + 1
             if i < args.len():
@@ -665,16 +608,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
                 path_explicit = true
         i = i + 1
 
-    if native_source_roots.len() > 0 and native_backend == "":
-        native_backend = "llvm"
-    if native_backend != "":
-        mode = TestExecutionMode.Native
-        # Legacy cache and daemon entries do not bind the selected producer.
-        no_cache = true
-        assert_ran = true
-        session_daemon = false
-        session_share = false
-
     if path == "":
         path = "test/"
     if paths.len() == 0:
@@ -692,8 +625,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
         tag: tag,
         fail_fast: fail_fast,
         mode: mode,
-        native_backend: native_backend,
-        native_source_roots: native_source_roots,
         timeout: timeout,
         list: list,
         list_ignored: list_ignored,
@@ -708,7 +639,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
         force_rebuild: force_rebuild,
         keep_artifacts: keep_artifacts,
         run_all: run_all,
-        whole: whole,
         unstable_mode: unstable_mode,
         unstable_mode_set: unstable_mode_set,
         format: format,
@@ -753,7 +683,6 @@ fn parse_test_args(args: [text]) -> TestOptions:
         mem_check: mem_check,
         fork_mode: fork_mode,
         resource_limit_pct: resource_limit_pct,
-        worker_memory_mb: worker_memory_mb,
         no_cache: no_cache,
         refresh_manifest: refresh_manifest,
         manifest_status: manifest_status,
@@ -783,7 +712,7 @@ fn parse_f64(s: text) -> f64:
     var decimal_divisor = 1.0
     var seen_dot = false
 
-    for i in 0..s.len():
+    for i in s.len():
         val ch = s[i:i + 1]
 
         if ch == ".":

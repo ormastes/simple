@@ -30,5 +30,3 @@ Implementation reports, completion logs, and session transcripts from developmen
 - [Tracking](../08_tracking/) — bug, test, and todo databases
 - [Metrics](../10_metrics/) — dashboards and coverage
 - [Plans](../03_plan/) — planning docs that precede reports
-
-- [Convention kernel TDD evidence](traceability_conventions_tdd_2026-10-11.md): scoped native26/0 and Astra review; full20/40 and runtime admission remain open.

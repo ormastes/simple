@@ -22,9 +22,6 @@ pub enum SimdMode {
 
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
 pub struct CompilerPipeline {
-    /// `[i64]` word lane on/off for MIR lowering; false while compiling for a
-    /// freestanding/WASM target whose runtime lacks `rt_typed_words_i64_*`.
-    pub(super) signed_word_lane: bool,
     pub(super) gc: Option<Arc<dyn GcAllocator>>,
     /// Optional project context for multi-file compilation
     pub(super) project: Option<ProjectContext>,
@@ -57,7 +54,6 @@ pub struct CompilerPipeline {
 impl CompilerPipeline {
     pub fn new() -> Result<Self, CompileError> {
         Ok(Self {
-            signed_word_lane: true,
             gc: None,
             project: None,
             lint_config: None,
@@ -77,7 +73,6 @@ impl CompilerPipeline {
 
     pub fn with_gc(gc: Arc<dyn GcAllocator>) -> Result<Self, CompileError> {
         Ok(Self {
-            signed_word_lane: true,
             gc: Some(gc),
             project: None,
             lint_config: None,
@@ -99,7 +94,6 @@ impl CompilerPipeline {
     pub fn with_project(project: ProjectContext) -> Result<Self, CompileError> {
         let lint_config = Some(project.lint_config.clone());
         Ok(Self {
-            signed_word_lane: true,
             gc: None,
             project: Some(project),
             lint_config,
@@ -121,7 +115,6 @@ impl CompilerPipeline {
     pub fn with_gc_and_project(gc: Arc<dyn GcAllocator>, project: ProjectContext) -> Result<Self, CompileError> {
         let lint_config = Some(project.lint_config.clone());
         Ok(Self {
-            signed_word_lane: true,
             gc: Some(gc),
             project: Some(project),
             lint_config,

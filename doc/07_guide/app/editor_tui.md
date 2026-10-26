@@ -92,7 +92,7 @@ frame from the **real `EditorBuffer`** via the interpreter:
 1. Write a `.spl` that builds the frame with `print` — not `terminal_write`,
    which the interpreter lacks as the extern `rt_stdout_write`:
 
-```simple:skip
+   ```simple
    use std.editor.buffer.buffer.*
    use std.editor.common.types.*
 

@@ -271,7 +271,6 @@ impl FutureExecutor {
 
     /// Spawn worker threads for the thread pool
     fn spawn_workers(&self) {
-        crate::value::note_user_threads_started();
         let count = self.worker_count.load(Ordering::SeqCst);
         let mut workers = self.workers.lock().unwrap();
 
@@ -604,23 +603,7 @@ pub struct IsolatedThreadHandle {
 // Track thread IDs
 static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
 
-// Twin of runtime_value.h rt_native_word_exceeds_user_va: a native closure
-// word above the target's user virtual-address ceiling cannot be an address,
-// so it is the int-tagged (addr << 3) form generated code passes through a
-// generic extern slot. aarch64 user VA is 48-bit and bits 56-63 of a real
-// pointer may carry a Top-Byte-Ignore / MTE tag, so those are not compared.
-#[cfg(target_arch = "aarch64")]
-const NATIVE_USER_VA_MAX: u64 = 0x0000_ffff_ffff_ffff;
-#[cfg(target_arch = "aarch64")]
-const NATIVE_PTR_TAG_BITS: u64 = 0xff00_0000_0000_0000;
-#[cfg(not(target_arch = "aarch64"))]
-const NATIVE_USER_VA_MAX: u64 = 0x0000_7fff_ffff_ffff;
-#[cfg(not(target_arch = "aarch64"))]
-const NATIVE_PTR_TAG_BITS: u64 = 0;
-
-fn native_word_exceeds_user_va(word: u64) -> bool {
-    (word & !NATIVE_PTR_TAG_BITS) > NATIVE_USER_VA_MAX
-}
+const X86_64_MAX_CANONICAL_USER_PTR: u64 = 0x0000_7fff_ffff_ffff;
 const NATIVE_DIRECT_FUNCTION_RECORD_MARKER: usize = 0x5344_4952_4543_5446;
 
 enum NativeCallable {
@@ -640,12 +623,8 @@ fn native_closure_payload(raw: u64) -> Option<u64> {
         return None;
     }
 
-    if native_word_exceeds_user_va(raw) {
+    if raw > X86_64_MAX_CANONICAL_USER_PTR {
         Some(raw >> 3)
-    } else if raw & 0x7 == 0x1 && !unsafe { native_address_is_code(raw as usize) } {
-        // TAG_HEAP record pointer (an odd raw code address stays as is);
-        // twin of runtime_thread.c rt_native_closure_payload.
-        Some(raw & !0x7)
     } else {
         Some(raw)
     }
@@ -659,45 +638,7 @@ fn native_worker_arg(value: RuntimeValue, raw_worker_args: bool) -> RuntimeValue
     }
 }
 
-// True only when `addr` lies inside an executable PT_LOAD segment of a loaded
-// object (twin of runtime_thread.c rt_native_address_is_code). dladdr alone is
-// not evidence: it also resolves DATA addresses, so a static closure record in
-// .data/.bss would be called as code.
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
-unsafe fn native_address_is_code(addr: usize) -> bool {
-    struct Probe {
-        addr: usize,
-        found: bool,
-    }
-    unsafe extern "C" fn visit(info: *mut libc::dl_phdr_info, _size: libc::size_t, raw: *mut libc::c_void) -> libc::c_int {
-        let probe = &mut *(raw as *mut Probe);
-        let info = &*info;
-        for i in 0..info.dlpi_phnum as usize {
-            let ph = &*info.dlpi_phdr.add(i);
-            // ELF constants are local: the libc crate exports PT_LOAD/PF_X
-            // only for some targets (not FreeBSD/NetBSD).
-            const PT_LOAD: u32 = 1;
-            const PF_X: u32 = 1;
-            if ph.p_type != PT_LOAD || (ph.p_flags & PF_X) == 0 {
-                continue;
-            }
-            let lo = (info.dlpi_addr as usize).wrapping_add(ph.p_vaddr as usize);
-            if probe.addr >= lo && probe.addr - lo < ph.p_memsz as usize {
-                probe.found = true;
-                return 1;
-            }
-        }
-        0
-    }
-    let mut probe = Probe {
-        addr: ((addr as u64) & !NATIVE_PTR_TAG_BITS) as usize,
-        found: false,
-    };
-    libc::dl_iterate_phdr(Some(visit), &mut probe as *mut Probe as *mut libc::c_void);
-    probe.found
-}
-
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))))]
+#[cfg(unix)]
 unsafe fn native_address_is_code(addr: usize) -> bool {
     let mut info: libc::Dl_info = std::mem::zeroed();
     libc::dladdr(addr as *const libc::c_void, &mut info) != 0 && !info.dli_fname.is_null()
@@ -709,7 +650,7 @@ unsafe fn native_address_is_code(_addr: usize) -> bool {
 }
 
 unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
-    let raw_worker_args = native_word_exceeds_user_va(closure_arg);
+    let raw_worker_args = closure_arg > X86_64_MAX_CANONICAL_USER_PTR;
     let payload = native_closure_payload(closure_arg)?;
     if payload < 4096 {
         return None;
@@ -759,7 +700,6 @@ unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
 /// A thread handle that can be used to join the thread
 #[no_mangle]
 pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue) -> u64 {
-    crate::value::note_user_threads_started();
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
@@ -782,11 +722,8 @@ pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue)
                 func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
             }
             NativeCallable::DirectFunction { entry, raw_worker_args } => {
-                // A direct-function entry takes no hidden environment
-                // argument (codegen calls it with arg_vals[1..]); C twin:
-                // runtime_thread.c rt_isolated_wrapper entry(data).
-                let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
-                func(native_worker_arg(copied_data, raw_worker_args))
+                let func: extern "C" fn(u64, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
+                func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
             }
         })
         .expect("Failed to spawn isolated thread");
@@ -808,7 +745,6 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
     data1: RuntimeValue,
     data2: RuntimeValue,
 ) -> u64 {
-    crate::value::note_user_threads_started();
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
@@ -839,10 +775,10 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
                 )
             }
             NativeCallable::DirectFunction { entry, raw_worker_args } => {
-                // No hidden environment argument; C twin: entry(data1, data2).
-                let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
+                let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                     unsafe { std::mem::transmute(entry) };
                 func(
+                    closure_ptr,
                     native_worker_arg(copied_data1, raw_worker_args),
                     native_worker_arg(copied_data2, raw_worker_args),
                 )
@@ -1045,7 +981,6 @@ pub extern "C" fn rt_thread_spawn_limited(
     fd_limit: i64,
     thread_limit: i64,
 ) -> u64 {
-    crate::value::note_user_threads_started();
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
@@ -1100,11 +1035,8 @@ pub extern "C" fn rt_thread_spawn_limited(
                     func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
                 }
                 NativeCallable::DirectFunction { entry, raw_worker_args } => {
-                    // A direct-function entry takes no hidden environment
-                    // argument (codegen calls it with arg_vals[1..]); C twin:
-                    // runtime_thread.c rt_isolated_wrapper entry(data).
-                    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
-                    func(native_worker_arg(copied_data, raw_worker_args))
+                    let func: extern "C" fn(u64, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
+                    func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
                 }
             }
         })
@@ -1138,7 +1070,6 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
     fd_limit: i64,
     thread_limit: i64,
 ) -> u64 {
-    crate::value::note_user_threads_started();
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
@@ -1200,10 +1131,10 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
                     )
                 }
                 NativeCallable::DirectFunction { entry, raw_worker_args } => {
-                    // No hidden environment argument; C twin: entry(data1, data2).
-                    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
+                    let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                         unsafe { std::mem::transmute(entry) };
                     func(
+                        closure_ptr,
                         native_worker_arg(copied_data1, raw_worker_args),
                         native_worker_arg(copied_data2, raw_worker_args),
                     )

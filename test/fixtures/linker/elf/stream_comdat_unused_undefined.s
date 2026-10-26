@@ -1,1 +1,0 @@
-.globl unused_undefined

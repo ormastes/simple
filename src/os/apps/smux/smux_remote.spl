@@ -3,37 +3,33 @@
 # Provides the app ID marker used by the OS package registry and
 # the remote-launch entry point for the smux native service.
 #
-# smux_remote_main is a line protocol over stdin/stdout on top of the smux
-# service API: every session it creates gets a real shell on a pseudo-terminal
-# (POSIX PTY or Windows ConPTY via std.sys.pty), and send/capture go to that
-# shell through the same API every other smux client uses.
+# The typed std.sys.pty capability selects POSIX PTY or Windows ConPTY.
+# smux_remote_main routes send/capture verbs through that capability.
 
 use os.apps.smux.api.{
     smux_create_session,
     smux_list_sessions,
-    smux_list_windows,
-    smux_list_panes,
-    smux_pane_spawn_pty,
     smux_send_command,
-    smux_capture, smux_capture_history,
-    smux_active_window, smux_focused_pane, smux_focus_window, smux_focus_pane,
-    smux_new_window, smux_split_pane, smux_close_pane, smux_resize,
-    smux_attach, smux_detach_from,
-    smux_select_layout, smux_window_rects,
-    smux_capture_cells,
-    smux_input_status,
-    smux_reset_for_test
+    smux_capture
 }
-use std.nogc_sync_mut.sosix.pty.{sosix_pty_default_shell as platform_default_shell}
-use std.nogc_sync_mut.sosix.stdio.{sosix_read_stdin_line, sosix_println}
-use os.apps.smux.mux_rects.{mux_rect_to_text, MuxRect}
-use os.apps.smux.vt_screen.{vt_cell_width}
-use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
+use std.sys.pty.{
+    open as pty_open,
+    spawn as pty_spawn,
+    write as pty_write,
+    read as pty_read,
+    close as pty_close,
+    platform_default_shell
+}
 
 # Use the tagged-text ABI.  The legacy optional-pointer rt_stdin_read_line ABI
 # is not safe through an interpreter call: its boxed text result can be
 # mistaken for a raw integer while unwrapping text?.  EOF is represented by an
 # empty tagged string, which already matches the service loop's stop rule.
+extern fn rt_read_stdin_line() -> text
+
+# Module-level fd for the single default PTY session.
+# -1 means no PTY has been opened yet.
+var default_master_fd: i32 = -1
 
 pub val SMUX_APP_ID: text = "smux"
 
@@ -47,274 +43,100 @@ pub fn smux_remote_launch_once(version: int) -> bool:
     # Bootstrap a default session so the first client has somewhere to attach.
     val marker = smux_ready_marker(version)
     val _s = smux_create_session("default")
-    sosix_println("smux " + marker + " ready")
+    print("smux " + marker + " ready")
     return true
-
-# Session id of the session NAMED `name`, or "".
-fn _session_id(name: text) -> text:
-    for s in smux_list_sessions():
-        if s.name == name:
-            return s.id
-    return ""
-
-# Creates session `name` with a shell on a PTY in its first pane.
-fn _open_shell_session(name: text) -> text:
-    if name == "":
-        return "smux: empty session name"
-    if _session_id(name) != "":
-        return "smux: session already exists: " + name
-    val s = smux_create_session(name)
-    if s.id == "":
-        return "smux: session capacity reached"
-    val w = smux_list_windows(s.id)[0]
-    val p = smux_list_panes(s.id, w.id)[0]
-    val spawned = smux_pane_spawn_pty(s.id, w.id, p.id, platform_default_shell())
-    if spawned.is_err():
-        return "smux: created session " + name + " (no shell: " + spawned.unwrap_err() + ")"
-    return "smux: created session " + name + " shell pid=" + spawned.unwrap().to_text()
 
 # smux_remote_main — entry point for the hosted smux client binary
 # (src/app/hosted_apps/smux_client.spl -> fn main calls this).
 #
-# Reads one-line commands from stdin: "VERB session [extra]".
+# Runs the service event loop: reads one-line commands from stdin and
+# dispatches them through the typed PTY capability. Each
+# command is "VERB session_id [extra]" terminated by newline.
 # Exits on empty input, "quit", or "exit".
 pub fn smux_remote_main():
-    sosix_println(_open_shell_session("default"))
-    sosix_println("smux_remote_main: service started, session=default")
+    val _s = smux_create_session("default")
+    # Open the default PTY (24 rows × 80 cols) and spawn a shell on it.
+    val fd = pty_open(24, 80)
+    if fd >= 0:
+        val shell = platform_default_shell()
+        print("smux_remote_main: starting PTY fd=" + fd.to_text() + " shell=" + shell)
+        val pid = pty_spawn(fd, shell)
+        if pid > 0:
+            default_master_fd = fd
+            print("smux_remote_main: PTY opened fd=" + fd.to_text() + " shell pid=" + pid.to_text())
+        else:
+            # Shell failed to fork — an open PTY with no shell would swallow
+            # every send, so stay on the scrollback fallback instead.
+            val _closed = pty_close(fd)
+            print("smux_remote_main: PTY spawn failed (" + pid.to_text() + "), no PTY available")
+    else:
+        print("smux_remote_main: PTY open failed (" + fd.to_text() + "), no PTY available")
+    print("smux_remote_main: service started, session=default")
     var done = false
     while done == false:
-        val line = sosix_read_stdin_line()
-        if line == "" or line == "quit" or line == "exit":
+        val line = rt_read_stdin_line()
+        if line == "":
             done = true
         else:
-            sosix_println(smux_remote_dispatch(line))
-    smux_reset_for_test()
-    sosix_println("smux_remote_main: service stopped")
+            if line == "quit" or line == "exit":
+                done = true
+            else:
+                _smux_dispatch(line)
+    if default_master_fd >= 0:
+        val _closed = pty_close(default_master_fd)
+        default_master_fd = -1
+    print("smux_remote_main: service stopped")
 
-# Handles one protocol line and returns the reply line. Exposed so a spec can
-# drive the protocol without a stdin.
-pub fn smux_remote_dispatch(line: text) -> text:
-    val interactive = smux_interactive_dispatch(line)
-    if interactive != "":
-        return interactive
-    if line.trim() == "":
-        return "smux: usage: VERB session_id [extra]"
-    val parts = line.trim().split(" ")
+fn _smux_dispatch(line: text):
+    # Parse "VERB session_id [extra]" — up to 3 space-separated tokens.
+    val parts = line.split(" ")
+    val n = parts.len()
+    if n < 2:
+        print("smux: usage: VERB session_id [extra]")
+        return
     val verb = parts[0]
-    if verb == "list":
-        return "smux: sessions=" + smux_list_sessions().len().to_text()
-    if parts.len() < 2:
-        return "smux: usage: VERB session_id [extra]"
-    val name = parts[1]
+    val sid  = parts[1]
     if verb == "new":
-        return _open_shell_session(name)
-    val sid = _session_id(name)
-    if sid == "":
-        return "smux: unknown session " + name
-    if verb == "windows":
-        var reply = "smux: windows[" + name + "]:\n"
-        for window in smux_list_windows(sid):
-            reply = reply + window.id + " " + window.name + "\n"
-        return reply
-    if verb == "select-window":
-        if parts.len() != 3:
-            return "smux: select-window requires window_id"
-        if not smux_focus_window(sid, parts[2]):
-            return "smux: unknown window " + parts[2]
-        return "smux: selected window " + parts[2]
-    if verb == "attach":
-        if parts.len() != 3:
-            return "smux: attach requires client_id"
-        if not smux_attach(sid, parts[2], 80, 24).attached:
-            return "smux: attach refused: " + parts[2]
-        return "smux: attached " + parts[2] + " to " + name
-    if verb == "detach":
-        if parts.len() != 3:
-            return "smux: detach requires client_id"
-        if not smux_detach_from(sid, parts[2]):
-            return "smux: detach refused: " + parts[2]
-        return "smux: detached " + parts[2] + " from " + name
-    if verb == "new-window":
-        if parts.len() != 3:
-            return "smux: new-window requires name"
-        val window = smux_new_window(sid, parts[2])
-        if window.id == "":
-            return "smux: window capacity reached"
-        val pane = smux_list_panes(sid, window.id)[0]
-        val spawned = smux_pane_spawn_pty(sid, window.id, pane.id, platform_default_shell())
-        if spawned.is_err():
-            return "smux: created window " + window.id + " (no shell: " + spawned.unwrap_err() + ")"
-        val _focused = smux_focus_window(sid, window.id)
-        return "smux: created window " + window.id
-    val active = smux_active_window(sid)
-    if active.is_err():
-        return "smux: no active window: " + name
-    val w = active.unwrap()
-    if verb == "layout":
-        if parts.len() != 5:
-            return "smux: layout requires name cols rows"
-        val cols = parts[3].to_int() ?? 0
-        val rows = parts[4].to_int() ?? 0
-        if cols <= 0 or rows <= 0:
-            return "smux: layout failed: canvas dimensions must be positive"
-        # Bound a remotely requested canvas before allocating its pane grids.
-        # Larger application-local grids are not part of this RPC contract.
-        if cols > 512 or rows > 256:
-            return "smux: layout failed: canvas exceeds remote limit"
-        if cols * rows > 60000:
-            return "smux: layout failed: canvas exceeds remote limit"
-        val selected = smux_select_layout(sid, w.id, parts[2], cols, rows)
-        if selected.is_err():
-            return "smux: layout failed: " + selected.unwrap_err()
-        return "smux: layout " + parts[2]
-    if verb == "rects":
-        var reply = "smux: rects[" + name + "]:\n"
-        for rect in smux_window_rects(sid, w.id):
-            reply = reply + mux_rect_to_text(rect) + "\n"
-        return reply
-    if verb == "screen":
-        val rects = smux_window_rects(sid, w.id)
-        if rects.len() == 0:
-            return "smux: select a layout before screen capture"
-        var screens: [[[text]]] = []
-        for rect in rects:
-            val captured = smux_capture_cells(sid, w.id, rect.pane_id)
-            if captured.is_err():
-                return "smux: screen capture failed: " + captured.unwrap_err()
-            screens.push(captured.unwrap())
-        return "smux: screen[" + name + "]:\n" + smux_composite_cells(rects, screens)
-    if verb == "panes":
-        var reply = "smux: panes[" + name + "]:\n"
-        for pane in smux_list_panes(sid, w.id):
-            reply = reply + pane.id + " " + pane.cols.to_text() + "x" + pane.rows.to_text() + "\n"
-        return reply
-    if verb == "select-pane":
-        if parts.len() != 3:
-            return "smux: select-pane requires pane_id"
-        if not smux_focus_pane(sid, w.id, parts[2]):
-            return "smux: unknown pane " + parts[2]
-        return "smux: selected pane " + parts[2]
-    val focused = smux_focused_pane(sid, w.id)
-    if focused.is_err():
-        return "smux: no focused pane: " + name
-    val p = focused.unwrap()
-    if verb == "input-status":
-        val status = smux_input_status(sid, w.id, p.id)
-        if status.is_err():
-            return "smux: input failed: " + status.unwrap_err()
-        return "smux: input[" + name + "]:" + status.unwrap()
-    if verb == "split":
-        if parts.len() > 3:
-            return "smux: split accepts one direction"
-        val direction = if parts.len() == 3: parts[2] else: "vertical"
-        val split = smux_split_pane(sid, w.id, p.id, direction)
-        if split.is_err():
-            return "smux: split failed: " + split.unwrap_err()
-        val added = split.unwrap()
-        val spawned = smux_pane_spawn_pty(sid, w.id, added.id, platform_default_shell())
-        if spawned.is_err():
-            var rollback_failed = not smux_close_pane(sid, w.id, added.id)
-            if smux_resize(sid, w.id, p.id, p.cols, p.rows).is_err():
-                rollback_failed = true
-            if w.layout != "manual":
-                if smux_select_layout(sid, w.id, w.layout, w.canvas_cols, w.canvas_rows).is_err():
-                    rollback_failed = true
-            if rollback_failed:
-                return "smux: split failed: " + spawned.unwrap_err() + "; rollback incomplete"
-            return "smux: split failed: " + spawned.unwrap_err()
-        val _focused = smux_focus_pane(sid, w.id, added.id)
-        return "smux: split pane " + added.id
+        val _s = smux_create_session(sid)
+        print("smux: created session " + sid)
+        return
+    if verb == "list":
+        val sessions = smux_list_sessions()
+        print("smux: sessions=" + sessions.len().to_text())
+        return
     if verb == "send":
-        if parts.len() < 3:
-            return "smux: send requires extra arg"
+        if n < 3:
+            print("smux: send requires extra arg")
+            return
         # Rejoin everything after "send <sid>" — multi-word commands must not
         # be truncated to their first token.
-        val sent = smux_send_command(sid, w.id, p.id, parts[2:].join(" "))
-        if sent.is_err():
-            return "smux: send failed: " + sent.unwrap_err()
-        return "smux: sent to " + name
-    if verb == "history":
-        if parts.len() > 3:
-            return "smux: history requires session and optional line count"
-        val count = if parts.len() == 3: parts[2].to_int() ?? 0 else: 200
-        if count <= 0 or count > 2000:
-            return "smux: history line count must be between 1 and 2000"
-        val cap = smux_capture_history(sid, w.id, p.id, count)
-        if cap.is_err():
-            return "smux: history failed: " + cap.unwrap_err()
-        return "smux: history[" + name + "]:\n" + cap.unwrap().content
+        var cmd = parts[2]
+        var i = 3
+        while i < n:
+            cmd = cmd + " " + parts[i]
+            i = i + 1
+        if default_master_fd >= 0 and sid == "default":
+            # Route the command through the real PTY master fd.
+            val written = pty_write(default_master_fd, cmd + "\r\n")
+            if written:
+                print("smux: sent to " + sid + " via PTY")
+            else:
+                print("smux: PTY write failed")
+        else:
+            # PTY unavailable — fall back to scrollback API.
+            val res = smux_send_command(sid, "0", "0", cmd)
+            if res.is_ok():
+                print("smux: sent to " + sid + " (scrollback fallback)")
+            else:
+                print("smux: send failed for " + sid)
+        return
     if verb == "capture":
-        val cap = smux_capture(sid, w.id, p.id, 20)
-        if cap.is_err():
-            return "smux: capture failed: " + cap.unwrap_err()
-        return "smux: capture[" + name + "]:\n" + cap.unwrap().content
-    return "smux: unknown verb: " + verb
-
-# Cache one capture per pane, then paint each visible row according to the
-# selected geometry. No additional child I/O occurs while painting the frame.
-pub fn smux_composite_cells(rects: [MuxRect], screens: [[[text]]]) -> text:
-    var height: i64 = 0
-    var width: i64 = 0
-    for rect in rects:
-        if rect.row + rect.rows > height:
-            height = rect.row + rect.rows
-        if rect.col + rect.cols > width:
-            width = rect.col + rect.cols
-    var canvas: [[text]] = []
-    var y: i64 = 0
-    while y < height:
-        var row: [text] = []
-        var x: i64 = 0
-        while x < width:
-            row.push(" ")
-            x = x + 1
-        canvas.push(row)
-        y = y + 1
-    var i: i64 = 0
-    while i < rects.len() and i < screens.len():
-        val rect = rects[i]
-        val rows = screens[i]
-        y = 0
-        while y < rect.rows and y < rows.len():
-            val cells = rows[y]
-            var target = canvas[rect.row + y]
-            var x: i64 = 0
-            while x < rect.cols and x < cells.len():
-                var cell = cells[x]
-                if vt_cell_width(cell) == 2:
-                    if x + 1 >= rect.cols or x + 1 >= cells.len():
-                        cell = " "
-                    elif cells[x + 1] != "":
-                        cell = " "
-                elif cell == "":
-                    if x == 0:
-                        cell = " "
-                    elif vt_cell_width(cells[x - 1]) != 2:
-                        cell = " "
-                target[rect.col + x] = cell
-                x = x + 1
-            canvas[rect.row + y] = target
-            y = y + 1
-        i = i + 1
-    var lines: [text] = []
-    for row in canvas:
-        lines.push(row.join(""))
-    return lines.join("\n")
-
-# Keep command status consistent for all request clients. A transport success
-# is not a command success (unknown ids, capacity and shell failures are errors).
-pub fn smux_remote_reply_ok(reply: text) -> bool:
-    if reply.starts_with("smux: created session ") or reply.starts_with("smux: created window "):
-        return not reply.contains("(no shell:")
-    return (reply.starts_with("smux: sessions=") or
-        reply.starts_with("smux: windows[") or reply.starts_with("smux: panes[") or
-        reply.starts_with("smux: rects[") or reply.starts_with("smux: screen[") or
-        (reply.starts_with("smux: layout ") and not reply.starts_with("smux: layout failed:") and not reply.starts_with("smux: layout requires ")) or
-        reply.starts_with("smux: selected window ") or reply.starts_with("smux: selected pane ") or
-        reply.starts_with("smux: attached ") or reply.starts_with("smux: detached ") or
-        reply.starts_with("smux: split pane ") or reply.starts_with("smux: sent to ") or
-        reply.starts_with("smux: capture[") or reply.starts_with("smux: history[") or
-        reply.starts_with("smux: input[") or reply == "smux: input accepted" or
-        reply.starts_with("SMUX-FRAME/1 ") or reply == "smux: stopping server")
-
-export smux_remote_dispatch, smux_remote_reply_ok, smux_composite_cells
+        if default_master_fd >= 0 and sid == "default":
+            # Wait briefly for output without blocking the service loop.
+            val output = pty_read(default_master_fd, 100)
+            print("smux: capture[" + sid + "]: " + output)
+        else:
+            val cap = smux_capture(sid, "0", "0", 20)
+            print("smux: capture[" + sid + "]: " + cap.content)
+        return
+    print("smux: unknown verb: " + verb)

@@ -37,7 +37,7 @@ The Simple compiler has **complete infrastructure sharing** across all execution
 
 **File:** `src/compiler/driver.spl:170-189`
 
-```simple:skip
+```simple
 fn parse_source(source: SourceFile) -> Module:
     val log = self.ctx.logger
 
@@ -116,7 +116,7 @@ All backends consume the **same Module (AST)** from the parser.
 ### SFFI Declarations
 
 **Execution Management:**
-```simple:skip
+```simple
 # Create execution manager
 extern fn rt_exec_manager_create(backend: text) -> i64
 
@@ -137,7 +137,7 @@ extern fn rt_exec_manager_cleanup(handle: i64)
 ```
 
 **Backend Control:**
-```simple:skip
+```simple
 # Set global JIT backend ("auto", "cranelift", "llvm")
 extern fn rt_set_jit_backend(backend: text) -> bool
 
@@ -146,7 +146,7 @@ extern fn rt_get_jit_backend() -> text
 ```
 
 **File I/O:**
-```simple:skip
+```simple
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -157,7 +157,7 @@ extern fn rt_file_delete(path: text) -> bool
 
 All SFFI has Simple-friendly wrappers:
 
-```simple:skip
+```simple
 # Tier 1: Extern declaration
 extern fn rt_file_read_text(path: text) -> text
 
@@ -169,7 +169,7 @@ fn file_read(path: text) -> text:
 ### Usage by All Backends
 
 **JIT Interpreter:**
-```simple:skip
+```simple
 use compiler.execution.mod.{LocalExecutionManager}
 
 val em = LocalExecutionManager.cranelift()
@@ -178,7 +178,7 @@ em.execute("main", args)
 ```
 
 **Tree-Walking Interpreter:**
-```simple:skip
+```simple
 use app.io.{file_read, file_write}
 
 val content = file_read("config.sdn")
@@ -186,14 +186,14 @@ file_write("output.txt", result)
 ```
 
 **Remote Debugger:**
-```simple:skip
+```simple
 use app.io.{rt_process_run}
 
 val (stdout, stderr, exit_code) = rt_process_run("gdb", ["--mi"])
 ```
 
 **Compiler:**
-```simple:skip
+```simple
 use compiler.execution.mod.LocalExecutionManager
 
 val em = LocalExecutionManager.llvm()
@@ -208,7 +208,7 @@ em.compile(mir_module)
 
 All compilation backends implement the same interface:
 
-```simple:skip
+```simple
 trait Backend:
     fn name() -> text
     fn kind() -> BackendKind
@@ -233,7 +233,7 @@ trait Backend:
 
 All debug backends implement the same interface:
 
-```simple:skip
+```simple
 trait DebugBackend:
     fn name() -> String
     fn attach(program_path: String, args: [String]) -> Result<Nil, String>
@@ -264,7 +264,7 @@ trait DebugBackend:
 
 **File:** `src/compiler/backend.spl:37-63`
 
-```simple:skip
+```simple
 pub fn create_backend(kind: BackendKind) -> Backend:
     match kind:
         case Interpreter:
@@ -283,7 +283,7 @@ pub fn create_backend(kind: BackendKind) -> Backend:
 
 **File:** `src/app/debug/coordinator.spl:78-114`
 
-```simple:skip
+```simple
 class DebugCoordinator:
     interpreter_backend: Option<DebugBackend>
     smf_backend: Option<DebugBackend>
@@ -349,7 +349,7 @@ class DebugCoordinator:
 
 ### Switching Example
 
-```simple:skip
+```simple
 use app.debug.coordinator.DebugCoordinator
 use app.mcp.session.{SessionManager, TargetType}
 
@@ -385,7 +385,7 @@ fn main():
 ### Same Interface, Different Implementation
 
 **Local Debugging (Interpreter):**
-```simple:skip
+```simple
 impl DebugBackend for InterpreterBackend:
     fn step_over() -> Result<Nil, String>:
         # Step in interpreter
@@ -398,7 +398,7 @@ impl DebugBackend for InterpreterBackend:
 ```
 
 **Remote Debugging (GDB):**
-```simple:skip
+```simple
 impl DebugBackend for RemoteRiscV32Backend:
     fn step_over() -> Result<Nil, String>:
         # Send GDB MI command
@@ -415,7 +415,7 @@ impl DebugBackend for RemoteRiscV32Backend:
 
 **DAP Server:**
 
-```simple:skip
+```simple
 # DAP server doesn't care if backend is local or remote!
 fn handle_step_over(session_id: String) -> Result<Nil, String>:
     val backend = coordinator.get_backend(session_id)?
@@ -424,7 +424,7 @@ fn handle_step_over(session_id: String) -> Result<Nil, String>:
 
 **REPL Debugger:**
 
-```simple:skip
+```simple
 fn debug_command(cmd: String, session_id: String):
     val backend = coordinator.get_backend(session_id)?
 
@@ -525,7 +525,7 @@ After (Actual):
 ```
 
 **Same Parser:**
-```simple:skip
+```simple
 # Remote debugging uses same parser for Simple source
 val source = file_read("app.spl")
 var parser = Parser.with_resolved_blocks(source, blocks)
@@ -541,7 +541,7 @@ val location = map_address_to_source(pc, module)
 ### Developer Experience
 
 **Single Learning Curve:**
-```simple:skip
+```simple
 # Learn Backend trait once, understand all backends
 trait Backend:
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>
@@ -553,7 +553,7 @@ val compiler = CompilerBackendImpl()
 ```
 
 **Same Debugging Interface:**
-```simple:skip
+```simple
 # Learn DebugBackend once, debug anywhere
 trait DebugBackend:
     fn step_over() -> Result<Nil, String>
@@ -593,7 +593,7 @@ val remote = RemoteRiscV32Backend.gdb_only(config)
 
 **Goal:** JIT compile on remote target
 
-```simple:skip
+```simple
 val remote = RemoteRiscV32Backend.with_jit(config)
 
 # Parse locally
@@ -613,7 +613,7 @@ remote.execute("main", args)
 
 **Goal:** Debug local code that calls remote code
 
-```simple:skip
+```simple
 # Local Simple calls remote firmware
 fn main():
     val sensor = RemoteSensor.connect()  # Remote device
@@ -629,7 +629,7 @@ debugger.step_out() # Back to local → switches to local backend
 
 **Goal:** Combine multiple backends
 
-```simple:skip
+```simple
 # Use JIT for hot code, interpreter for cold code
 val hybrid = CompositeBackend(
     hot: JitInterpreterBackend.default(),

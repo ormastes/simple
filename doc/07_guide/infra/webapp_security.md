@@ -47,7 +47,7 @@ Capabilities are grant-based (not role-based). Each grant has:
 - **Expiry**: mandatory expiry time (no perpetual grants)
 - **Delegatable**: whether the principal can sub-grant
 
-```text
+```simple
 use std.security.enforcement.capability.{CapabilityStore, Capability}
 
 var store = CapabilityStore.new()
@@ -71,7 +71,7 @@ val can_admin = store.check("user123", Capability.Admin("system"))  # false (den
 
 All state-changing requests (POST, PUT, DELETE) should include a CSRF token:
 
-```text
+```simple
 # Controller: generate token
 val token = csrf_token_for_session(session_id, app_secret)
 
@@ -102,7 +102,7 @@ one origin's allowed response to a different origin. The middleware
 (`add_cors_headers`) and the access-phase `cors_handler` add `Vary: Origin`
 automatically for reflected origins and skip it for the origin-independent `*`.
 
-```text
+```simple
 # Wildcard + credentials is rejected (credentialed reflection bypass);
 # a reflected concrete origin always carries Vary: Origin.
 val cors = CorsConfig.default()   # allowed_origins must be an explicit allowlist
@@ -120,7 +120,7 @@ Rate limiting keys on the **direct socket peer** (`peer_addr`) by default.
 proxy — otherwise a client could spoof XFF to evade limits or frame another
 address.
 
-```text
+```simple
 val config = RateLimitConfig(
     requests_per_window: 100, window_ms: 60000, burst_size: 20,
     exempt_paths: ["/health"],
@@ -170,7 +170,7 @@ The implementation report is
 
 Always verify resource ownership before allowing access:
 
-```text
+```simple
 fn action_edit(ctx: ControllerContext) -> HttpResponseData:
     val todo = find_todo(ctx.params.get("id"))?
     # CRITICAL: verify ownership
@@ -187,7 +187,7 @@ The `SEC-AUTH001` lint rule warns when handlers lack security annotations, but I
 
 The framework enforces parameterized queries. The `SEC-SQL001` lint rule (deny level) catches string interpolation with SQL keywords:
 
-```text
+```simple
 # BAD — lint error SEC-SQL001
 val sql = "SELECT * FROM users WHERE id = {id}"
 
@@ -253,7 +253,7 @@ Blocked destinations: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.
 
 If your webapp uses LLM features:
 
-```text
+```simple
 use std.security.validation.prompt_sanitizer.{PromptSanitizer}
 
 var sanitizer = PromptSanitizer(
@@ -272,7 +272,7 @@ val wrapped = sanitizer.wrap_user_input(safe_input)
 
 Always use bcrypt (available via `std.bcrypt`):
 
-```text
+```simple
 use std.bcrypt.{bcrypt_hash, bcrypt_verify}
 
 val hash = bcrypt_hash(password, cost: 12)

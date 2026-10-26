@@ -154,7 +154,7 @@ $B run examples/09_embedded/simpleos_nvme_fw/emu/nvme_emu_main.spl   # -> EMU E2
 all four — each is a module-level `*_selftest() -> i64` (failure count). To exercise them
 locally, create a temporary file *inside `emu/`* (so the bare `use` imports resolve) and run it:
 
-```simple:skip
+```simple
 # emu/_selftests.spl  (temporary; uses print, not the deprecated println)
 use nand_onfi.*
 use nvme_memcpy.*
@@ -177,7 +177,7 @@ $B run examples/09_embedded/simpleos_nvme_fw/emu/_selftests.spl   # each module 
 Data crosses the host↔device boundary only through a `Dma` whose `copy` is a swappable
 fn-field. `NvmeEmu` re-plugs each side independently:
 
-```simple:skip
+```simple
 emu.set_host_memcpy(\s, o, n: dma_copy_corrupt(s, o, n))   # corrupt host side
 emu.set_dev_memcpy(\s, o, n: dma_copy_corrupt(s, o, n))    # corrupt device side
 # ... restore with \s,o,n: dma_copy_words(s,o,n)

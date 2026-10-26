@@ -939,27 +939,6 @@ impl LlvmBackend {
                         let sanitized = func_name.replace('.', "_dot_");
                         m.get_function(&sanitized)
                     })
-                    .or_else(|| {
-                        // Imported and named only by this initializer: declare
-                        // the import with the uniform all-`i64` user-function
-                        // signature, its arity from the global's function type.
-                        let arity = module_ir
-                            .globals
-                            .iter()
-                            .find(|(name, _, _)| name == global_name)
-                            .and_then(|(_, ty, _)| match module_ir.type_registry.get(*ty) {
-                                Some(crate::hir::HirType::Function { params, .. }) => Some(params.len()),
-                                _ => None,
-                            })?;
-                        let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                            (0..arity).map(|_| i64_type.into()).collect();
-                        let sanitized = func_name.replace('.', "_dot_");
-                        Some(m.add_function(
-                            &sanitized,
-                            i64_type.fn_type(&params, false),
-                            Some(inkwell::module::Linkage::External),
-                        ))
-                    })
                     .ok_or_else(|| {
                         CompileError::Codegen(format!(
                             "function global initializer '{}' references unknown function '{}'",

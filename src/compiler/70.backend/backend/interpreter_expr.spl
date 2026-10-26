@@ -1,19 +1,18 @@
-use compiler.backend.backend_types.{backend_value_array_v1, backend_value_bool_v1, backend_value_closure_v1, backend_value_dict_v1, backend_value_float_v1, backend_value_function_v1, backend_value_int_v1, backend_value_string_v1, backend_value_tuple_v1}
 # Interpreter Backend - expression evaluation extension
 #
 # Split from interpreter.spl to bound the largest physical parser surface.
 
 use compiler.hir.hir.*
 use compiler.backend.backend_types.*
-use compiler.backend.env.{EvalContext}
-use compiler.backend.interpreter.{
+use compiler.backend.backend.env.{EvalContext}
+use compiler.backend.backend.interpreter.{
     InterpreterBackendImpl,
     interp_hir_expr_unsigned,
     itrace,
     resolve_sym_name,
     interp_enum_discriminant_raw
 }
-use compiler.backend.interpreter_calls.*
+use compiler.backend.backend.interpreter_calls.*
 use compiler.semantics.perf_facts.builtin_collection.{resolve_builtin_collection_operation}
 
 impl InterpreterBackendImpl:
@@ -69,31 +68,22 @@ impl InterpreterBackendImpl:
         match expr.kind:
             case HirExprKind.IntLit(value, _):
                 itrace("[EE] IntLit arm")
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_int_v1(value))
+                Ok(Value.Int(value))
 
             case HirExprKind.FloatLit(value, _):
                 itrace("[EE] FloatLit arm")
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_float_v1(value))
-
-            case HirExprKind.FloatLexeme(value, _):
-                itrace("[EE] FloatLexeme arm")
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_float_v1(value.to_float()))
+                Ok(Value.Float(value))
 
             case HirExprKind.StringLit(value, _):
                 itrace("[EE] StringLit arm")
                 # Hoist nested enum construction: direct Ok(Value.String(...))
                 # loses the inner payload on the current stage4 AOT path.
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                val string_value: Value = backend_value_string_v1(value)
+                val string_value: Value = Value.String(value)
                 Ok(string_value)
 
             case HirExprKind.BoolLit(value):
                 itrace("[EE] BoolLit arm")
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_bool_v1(value))
+                Ok(Value.Bool(value))
 
             case HirExprKind.Var(symbol):
                 # Env is name-keyed (iteration 21, target (a)); resolve the
@@ -140,8 +130,7 @@ impl InterpreterBackendImpl:
                     itrace("[EE] NamedVar fallback")
                     val nv_fv: FunctionValue = FunctionValue(symbol: symbol, name: nv_name_t)
                     itrace("[EE] NamedVar fv_nil={nv_fv == nil}")
-                    # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                    val nv_fn_value: Value = backend_value_function_v1(nv_fv)
+                    val nv_fn_value: Value = Value.Function(nv_fv)
                     Ok(nv_fn_value)
 
             case HirExprKind.ArrayLit(elements, _):
@@ -150,8 +139,7 @@ impl InterpreterBackendImpl:
                 for elem in elements:
                     val v = self.eval_expr(elem, ctx)?
                     values = values.push(v)
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_array_v1(values))
+                Ok(Value.Array(values))
 
             case HirExprKind.ArrayRepeat(value, count, _):
                 itrace("[EE] ArrayRepeat arm")
@@ -165,8 +153,7 @@ impl InterpreterBackendImpl:
                 while ri < n:
                     repeated = repeated.push(repeat_val)
                     ri = ri + 1
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_array_v1(repeated))
+                Ok(Value.Array(repeated))
 
             case HirExprKind.TupleLit(elements):
                 itrace("[EE] TupleLit arm")
@@ -174,8 +161,7 @@ impl InterpreterBackendImpl:
                 for elem in elements:
                     val v = self.eval_expr(elem, ctx)?
                     values = values.push(v)
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_tuple_v1(values))
+                Ok(Value.Tuple(values))
 
             case HirExprKind.Index(base, index):
                 itrace("[EE] Index arm")
@@ -229,8 +215,7 @@ impl InterpreterBackendImpl:
                             dict[k] = value
                         case _:
                             return Err(BackendError.type_error("dict key must be string", Some(expr.span)))
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_dict_v1(dict))
+                Ok(Value.Dict(dict))
 
             case HirExprKind.Binary(op, left, right):
                 itrace("[EE] Binary arm")
@@ -364,8 +349,7 @@ impl InterpreterBackendImpl:
                                                     if keep: output.push(element)
                                                 case _:
                                                     return Err(BackendError.type_error("Array filter predicate must return bool", Some(expr.span)))
-                                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                                Ok(backend_value_array_v1(output))
+                                Ok(Value.Array(output))
                             case _:
                                 Err(BackendError.type_error("builtin collection receiver must be Array", Some(expr.span)))
                     case MethodResolution.StaticMethod(_, method_id):
@@ -425,8 +409,7 @@ impl InterpreterBackendImpl:
 
             case HirExprKind.Lambda(params, body, _):
                 val captures = ctx.env.snapshot_locals()
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_closure_v1(ClosureValue(
+                Ok(Value.Closure(ClosureValue(
                     params: params,
                     body: body,
                     captures: captures

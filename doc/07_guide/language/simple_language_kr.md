@@ -171,7 +171,7 @@ Simple은 표면적이 *매우* 넓다 — 매크로, 수학 블록(`m{}`, `loss
 
 예를 들어, 검사된 수학 블록은 소스 가까이에 그대로 둘 수 있다:
 
-```simple:skip
+```simple
 loss = m{
     L = sum((y_pred - y_true)^2) / n
 }

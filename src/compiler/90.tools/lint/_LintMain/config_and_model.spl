@@ -25,7 +25,6 @@ use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
 use compiler.common.assurance.mc_exceptions.{McException, parse_mc_exceptions,
     mc_exception_reason_for}
 use compiler.semantics.lint.option_me_call.{OptionMeCallWarning}
-use compiler.semantics.lint.raw_rt_access.{RawRtLexState}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -244,12 +243,9 @@ fn build_default_levels() -> Dict<String, String>:
     levels["freestanding_bare_conversion"] = "warn"
     levels["freestanding_global_call_init"] = "warn"
     levels["module_init_literal"] = "warn"
-    # PERF-SCAN-001/002 (linear scan / slice compare per loop iteration).
-    levels["linear_scan_in_loop"] = "warn"
     levels["raw_rt_access"] = "warn"
     levels["const_ref_default"] = "warn"
     levels["bare_primitive_internal"] = "allow"
-    levels["representation_boundary"] = "warn"
     levels["unwrapped_foreign_resource"] = "allow"
     levels["raw_sffi_call"] = "allow"
     # ===== SILENT-DEFAULT ESCALATION POINT =====
@@ -260,34 +256,6 @@ fn build_default_levels() -> Dict<String, String>:
     # `sh scripts/check/check-silent-default-baseline.shs` must report a
     # baseline of 0. Nothing in silent_default.spl changes.
     levels["silent_default"] = "warn"
-    # ===== FRONTEND (HIR / inference) WARN-FIRST FAMILIES, 2026-10-10 =====
-    # Robustness plan UP §4 / BP §15: every NEW policy restriction starts at
-    # "warn" in EVERY profile (the robust elevation below deliberately does not
-    # touch them) and is promoted only after the ratchet baseline in
-    # scripts/check/frontend_diag_baseline.txt is burned down. Codes:
-    #   nil_compare_non_optional    E-TYPE-NIL-COMPARE   (30.types/type_infer)
-    #   variant_shadow_binding      MEXH007              (35.semantics/lint/hir_frontend_diagnostics.spl)
-    #   inferred_type_fallback_use  W-HIR-INFER-001/002  (same module)
-    # MEXH008/MEXH009 (HIR arm reachability) join the existing
-    # non_exhaustive_match family.
-    # nil_compare_non_optional is "deny": it NAMES a comparison that the
-    # inference pass already rejected as a generic unification error, so
-    # recording it lower would loosen an existing check (RBH §7 row 4).
-    levels["nil_compare_non_optional"] = "deny"
-    levels["variant_shadow_binding"] = "warn"
-    levels["inferred_type_fallback_use"] = "warn"
-    # ===== ANY RULES (robustness item 7b), 2026-10-10 =====
-    # Moderate/strict keep these opt-in; robust/critical enable warnings.
-    # HIR-backed lint diagnostics start a check child: the recorded historical
-    # 23.5s -> 59.0s compiler-file lint regression remains a performance debt.
-    # Explicit family levels and SIMPLE_ANY_RULES=off remain authoritative.
-    # Shrink-only baseline: scripts/check/any_warn_rules_baseline.txt.
-    #   written_any_decl   W-ANY-DECL-001     written `Any` in a src/compiler/** declaration
-    #   any_fallback_use   W-HIR-INFER-003    fallback-typed binding used where a concrete type is needed
-    #   any_receiver_use   W-ANY-USE-001/002  `for` over / method call on an `Any` value
-    levels["written_any_decl"] = "allow"
-    levels["any_fallback_use"] = "allow"
-    levels["any_receiver_use"] = "allow"
     # DEFAULT OFF. wm_lane_boundary walks every module-level `use` line of every
     # file in the portable WM/GUI/web/2D lane, which costs real time, so it is
     # opt-in only: `--wm-lane`, `--warn-all`, or an explicit simple.sdn
@@ -297,10 +265,6 @@ fn build_default_levels() -> Dict<String, String>:
     # DEFAULT OFF, same reasoning: gpu_2d_perf is opt-in via --gpu-2d-perf,
     # --warn-all, or an explicit simple.sdn [lints] entry.
     levels["gpu_2d_perf"] = "allow"
-    # DEFAULT OFF until the tree-wide nil -> None sweep lands (~26k findings):
-    # nil_outside_unsafe (NIL-UNSAFE-001) is opt-in via --warn-all or an
-    # explicit simple.sdn [lints] entry. lint-cached caches clean files only.
-    levels["nil_outside_unsafe"] = "allow"
     levels
 
 # Per-tier default levels, layered on top of build_default_levels().
@@ -331,7 +295,6 @@ fn profile_default_levels(profile: LintProfile) -> Dict<String, String>:
             # const_ref_default keeps its existing default level.
             var mc = _strict_robust_levels(levels)
             mc["bare_primitive_internal"] = "warn"
-            mc["representation_boundary"] = "deny"
             mc["unwrapped_foreign_resource"] = "warn"
             return mc
     levels
@@ -349,21 +312,7 @@ fn _strict_robust_levels(levels: Dict<String, String>) -> Dict<String, String>:
     strict["non_exhaustive_match"] = "deny"
     strict["resource_leak"] = "deny"
     strict["init_boundary_violation"] = "deny"
-    strict["written_any_decl"] = "warn"
-    strict["any_fallback_use"] = "warn"
-    strict["any_receiver_use"] = "warn"
     strict
-
-# Explicit family severities take priority; an environment level overrides
-# only the profile default. Keep this projection shared with relay tests.
-fn any_rule_relay_level(config: LintConfig, name: text, keep: bool, level: LintLevel, env_level: text) -> LintLevel:
-    if env_level == "off": return LintLevel.Allow
-    if config.levels.has(name): return config.get_level(name)
-    if env_level != "":
-        if env_level == "deny": return phased_lint_level(LintLevel.Deny, config.warning_phase)
-        return LintLevel.Warn
-    if keep: return level
-    LintLevel.Allow
 
 # --- Engine-default axis (REQ-MC-012 priority tier 3) -----------------------
 # Profile resolution priority (highest first): explicit --profile= CLI flag
@@ -514,13 +463,6 @@ impl LintCliPolicy:
 
 # LintDiag configuration — overrides for lint levels.
 # Loaded from the simple.sdn `lints:` section and/or file-level attributes.
-struct LintSuppressionIssue:
-    line: i64
-    column: i64
-    message: text
-
-use compiler.common.assurance.representation_context_v1.{RepresentationProjectContextV1, representation_context_missing_v1, representation_context_from_project_v1}
-
 class LintConfig:
     levels: Dict<String, String>
     # Immutable effective defaults for this selected profile. Built once when
@@ -544,8 +486,6 @@ class LintConfig:
     # `mc_exceptions:` key under `lints:`; see
     # compiler.common.assurance.mc_exceptions for the grammar.
     mc_exceptions: [McException]
-    suppression_issues: [LintSuppressionIssue] = []
-    representation_project: RepresentationProjectContextV1 = representation_context_missing_v1()
 
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
@@ -570,7 +510,6 @@ impl LintConfig:
             return LintConfig.new()
         var config = LintConfig.from_sdn_string(content)
         config.source_path = path
-        config.representation_project = representation_context_from_project_v1(content, path)
         config
 
     # Parse config from an SDN string.
@@ -729,23 +668,16 @@ impl LintConfig:
 
     # Apply file-level attribute overrides.
     # Scans the first N lines (before first definition) for:
-    #   @allow(lint1, lint2) # reason: why these warnings are intentional
+    #   @allow(lint1, lint2)
     #   @warn(lint1, lint2)
     #   @deny(lint1, lint2)
-    #   @allow(lint1) # reason: why this warning is intentional
+    #   @allow(lint1)  (inner attribute)
     me apply_file_attributes(content: String):
         self.apply_file_attributes_lines(content.split("\n"))
 
     me apply_file_attributes_lines(lines: [String]):
-        self.suppression_issues = []
-        var lexical = RawRtLexState.new()
-        var line_number = 0
         for line in lines:
-            line_number = line_number + 1
-            # Reuse the existing incremental string/comment scanner in this
-            # header walk. Attribute-like text in comments/docstrings is inert.
-            val code_line = lexical.scan_line(line)
-            val trimmed = code_line.trim()
+            val trimmed = line.trim()
 
             # Stop scanning at the first definition (fn, class, enum, struct, trait, etc.)
             if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("class ") or trimmed.starts_with("enum ") or trimmed.starts_with("struct ") or trimmed.starts_with("trait "):
@@ -796,21 +728,6 @@ impl LintConfig:
                         continue
                     val lint_list_str = attr_line.slice(inner_start, close_paren)
                     val lint_names = lint_list_str.split(",")
-                    if level == LintLevel.Allow:
-                        val suffix = line.trim().slice(close_paren + 1).trim()
-                        var has_reason = false
-                        if suffix.starts_with("# reason:"):
-                            has_reason = suffix.slice(9).trim() != ""
-                        var blanket = false
-                        for name in lint_names:
-                            val target = name.trim()
-                            if target == "all" or target == "warnings" or target == "*": blanket = true
-                        if not has_reason or blanket:
-                            val problem = if blanket: "blanket warning suppression is not supported" else: "named warning suppression is missing its description"
-                            self.suppression_issues.push(LintSuppressionIssue(
-                                line: line_number, column: code_line.find("@") + 1,
-                                message: "{problem}; prefer a safe idiom, or use @allow(rule) # reason: <why this warning is intentional>; the warning remains enabled"))
-                            continue
                     for name in lint_names:
                         val clean_name = name.trim()
                         if clean_name == "":
@@ -835,8 +752,7 @@ impl LintConfig:
                    source_path: self.source_path,
                    profile: self.profile, error: self.error,
                    warning_phase: self.warning_phase,
-                   mc_exceptions: self.mc_exceptions,
-                   representation_project: self.representation_project)
+                   mc_exceptions: self.mc_exceptions)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
     resolve_lint_config_with_lines(base, path, content.split("\n"))
@@ -848,32 +764,12 @@ fn resolve_lint_config_with_lines(
     config.apply_file_attributes_lines(lines)
 
     val sdn_path = find_project_sdn(path)
-    # Policy inheritance does not prove namespace ownership. Rebind identity
-    # to this source's nearest selected manifest, including explicit absence.
-    if sdn_path == "":
-        config.representation_project = representation_context_missing_v1()
-    elif sdn_path == base.source_path:
-        config.representation_project = base.representation_project
     if sdn_path != "" and sdn_path != base.source_path:
         val file_config = LintConfig.from_sdn_file(sdn_path)
-        config.representation_project = file_config.representation_project
-        config.source_path = sdn_path
         for key in file_config.levels.keys():
             if not config.levels.has(key):
                 config.levels[key] = file_config.levels[key]
     config
-
-# Suppression admission is a configuration diagnostic, not a suppressible
-# lint family. Only explicit robust/critical profiles require a description
-# as an error; the existing warning-phase migration still lowers it to Warn.
-fn lint_suppression_issue_level(config: LintConfig) -> LintLevel:
-    match config.profile:
-        case Some(LintProfile.Robust):
-            return phased_lint_level(LintLevel.Deny, config.warning_phase)
-        case Some(LintProfile.Critical):
-            return phased_lint_level(LintLevel.Deny, config.warning_phase)
-        case _:
-            return LintLevel.Warn
 
 # Check if a lint result should be suppressed based on config.
 # Returns true if the result should be kept (not suppressed).
@@ -934,8 +830,6 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "too_many_arguments"
     if code == "WML001" or code == "WML002":
         return "wm_lane_boundary"
-    if code == "NIL-UNSAFE-001":
-        return "nil_outside_unsafe"
     if code == "G2DP001" or code == "G2DP002" or code == "G2DP003":
         return "gpu_2d_perf"
     if code == "ACC001":
@@ -969,21 +863,8 @@ fn map_lint_code_to_config_name(code: String) -> String:
     if code == "C002":
         return "non_exhaustive_match"
     if (code == "MEXH001" or code == "MEXH002" or code == "MEXH003" or
-        code == "MEXH004" or code == "MEXH005" or code == "MEXH008" or
-        code == "MEXH009"):
+        code == "MEXH004" or code == "MEXH005"):
         return "non_exhaustive_match"
-    if code == "MEXH007":
-        return "variant_shadow_binding"
-    if code == "E-TYPE-NIL-COMPARE":
-        return "nil_compare_non_optional"
-    if code == "W-HIR-INFER-001" or code == "W-HIR-INFER-002":
-        return "inferred_type_fallback_use"
-    if code == "W-ANY-DECL-001":
-        return "written_any_decl"
-    if code == "W-HIR-INFER-003":
-        return "any_fallback_use"
-    if code == "W-ANY-USE-001" or code == "W-ANY-USE-002":
-        return "any_receiver_use"
     if code == "S001" or code == "S002" or code == "S003":
         return "unsafe_pattern"  # safety lints
     if code == "CC001" or code == "CC002":
@@ -1023,18 +904,12 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "module_init_literal"
     if code == "PERF-COW-001" or code == "PERF-COW-002" or code == "PERF-COW-003":
         return "cow_alias_hotpath"
-    if code.starts_with("NOGC-OWN-") or code.starts_with("NOGC-BOR-") or code.starts_with("NOGC-ALIAS-"):
-        return "nogc_ownership"
-    if code == "PERF-SCAN-001" or code == "PERF-SCAN-002":
-        return "linear_scan_in_loop"
     if code == "RAW-RT-001" or code == "RAW-RT-002" or code == "RAW-RT-003":
         return "raw_rt_access"
     if code == "W-MC-REF-001":
         return "const_ref_default"
     if code == "W-MC-VAL-001":
         return "bare_primitive_internal"
-    if code.starts_with("E-MC-REP-"):
-        return "representation_boundary"
     if code == "W-MC-RES-001":
         return "unwrapped_foreign_resource"
     if code == "SFFI009" or code == "SFFI010":
@@ -1270,9 +1145,7 @@ impl LintRunResult:
             case Some(fix):
                 lines.push("  fix: available [{fix.id}] ({fix.confidence_str()})")
             case nil:
-                val rule_name = map_lint_code_to_config_name(self.lint.code)
-                if rule_name != "" and self.lint.level != LintLevel.Allow:
-                    lines.push("  fix: no machine-applicable rewrite; prefer a safe idiom. If intentional, scope @allow({rule_name}) with # reason: <description>. Mark an operation unsafe only when its contract actually requires it.")
+                val _ = 0
 
         for evidence_line in self.lint.evidence:
             lines.push("  evidence: " + evidence_line)

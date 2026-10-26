@@ -9,31 +9,10 @@ alwaysApply: false
 
 ## Bootstrap failure collection
 
-During diagnosis, finish every independently runnable module/build/test row,
-collect failures and delegate independent causes to parallel repair agents.
-The exact immutable compiler must compile Hello World and execute its output
-successfully before the next provisional phase starts; full qualification may
-continue alongside it. A failure blocks only work needing that capability.
-User-authorized time, memory or policy bypasses belong to separate monitored
-DIAGNOSTIC attempts. Retain failed receipts and truthful identities; restore
-normal gates before formal admission or promotion. Never turn missing inputs
-or failed assertions into PASS. Preserve compatible frontend/HIR/native caches
-and freeze latest requested release plus reviewed applicable unmerged fixes at
-the next actual restart, without changing live source/producer bytes.
-
-Full bootstrap follows the
-[parallel collection graph](../../doc/07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph):
-build/sanity-check Phase 1 and collect its whole suite; build Phase 2; after
-Phase 2 compile/run sanity, overlap its six subsystem test binaries with
-Phase 3 and early Phase 4 from Phase 2. After Phase 3 sanity, overlap whole
-tools/library tests with Phase 4 from Phase 3. Test both Phase 4 cohorts.
-Use the shared managed-task owner for admission and process cleanup. Keep
-frontend process limits separate from the selected code-generation job count.
-After three unresolved repair cycles, retain the bug and scoped workaround,
-continue independent cached work, and revisit the bug on the later rebuild.
-Current RC1 qualification is Windows-only; remote synchronization and release
-publication follow successful local bootstrap, tests and deployment.
-
+During diagnosis, continue independently runnable build and test rows after
+failures. A usable immutable compiler plus minimum sanity may start the next
+diagnostic phase before formal admission; keep that lineage unadmitted. Crash or
+sanity failure blocks its dependent chain while independent work continues.
 Follow the
 [shared collection policy](../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
 cache preservation, and bug evidence. This is agent workflow guidance; it does
@@ -156,14 +135,11 @@ deployment. Warning-only mismatch handling is permitted solely for explicitly
 labeled temporary diagnostic rows.
 
 For the Windows/Linux parallel repair workflow, start dependent Phase 3/4
-diagnostic builds after each exact compiler has compiled Hello World and its
-output has executed successfully, while upstream qualification continues.
-Freeze the producer bytes and source identity,
+diagnostic builds as soon as each required compiler binary exists while
+upstream admission continues. Freeze the producer bytes and source identity,
 isolate writable caches and outputs, and share CPU capacity within memory
 limits. This diagnostic scheduling rule does not change the admitted scheduler
-or its receipt requirements; binary existence is neither the Hello gate nor
-admission evidence. Apply the shared policy's explicit diagnostic exceptions,
-finite repair budgets and session-specific worker selection.
+or its receipt requirements; binary existence is not admission evidence.
 
 Temporary source workarounds must link the owning canonical bug immediately
 before the affected block. Use the
@@ -394,10 +370,6 @@ scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 #     && mv bin/release/<triple>/simple.new bin/release/<triple>/simple
 # Windows:
 scripts/bootstrap/bootstrap-windows.sh --deploy
-# Windows default lane = llvm-mingw UCRT (gnu): clang + lld, compiler-rt + libunwind, NEVER GCC.
-# Source the env setup FIRST (puts llvm-mingw first on PATH, requires clang/ld.lld/llvm-ar).
-# MSVC (clang-cl) is the optional --msvc lane (needs VCINSTALLDIR/LIB). Never use GCC.
-. scripts/setup/windows-gitbash-bootstrap-env.shs
 # Manual stages:
 cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all
 SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple native-build \

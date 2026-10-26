@@ -272,19 +272,6 @@ fn is_simple_name_pattern(pattern: &simple_parser::Pattern) -> bool {
     }
 }
 
-/// `use m.{f as g}` import-binding marker emitted by flattening. It is module
-/// metadata, not a statement: HIR alias resolution
-/// (`Lowerer::collect_flattened_import_aliases`) scans only top-level items, so
-/// burying it in a synthesized `main` left every alias unresolved
-/// (`Undefined("undefined identifier: g")`) whenever the entry had no `fn main`.
-/// Position-independent (it names importer, alias and source), unlike the
-/// global-owner marker, which tags the declaration that follows it and so must
-/// stay where it is.
-fn is_import_binding_marker(node: &Node) -> bool {
-    matches!(node, Node::Const(decl)
-        if decl.name.starts_with(crate::interpreter::FLATTEN_IMPORT_BINDING_MARKER_PREFIX))
-}
-
 fn is_liftable_global_decl(node: &Node) -> bool {
     match node {
         Node::Const(decl) => is_const_global_initializer(&decl.value),
@@ -371,11 +358,7 @@ pub(crate) fn wrap_entry_script_as_main(
             && module_level_decl_name(&item)
                 .map(|name| sibling_reads.contains(&name))
                 .unwrap_or(false);
-        if is_liftable_global_decl(&item)
-            || is_read_by_sibling
-            || (is_freestanding && is_module_level_decl)
-            || is_import_binding_marker(&item)
-        {
+        if is_liftable_global_decl(&item) || is_read_by_sibling || (is_freestanding && is_module_level_decl) {
             lifted.push(item);
         } else if is_script_statement(&item) {
             script_body.push(item);
@@ -476,7 +459,6 @@ impl NativeProjectBuilder {
         // Whole-graph suffix index: identical for every module, so build it
         // once per compile phase instead of once per compiled module.
         let global_suffix_index = shared_suffix_index(&imports, &backend, no_mangle);
-        let admission = NativeCompileAdmission::default();
 
         // Large public aggregation facades spend most of their time resolving
         // hundreds of re-exports.  Running one beside every LLVM worker made
@@ -491,9 +473,7 @@ impl NativeProjectBuilder {
         let mut results = if contention_sensitive.is_empty() {
             Vec::new()
         } else {
-            self.compile_entries_sequential_with_admission(
-                &contention_sensitive, &temp_dir, &canonical_entry, &imports, &admission,
-            )
+            self.compile_entries_sequential(&contention_sensitive, &temp_dir, &canonical_entry, &imports)
         };
 
         let mut parallel_results: Vec<_> = regular
@@ -518,7 +498,6 @@ impl NativeProjectBuilder {
                     is_entry,
                     imports.clone(),
                     global_suffix_index.clone(),
-                    &admission,
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
@@ -550,19 +529,6 @@ impl NativeProjectBuilder {
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
     ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
-        self.compile_entries_sequential_with_admission(
-            entries, temp_dir, canonical_entry, imports, &NativeCompileAdmission::default(),
-        )
-    }
-
-    fn compile_entries_sequential_with_admission(
-        &self,
-        entries: &[(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>)],
-        temp_dir: &Path,
-        canonical_entry: &Option<PathBuf>,
-        imports: &ModuleImports,
-        admission: &NativeCompileAdmission,
-    ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
         let total = entries.len();
         // Same hoist as `compile_entries_parallel`: one whole-graph index for
         // the whole phase, not one per module.
@@ -590,7 +556,6 @@ impl NativeProjectBuilder {
                     is_entry,
                     imports.clone(),
                     global_suffix_index.clone(),
-                    admission,
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
@@ -791,7 +756,6 @@ pub(crate) fn compile_file_to_object(
     // reached via the global import map (no `use` import) get a real result
     // type instead of ANY (Pass 0.5c in module_pass.rs resolves them).
     lowerer.set_global_fn_return_types(std::sync::Arc::clone(&imports.fn_return_types));
-    lowerer.set_global_method_param_defaults(std::sync::Arc::clone(&imports.method_param_defaults));
     lowerer.set_qualified_import_functions(std::sync::Arc::new(use_map.clone()));
     // W15-H: seed the lowerer with the project-wide enum table and
     // eagerly register every entry into `module.types` + `self.globals`
@@ -807,8 +771,8 @@ pub(crate) fn compile_file_to_object(
         lowerer.set_global_enum_defs(std::sync::Arc::clone(&imports.enum_defs));
         lowerer.register_global_enums();
     }
-    let (mut hir, function_return_types) = lowerer
-        .lower_module_with_return_types(&ast)
+    let mut hir = lowerer
+        .lower_module(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
     let module_prefix = module_prefix_from_path(file_path, source_root);
     assign_native_dynamic_initializer_identity(&mut hir, &module_prefix);
@@ -817,13 +781,10 @@ pub(crate) fn compile_file_to_object(
     pipeline.rewrite_hir_simd_loops(&mut hir);
 
     // MIR
-    // Freestanding and WASM runtimes do not define the `[i64]` word lane.
-    let signed_word_lane = !target.is_baremetal() && !target.is_wasm();
-    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls_and_word_lane(
+    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(
         &hir,
         imports.trait_impls.as_ref(),
         target.array_push_returns_header(),
-        signed_word_lane,
     )
     .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
     qualify_native_struct_layouts(
@@ -1060,7 +1021,6 @@ pub(crate) fn compile_file_to_object(
     codegen.set_use_map(use_map);
     codegen.set_data_exports(imports.data_exports.clone());
     codegen.set_fn_arities(imports.fn_arities.clone());
-    codegen.set_function_return_types(function_return_types);
     codegen.set_enum_defs(imports.enum_defs.clone());
     codegen.set_tag_runtime_pool_join_result(true);
     if !no_mangle {
@@ -1071,29 +1031,6 @@ pub(crate) fn compile_file_to_object(
         .map_err(|e| format!("{}: codegen: {e}", file_path.display()))?;
 
     Ok(obj)
-}
-
-/// Stop replacement admission after a timeout: dropping a Rust JoinHandle
-/// cannot cancel its worker. Already admitted files retain bounded waits, and
-/// normal compiler errors still allow the remaining files to be attempted.
-#[derive(Default)]
-pub(crate) struct NativeCompileAdmission(std::sync::atomic::AtomicBool);
-
-impl NativeCompileAdmission {
-    fn run<T>(&self, compile: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        use std::sync::atomic::Ordering;
-        if self.0.load(Ordering::SeqCst) {
-            return Err("NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission".into());
-        }
-        let result = compile();
-        if let Err(error) = &result {
-            if error.starts_with("timeout (") && error.ends_with("s)") {
-                // Publish before this scheduler slot can accept another file.
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-        result
-    }
 }
 
 /// Compile a file with panic catching and timeout.
@@ -1112,29 +1049,41 @@ pub(crate) fn compile_file_safe(
     is_entry: bool,
     imports: ModuleImports,
     global_suffix_index: Option<std::sync::Arc<std::collections::HashMap<String, Vec<String>>>>,
-    admission: &NativeCompileAdmission,
 ) -> Result<Vec<u8>, String> {
     use std::sync::mpsc;
 
-    admission.run(|| {
-        let (tx, rx) = mpsc::channel();
-        let handle = std::thread::Builder::new()
-            .name(format!(
-                "compile-{}",
-                file_path.file_name().unwrap_or_default().to_string_lossy()
-            ))
-            .stack_size(stack_size)
-            .spawn(move || {
-                // Bound this worker's parsed-source memo. The cache is
-                // thread-local, so the phase-wide default (4096) would otherwise
-                // let one worker retain a whole-graph source+AST copy; entries
-                // are pure recomputable memos, so eviction only costs a re-read
-                // and re-parse on a later miss within this worker.
-                crate::interpreter::parsed_source_cache_set_limit(crate::interpreter::parsed_source_cache_compile_max());
-                let timing_wall = std::time::Instant::now();
-                let timing_cpu = current_thread_cpu_time();
-                let source_root = source_root_for_file(&file_path, &source_dirs, &fallback_root);
-                let result = if std::env::var("SIMPLE_NO_CATCH").is_ok() {
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::Builder::new()
+        .name(format!(
+            "compile-{}",
+            file_path.file_name().unwrap_or_default().to_string_lossy()
+        ))
+        .stack_size(stack_size)
+        .spawn(move || {
+            // Bound this worker's parsed-source memo. The cache is
+            // thread-local, so the phase-wide default (4096) would otherwise
+            // let one worker retain a whole-graph source+AST copy; entries
+            // are pure recomputable memos, so eviction only costs a re-read
+            // and re-parse on a later miss within this worker.
+            crate::interpreter::parsed_source_cache_set_limit(crate::interpreter::parsed_source_cache_compile_max());
+            let source_root = source_root_for_file(&file_path, &source_dirs, &fallback_root);
+            let result = if std::env::var("SIMPLE_NO_CATCH").is_ok() {
+                compile_file_to_object(
+                    &source,
+                    &file_path,
+                    &project_root,
+                    &source_root,
+                    &fallback_root,
+                    &source_dirs,
+                    no_mangle,
+                    &backend,
+                    opt_level,
+                    is_entry,
+                    &imports,
+                    &global_suffix_index,
+                )
+            } else {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     compile_file_to_object(
                         &source,
                         &file_path,
@@ -1149,86 +1098,26 @@ pub(crate) fn compile_file_safe(
                         &imports,
                         &global_suffix_index,
                     )
-                } else {
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        compile_file_to_object(
-                            &source,
-                            &file_path,
-                            &project_root,
-                            &source_root,
-                            &fallback_root,
-                            &source_dirs,
-                            no_mangle,
-                            &backend,
-                            opt_level,
-                            is_entry,
-                            &imports,
-                            &global_suffix_index,
-                        )
-                    })) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let msg = if let Some(s) = e.downcast_ref::<String>() {
-                                format!("panic: {s}")
-                            } else if let Some(s) = e.downcast_ref::<&str>() {
-                                format!("panic: {s}")
-                            } else {
-                                "panic: unknown".to_string()
-                            };
-                            Err(msg)
-                        }
+                })) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let msg = if let Some(s) = e.downcast_ref::<String>() {
+                            format!("panic: {s}")
+                        } else if let Some(s) = e.downcast_ref::<&str>() {
+                            format!("panic: {s}")
+                        } else {
+                            "panic: unknown".to_string()
+                        };
+                        Err(msg)
                     }
-                };
-                if std::env::var("SIMPLE_NATIVE_FILE_TIMING").as_deref() == Ok("1") {
-                    let cpu = match (timing_cpu, current_thread_cpu_time()) {
-                        (Some(a), Some(b)) => format!("{:.1}s", b.saturating_sub(a).as_secs_f64()),
-                        _ => "?".to_string(),
-                    };
-                    eprintln!(
-                        "[native-file-timing] wall={:.1}s cpu={} {}",
-                        timing_wall.elapsed().as_secs_f64(),
-                        cpu,
-                        file_path.display()
-                    );
                 }
-                let _ = tx.send(());
-                result
-            })
-            .map_err(|e| format!("spawn: {e}"))?;
+            };
+            let _ = tx.send(());
+            result
+        })
+        .map_err(|e| format!("spawn: {e}"))?;
 
-        wait_for_compiler_thread(rx, handle, timeout_secs)
-    })
-}
-
-/// CPU time consumed so far by the calling thread.
-#[cfg(windows)]
-fn current_thread_cpu_time() -> Option<Duration> {
-    use windows_sys::Win32::Foundation::FILETIME;
-    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
-    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-    let (mut c, mut e, mut k, mut u) = (zero, zero, zero, zero);
-    // SAFETY: GetCurrentThread is a pseudo-handle; all out-pointers are valid.
-    if unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) } == 0 {
-        return None;
-    }
-    let ticks = |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
-    Some(Duration::from_nanos((ticks(k) + ticks(u)) * 100))
-}
-
-/// CPU time consumed so far by the calling thread.
-#[cfg(unix)]
-fn current_thread_cpu_time() -> Option<Duration> {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    // SAFETY: valid out-pointer; CLOCK_THREAD_CPUTIME_ID is per-thread.
-    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } != 0 {
-        return None;
-    }
-    Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
-}
-
-#[cfg(not(any(windows, unix)))]
-fn current_thread_cpu_time() -> Option<Duration> {
-    None
+    wait_for_compiler_thread(rx, handle, timeout_secs)
 }
 
 /// Wait for one native compilation worker.
@@ -1245,100 +1134,9 @@ fn wait_for_compiler_thread(
         return handle.join().unwrap_or_else(|_| Err("thread join error".to_string()));
     }
 
-    let started = std::time::Instant::now();
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(()) => {
-            handle.join().unwrap_or_else(|_| Err("thread join error".to_string()))
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            // A sender can be dropped before its worker exits. Preserve the
-            // positive deadline instead of joining that worker indefinitely.
-            while !handle.is_finished() {
-                if started.elapsed() >= Duration::from_secs(timeout_secs) {
-                    return Err(format!("timeout ({}s)", timeout_secs));
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            handle.join().unwrap_or_else(|_| Err("thread join error".to_string()))
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err(format!("timeout ({}s)", timeout_secs))
-        }
-    }
-}
-
-#[cfg(test)]
-mod native_compile_admission_tests {
-    use super::{NativeCompileAdmission, wait_for_compiler_thread};
-    use std::sync::{Arc, Barrier, mpsc};
-    use std::time::Duration;
-
-    #[test]
-    fn timeout_stops_replacement_but_normal_errors_continue() {
-        let admission = NativeCompileAdmission::default();
-        assert_eq!(admission.run::<()>(|| Err("invalid input".into())), Err("invalid input".into()));
-        assert_eq!(admission.run(|| Ok(7)), Ok(7));
-        let (tx, rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            release_rx.recv().unwrap();
-            let _ = tx.send(());
-            done_tx.send(()).unwrap();
-            Ok(Vec::new())
-        });
-        let result = admission.run(|| wait_for_compiler_thread(rx, worker, 1));
-        // Release and drain even if the following regression assertion fails.
-        release_tx.send(()).unwrap();
-        done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert_eq!(result, Err("timeout (1s)".into()));
-        let mut attempted = false;
-        let result = admission.run(|| { attempted = true; Ok(()) });
-        assert!(!attempted);
-        assert!(result.unwrap_err().starts_with("NOT_ATTEMPTED:"));
-    }
-
-    #[test]
-    fn already_admitted_workers_have_bounded_waits_without_replacements() {
-        let admission = Arc::new(NativeCompileAdmission::default());
-        let barrier = Arc::new(Barrier::new(2));
-        let (result_tx, result_rx) = mpsc::channel();
-        let mut releases = Vec::new();
-        let mut completions = Vec::new();
-        let mut schedulers = Vec::new();
-        for _ in 0..2 {
-            let admission = admission.clone();
-            let barrier = barrier.clone();
-            let result_tx = result_tx.clone();
-            let (release_tx, release_rx) = mpsc::channel();
-            let (done_tx, done_rx) = mpsc::channel();
-            releases.push(release_tx);
-            completions.push(done_rx);
-            schedulers.push(std::thread::spawn(move || {
-                let result = admission.run(|| {
-                    let (tx, rx) = mpsc::channel();
-                    let worker = std::thread::spawn(move || {
-                        release_rx.recv().unwrap();
-                        let _ = tx.send(());
-                        done_tx.send(()).unwrap();
-                        Ok(Vec::new())
-                    });
-                    barrier.wait();
-                    wait_for_compiler_thread(rx, worker, 1)
-                });
-                result_tx.send(result).unwrap();
-            }));
-        }
-        let first = result_rx.recv_timeout(Duration::from_secs(3));
-        let second = result_rx.recv_timeout(Duration::from_secs(3));
-        for release in releases { release.send(()).unwrap(); }
-        for completion in completions { completion.recv_timeout(Duration::from_secs(3)).unwrap(); }
-        for scheduler in schedulers { scheduler.join().unwrap(); }
-        assert_eq!(first.unwrap(), Err("timeout (1s)".into()));
-        assert_eq!(second.unwrap(), Err("timeout (1s)".into()));
-        let mut attempted = false;
-        assert!(admission.run(|| { attempted = true; Ok(()) }).is_err());
-        assert!(!attempted);
+        Ok(()) => handle.join().unwrap_or_else(|_| Err("thread join error".to_string())),
+        Err(_) => Err(format!("timeout ({}s)", timeout_secs)),
     }
 }
 
@@ -1370,38 +1168,6 @@ mod native_compile_timeout_tests {
         });
 
         assert_eq!(wait_for_compiler_thread(rx, handle, 1), Err("timeout (1s)".to_string()));
-    }
-
-    #[test]
-    fn disconnected_worker_reports_join_error_instead_of_timeout() {
-        let (tx, rx) = mpsc::channel::<()>();
-        let handle = std::thread::spawn(move || -> Result<Vec<u8>, String> {
-            drop(tx);
-            panic!("worker exited before signaling completion");
-        });
-
-        assert_eq!(
-            wait_for_compiler_thread(rx, handle, 1),
-            Err("thread join error".to_string())
-        );
-    }
-
-    #[test]
-    fn disconnected_live_worker_keeps_positive_deadline() {
-        let (tx, rx) = mpsc::channel::<()>();
-        let (done_tx, done_rx) = mpsc::channel();
-        let handle = std::thread::spawn(move || -> Result<Vec<u8>, String> {
-            drop(tx);
-            std::thread::sleep(Duration::from_millis(1_100));
-            done_tx.send(()).unwrap();
-            Ok(Vec::new())
-        });
-
-        assert_eq!(
-            wait_for_compiler_thread(rx, handle, 1),
-            Err("timeout (1s)".to_string())
-        );
-        done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     }
 
     #[test]
@@ -2181,44 +1947,6 @@ mod aggregate_layout_tests {
     use super::*;
     use crate::mir::{AggregateFieldCopy, MirFunction, MirInst, MirModule, VReg};
     use std::collections::{HashMap, HashSet};
-
-    #[test]
-    fn shorthand_trait_inventory_preserves_receiver_header_in_copies() {
-        let root = std::path::PathBuf::from("/tmp/shorthand-trait-layout/src");
-        let sources = vec![
-            (root.join("provider.spl"), concat!(
-                "trait Probe:\n    fn read() -> i64\n\n",
-                "struct Value(Probe):\n    first: i64\n    second: i64\n",
-                "    fn read() -> i64:\n        self.second\n"
-            ).to_string()),
-            (root.join("plain.spl"), "struct Value:\n    first: i64\n    second: i64\n".to_string()),
-        ];
-        // Parse independently so a silently skipped malformed fixture cannot pass.
-        for (_, source) in &sources {
-            simple_parser::Parser::new(source).parse().unwrap();
-        }
-        let inventory = super::super::imports::build_import_map(&sources, std::slice::from_ref(&root), &root);
-        assert!(inventory.vtable_type_owners.contains("provider__Value"));
-        assert!(!inventory.vtable_type_owners.contains("plain__Value"));
-        assert_eq!(inventory.vtable_symbols.get("provider__Value").map(String::as_str),
-                   Some("__vtable__provider__Value__for__Probe"));
-        let mut mir = MirModule::new();
-        mir.local_globals.insert("Value".to_string());
-        let mut function = MirFunction::new("read".to_string(), crate::hir::TypeId::I64,
-                                           simple_parser::ast::Visibility::Public);
-        function.blocks[0].instructions.push(MirInst::AggregateCopy {
-            dest: VReg(1), src: VReg(0), byte_size: 16,
-            type_name: Some("Value".to_string()), owner_has_vtable: None, deep_fields: vec![],
-        });
-        mir.functions.push(function);
-        qualify_native_struct_layouts(&mut mir, "provider", &HashMap::new(), &HashMap::new(),
-            &HashSet::new(), &HashMap::new(), &inventory.vtable_type_owners,
-            &inventory.vtable_symbols).unwrap();
-        let MirInst::AggregateCopy { byte_size, owner_has_vtable, .. } =
-            &mir.functions[0].blocks[0].instructions[0] else { panic!("expected copy") };
-        assert_eq!(*byte_size, 16, "user payload size remains two words");
-        assert_eq!(*owner_has_vtable, Some(true), "backend must retain the additional header word");
-    }
 
     fn field(name: &str, nested: Vec<AggregateFieldCopy>) -> AggregateFieldCopy {
         AggregateFieldCopy {

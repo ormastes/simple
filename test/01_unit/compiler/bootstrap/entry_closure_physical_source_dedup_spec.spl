@@ -141,7 +141,7 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("var closure_loaded_mods = _driver_text_bucket_set_new(512)")
         expect(driver).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(512)")
         expect(driver).to_contain("var closure_queued_paths = _driver_text_bucket_set_new(512)")
-        expect(driver).to_contain("if closure_seen_mods.contains_key(closure_seen_key):")
+        expect(driver).to_contain("if closure_seen_mods.contains_key(closure_mp):")
         expect(driver).to_contain("if closure_loaded_mods.contains_key(closure_mp):")
         expect(driver).to_contain("if not closure_queued_paths.contains_key(closure_physical_key):")
         expect(driver).to_not_contain("var closure_seen_mods: [text]")
@@ -192,12 +192,8 @@ describe "entry-closure physical source deduplication":
         expect(cli_entry).to_contain("use lazy compiler.tools.leak_check.main.\{run_leak_check}")
         expect(cli_entry).to_contain("return run_test_cli()")
         expect(cli_entry).to_contain("elif str_eq(first, \"leak-check\"):\n        return run_leak_check()")
-        # 5830d26f209 restored json_wrapper.spl as a shim retired onto the SDN
-        # result-file transport: it delegates to run_test_sdn_wrapper instead
-        # of spawning a JSON worker, and the TEST_JSON_WORKER_ARG protocol is
-        # gone (sdn_worker_args.spl rejects it as retired).
-        expect(json_wrapper).to_contain("run_test_sdn_wrapper(sdn_args) as i64")
-        expect(json_wrapper).to_not_contain("TEST_JSON_WORKER_ARG")
+        expect(json_wrapper).to_contain("return [\"run\", \"src/app/test_runner_new/main.spl\", TEST_JSON_WORKER_ARG] + test_args")
+        expect(json_wrapper).to_not_contain("return [\"run\", arg, \"test\", TEST_JSON_WORKER_ARG]")
 
     it "uses the HIR call type arguments already bound by inference":
         # @req REQ-SSPEC-COMPILER
@@ -226,10 +222,8 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("_driver_collect_entry_import_source(input_path)")
         val walk_done_at = driver.find("phase1:load_sources:closure:done") ?? -1
         val env_set_at = driver.find("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")") ?? -1
-        # 6f1269a70d5 widened the closure gate with admitted-preclosed and
-        # group inputs, and full-inventory mode also skips the bulk load.
-        val gate_read_at = driver.find("val nb_entry_closure = admitted_preclosed != nil or explicit_entry_closure or native_group_inputs.len() > 0 or (") ?? -1
-        val bulk_gate_at = driver.find("if (has_project_source and needs_bulk_project_sources and\n                not nb_entry_closure and not package_index_routed and\n                not full_inventory_mode):") ?? -1
+        val gate_read_at = driver.find("val nb_entry_closure = explicit_entry_closure or (") ?? -1
+        val bulk_gate_at = driver.find("if (has_project_source and needs_bulk_project_sources and\n                not nb_entry_closure and not package_index_routed):") ?? -1
         val bulk_load_at = driver.find("val bulk_loaded = _driver_collect_sources_via_find(paths)") ?? -1
         expect(walk_done_at).to_be_greater_than(-1)
         expect(env_set_at).to_be_greater_than(walk_done_at)
@@ -254,12 +248,12 @@ describe "entry-closure physical source deduplication":
         expect(compile_end).to_be_greater_than(compile_start)
         val compile_body = driver.substring(compile_start, compile_end)
 
-        val load_call = compile_body.index_of("val (loaded_ctx, load_ok) = self.load_sources_impl(nil)") ?? -1
+        val load_call = compile_body.index_of("val (loaded_ctx, load_ok) = self.load_sources_impl()") ?? -1
         val load_fail = compile_body.index_of("if not load_ok:\n            log_error(\"phase 1 FAILED\")") ?? -1
         val parse_call = compile_body.index_of("val parse_ok = self.parse_all_committing_impl()") ?? -1
         val parse_gate = compile_body.index_of("        if not parse_ok:\n") ?? -1
         val parse_fail = compile_body.index_of("log_error(\"phase 2 FAILED (") ?? -1
-        val hir_call = compile_body.index_of("self.lower_and_check_retained_owner_impl()") ?? -1
+        val hir_call = compile_body.index_of("self.lower_and_check_impl()") ?? -1
         val hir_fail = compile_body.index_of("log_error(\"phase 3 FAILED\")") ?? -1
         val phase4_start = compile_body.index_of("phase4:monomorphize:start") ?? -1
         expect(load_call).to_be_greater_than(-1)
@@ -268,7 +262,7 @@ describe "entry-closure physical source deduplication":
         expect(parse_gate).to_be_greater_than(parse_call)
         expect(parse_fail).to_be_greater_than(parse_gate)
         val parse_fail_body = compile_body.substring(parse_fail)
-        expect(parse_fail_body.index_of("return CompileResult.ParseError(self.ctx.errors)") ?? -1).to_be_less_than(parse_fail_body.index_of("self.lower_and_check_retained_owner_impl()") ?? -1)
+        expect(parse_fail_body.index_of("return CompileResult.ParseError(self.ctx.errors)") ?? -1).to_be_less_than(parse_fail_body.index_of("self.lower_and_check_impl()") ?? -1)
         expect(hir_call).to_be_greater_than(parse_fail)
         expect(hir_fail).to_be_greater_than(hir_call)
         expect(phase4_start).to_be_greater_than(hir_fail)
@@ -290,7 +284,7 @@ describe "entry-closure physical source deduplication":
         # is poisoned; the poison budget decides when to stop.
         val parse_body = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_parsing.spl") ?? ""
         expect(parse_body).to_contain("if par_had_error_get():")
-        expect(parse_body).to_contain("self.ctx.add_error(\n                    driver_parse_error_message(source.path))")
+        expect(parse_body).to_contain("self.ctx.add_error(\n                    \"parse error in \{source.path} (see [parser_error] output above)\")")
         expect(parse_body).to_contain("poison_ctx.mark_module_poisoned(source.module_name)")
         expect(parse_body).to_contain("if poison_ctx.poison_budget_exhausted():")
 
@@ -308,9 +302,7 @@ describe "entry-closure physical source deduplication":
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
         val helpers = rt_file_read_text("src/compiler/80.driver/driver_helpers.spl") ?? ""
 
-        # 37237cdf1e4 admits the exact requested native entry through the
-        # explicit compiler-source loader; every other path stays bulk.
-        expect(loading).to_contain("val loaded = if explicit_entry: _driver_collect_explicit_compiler_source(path)\n                else: _driver_load_bulk_source_file(path, native_entry_active)")
+        expect(loading).to_contain("val loaded = _driver_load_bulk_source_file(path, native_entry_active)")
         expect(loading).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
         expect(loading).to_not_contain("find src/app src/lib src/compiler src/runtime")
         expect(helpers).to_not_contain("find src/app src/lib src/compiler src/runtime")

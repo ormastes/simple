@@ -13,10 +13,13 @@ later bind behind identical names.
 
 ## Overhead policy
 
-Non-text operations retain thin aliases. Text ingress is admitted inside
-SOSIX before tool code can trim, parse or interpret paths. Checked siblings
-carry encoding failures. Ordinary APIs declare UTF-8; this does not infer the
-encoding of arbitrary OS bytes. Native POSIX qualification remains separate.
+The host path adds no facade call frame where the underlying primitive has
+the exact signature: braced `export use module.{source as sosix_name}` binds the
+same declaration under the SOSIX name. The unbraced
+`export use module.source as sosix_name` form is still an open module-versus-
+symbol resolution gap. Only `sosix_run`, `sosix_platform` and
+`sosix_proc_usage` carry adapter bodies because their signature or value
+domain differs. Native POSIX raw-alias qualification remains separate.
 
 ## Why no `variants/` overlay
 
@@ -24,50 +27,29 @@ The `variants/` overlay selects a module ROOT at compile time. That fits a
 per-host tool binary (unlike the compiler, which is multi-target at runtime from
 one binary and is therefore explicitly disqualified from a host-OS variants axis
 by the seam-qualification bar in `.claude/skills/spipe.md`). It is still not
-warranted for the whole facade: Windows process capture has an operation-specific
-strict byte provider, while directory listing, spawn and ordinary console text
-remain unsupported here. Their admission stays separate; supporting one operation
-does not admit the POSIX text routes for every Windows operation.
+warranted here: the Windows side is an honest unavailable-stub, so there is no
+second real implementation to select between. A cheap platform check keeps the
+diff minimal and the POSIX path alias-thin. When a real Windows backend lands,
+promoting this seam to the `platform` variants group is a mechanical change.
 """
 
 use std.nogc_sync_mut.io_runtime.{platform_name}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_bounded_bytes, process_windows_executable, process_spawn_async}
-use std.common.string_core.{str_len}
-use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message}
-use std.nogc_sync_mut.io.external_text_io.{io_text_decode}
-use std.common.encoding.external_text.{utf8_format}
-use std.nogc_async_mut.sosix.text_boundary.{SOSIX_TEXT_BYTE_LIMIT,
-    sosix_admit_utf8, sosix_admit_c_string, sosix_require_posix_text_provider, sosix_resolved_path_checked}
-use std.nogc_sync_mut.io_runtime.{dir_list_optional}
-use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_async_mut.io.process_ops.{process_run}
 export use std.nogc_async_mut.io.process_ops.{
+    process_spawn_async as sosix_spawn,
     process_is_running as sosix_is_running,
     process_kill as sosix_kill
 }
-export use std.nogc_sync_mut.io.dir_ops.{
-    dir_is_real_no_follow as sosix_dir_is_real_no_follow
+export use std.nogc_async_mut.env.{which as sosix_which}
+export use std.sys.pty.{
+    open as sosix_pty_open,
+    spawn as sosix_pty_spawn,
+    write as sosix_pty_write,
+    read as sosix_pty_read,
+    close as sosix_pty_close,
+    is_running as sosix_pty_is_running,
+    platform_default_shell as sosix_pty_default_shell
 }
-export use std.nogc_sync_mut.io.file_ops.{
-    file_read as sosix_file_read,
-    file_exists as sosix_file_exists,
-    file_atomic_write as sosix_file_atomic_write
-}
-export use std.nogc_sync_mut.io.dir_ops.{dir_create_all as sosix_dir_create_all}
-export use std.nogc_sync_mut.io_runtime.{
-    is_dir as sosix_dir_exists,
-    file_read_bytes_result as sosix_file_read_bytes_result,
-    file_write_bytes as sosix_file_write_bytes,
-    read_file_text_result as sosix_file_read_text_result
-}
-export use std.nogc_async_mut.sosix.environment.{sosix_env_get, sosix_env_get_opt,
-    sosix_env_get_checked, sosix_env_get_nullable, sosix_env_set, sosix_env_set_checked,
-    sosix_env_remove, sosix_env_remove_checked, sosix_cwd, sosix_cwd_checked}
-export use std.nogc_sync_mut.io_runtime.{
-    file_read_text_at_nullable,
-    file_read_text_at_nullable as sosix_file_read_text_at_nullable
-}
-export use std.nogc_async_mut.sosix.stdio.{sosix_eprint, sosix_print_raw,
-    sosix_eprint_checked, sosix_print_raw_checked}
 
 
 struct SosixRun:
@@ -97,139 +79,14 @@ fn sosix_platform() -> text:
     "posix"
 
 
-fn sosix_dir_list_checked(path: text) -> Result<[text], TextIoError>:
-    val admitted = sosix_admit_c_string(path, false)?
-    sosix_require_posix_text_provider()?
-    # Native provider currently collapses some open failures to an empty
-    # array. Preserve that limitation; nil is the only reported failure.
-    val raw = dir_list_optional(admitted)
-    if raw == nil: return Err(TextIoError.Io("directory listing provider failed"))
-    val entries = raw!
-    if entries.len() > 65536:
-        return Err(TextIoError.Io("SOSIX directory entry count exceeds 65536"))
-    var output: [text] = []
-    var total_bytes: i64 = 0
-    for entry in entries:
-        val size = str_len(entry)
-        if size < 0 or size > SOSIX_TEXT_BYTE_LIMIT - total_bytes:
-            return Err(TextIoError.Io("SOSIX directory names exceed 16 MiB"))
-        total_bytes = total_bytes + size
-        output.push(sosix_admit_utf8(entry)?)
-    Ok(output)
-
-fn sosix_dir_list(path: text) -> [text]:
-    match sosix_dir_list_checked(path):
-        case Ok(entries): entries
-        case Err(error): panic(io_text_error_message(error))
-
-fn sosix_decode_process_bytes(captured: ([u8], [u8], i64)) -> Result<SosixRun, TextIoError>:
-    val stdout = io_text_decode(captured.0, utf8_format())?
-    val stderr = io_text_decode(captured.1, utf8_format())?
-    Ok(SosixRun(stdout: stdout, stderr: stderr, exit_code: captured.2))
-
-fn sosix_run_path_checked(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> Result<SosixRun, TextIoError>:
-    if platform_name() == "windows":
-        val captured = process_run_bounded_bytes(cmd, args, timeout_ms, max_output_bytes)
-        return sosix_decode_process_bytes(captured)
-    sosix_require_posix_text_provider()?
-    # The caller has admitted an explicit path and every argument. Passing an
-    # explicit path bypasses the provider's bare-name resolver/early trim.
-    val result = process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
-    val stdout = sosix_admit_utf8(result.0)?
-    val stderr = sosix_admit_utf8(result.1)?
-    Ok(SosixRun(stdout: stdout, stderr: stderr, exit_code: result.2))
-
-fn sosix_which_checked(name: text) -> Result<text?, TextIoError>:
-    val admitted = sosix_admit_c_string(name, false)?
-    if platform_name() == "windows":
-        if admitted.starts_with("-"):
-            return Err(TextIoError.Io("use an explicit path for an executable beginning with a hyphen"))
-        if val found = process_windows_executable(admitted):
-            return Ok(Some(sosix_admit_c_string(found, false)?))
-        return Ok(nil)
-    sosix_require_posix_text_provider()?
-    if admitted == "": return Ok(nil)
-    if admitted.starts_with("-"):
-        return Err(TextIoError.Io("use an explicit path for an executable beginning with a hyphen"))
-    # Explicit resolver path bypasses process_ops' bare-name resolver, which
-    # trims raw output before normalization. This reuses its capture provider,
-    # governor and argument boundary without recursively invoking which.
-    var resolver = "/usr/bin/which"
-    if not file_exists(resolver): resolver = "/bin/which"
-    if not file_exists(resolver):
-        return Err(TextIoError.Unsupported("SOSIX has no explicit which provider"))
-    val result = sosix_run_path_checked(resolver, [admitted], 5000, 65536)?
-    if result.exit_code == 1: return Ok(nil)
-    if result.exit_code != 0:
-        return Err(TextIoError.Native(result.exit_code, "executable resolver failed"))
-    val path = sosix_resolved_path_checked(result.stdout)?
-    Ok(Some(path))
-
-fn sosix_which(name: text) -> text:
-    match sosix_which_checked(name):
-        case Ok(path): path ?? ""
-        case Err(error): panic(io_text_error_message(error))
-
-fn sosix_arguments_checked(args: [text]) -> Result<(), TextIoError>:
-    if args.len() > 65536: return Err(TextIoError.Io("SOSIX argument count exceeds 65536"))
-    var total: i64 = 0
-    for arg in args:
-        val count = str_len(arg)
-        if count < 0 or count > SOSIX_TEXT_BYTE_LIMIT - total:
-            return Err(TextIoError.Io("SOSIX argument bytes exceed 16 MiB"))
-        total = total + count
-        val admitted_arg = sosix_admit_c_string(arg, false)?
-    Ok(())
-
-fn sosix_run_bounded_checked(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> Result<SosixRun, TextIoError>:
-    if timeout_ms < 0 or max_output_bytes < 0 or max_output_bytes > SOSIX_TEXT_BYTE_LIMIT:
-        return Err(TextIoError.Io("invalid SOSIX timeout or capture limit"))
-    val admitted = sosix_admit_c_string(cmd, false)?
-    if admitted == "": return Err(TextIoError.Io("empty executable name"))
-    # Preflight every argument before a resolver process can be started.
-    sosix_arguments_checked(args)?
-    var resolved = admitted
-    if not admitted.contains("/") and not (platform_name() == "windows" and (admitted.contains("\\") or admitted.contains(":"))):
-        val found = sosix_which_checked(admitted)?
-        if val path = found: resolved = path
-        else: return Ok(SosixRun(stdout: "", stderr: "SOSIX executable not found: {admitted}", exit_code: 127))
-    sosix_run_path_checked(resolved, args, timeout_ms, max_output_bytes)
-
-fn sosix_run_checked(cmd: text, args: [text]) -> Result<SosixRun, TextIoError>:
-    sosix_run_bounded_checked(cmd, args, 0, SOSIX_TEXT_BYTE_LIMIT)
-
 fn sosix_run(cmd: text, args: [text]) -> SosixRun:
-    """UTF-8 process capture; typed errors become an explicit failed run.
+    """Run `cmd` to completion, capturing stdout/stderr and the exit code.
 
-    Ordinary capture is bounded to 16 MiB per provider stream. Use the checked
-    sibling for typed errors and the bounded sibling to choose a smaller cap.
+    Adapter, not an alias: the underlying primitive returns the bare tuple
+    `(text, text, i64)`, and this facade's contract is a named struct.
     """
-    match sosix_run_checked(cmd, args):
-        case Ok(result): result
-        case Err(error): SosixRun(stdout: "", stderr: io_text_error_message(error), exit_code: -1)
-
-fn sosix_spawn_checked(cmd: text, args: [text]) -> Result<i64, TextIoError>:
-    val admitted = sosix_admit_c_string(cmd, false)?
-    sosix_require_posix_text_provider()?
-    if admitted == "": return Err(TextIoError.Io("empty executable name"))
-    sosix_arguments_checked(args)?
-    var resolved = admitted
-    if not admitted.contains("/"):
-        val found = sosix_which_checked(admitted)?
-        if val path = found: resolved = path
-        else: return Err(TextIoError.Io("SOSIX executable not found: {admitted}"))
-    val pid = process_spawn_async(resolved, args)
-    if pid <= 0: return Err(TextIoError.Io("process spawn provider failed"))
-    Ok(pid)
-
-fn sosix_spawn(cmd: text, args: [text]) -> i64:
-    match sosix_spawn_checked(cmd, args):
-        case Ok(pid): pid
-        case Err(_): -1
-
-fn sosix_process_run(cmd: text, args: [text]) -> (text, text, i64):
-    val result = sosix_run(cmd, args)
-    (result.stdout, result.stderr, result.exit_code)
+    val (out, err, code) = process_run(cmd, args)
+    SosixRun(stdout: out, stderr: err, exit_code: code)
 
 
 fn sosix_proc_usage(pid: i64) -> SosixProcUsage:
@@ -246,12 +103,12 @@ fn sosix_proc_usage(pid: i64) -> SosixProcUsage:
         # Honest stub: the real Windows backend is a separate work package.
         return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
 
-    val sampled = sosix_run("ps", ["-o", "%cpu=,rss=", "-p", "{pid}"])
-    if sampled.exit_code != 0:
+    val (out, _err, code) = process_run("ps", ["-o", "%cpu=,rss=", "-p", "{pid}"])
+    if code != 0:
         return SosixProcUsage(cpu_pct: 0.0, rss_mb: 0, valid: false)
 
     var fields = []
-    for part in sampled.stdout.trim().split(" "):
+    for part in out.trim().split(" "):
         if part.trim() != "":
             fields.push(part.trim())
     if fields.len() < 2:
@@ -277,9 +134,4 @@ fn _parse_pct(raw: text) -> f64:
 
 
 export SosixRun, SosixProcUsage
-export sosix_platform, sosix_run, sosix_proc_usage, sosix_process_run
-export sosix_run_checked, sosix_run_bounded_checked, sosix_which_checked, sosix_which
-export sosix_decode_process_bytes
-export sosix_dir_list_checked, sosix_dir_list
-
-export sosix_spawn_checked, sosix_spawn
+export sosix_platform, sosix_run, sosix_proc_usage

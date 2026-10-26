@@ -14,7 +14,7 @@ with directory-based precedence.
 
 ## Config File Format
 
-```simple:skip
+```simple
 port = 8080
 timeout = 30.5
 

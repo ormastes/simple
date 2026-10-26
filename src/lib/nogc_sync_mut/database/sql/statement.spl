@@ -1,17 +1,17 @@
 # Typed SQL Database Library - Prepared Statement
 #
 # Typed prepared statement wrapper over SqliteStatement.
-# Returns typed DbRow with DbValue entries using sqlite_raw_column_type
+# Returns typed DbRow with DbValue entries using rt_sqlite_column_type
 # to determine types, unlike raw SFFI which returns everything as text.
 
 use std.io.sqlite_sffi.{SqliteStatement, SqliteConnection, sqlite_prepare,
     sqlite_bind_text, sqlite_bind_int, sqlite_bind_float, sqlite_bind_null,
     sqlite_reset, sqlite_finalize, sqlite_error_message}
-use std.nogc_sync_mut.io.sqlite_embedded.{sqlite_raw_query_next, sqlite_raw_column_count,
-    sqlite_raw_column_name, sqlite_raw_column_type, sqlite_raw_column_int,
-    sqlite_raw_column_float, sqlite_raw_column_text,
-    sqlite_raw_changes, sqlite_raw_bind_text, sqlite_raw_bind_int,
-    sqlite_raw_bind_float, sqlite_raw_bind_null, sqlite_raw_reset}
+use std.io.sqlite_sffi.{rt_sqlite_query_next, rt_sqlite_column_count,
+    rt_sqlite_column_name, rt_sqlite_column_type, rt_sqlite_column_int,
+    rt_sqlite_column_float, rt_sqlite_column_text,
+    rt_sqlite_changes, rt_sqlite_bind_text, rt_sqlite_bind_int,
+    rt_sqlite_bind_float, rt_sqlite_bind_null, rt_sqlite_reset}
 use std.database.sql.types.{DbValue, DbRow, DbError}
 use std.io.sffi_common.{is_valid_handle, is_invalid_handle}
 
@@ -39,7 +39,7 @@ impl PreparedStatement:
         """Bind integer value at 1-based index"""
         if is_invalid_handle(self.raw.handle):
             return Err(DbError.BindFailed(index: idx, message: "Invalid statement handle"))
-        val result = sqlite_raw_bind_int(self.raw.handle, idx, value)
+        val result = rt_sqlite_bind_int(self.raw.handle, idx, value)
         if result == 1:
             Ok(())
         else:
@@ -50,7 +50,7 @@ impl PreparedStatement:
         """Bind float value at 1-based index"""
         if is_invalid_handle(self.raw.handle):
             return Err(DbError.BindFailed(index: idx, message: "Invalid statement handle"))
-        val result = sqlite_raw_bind_float(self.raw.handle, idx, value)
+        val result = rt_sqlite_bind_float(self.raw.handle, idx, value)
         if result == 1:
             Ok(())
         else:
@@ -61,7 +61,7 @@ impl PreparedStatement:
         """Bind text value at 1-based index"""
         if is_invalid_handle(self.raw.handle):
             return Err(DbError.BindFailed(index: idx, message: "Invalid statement handle"))
-        val result = sqlite_raw_bind_text(self.raw.handle, idx, value)
+        val result = rt_sqlite_bind_text(self.raw.handle, idx, value)
         if result == 1:
             Ok(())
         else:
@@ -72,7 +72,7 @@ impl PreparedStatement:
         """Bind NULL at 1-based index"""
         if is_invalid_handle(self.raw.handle):
             return Err(DbError.BindFailed(index: idx, message: "Invalid statement handle"))
-        val result = sqlite_raw_bind_null(self.raw.handle, idx)
+        val result = rt_sqlite_bind_null(self.raw.handle, idx)
         if result == 1:
             Ok(())
         else:
@@ -110,43 +110,43 @@ impl PreparedStatement:
         """
         if is_invalid_handle(self.raw.handle):
             return Err(DbError.QueryFailed(sql: self.sql_text, message: "Invalid statement handle"))
-        val result = sqlite_raw_query_next(self.raw.handle)
+        val result = rt_sqlite_query_next(self.raw.handle)
         # For non-SELECT statements, step returns 0 (done) or 1 (row)
         # Either way, we get the changes count from the connection
-        val changes = sqlite_raw_changes(self.conn.handle)
+        val changes = rt_sqlite_changes(self.conn.handle)
         Ok(changes)
 
     fn query_rows() -> Result<[DbRow], DbError>:
         """Step through all results, building typed DbRow for each row.
 
-        Uses sqlite_raw_column_type to determine the column type per-row,
-        then calls the appropriate sqlite_raw_column_int/float/text to get
+        Uses rt_sqlite_column_type to determine the column type per-row,
+        then calls the appropriate rt_sqlite_column_int/float/text to get
         the correctly typed value. This is the key advantage over raw SFFI.
         """
         if is_invalid_handle(self.raw.handle):
             return Err(DbError.QueryFailed(sql: self.sql_text, message: "Invalid statement handle"))
 
-        val col_count = sqlite_raw_column_count(self.raw.handle)
+        val col_count = rt_sqlite_column_count(self.raw.handle)
 
         # Collect column names once
         var column_names: [text] = []
         for i in 0..col_count:
-            val name = sqlite_raw_column_name(self.raw.handle, i)
+            val name = rt_sqlite_column_name(self.raw.handle, i)
             column_names.push(name)
 
         # Fetch all rows with typed values
         var rows: [DbRow] = []
-        var has_row = sqlite_raw_query_next(self.raw.handle)
+        var has_row = rt_sqlite_query_next(self.raw.handle)
         while has_row == 1:
             var values: [DbValue] = []
             for i in 0..col_count:
-                val col_type = sqlite_raw_column_type(self.raw.handle, i)
+                val col_type = rt_sqlite_column_type(self.raw.handle, i)
                 val typed_value = _read_column_value(self.raw.handle, i, col_type)
                 values.push(typed_value)
 
             val row = DbRow(columns: column_names, values: values)
             rows.push(row)
-            has_row = sqlite_raw_query_next(self.raw.handle)
+            has_row = rt_sqlite_query_next(self.raw.handle)
 
         Ok(rows)
 
@@ -162,7 +162,7 @@ impl PreparedStatement:
         """Reset the statement for reuse and clear bindings"""
         if is_invalid_handle(self.raw.handle):
             return Err(DbError.QueryFailed(sql: self.sql_text, message: "Invalid statement handle"))
-        val result = sqlite_raw_reset(self.raw.handle)
+        val result = rt_sqlite_reset(self.raw.handle)
         if result == 1:
             Ok(())
         else:
@@ -182,25 +182,25 @@ impl PreparedStatement:
 fn _read_column_value(stmt_handle: i64, idx: i64, col_type: text) -> DbValue:
     """Read a single column value using the appropriate typed accessor.
 
-    col_type is the string returned by sqlite_raw_column_type:
+    col_type is the string returned by rt_sqlite_column_type:
     "integer", "real", "text", "blob", or "null".
     """
     if col_type == "integer":
-        val v = sqlite_raw_column_int(stmt_handle, idx)
+        val v = rt_sqlite_column_int(stmt_handle, idx)
         DbValue.Integer(value: v)
     elif col_type == "real":
-        val v = sqlite_raw_column_float(stmt_handle, idx)
+        val v = rt_sqlite_column_float(stmt_handle, idx)
         DbValue.Real(value: v)
     elif col_type == "text":
-        val v = sqlite_raw_column_text(stmt_handle, idx)
+        val v = rt_sqlite_column_text(stmt_handle, idx)
         DbValue.Text(value: v)
     elif col_type == "blob":
         # Blob read not yet supported at SFFI level; return text representation
-        val v = sqlite_raw_column_text(stmt_handle, idx)
+        val v = rt_sqlite_column_text(stmt_handle, idx)
         DbValue.Text(value: v)
     elif col_type == "null":
         DbValue.Null
     else:
         # Unknown type — fall back to text
-        val v = sqlite_raw_column_text(stmt_handle, idx)
+        val v = rt_sqlite_column_text(stmt_handle, idx)
         DbValue.Text(value: v)

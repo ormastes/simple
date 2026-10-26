@@ -1,16 +1,15 @@
 # ELF archive closure — fixpoint member extraction (lane A7 slice 1, design L5).
 #
 # Replaces the single-pass selection of linker_wrapper_lib_support: a member is
-# extracted when it satisfies a strong unresolved reference or supplies a
-# strong regular definition for a tentative COMMON. A COMMON member satisfies
-# unresolved demand but does not replace an already selected COMMON. Extraction
+# extracted when it defines a symbol that is still undefined (strong reference)
+# after all objects and previously extracted members are considered. Extraction
 # repeats until a pass extracts nothing, so a member reachable only through
 # another member (A needs B) is pulled on a later pass. Weak undefined
 # references never extract a member (ELF rule). Every member's own symtab is
 # read directly, so no archive symbol index ("/") is required.
 
 use compiler.backend.linker.elf_parser.{
-    ElfObject, ElfSymbol, elf_parse_object, elf_symbol_binding,
+    ElfObject, elf_parse_object, elf_symbol_binding,
     SHN_UNDEF, STB_GLOBAL, STB_WEAK
 }
 use compiler.backend.linker.archive_parser.{ar_parse, ar_member_data}
@@ -25,7 +24,7 @@ val SHN_COMMON: i64 = 0xfff2
 struct ElfArchiveMember:
     archive_idx: i64
     name: text
-    raw: [u8]
+    raw: [i64]
     obj: ElfObject
 
 struct ElfClosureResult:
@@ -36,20 +35,34 @@ struct ElfClosureResult:
 # Helpers
 # ============================================================================
 
-fn elf_closure_is_elf(bytes: [u8]) -> bool:
+fn elf_closure_is_elf(bytes: [i64]) -> bool:
     bytes.len() >= 4 and bytes[0] == 0x7f and bytes[1] == 0x45 and bytes[2] == 0x4c and bytes[3] == 0x46
 
-fn elf_closure_is_strong_demand(sym: ElfSymbol) -> bool:
-    sym.name != "" and (sym.st_shndx == SHN_UNDEF or sym.st_shndx == SHN_COMMON) and
-        elf_symbol_binding(sym) == STB_GLOBAL
+fn elf_closure_add_defs(defined: {text: bool}, obj: ElfObject) -> {text: bool}:
+    var d = defined
+    for sym in obj.symbols:
+        if sym.name != "" and sym.st_shndx != SHN_UNDEF and sym.st_shndx != SHN_COMMON:
+            val bind = elf_symbol_binding(sym)
+            if bind == STB_GLOBAL or bind == STB_WEAK:
+                d[sym.name] = true
+    d
+
+fn elf_closure_add_strong_undefs(undef: {text: bool}, defined: {text: bool}, obj: ElfObject) -> {text: bool}:
+    var u = undef
+    for sym in obj.symbols:
+        if sym.name != "" and (sym.st_shndx == SHN_UNDEF or sym.st_shndx == SHN_COMMON) and elf_symbol_binding(sym) == STB_GLOBAL:
+            if not defined.has(sym.name):
+                # false = a real undefined reference; true = tentative-only demand.
+                # Once real undefined, later COMMON declarations cannot weaken it.
+                if sym.st_shndx == SHN_UNDEF or not u.has(sym.name):
+                    u[sym.name] = sym.st_shndx == SHN_COMMON
+    u
 
 fn elf_closure_member_satisfies(obj: ElfObject, undef: {text: bool}) -> bool:
     for sym in obj.symbols:
-        if sym.name != "" and sym.st_shndx != SHN_UNDEF and undef.has(sym.name):
+        if sym.name != "" and sym.st_shndx != SHN_UNDEF and sym.st_shndx != SHN_COMMON and undef.has(sym.name):
             val bind = elf_symbol_binding(sym)
-            if sym.st_shndx == SHN_COMMON:
-                if bind == STB_GLOBAL and not undef[sym.name]: return true
-            elif bind == STB_GLOBAL or (bind == STB_WEAK and not undef[sym.name]):
+            if bind == STB_GLOBAL or (bind == STB_WEAK and not undef[sym.name]):
                 return true
     false
 
@@ -57,7 +70,7 @@ fn elf_closure_member_satisfies(obj: ElfObject, undef: {text: bool}) -> bool:
 # Fixpoint
 # ============================================================================
 
-fn elf_archive_members(archives: [[u8]]) -> Result<[ElfArchiveMember], text>:
+fn elf_archive_members(archives: [[i64]]) -> Result<[ElfArchiveMember], text>:
     """Parse every ELF member of every archive (special/non-ELF members skipped)."""
     var out: [ElfArchiveMember] = []
     var ai: i64 = 0
@@ -77,16 +90,16 @@ fn elf_archive_members(archives: [[u8]]) -> Result<[ElfArchiveMember], text>:
         ai = ai + 1
     Ok(out)
 
-fn elf_archive_closure(roots: [ElfObject], archives: [[u8]]) -> Result<ElfClosureResult, text>:
+fn elf_archive_closure(roots: [ElfObject], archives: [[i64]]) -> Result<ElfClosureResult, text>:
     """Extract archive members until no still-undefined strong symbol can be resolved."""
     elf_archive_closure_retained(roots, archives, [])
 
-fn elf_archive_closure_retained(roots: [ElfObject], archives: [[u8]],
+fn elf_archive_closure_retained(roots: [ElfObject], archives: [[i64]],
         retained_symbols: [text]) -> Result<ElfClosureResult, text>:
     """Archive closure with `-u/--undefined`-style extraction roots."""
     elf_archive_closure_retained_wrapped(roots, archives, retained_symbols, [])
 
-fn elf_archive_closure_retained_wrapped(roots: [ElfObject], archives: [[u8]],
+fn elf_archive_closure_retained_wrapped(roots: [ElfObject], archives: [[i64]],
         retained_symbols: [text], wraps: [text]) -> Result<ElfClosureResult, text>:
     """Archive closure after applying the same --wrap view as relocation."""
     var wrapped_roots: [ElfObject] = []
@@ -101,69 +114,42 @@ fn elf_archive_closure_retained_wrapped(roots: [ElfObject], archives: [[u8]],
     for _m in members:
         taken = taken.push(false)
 
-    # Incremental fixpoint with exactly the per-pass semantics of a full
-    # recomputation: `defined` only grows, a satisfied name leaves `undef` as
-    # soon as a member defines it, and the demand of members taken in a pass is
-    # added at the end of that pass. The maps are updated in place in this
-    # scope; passing them through helpers copied them once per object.
     var selected: [ElfArchiveMember] = []
     var passes: i64 = 0
-    var defined: {text: i64} = {}
-    for obj in wrapped_roots:
-        for sym in obj.symbols:
-            if sym.name != "" and sym.st_shndx != SHN_UNDEF:
-                val bind = elf_symbol_binding(sym)
-                if bind == STB_GLOBAL or bind == STB_WEAK:
-                    # COMMON satisfies an undefined reference but still permits
-                    # extraction of a regular strong definition from an archive.
-                    val rank = if sym.st_shndx == SHN_COMMON: 2 else: if bind == STB_GLOBAL: 3 else: 1
-                    if not defined.has(sym.name) or rank > defined[sym.name]: defined[sym.name] = rank
-    var undef: {text: bool} = {}
-    for obj in wrapped_roots:
-        for sym in obj.symbols:
-            if elf_closure_is_strong_demand(sym):
-                if not defined.has(sym.name):
-                    undef[sym.name] = false
-                elif defined[sym.name] == 2:
-                    undef[sym.name] = true
-    for name in retained_symbols:
-        if name != "" and not defined.has(name):
-            undef[name] = false
-        elif name != "" and defined[name] == 2:
-            undef[name] = true
-    while undef.len() > 0:
-        var taken_now: [i64] = []
+    var changed = true
+    while changed:
+        changed = false
+        var defined: {text: bool} = {}
+        for obj in wrapped_roots:
+            defined = elf_closure_add_defs(defined, obj)
+        for sm in selected:
+            defined = elf_closure_add_defs(defined, sm.obj)
+        var undef: {text: bool} = {}
+        for obj in wrapped_roots:
+            undef = elf_closure_add_strong_undefs(undef, defined, obj)
+        for sm in selected:
+            undef = elf_closure_add_strong_undefs(undef, defined, sm.obj)
+        for name in retained_symbols:
+            if name != "" and not defined.has(name):
+                undef[name] = false
+        if undef.len() == 0:
+            break
+
         var mi: i64 = 0
         while mi < members.len():
             if not taken[mi] and elf_closure_member_satisfies(members[mi].obj, undef):
                 taken[mi] = true
                 selected = selected.push(members[mi])
-                taken_now.push(mi)
+                changed = true
+                # Its definitions no longer count as undefined for later members.
                 for sym in members[mi].obj.symbols:
-                    if sym.name != "" and sym.st_shndx != SHN_UNDEF:
+                    if sym.name != "" and sym.st_shndx != SHN_UNDEF and sym.st_shndx != SHN_COMMON and undef.has(sym.name):
                         val bind = elf_symbol_binding(sym)
-                        if bind == STB_GLOBAL or bind == STB_WEAK:
-                            val rank = if sym.st_shndx == SHN_COMMON: 2 else: if bind == STB_GLOBAL: 3 else: 1
-                            if not defined.has(sym.name) or rank > defined[sym.name]: defined[sym.name] = rank
-                # A newly extracted COMMON changes real demand to tentative
-                # demand: another COMMON/weak member must not be extracted.
-                for sym in members[mi].obj.symbols:
-                    if sym.name != "" and undef.has(sym.name) and defined.has(sym.name):
-                        if defined[sym.name] == 2:
-                            undef[sym.name] = true
-                        else:
+                        if bind == STB_GLOBAL or (bind == STB_WEAK and not undef[sym.name]):
                             undef.remove(sym.name)
             mi = mi + 1
-        if taken_now.len() == 0:
-            break
-        passes = passes + 1
-        for ti in taken_now:
-            for sym in members[ti].obj.symbols:
-                if elf_closure_is_strong_demand(sym):
-                    if not defined.has(sym.name):
-                        undef[sym.name] = false
-                    elif defined[sym.name] == 2:
-                        undef[sym.name] = true
+        if changed:
+            passes = passes + 1
 
     Ok(ElfClosureResult(members: selected, passes: passes))
 

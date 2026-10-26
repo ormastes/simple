@@ -49,28 +49,6 @@ pub mod units;
 // Re-export key functions for backward compatibility
 pub use body::compile_function_body;
 
-// Nullable text can arrive at codegen as a registered Pointer<text> TypeId,
-// even though its value is still a runtime string handle. Keep casts from
-// known primitive types on their width-aware path; inspect every other i64-
-// shaped receiver at runtime before accepting it as an integer.
-fn int_cast_needs_runtime_dispatch(from_ty: TypeId) -> bool {
-    !matches!(
-        from_ty,
-        TypeId::BOOL
-            | TypeId::CHAR
-            | TypeId::I8
-            | TypeId::I16
-            | TypeId::I32
-            | TypeId::U8
-            | TypeId::U16
-            | TypeId::U32
-            | TypeId::U64
-            | TypeId::F32
-            | TypeId::F64
-            | TypeId::STRING
-    )
-}
-
 // Import compile_* functions from submodules for use in compile_instruction
 use actors::{
     compile_actor_join, compile_actor_recv, compile_actor_reply, compile_actor_send, compile_await,
@@ -533,13 +511,10 @@ pub fn compile_instruction<M: Module>(
                 let closure = helpers::call_runtime_2(ctx, builder, "rt_closure_new", addr, count);
                 ctx.vreg_values.insert(*dest, closure);
             } else if let Some(&func_id) = ctx.func_ids.get(global_name) {
-                // A declared function with no `$boxed` entry: an `extern fn`
-                // (or an import whose value type carried no signature). Keep
-                // the raw-convention direct record: runtime consumers that take
-                // an extern entry point (`runtime_thread.c` /
-                // `executor.rs` DirectFunction) accept exactly this shape.
-                // User functions -- local, or imported with a function type --
-                // never reach here; they take the `$boxed` branch above.
+                // Function reference used as a value (e.g., from MIR GlobalLoad of an
+                // imported function). Materialize it as the same heap closure shape
+                // used by ClosureCreate so values survive parameter passing and array
+                // storage before a later IndirectCall.
                 let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
                 let closure_size = builder.ins().iconst(types::I64, 16);
                 let closure_ptr = helpers::call_runtime_1(ctx, builder, "rt_alloc", closure_size);
@@ -573,24 +548,47 @@ pub fn compile_instruction<M: Module>(
                             ctx.vreg_values.insert(*dest, val);
                         }
                     }
-                } else if let Some(cranelift_module::FuncOrDataId::Data(data_id)) = ctx.module.get_name(&symbol) {
-                    // Already declared as imported DATA in this unit.
-                    let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-                    let global_addr = builder.ins().global_value(types::I64, global_ref);
-                    let val = builder
-                        .ins()
-                        .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
-                    ctx.vreg_values.insert(*dest, val);
                 } else {
-                    // Cross-module function reference used as a value with no
-                    // `$boxed` entry (its value type carried no signature):
-                    // refuse it rather than fabricate a record that
-                    // `rt_closure_func_ptr` rejects, which calls address 0.
-                    return Err(format!(
-                        "GlobalLoad: imported function '{}' ({}) is used as a value but has no boxed entry \
-                         (its value type is not a function type); refusing to build a NULL function value",
-                        global_name, symbol
-                    ));
+                    // Cross-module function reference used as a value.
+                    // Data exports are handled above so imported top-level vals do
+                    // not get lowered to function addresses.
+                    let call_conv = crate::codegen::shared::platform_call_conv();
+                    let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+                    sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    if let Ok(fid) = ctx
+                        .module
+                        .declare_function(&symbol, cranelift_module::Linkage::Import, &sig)
+                    {
+                        ctx.func_ids.entry(global_name.clone()).or_insert(fid);
+                        let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
+                        let closure_size = builder.ins().iconst(types::I64, 16);
+                        let closure_ptr = helpers::call_runtime_1(ctx, builder, "rt_alloc", closure_size);
+                        let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+                        let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
+                        builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+                        builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
+                        ctx.vreg_values.insert(*dest, closure_ptr);
+                    } else {
+                        match ctx
+                            .module
+                            .declare_data(&symbol, cranelift_module::Linkage::Import, true, false)
+                        {
+                            Ok(data_id) => {
+                                let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+                                let global_addr = builder.ins().global_value(types::I64, global_ref);
+                                let val =
+                                    builder
+                                        .ins()
+                                        .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
+                                ctx.vreg_values.insert(*dest, val);
+                            }
+                            Err(_) => {
+                                let val = builder.ins().iconst(types::I64, 0);
+                                ctx.vreg_values.insert(*dest, val);
+                            }
+                        }
+                    }
                 }
             } else {
                 // Truly unresolved: not a declared global, not a const-data name,
@@ -667,7 +665,6 @@ pub fn compile_instruction<M: Module>(
                 None
             };
             compile_call(ctx, builder, dest, target, args)?;
-            pointers::writeback_extern_out_slots(ctx, builder, args);
             if let (Some(is_nil), Some(dest_reg)) = (nil_flag, dest.as_ref()) {
                 if let Some(&numeric) = ctx.vreg_values.get(dest_reg) {
                     let (ptr, len) = helpers::create_string_constant(ctx, builder, "nil")?;
@@ -689,7 +686,7 @@ pub fn compile_instruction<M: Module>(
             let func_id = if let Some(func_id) = ctx.func_ids.get(&symbol).copied() {
                 func_id
             } else {
-                let sig = Signature::new(ctx.module.isa().default_call_conv());
+                let sig = Signature::new(super::shared::platform_call_conv());
                 let func_id = ctx
                     .module
                     .declare_function(&symbol, Linkage::Import, &sig)

@@ -15,8 +15,8 @@ compositor `LayerTree`, so 2D canvases and GUI stack above/below it by z-index.
 No shared depth buffer: the 3D layer is opaque color output; world-space 2D
 belongs on a texture inside the 3D scene.
 
-```simple:skip
-use std.nogc_sync_mut.engine.render.surface_layer.*
+```simple
+use nogc_sync_mut.engine.render.surface_layer.*
 
 val scene = Scene3DLayer.create(target_id, 1280.0, 720.0, 0)  # pure, no tree
 var attached = Scene3DLayer.attach(tree, target_id, 1280.0, 720.0, 0)
@@ -33,7 +33,7 @@ compositor for attached layers.
 `camera` / `camera3d` / `CameraData` now carry `render_order: i64` (default 0).
 Higher draws later (on top). Pure helpers:
 
-```simple:skip
+```simple
 val sorted = sort_camera_orders([10, -5, 0])   # [-5, 0, 10]
 val on_top = camera_draws_after(10, 0)          # true
 ```
@@ -44,7 +44,7 @@ FMOD/Godot-style named bus graph in the dB domain, layered over
 `AudioGroupTree` (which stays the linear playback-routing layer). Routing must
 form a DAG to master; cycles are rejected.
 
-```simple:skip
+```simple
 var g = BusGraph.new()
 g.add_bus("sfx", -6.0206, false, "")        # name, volume_db, muted, send("" = master)
 g.add_bus("ui", 0.0, false, "sfx")
@@ -57,7 +57,7 @@ g.set_muted("sfx", true)                    # zeroes all descendants
 One accumulator for both `game_loop` and `game_loop3d` (seconds, f64). Cap
 drains the accumulator to zero to prevent spiral-of-death.
 
-```simple:skip
+```simple
 var ts = FixedTimestep.create(1.0/60.0, 5)
 val steps = ts.advance(frame_delta)         # fixed steps to simulate this frame
 val alpha = ts.interpolation_alpha()        # [0,1) render interpolation factor

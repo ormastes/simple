@@ -1147,15 +1147,11 @@ impl ExecCore {
         // `test/01_unit/compiler/dup_struct_name/`), which is green while the
         // gate is off and red the moment it is defaulted on.
         //
-        // 2026-10-19 — the real fix landed: module-qualified struct identity.
-        // The flattener tags every struct/class with its owner, and HIR
-        // lowering gives each colliding same-named declaration an owner-exact
-        // type, resolved per function owner and import binding
-        // (`hir/lower/module_lowering/flatten_struct_owner.rs`), so
-        // attributable same-named structs no longer need the consensus
-        // fallback. The gate stays OFF: the fallback itself is unsound, and
-        // glob-imported names still resolve by bare name.
-        // See doc/08_tracking/bug/lint_dejits_whole_program_span_struct_collision_2026-08-18.md.
+        // The real fix is module-qualified struct resolution, which this lane
+        // cannot express: `load_module_with_imports` flattens every import into
+        // one bare-name namespace and `simple_parser::token::Span` carries no
+        // file, so no definition or use site retains module identity. See
+        // doc/08_tracking/bug/lint_dejits_whole_program_span_struct_collision_2026-08-18.md.
         let duplicate_structs = if std::env::var_os("SIMPLE_JIT_DUP_STRUCT_FEED").is_some() {
             simple_compiler::pipeline::module_loader::collect_duplicate_struct_defs(&ast)
         } else {
@@ -1192,10 +1188,6 @@ impl ExecCore {
             .extern_fn_names
             .iter()
             .filter(|name| self.symbol_provider.get_symbol(name.as_str()).is_none())
-            // Byte/word accessors are lowered inline by codegen; they never
-            // need a runtime symbol, so they must not be spliced through the
-            // interpreter bridge.
-            .filter(|name| !simple_compiler::codegen::instr::calls::is_inline_lowered_byte_accessor(name.as_str()))
             .cloned()
             .collect();
         if std::env::var("SIMPLE_DEBUG_EXTERNS").is_ok() {
@@ -1359,7 +1351,7 @@ impl ExecCore {
     ///
     /// The args are made available to the Simple program via `sys_get_args()`.
     pub fn run_file_interpreted_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
-        use simple_compiler::interpreter::{evaluate_module_owned, set_current_file};
+        use simple_compiler::interpreter::{evaluate_module, set_current_file};
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use simple_compiler::set_interpreter_args;
         use std::collections::HashSet;
@@ -1389,9 +1381,7 @@ impl ExecCore {
         // reaches the user as "no output, exit 0".
         Self::reject_silent_no_op_module(&module.items)?;
 
-        // Owned: the flattened entry module is freed once registration is
-        // done instead of staying alive for the whole of `main`.
-        let exit_code = evaluate_module_owned(module.items).map_err(|e| format!("{}", e))?;
+        let exit_code = evaluate_module(&module.items).map_err(|e| format!("{}", e))?;
 
         // Clear current file after evaluation
         set_current_file(None);
@@ -1539,11 +1529,6 @@ fn should_force_interpreter_for_source(path: &Path) -> bool {
     normalized.ends_with("src/app/simpleos_nvme_serial_check/main.spl")
 }
 
-fn source_is_lint_entry(path: &Path) -> bool {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    normalized.ends_with("src/app/cli/lint_entry.spl")
-}
-
 fn should_prefer_interpreter_for_source(path: &Path, extension: &str, cli_args_backed: bool) -> bool {
     match interpreter_preference_reason(path, extension, cli_args_backed) {
         Some(reason) => {
@@ -1573,23 +1558,6 @@ fn interpreter_preference_reason(path: &Path, extension: &str, cli_args_backed: 
     }
     if std::env::var_os("SIMPLE_EXECUTION_MODE").is_some() {
         return None;
-    }
-    // `lint` / `fix` / `fmt` (all `src/app/cli/lint_entry.spl`) stay on the
-    // interpreter unless a lane is requested explicitly above. Their JIT lane
-    // has no parity proof and is measurably WRONG, not merely slower: on a
-    // fixture with two positional duplicate-typed calls the interpreter reports
-    // 2 `unnamed_duplicate_typed_args` warnings and the JIT reports
-    // `Lint passed: all files clean` (`_collect_indexed_call_replacements`
-    // returns 0 rows when JIT-compiled). A lint that answers "clean" for a
-    // dirty file is worse than one that crashes. Until 2026-10-09 this entry
-    // only ever ran interpreted, by accident (a HIR lowering error made every
-    // JIT attempt fall back); once that error was fixed the JIT lane went live
-    // and SEGV'd, then exited 70 on `Array.sort_by`, then went falsely green.
-    // On small files the interpreter is also the faster lane (7-14s vs 29s, the
-    // JIT lane's fixed compile cost); large files were not compared.
-    // See doc/08_tracking/bug/lint_jit_segv_text_as_string_array_2026-10-10.md.
-    if source_is_lint_entry(path) {
-        return Some("lint-jit-parity-unproven");
     }
     // Was an unconditional SUBSTRING gate ("cli-args-substring"): any entry file
     // merely MENTIONING `std.cli` / `get_cli_args` / `sys_get_args` was diverted
@@ -1733,25 +1701,6 @@ mod tests {
         std::env::remove_var("SIMPLE_EXECUTION_MODE");
         assert_eq!(interpreter_preference_reason(&path, "spl", true), None);
         assert!(!should_prefer_interpreter_for_source(&path, "spl", true));
-    }
-
-    /// The lint entry is pinned to the interpreter by default (its JIT lane
-    /// reports dirty files as clean), under either path separator, and an
-    /// explicit `SIMPLE_EXECUTION_MODE` still reaches the JIT for parity work.
-    /// A sibling CLI entry must not be swept in.
-    #[test]
-    fn interpreter_preference_reason_pins_the_lint_entry() {
-        std::env::remove_var("SIMPLE_EXECUTION_MODE");
-        for lint in ["repo/src/app/cli/lint_entry.spl", r"C:\repo\src\app\cli\lint_entry.spl"] {
-            assert_eq!(
-                interpreter_preference_reason(Path::new(lint), "spl", true),
-                Some("lint-jit-parity-unproven")
-            );
-        }
-        assert_eq!(
-            interpreter_preference_reason(Path::new("repo/src/app/cli/check_entry.spl"), "spl", true),
-            None
-        );
     }
 
     /// `.shs` and the forced allowlist are separate gates and must not be

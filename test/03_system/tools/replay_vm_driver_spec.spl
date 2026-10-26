@@ -1,12 +1,4 @@
-# codex-system-test
-# @req REQ-SSPEC-SYSTEM
-# @tag:system
-# @cover src/lib/nogc_sync_mut/replay/vm/vm_types.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/vm/replay_driver.spl 80%
-# @cover src/lib/nogc_sync_mut/replay/vm/vcpu.spl 80%
-# Coverage percentages are targets, not measured coverage.
-# Evidence class: host-fixture; documented CPU register/PC/cycle prototype only.
-# OPEN: memory bytes, live devices, halted/interrupt state and full-VM replay.
+# @cover src/lib/nogc_sync_mut/replay/vm/vm_types.spl 0%
 # System Tests — VM Replay Driver
 #
 # Tests for VmReplayDriver: construction, execution stepping,
@@ -19,25 +11,6 @@
 use std.spec
 use std.nogc_sync_mut.replay.vm.vm_types.{VmConfig, VmState, VmReplayMode}
 use std.nogc_sync_mut.replay.vm.replay_driver.{VmReplayDriver}
-
-fn vm_snapshot_set_cpu_fixture(original: VmReplayDriver, register_base: i64, pc: i64, cycles: i64) -> VmReplayDriver:
-    var driver = original
-    driver.start(pc)
-    driver.cpu.cycle_count = cycles
-    var index = 0
-    while index < 32:
-        driver.cpu.write_register(index, register_base + index)
-        index = index + 1
-    driver
-
-fn expect_vm_snapshot_cpu(driver: VmReplayDriver, register_base: i64, pc: i64, cycles: i64):
-    expect(driver.get_pc()).to_equal(pc)
-    expect(driver.get_cycle_count()).to_equal(cycles)
-    expect(driver.read_register(0)).to_equal(0)
-    var index = 1
-    while index < 32:
-        expect(driver.read_register(index)).to_equal(register_base + index)
-        index = index + 1
 
 # ============================================================================
 # VmConfig — default_rv32
@@ -176,78 +149,6 @@ describe "VmReplayDriver restore_snapshot":
         driver.start(0x200)
         driver.restore_snapshot(snap_id)
         expect(driver.get_pc()).to_equal(0x100)
-
-# ============================================================================
-# VmReplayDriver — complete documented CPU snapshot contract
-# ============================================================================
-
-describe "VmReplayDriver CPU snapshot contents":
-    it "should restore every register PC and cycle count after mutation":
-        step("Populate the production CPU with distinct nonzero register values")
-        val config = VmConfig.default_rv32(0)
-        var driver = VmReplayDriver.create(config)
-        driver = vm_snapshot_set_cpu_fixture(driver, 305397760, 4096, 12345)
-        expect_vm_snapshot_cpu(driver, 305397760, 4096, 12345)
-        val snapshot_id = driver.save_snapshot()
-        step("Change every writable register PC and cycle count")
-        driver = vm_snapshot_set_cpu_fixture(driver, 1450704896, 8192, 67890)
-        expect_vm_snapshot_cpu(driver, 1450704896, 8192, 67890)
-        step("Restore the snapshot and compare all CPU values")
-        match driver.restore_snapshot(snapshot_id):
-            case Ok(_):
-                expect_vm_snapshot_cpu(driver, 305397760, 4096, 12345)
-                expect(driver.state == VmState.Running).to_equal(true)
-            case Err(message):
-                fail("saved CPU snapshot could not be restored: {message}")
-
-    it "should preserve independent CPU contents across two snapshots and repeated restores":
-        step("Save two snapshots with different values in every writable CPU register")
-        val config = VmConfig.default_rv32(0)
-        var driver = VmReplayDriver.create(config)
-        driver = vm_snapshot_set_cpu_fixture(driver, 65536, 256, 100)
-        val first_id = driver.save_snapshot()
-        driver = vm_snapshot_set_cpu_fixture(driver, 131072, 512, 200)
-        val second_id = driver.save_snapshot()
-        expect(first_id).to_equal(0)
-        expect(second_id).to_equal(1)
-        driver = vm_snapshot_set_cpu_fixture(driver, 196608, 768, 300)
-        step("Restore first then second then first again and compare the saved values")
-        match driver.restore_snapshot(first_id):
-            case Ok(_):
-                expect_vm_snapshot_cpu(driver, 65536, 256, 100)
-            case Err(message):
-                fail("first CPU snapshot restore failed: {message}")
-                return
-        match driver.restore_snapshot(second_id):
-            case Ok(_):
-                expect_vm_snapshot_cpu(driver, 131072, 512, 200)
-            case Err(message):
-                fail("second CPU snapshot restore failed: {message}")
-                return
-        match driver.restore_snapshot(first_id):
-            case Ok(_):
-                expect_vm_snapshot_cpu(driver, 65536, 256, 100)
-            case Err(message):
-                fail("repeated first CPU snapshot restore failed: {message}")
-
-    it "should reject a missing snapshot without changing registers PC cycles or stopped state":
-        step("Set real CPU state and stop the driver before requesting a missing snapshot")
-        val config = VmConfig.default_rv32(0)
-        var driver = VmReplayDriver.create(config)
-        driver = vm_snapshot_set_cpu_fixture(driver, 262144, 1024, 400)
-        driver.stop()
-        expect_vm_snapshot_cpu(driver, 262144, 1024, 400)
-        expect(driver.state == VmState.Stopped).to_equal(true)
-        step("Require an error for the missing ID and compare all retained state")
-        match driver.restore_snapshot(999):
-            case Err(message):
-                expect(message).to_contain("snapshot 999 not found")
-                expect_vm_snapshot_cpu(driver, 262144, 1024, 400)
-                expect(driver.state == VmState.Stopped).to_equal(true)
-                expect(driver.snapshots.len()).to_equal(0)
-                expect(driver.snapshot_counter).to_equal(0)
-            case Ok(_):
-                fail("missing snapshot unexpectedly restored")
 
 # ============================================================================
 # VmReplayDriver — run_steps

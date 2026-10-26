@@ -125,7 +125,7 @@ The startup-light play CLI recognizes matching planner subcommands:
 
 Executable UI, SGTTI, and Draw IR specs should use the canonical SPipe import:
 
-```simple:skip
+```simple
 use std.spec
 ```
 

@@ -19,8 +19,10 @@
 #   - std.common.term         — the pure VT/ANSI screen; panes hold TermScreen and
 #                               never re-implement scrollback or rendering.
 #
-# Named layouts are pure rectangle plans. Selection persists per window;
-# zoom temporarily presents one pane without discarding the selected plan.
+# ponytail: v1 lays panes out as N even vertical columns and has no split tree, so
+# `mux_zoom_pane` is the only non-uniform geometry. Upgrade path: the recursive
+# MuxLayoutNode described in mux_rects.spl — this file only consumes [MuxRect], so
+# nothing below changes when that lands.
 
 # NAMING: these are `*State` and not `MuxSession`/`MuxWindow`/`MuxPane` on
 # purpose. `contract.spl` in this same package already defines CLASSES by those
@@ -40,8 +42,7 @@ use os.apps.smux.mux_rects.{
     MuxRect,
     mux_rect_to_text,
     mux_full_rect,
-    mux_layout_known,
-    mux_layout_rects
+    mux_even_columns
 }
 
 struct MuxPane:
@@ -57,7 +58,6 @@ struct MuxWindow:
     window_id: text
     panes: [MuxPane]
     active_pane: i64       # index; -1 when none
-    layout: text          # canonical named layout; independent of zoom
 
 struct MuxSession:
     session_id: text
@@ -93,14 +93,6 @@ fn mux_window_zoom_index(w: MuxWindow) -> i64:
         i = i + 1
     return -1
 
-fn mux_window_fits(w: MuxWindow, cols: i64, rows: i64) -> bool:
-    if not mux_layout_known(w.layout) or cols < 1 or rows < 1:
-        return false
-    var ids: [text] = []
-    for pane in w.panes:
-        ids.push(pane.pane_id)
-    return mux_layout_rects(ids, cols, rows, w.layout).len() == ids.len()
-
 # Geometry for one window at the given size. A zoomed pane owns the whole area
 # and is the ONLY rect returned.
 fn mux_window_rects(w: MuxWindow, cols: i64, rows: i64) -> [MuxRect]:
@@ -114,7 +106,7 @@ fn mux_window_rects(w: MuxWindow, cols: i64, rows: i64) -> [MuxRect]:
     while i < w.panes.len():
         ids.push(w.panes[i].pane_id)
         i = i + 1
-    return mux_layout_rects(ids, cols, rows, w.layout)
+    return mux_even_columns(ids, cols, rows)
 
 fn mux_rect_for(rects: [MuxRect], pane_id: text) -> MuxRect:
     var i = 0
@@ -150,7 +142,7 @@ fn mux_relayout_window(w: MuxWindow, cols: i64, rows: i64, mark_active: bool) ->
             zoomed: p.zoomed
         ))
         i = i + 1
-    return MuxWindow(window_id: w.window_id, panes: out, active_pane: w.active_pane, layout: w.layout)
+    return MuxWindow(window_id: w.window_id, panes: out, active_pane: w.active_pane)
 
 fn mux_with_windows(s: MuxSession, windows: [MuxWindow]) -> MuxSession:
     return MuxSession(
@@ -210,7 +202,7 @@ fn mux_new(session_id: text, cols: i64, rows: i64) -> MuxSession:
         r = 1
     var panes: [MuxPane] = []
     var windows: [MuxWindow] = []
-    windows.push(MuxWindow(window_id: session_id + ".w0", panes: panes, active_pane: -1, layout: "even-horizontal"))
+    windows.push(MuxWindow(window_id: session_id + ".w0", panes: panes, active_pane: -1))
     return MuxSession(
         session_id: session_id,
         windows: windows,
@@ -250,9 +242,7 @@ fn mux_add_pane(s: MuxSession, title: text, pty_handle: i64, pid: i64) -> (MuxSe
         active: true,
         zoomed: false
     ))
-    val grown = MuxWindow(window_id: w.window_id, panes: panes, active_pane: panes.len() - 1, layout: w.layout)
-    if not mux_window_fits(grown, s.cols, s.rows):
-        return (s, "")
+    val grown = MuxWindow(window_id: w.window_id, panes: panes, active_pane: panes.len() - 1)
     val laid = mux_relayout_window(grown, s.cols, s.rows, true)
     val next = mux_replace_window(s, wi, laid)
     return (MuxSession(
@@ -270,7 +260,7 @@ fn mux_select_pane(s: MuxSession, pane_id: text) -> (MuxSession, bool):
     if wi < 0:
         return (s, false)
     val w = s.windows[wi]
-    val selected = MuxWindow(window_id: w.window_id, panes: w.panes, active_pane: pi, layout: w.layout)
+    val selected = MuxWindow(window_id: w.window_id, panes: w.panes, active_pane: pi)
     val laid = mux_relayout_window(selected, s.cols, s.rows, true)
     val next = mux_replace_window(s, wi, laid)
     return (MuxSession(
@@ -309,7 +299,7 @@ fn mux_zoom_pane(s: MuxSession, pane_id: text) -> (MuxSession, bool):
     var active = w.active_pane
     if was_zoomed == false:
         active = pi
-    val toggled = MuxWindow(window_id: w.window_id, panes: panes, active_pane: active, layout: w.layout)
+    val toggled = MuxWindow(window_id: w.window_id, panes: panes, active_pane: active)
     val laid = mux_relayout_window(toggled, s.cols, s.rows, true)
     return (mux_replace_window(s, wi, laid), true)
 
@@ -338,7 +328,7 @@ fn mux_kill_pane(s: MuxSession, pane_id: text) -> (MuxSession, bool):
             active = panes.len() - 1
         if active < 0:
             active = 0
-    val shrunk = MuxWindow(window_id: w.window_id, panes: panes, active_pane: active, layout: w.layout)
+    val shrunk = MuxWindow(window_id: w.window_id, panes: panes, active_pane: active)
     val laid = mux_relayout_window(shrunk, s.cols, s.rows, true)
     return (mux_replace_window(s, wi, laid), true)
 
@@ -366,28 +356,9 @@ fn mux_feed_pane(s: MuxSession, pane_id: text, bytes: text) -> MuxSession:
             zoomed: p.zoomed
         ))
         i = i + 1
-    val fed = MuxWindow(window_id: w.window_id, panes: panes, active_pane: w.active_pane, layout: w.layout)
+    val fed = MuxWindow(window_id: w.window_id, panes: panes, active_pane: w.active_pane)
     return mux_replace_window(s, wi, fed)
 
-fn mux_select_layout(s: MuxSession, window_id: text, name: text) -> (MuxSession, bool):
-    if not mux_layout_known(name):
-        return (s, false)
-    var wi = 0
-    while wi < s.windows.len():
-        val w = s.windows[wi]
-        if w.window_id == window_id:
-            val selected = MuxWindow(window_id: w.window_id, panes: w.panes,
-                active_pane: w.active_pane, layout: name)
-            # Validate all panes even if zoom currently hides some of them.
-            if not mux_window_fits(selected, s.cols, s.rows):
-                return (s, false)
-            val laid = mux_relayout_window(selected, s.cols, s.rows, false)
-            return (mux_replace_window(s, wi, laid), true)
-        wi = wi + 1
-    return (s, false)
-
-# A resize that cannot fit any window's selected layout preserves the whole
-# session. Validation uses unzoomed geometry so unzoom cannot reveal overflow.
 fn mux_resize(s: MuxSession, cols: i64, rows: i64) -> MuxSession:
     var c = cols
     if c < 1:
@@ -395,9 +366,6 @@ fn mux_resize(s: MuxSession, cols: i64, rows: i64) -> MuxSession:
     var r = rows
     if r < 1:
         r = 1
-    for window in s.windows:
-        if not mux_window_fits(window, c, r):
-            return s
     var windows: [MuxWindow] = []
     var i = 0
     while i < s.windows.len():
@@ -433,8 +401,9 @@ fn mux_find_pane(s: MuxSession, pane_id: text) -> MuxPane?:
         return None
     return Some(s.windows[wi].panes[pi])
 
-# Composite frame of the ACTIVE window: one title summary followed by the
-# selected layout's two-dimensional pane rectangles.
+# Composite frame of the ACTIVE window: one header row naming each visible pane
+# (the active one bracketed with '*'), then the panes' own term_render_text
+# sliced into their column bands.
 fn mux_render(s: MuxSession) -> text:
     if s.windows.len() == 0:
         return ""
@@ -448,6 +417,8 @@ fn mux_render(s: MuxSession) -> text:
 
     var header = ""
     var bodies: [[text]] = []
+    var widths: [i64] = []
+    var height = 0
     var ri = 0
     while ri < rects.len():
         val r = rects[ri]
@@ -461,31 +432,21 @@ fn mux_render(s: MuxSession) -> text:
             else:
                 label = " " + p.title
             rendered = term_render_text(p.screen)
-        if ri > 0:
-            header = header + " "
-        header = header + label
+        header = header + mux_pad_to(label, r.cols)
         bodies.push(rendered.split("\n"))
+        widths.push(r.cols)
+        if r.rows > height:
+            height = r.rows
         ri = ri + 1
 
-    var out = mux_pad_to(header, s.cols)
+    var out = header
     var row = 0
-    while row < s.rows:
+    while row < height:
         var line = ""
-        var col = 0
-        # Every named planner emits each row's visible bands in increasing
-        # column order. Visit each rectangle once, retaining O(rows * panes)
-        # layout work rather than searching all panes for every output band.
         var ci = 0
-        while ci < rects.len():
-            val r = rects[ci]
-            if row >= r.row and row < r.row + r.rows:
-                while col < r.col:
-                    line = line + " "
-                    col = col + 1
-                line = line + mux_pad_to(mux_line_of(bodies[ci], row - r.row), r.cols)
-                col = col + r.cols
+        while ci < bodies.len():
+            line = line + mux_pad_to(mux_line_of(bodies[ci], row), widths[ci])
             ci = ci + 1
-        line = mux_pad_to(line, s.cols)
         out = out + "\n" + line
         row = row + 1
     return out
@@ -493,4 +454,3 @@ fn mux_render(s: MuxSession) -> text:
 export MuxPane, MuxWindow, MuxSession
 export mux_new, mux_add_pane, mux_select_pane, mux_zoom_pane, mux_kill_pane
 export mux_feed_pane, mux_resize, mux_pane_rects, mux_render, mux_find_pane
-export mux_select_layout

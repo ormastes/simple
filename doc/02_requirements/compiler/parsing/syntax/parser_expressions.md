@@ -13,7 +13,7 @@ arithmetic, logical, comparison, indexing, method calls, and more.
 
 ## Syntax
 
-```simple:skip
+```simple
 # Arithmetic
 x + y, x - y, x * y, x / y, x % y, x ** y, x // y
 

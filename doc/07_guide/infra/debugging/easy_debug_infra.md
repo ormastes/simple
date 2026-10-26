@@ -32,8 +32,8 @@ deliberately **not** env-gated.
 
 ## The primitives
 
-```simple:skip
-use std.nogc_sync_mut.diag.{dbg_stage, dbg_deadline, dbg_deadline_clear, dbg_time_begin,
+```simple
+use std.diag.{dbg_stage, dbg_deadline, dbg_deadline_clear, dbg_time_begin,
               dbg_time_end, dbg_count, dbg_summary_dump, dbg_event_hop,
               dbg_events_on, dbg_provenance}
 
@@ -84,7 +84,7 @@ instrumentation is permanent and free when off:
 SIMPLE_DIAG=stage,watchdog bin/simple run src/app/browser/main.spl
 ```
 
-```text
+```simple
 # at launch
 dbg_deadline("first-frame", 10000)
 dbg_stage("browser", "parse_html")

@@ -58,7 +58,7 @@ method-call result). Top: `test/integration/os/port/llvm/per_target_build_spec.s
 (31), `test/01_unit/lib/crypto/ml_kem_768_kat_spec.spl` (21),
 `test/integration/os/port/llvm/cross_build_plan_spec.spl` (15),
 `test/unit/lib/ecs/ecs_spec.spl` (13 — stale duplicate tree, not touched).
-`test/03_system/os/port/disk_boot_spec.spl:121` has a matcher with no `expect` at all.
+`test/system/os/port/disk_boot_spec.spl:121` has a matcher with no `expect` at all.
 
 ## Environment note
 

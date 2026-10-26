@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec_modern_sspec_typed_evidence_design.md
+
+"""
+# Workspace Root Write Guard (behavioral)
+
+Executes the real guard end to end via subprocess. `audit --staged --dry-run`
+on a clean staged set must exit 0 and print the OK verdict; `audit --strict
+--dry-run` over the working tree must exit non-zero and name its violations.
+No repo files are mutated: every run uses --dry-run.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.src.infra.{run_process}
+
+fn _guard(args: array[text]) -> tuple:
+    val result = run_process("sh", ["scripts/check-workspace-root-guard.shs"] + args)
+    expect(result.is_ok()).to_equal(true)
+    match result:
+        case Ok(pr):
+            return (pr.exit_code, pr.stdout + pr.stderr)
+        case Err(message):
+            expect("${message}").to_equal("__unreachable__")
+            return (-999, "")
+
+describe "Workspace root write guard":
+    # @manual scenario evidence
+    it "passes a clean staged audit with exit 0":
+        # @req REQ-SSPEC-SYSTEM
+        step("run the guard in staged audit mode over a clean staged set")
+        # evidence(protocol_json): exit status and verdict line asserted below are the complete typed oracle
+        val (code, output) = _guard(["audit", "--staged", "--dry-run"])
+        expect(code).to_equal(0)  # oracle: a clean staged set must pass with exit 0
+        expect(output.contains("workspace-root-guard: OK")).to_equal(true)
+
+    it "fails a strict tree audit with a non-zero exit and a violation count":
+        # @req REQ-SSPEC-SYSTEM
+        step("run the guard in strict audit mode over the working tree")
+        # evidence(protocol_json): exit status and FAILED verdict asserted below are the complete typed oracle
+        val (code, output) = _guard(["audit", "--strict", "--dry-run"])
+        expect(code != 0).to_equal(true)  # oracle: real violations must fail the audit
+        expect(output.contains("workspace-root-guard: FAILED with")).to_equal(true)
+
+    it "reports a diagnostic code per violation family":
+        # @req REQ-SSPEC-SYSTEM
+        step("run a strict audit and inspect the emitted diagnostic codes")
+        # evidence(protocol_json): WRG diagnostic codes in output asserted below are the complete typed oracle
+        val (code, output) = _guard(["audit", "--strict", "--dry-run"])
+        expect(code != 0).to_equal(true)
+        expect(output.contains("WRG0")).to_equal(true)  # oracle: violations are reported with WRGxxx diagnostic codes
+
+    it "defines root and immediate-child diagnostics":
+        val source = read_file("scripts/check-workspace-root-guard.shs")
+        expect(source.contains("WRG001")).to_equal(true)
+        expect(source.contains("WRG002")).to_equal(true)
+
+    it "has staged lint integration":
+        val cli_ops = read_file("src/app/io/cli_ops.spl")
+        val cli_lint = read_file("src/app/io/cli_lint_commands.spl")
+        # Post-self-hosting bin/simple is a native binary, not a shell wrapper; the
+        # staged-audit invocation moved into the Simple CLI source (cli_ops runs
+        # check-workspace-root-guard.shs with audit --staged). (#38 stale-assertion fix)
+        expect(cli_ops.contains("check-workspace-root-guard.shs")).to_equal(true)
+        expect(cli_ops.contains("--staged")).to_equal(true)
+        expect(cli_ops.contains("_cli_run_workspace_root_guard")).to_equal(true)
+        expect(cli_lint.contains("_cli_run_workspace_root_guard()")).to_equal(true)
+
+    it "has tracked repo hygiene integration":
+        val hygiene = read_file("scripts/check/check-repo-hygiene.shs")
+        expect(hygiene.contains("check-workspace-root-guard.shs audit --staged")).to_equal(true)
+
+    it "has a pre-commit hook wrapper":
+        val hook = read_file("scripts/hooks/pre-commit")
+        expect(hook.contains("check-workspace-root-guard.shs audit --staged")).to_equal(true)

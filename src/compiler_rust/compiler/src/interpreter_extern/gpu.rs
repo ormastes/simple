@@ -638,8 +638,8 @@ fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize)
         return Ok(bytes.to_vec().into_boxed_slice());
     }
     let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
-        Value::FixedSizeArray { data, .. } => data.as_slice(),
+        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
+        Value::FixedSizeArray { data, .. } => data.as_ref(),
         other => {
             return Err(CompileError::semantic(format!(
                 "{name} argument {index} must be [u8], got {}",
@@ -681,8 +681,8 @@ fn strict_i64_values(args: &[Value], index: usize, name: &str, expected: usize) 
         .get(index)
         .ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
     let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
-        Value::FixedSizeArray { data, .. } => data.as_slice(),
+        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
+        Value::FixedSizeArray { data, .. } => data.as_ref(),
         other => {
             return Err(CompileError::semantic(format!(
                 "{name} argument {index} must be [i64], got {}",
@@ -741,11 +741,9 @@ pub fn rt_cuda_launch_kernel_name_array_fn(args: &[Value]) -> Result<Value, Comp
 pub fn rt_font_load_array_fn(args: &[Value]) -> Result<Value, CompileError> {
     let bytes = strict_owned_bytes(args, 0, "rt_font_load_array", 1)?;
     let owner = runtime_byte_owner(&bytes);
-    let raw = simple_runtime::packed_byte_adapters::rt_font_load_array(owner);
+    let result = simple_runtime::packed_byte_adapters::rt_font_load_array(owner);
     release_runtime_owner(owner);
-    // Park the raw FontData* in the font handle table; Simple only ever sees
-    // the opaque, generation-checked handle (see font.rs).
-    Ok(Value::Int(super::font::font_handle_for_raw(raw)))
+    Ok(Value::Int(result))
 }
 
 pub fn rt_metal_load_library_array_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -4326,14 +4324,6 @@ pub fn rt_vulkan_selected_device_driver_identity_hash_fn(_args: &[Value]) -> Res
             positive
         }
     })))
-}
-
-// Interpreter Vulkan uses its own dlopen state rather than the native
-// simple-runtime STATE.device owner. It cannot attest that native Engine2D
-// framebuffer generation, so the typed Simple facade must reject this lane.
-pub fn rt_vulkan_selected_device_identity_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let _expected_token = arg_i64(args, 0, "rt_vulkan_selected_device_identity_v1", 1)?;
-    Ok(Value::text(String::new()))
 }
 
 fn vulkan_device_type_name(kind: u32) -> &'static str {

@@ -1,6 +1,5 @@
 # CLI commands — web/compile/replay/check handler dispatch
 use app.io._CliCommands.run_commands.{cli_run_file, cli_not_implemented}
-use app.io.collection_profile_run.{collection_run_options, collection_run_file}
 # CLI Command Handlers - Command dispatch functions
 # Extracted from cli_ops.spl for modularity
 # Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
@@ -9,9 +8,9 @@ use compiler.common.assurance.policy_names.{normalize_profile_name, valid_profil
 use compiler.driver.driver_api_core.{interpret_file, check_file}
 use compiler.driver.driver_types.{CompileResult}
 use app.io.cli_compile.{cli_compile}
-use lazy compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, print_diff}
+use lazy compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixToolApplicator}
-use lazy compiler.tools.fix.rules.impl_.lint_simd.{check_simd_opportunities}
+use lazy compiler.tools.fix.rules.{check_simd_opportunities}
 use compiler.tools.lint.main.{LintConfig, LintLevel, Linter}
 use std.tooling.easy_fix.{FixConfidence}
 use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
@@ -163,17 +162,12 @@ fn _run_resolve_profile(cli_value: text) -> text:
     run_read_sdn_lints_profile("simple.sdn")
 
 fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
-    val capture = collection_run_options(args)
-    if capture.error != "":
-        _cli_eprint("Error: {capture.error}")
-        return 1
-    val run_args = capture.args
-    if run_args.len() > 0:
+    if args.len() > 0:
         var program_args: [text] = []
         var result_file = ""
         var profile_value = ""
         var parse_internal = true
-        for arg in run_args[1:]:
+        for arg in args[1:]:
             if parse_internal and arg == "--":
                 parse_internal = false
                 program_args = program_args.push(arg)
@@ -196,17 +190,7 @@ fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
         val previous_safety_profile = env_get("SIMPLE_SAFETY_PROFILE") ?? ""
         if resolved_profile != "" and not env_set("SIMPLE_SAFETY_PROFILE", resolved_profile):
             return 1
-        # Capture must execute in the owner process: a delegated child has a
-        # different ABI channel and cannot contribute to this snapshot.
-        val code = if capture.output != "" or capture.input != "":
-            var invocation = capture
-            invocation.args = [run_args[0]]
-            for arg in program_args: invocation.args.push(arg)
-            collection_run_file(invocation, gc_log, gc_off)
-        else:
-            cli_run_file(run_args[0], program_args, gc_log, gc_off)
-        if capture.output != "" and code != 0:
-            _cli_eprint("Error: collection capture execution or publication failed")
+        val code = cli_run_file(args[0], program_args, gc_log, gc_off)
         if result_file != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_result_file):
             return 1
         if resolved_profile != "" and not env_set("SIMPLE_SAFETY_PROFILE", previous_safety_profile):

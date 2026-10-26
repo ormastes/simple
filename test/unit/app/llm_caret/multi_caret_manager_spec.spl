@@ -1,0 +1,78 @@
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{process_spawn_async}
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.agent_runtime.{AgentProcess, summarize_agent_team}
+use app.llm_caret.agent_tmux.{build_agent_tmux_embed}
+use app.llm_caret.multi_caret_manager.{MultiCaretManager,
+    launch_multi_caret_manager, poll_multi_caret_manager,
+    stop_multi_caret_manager}
+
+fn _request(provider: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: provider, agent_md_path: "agents/a.md",
+        skill_path: "", task_desc: "t", model: "", session_id: "",
+        extra_args: [])
+
+fn _manager_over(processes: [AgentProcess]) -> MultiCaretManager:
+    val team = summarize_agent_team("m-1", processes)
+    MultiCaretManager(manager_id: "m-1", status: "running",
+        reason: "fixture", capacity: 4, team: team,
+        terminal_view: build_agent_tmux_embed(team, []))
+
+describe "LLM Caret multi-process manager reports process truth":
+    it "refuses a launch outside its bounded envelope":
+        step("A manager without an id, or outside 1..16 capacity, never spawns")
+        expect(launch_multi_caret_manager("", [_request("bogus")], 2,
+            "", "", "", "", "").reason).to_equal("manager_id_required")
+        expect(launch_multi_caret_manager("m", [_request("bogus")], 0,
+            "", "", "", "", "").reason).to_equal("capacity_out_of_range")
+        expect(launch_multi_caret_manager("m", [_request("bogus")], 17,
+            "", "", "", "", "").reason).to_equal("capacity_out_of_range")
+        expect(launch_multi_caret_manager("m", [], 2,
+            "", "", "", "", "").reason).to_equal("requests_required")
+        expect(launch_multi_caret_manager("m",
+            [_request("bogus"), _request("bogus"), _request("bogus")], 2,
+            "", "", "", "", "").reason).to_equal("capacity_exceeded")
+
+    it "reports a clean rollback only when nothing was left running":
+        step("Every child failed BEFORE spawning, so no process can leak")
+        val m = launch_multi_caret_manager("m-2", [_request("bogus")], 2,
+            "", "", "", "", "")
+        expect(m.status).to_equal("not_started")
+        expect(m.reason).to_equal("launch_rolled_back")
+
+    it "reports a rollback that left children running as an error":
+        step("A kill that failed on a real pid is a leak, not a clean rollback")
+        val leaked = _manager_over([AgentProcess(agent_id: "a",
+            status: "error", reason: "process_kill_failed", pid: 424242)])
+        val stopped = stop_multi_caret_manager(leaked)
+        expect(stopped.status).to_equal("stop_failed")
+        expect(stopped.reason).to_equal("stop_incomplete:1")
+
+    it "distinguishes a partly-dead team from a fully-dead one":
+        step("Spawn one real child, pair it with a never-spawned slot, poll")
+        val pid = process_spawn_async("/bin/sleep", ["30"])
+        expect(pid > 0).to_equal(true)
+        val mixed = _manager_over([
+            AgentProcess(agent_id: "alive", status: "started",
+                reason: "process_spawned", pid: pid),
+            AgentProcess(agent_id: "dead", status: "started",
+                reason: "process_spawned", pid: -1)])
+        expect(poll_multi_caret_manager(mixed).status).to_equal("degraded")
+
+        step("Tearing the same team down kills the survivor and reports clean")
+        val stopped = stop_multi_caret_manager(mixed)
+        expect(stopped.status).to_equal("stopped")
+        expect(stopped.reason).to_equal("processes_stopped")
+
+        step("With the survivor gone the team is fully exited, not degraded")
+        expect(poll_multi_caret_manager(mixed).status).to_equal("exited")
+
+    it "leaves a manager that is not running untouched by a poll":
+        val idle = launch_multi_caret_manager("", [_request("bogus")], 2,
+            "", "", "", "", "")
+        expect(poll_multi_caret_manager(idle).status).to_equal("not_started")
+
+    it "stops an empty team without claiming it killed anything":
+        val idle = launch_multi_caret_manager("", [_request("bogus")], 2,
+            "", "", "", "", "")
+        expect(stop_multi_caret_manager(idle).reason).to_equal("no_processes")

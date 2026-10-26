@@ -67,28 +67,6 @@ describe "compiler.tools.formatter Formatter.format_source":
         val out = formatted_or_fail("# a pure-Simple comment\nfn add(a: i64, b: i64) -> i64:\n    a + b\n")
         assert_contains(out, "# a pure-Simple comment")
 
-    it "keeps docstring prose verbatim instead of operator-spacing it":
-        # @req REQ-SSPEC-UNIT
-        step("keeps docstring prose verbatim instead of operator-spacing it")
-        """Regression (2026-10-20): `Non-UTF-8` / `U+FFFD` inside a docstring
-        were rewritten to `Non - UTF - 8` / `U + FFFD`, which the lexical
-        guard then refused, so `fmt --check` failed on base_encoding.spl."""
-        val src = "fn bytes_to_text(data: [u8]) -> text:\n    \"\"\"Interpret bytes as UTF-8.\n\n    Non-UTF-8 bytes become U+FFFD.\n    \"\"\"\n    \"\"\n"
-        val out = formatted_or_fail(src)
-        assert_contains(out, "    Non-UTF-8 bytes become U+FFFD.")
-        assert_equal(out, src)
-
-    it "leaves a long line unbroken when breaking it would change its tokens":
-        # @req REQ-SSPEC-UNIT
-        step("leaves a long line unbroken when breaking it would change its tokens")
-        """Regression (2026-10-20): the heuristic breakers split a long `if`
-        condition into a non-equivalent token stream; the whole file was then
-        refused. A long line is valid Simple, a rewritten one is not."""
-        val cond = "if (b2 & 0xC0) == 0x80 and (b3 & 0xC0) == 0x80 and cp >= 0x800 and not (cp >= 0xD800 and cp <= 0xDFFF):"
-        val src = "fn check(b2: i64, b3: i64, cp: i64) -> bool:\n    " + cond + "\n        return true\n    false\n"
-        val out = formatted_or_fail(src)
-        assert_contains(out, cond)
-
     it "is idempotent: formatting already-formatted source changes nothing":
         # @req REQ-SSPEC-UNIT
         step("is idempotent: formatting already-formatted source changes nothing")
@@ -108,79 +86,3 @@ describe "compiler.tools.formatter Formatter.format_source":
         assert_contains(source, "parts.push(\"token:")
         assert_contains(source, "return Ok(parts.join(\"\"))")
         assert_equal(source.contains("result = result +"), false)
-
-describe "compiler.tools.formatter unary minus and power operator":
-    """Unary minus and `**` must format without refusal and keep their meaning;
-    binary minus stays binary; output is idempotent."""
-
-    it "formats the ** power operator (src/lib/common/math.spl refusal)":
-        step("formats the ** power operator")
-        val out = formatted_or_fail("fn p(x: f64) -> f64:\n    x ** 0.5\n")
-        assert_equal(out, "fn p(x: f64) -> f64:\n    x ** 0.5\n")
-
-    it "keeps unary minus attached to its operand":
-        step("keeps unary minus attached to its operand")
-        val src = "fn u(a: i64, b: i64) -> i64:\n    val y = -a\n    val z = a * -b\n    val w = -(a + b)\n    val c = -1\n    f(a, -b)\n    -a\n"
-        val out = formatted_or_fail(src)
-        assert_equal(out, src)
-
-    it "keeps binary minus binary":
-        step("keeps binary minus binary")
-        val out = formatted_or_fail("fn s(a: i64, b: i64) -> i64:\n    a-b\n")
-        assert_contains(out, "a - b")
-        val out2 = formatted_or_fail("fn s(a: i64, b: i64) -> i64:\n    a - -b\n")
-        assert_contains(out2, "a - -b")
-
-    it "is idempotent over unary minus and **":
-        step("is idempotent over unary minus and **")
-        val once = formatted_or_fail("fn q(a: f64, b: f64) -> f64:\n    val t = a** -b\n    -t - a\n")
-        assert_equal(formatted_or_fail(once), once)
-
-describe "compiler.tools.formatter minus review fixes":
-    """Strings, docstrings and comments stay untouched; compound operators
-    stay whole; minus next to keywords; idempotence over all of it."""
-
-    it "leaves bullet lines in a multi-line docstring untouched":
-        step("leaves bullet lines in a multi-line docstring untouched")
-        val src = "fn d() -> i64:\n    \"\"\"\n    Notes:\n    - item\n    - other\n    \"\"\"\n    1\n"
-        assert_equal(formatted_or_fail(src), src)
-
-    it "leaves bullets in a docstring opened after code untouched":
-        step("leaves bullets in a docstring opened after code untouched")
-        val src = "val s = \"\"\"\n- item\n\"\"\"\n"
-        assert_equal(formatted_or_fail(src), src)
-
-    it "leaves a trailing comment starting with minus untouched":
-        step("leaves a trailing comment starting with minus untouched")
-        val src = "fn c(a: i64) -> i64:\n    val b = a  # - note\n    b\n"
-        assert_contains(formatted_or_fail(src), "# - note")
-
-    it "keeps -= and **= whole":
-        step("keeps -= and **= whole")
-        val src = "fn k(x: i64) -> i64:\n    var y = x\n    y -= 1\n    y **= 2\n    y += 1\n    y\n"
-        assert_equal(formatted_or_fail(src), src)
-
-    it "keeps -> and => whole":
-        step("keeps -> and => whole")
-        val src = "fn m(x: i64) -> i64:\n    match x:\n        case 1 => -x\n        case _ => x\n"
-        assert_equal(formatted_or_fail(src), src)
-
-    it "handles minus next to keywords":
-        step("handles minus next to keywords")
-        val src = "fn r(x: i64, min: i64) -> i64:\n    if -x:\n        return -x\n    val a = min - 1\n    var b = 0\n    b = -1\n    a + b\n"
-        assert_equal(formatted_or_fail(src), src)
-
-    it "is idempotent over every new example":
-        step("is idempotent over every new example")
-        val srcs = [
-            "fn d() -> i64:\n    \"\"\"\n    - item\n    \"\"\"\n    1\n",
-            "val s = \"\"\"\n- item\n\"\"\"\n",
-            "fn c(a: i64) -> i64:\n    val b = a  # - note\n    b\n",
-            "fn k(x: i64) -> i64:\n    var y = x\n    y -= 1\n    y **= 2\n    y\n",
-            "fn m(x: i64) -> i64:\n    match x:\n        case 1 => -x\n        case _ => x\n",
-            "fn r(x: i64, min: i64) -> i64:\n    if -x:\n        return -x\n    val a = min - 1\n    a\n",
-            "fn q(a: f64, b: f64) -> f64:\n    val t = a** -b\n    -t - a\n"
-        ]
-        for s in srcs:
-            val once = formatted_or_fail(s)
-            assert_equal(formatted_or_fail(once), once)

@@ -167,63 +167,10 @@ case "$threads" in ''|*[!0-9]*|0) resume_fail "invalid transcript thread count" 
 [ "$(transcript_executable "$transcript")" = "$runtime/simple" ] ||
     resume_fail "transcript executable is not the frozen runtime compiler"
 
-stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$transcript") ||
-    resume_fail "transcript SCV cold-init control is invalid"
-stage2_recorded_compiler_ceiling=$(bootstrap_stage3_transcript_compiler_ceiling "$transcript") ||
-    resume_fail "transcript compiler RSS ceiling is invalid"
-stage2_recorded_diagnostics=$(bootstrap_stage3_stage2_transcript_diagnostics "$transcript") ||
-    resume_fail "transcript diagnostics are invalid"
-stage2_diagnostic_names=
-if [ -n "$stage2_recorded_diagnostics" ]; then
-    stage2_diagnostic_names=$(bootstrap_stage3_env_assignment_names ${stage2_recorded_diagnostics}) ||
-        resume_fail "transcript diagnostic names are invalid"
-fi
-# A snapshot request has exclusive ownership. Cache replay cannot reopen its
-# evidence or change its path while claiming the old command identity. Use a new
-# canonical constructor invocation with a fresh request instead.
-case " $stage2_diagnostic_names " in
-    *' SIMPLE_MEM_SNAPSHOT_FILE '*) resume_fail "snapshot diagnostics require a new exclusive constructor request" ;;
-esac
-if [ -n "$stage2_recorded_diagnostics" ]; then
-    [ "${SIMPLE_M4_WORK_RECEIPT-1}" = 1 ] || resume_fail "ambient M4 receipt mode conflicts with transcript"
-    SIMPLE_M4_WORK_RECEIPT=1
-    export SIMPLE_M4_WORK_RECEIPT
-else
-    [ "${SIMPLE_M4_WORK_RECEIPT+x}" != x ] || resume_fail "legacy transcript cannot acquire ambient M4 receipts"
-    unset SIMPLE_M4_WORK_RECEIPT
-fi
-[ "${SIMPLE_MEM_SNAPSHOT_FILE+x}${SIMPLE_EVIDENCE_RUN_ID+x}" = '' ] ||
-    resume_fail "cache replay cannot acquire ambient snapshot diagnostics"
-stage2_recorded_env_names=$(transcript_explicit_env_names "$transcript") ||
-    resume_fail "transcript environment set is unavailable"
-stage2_recorded_preflight_names=
-case " $stage2_recorded_env_names " in
-    *' SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1 '*)
-        stage2_recorded_preflight_names=SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1 ;;
-esac
-expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform" "$stage2_recorded_cold_init" "$stage2_recorded_compiler_ceiling" "$stage2_diagnostic_names" "$stage2_recorded_preflight_names") ||
+expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform") ||
     resume_fail "canonical environment set is unavailable"
-[ "$stage2_recorded_env_names" = "$expected_env_names" ] ||
+[ "$(transcript_explicit_env_names "$transcript")" = "$expected_env_names" ] ||
     resume_fail "transcript environment set is not canonical"
-# Replay exactly the recorded policy; an ambient export cannot change it.
-if [ "$stage2_recorded_cold_init" = 1 ]; then
-    SIMPLE_SCV_INVENTORY_COLD_INIT=1
-    export SIMPLE_SCV_INVENTORY_COLD_INIT
-else
-    unset SIMPLE_SCV_INVENTORY_COLD_INIT
-fi
-# Reuse the recorded ceiling only. A new ambient value must not change the
-# recovered command's policy; a legacy transcript retains its absent binding.
-if [ -n "$stage2_recorded_compiler_ceiling" ]; then
-    [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB-$stage2_recorded_compiler_ceiling}" = "$stage2_recorded_compiler_ceiling" ] ||
-        resume_fail "ambient compiler RSS ceiling conflicts with transcript"
-    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$stage2_recorded_compiler_ceiling
-    export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
-else
-    [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" != x ] ||
-        resume_fail "legacy transcript cannot acquire an ambient compiler RSS ceiling"
-    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
-fi
 
 SIMPLE_ABI_POLICY=$(bootstrap_stage3_transcript_explicit_env_value "$transcript" SIMPLE_ABI_POLICY) ||
     resume_fail "ABI policy missing from transcript"

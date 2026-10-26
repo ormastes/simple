@@ -9,26 +9,6 @@ of that plan, not the sole consumer. See
 `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md` §10 row 9.
 **Related**: `doc/06_spec/layout.sdn`, `doc/format/smf_specification.md`
 
-## Generator repair contract (2026-10-18)
-
-For nonnegative `i64` addresses, `format_hex` renders uppercase hexadecimal
-with a `0x` prefix and no leading zeroes except for `0x0`. Digit selection uses
-text literals instead of character-code conversion. Negative address validation
-and addresses beyond the signed 64-bit range are outside this repair.
-
-The GNU LD projection of `Section.section_type == "nobits"` is
-`section_name [address] (NOLOAD) : { ... } > memory`. PROGBITS sections retain
-their ordinary header. Alignment, fixed-size reservation, input KEEP and
-boundary-symbol generation keep their existing behavior. This projection does
-not prove bootability, internal-linker equivalence or an ELF output section's
-type without an actual link and binary inspection.
-
-Executable regressions live in
-`test/03_system/feature/app/linker_gen_spec.spl` under REQ-LNK-018/019/022.
-The repair is pending execution with an admitted SPipe runtime; see
-`doc/09_report/item4_generator_2026-10-18.md`. Sidecars: N/A for this focused
-repair. Merge owner and final reviewer: Item 4 continuation.
-
 ---
 
 ## Overview

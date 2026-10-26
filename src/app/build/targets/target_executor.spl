@@ -11,10 +11,6 @@ use app.io.cli_compile.{cli_native_build}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists}
 use app.io.mod.{file_delete, file_hash_sha256, file_size_raw, getpid, file_rename}
-use app.build.targets.artifact_receipt.{
-    DependencyArtifactInputV1, digest_is_sha256,
-    publish_dependency_manifest_layer_v1
-}
 
 struct TargetAction:
     target: text
@@ -116,60 +112,10 @@ fn target_action_args(repo_root: text, action: TargetAction) -> [text]:
     ]
     if action.emit_archive:
         args.push("--emit-archive")
-        args.push("--no-mangle")
     if action.emit_shared:
         args.push("--emit-shared")
         args.push("--no-mangle")
     args
-
-fn target_action_args_with_manifest(
-    repo_root: text, action: TargetAction, manifest_path: text
-) -> [text]:
-    var args = target_action_args(repo_root, action)
-    if manifest_path != "":
-        args.push("--input-manifest")
-        args.push(manifest_path)
-    args
-
-fn target_dependency_manifest_path(
-    repo_root: text, ts: TargetSet, target: BuildTarget,
-    cache_dir: text
-) -> text:
-    """Publish exact dependency bytes for an executable link action.
-
-    A full artifact hash is a conservative link/ABI identity: every change to
-    exports or ABI changes these digests too. The linker still consumes the
-    artifact itself, through the admitted manifest and private copies."""
-    if target.deps.len() == 0:
-        return ""
-    var inputs: [DependencyArtifactInputV1] = []
-    for dep_name in target.deps:
-        val index = find_target(ts, dep_name)
-        if index < 0:
-            return "target-error: unknown-dep: " + target.name + " -> " + dep_name
-        val dep = ts.targets[index]
-        if dep.kind != "library":
-            return "target-error: dependency-kind-unsupported: " + dep_name
-        val output = target_output_path(repo_root, dep)
-        val prefix = repo_root + "/"
-        if not output.starts_with(prefix):
-            return "target-error: dependency-output-outside-repo: " + dep_name
-        val digest = file_hash_sha256(output)
-        if not digest_is_sha256(digest):
-            return "target-error: dependency-output-missing: " + dep_name
-        inputs.push(DependencyArtifactInputV1(
-            dep_name, "link", output[prefix.len():], "archive",
-            digest, digest, digest
-        ))
-    val entry = if target.entry.starts_with(repo_root + "/"):
-        target.entry[(repo_root + "/").len():]
-    else:
-        target.entry
-    val digest = publish_dependency_manifest_layer_v1(
-        repo_root, cache_dir, entry, inputs)
-    if not digest_is_sha256(digest):
-        return digest
-    cache_dir + "/manifests/" + digest + ".manifest"
 
 fn target_action_reusable(repo_root: text, target: BuildTarget, action: TargetAction) -> bool:
     """Executor-level reuse is disabled until closure digest evidence exists."""
@@ -215,27 +161,17 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
     val plan = resolve_target(ts, name)
     if plan.error.len() > 0:
         return TargetExecutionSummary(0, 0, 0, 0, 0, "", plan.error)
-    # Preflight the entire selected closure before any side effect. The typed
-    # linker bridge currently supports archive providers for executables only.
+    # Preflight the entire selected closure before any side effect. Native-build
+    # cannot consume a declared archive/object/manifest input; merely ordering a
+    # dependency and ignoring its artifact is unsound.
     var preflight = 0
     while preflight < plan.order.len():
         val preflight_index = find_target(ts, plan.order[preflight])
         if preflight_index >= 0 and ts.targets[preflight_index].deps.len() > 0:
             val blocked = ts.targets[preflight_index]
-            # The canonical manifest sorts producer names. Link order is
-            # meaningful for static archives, so admit only one provider until
-            # a separate ordered link list has an explicit contract.
-            if blocked.deps.len() > 1:
-                return TargetExecutionSummary(plan.order.len(), 0, 0, 0, 0, blocked.name,
-                    "target-error: multiple-link-dependencies-unsupported: " + blocked.name)
-            if blocked.kind != "binary" and blocked.kind != "test":
-                return TargetExecutionSummary(plan.order.len(), 0, 0, 0, 0, blocked.name,
-                    "target-error: dependent-kind-unsupported: " + blocked.name)
-            for dep_name in blocked.deps:
-                val dep_index = find_target(ts, dep_name)
-                if dep_index < 0 or ts.targets[dep_index].kind != "library":
-                    return TargetExecutionSummary(plan.order.len(), 0, 0, 0, 0, blocked.name,
-                        "target-error: dependency-kind-unsupported: " + dep_name)
+            return TargetExecutionSummary(plan.order.len(), 0, 0, 0, 0, blocked.name,
+                "target-error: dependency-input-unsupported: " + blocked.name +
+                ": native-build has no --input-manifest contract")
         preflight = preflight + 1
 
     var executed: i64 = 0
@@ -273,13 +209,7 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
             emit_shared: action.emit_shared,
             action_digest: action.action_digest
         )
-        val manifest_path = target_dependency_manifest_path(
-            repo_root, ts, target, action.cache_dir)
-        if target.deps.len() > 0 and not manifest_path.starts_with(action.cache_dir + "/manifests/"):
-            return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
-                manifest_path)
-        val rc = cli_native_build(target_action_args_with_manifest(
-            repo_root, candidate_action, manifest_path))
+        val rc = cli_native_build(target_action_args(repo_root, candidate_action))
         executed = executed + 1
         rebuilt = rebuilt + 1
         if rc != 0:

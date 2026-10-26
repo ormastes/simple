@@ -4,10 +4,7 @@
 # an already-owned delegated scope and converts kernel files into typed evidence
 # without relabeling cgroup charge as RSS.
 
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text, file_write, file_size, file_delete}
-use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
-use std.nogc_sync_mut.io.windows_redirected_process.{windows_redirected_spawn_with_memory, windows_redirected_wait, windows_redirected_completion, windows_redirected_is_running, windows_redirected_failure_reason, windows_redirected_quarantine}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text, file_write}
 use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
 use std.nogc_sync_mut.io.process_governor.{proc_slot_acquire, proc_slot_release}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out, process_bounded_kill_signal}
@@ -31,7 +28,6 @@ struct ObservedProcessResult:
     stdout_truncated: bool
     stderr_truncated: bool
     runtime_error: i64
-    completion: Option<ProcessCompletionV1> = nil
 
 pub enum ExecutionResourceClass:
     Unit
@@ -228,136 +224,32 @@ fn _limit_shell(scope: ExecutionResourceScope) -> text:
 fn _rlimit_as_enforceable() -> bool:
     not file_exists("/System/Library/CoreServices/SystemVersion.plist")
 
-# Resident-memory cap through a transient `systemd-run --user --scope`.
-# The direct cgroup-v2 path above needs the memory controller delegated to a
-# child of the caller's own cgroup, which a login/tmux/`systemd-run --scope`
-# shell never has (no-internal-processes rule: its cgroup.subtree_control is
-# empty). The old fallback was `ulimit -v`, i.e. RLIMIT_AS, which counts
-# RESERVED address space: the seed reserves ~1.2-1.5 GB it never touches
-# (glibc per-thread arenas, 128 MiB AArch64 JIT code arenas, stacks), so under
-# the 3 GiB Unit cap a spec aborted with `memory allocation of N bytes failed`
-# at ~1.6-2.6 GB RSS. A user scope's MemoryMax charges resident pages instead.
-# Probed once per process with the exact property set the wrapper emits (an
-# older systemd that rejects one must fall back, not fail every child), then
-# cached. A scope, not run_in_systemd_resource_scope's `--wait --pipe` service:
-# a service drops the caller's env and cwd (SIMPLE_TEST_RESULT_FILE, relative
-# spec paths); a scope execs in place and keeps both.
-var _systemd_scope_probe: i64 = -1
-var _memscope_sequence: i64 = 0
-
-# The probe must prove ENFORCEMENT, not just that systemd-run exits 0: a user
-# manager without the memory controller delegated (cgroup v1/hybrid, old
-# user@.service) accepts MemoryMax and silently ignores it.
-fn _systemd_scope_available() -> bool:
-    if _systemd_scope_probe < 0:
-        _systemd_scope_probe = 0
-        if file_exists("/usr/bin/systemd-run") and file_exists("/proc/self/cgroup") and file_exists("/sys/fs/cgroup/cgroup.controllers"):
-            val (_out, _err, code) = process_run_bounded("/usr/bin/systemd-run", ["--user", "--scope", "--quiet", "--property=MemoryMax=67108864", "--property=MemorySwapMax=0", "--property=OOMPolicy=continue", "--property=TasksMax=64", "--", "/bin/sh", "-c", "[ \"$(cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max)\" = 67108864 ]"], 10_000, 4_096)
-            if code == 0:
-                _systemd_scope_probe = 1
-    _systemd_scope_probe == 1
-
-# A user scope is a sibling of the runner's own cgroup, so the caller's
-# MemoryMax (e.g. an outer `systemd-run --scope -p MemoryMax=8G`) no longer
-# bounds the child. Clamp each child to the tightest memory.max on the
-# runner's own cgroup chain so a child never gets more than its parent had.
-fn _ancestor_memory_max() -> i64:
-    var path = _cgroup_v2_parent()
-    var tightest = 0
-    while path.starts_with("/sys/fs/cgroup") and path.len() > "/sys/fs/cgroup".len():
-        if file_exists(path + "/memory.max"):
-            val raw = file_read_text(path + "/memory.max").trim()
-            if raw != "max":
-                val value = raw.to_int()
-                if value > 0 and (tightest == 0 or value < tightest):
-                    tightest = value
-        val slash = path.rfind("/")
-        if slash <= 0:
-            return tightest
-        path = path[0:slash]
-    tightest
-
-fn _cgroup_v2_memory_delegated() -> bool:
-    val parent = _cgroup_v2_parent()
-    if parent == "" or not file_exists(parent + "/cgroup.subtree_control"):
-        return false
-    for controller in file_read_text(parent + "/cgroup.subtree_control").trim().split(" "):
-        if controller == "memory":
-            return true
-    false
-
-pub fn resource_scope_memory_enforcement() -> text:
-    """Mechanism that caps a scoped child's memory on this host: cgroup | systemd-scope | rlimit-as | none."""
-    if host_is_windows_host():
-        return "none"
-    if _cgroup_v2_memory_delegated():
-        return "cgroup"
-    if _systemd_scope_available():
-        return "systemd-scope"
-    if _rlimit_as_enforceable(): "rlimit-as" else: "none"
-
-# Runs inside the scope as `sh -c SUPERVISOR sh <report> <cmd> <args...>`. It
-# outlives the child so the scope's counters can still be read, and writes
-# `oom_kill:memory.peak:pids.events max` to <report> (a private file, so child
-# output can neither forge it nor push it out of a truncated capture). The
-# TERM/INT/HUP trap is deferred while the child runs: a group SIGTERM still
-# reaches the child, and the child keeps its grace period instead of losing
-# its supervisor (the owner SIGKILLs the group once the leader exits). A fatal
-# child signal is re-raised (stop signals excluded, no core) so the caller
-# sees the same signal death as with a plain `exec`.
-val _MEMSCOPE_SUPERVISOR = "trap ':' TERM INT HUP; f=$1; shift; \"$@\"; rc=$?; cg=$(cut -d: -f3 /proc/self/cgroup); k=$(awk '$1 == \"oom_kill\" { print $2 }' \"/sys/fs/cgroup$cg/memory.events\" 2>/dev/null); p=$(cat \"/sys/fs/cgroup$cg/memory.peak\" 2>/dev/null); t=$(awk '$1 == \"max\" { print $2 }' \"/sys/fs/cgroup$cg/pids.events\" 2>/dev/null); printf '%s:%s:%s' \"$k\" \"$p\" \"$t\" > \"$f\"; if [ $rc -gt 128 ] && [ $rc -lt 160 ]; then s=$((rc - 128)); case $s in 19|20|21|22) ;; *) ulimit -c 0; trap - TERM INT HUP; kill -$s $$ ;; esac; fi; exit $rc"
-
 fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ObservedProcessResult:
-    val requested_memory = if scope.budget.max_tree_charge_bytes > 0: scope.budget.max_tree_charge_bytes else: scope.budget.max_direct_child_rss_bytes
-    val memory_scoped = requested_memory > 0 and _systemd_scope_available()
-    val ancestor_cap = if memory_scoped: _ancestor_memory_max() else: 0
-    val memory_bytes = if ancestor_cap > 0 and ancestor_cap < requested_memory: ancestor_cap else: requested_memory
-    # Inside a scope the pid cap is TasksMax, so no `ulimit -u` and no bash needed.
-    val shell = if memory_scoped: "/bin/sh" else: _limit_shell(scope)
+    val shell = _limit_shell(scope)
     if shell == "":
         return ObservedProcessResult(
             stdout: "",
             stderr: "resource scope: max_pids={scope.budget.max_pids} requires a shell with `ulimit -u` (bash/ksh/zsh); none found, refusing to run unlimited",
             usage: _unavailable_usage(0, 125), stdout_truncated: false, stderr_truncated: false, runtime_error: 125)
     var prefix = ""
-    if memory_bytes > 0 and not memory_scoped:
+    val memory_bytes = if scope.budget.max_tree_charge_bytes > 0: scope.budget.max_tree_charge_bytes else: scope.budget.max_direct_child_rss_bytes
+    if memory_bytes > 0:
         if _rlimit_as_enforceable():
             prefix = prefix + "ulimit -v {memory_bytes / 1024} || exit 125; "
         else:
             eprint("[resource-scope] address-space cap of {memory_bytes} bytes NOT enforced: RLIMIT_AS (`ulimit -v`) is unimplemented on this platform; cpu/pid/fd caps still apply")
     if scope.budget.max_cpu_ms > 0:
         prefix = prefix + "ulimit -t {(scope.budget.max_cpu_ms + 999) / 1000} || exit 125; "
-    # RLIMIT_NPROC counts every process of the UID, so inside a scope the pid
-    # cap is the scope's own TasksMax (cgroup pids.max) instead.
-    if scope.budget.max_pids > 0 and not memory_scoped:
+    if scope.budget.max_pids > 0:
         prefix = prefix + "ulimit -u {scope.budget.max_pids} || exit 125; "
     if scope.budget.max_fds > 0:
         prefix = prefix + "ulimit -n {scope.budget.max_fds} || exit 125; "
-    var command = prefix + "exec "
-    var report = ""
-    if memory_scoped:
-        _memscope_sequence = _memscope_sequence + 1
-        val temporary = env_get("TMPDIR") ?? "/tmp"
-        report = (if temporary == "": "/tmp" else: temporary) + "/simple-memscope-{getpid()}-{time_now_unix_micros()}-{_memscope_sequence}"
-        val tasks = if scope.budget.max_pids > 0: " --property=TasksMax={scope.budget.max_pids}" else: ""
-        command = command + "/usr/bin/systemd-run --user --scope --quiet --property=MemoryMax={memory_bytes} --property=MemorySwapMax=0 --property=OOMPolicy=continue" + tasks + " -- /bin/sh -c " + _shell_quote(_MEMSCOPE_SUPERVISOR) + " sh " + _shell_quote(report) + " "
-    command = command + _shell_quote(cmd)
+    var command = prefix + "exec " + _shell_quote(cmd)
     for arg in args:
         command = command + " " + _shell_quote(arg)
     val process = process_run_observed_bounded(shell, ["-c", command], scope.timeout_ms, scope.max_output_bytes)
-    var memscope: [text] = []
-    if report != "" and file_exists(report):
-        memscope = file_read_text(report).trim().split(":")
-        val _removed = file_delete(report)
-    val oom_kills = if memscope.len() == 3: memscope[0].to_int() else: 0
-    val scope_peak = if memscope.len() == 3: memscope[1].to_int() else: 0
-    val pids_max_events = if memscope.len() == 3: memscope[2].to_int() else: 0
     val termination = if process.usage.exit_code == 125:
         TerminationCause.InfrastructureFailure
-    elif oom_kills > 0:
-        TerminationCause.MemoryMax
-    elif pids_max_events > 0:
-        TerminationCause.ProcessLimit
     elif scope.budget.max_cpu_ms > 0 and process.usage.signal == 24:
         TerminationCause.CpuLimit
     else:
@@ -365,7 +257,7 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     val usage = ResourceUsage(
         wall_ms: process.usage.wall_ms, user_cpu_ms: process.usage.user_cpu_ms,
         system_cpu_ms: process.usage.system_cpu_ms,
-        peak_tree_charge_bytes: if scope_peak > 0: scope_peak else: process.usage.peak_tree_charge_bytes,
+        peak_tree_charge_bytes: process.usage.peak_tree_charge_bytes,
         peak_direct_child_rss_bytes: process.usage.peak_direct_child_rss_bytes,
         heap_live_end_bytes: process.usage.heap_live_end_bytes,
         heap_peak_bytes: process.usage.heap_peak_bytes,
@@ -431,17 +323,6 @@ fn _without_line_prefix(content: text, prefix: text) -> text:
             kept.push(line)
     kept.join("\n")
 
-pub fn resource_scope_systemd_metrics_v1(output: text, exit_code: i64, runtime_error: i64,
-        stdout_truncated: bool, stderr_truncated: bool) -> Option<(i64, i64)>:
-    # This parses the actual systemctl observation, not an enforcement claim.
-    # Incomplete/failed observations cannot certify even a displayed zero.
-    if exit_code != 0 or runtime_error != 0 or stdout_truncated or stderr_truncated: return None
-    if _property_value(output, "Result") == "": return None
-    val peak = resource_scope_nonnegative_counter_v1(_property_value(output, "MemoryPeak"))
-    val cpu = resource_scope_nonnegative_counter_v1(_property_value(output, "CPUUsageNSec"))
-    if peak.is_none() or cpu.is_none(): return None
-    Some((peak.unwrap(), cpu.unwrap()))
-
 pub fn run_in_systemd_resource_scope(scope: ExecutionResourceScope, cmd: text, args: [text], cancel_after_ms: i64 = 0) -> ExecutionScopeResult:
     """Linux delegated-service provider used when direct cgroup delegation is unavailable."""
     val started = time_now_unix_micros()
@@ -480,12 +361,9 @@ pub fn run_in_systemd_resource_scope(scope: ExecutionResourceScope, cmd: text, a
     # Non-zero fallback: `.to_int()` fails open to 0, which would mask a real
     # exit code here, so parse explicitly and keep the caller's default.
     val main_status = try_parse_int(_property_value(shown.stdout, "ExecMainStatus")) ?? executed.usage.exit_code
-    val metrics = resource_scope_systemd_metrics_v1(shown.stdout, shown.usage.exit_code,
-        shown.runtime_error, shown.stdout_truncated, shown.stderr_truncated)
-    # Zero is retained as the compatible absence value, distinguished by
-    # Unavailable. A measured zero is accepted only through the strict parser.
-    val memory_peak = if metrics.is_some(): metrics.unwrap().0 else: 0
-    val cpu_ns = if metrics.is_some(): metrics.unwrap().1 else: 0
+    val memory_peak_text = _property_value(shown.stdout, "MemoryPeak")
+    val memory_peak = memory_peak_text.to_int()
+    val cpu_ns = _property_value(shown.stdout, "CPUUsageNSec").to_int()
     val pids_pair = _line_value(executed.stderr, pids_marker).split(":")
     val pids_limit_event = pids_pair.len() == 2 and pids_pair[1].to_int() > pids_pair[0].to_int()
     val external_signal = _line_value(executed.stderr, external_marker).to_int()
@@ -510,7 +388,7 @@ pub fn run_in_systemd_resource_scope(scope: ExecutionResourceScope, cmd: text, a
         peak_tree_charge_bytes: memory_peak, peak_direct_child_rss_bytes: 0,
         heap_live_end_bytes: 0, heap_peak_bytes: 0,
         io_read_bytes: 0, io_write_bytes: 0, pids_peak: 0,
-        evidence_quality: if metrics.is_some(): ResourceEvidenceQuality.ExactTree else: ResourceEvidenceQuality.Unavailable,
+        evidence_quality: if result_name == "" or memory_peak_text == "" or memory_peak_text.starts_with("["): ResourceEvidenceQuality.Unavailable else: ResourceEvidenceQuality.ExactTree,
         termination: classify_termination(evidence), signal: evidence.signal,
         exit_code: main_status)
     val process = ObservedProcessResult(
@@ -542,26 +420,6 @@ fn cgroup_process_limit_event(before: CgroupV2Events, after: CgroupV2Events) -> 
 fn _read_i64(path: text) -> i64:
     file_read_text(path).trim().to_int()
 
-pub fn resource_scope_nonnegative_counter_v1(value: text) -> Option<i64>:
-    # Kernel counters are decimal, not signed numbers or display placeholders.
-    # Retain try_parse_int's portable 2^60-1 ceiling rather than overflowing on
-    # a tagged backend or interpreting systemd's UINT64_MAX sentinel as zero.
-    val digits = value.trim()
-    if digits.len() == 0: return None
-    for index in 0..digits.len():
-        val byte = digits.byte_at(index)
-        if byte < 48 or byte > 57: return None
-    val parsed = try_parse_int(digits)
-    if parsed == nil: return None
-    Some(parsed ?? 0)
-
-fn _unavailable_cgroup_v2(reason: text) -> CgroupV2Observation:
-    CgroupV2Observation(
-        available: false, memory_current_bytes: 0, memory_peak_bytes: 0,
-        user_cpu_micros: 0, system_cpu_micros: 0, pids_current: 0, pids_peak: 0,
-        io_read_bytes: 0, io_write_bytes: 0,
-        events: parse_cgroup_v2_events("", ""), unavailable_reason: reason)
-
 fn read_cgroup_v2_observation(scope_path: text) -> CgroupV2Observation:
     val memory_current_path = scope_path + "/memory.current"
     val memory_peak_path = scope_path + "/memory.peak"
@@ -572,26 +430,28 @@ fn read_cgroup_v2_observation(scope_path: text) -> CgroupV2Observation:
     val pids_events_path = scope_path + "/pids.events"
     val io_stat_path = scope_path + "/io.stat"
 
-    if not file_exists(memory_current_path) or not file_exists(memory_peak_path) or
-            not file_exists(memory_events_path) or not file_exists(cpu_stat_path):
-        return _unavailable_cgroup_v2("required cgroup v2 metric files are unavailable")
-
-    # Read current first: a subsequent lifetime peak cannot be smaller for this
-    # owned scope. Missing, reset or malformed evidence is never a measured zero.
-    val current = resource_scope_nonnegative_counter_v1(file_read_text(memory_current_path))
-    val peak = resource_scope_nonnegative_counter_v1(file_read_text(memory_peak_path))
-    if current.is_none() or peak.is_none():
-        return _unavailable_cgroup_v2("cgroup v2 memory counters are invalid or unavailable")
-    if peak.unwrap() < current.unwrap():
-        return _unavailable_cgroup_v2("cgroup v2 memory peak is below current usage")
+    if not file_exists(memory_current_path) or not file_exists(memory_events_path) or not file_exists(cpu_stat_path):
+        return CgroupV2Observation(
+            available: false,
+            memory_current_bytes: 0,
+            memory_peak_bytes: 0,
+            user_cpu_micros: 0,
+            system_cpu_micros: 0,
+            pids_current: 0,
+            pids_peak: 0,
+            io_read_bytes: 0,
+            io_write_bytes: 0,
+            events: parse_cgroup_v2_events("", ""),
+            unavailable_reason: "required cgroup v2 metric files are unavailable"
+        )
 
     val cpu_stat = file_read_text(cpu_stat_path)
     val pids_events = if file_exists(pids_events_path): file_read_text(pids_events_path) else: ""
     val io_stat = if file_exists(io_stat_path): file_read_text(io_stat_path) else: ""
     CgroupV2Observation(
         available: true,
-        memory_current_bytes: current.unwrap(),
-        memory_peak_bytes: peak.unwrap(),
+        memory_current_bytes: _read_i64(memory_current_path),
+        memory_peak_bytes: if file_exists(memory_peak_path): _read_i64(memory_peak_path) else: 0,
         user_cpu_micros: _counter_value(cpu_stat, "user_usec"),
         system_cpu_micros: _counter_value(cpu_stat, "system_usec"),
         pids_current: if file_exists(pids_current_path): _read_i64(pids_current_path) else: 0,
@@ -781,77 +641,11 @@ pub fn run_in_execution_resource_scope(scope: ExecutionResourceScope, cmd: text,
         observed
     ExecutionScopeResult(process: process, budget_decision: evaluate_resource_budget(process.usage, scope.budget))
 
-pub fn run_in_owned_execution_resource_scope(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ExecutionScopeResult:
-    if not host_is_windows_host(): return run_in_execution_resource_scope(scope, cmd, args)
-    val observed = _run_windows_owned_scope(scope, cmd, args)
-    ExecutionScopeResult(process: observed,
-        budget_decision: evaluate_resource_budget(observed.usage, scope.budget))
-
-pub fn run_in_owned_test_resource_scope(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ExecutionScopeResult:
-    run_in_owned_execution_resource_scope(scope, cmd, args)
-
-export run_in_owned_test_resource_scope, run_in_owned_execution_resource_scope
-
-var _windows_scope_sequence: i64 = 0
-
-fn _run_windows_owned_scope(scope: ExecutionResourceScope, cmd: text,
-        args: [text]) -> ObservedProcessResult:
-    # Avoid the historical raw tuple ABI. Memory/deadline are enforced by the
-    # JobObject owner; CPU/RSS measurements remain explicitly unavailable.
-    val started = time_now_unix_micros()
-    _windows_scope_sequence = _windows_scope_sequence + 1
-    val temporary = env_get("TMPDIR") ?? env_get("TEMP") ?? ""
-    if temporary == "":
-        return ObservedProcessResult("", "owned Windows temporary root unavailable",
-            _unavailable_usage(0, -1), false, false, -1)
-    val prefix = temporary + "/simple-owned-{getpid()}-{started}-{_windows_scope_sequence}"
-    val output = prefix + ".out"
-    val error = prefix + ".err"
-    proc_slot_acquire()
-    val token = windows_redirected_spawn_with_memory(cmd, args, output, error,
-        scope.timeout_ms, scope.max_output_bytes, scope.budget.max_tree_charge_bytes)
-    if token < 0:
-        proc_slot_release()
-        return ObservedProcessResult("", "owned Windows process admission failed",
-            _unavailable_usage(0, -1), false, false, -1)
-    var raw_exit = windows_redirected_wait(token, 0)
-    if windows_redirected_is_running(token):
-        # An observation error has already requested owned cancellation. Give
-        # that exact lease one bounded cleanup observation, never another run.
-        raw_exit = windows_redirected_wait(token, 5000)
-    # Keep admission and capture ownership if cleanup is unproven.
-    if windows_redirected_is_running(token):
-        windows_redirected_quarantine()
-        return ObservedProcessResult("", windows_redirected_failure_reason(token),
-            _unavailable_usage((time_now_unix_micros() - started) / 1000, -1), false, false, -1)
-    proc_slot_release()
-    val stdout_size = file_size(output)
-    val stderr_size = file_size(error)
-    val stdout = if stdout_size >= 0 and stdout_size <= scope.max_output_bytes: file_read_text(output) else: ""
-    val stderr = if stderr_size >= 0 and stderr_size <= scope.max_output_bytes: file_read_text(error) else: ""
-    val completed = windows_redirected_completion(token)
-    val wall_ms = (time_now_unix_micros() - started) / 1000
-    var result = ObservedProcessResult(stdout, stderr, _unavailable_usage(wall_ms, raw_exit),
-        stdout_size > scope.max_output_bytes, stderr_size > scope.max_output_bytes, -1)
-    match completed:
-        case Ok(receipt):
-            result.completion = Some(receipt)
-            result.usage.exit_code = receipt.exit_code
-            result.usage.termination = if receipt.timed_out: TerminationCause.WallTimeout elif receipt.cancelled: TerminationCause.InfrastructureFailure else: TerminationCause.Exited
-            result.runtime_error = if receipt.cancelled and not receipt.timed_out: -1 else: 0
-        case Err(reason): result.stderr = result.stderr + "\n" + reason
-    val removed_output = file_delete(output)
-    val removed_error = file_delete(error)
-    if not removed_output or not removed_error: result.runtime_error = -1
-    result
-
 export CgroupV2Events, CgroupV2Observation, ObservedProcessResult
 export ExecutionResourceClass, ExecutionResourceScope, ExecutionScopeResult
 export CurrentExecutionResourceScope, begin_current_execution_resource_scope, end_current_execution_resource_scope
 export standard_resource_budget, execution_resource_scope, execution_resource_scope_with_budget, run_in_execution_resource_scope
-export run_in_systemd_resource_scope, resource_scope_memory_enforcement
+export run_in_systemd_resource_scope
 export parse_cgroup_v2_events, cgroup_memory_high_event, cgroup_memory_max_event, cgroup_process_limit_event
 export read_cgroup_v2_observation
 export process_run_observed_bounded
-export resource_scope_nonnegative_counter_v1
-export resource_scope_systemd_metrics_v1

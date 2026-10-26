@@ -7,28 +7,6 @@
 #
 # All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
 
-# Explicit owners for names the seed resolved through its flat namespace;
-# the pure-Simple HIR resolves per module and reported them as unresolved.
-use compiler.core.ast.{decl_get, expr_get, stmts_contain_yield}
-use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, expr_get_arg_names}
-use compiler.core.ast_stmt.{STMT_ASSIGN}
-use compiler.core.interpreter.env.{env_define, env_lookup, env_pop_frame, env_pop_scope, env_push_frame}
-use compiler.core.interpreter.env.{env_push_scope, env_set_local}
-use compiler.core.interpreter.eval.{eval_caller_file, eval_current_decl_id, eval_expr, eval_had_error, eval_return_value}
-use compiler.core.interpreter.eval.{eval_returning, eval_set_error, eval_yield_stack, infer_type_args_from_values, infer_type_tags_from_values}
-use compiler.core.interpreter.eval.{type_check_value}
-use compiler.core.interpreter.eval_builtins.{eval_builtin_call}
-use compiler.core.interpreter.eval_ops.{eval_enum_variant_call, eval_struct_constructor}
-use compiler.core.interpreter.eval_stmts.{eval_stmt}
-use compiler.core.interpreter.eval_tables.{enum_table_lookup, func_flat_lookup_for_caller, func_module_namespace_lookup, func_resolve_for_caller, func_resolve_module_member_for_caller}
-use compiler.core.interpreter.eval_tables.{func_table_lookup, struct_table_lookup}
-use compiler.core.interpreter.jit.{jit_is_compiled, jit_record_call, jit_try_execute}
-use compiler.core.interpreter.module_loader_core.{try_force_any_deferred_for}
-use compiler.core.interpreter.resolve.{resolve_cached_local_count, resolve_is_slot_shadowed}
-use compiler.core.interpreter.value.{val_get_func_decl, val_get_int, val_get_struct_fields, val_get_struct_name, val_get_struct_values}
-use compiler.core.interpreter.value.{val_is_function, val_is_int, val_is_struct, val_make_array, val_make_int}
-use compiler.core.interpreter.value.{val_make_nil, val_make_struct}
-use compiler.core.interpreter.value.{val_is_array, val_get_array, val_array_push, val_struct_set_field_idx}
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
 use compiler.core.monomorphize.{mono_cache_init, mono_cache_lookup, mono_cache_register, mono_specialize}
 
@@ -296,12 +274,13 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
         var pval = val_make_nil()
         if pi < arg_values.len():
             pval = arg_values[pi]
-            # Value-type arrays and structs are copied on bind so callee
+            # Value-type (struct) params are copied on bind so callee field
             # mutations never leak back to the caller's argument. Reference
             # types (class/actor) keep sharing the same value_id — mutations
             # through them are meant to be visible to the caller. See
             # decl_set_is_value_type / interp_struct_is_value_type (#108).
-            pval = val_copy_for_parameter(pval)
+            if val_is_struct(pval) and interp_struct_is_value_type(pval):
+                pval = val_struct_deep_copy(pval)
         env_define(pname, pval)
         # LOAD_FAST: set fast local for non-shadowed params
         if local_count > 0:
@@ -379,55 +358,20 @@ fn interp_struct_is_value_type(vid: i64) -> bool:
 
 fn val_struct_deep_copy(vid: i64) -> i64:
     """Deep-copy a struct value for value-type param binding. Nested fields
-    and arrays are copied recursively. Class-typed (reference) fields keep
+    that are themselves value-type structs are copied recursively (struct-in-
+    struct). Class-typed (reference) fields and all other value kinds keep
     the same value_id, so a class field embedded in a struct still shares its
     identity with the caller after the struct itself is copied."""
-    val context = InterpreterValueCopyContext(copies: {})
-    context.copy_value(vid)
-
-class InterpreterValueCopyContext:
-    # Reference ownership keeps recursive calls on one memo table.
-    copies: {i64: i64}
-
-    me copy_value(vid: i64) -> i64:
-        if vid < 0: return vid
-        val is_array = val_is_array(vid)
-        val is_value_struct = val_is_struct(vid) and interp_struct_is_value_type(vid)
-        if not is_array and not is_value_struct: return vid
-        if self.copies.contains_key(vid):
-            return self.copies[vid] ?? -1
-        if is_array:
-            val copied = val_make_array([])
-            self.copies[vid] = copied
-            for element in val_get_array(vid):
-                val cloned = self.copy_value(element)
-                val _ = val_array_push(copied, cloned)
-            return copied
-        val fields = val_get_struct_fields(vid)
-        val values = val_get_struct_values(vid)
-        var placeholders: [i64] = []
-        for value in values:
-            placeholders.push(-1)
-        val copied = val_make_struct(val_get_struct_name(vid), fields, placeholders)
-        self.copies[vid] = copied
-        var index = 0
-        while index < values.len():
-            val cloned = self.copy_value(values[index])
-            val_struct_set_field_idx(copied, index, cloned)
-            index = index + 1
-        copied
-
-fn val_copy_for_parameter(vid: i64) -> i64:
-    """Copy array storage and value structs across a parameter binding.
-    Array elements follow their own value/reference semantics, so nested
-    arrays and structs are copied while class and actor identities are shared.
-    Scalar values are immutable arena entries and keep their identity."""
-    if vid < 0: return vid
-    if not val_is_array(vid):
-        if not val_is_struct(vid): return vid
-        if not interp_struct_is_value_type(vid): return vid
-    val context = InterpreterValueCopyContext(copies: {})
-    context.copy_value(vid)
+    val name = val_get_struct_name(vid)
+    val fields = val_get_struct_fields(vid)
+    val values = val_get_struct_values(vid)
+    var new_values: [i64] = []
+    for fv in values:
+        if val_is_struct(fv) and interp_struct_is_value_type(fv):
+            new_values.push(val_struct_deep_copy(fv))
+        else:
+            new_values.push(fv)
+    val_make_struct(name, fields, new_values)
 
 fn val_copy_if_value_struct(vid: i64) -> i64:
     """The shared value-type copy gate for every identity-contract copy site

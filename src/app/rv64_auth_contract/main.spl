@@ -1,16 +1,27 @@
 use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget, ManifestResourceLimits, SimpleArtifactManifest}
 use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableAdmissionDecisionV1, ExecutableAdmissionV1}
-use os.kernel.loader.executable_crypto_authority.{executable_manifest_signing_body_v1}
-
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+use os.kernel.loader.executable_signing_body.{executable_manifest_signing_body_v1}
+use app.io.args_ops.{get_args}
+use app.io.binary_file_ops.{binary_file_write}
 
 fn _positive(value: text) -> u64:
-    val parsed = value.to_i64()
-    if parsed <= 0: panic("rv64-auth-contract: invalid positive coordinate")
-    parsed.to_u64()
+    if value == "": panic("rv64-auth-contract: invalid positive coordinate")
+    var parsed: u64 = 0u64
+    var i = 0
+    while i < value.len():
+        val byte = value.bytes()[i]
+        if byte < 48u8 or byte > 57u8:
+            panic("rv64-auth-contract: invalid positive coordinate")
+        val digit = (byte - 48u8).to_u64()
+        if parsed > (9223372036854775807u64 - digit) / 10u64:
+            panic("rv64-auth-contract: coordinate overflow")
+        parsed = parsed * 10u64 + digit
+        i = i + 1
+    if parsed == 0u64: panic("rv64-auth-contract: invalid positive coordinate")
+    parsed
 
 fn main():
-    val args = get_cli_args()
+    val args = get_args()
     if args.len() != 9:
         panic("rv64-auth-contract: expected OUTPUT IMAGE_HASH KERNEL_HASH TRUST_HASH MOUNT_ID MOUNT_GEN FILE_ID FILE_GEN")
     val target = ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos")
@@ -32,5 +43,5 @@ fn main():
         mount_id: _positive(args[5]), mount_generation: _positive(args[6]),
         file_id: _positive(args[7]), file_generation: _positive(args[8]),
         effective_capabilities: 69u32)
-    if not rt_file_write_bytes(args[1], executable_manifest_signing_body_v1(manifest, admission, args[2])):
+    if not binary_file_write(args[1], executable_manifest_signing_body_v1(manifest, admission, args[2])):
         panic("rv64-auth-contract: cannot write canonical body")

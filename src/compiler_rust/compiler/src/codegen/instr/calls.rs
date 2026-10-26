@@ -161,37 +161,8 @@ mod tests {
 
     use super::{
         boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target, sffi_alias_target_shadowed,
-        strip_call_module_prefix, text_arg_indices,
+        text_arg_indices,
     };
-
-    /// A flattened private helper named `_i64` must not decay to the `i64`
-    /// builtin (every engine2d `_i64(width)` returned 0 under the JIT).
-    #[test]
-    fn module_prefix_strip_keeps_leading_underscores_of_the_bare_name() {
-        assert_eq!(strip_call_module_prefix("__spl_flat_a_spl_2f38f839801620b5___i64"), "_i64");
-        assert_eq!(strip_call_module_prefix("__spl_flat_a_spl_2f38f839801620b5____priv"), "__priv");
-        assert_eq!(strip_call_module_prefix("compiler__driver__driver_types__rt_file_read_text"), "rt_file_read_text");
-        assert_eq!(strip_call_module_prefix("mod___x"), "_x");
-    }
-
-    /// Everything without a mid-string underscore run of 3+ keeps the old
-    /// `rsplit_once("__")` result.
-    #[test]
-    fn module_prefix_strip_matches_rsplit_once_elsewhere() {
-        for name in [
-            "rt_len",
-            "_i64",
-            "widen",
-            "__module_init",
-            "__module_init_dynamic",
-            "a__b__c",
-            "compiler__x__rt_value_int",
-            "__simple_runtime_init",
-        ] {
-            let old = name.rsplit_once("__").map(|(_, t)| t).unwrap_or(name);
-            assert_eq!(strip_call_module_prefix(name), old, "{name}");
-        }
-    }
 
     /// doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md:
     /// a module-level `fn len(xs)` must not be replaced by `rt_len` in the JIT.
@@ -209,17 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn atomic_publication_retains_tagged_text_and_scalar_mode() {
-        assert_eq!(boxed_text_arg_indices("rt_file_atomic_write"), Some(&[0, 1][..]));
-        assert_eq!(boxed_text_arg_indices("rt_file_atomic_write_mode"), Some(&[0, 1][..]));
-        assert!(!boxed_text_arg_indices("rt_file_atomic_write_mode").unwrap().contains(&2));
-        assert_eq!(boxed_text_arg_indices("other.rt_file_atomic_write"), None);
-        assert_eq!(boxed_text_arg_indices("other.rt_file_atomic_write_mode"), None);
-        assert_eq!(boxed_text_arg_indices("rt_file_atomic_write_mode_extra"), None);
-        assert_eq!(boxed_text_arg_indices("rt_string_builder_push"), Some(&[1][..]));
-    }
-
-    #[test]
     fn string_builder_push_boxes_only_its_text_argument() {
         assert_eq!(boxed_text_arg_indices("rt_string_builder_push"), Some(&[1][..]));
         assert_eq!(boxed_text_arg_indices("rt_string_builder_finish"), None);
@@ -234,97 +194,11 @@ mod tests {
     }
 
     #[test]
-    fn secure_temp_dir_split_setters_take_one_boxed_text_value() {
-        // Seed-vintage independent ABI: no (ptr, len) expansion row, so the
-        // boxed RuntimeValue crosses as one word in every seed.
-        for name in [
-            "rt_secure_temp_dir_set_parent",
-            "rt_secure_temp_dir_set_prefix",
-            "rt_secure_temp_dir_make",
-        ] {
-            assert_eq!(text_arg_indices(name), None, "{name}");
-            assert_eq!(boxed_text_arg_indices(name), None, "{name}");
-        }
-    }
-
-    #[test]
-    fn real_directory_probe_expands_text_to_path_pointer_and_length() {
-        assert_eq!(text_arg_indices("rt_dir_is_real_no_follow"), Some(&[0][..]));
-    }
-
-    #[test]
-    fn linux_owner_text_pairs_preserve_arrays_and_scalar_limits() {
-        assert_eq!(text_arg_indices("rt_linux_group_available_capacity_v1"), Some(&[0][..]));
-        assert_eq!(text_arg_indices("rt_linux_group_parent_acquire_v1"), Some(&[0, 1][..]));
-        assert_eq!(text_arg_indices("rt_linux_group_launch_broker_v1"), Some(&[0, 1][..]));
-        assert_eq!(text_arg_indices("rt_linux_group_start_v1"), Some(&[0, 1, 4, 5, 6, 9, 10][..]));
-        assert_eq!(text_arg_indices("rt_linux_group_poll_v1"), None);
-    }
-
-    #[test]
-    fn linux_parent_generated_call_keeps_four_machine_arguments() {
-        use cranelift_codegen::{ir::{types, AbiParam, InstBuilder}, settings};
-        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-        use cranelift_jit::{JITBuilder, JITModule};
-        use cranelift_module::Module;
-
-        extern "C" fn capture(first: i64, first_len: i64, second: i64, second_len: i64) -> i64 {
-            i64::from([first, first_len, second, second_len] == [11, 22, 33, 64])
-        }
-
-        let isa = cranelift_native::builder().expect("host ISA")
-            .finish(settings::Flags::new(settings::builder())).expect("ISA flags");
-        let mut jit = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        jit.symbol("rt_linux_group_parent_acquire_v1", capture as *const u8);
-        let mut module = JITModule::new(jit);
-        let spec = crate::codegen::runtime_sffi::spec_for("rt_linux_group_parent_acquire_v1")
-            .expect("registered Linux owner machine signature");
-        let signature = spec.build_signature(module.make_signature().call_conv);
-        let owner = module.declare_function(spec.name, Linkage::Import, &signature).unwrap();
-        let mut context = module.make_context();
-        context.func.signature = module.make_signature();
-        context.func.signature.returns.push(AbiParam::new(types::I64));
-        let entry = module.declare_function("linux_parent_abi_probe", Linkage::Export,
-            &context.func.signature).unwrap();
-        let mut frontend = FunctionBuilderContext::new();
-        {
-            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
-            let block = builder.create_block();
-            builder.switch_to_block(block);
-            builder.seal_block(block);
-            let target = module.declare_func_in_func(owner, builder.func);
-            let machine_args = [11, 22, 33, 64].into_iter()
-                .map(|value| builder.ins().iconst(types::I64, value)).collect();
-            let adapted = super::adapt_args_to_signature(&mut builder, target, machine_args);
-            assert_eq!(adapted.len(), 4, "expanded text pairs must not be truncated");
-            let call = builder.ins().call(target, &adapted);
-            let result = builder.inst_results(call)[0];
-            builder.ins().return_(&[result]);
-            builder.finalize();
-        }
-        module.define_function(entry, &mut context).unwrap();
-        module.finalize_definitions().unwrap();
-        let compiled: extern "C" fn() -> i64 = unsafe {
-            std::mem::transmute(module.get_finalized_function(entry))
-        };
-        assert_eq!(compiled(), 1, "generated native call must deliver all four C ABI words");
-    }
-
-    #[test]
     fn owned_process_v3_start_expands_only_command_text() {
         assert_eq!(
             super::process_c_runtime_arg_indices("rt_process_owned_v3_start_value"),
             Some((&[0][..], &[1][..]))
         );
-    }
-
-    #[test]
-    fn owned_bounded_capsules_expand_command_text_to_ptr_len() {
-        for name in ["rt_process_run_owned_bounded_value", "rt_process_run_owned_observed_bounded_value"] {
-            assert_eq!(super::process_c_runtime_arg_indices(name), Some((&[0][..], &[1][..])), "{name}");
-            let spec = crate::codegen::runtime_sffi::spec_for(name).expect("owned capsule runtime spec");
-            assert_eq!(spec.params.len(), 5, "{name}: cmd ptr+len, args, timeout, max_output");
-        }
     }
 
     #[test]
@@ -597,8 +471,7 @@ fn compile_inline_bytes_u8_at<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        // Pure read with an unused result: nothing to emit.
-        return Ok(true);
+        return Ok(false);
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
@@ -702,68 +575,6 @@ fn compile_inline_bytes_u8_at<M: Module>(
     Ok(true)
 }
 
-/// Little-endian `width`-byte read at `index` from a hosted `[u8]`, for
-/// either element layout: a byte-packed array (gc_flags bit 3, the packed
-/// RT_CORE_ARRAY_FLAG_BYTES layout) is read directly; a slot array (8-byte
-/// tagged elements — what e.g. `[0u8; n]` with a runtime `n` builds) is
-/// composed from per-slot byte decodes. Reading packed bytes out of a slot
-/// array returned the slot words' low bytes (a 16-byte sum of 2040 read 105).
-fn hosted_bytes_le_load(builder: &mut FunctionBuilder, ptr_bits: Value, index: Value, width: i64) -> Value {
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let packed_block = builder.create_block();
-    let slot_block = builder.create_block();
-    let join_block = builder.create_block();
-    builder.append_block_param(join_block, types::I64);
-    let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
-    let byte_packed = builder.ins().band_imm(gc_flags, 8);
-    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-    builder.ins().brif(is_byte_packed, packed_block, &[], slot_block, &[]);
-
-    builder.switch_to_block(packed_block);
-    let byte_ptr = builder.ins().iadd(data_ptr, index);
-    // The `_le_` contract is little-endian bytes, independent of the host:
-    // the multi-byte packed loads say so explicitly (a no-op on LE hosts, a
-    // byte swap on BE). The slot arm below composes bytes with shifts.
-    let le = MemFlags::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
-    let packed = if width == 8 {
-        builder.ins().load(types::I64, le, byte_ptr, 0)
-    } else if width == 1 {
-        let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-        builder.ins().uextend(types::I64, value)
-    } else {
-        let value = builder.ins().load(types::I32, le, byte_ptr, 0);
-        builder.ins().uextend(types::I64, value)
-    };
-    builder.ins().jump(join_block, &[packed]);
-    builder.seal_block(packed_block);
-
-    builder.switch_to_block(slot_block);
-    let mut acc: Option<Value> = None;
-    for i in 0..width {
-        let off = builder.ins().iadd_imm(index, i);
-        let slot_off = builder.ins().imul_imm(off, 8);
-        let slot_ptr = builder.ins().iadd(data_ptr, slot_off);
-        let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
-        let byte = decode_byte_from_slot(builder, slot);
-        let piece = if i == 0 {
-            byte
-        } else {
-            builder.ins().ishl_imm(byte, (i * 8) as i64)
-        };
-        acc = Some(match acc {
-            None => piece,
-            Some(a) => builder.ins().bor(a, piece),
-        });
-    }
-    let composed = acc.expect("at least one byte composed");
-    builder.ins().jump(join_block, &[composed]);
-    builder.seal_block(slot_block);
-
-    builder.switch_to_block(join_block);
-    builder.seal_block(join_block);
-    builder.block_params(join_block)[0]
-}
-
 fn compile_inline_bytes_le_at<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -819,7 +630,17 @@ fn compile_inline_bytes_le_at<M: Module>(
         }
         acc.expect("at least one byte composed")
     } else {
-        hosted_bytes_le_load(builder, ptr_bits, index, width)
+        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+        let byte_ptr = builder.ins().iadd(data_ptr, index);
+        if width == 8 {
+            builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+        } else if width == 1 {
+            let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+            builder.ins().uextend(types::I64, value)
+        } else {
+            let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
+            builder.ins().uextend(types::I64, value)
+        }
     };
     builder.ins().jump(done_block, &[loaded]);
     builder.seal_block(load_block);
@@ -842,26 +663,19 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        // Pure read with an unused result: nothing to emit.
-        return Ok(true);
+        return Ok(false);
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let loaded = if ctx.fam_arrays || ctx.baremetal {
+    let loaded = if ctx.fam_arrays {
         // FAM byte arrays store each element as a tagged RuntimeValue slot at
         // items@16 (never raw-packed), so the little-endian value must be
         // composed from per-slot decodes — mirroring the freestanding C
         // rt_arm_array_get_u16_le / rt_arm_array_get_u32_le helpers.
-        // The NON-FAM freestanding runtimes (riscv64 / x86_64 baremetal_stubs,
-        // rt_extras.c) keep the hosted header (items POINTER @24) but also
-        // store tagged 8-byte slots, never packed bytes — only the hosted
-        // runtime has the packed RT_CORE_ARRAY_FLAG_BYTES layout. Reading
-        // packed bytes there made adler32 (and every DBFS checkpoint check
-        // built on it) wrong on riscv64.
-        let items = array_items_base(builder, ptr_bits, ctx.fam_arrays);
+        let items = array_items_base(builder, ptr_bits, true);
         let mut acc: Option<Value> = None;
         for i in 0..width {
             let off = builder.ins().iadd_imm(index, i);
@@ -881,37 +695,19 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
         }
         acc.expect("at least one byte composed")
     } else {
-        hosted_bytes_le_load(builder, ptr_bits, index, width)
+        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+        let byte_ptr = builder.ins().iadd(data_ptr, index);
+        if width == 8 {
+            builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+        } else if width == 1 {
+            let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+            builder.ins().uextend(types::I64, value)
+        } else {
+            let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
+            builder.ins().uextend(types::I64, value)
+        }
     };
     ctx.vreg_values.insert(*dest, loaded);
-    Ok(true)
-}
-
-/// `rt_array_is_byte_packed(array)` -> 1 when the hosted array stores packed
-/// bytes (gc_flags bit 3), else 0. FAM/freestanding arrays never byte-pack.
-fn compile_inline_array_is_byte_packed<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    dest: &Option<VReg>,
-    args: &[VReg],
-) -> InstrResult<bool> {
-    if args.len() != 1 {
-        return Ok(false);
-    }
-    let Some(dest) = dest else {
-        return Ok(true);
-    };
-    let value = if ctx.fam_arrays || ctx.baremetal {
-        builder.ins().iconst(types::I64, 0)
-    } else {
-        let array = coerce_vreg_to_i64(ctx, builder, args[0]);
-        let ptr_bits = builder.ins().band_imm(array, !7i64);
-        let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
-        let packed = builder.ins().band_imm(gc_flags, 8);
-        let is_packed = builder.ins().icmp_imm(IntCC::NotEqual, packed, 0);
-        builder.ins().uextend(types::I64, is_packed)
-    };
-    ctx.vreg_values.insert(*dest, value);
     Ok(true)
 }
 
@@ -1024,66 +820,23 @@ fn compile_inline_array_get<M: Module>(
     // read on OOB. FAM: items base is header+16 (no indirection, no byte-packing).
     builder.switch_to_block(load_block);
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
-    // Word-packed arrays (flag 0x10: a `[i64]` packed in place by a wide store,
-    // or a `[u64]`) hold RAW words, which the tagged-slot load below would hand
-    // out untagged. They are tagged here instead; a word outside the inline
-    // range needs a heap box, which only `rt_value_int` can make (the same
-    // runtime entry BoxInt already uses, so no new symbol and no
-    // `rt_array_get` call is introduced).
-    let words_block = if ctx.fam_arrays { None } else { Some(builder.create_block()) };
     if let Some(byte_block) = byte_block {
         let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
         let flags64 = builder.ins().uextend(types::I64, flags);
-        if let Some(words_block) = words_block {
-            let dispatch_block = builder.create_block();
-            let any_packed = builder.ins().band_imm(flags64, 0x18);
-            let is_any_packed = builder.ins().icmp_imm(IntCC::NotEqual, any_packed, 0);
-            builder.ins().brif(is_any_packed, dispatch_block, &[], word_block, &[]);
-            builder.switch_to_block(dispatch_block);
-            let byte_packed = builder.ins().band_imm(flags64, 0x08);
-            let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-            builder.ins().brif(is_byte_packed, byte_block, &[], words_block, &[]);
-            builder.seal_block(dispatch_block);
-        } else {
-            let byte_packed = builder.ins().band_imm(flags64, 0x08);
-            let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-            builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
-        }
+        let byte_packed = builder.ins().band_imm(flags64, 0x08);
+        let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+        builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
     } else {
         builder.ins().jump(word_block, &[]);
     }
     builder.seal_block(load_block);
-
-    if let Some(words_block) = words_block {
-        builder.switch_to_block(words_block);
-        let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
-        let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-        let raw_word = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
-        let tagged = builder.ins().ishl_imm(raw_word, 3);
-        let round_trip = builder.ins().sshr_imm(tagged, 3);
-        let fits = builder.ins().icmp(IntCC::Equal, round_trip, raw_word);
-        let wide_block = builder.create_block();
-        builder.ins().brif(fits, done_block, &[tagged], wide_block, &[]);
-        builder.seal_block(words_block);
-        builder.set_cold_block(wide_block);
-        builder.switch_to_block(wide_block);
-        let boxed = call_runtime_1(ctx, builder, "rt_value_int", raw_word);
-        builder.ins().jump(done_block, &[boxed]);
-        builder.seal_block(wide_block);
-    }
 
     if let Some(byte_block) = byte_block {
         builder.switch_to_block(byte_block);
         let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
         let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
         let byte_value = builder.ins().uextend(types::I64, byte);
-        // Tag it (`from_int`: `v << 3`), exactly what the runtime
-        // `rt_array_get` returns for a byte-packed array and what every MIR
-        // consumer decodes (UnboxInt). The raw byte used to escape here, so a
-        // byte that is a multiple of 8 was shifted on decode: `for b in bytes`
-        // read 104 as 13 under the JIT, while 101 passed through untouched.
-        let tagged_byte = builder.ins().ishl_imm(byte_value, 3);
-        builder.ins().jump(done_block, &[tagged_byte]);
+        builder.ins().jump(done_block, &[byte_value]);
         builder.seal_block(byte_block);
     }
 
@@ -1229,58 +982,16 @@ fn compile_inline_array_set<M: Module>(
 
     builder.switch_to_block(store_block);
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
-    // Word-packed arrays (flag 0x10) hold raw words: storing the tagged value
-    // here would corrupt them. Inline ints store their decoded word directly;
-    // everything else takes the cold `rt_array_set` call (see wide_block).
-    let words_block = if ctx.fam_arrays { None } else { Some(builder.create_block()) };
     if let Some(byte_block) = byte_block {
         let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
         let flags64 = builder.ins().uextend(types::I64, flags);
-        if let Some(words_block) = words_block {
-            let dispatch_block = builder.create_block();
-            let any_packed = builder.ins().band_imm(flags64, 0x18);
-            let is_any_packed = builder.ins().icmp_imm(IntCC::NotEqual, any_packed, 0);
-            builder.ins().brif(is_any_packed, dispatch_block, &[], word_block, &[]);
-            builder.switch_to_block(dispatch_block);
-            let byte_packed = builder.ins().band_imm(flags64, 0x08);
-            let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-            builder.ins().brif(is_byte_packed, byte_block, &[], words_block, &[]);
-            builder.seal_block(dispatch_block);
-        } else {
-            let byte_packed = builder.ins().band_imm(flags64, 0x08);
-            let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-            builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
-        }
+        let byte_packed = builder.ins().band_imm(flags64, 0x08);
+        let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+        builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
     } else {
         builder.ins().jump(word_block, &[]);
     }
     builder.seal_block(store_block);
-
-    if let Some(words_block) = words_block {
-        builder.switch_to_block(words_block);
-        let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
-        let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-        let value_tag = builder.ins().band(value, tag_mask);
-        let is_inline_int = builder.ins().icmp_imm(IntCC::Equal, value_tag, 0);
-        let inline_block = builder.create_block();
-        let wide_block = builder.create_block();
-        builder.ins().brif(is_inline_int, inline_block, &[], wide_block, &[]);
-        builder.seal_block(words_block);
-        builder.switch_to_block(inline_block);
-        let inline_word = builder.ins().sshr_imm(value, 3);
-        builder.ins().store(MemFlags::new(), inline_word, slot_ptr, 0);
-        builder.ins().jump(done_block, &[one]);
-        builder.seal_block(inline_block);
-        builder.set_cold_block(wide_block);
-        builder.switch_to_block(wide_block);
-        // Not an inline int: a wide (heap-boxed) integer, or a value the word
-        // layout cannot hold (nil/float/text). `rt_array_set` stores the former
-        // as a raw word and returns the array to the tagged layout for the latter.
-        let set_ok = call_runtime_3(ctx, builder, "rt_array_set", array, index, value);
-        let set_ok64 = builder.ins().uextend(types::I64, set_ok);
-        builder.ins().jump(done_block, &[set_ok64]);
-        builder.seal_block(wide_block);
-    }
 
     if let Some(byte_block) = byte_block {
         builder.switch_to_block(byte_block);
@@ -1930,48 +1641,21 @@ fn compile_inline_typed_bytes_data_at<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        // Pure read with an unused result: nothing to emit.
-        return Ok(true);
+        return Ok(false);
     };
-    let tagged_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    // Bit 0 of the pointer is the layout tag computed once per loop by the MIR
-    // preheader: set = slot layout (8-byte tagged elements), clear = byte-packed.
-    let data_ptr = builder.ins().band_imm(tagged_ptr, !1i64);
-    let widened = if ctx.fam_arrays || ctx.baremetal {
-        // The hoisted data pointer is the items base (FAM: header+16; non-FAM
-        // freestanding: the items pointer); elements are tagged slots on every
-        // freestanding runtime, so decode the byte instead of reading raw memory.
+    let widened = if ctx.fam_arrays {
+        // The hoisted data pointer is the FAM items base (header+16); elements
+        // are tagged slots, so decode the byte instead of reading raw memory.
         let slot_off = builder.ins().imul_imm(index, 8);
         let slot_ptr = builder.ins().iadd(data_ptr, slot_off);
         let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
         decode_byte_from_slot(builder, slot)
     } else {
-        let packed_block = builder.create_block();
-        let slot_block = builder.create_block();
-        let join_block = builder.create_block();
-        builder.append_block_param(join_block, types::I64);
-        let is_slot = builder.ins().band_imm(tagged_ptr, 1);
-        builder.ins().brif(is_slot, slot_block, &[], packed_block, &[]);
-
-        builder.switch_to_block(packed_block);
         let byte_ptr = builder.ins().iadd(data_ptr, index);
         let loaded = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-        let packed_value = builder.ins().uextend(types::I64, loaded);
-        builder.ins().jump(join_block, &[packed_value]);
-        builder.seal_block(packed_block);
-
-        builder.switch_to_block(slot_block);
-        let slot_off = builder.ins().imul_imm(index, 8);
-        let slot_ptr = builder.ins().iadd(data_ptr, slot_off);
-        let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
-        let slot_value = decode_byte_from_slot(builder, slot);
-        builder.ins().jump(join_block, &[slot_value]);
-        builder.seal_block(slot_block);
-
-        builder.switch_to_block(join_block);
-        builder.seal_block(join_block);
-        builder.block_params(join_block)[0]
+        builder.ins().uextend(types::I64, loaded)
     };
     ctx.vreg_values.insert(*dest, widened);
     Ok(true)
@@ -1988,8 +1672,7 @@ fn compile_inline_typed_words_at<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        // Pure read with an unused result: nothing to emit.
-        return Ok(true);
+        return Ok(false);
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
@@ -2047,103 +1730,6 @@ fn compile_inline_typed_words_at<M: Module>(
     Ok(true)
 }
 
-/// Inline `rt_typed_words_i64_at` (`[i64]` signed read). Hot paths, no call and
-/// no registry lock: a heap-tagged array, in bounds, then either the packed raw
-/// word (flag 0x10) or the tagged inline int (`>> 3`). Only a heap-boxed wide
-/// integer in a tagged slot takes the cold runtime call.
-fn compile_inline_typed_words_i64_at<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    dest: &Option<VReg>,
-    args: &[VReg],
-) -> InstrResult<bool> {
-    if args.len() != 2 {
-        return Ok(false);
-    }
-    let Some(dest) = dest else {
-        return Ok(true);
-    };
-
-    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let zero = builder.ins().iconst(types::I64, 0);
-    let tag_mask = builder.ins().iconst(types::I64, 7);
-    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
-    let index_is_unsigned = vreg_is_signed(ctx, args[1]) == Some(false);
-
-    let bounds_block = builder.create_block();
-    let load_block = builder.create_block();
-    let packed_block = builder.create_block();
-    let tagged_block = builder.create_block();
-    let inline_block = builder.create_block();
-    let cold_block = builder.create_block();
-    let done_block = builder.create_block();
-    builder.append_block_param(done_block, types::I64);
-
-    // Not a heap pointer: same answer as the runtime accessor (0).
-    let tag = builder.ins().band(array, tag_mask);
-    let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
-    builder.ins().brif(is_heap, bounds_block, &[], done_block, &[zero]);
-
-    builder.switch_to_block(bounds_block);
-    let ptr_bits = builder.ins().band(array, ptr_mask);
-    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
-    let normalized_index = if index_is_unsigned {
-        index
-    } else {
-        let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
-        let negative_index = builder.ins().iadd(len, index);
-        builder.ins().select(index_is_negative, negative_index, index)
-    };
-    let in_bounds = if index_is_unsigned {
-        builder.ins().icmp(IntCC::UnsignedLessThan, normalized_index, len)
-    } else {
-        let ge_zero = builder
-            .ins()
-            .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
-        let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
-        builder.ins().band(ge_zero, lt_len)
-    };
-    builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
-    builder.seal_block(bounds_block);
-
-    builder.switch_to_block(load_block);
-    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
-    let slot_offset = builder.ins().imul_imm(normalized_index, 8);
-    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-    let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
-    let is_packed = u64_packed_condition(builder, ptr_bits);
-    builder.ins().brif(is_packed, packed_block, &[], tagged_block, &[]);
-    builder.seal_block(load_block);
-
-    builder.switch_to_block(packed_block);
-    builder.ins().jump(done_block, &[raw]);
-    builder.seal_block(packed_block);
-
-    builder.switch_to_block(tagged_block);
-    let slot_tag = builder.ins().band(raw, tag_mask);
-    let is_inline_int = builder.ins().icmp_imm(IntCC::Equal, slot_tag, 0);
-    builder.ins().brif(is_inline_int, inline_block, &[], cold_block, &[]);
-    builder.seal_block(tagged_block);
-
-    builder.switch_to_block(inline_block);
-    let payload = builder.ins().sshr_imm(raw, 3);
-    builder.ins().jump(done_block, &[payload]);
-    builder.seal_block(inline_block);
-
-    builder.set_cold_block(cold_block);
-    builder.switch_to_block(cold_block);
-    let wide = call_runtime_2(ctx, builder, "rt_typed_words_i64_at", array, index);
-    builder.ins().jump(done_block, &[wide]);
-    builder.seal_block(cold_block);
-
-    builder.switch_to_block(done_block);
-    let result = builder.block_params(done_block)[0];
-    builder.seal_block(done_block);
-    ctx.vreg_values.insert(*dest, result);
-    Ok(true)
-}
-
 fn u64_packed_condition(builder: &mut FunctionBuilder, header_ptr: Value) -> Value {
     let flags = builder.ins().load(types::I8, MemFlags::new(), header_ptr, 1);
     let flags64 = builder.ins().uextend(types::I64, flags);
@@ -2187,8 +1773,7 @@ fn compile_inline_typed_words_unchecked<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        // Pure read with an unused result: nothing to emit.
-        return Ok(true);
+        return Ok(false);
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
@@ -3078,10 +2663,6 @@ fn returns_c_string(func_name: &str) -> bool {
 ///
 pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
-        "rt_linux_group_available_capacity_v1" => Some(&[0]),
-        "rt_linux_group_parent_acquire_v1" => Some(&[0, 1]),
-        "rt_linux_group_launch_broker_v1" => Some(&[0, 1]),
-        "rt_linux_group_start_v1" => Some(&[0, 1, 4, 5, 6, 9, 10]),
         // Print/IO (text → ptr, len)
         "rt_print_str" | "rt_println_str" | "rt_eprint_str" | "rt_eprintln_str" => Some(&[0]),
 
@@ -3103,12 +2684,6 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // registered so the Rust seed expands each value to its C ABI
         // (ptr, len) pair instead of passing boxed RuntimeValue payloads.
         "rt_secure_temp_dir" | "rt_file_publish_noreplace" => Some(&[0, 1]),
-
-        // NOT listed: rt_secure_temp_dir_set_parent / _set_prefix take ONE
-        // boxed text RuntimeValue (runtime_native.c), the generic crossing
-        // every seed emits. A (ptr, len) row here made the ABI depend on the
-        // seed's table vintage; see doc/08_tracking/bug/
-        // tracked_seed_cranelift_split_secure_temp_dir_refuses_20261019.md
 
         // Package SFFI (runtime/src/value/sffi/package.rs). Every text param is
         // a (ptr, len) pair — the family was converted off `*const c_char`
@@ -3214,7 +2789,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.
         // Length-safe pinning likewise takes (path_ptr, path_len), rejecting
         // embedded NUL in the native provider without requiring C-string text.
-        "rt_process_run_with_limits" | "rt_process_run_bounded_bytes"
+        "rt_process_run_with_limits"
         | "rt_process_pin_executable_owned_value" => Some(&[0]),
         // rt_io_file_open/exists/delete take (path_ptr, path_len[, mode]) —
         // runtime/src/value/sffi/file_io/io_file.rs:82,331,340. They were absent
@@ -3231,8 +2806,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
         // Directory operations
         "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_walk" | "rt_set_current_dir"
-        | "rt_dir_exists"
-        | "rt_dir_is_real_no_follow" => Some(&[0]),
+        | "rt_dir_exists" => Some(&[0]),
         // rt_dir_glob takes (dir, pattern) — the ONLY implementation
         // (runtime/src/value/sffi/file_io/directory.rs:199) has four params.
         "rt_dir_glob" => Some(&[0, 1]),
@@ -3318,9 +2892,6 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 pub fn boxed_text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         "rt_string_builder_push" => Some(&[1]),
-        // Both atomic runtime owners consume tagged path/content values;
-        // mode remains a scalar argument at index 2.
-        "rt_file_atomic_write" | "rt_file_atomic_write_mode" => Some(&[0, 1]),
         _ => None,
     }
 }
@@ -3381,14 +2952,6 @@ pub(crate) fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static
         | "rt_process_execute"
         | "rt_process_run_timeout"
         | "rt_process_run_bounded"
-        // Owned bounded capsules (runtime_process_owned.c) take the same
-        // (cmd_ptr, cmd_len, SplArray* args, ...) shape. Unlisted, the observed
-        // variant was called with the Simple-level 4 words, every argument
-        // after cmd shifted, the owner refused at arg validation before any
-        // fork, and every self-hosted `simple test` child reported
-        // `Resource limit exceeded (infrastructure)` (2026-10-20).
-        | "rt_process_run_owned_bounded_value"
-        | "rt_process_run_owned_observed_bounded_value"
         | "rt_process_owned_v3_start_value" => Some((&[0], &[1])),
         _ => None,
     }
@@ -3627,32 +3190,6 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
     adapted
 }
 
-/// Strip a `prefix__` module qualifier from a call name, keeping any leading
-/// underscores of the bare name.
-///
-/// `rsplit_once("__")` splits inside an underscore run, so a qualified name
-/// whose bare part starts with `_` lost it: the flattened private helper
-/// `__spl_flat_<stem>_<hash>__` + `_i64` = `..._<hash>___i64` came back as
-/// `i64`, which `compile_call` then routed to the lenient `i64(text)` builtin
-/// and every `_i64(width)` in engine2d returned 0 under the JIT. The separator
-/// is the FIRST two underscores of the last underscore run; the rest belongs
-/// to the name. When the run starts the string (`__module_init`) there is no
-/// qualifier to strip, and the previous `rsplit_once` result is kept exactly.
-pub(crate) fn strip_call_module_prefix(raw: &str) -> &str {
-    let Some(last) = raw.rfind("__") else {
-        return raw;
-    };
-    let bytes = raw.as_bytes();
-    let mut run_start = last;
-    while run_start > 0 && bytes[run_start - 1] == b'_' {
-        run_start -= 1;
-    }
-    if run_start == 0 {
-        return &raw[last + 2..];
-    }
-    &raw[run_start + 2..]
-}
-
 /// Map a Simple-facing call name to its canonical runtime SFFI name.
 ///
 /// Returns `Some(canonical)` when the name is an alias that should be
@@ -3711,33 +3248,6 @@ pub fn sffi_alias_target_shadowed(name: &str, user_defined: bool) -> Option<&'st
 /// 1. Built-in I/O functions (print, println, etc.) - handled via compile_builtin_io_call
 /// 2. User-defined functions - looked up in func_ids
 /// 3. Runtime SFFI functions - looked up in runtime_funcs
-/// Runtime byte/word accessors that this Cranelift backend always lowers
-/// inline (see the `compile_inline_bytes_u8_at` /
-/// `compile_inline_typed_bytes_le_unchecked` / `compile_inline_typed_bytes_data_at`
-/// / `compile_inline_typed_words_*` dispatch in `compile_call`). The JIT
-/// runtime does not export symbols for most of them, so a source-level
-/// `extern fn` declaration of one must NOT be treated as an unresolvable
-/// extern: doing so splices every call through the interpreter bridge
-/// instead of the inline load (wrong values and an O(n) array conversion per
-/// call — see doc/08_tracking/bug/jit_typed_bytes_extern_spliced_to_interpreter_2026-10-05.md).
-pub fn is_inline_lowered_byte_accessor(name: &str) -> bool {
-    matches!(
-        name,
-        "rt_typed_bytes_u8_at"
-            | "rt_bytes_u8_at"
-            | "rt_typed_bytes_u8_unchecked"
-            | "rt_typed_bytes_u8_data_at"
-            | "rt_typed_bytes_u32_le_at"
-            | "rt_typed_bytes_u64_le_at"
-            | "rt_typed_bytes_u32_le_unchecked"
-            | "rt_typed_bytes_u64_le_unchecked"
-            | "rt_typed_words_u32_at"
-            | "rt_typed_words_u64_at"
-            | "rt_typed_words_u32_unchecked"
-            | "rt_typed_words_u64_unchecked"
-    )
-}
-
 pub fn compile_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -3748,7 +3258,10 @@ pub fn compile_call<M: Module>(
     let func_name_raw = target.name();
     // For runtime SFFI matching only, strip module prefix to find the base function name.
     // e.g., "compiler__driver__driver_types__rt_file_read_text" → "rt_file_read_text"
-    let func_name_for_sffi = strip_call_module_prefix(func_name_raw);
+    let func_name_for_sffi = func_name_raw
+        .rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .unwrap_or(func_name_raw);
     // Map Simple builtin names to runtime SFFI function names (for SFFI lookup only)
     // Note: "str", "int", "input" are handled in compile_builtin_io_call, not here
     // The alias table is shared with referenced_call_names via sffi_alias_target().
@@ -3817,9 +3330,6 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if compile_inline_ctype_call(ctx, builder, dest, func_name, sffi_name, args)? {
-        return Ok(());
-    }
-    if sffi_name == "rt_array_is_byte_packed" && compile_inline_array_is_byte_packed(ctx, builder, dest, args)? {
         return Ok(());
     }
     if sffi_name == "rt_array_data_ptr" && compile_inline_array_data_ptr(ctx, builder, dest, args)? {
@@ -3909,9 +3419,6 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if sffi_name == "rt_typed_words_u32_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 4)? {
-        return Ok(());
-    }
-    if sffi_name == "rt_typed_words_i64_at" && compile_inline_typed_words_i64_at(ctx, builder, dest, args)? {
         return Ok(());
     }
     if sffi_name == "rt_typed_words_u64_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 8)? {
@@ -4423,7 +3930,7 @@ pub fn compile_call<M: Module>(
                 } else {
                     // On-demand declaration: MIR referenced "str.starts_with" etc.
                     // but referenced_names only had the dotted form, not the rt_ name.
-                    let call_conv = ctx.module.isa().default_call_conv();
+                    let call_conv = crate::codegen::shared::platform_call_conv();
                     let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                     let param_count = args.len();
                     for _ in 0..param_count {
@@ -4446,17 +3953,7 @@ pub fn compile_call<M: Module>(
                     if let Some(d) = dest {
                         let results = builder.inst_results(call);
                         if !results.is_empty() {
-                            let mut value = results[0];
-                            if rt_name == "rt_array_write_span" {
-                                // The runtimes return the RAW i64 count (C twin,
-                                // pure-Simple lowering and this seed's runtime all
-                                // agree). This erased-receiver path hands results on
-                                // as tagged values, so tag it here: the int tag is
-                                // `(v << 3) | 0`, exactly `rt_value_int(v)`.
-                                // doc/08_tracking/bug/native_write_span_return_count_decoded_as_tagged_2026-10-05.md
-                                value = builder.ins().ishl_imm(value, 3);
-                            }
-                            ctx.vreg_values.insert(*d, value);
+                            ctx.vreg_values.insert(*d, results[0]);
                         }
                     }
                     return Ok(());
@@ -4627,7 +4124,7 @@ pub fn compile_call<M: Module>(
                     func_name, resolved_name
                 ));
             }
-            let call_conv = ctx.module.isa().default_call_conv();
+            let call_conv = crate::codegen::shared::platform_call_conv();
             let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
             // Same single-source-of-truth arity as the receiver-strip above:
             // never re-key this lookup independently of `callee_arity`.

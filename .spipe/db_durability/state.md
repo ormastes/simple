@@ -19,7 +19,7 @@ the `OK` had been told something untrue.
 | `src/lib/nogc_sync_mut/database/server/durability.spl` (NEW, ~300 L) | the durability contract (module docstring), the commit pipeline, undo pre-images, the fault-injection points, and the on-disk oracle |
 | `src/lib/nogc_sync_mut/database/server/server.spl` | `DbServerCapsule` gained a `durability: DurabilityPolicy` port; `sys_commit` now persists before it acknowledges |
 | `src/lib/nogc_sync_mut/database/server/protocol.spl` | two error codes: `durability`, `crashed` |
-| `test/03_system/database/server/db_durability_spec.spl` (NEW) | 16 examples across 4 describe blocks |
+| `test/system/database/server/db_durability_spec.spl` (NEW) | 16 examples across 4 describe blocks |
 
 **No second storage or locking engine** (§4 of the increment-1 ledger). The
 durable write is `SdnDatabase.save()`, which is `atomic_write()` from
@@ -104,7 +104,7 @@ Each mutant was reverted and the suite re-verified green in both engines.
 ## 6. Verification
 
 ```
-bin/simple run test/03_system/database/server/db_durability_spec.spl
+bin/simple run test/system/database/server/db_durability_spec.spl
   5 examples, 0 failures    (acknowledged commit is permanent)
   6 examples, 0 failures    (crash-point matrix)
   2 examples, 0 failures    (increment-1 guarantees unchanged)
@@ -182,5 +182,5 @@ brief. Durability was step 1 and is done.
 - `src/lib/nogc_sync_mut/database/server/durability.spl` (new)
 - `src/lib/nogc_sync_mut/database/server/server.spl` (durability port + `sys_commit`)
 - `src/lib/nogc_sync_mut/database/server/protocol.spl` (2 error codes)
-- `test/03_system/database/server/db_durability_spec.spl` (new, 16 examples)
+- `test/system/database/server/db_durability_spec.spl` (new, 16 examples)
 - `doc/08_tracking/os/production_status.sdn` — the one `database:` note line

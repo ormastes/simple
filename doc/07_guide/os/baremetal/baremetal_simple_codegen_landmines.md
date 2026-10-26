@@ -19,7 +19,7 @@ here):
 ## 1. `if val x = opt:` on Option-typed globals/fields can return nil on the hit path (C2)
 
 **Failing shape:**
-```simple:skip
+```simple
 if val candidate = selected:
     candidate.sha256   # candidate can be nil HERE, on the branch that says it isn't
 ```
@@ -33,7 +33,7 @@ dereference, `cr2=0x0`. Seen on a module-global font mutex and inside
 **Safe pattern:** avoid the binding-if on Option-typed globals/fields under
 entry-closure freestanding builds. Prefer an explicit nil-compare followed by
 a direct (non-rebound) access:
-```simple:skip
+```simple
 if selected.?:
     selected.sha256    # read the original, not a rebound copy
 ```
@@ -44,7 +44,7 @@ without an intermediate binding-if. Re-verify with a disassembly spot-check
 ## 2. Import-alias static constructors can bind to the wrong class (C8 original — fixed, but stay defensive)
 
 **Failing shape:**
-```simple:skip
+```simple
 use { SharedFat32Driver as Fat32Core }
 ...
 val x = Fat32Core.new(...)   # type annotations honored the alias, but
@@ -70,7 +70,7 @@ multiple production bugs (vtable NAME-keying, `StmtKind.Expr`-vs-struct,
 ## 3. Instance-method receiver binding can drop `self` under `--entry-closure` (94a893e77b9)
 
 **Failing shape:**
-```simple:skip
+```simple
 val config = font_render_config_default_for_size(size)
 config.identity()     # instance method call on a local value
 ```
@@ -90,7 +90,7 @@ functions with an explicit typed argument were unaffected in every check.
 **Safe pattern:** for hot/boot-path config objects under entry-closure
 freestanding builds, convert instance methods to typed free functions and
 pass the receiver as an explicit argument:
-```text
+```simple
 fn font_render_config_identity(config: FontRenderConfig) -> ...
 ...
 font_render_config_identity(config)   # no receiver dispatch at all
@@ -103,7 +103,7 @@ storm from 81 recovered faults to 1 in the same boot.
 ## 4. Implicit-self field ASSIGNMENT silently no-ops in `me` methods — despite the lint's advice
 
 **Failing shape:**
-```text
+```simple
 class C:
     flag: bool
     me set_it():

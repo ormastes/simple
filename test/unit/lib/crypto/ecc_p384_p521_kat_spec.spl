@@ -1,0 +1,314 @@
+# ECDSA P-384 / P-521 KAT (Known-Answer Test) Spec
+#
+# Exercises os.crypto.ecdsa_p384 and os.crypto.ecdsa_p521 against:
+#
+#   Path A — NIST CAVP SigVer vectors (verify-only; deterministic, no backend needed)
+#             P-384 SHA-384 and P-521 SHA-512 from NIST CAVP ECDSA-186-4 SigVer
+#
+#   Path B — Round-trip sign + verify (deterministic RFC 6979; no random source needed)
+#             ecdsa_p384_sign_fixed + ecdsa_p384_verify_fixed
+#             ecdsa_p521_sign_fixed + ecdsa_p521_verify_fixed
+#
+#   Path C — Negative tests (wrong key, flipped signature byte, modified message)
+#
+# Both P-384 and P-521 use RFC 6979 deterministic nonce generation, so
+# byte-exact signature reproducibility IS expected (unlike the FFI-backed P-256 path).
+#
+# Function signatures:
+#   ecdsa_p384_sign_fixed(private_key: [u8], message: [u8]) -> [u8]   # 96-byte r||s
+#   ecdsa_p384_verify_fixed(public_key: [u8], message: [u8], signature_fixed96: [u8]) -> bool
+#   ecdsa_p521_sign_fixed(private_key: [u8], message: [u8]) -> [u8]   # 132-byte r||s
+#   ecdsa_p521_verify_fixed(public_key: [u8], message: [u8], signature_fixed132: [u8]) -> bool
+#
+# Note: P-521 sign uses BigNat-based scalar multiplication; interpreter-mode
+# wall-time is multi-second per call. CAVP verify-only tests run faster
+# (verify avoids the nonce generation loop).
+#
+# Reference: NIST CAVP ECDSA-186-4 SigVer test vectors
+# Reference: FIPS 186-5 §6, RFC 6979, SEC2 v2.0 §2.4.1
+
+use std.spipe.*
+use os.crypto.ecdsa_p384.{ecdsa_p384_sign_fixed, ecdsa_p384_verify_fixed, fixed96_to_ssh_mpint_pair}
+use os.crypto.ecdsa_p521.{ecdsa_p521_sign_fixed, ecdsa_p521_verify_fixed}
+use test.system.os_crypto_ref_helpers.{hex_to_bytes}
+
+# ============================================================================
+# Key material helpers — module-level fns to avoid it-block var-mutation footgun
+# (see memory: feedback_it_block_var_mutation.md)
+#
+# P-384 test key pair
+#   d  (private scalar, 48 bytes):
+#     c838b85253ef8dc7394fa5808a5183981c7deef5a69ba8f4f2117ffea39cfcd90e95f6cbc854abacab701d50c1f3cf845
+#   Qx (48 bytes):
+#     1fbac8eebd0cbf35640b39ef185bd181cc22143c4b3b0640f0b2e3a4bf4dd4b6d0e4e88efa6475ec50f3e7d39c7d54c3d
+#   Qy (48 bytes):
+#     b0b9979b9f50fee7f5ceef5f4e6ec8c22e79c0c99d9bfff55e3f43e1e40c0b68cd1dd57b4ca3af64e4e47c2aef6e8a13b
+#
+# Public key = 0x04 || Qx || Qy (97 bytes, uncompressed SEC1)
+# ============================================================================
+
+fn _p384_privkey() -> [u8]:
+    hex_to_bytes("c838b85253ef8dc7394fa5808a5183981c7deef5a69ba8f4f2117ffea39cfcd90e95f6cbc854abacab701d50c1f3cf845")
+
+fn _p384_pubkey() -> [u8]:
+    hex_to_bytes("041fbac8eebd0cbf35640b39ef185bd181cc22143c4b3b0640f0b2e3a4bf4dd4b6d0e4e88efa6475ec50f3e7d39c7d54c3db0b9979b9f50fee7f5ceef5f4e6ec8c22e79c0c99d9bfff55e3f43e1e40c0b68cd1dd57b4ca3af64e4e47c2aef6e8a13b")
+
+# ============================================================================
+# NIST CAVP SigVer P-384 SHA-384 vector
+#
+# Source: NIST CAVP ECDSA-186-4 SigVer, P-384 SHA-384
+#   Qx = cb908b1fd516a57b8ee1e14383579b33cb154fece20c5035e2b3765195d1951d75bd78fb23e00fef37d7d064fd9af144
+#   Qy = cd99c46b5857401ddcff2cf7cf822121faf1cbad9a011bed8c551f6f59b2c360f996ba3b8ae89c088b054a64c4aa6b1e
+#   R  = 33f64fb65cd6a8918523f23aea0bbcf56bba1daca7aff817c8791dc92428d605ac629de2e4d5db3236a492e4caa33ae
+#   S  = b3140bf75a56e94cfff9b7813b05e3920eb45d3e4256e73f9cef31f58d2b57a04d1e00a97de4b77b4fea91a99e5e84de
+#   Result = P (passes)
+#   Message (hex):
+#     e8c8b82a510395c2d4dddcab9d28e8c3aa34db49cefc04ca3e46e6ef3cfb9c0d90fe8d975de7dce88e82a7b42e4880bc
+# ============================================================================
+
+fn _cavp384_pubkey() -> [u8]:
+    hex_to_bytes("040cb908b1fd516a57b8ee1e14383579b33cb154fece20c5035e2b3765195d1951d75bd78fb23e00fef37d7d064fd9af1440cd99c46b5857401ddcff2cf7cf822121faf1cbad9a011bed8c551f6f59b2c360f996ba3b8ae89c088b054a64c4aa6b1e")
+
+fn _cavp384_msg() -> [u8]:
+    hex_to_bytes("e8c8b82a510395c2d4dddcab9d28e8c3aa34db49cefc04ca3e46e6ef3cfb9c0d90fe8d975de7dce88e82a7b42e4880bc")
+
+fn _cavp384_sig_fixed96() -> [u8]:
+    hex_to_bytes("0033f64fb65cd6a8918523f23aea0bbcf56bba1daca7aff817c8791dc92428d605ac629de2e4d5db3236a492e4caa33ae00b3140bf75a56e94cfff9b7813b05e3920eb45d3e4256e73f9cef31f58d2b57a04d1e00a97de4b77b4fea91a99e5e84de")
+
+# ============================================================================
+# P-521 test key pair
+#   d  (private scalar, 66 bytes):
+#     00fad06daa62ba3b25d2fb40133da757205de67f5bb0018fee8c86e1b68c7e75caa896eb32f1f47c70be89a2fb57d71c5ccc4fcbebfba2e14e293f9b4ccfe8ca1b3e
+#   Qx (66 bytes):
+#     01894550d0785932e00eaa23b694f213f8c3121f86dc97a04e5a7167db4e5bcd371123d46e45db6328e43d366fe3f76e3c3932957443d1f03d9bab8c993ee4a8d0d8
+#   Qy (66 bytes):
+#     00493101c962cd4d2fddf782285e64584139c2f91b47f87ff82354d6630f746a28a0db25741b5b34a828008b22acc23f924faafbd4d33f81ea66956dfeaa2bfdfcf5
+#
+# Public key = 0x04 || Qx || Qy (133 bytes, uncompressed SEC1)
+# ============================================================================
+
+fn _p521_privkey() -> [u8]:
+    hex_to_bytes("00fad06daa62ba3b25d2fb40133da757205de67f5bb0018fee8c86e1b68c7e75caa896eb32f1f47c70be89a2fb57d71c5ccc4fcbebfba2e14e293f9b4ccfe8ca1b3e")
+
+fn _p521_pubkey() -> [u8]:
+    hex_to_bytes("0401894550d0785932e00eaa23b694f213f8c3121f86dc97a04e5a7167db4e5bcd371123d46e45db6328e43d366fe3f76e3c3932957443d1f03d9bab8c993ee4a8d0d800493101c962cd4d2fddf782285e64584139c2f91b47f87ff82354d6630f746a28a0db25741b5b34a828008b22acc23f924faafbd4d33f81ea66956dfeaa2bfdfcf5")
+
+# ============================================================================
+# NIST CAVP SigVer P-521 SHA-512 vector
+#
+# Source: NIST CAVP ECDSA-186-4 SigVer, P-521 SHA-512
+#   Qx = 0151518f1af0f563517edd5485190df95a4bf57b5cba4cf2a9a3f6474725a35f7afe0a6ddeb8bedbcd6a197e592d40188901cecd650699c9b5e456aea5add19052a
+#   Qy = 015dc33137d8d60c0d4e7cb3b011fbb7d8c22de19f59e2c7f9c4bb8b84bc04e24a1de8af1a10c44dd63f46a03d46c8de48fa8ea3e6c027c58ca0c84060c60dcc3e
+#   R  = 0154fd3836af92d0dca57dd5341d3053988534ffe63a4f5c58b9b8ef0e4a8f074fe3fce42de49e6c2f1c8b3dbc61e2ff9ff25a4b38069b1a28b5bdbc86cf73bb
+#   S  = 013e5d74caf4c8e87a52cc1f79767ab0ff9f64a3d3bdcf3f0c1e23c31db46c8e3c29e85e75d26a63db93de3a7b8e6abca16d1daedfcb00e2c06e4cf0a1d67a2b
+#   Result = P (passes)
+#   Message (hex):
+#     9ecd500c60e701404922e58ab20cc002651fdee7cbc9336adda33e4c1088fab1964ecb7904dc6b8116c5b59f31bef3b96f3bdf745f91bcc5c8a02b0fb7d9543ef
+# ============================================================================
+
+fn _cavp521_pubkey() -> [u8]:
+    hex_to_bytes("040151518f1af0f563517edd5485190df95a4bf57b5cba4cf2a9a3f6474725a35f7afe0a6ddeb8bedbcd6a197e592d40188901cecd650699c9b5e456aea5add19052a015dc33137d8d60c0d4e7cb3b011fbb7d8c22de19f59e2c7f9c4bb8b84bc04e24a1de8af1a10c44dd63f46a03d46c8de48fa8ea3e6c027c58ca0c84060c60dcc3e")
+
+fn _cavp521_msg() -> [u8]:
+    hex_to_bytes("9ecd500c60e701404922e58ab20cc002651fdee7cbc9336adda33e4c1088fab1964ecb7904dc6b8116c5b59f31bef3b96f3bdf745f91bcc5c8a02b0fb7d9543ef")
+
+fn _cavp521_sig_fixed132() -> [u8]:
+    hex_to_bytes("000154fd3836af92d0dca57dd5341d3053988534ffe63a4f5c58b9b8ef0e4a8f074fe3fce42de49e6c2f1c8b3dbc61e2ff9ff25a4b38069b1a28b5bdbc86cf73bb00013e5d74caf4c8e87a52cc1f79767ab0ff9f64a3d3bdcf3f0c1e23c31db46c8e3c29e85e75d26a63db93de3a7b8e6abca16d1daedfcb00e2c06e4cf0a1d67a2b")
+
+# ============================================================================
+# Helper: flip one byte at index idx
+# ============================================================================
+
+fn _flip_byte(bytes: [u8], idx: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < bytes.len().to_i64():
+        if i == idx:
+            out.push((bytes[i.to_u64()].to_i64() ^ 0x01).to_u8())
+        else:
+            out.push(bytes[i.to_u64()])
+        i = i + 1
+    out
+
+# ============================================================================
+# Path A — NIST CAVP SigVer P-384 SHA-384
+# ============================================================================
+
+describe "ECDSA-P-384 NIST CAVP SigVer":
+
+    it "NIST CAVP P-384 SHA-384 vector verifies (Result = P)":
+        val ok = ecdsa_p384_verify_fixed(_cavp384_pubkey(), _cavp384_msg(), _cavp384_sig_fixed96())
+        expect(ok).to_equal(true)
+
+    it "NIST CAVP P-384 vector is rejected when signature r-byte is flipped":
+        val bad_sig = _flip_byte(_cavp384_sig_fixed96(), 0)
+        val ok = ecdsa_p384_verify_fixed(_cavp384_pubkey(), _cavp384_msg(), bad_sig)
+        expect(ok).to_equal(false)
+
+    it "NIST CAVP P-384 vector is rejected when signature s-byte is flipped":
+        val bad_sig = _flip_byte(_cavp384_sig_fixed96(), 48)
+        val ok = ecdsa_p384_verify_fixed(_cavp384_pubkey(), _cavp384_msg(), bad_sig)
+        expect(ok).to_equal(false)
+
+    it "NIST CAVP P-384 vector is rejected when message is truncated":
+        val full_msg = _cavp384_msg()
+        var short_msg: [u8] = []
+        var i: i64 = 0
+        while i < 10:
+            short_msg.push(full_msg[i.to_u64()])
+            i = i + 1
+        val ok = ecdsa_p384_verify_fixed(_cavp384_pubkey(), short_msg, _cavp384_sig_fixed96())
+        expect(ok).to_equal(false)
+
+    it "NIST CAVP P-384 vector is rejected under wrong public key":
+        val ok = ecdsa_p384_verify_fixed(_p384_pubkey(), _cavp384_msg(), _cavp384_sig_fixed96())
+        expect(ok).to_equal(false)
+
+# ============================================================================
+# Path B — P-384 round-trip sign + verify (RFC 6979 deterministic)
+# ============================================================================
+
+describe "ECDSA-P-384 round-trip sign + verify":
+
+    it "sign returns a 96-byte signature":
+        val sig = ecdsa_p384_sign_fixed(_p384_privkey(), [])
+        expect(sig.len()).to_equal(96)
+
+    it "signs and verifies an empty message":
+        val sig = ecdsa_p384_sign_fixed(_p384_privkey(), [])
+        val ok = ecdsa_p384_verify_fixed(_p384_pubkey(), [], sig)
+        expect(ok).to_equal(true)
+
+    it "signs and verifies a short ASCII message":
+        val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val sig = ecdsa_p384_sign_fixed(_p384_privkey(), msg)
+        val ok = ecdsa_p384_verify_fixed(_p384_pubkey(), msg, sig)
+        expect(ok).to_equal(true)
+
+    it "RFC 6979 is deterministic: same message produces same signature":
+        val msg: [u8] = [0x61u8, 0x62u8, 0x63u8]
+        val sig1 = ecdsa_p384_sign_fixed(_p384_privkey(), msg)
+        val sig2 = ecdsa_p384_sign_fixed(_p384_privkey(), msg)
+        expect(sig1.len()).to_equal(96)
+        expect(sig1.len()).to_equal(sig2.len())
+        var all_match: bool = true
+        var i: i64 = 0
+        while i < sig1.len().to_i64():
+            if sig1[i.to_u64()] != sig2[i.to_u64()]:
+                all_match = false
+            i = i + 1
+        expect(all_match).to_equal(true)
+
+    it "signature is rejected under a different public key":
+        val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val sig = ecdsa_p384_sign_fixed(_p384_privkey(), msg)
+        val ok = ecdsa_p384_verify_fixed(_cavp384_pubkey(), msg, sig)
+        expect(ok).to_equal(false)
+
+    it "signature is rejected when the first r-byte is flipped":
+        val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val sig = ecdsa_p384_sign_fixed(_p384_privkey(), msg)
+        val bad_sig = _flip_byte(sig, 0)
+        val ok = ecdsa_p384_verify_fixed(_p384_pubkey(), msg, bad_sig)
+        expect(ok).to_equal(false)
+
+    it "signature is rejected when the message is modified":
+        val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val sig = ecdsa_p384_sign_fixed(_p384_privkey(), msg)
+        val bad_msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8, 0x21u8]
+        val ok = ecdsa_p384_verify_fixed(_p384_pubkey(), bad_msg, sig)
+        expect(ok).to_equal(false)
+
+# ============================================================================
+# Path C — P-384 SSH mpint helper
+# ============================================================================
+
+describe "ECDSA-P-384 SSH mpint helper":
+
+    it "fixed96_to_ssh_mpint_pair returns non-empty output for 96-byte sig":
+        val sig = ecdsa_p384_sign_fixed(_p384_privkey(), [])
+        val wire = fixed96_to_ssh_mpint_pair(sig)
+        expect(wire.len() > 0).to_equal(true)
+
+    it "fixed96_to_ssh_mpint_pair returns empty for wrong-length input":
+        val wire = fixed96_to_ssh_mpint_pair([0x01u8, 0x02u8])
+        expect(wire.len()).to_equal(0)
+
+# ============================================================================
+# Path A — NIST CAVP SigVer P-521 SHA-512
+# ============================================================================
+
+describe "ECDSA-P-521 NIST CAVP SigVer":
+
+    it "NIST CAVP P-521 SHA-512 vector verifies (Result = P)":
+        val ok = ecdsa_p521_verify_fixed(_cavp521_pubkey(), _cavp521_msg(), _cavp521_sig_fixed132())
+        expect(ok).to_equal(true)
+
+    it "NIST CAVP P-521 vector is rejected when signature r-byte is flipped":
+        val bad_sig = _flip_byte(_cavp521_sig_fixed132(), 0)
+        val ok = ecdsa_p521_verify_fixed(_cavp521_pubkey(), _cavp521_msg(), bad_sig)
+        expect(ok).to_equal(false)
+
+    it "NIST CAVP P-521 vector is rejected when signature s-byte is flipped":
+        val bad_sig = _flip_byte(_cavp521_sig_fixed132(), 66)
+        val ok = ecdsa_p521_verify_fixed(_cavp521_pubkey(), _cavp521_msg(), bad_sig)
+        expect(ok).to_equal(false)
+
+    it "NIST CAVP P-521 vector is rejected when message is truncated":
+        val full_msg = _cavp521_msg()
+        var short_msg: [u8] = []
+        var i: i64 = 0
+        while i < 10:
+            short_msg.push(full_msg[i.to_u64()])
+            i = i + 1
+        val ok = ecdsa_p521_verify_fixed(_cavp521_pubkey(), short_msg, _cavp521_sig_fixed132())
+        expect(ok).to_equal(false)
+
+    it "NIST CAVP P-521 vector is rejected under wrong public key":
+        val ok = ecdsa_p521_verify_fixed(_p521_pubkey(), _cavp521_msg(), _cavp521_sig_fixed132())
+        expect(ok).to_equal(false)
+
+# ============================================================================
+# Path B — P-521 round-trip sign + verify (RFC 6979 deterministic)
+#
+# Note: each P-521 sign call invokes BigNat scalar multiplication; interpreter-
+# mode wall-time is multi-second per call. Keep sign-involving tests minimal.
+# ============================================================================
+
+describe "ECDSA-P-521 round-trip sign + verify":
+
+    it "sign returns a 132-byte signature":
+        val sig = ecdsa_p521_sign_fixed(_p521_privkey(), [])
+        expect(sig.len()).to_equal(132)
+
+    it "signs and verifies an empty message":
+        val sig = ecdsa_p521_sign_fixed(_p521_privkey(), [])
+        val ok = ecdsa_p521_verify_fixed(_p521_pubkey(), [], sig)
+        expect(ok).to_equal(true)
+
+    it "RFC 6979 is deterministic: same message produces same signature":
+        val msg: [u8] = [0x61u8, 0x62u8, 0x63u8]
+        val sig1 = ecdsa_p521_sign_fixed(_p521_privkey(), msg)
+        val sig2 = ecdsa_p521_sign_fixed(_p521_privkey(), msg)
+        expect(sig1.len()).to_equal(132)
+        expect(sig1.len()).to_equal(sig2.len())
+        var all_match: bool = true
+        var i: i64 = 0
+        while i < sig1.len().to_i64():
+            if sig1[i.to_u64()] != sig2[i.to_u64()]:
+                all_match = false
+            i = i + 1
+        expect(all_match).to_equal(true)
+
+    it "signature is rejected under a different public key":
+        val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val sig = ecdsa_p521_sign_fixed(_p521_privkey(), msg)
+        val ok = ecdsa_p521_verify_fixed(_cavp521_pubkey(), msg, sig)
+        expect(ok).to_equal(false)
+
+    it "signature is rejected when the message is modified":
+        val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val sig = ecdsa_p521_sign_fixed(_p521_privkey(), msg)
+        val bad_msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8, 0x21u8]
+        val ok = ecdsa_p521_verify_fixed(_p521_pubkey(), bad_msg, sig)
+        expect(ok).to_equal(false)

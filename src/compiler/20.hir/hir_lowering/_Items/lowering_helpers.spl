@@ -5,7 +5,6 @@
 
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-use compiler.hir.hir_function_order.{hir_function_symbol_order}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
@@ -37,7 +36,7 @@ extern fn rt_env_get(key: text) -> text?
 @unsafe(reason: "raw process termination ABI", capabilities: [ffi])
 extern fn rt_exit(code: i64)
 @unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
-extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
 
 @always_inline
 fn _sffi_env_get(key: text) -> text?:
@@ -50,7 +49,7 @@ fn _sffi_exit(code: i64):
         rt_exit(code)
 
 @always_inline
-fn _sffi_transient_heap_promote<T>(value: T) -> bool:
+fn _sffi_transient_heap_promote(value: Any) -> bool:
     unsafe(capabilities: [ffi]):
         rt_transient_heap_promote(value)
 
@@ -138,8 +137,8 @@ fn bootstrap_hir_modules_add(name: text, is_entry: bool, symbols: [HirSymbol], f
 
 # HIR-cache replay of module_build.spl's bootstrap_flat_mode block: a cache
 # hit skips lowering, so the flat rows the bootstrap MIR bridge reads must be
-# published from the decoded module instead. Same flattening and scalar
-# SymbolId order as module_build.spl; a no-op outside bootstrap_flat_mode.
+# published from the decoded module instead. Same flattening, same order
+# (Dict.keys() order), same mode gate; a no-op outside bootstrap_flat_mode.
 fn bootstrap_hir_modules_add_from_module(module: HirModule, registry_module_name: text, is_entry: bool):
     val bootstrap_mode = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
     val bootstrap_flat_mode = bootstrap_mode and (_sffi_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
@@ -152,9 +151,9 @@ fn bootstrap_hir_modules_add_from_module(module: HirModule, registry_module_name
     # only one copy stabilised nothing, which is exactly the partial-fix-to-duplicated-code
     # defect class that 00.common/module_path_naming.spl's own header warns about
     # ("70a29867bc2 changed only one of the four hand-kept copies").
-    # `rt_dict_keys` (src/runtime/runtime_native.c:8652) walks BUCKET order.
-    # Aggregate function keys must also avoid a copied-key dictionary lookup;
-    # order the original values by their scalar SymbolIds instead.
+    # `rt_dict_keys` (src/runtime/runtime_native.c:8652) walks BUCKET order, so an
+    # unsorted `.keys()` here is a per-process ordering. Keys are hoisted, sorted, then
+    # indexed because these were `for k in D.keys():` loops.
     # MEASUREMENT PREREQUISITE ONLY -- this makes error counts comparable between runs. It
     # fixes nothing else; the disc=-1 defect is untouched by it.
     var flat_symbols: [HirSymbol] = []
@@ -165,9 +164,12 @@ fn bootstrap_hir_modules_add_from_module(module: HirModule, registry_module_name
         flat_symbols = flat_symbols.push(module.symbols.symbols[symbol_keys[symbol_i]])
         symbol_i = symbol_i + 1
     var flat_functions: [HirFunction] = []
-    val function_values: [HirFunction] = module.functions.values()
-    for function_index in hir_function_symbol_order(function_values):
-        flat_functions = flat_functions.push(function_values[function_index])
+    var function_keys = module.functions.keys()
+    function_keys.sort()
+    var function_i = 0
+    while function_i < function_keys.len():
+        flat_functions = flat_functions.push(module.functions[function_keys[function_i]])
+        function_i = function_i + 1
     var flat_constants: [HirConst] = []
     var constant_keys = module.constants.keys()
     constant_keys.sort()
@@ -446,31 +448,22 @@ fn bootstrap_function_names_from_env() -> [text]:
 # is raised instead (route (b)) rather than shipping a body that will crash
 # the backend with a useless message.
 struct ReturnScan:
-    # resolved_name uses "" as the absent sentinel: the former `text?`
-    # optional made this struct cross the stage-native value ABI with a
-    # presence map, and that transport deterministically corrupted copies
-    # (p2_add stage2-sanity SIGSEGV, cycles 60-64). All-scalar fields only.
     found_value_return: bool
-    resolved_name: text
+    resolved_name: text?
     ambiguous: bool
 
 fn return_scan_empty() -> ReturnScan:
-    ReturnScan(found_value_return: false, resolved_name: "", ambiguous: false)
+    ReturnScan(found_value_return: false, resolved_name: nil, ambiguous: false)
 
-fn merge_return_scan(a_raw: ReturnScan, b_raw: ReturnScan) -> ReturnScan:
-    # ANY-transport hazard: ReturnScan crosses the stage-native value ABI
-    # (by-value param/return with an optional text field); rebind before any
-    # field read. p2_add stage2-sanity SIGSEGV traced here (cycle-62).
-    val a: ReturnScan = a_raw
-    val b: ReturnScan = b_raw
+fn merge_return_scan(a: ReturnScan, b: ReturnScan) -> ReturnScan:
     var out = a
     if b.ambiguous:
         out.ambiguous = true
     if b.found_value_return:
         out.found_value_return = true
-        if b.resolved_name != "":
-            if out.resolved_name != "":
-                if out.resolved_name != b.resolved_name:
+        if b.resolved_name.?:
+            if out.resolved_name.?:
+                if out.resolved_name.unwrap() != b.resolved_name.unwrap():
                     out.ambiguous = true
             else:
                 out.resolved_name = b.resolved_name

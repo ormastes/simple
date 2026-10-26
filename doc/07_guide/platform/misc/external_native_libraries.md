@@ -55,7 +55,7 @@ to compiler/runtime default libraries.
 
 Use the existing runtime loading primitives:
 
-```simple:skip
+```simple
 extern fn spl_dlopen(path: text) -> i64
 extern fn spl_dlsym(handle: i64, name: text) -> i64
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64

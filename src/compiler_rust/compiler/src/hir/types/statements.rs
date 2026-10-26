@@ -160,17 +160,6 @@ pub struct HirCalcStep {
     pub justification: Option<String>,
 }
 
-/// Immutable owner-qualified trait table shared by returned receiver locals.
-#[derive(Debug, Clone)]
-pub struct HirTraitDeclarationOwner {
-    pub owner: String,
-    pub source_file: std::path::PathBuf,
-    pub info: HirTraitInfo,
-    pub declaration: simple_parser::ast::TraitDef,
-}
-
-pub type HirTraitDispatch = std::sync::Arc<HirTraitDeclarationOwner>;
-
 /// Local variable info
 #[derive(Debug, Clone)]
 pub struct LocalVar {
@@ -179,8 +168,6 @@ pub struct LocalVar {
     /// Authored type name when available. This preserves trait/interface names
     /// that may erase to `Any` in the type registry.
     pub type_name_hint: Option<String>,
-    /// Exact declared trait owner for dispatch only; never used for DI/security.
-    pub trait_dispatch_owner: Option<HirTraitDispatch>,
     pub mutability: Mutability,
     /// Per-parameter DI injection flag (#1013)
     pub inject: bool,

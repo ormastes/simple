@@ -29,7 +29,7 @@ The policy is enforced on every `Mock.new()`, `Spy.new()`, and `Stub.new()` call
 
 ### Unit Tests (default — mocks allowed)
 
-```text
+```simple
 use std.spec.*
 
 describe "UserService":
@@ -41,7 +41,7 @@ describe "UserService":
 
 ### System Tests (mock ban active)
 
-```text
+```simple
 use std.spec.*
 use std.spec.mock.{mock_policy_disable, mock_policy_reset}
 

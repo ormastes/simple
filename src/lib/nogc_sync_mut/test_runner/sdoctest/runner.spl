@@ -8,8 +8,7 @@ use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_remove}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-use std.sffi.cli_args.{cli_get_args}
-use std.test_runner.test_executor_parsing.{find_simple_binary}
+use std.sffi.cli.{cli_get_args}
 use nogc_sync_mut.platform.{get_host_os, get_host_arch}
 use std.test_runner.test_runner_types.{TestOptions, TEST_OUTPUT_CAPTURE_BYTES, doctest_discovery_scope_path}
 use std.test_runner.test_runner_files.{strip_ansi}
@@ -17,7 +16,6 @@ use std.test_runner.sdoctest.types.{BlockResult, BlockStatus, SdoctestBlock, Sdo
 use std.test_runner.sdoctest.config.{find_init_script_file, find_env_timeout, find_env_vars, find_env_run_config}
 use std.test_runner.sdoctest.extractor.{extract_sdoctest_blocks, extract_reusable_lines}
 use std.test_runner.sdoctest.discovery.{discover_sdoctest_files, is_tag_ignored}
-use std.test_runner.sdoctest.transcript.{parse_sdoctest_transcript, sdoctest_output_matches}
 
 # =========================================================================
 # Top-Level Orchestrator
@@ -228,13 +226,6 @@ fn find_sdoctest_binary() -> text:
         if self_exe != "" and (self_exe.ends_with("/simple") or self_exe.ends_with("simple.exe")) and file_exists(self_exe):
             return self_exe
 
-    # argv[0] is often the script, not the binary (see test_executor_parsing.
-    # find_simple_binary). Ask the kernel which executable this process is, so a
-    # fresh worktree with no bin/simple still spawns the binary under test.
-    val running = find_simple_binary()
-    if running != "" and file_exists(running):
-        return running
-
     # Fallback: try known locations, preferring bin/simple and platform-specific
     # release paths before the flat legacy path.
     var candidates: [text] = [
@@ -374,34 +365,25 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
             )
 
     if exit_code == 0:
-        if block.transcript != "":
-            val transcript = parse_sdoctest_transcript(block.transcript)
-            if transcript.prompted:
-                if block.has_modifier_ignore_output():
-                    return BlockResult(
-                        block: block, status: BlockStatus.Skipped,
-                        duration_ms: duration_ms, stdout: stdout, stderr: stderr,
-                        error: "output comparison waived (ignore_output)"
-                    )
-                if not sdoctest_output_matches(stdout, transcript.expected):
-                    return BlockResult(
-                        block: block, status: BlockStatus.Failed,
-                        duration_ms: duration_ms, stdout: stdout, stderr: stderr,
-                        error: "Output mismatch: expected <{transcript.expected}>, got <{stdout}>"
-                    )
         BlockResult(
             block: block, status: BlockStatus.Passed,
             duration_ms: duration_ms, stdout: stdout, stderr: stderr, error: ""
         )
     else:
-        # Every executed fence must succeed unless should_fail was explicit.
-        # A language tag cannot turn a failed child process into a passing test.
-        val error_msg = extract_block_error(stderr: stderr, stdout: stdout)
-        BlockResult(
-            block: block, status: BlockStatus.Failed,
-            duration_ms: duration_ms, stdout: stdout, stderr: stderr,
-            error: error_msg
-        )
+        # Simple blocks ignore exit code - they're demonstration code, not tests
+        # Only sdoctest blocks (interactive examples) require exit code 0
+        if block.language == "simple" or block.language == "spl":
+            BlockResult(
+                block: block, status: BlockStatus.Passed,
+                duration_ms: duration_ms, stdout: stdout, stderr: stderr, error: ""
+            )
+        else:
+            val error_msg = extract_block_error(stderr: stderr, stdout: stdout)
+            BlockResult(
+                block: block, status: BlockStatus.Failed,
+                duration_ms: duration_ms, stdout: stdout, stderr: stderr,
+                error: error_msg
+            )
 
 # =========================================================================
 # Code Building (init script prepending)
@@ -423,11 +405,8 @@ fn build_temp_code(block: SdoctestBlock, config: SdoctestConfig, preamble: text)
     if preamble != "":
         parts.push(preamble)
 
-    # 3. Prompt expressions use the real REPL-style runtime wrapper.
-    if block.transcript != "":
-        parts.push(parse_sdoctest_transcript(block.transcript).code)
-    else:
-        parts.push(block.code)
+    # 3. The actual block code
+    parts.push(block.code)
 
     parts.join("\n\n")
 

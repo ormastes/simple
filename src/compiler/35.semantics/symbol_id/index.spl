@@ -13,9 +13,6 @@ use compiler.semantics.symbol_id.stable_id.{
     SymbolComponents, stable_symbol_id, short_fingerprint_n,
     clamp_short_len, default_short_len
 }
-use compiler.semantics.symbol_id.redirects_v1.{
-    SymbolRedirectV1, SymbolRedirectTableV1, build_symbol_redirect_table_v1
-}
 
 class SymbolIndex:
     short_len: i64
@@ -23,7 +20,6 @@ class SymbolIndex:
     shorts: [text]                    # insertion-ordered short forms
     short_to_full: Dict<text, text>   # short -> full 32-hex id
     short_to_module: Dict<text, text> # short -> module path
-    redirect_table_v1: SymbolRedirectTableV1
 
     me size() -> i64:
         self.count
@@ -45,18 +41,6 @@ class SymbolIndex:
         else:
             ""
 
-    me resolve_full_id_v1(full_id: text) -> text:
-        """Exact current or registered historical full ID, else empty text.
-
-        Short forms retain the existing full_id_of semantics. This read borrows
-        the index and its owned table; no ID hashing or history walk occurs.
-        """
-        val short = short_fingerprint_n(full_id, self.short_len)
-        if self.short_to_full.contains_key(short):
-            if self.short_to_full[short] == full_id:
-                return full_id
-        self.redirect_table_v1.resolve_old_id_v1(full_id)
-
 fn build_symbol_index(items: [SymbolComponents]) -> Result<SymbolIndex, text>:
     build_symbol_index_with_short_len(items, default_short_len())
 
@@ -72,13 +56,7 @@ fn build_symbol_index_with_short_len(items: [SymbolComponents], short_len: i64) 
         count: 0,
         shorts: [],
         short_to_full: {},
-        short_to_module: {},
-        redirect_table_v1: SymbolRedirectTableV1(
-            table_version: 1,
-            edge_count: 0,
-            direct_to_full: {},
-            terminal_by_old: {}
-        )
+        short_to_module: {}
     )
     var collisions: [text] = []
     for c in items:
@@ -98,25 +76,3 @@ fn build_symbol_index_with_short_len(items: [SymbolComponents], short_len: i64) 
     else:
         val joined = collisions.join(", ")
         Err("short fingerprint collision at length {n}: {joined}")
-
-fn build_symbol_index_with_redirects_v1(items: [SymbolComponents], rows: [SymbolRedirectV1]) -> Result<SymbolIndex, text>:
-    """Build current symbols first, then atomically admit explicit redirects.
-
-    Only fully validated snapshots escape. Empty rows preserve the legacy
-    construction path without historical preprocessing or duplicate hashing.
-    """
-    match build_symbol_index(items):
-        case Err(message):
-            Err(message)
-        case Ok(idx):
-            if rows.is_empty():
-                return Ok(idx)
-            var live_full_ids: [text] = []
-            for short in idx.shorts:
-                live_full_ids = live_full_ids.push(idx.short_to_full[short])
-            match build_symbol_redirect_table_v1(rows, live_full_ids):
-                case Err(message):
-                    Err(message)
-                case Ok(table):
-                    idx.redirect_table_v1 = table
-                    Ok(idx)

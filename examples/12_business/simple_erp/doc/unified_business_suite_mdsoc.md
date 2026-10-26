@@ -42,15 +42,6 @@ The pitch is therefore not "another Odoo." It is: **the first business suite whe
 
 ---
 
-Money stays integral; a VAT slice on an invoice subtotal is plain host arithmetic:
-
-```sdoctest
->>> val subtotal_cents = 10000
->>> val vat_rate_pct = 20
->>> subtotal_cents * vat_rate_pct / 100
-2000
-```
-
 ## 1. Full feature catalog (module by module)
 
 Scope note: a credible "beat SAP/NetSuite/Rippling/Odoo" suite needs far more than the four modules in the draft. Below are **14 modules + the cross-cutting dimension layer**. For each: who it displaces, the comprehensive feature set, and the *unified-core edge* that incumbents can't match.
@@ -303,7 +294,7 @@ Simple's **virtual capsules + manifests + architecture-aware repo structure** ar
 - A **manifest** declares what a capsule *introduces*, *requires*, and *exports* — the contract that lets the IDE and compiler reason about composition without expanding everything (the same contract-first principle as Simple's parser-friendly macros).
 - **Architecture rules** (`forbid`/`allow` pointcuts) enforce dimension boundaries at compile time so, e.g., a presentation capsule can never reach into the ledger directly.
 
-```text
+```simple
 # manifest: the tax dimension contributes a VAT slice to Invoice
 capsule tax.invoice_vat:
     requires entity Invoice has (subtotal: Money, jurisdiction: JurisdictionId)
@@ -347,7 +338,7 @@ The compiler **enforces family boundaries**, so an analytics module can't accide
 
 Audit, permission checks, tax application, and approval gating are textbook cross-cutting concerns. Implement them as **predicate-based AOP advice with compile-time weaving** (Simple's default), so there's zero overhead where no aspect applies and no per-module duplication:
 
-```text
+```simple
 # audit every state-changing service call, suite-wide, once
 on pc{ execution(* services.*.commit(..)) } use audit_write after_success priority 20
 
@@ -369,7 +360,7 @@ This is the literal realization of MDSOC's claim that AOP/MDSOC lets you "specif
 
 This is where Simple buys you correctness incumbents fake with conventions:
 
-```text
+```simple
 # money is a unit type, not a float; currencies are nominal and non-mixable
 unit currency(base: Decimal):
     USD = 1.0, EUR = 1.0, KRW = 1.0      # held per-book; cross-rate via explicit FX
@@ -404,7 +395,7 @@ For a system of record, "the ledger provably balances" is a differentiator no Sa
 
 ### 2.10 End-to-end sketch: one event, every dimension, one commit
 
-```text
+```simple
 # A single shipment event composes across dimensions in one transaction.
 actor OrderFulfillment:
     fn on_ship(order: OrderId, lines: [ShipLine]) -> Result[Unit, FulfillError]:

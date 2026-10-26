@@ -43,10 +43,10 @@ macro_rules! loader_trace {
 use simple_parser::ast::{Capability, ClassDef, EnumDef, Effect, ImportTarget, Node, UseStmt};
 
 use crate::error::CompileError;
-use crate::value::{Env, ModuleTable, Value};
+use crate::value::{Env, Value};
 
 use super::module_cache::{
-    cache_module_definitions, cache_module_export_table, clear_partial_module_exports, module_dict_get, decrement_load_depth,
+    cache_module_definitions, cache_module_exports, clear_partial_module_exports, decrement_load_depth,
     get_cached_module_exports, get_partial_module_exports, increment_load_depth, reserve_module_load,
     is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading,
     record_module_visit, record_module_eval_time, record_sibling_preload, MAX_MODULE_DEPTH,
@@ -328,7 +328,7 @@ fn unresolved_bare_export_names(items: &[Node]) -> Vec<String> {
     for item in items {
         if let Node::ExportUseStmt(export_stmt) = item {
             if export_stmt.path.segments.is_empty() {
-                for name in bare_export_source_names(&export_stmt.target) {
+                for name in export_target_names(&export_stmt.target) {
                     if !local_names.iter().any(|local| local == &name) && !names.iter().any(|seen| seen == &name) {
                         names.push(name);
                     }
@@ -337,16 +337,6 @@ fn unresolved_bare_export_names(items: &[Node]) -> Vec<String> {
         }
     }
     names
-}
-
-/// Local names a bare export (`export X` / `export impl as public`) needs
-/// defined somewhere: the alias is the exported name, not a symbol to find.
-fn bare_export_source_names(target: &ImportTarget) -> Vec<String> {
-    match target {
-        ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => vec![name.clone()],
-        ImportTarget::Group(items) => items.iter().flat_map(bare_export_source_names).collect(),
-        ImportTarget::Glob => Vec::new(),
-    }
 }
 
 fn export_target_names(target: &ImportTarget) -> Vec<String> {
@@ -410,21 +400,7 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
 /// the check also runs on module-cache hits (where the AST is long gone).
 /// `None` means "surface is opaque — do not check this module" (it re-exports
 /// through a glob or bare `export use`, so its true surface is unknowable here).
-type ProvidedNames = Option<Arc<ProvidedSet>>;
-
-/// A module's provided surface: its export table (shared with the module
-/// cache, not copied) plus the non-exported names that also count.
-#[derive(Debug)]
-struct ProvidedSet {
-    exports: Arc<ModuleTable>,
-    extra: std::collections::HashSet<String>,
-}
-
-impl ProvidedSet {
-    fn contains(&self, name: &str) -> bool {
-        self.exports.contains_key(name) || self.extra.contains(name)
-    }
-}
+type ProvidedNames = Option<Arc<std::collections::HashSet<String>>>;
 
 fn provided_names_registry() -> &'static std::sync::Mutex<HashMap<std::path::PathBuf, ProvidedNames>> {
     static REGISTRY: OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, ProvidedNames>>> = OnceLock::new();
@@ -471,7 +447,7 @@ fn module_surface_is_opaque(items: &[Node]) -> bool {
 /// Collect every name the freshly loaded module makes available to importers.
 fn collect_provided_names(
     items: &[Node],
-    exports: &Arc<ModuleTable>,
+    exports: &HashMap<String, Value>,
     module_functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     module_classes: &HashMap<String, Arc<ClassDef>>,
     module_enums: &Enums,
@@ -479,9 +455,8 @@ fn collect_provided_names(
     if module_surface_is_opaque(items) {
         return None;
     }
-    // Export names are answered by the shared table itself; collecting them
-    // here made this set as wide as the module's transitive import closure.
     let mut provided: std::collections::HashSet<String> = std::collections::HashSet::new();
+    provided.extend(exports.keys().cloned());
     provided.extend(module_functions.keys().cloned());
     provided.extend(module_classes.keys().cloned());
     for (name, enum_def) in module_enums {
@@ -505,11 +480,7 @@ fn collect_provided_names(
             }
         }
     }
-    provided.retain(|name| !exports.contains_key(name));
-    Some(Arc::new(ProvidedSet {
-        exports: Arc::clone(exports),
-        extra: provided,
-    }))
+    Some(Arc::new(provided))
 }
 
 /// Report braced `use` names the resolved module does not provide.
@@ -557,20 +528,19 @@ fn warn_unprovided_use_names(
 /// Tokenizes on non-identifier characters so a name must appear as a whole
 /// token, not merely as a substring of a longer identifier. Reads the file
 /// once regardless of how many names are probed. Deliberately loose/
-/// best-effort. `None` means the bounded probe could not inspect the source,
-/// not that the requested names are absent. Only `Some(empty)` proves that
-/// no requested token was found in a completely read source.
-fn file_plausibly_provides_names(path: &Path, names: &[String]) -> Option<std::collections::HashSet<String>> {
+/// best-effort: a false positive here just falls back to the existing
+/// "package wins" default below, not a wrong resolution.
+fn file_plausibly_provides_names(path: &Path, names: &[String]) -> std::collections::HashSet<String> {
     let max_check_bytes = crate::memory_guard::sibling_max_check_bytes();
-    let source = super::module_cache::probe_source_cached(path, max_check_bytes)?;
+    let Some(source) = super::module_cache::probe_source_cached(path, max_check_bytes) else {
+        return std::collections::HashSet::new();
+    };
     let tokens: std::collections::HashSet<&str> = source.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
-    Some(
-        names
-            .iter()
-            .filter(|name| tokens.contains(name.as_str()))
-            .cloned()
-            .collect(),
-    )
+    names
+        .iter()
+        .filter(|name| tokens.contains(name.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
@@ -600,20 +570,15 @@ fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt)
                     // case and re-lost `print_summary`. So: withhold the
                     // (otherwise unconditional) package-init preference as soon as
                     // ANY single requested name is positively confirmed on the
-                    // file but NOT on the package. An unavailable bounded probe
-                    // cannot justify redirecting the already-resolved file. When
-                    // both sources were inspected, a name absent from both keeps
-                    // the existing "package wins" default (see
+                    // file but NOT on the package; an empty/ambiguous probe on
+                    // both sides for a given name doesn't count either way and
+                    // falls back to the existing "package wins" default (see
                     // `prefers_package_init_for_group_imports_when_both_exist`).
                     if let ImportTarget::Group(_) = &use_stmt.target {
                         if let Some(requested) = requested_group_import_names(use_stmt) {
                             if !requested.is_empty() {
-                                let Some(file_names) = file_plausibly_provides_names(module_path, &requested) else {
-                                    return module_path.to_path_buf();
-                                };
-                                let Some(package_names) = file_plausibly_provides_names(&package_init, &requested) else {
-                                    return module_path.to_path_buf();
-                                };
+                                let file_names = file_plausibly_provides_names(module_path, &requested);
+                                let package_names = file_plausibly_provides_names(&package_init, &requested);
                                 let file_has_unique_name = file_names.iter().any(|name| !package_names.contains(name));
                                 if file_has_unique_name {
                                     return module_path.to_path_buf();
@@ -872,8 +837,8 @@ pub fn load_and_merge_module(
                         .and_then(|module_value| {
                             // Extract the specific item from the loaded module
                             if let Value::Dict(exports_dict) = &module_value {
-                                if let Some(value) = module_dict_get(exports_dict, &item_name) {
-                                    return Ok(value);
+                                if let Some(value) = exports_dict.get(&item_name) {
+                                    return Ok(value.clone());
                                 }
                             }
                             Err(CompileError::Runtime(format!(
@@ -927,8 +892,8 @@ pub fn load_and_merge_module(
         // If importing a specific item, extract it from cached exports
         if let Some(item_name) = import_item_name {
             if let Value::Dict(exports_dict) = &cached_exports {
-                if let Some(value) = module_dict_get(exports_dict, &item_name) {
-                    return Ok(value);
+                if let Some(value) = exports_dict.get(&item_name) {
+                    return Ok(value.clone());
                 }
             }
             return Err(CompileError::Runtime(format!("Module does not export '{}'", item_name)));
@@ -1041,19 +1006,13 @@ pub fn load_and_merge_module(
     } else {
         None
     };
-    // Release this lane's handle on the entry so `take_shared_ast` can see
-    // whether anyone besides the cache still borrows the AST.
-    drop(shared);
     let parsed = match reusable {
         Some(Ok(ast)) => {
             crate::perf_counters::bump(&crate::perf_counters::INTERP_MODULE_AST_REUSE, 1);
-            // `Node` owns its definitions by value, so the interpreter needs a
-            // tree it alone owns, identical to the one a fresh parse produces,
-            // without lexing the file a second time. When no other lane still
-            // borrows the cached parse it is MOVED out of the cache instead of
-            // deep-copied (one AST alive instead of two); otherwise it is
-            // cloned exactly as before.
-            Ok(crate::interpreter::take_shared_ast(&module_path, ast))
+            // `Node` owns its definitions by value, so this is a deep copy: the
+            // interpreter gets a tree it alone owns, identical to the one the
+            // fresh parse produced, without lexing the file a second time.
+            Ok((*ast).clone())
         }
         Some(Err(message)) => Err(message.to_string()),
         None => {
@@ -1234,14 +1193,14 @@ pub fn load_and_merge_module(
                                         &mut preload_classes,
                                         &mut preload_enums,
                                     ) {
-                                        sib_exports.for_each_visible(|k, v| {
+                                        for (k, v) in sib_exports {
                                             // Preserve the first provider for a symbol.
                                             // This matters for packages like std.nogc_sync_mut.io
                                             // where real implementations and fallback stubs coexist:
                                             // env_ops/dir_ops should win, and later stub files should
                                             // not silently replace them during __init__ preloading.
-                                            merged_exports.entry(k.clone()).or_insert_with(|| v.clone());
-                                        });
+                                            merged_exports.entry(k).or_insert(v);
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -1295,9 +1254,10 @@ pub fn load_and_merge_module(
     // Previously this merged the importer's entire filtered_env into each function's
     // captured_env, causing O(N*M) cascading memory growth across import chains.
     // Functions already have everything they need from their defining module's env.
-    // The module's export table: its own entries plus whatever it imported
-    // whole, shared as layers (see `ModuleTable`).
-    let exports: Arc<ModuleTable> = Arc::new(module_exports.into_table());
+    let mut exports: HashMap<String, Value> = HashMap::new();
+    for (name, value) in module_exports {
+        exports.insert(name, value);
+    }
 
     // Use-list check: the braced names in `use mod.{a, b}` are otherwise never
     // compared against what `mod` actually provides. Record the surface so
@@ -1314,7 +1274,8 @@ pub fn load_and_merge_module(
     warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names);
 
     // Cache the full module exports for future use
-    cache_module_export_table(&module_path, Arc::clone(&exports));
+    let exports_value = Value::Dict(Arc::new(exports.clone()));
+    cache_module_exports(&module_path, exports_value.clone());
 
     // Also cache the module definitions (classes, functions, enums) for future imports.
     // module_functions is already HashMap<String, Arc<FunctionDef>> -- cache stores Arc clones (cheap).
@@ -1350,11 +1311,11 @@ pub fn load_and_merge_module(
         "loaded",
         "{} ({} exports, {}d, {}ms)",
         module_path.display(),
-        exports.own().len(),
+        exports.len(),
         depth,
         elapsed_ms
     );
-    debug!(path = ?module_path, exports = exports.own().len(), "Successfully loaded module");
+    debug!(path = ?module_path, exports = exports.len(), "Successfully loaded module");
 
     // If importing a specific item, extract it from exports
     if let Some(item_name) = import_item_name {
@@ -1370,14 +1331,13 @@ pub fn load_and_merge_module(
     }
 
     // Otherwise, return the full module dict (for glob imports or module-level imports)
-    Ok(Value::Dict(Arc::clone(exports.own())))
+    Ok(exports_value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        bare_export_source_names, enforce_gc_boundary_policy, export_target_names, gc_boundary_warning_message,
-        file_plausibly_provides_names, load_and_merge_module, loader_trace_enabled,
+        enforce_gc_boundary_policy, gc_boundary_warning_message, load_and_merge_module, loader_trace_enabled,
         mark_module_loading, prefer_package_init_for_member_import, resolve_member_import_target,
         should_keep_selective_export, unmark_module_loading,
     };
@@ -1554,81 +1514,6 @@ mod tests {
         assert_eq!(resolved, init_path);
     }
 
-    // Build only slightly beyond the production probe budget. Do not relax the
-    // budget or read the oversized file through an uncapped fallback in tests.
-    fn oversized_member_probe_source(definition: &str) -> String {
-        let limit = crate::memory_guard::sibling_max_check_bytes();
-        assert!(limit <= 1024 * 1024, "member-import fixtures require a probe budget <= 1 MiB");
-        format!("#{}\n{}", " ".repeat(limit as usize), definition)
-    }
-
-    #[test]
-    fn member_probe_distinguishes_uninspected_source_from_known_absence() {
-        let temp = tempfile::tempdir().unwrap();
-        let small = temp.path().join("small.spl");
-        let large = temp.path().join("large.spl");
-        let names = vec!["file_only".to_string()];
-        fs::write(&small, "# no matching identifier\n").unwrap();
-        fs::write(&large, oversized_member_probe_source("fn file_only(): 41\n")).unwrap();
-        assert_eq!(file_plausibly_provides_names(&small, &names), Some(Default::default()));
-        assert_eq!(file_plausibly_provides_names(&large, &names), None);
-        assert_eq!(file_plausibly_provides_names(&temp.path().join("missing.spl"), &names), None);
-    }
-
-    #[test]
-    fn oversized_file_keeps_group_import_owner_and_aliased_member() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("spec.spl");
-        let package = temp.path().join("spec/__init__.spl");
-        fs::create_dir_all(package.parent().unwrap()).unwrap();
-        // Unique name lies after the probe budget, not in an inspectable prefix.
-        fs::write(&file, oversized_member_probe_source("fn shared(): 1\nfn file_only(): 41\n")).unwrap();
-        fs::write(&package, "fn shared(): 2\n").unwrap();
-        let requested = use_stmt_with_target(ImportTarget::Group(vec![
-            ImportTarget::Single("shared".into()),
-            ImportTarget::Aliased { name: "file_only".into(), alias: "selected".into() },
-        ]));
-        assert_eq!(resolve_member_import_target(&file, &requested), file);
-        // The same unknown result is memoized; repeated visits must not switch
-        // owners or make the file eligible for a full-source probe.
-        for _ in 0..8 {
-            assert_eq!(resolve_member_import_target(&file, &requested), file);
-            assert!(super::super::module_cache::probe_source_cached(
-                &file, crate::memory_guard::sibling_max_check_bytes()
-            ).is_none());
-        }
-    }
-
-    #[test]
-    fn oversized_package_does_not_supply_known_absence_for_group_redirect() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("spec.spl");
-        let package = temp.path().join("spec/__init__.spl");
-        fs::create_dir_all(package.parent().unwrap()).unwrap();
-        fs::write(&file, "fn shared(): 1\n").unwrap();
-        fs::write(&package, oversized_member_probe_source("fn shared(): 2\n")).unwrap();
-        let requested = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("shared".into())]));
-        assert_eq!(resolve_member_import_target(&file, &requested), file);
-        // Glob imports retain their existing package preference.
-        assert_eq!(resolve_member_import_target(&file, &use_stmt_with_target(ImportTarget::Glob)), package);
-    }
-
-    #[test]
-    fn inspected_file_unique_name_preserves_mixed_group_but_shared_names_prefer_package() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("spec.spl");
-        let package = temp.path().join("spec/__init__.spl");
-        fs::create_dir_all(package.parent().unwrap()).unwrap();
-        fs::write(&file, "fn shared(): 1\nfn file_only(): 41\n").unwrap();
-        fs::write(&package, "fn shared(): 2\n").unwrap();
-        let mixed = use_stmt_with_target(ImportTarget::Group(vec![
-            ImportTarget::Single("shared".into()), ImportTarget::Single("file_only".into()),
-        ]));
-        assert_eq!(resolve_member_import_target(&file, &mixed), file);
-        let shared = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("shared".into())]));
-        assert_eq!(resolve_member_import_target(&file, &shared), package);
-    }
-
     #[test]
     fn resolve_member_import_target_falls_back_to_file_on_self_referential_redirect_cycle() {
         // task #153 shape: `driver.spl` (real definitions) sits next to a
@@ -1734,23 +1619,6 @@ mod tests {
 
         assert!(matches!(exports.get("env_get"), Some(Value::Function { .. })));
         assert!(matches!(exports.get("dir_walk"), Some(Value::Function { .. })));
-    }
-
-    /// Generalization: aliases in a bare export list resolve each local name
-    /// independently, keep unaliased names, and never invent the alias as a
-    /// symbol to search for (the alias names nothing locally).
-    #[test]
-    fn bare_export_source_names_ignore_aliases() {
-        let target = ImportTarget::Group(vec![
-            ImportTarget::Aliased { name: "init".to_string(), alias: "mimalloc_init".to_string() },
-            ImportTarget::Single("alloc".to_string()),
-        ]);
-        assert_eq!(bare_export_source_names(&target), vec!["init".to_string(), "alloc".to_string()]);
-        // Re-export lists still name BOTH sides (provided-names oracle).
-        assert_eq!(
-            export_target_names(&target),
-            vec!["init".to_string(), "mimalloc_init".to_string(), "alloc".to_string()]
-        );
     }
 
     #[test]
@@ -2257,48 +2125,6 @@ mod cross_lane_parsed_source_tests {
     }
 
     #[test]
-    fn unborrowed_parse_is_moved_to_the_interpreter_not_duplicated() {
-        crate::interpreter::clear_module_cache();
-        let temp = tempfile::tempdir().unwrap();
-        let entry = temp.path().join("entry.spl");
-        fs::write(&entry, "").unwrap();
-        let module = temp.path().join("solo.spl");
-        let original = "fn solo_value(): 1\nexport solo_value\n";
-        fs::write(&module, original).unwrap();
-
-        // Lane 1 fills the cache and then lets go of its handle, as the HIR
-        // lowerer does when the JIT attempt finishes.
-        let lowered = crate::hir::lower::import_loader::parsed_imported_module(&module).expect("parses");
-        let expected = (*lowered).clone();
-        drop(lowered);
-        assert_eq!(parsed_source_cache_len(), 1);
-
-        let mut functions = HashMap::new();
-        let mut classes = HashMap::new();
-        let mut enums = HashMap::new();
-        load_and_merge_module(
-            &glob_use("solo"),
-            Some(&entry),
-            &mut functions,
-            &mut classes,
-            &mut enums,
-        )
-        .expect("module loads");
-        assert!(functions.contains_key("solo_value"), "moved parse still yields the exports");
-        assert_eq!(parsed_source_cache_len(), 0, "the unborrowed AST was moved out, not copied");
-
-        // A later lookup re-parses the bytes first read -- never the edited
-        // file -- so it is indistinguishable from the entry having stayed.
-        fs::write(&module, "fn edited(): 2\n").unwrap();
-        let SharedSource::Parsed { source, ast: Ok(again) } = shared_source(&module) else {
-            panic!("released entry must re-parse from its retained source");
-        };
-        assert_eq!(source.as_str(), original);
-        assert_eq!(*again, expected, "re-parse of the retained bytes equals the original parse");
-        assert_eq!(parsed_source_cache_len(), 1);
-    }
-
-    #[test]
     fn alias_spellings_of_one_file_share_one_entry() {
         clear_parsed_source_cache();
         let temp = tempfile::tempdir().unwrap();
@@ -2378,79 +2204,5 @@ mod cross_lane_parsed_source_tests {
             stripped_ast.items.len() < raw_ast.items.len(),
             "the stripped parse must drop the wrong-arch global, which is why it cannot borrow"
         );
-    }
-
-    /// doc/08_tracking/bug/interpreter_use_unpack_reexports_transitive_closure_2026-10-20.md
-    ///
-    /// N modules in a chain, each `use prev.*` plus K functions of its own.
-    /// Every name stays visible from the top (same resolution as the old
-    /// per-name copy), but what each module RETAINS -- export table, module
-    /// env, import bindings -- is linear in its own K, not in the K*i names
-    /// of its closure. On the copying seed the last module's export table,
-    /// env and binding table each held K*N entries.
-    #[test]
-    fn chained_glob_imports_retain_tables_linear_in_own_exports() {
-        use crate::interpreter::clear_module_cache;
-        use crate::value::Value;
-        use std::sync::Arc;
-        const N: usize = 40;
-        const K: usize = 5;
-        clear_module_cache();
-        let temp = tempfile::tempdir().unwrap();
-        let entry = temp.path().join("entry.spl");
-        fs::write(&entry, "").unwrap();
-        for i in 0..N {
-            let mut src = String::new();
-            if i > 0 {
-                src.push_str(&format!("use chain_{}.*\n", i - 1));
-            }
-            for k in 0..K {
-                src.push_str(&format!("fn f_{i}_{k}() -> i64:\n    {}\n", i * 100 + k));
-            }
-            fs::write(temp.path().join(format!("chain_{i}.spl")), src).unwrap();
-        }
-        let use_stmt = use_stmt_with_path(&[&format!("chain_{}", N - 1)], ImportTarget::Glob);
-        let mut functions = HashMap::new();
-        let mut classes = HashMap::new();
-        let mut enums = HashMap::new();
-        let value = load_and_merge_module(&use_stmt, Some(&entry), &mut functions, &mut classes, &mut enums).unwrap();
-        let Value::Dict(top) = &value else {
-            panic!("module value must be a dict");
-        };
-
-        // Resolution: every function of every chain module is visible from
-        // the top module's export dict, as with the flat copy.
-        for i in 0..N {
-            for k in 0..K {
-                let name = format!("f_{i}_{k}");
-                assert!(
-                    matches!(crate::interpreter::module_dict_get(top, &name), Some(Value::Function { .. })),
-                    "{name} must stay visible through the chain"
-                );
-            }
-        }
-        assert_eq!(crate::interpreter::module_dict_len(top), N * K);
-
-        // Retention: the top dict holds only its own K entries.
-        assert_eq!(top.len(), K, "export table retains own entries only");
-
-        let owner_of = |i: usize| -> Arc<str> {
-            let path = crate::interpreter::normalize_path_key(&temp.path().join(format!("chain_{i}.spl")));
-            Arc::from(path.to_string_lossy().as_ref())
-        };
-        let env_retained = |i: usize| {
-            crate::interpreter::MODULE_ENV_BY_OWNER
-                .with(|cell| cell.borrow().get(&owner_of(i)).map(|env| env.retained_len()))
-                .expect("module env recorded")
-        };
-        let bindings_retained =
-            |i: usize| crate::interpreter::owner_bindings(&owner_of(i)).map_or(0, |bindings| bindings.len());
-        // Depth-independent: module 1 and module N-1 retain the same amount
-        // (own K functions + builtins + one layer), although the last one
-        // sees N times as many names.
-        assert_eq!(env_retained(N - 1), env_retained(1));
-        assert_eq!(bindings_retained(N - 1), bindings_retained(1));
-        assert!(bindings_retained(N - 1) <= 1, "one layer, no per-name copies");
-        clear_module_cache();
     }
 }

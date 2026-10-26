@@ -71,10 +71,6 @@ pub struct Parser<'a> {
     pub(crate) current_scope: String,
     /// Collected error hints (helpful messages for common mistakes)
     pub(crate) error_hints: Vec<ErrorHint>,
-    /// Unbalanced `@when`/`@elif`/`@else`/`@end` directives: `parse()` fails
-    /// closed with this message instead of compiling both branches (the same
-    /// contract as the text-level strip path in the compiler crate).
-    pub(crate) cond_structural_error: Option<String>,
     /// Count of INDENT tokens consumed during pattern parsing that need matching DEDENTs
     /// consumed after the match arm body. Reset to 0 after consuming the dedents.
     pub(crate) pattern_indent_count: usize,
@@ -102,12 +98,6 @@ pub struct Parser<'a> {
     /// this counter tracks how many should be consumed at a later point (e.g., after
     /// an if-block before checking for elif/else).
     pub(crate) deferred_dedent_count: usize,
-    /// `Some(call_arg_depth)` while parsing the INLINE then-branch of an `if`
-    /// expression. At that depth an `else:` after `expr as Type` belongs to the
-    /// `if`, not to the `CastElse` form: `if c: x as i64 else: 0` is an if/else
-    /// (as the pure-Simple parser reads it), never a fallback cast inside an
-    /// `if` that silently lost its else branch.
-    pub(crate) inline_if_then_call_depth: Option<usize>,
     /// Nesting depth while parsing call arguments. Placeholder short grammar is
     /// transformed for the direct argument expression and deferred for nested
     /// ordinary call arguments so outer callbacks can own the placeholder scope.
@@ -126,23 +116,7 @@ pub struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str) -> Self {
-        Self::from_lexer(source, Lexer::new(source))
-    }
-
-    /// Parse with `@when(...)` conditional-compilation blocks evaluated against
-    /// an explicit target (`os`, `arch`) instead of `SIMPLE_TARGET_*`/host.
-    pub fn new_for_target(source: &'a str, os: &str, arch: &str) -> Self {
-        Self::from_lexer(source, Lexer::new_for_target(source, os, arch))
-    }
-
-    fn from_lexer(source: &'a str, mut lexer: Lexer<'a>) -> Self {
-        let cond_diagnostics = std::mem::take(&mut lexer.cond_diagnostics);
-        let cond_structural_error = (!lexer.cond_balanced).then(|| {
-            format!(
-                "unbalanced conditional compilation directives: {}",
-                cond_diagnostics.join("; ")
-            )
-        });
+        let mut lexer = Lexer::new(source);
         let current = lexer.next_token();
         let previous = Token::new(TokenKind::Eof, Span::new(0, 0, 1, 1), String::new());
 
@@ -162,29 +136,16 @@ impl<'a> Parser<'a> {
             macro_registry: MacroRegistry::new(),
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
-            cond_structural_error: None,
             pattern_indent_count: 0,
             match_arm_depth: 0,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
-            inline_if_then_call_depth: None,
             call_arg_depth: 0,
             parse_recursion_depth: 0,
             grid_row_depth: 0,
         };
-
-        parser.cond_structural_error = cond_structural_error;
-        for message in cond_diagnostics {
-            parser.error_hints.push(ErrorHint {
-                level: crate::error_recovery::ErrorHintLevel::Warning,
-                message: format!("conditional compilation: {message}"),
-                span: Span::new(0, 0, 1, 1),
-                suggestion: None,
-                help: None,
-            });
-        }
 
         // Check for common mistakes in the initial token
         // (since it was loaded via lexer.next_token() bypassing advance())
@@ -255,14 +216,12 @@ impl<'a> Parser<'a> {
             macro_registry: MacroRegistry::new(),
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
-            cond_structural_error: None,
             pattern_indent_count: 0,
             match_arm_depth: 0,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
-            inline_if_then_call_depth: None,
             call_arg_depth: 0,
             parse_recursion_depth: 0,
             grid_row_depth: 0,
@@ -379,15 +338,6 @@ impl<'a> Parser<'a> {
 
     pub fn parse(&mut self) -> Result<Module, ParseError> {
         self.debug_trace("Starting parse()");
-        if let Some(message) = self.cond_structural_error.take() {
-            return Err(ParseError::SyntaxError {
-                message,
-                line: 1,
-                column: 1,
-                span: None,
-                context: None,
-            });
-        }
         let mut items = Vec::new();
         let mut iterations = 0usize;
 
@@ -750,33 +700,7 @@ impl<'a> Parser<'a> {
                     self.parse_var() // parse as var
                 }
             }
-            // `unit`/`newunit` declarations are always `unit <Name> ...`; a
-            // statement like `unit = x`, `unit += 1`, `unit.f = x` or
-            // `unit[i] = x` is an assignment to a variable named `unit`
-            // (expression position already reads it via
-            // `parse_keyword_identifier("unit")`).
-            TokenKind::Unit => {
-                if matches!(
-                    self.peek_next().kind,
-                    TokenKind::Assign
-                        | TokenKind::PlusAssign
-                        | TokenKind::MinusAssign
-                        | TokenKind::StarAssign
-                        | TokenKind::SlashAssign
-                        | TokenKind::PercentAssign
-                        | TokenKind::TildeAssign
-                        | TokenKind::TildePlusAssign
-                        | TokenKind::TildeMinusAssign
-                        | TokenKind::TildeStarAssign
-                        | TokenKind::TildeSlashAssign
-                        | TokenKind::Dot
-                        | TokenKind::LBracket
-                ) {
-                    self.parse_expression_or_assignment()
-                } else {
-                    self.parse_unit()
-                }
-            }
+            TokenKind::Unit => self.parse_unit(),
             TokenKind::HandlePool => self.parse_handle_pool(),
             TokenKind::Extern => self.parse_extern(),
             TokenKind::Macro => self.parse_macro_def(),
@@ -910,18 +834,10 @@ impl<'a> Parser<'a> {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.peek_next();
 
-                // Comparison operators continue the identifier expression,
-                // including an implicit function tail such as `context != ""`.
-                // A DSL receiver still begins after `context` (e.g. `active:`).
+                // If next token is assignment, variable name, string literal (BDD), or paren (call)
                 if matches!(
                     &next.kind,
-                    TokenKind::Eq
-                        | TokenKind::NotEq
-                        | TokenKind::Lt
-                        | TokenKind::Gt
-                        | TokenKind::LtEq
-                        | TokenKind::GtEq
-                        | TokenKind::Assign
+                    TokenKind::Assign
                         | TokenKind::PlusAssign
                         | TokenKind::MinusAssign
                         | TokenKind::StarAssign

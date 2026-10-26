@@ -429,33 +429,3 @@ does not collapse out of `<body>` (Chrome y=0, Simple y=16 — neutralise it wit
 `style="margin:0;padding:0"` when asserting absolute y), and `Style.font_size`
 is `i32` so Chrome's fractional `13.3333px` form-control size is lost, which is
 the real cause of the `tab-bar` flex-item width cluster.
-
-## Image decoders behind the image store (2026-10-05)
-
-`BrowserSession._store_image_response` (`gc_async_mut/web/browser_session_loading.spl`)
-dispatches on the declared media type through
-`src/lib/common/image/image_decode.spl` (`image_decoder_format` ->
-`image_signature_valid` -> `decode_image_to_argb_bounded`). `image/png` is the
-unchanged PNG path; `image/jpeg` (also `image/jpg`, `image/pjpeg`) goes to
-`src/lib/common/image/jpeg_decode.spl` — baseline + progressive Huffman,
-any sampling, restart markers, bit-exact with `djpeg -dct int`.
-`image/webp` goes to `src/lib/common/image/webp_decode.spl` (RIFF + VP8X
-container; VP8L lossless with all transforms, color cache, meta codes; lossy
-VP8 key frames via `webp_vp8_decode.spl` plus ALPH alpha — all bit-identical
-to libwebp; animation rejected by name).
-`image/svg+xml` goes to `src/lib/skia/feature/codec/svg_render.spl`: a
-static-SVG subset (shapes, all path commands incl. arcs, transforms,
-fill/stroke/opacity, viewBox) rasterized with skia's CPU `fill_path_aa` +
-`expand_stroke`, at the document size scaled down to the pixel budget;
-nothing is fetched (`<image>`, `<use>`, `url()` paints are inert). The session
-pixel budget (`BROWSER_MAX_IMAGE_PIXELS`) is passed in and enforced from the
-JPEG SOF before allocation. EXIF orientation is recorded
-(`JpegImage.exif_orientation`), not applied. Note `img src` data: URLs are
-capped at 256 bytes (`SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES`), so real image
-bodies only arrive over the network path. Specs:
-`test/01_unit/lib/common/image/{jpeg_decode,webp_lossless_decode,webp_lossy_decode,browser_image_decode_dispatch}_spec.spl`,
-`test/01_unit/lib/skia/svg_render_spec.spl`;
-fixtures `test/fixtures/image/{jpeg,webp_lossless,webp_lossy,svg}/` (kept out of LFS by a local `.gitattributes`).
-
-## HTTP Content-Encoding (h1_client)
-`build_request_bytes` sends `Accept-Encoding: gzip, deflate` unless the caller set one. `parse_http_response_bytes` decodes `Content-Encoding` after chunked/length framing (list decoded in reverse; identity no-op; deflate = zlib first, raw fallback), then drops `content-encoding`/`content-length` from the returned header text. Unknown tokens (`br`, `zstd`: not advertised) and decode failures are parse errors, never a pass-through. Cap: decoded size > `BROWSER_MAX_RESOURCE_BYTES` errors, but the check is post-decode (decoders buffer fully). zstd is held back only because `std.common.compress.zstd` costs ~29 MB RSS per interpreted process (the decoder handles predefined/repeat tables since #3739) (gzip+deflate cost ~6 MB). Spec: `h1_content_encoding_spec.spl`.

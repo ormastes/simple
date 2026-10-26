@@ -348,8 +348,6 @@ export class UnsafeArrayList:
 
 ### Option 3: Add `&mut T` References (Rust-style)
 
-> **2026-10-20:** conflicts with `doc/05_design/language/misc/memory.md`, where `&T` is the owning unique pointer; `&mut` is unspecified there. Treat this option as historical.
-
 **Most Rust-like** - Mutable references with borrow checking:
 
 ```simple

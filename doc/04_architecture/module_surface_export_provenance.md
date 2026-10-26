@@ -18,7 +18,7 @@ surface edge into hundreds of unresolved-type diagnostics.
 
 Add a compact semantic edge record in the existing 20.hir owner:
 
-```simple:skip
+```simple
 struct ModuleSurfaceExportOrigin:
     owner_surface_index: i64
     owner_name: text

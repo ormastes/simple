@@ -28,7 +28,7 @@ it "user adds a task and sees it in the list":
 `check(1 == 1)` (`auto_coverage_1_spec.spl:12`, `compress_tool_basic_spec.spl:11`)
 gives docgen one word to render — **"check"** — and no narrative.
 
-```text
+```simple
 # BAD
 it "compresses a file":
     check(compress("in") == "out")
@@ -56,7 +56,7 @@ loader reports the first syntax error with a line number so they can fix it."""
 `verify(sum == 435)` (`acceptance_1_system_spec.spl:27-35`) — 435 is 1..29 summed,
 no domain meaning. A reader cannot tell what behavior passed.
 
-```text
+```simple
 # BAD
 expect(total).to_equal(435)
 # GOOD
@@ -70,7 +70,7 @@ Sampled unit/system specs attach **no** TUI/CLI evidence, so the manual shows
 steps with nothing the user recognizes. Every user-facing flow needs a `@capture`
 grid (Todo example's boxed screens).
 
-```text
+```simple
 # GOOD
 # @capture
 it "shows the empty task list on launch":
@@ -84,7 +84,7 @@ An `it "end-to-end workflow"` that is string concat + array math
 (`acceptance_1_system_spec.spl:16-35`) exercises nothing real: the manual
 promises a workflow and delivers arithmetic.
 
-```text
+```simple
 # BAD
 it "end-to-end workflow":
     val s = "a" + "b" + "c"
@@ -100,7 +100,7 @@ it "operator submits an order and sees it queued":
 When edge/matrix/stress scenarios sit inline with primary flows and no
 `@manual_section` folding, the primary flow is lost in noise. Group; fold the rest.
 
-```text
+```simple
 # GOOD
 # @manual_section("Adding a Task")
 it "user adds a task and sees it in the list": ...
@@ -116,7 +116,7 @@ it "rejects an empty task name": ...
 plumbing into every manual section. Extract a named `@step` helper so the manual
 reads as one sentence and the setup appears once.
 
-```text
+```simple
 # GOOD
 @step "Run the tool against the sample project"
 fn run_for_sample() -> text:
@@ -129,7 +129,7 @@ No `@troubleshooting(...)` rows and no verification metadata means the manual
 lacks the *Troubleshooting* and *Verification Record* appendices (example manual's
 Appendix A) that make it trustworthy.
 
-```text
+```simple
 # GOOD
 # @troubleshooting(symptom: "Task not added on Enter", fix: "Type a name first")
 it "rejects an empty task name": ...
@@ -140,7 +140,7 @@ it "rejects an empty task name": ...
 `compress_tool_basic` ships the template header with empty **Feature IDs** and an
 unedited category line; docgen emits it verbatim atop the manual. Fill or delete.
 
-```text
+```simple
 # BAD
 **Feature IDs:**            **Category:** Infrastructure | Language | ...
 # GOOD
@@ -152,7 +152,7 @@ unedited category line; docgen emits it verbatim atop the manual. Fill or delete
 `(slow)` appended to every scenario name leaks a runner hint into the manual title.
 Keep internal tags in annotations, not in user-visible `it` strings.
 
-```text
+```simple
 # BAD
 it "rebuilds the index (slow)": ...
 # GOOD
@@ -166,7 +166,7 @@ With neither legacy `Given_`/`When_`/`Then_` helpers nor `step(...)` calls, docg
 has nothing to lay out as ordered steps — the manual becomes a title and a bare
 assertion. Always express the flow as steps.
 
-```text
+```simple
 # BAD
 it "signs in":
     expect(login("u", "p")).to_be_truthy()
@@ -184,7 +184,7 @@ A `%%mode` cell runs on a single lane in isolation. Cross-lane state sharing is
 §3). Asserting that state from a previous lane persists into the `%%mode` cell
 fails silently because the cell cannot see the other lane's session.
 
-```text
+```simple
 # BAD — cross-lane state assertion
 it "CUDA and Vulkan lanes share memory":
     step("Initialize state on CUDA lane")
@@ -222,7 +222,7 @@ incompatibility). Specs that require a lane must **always** probe first and exit
 cleanly with skip status when the lane is not available — they must never fail
 the build or test run.
 
-```text
+```simple
 # BAD — unconditional lane execution, fails when hardware absent
 it "CUDA kernel compiles":
     # No probe; this fails hard when no GPU is present
@@ -251,7 +251,7 @@ manager internals. The trait is the integration boundary; testing its
 implementation details creates brittle specs that break when the executor
 strategy changes.
 
-```text
+```simple
 # BAD — testing internal accumulation state
 it "local lane accumulates function state":
     # This asserts internal notebook._local_accumulation_state, not public behavior

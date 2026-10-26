@@ -2,39 +2,17 @@
 
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceEnum, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, ModuleSurfaceConst, ModuleSurfaceImpl}
-use compiler.common.cache.native_resolution_trace.{NativeResolutionTraceV1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_index_build}
-use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error, module_surfaces_validate_index_alignment}
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_fold_std_alias, module_surface_declaration_matches, module_surface_logical_name_from_path}
-use std.io_runtime.{hash_text}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_canonical_module_name, module_surface_declaration_matches}
 
 extern fn rt_hash_text(content: text) -> i64
-extern fn rt_transient_heap_promote<T>(value: T) -> bool
-extern fn rt_array_free<T>(array: [T])
+extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_array_free(array: [Any])
 
-# One managed root array per batch keeps promotion a single traversal. Each
-# element boxes one retained owner (a runtime enum object), and the walk
-# follows its payload into the owner exactly as it would follow an array slot.
-enum ModuleSurfaceRoot:
-    Imports([ParserImport])
-    Exports([Export])
-    Ints([i64])
-    Texts([text])
-    Bools([bool])
-    Traces([NativeResolutionTraceV1])
-    Callables([ModuleSurfaceCallable])
-    Composites([ModuleSurfaceComposite])
-    Enums([ModuleSurfaceEnum])
-    Traits([ModuleSurfaceTrait])
-    TypeAliases([ModuleSurfaceTypeAlias])
-    Constants([ModuleSurfaceConst])
-    Impls([ModuleSurfaceImpl])
-    Surface(ModuleSurface)
-    Registry(ModuleSurfacesByName)
-
-fn module_surface_promote_roots(roots: [ModuleSurfaceRoot]) -> bool:
+fn module_surface_promote_roots(roots: [Any]) -> bool:
     val promoted = rt_transient_heap_promote(roots)
     rt_array_free(roots)
     promoted
@@ -58,53 +36,7 @@ impl ModuleSurfaceBuilder:
     static fn new() -> ModuleSurfaceBuilder:
         ModuleSurfaceBuilder(
             surfaces: [], index_by_name: {}, index_by_path: {},
-            ordered_names: [], ordered_indices: [], frozen: false,
-            index_by_path_keys: [], index_by_path_values: [],
-            index_by_path_hash_buckets: [], index_by_path_hash_next: [],
-            index_by_path_hash_mask: 0)
-
-    me index_by_path_lookup(path: text) -> i64:
-        """Slot of `path` in the scalar path->index chain table, or -1. Never
-        reads the {text: i64} Dict: contains_key on it false-positives under
-        stage-2 native codegen (BOOT-20 family, 2026-10-13 compiler_cli_build
-        victims; see the field comment on ModuleSurfaceBuilder)."""
-        if self.index_by_path_hash_buckets.len() == 0:
-            return -1
-        val bucket = hash_text(path) & self.index_by_path_hash_mask
-        var index = self.index_by_path_hash_buckets[bucket]
-        while index >= 0:
-            if self.index_by_path_keys[index] == path:
-                return index
-            index = self.index_by_path_hash_next[index]
-        -1
-
-    me index_by_path_lookup_index(path: text) -> i64:
-        """Surface index for `path`, or -1. Scalar authority; the Dict is not
-        consulted (same native defect class as index_by_path_lookup)."""
-        val slot = self.index_by_path_lookup(path)
-        if slot < 0:
-            return -1
-        self.index_by_path_values[slot]
-
-    me index_by_path_record(path: text, surface_index: i64):
-        """Append one path -> surface index row to the scalar chain table; the
-        legacy Dict is written in lockstep so its shape stays spec-visible."""
-        if self.index_by_path_hash_buckets.len() == 0:
-            # 4096 buckets, built once per builder: bounded by the closure's
-            # source count, chains absorb the alias volume.
-            val path_bucket_count: i64 = 4096
-            self.index_by_path_hash_mask = path_bucket_count - 1
-            var fill = 0
-            while fill < path_bucket_count:
-                self.index_by_path_hash_buckets = self.index_by_path_hash_buckets.push(-1)
-                fill = fill + 1
-        val bucket = hash_text(path) & self.index_by_path_hash_mask
-        self.index_by_path_hash_next = self.index_by_path_hash_next.push(
-            self.index_by_path_hash_buckets[bucket])
-        self.index_by_path_hash_buckets[bucket] = self.index_by_path_keys.len()
-        self.index_by_path_keys = self.index_by_path_keys.push(path)
-        self.index_by_path_values = self.index_by_path_values.push(surface_index)
-        self.index_by_path[path] = surface_index
+            ordered_names: [], ordered_indices: [], frozen: false)
 
     me add_indexed_name(name: text, surface_index: i64) -> Result<(), text>:
         if self.frozen:
@@ -137,7 +69,7 @@ impl ModuleSurfaceBuilder:
         Ok(())
 
     me add_indexed_canonical_identity(
-        name: text, surface_index: i64, physical_canonical_name: text
+        name: text, surface_index: i64
     ) -> Result<(), text>:
         """Register one resolver spelling and its logical identity once.
 
@@ -150,25 +82,19 @@ impl ModuleSurfaceBuilder:
         val name_result = self.add_indexed_name(name, surface_index)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
-        val std_folded_name = module_surface_fold_std_alias(name)
-        if std_folded_name != name:
-            val folded_result = self.add_indexed_name(
-                std_folded_name, surface_index)
-            if folded_result.is_err():
-                return Err(folded_result.unwrap_err())
-        if physical_canonical_name != name and
-           physical_canonical_name != std_folded_name:
+        val canonical_name = module_surface_canonical_module_name(name)
+        if canonical_name != name:
             val canonical_result = self.add_indexed_name(
-                physical_canonical_name, surface_index)
+                canonical_name, surface_index)
             if canonical_result.is_err():
                 return Err(canonical_result.unwrap_err())
         Ok(())
 
     me has_path(path: text) -> bool:
-        self.index_by_path_lookup_index(module_surface_canonical_path(path)) >= 0
+        self.index_by_path.contains_key(module_surface_canonical_path(path))
 
     me has_canonical_path(canonical_path: text) -> bool:
-        self.index_by_path_lookup_index(canonical_path) >= 0
+        self.index_by_path.contains_key(canonical_path)
 
     me add_parsed(module: ParserModule, source: SourceFile, source_index: i64) -> Result<(), text>:
         val canonical_path = module_surface_canonical_path(source.path)
@@ -177,7 +103,7 @@ impl ModuleSurfaceBuilder:
     me add_parsed_canonical(module: ParserModule, source: SourceFile, source_index: i64, canonical_path: text) -> Result<(), text>:
         if self.frozen:
             return Err("module surface builder is frozen")
-        if self.index_by_path_lookup_index(canonical_path) >= 0:
+        if self.index_by_path.contains_key(canonical_path):
             return Err("module surface already exists for physical source: {canonical_path}")
         val surface_result = module_surface_from_module(module, source, source_index)
         if surface_result.is_err():
@@ -202,63 +128,15 @@ impl ModuleSurfaceBuilder:
     ) -> Result<(), text>:
         if self.frozen:
             return Err("module surface builder is frozen")
-        if self.index_by_path_lookup_index(canonical_path) >= 0:
+        if self.index_by_path.contains_key(canonical_path):
             return Err("module surface already exists for physical source: {canonical_path}")
-        # ADMISSION NAME VALIDATION, CANONICAL LANE ONLY (cycle-37, evidence in
-        # doc/08_tracking/bug/compiler_cli_unresolved_mirtype_chase_nondeterminism_2026-10-13):
-        # a source row admitted with a module_name that disagrees with its
-        # OWN path's logical derivation cross-maps the registry's name->index
-        # routing (observed: compiler.mir_opt.optimization_passes routed to
-        # the lib.compiler.* stub facade, surf_idx 871, all-zero declaration
-        # arrays, hard 'has no exported item' for every consumer). The check
-        # runs ONLY on canonical admissions (a NEW physical source): the
-        # first spelling of a path is path-derived by construction
-        # (_driver_collect_entry_import_source_untimed lists the canonical
-        # spelling first), so a divergent canonical row is mis-tagged by
-        # definition. The ALIAS lane deliberately has NO such check:
-        # module_surface_numbered_path_spec pins derivation-divergent alias
-        # names as legal (std.editor.alias_types on the types.spl path), and
-        # the entry-closure dual-tree import walk registers exactly such rows
-        # (a lib-tree file walked under a compiler.* import spelling). The
-        # bad alias row is registry-indistinguishable from those legal rows;
-        # the durable fix for its class belongs at the closure/inventory
-        # selection layer, not here.
-        # Scope: src/ trees ONLY. Non-src roots (examples/, test/, doc/) are
-        # admitted under their own naming conventions -- the cli closure
-        # resolves examples/10_tooling/trace32_tools/t32_cli/mod.spl as
-        # app.t32_cli.mod (cycle-39 verifier regression: this check rejected
-        # that admission and killed the whole cli closure at parse). The
-        # dual-tree mis-tagging the check targets only exists under src/.
-        val admit_in_src_tree = canonical_path.starts_with("src/") or canonical_path.contains("/src/")
-        # Mirror-layout carve-out: vendored crates at src/lib/<crate>/src/ use
-        # crate-relative module names (loader-authoritative: collections.hashmap
-        # for src/lib/nogc_sync_mut/src/collections/hashmap.spl), which this
-        # check's repo-relative derivation cannot reproduce -- the cycle-40
-        # verifier fired it as a false positive on every nogc_sync_mut module,
-        # killing the cli closure. The check's target class (a lib-tree file
-        # mis-tagged with a compiler.* name) can never match on these paths:
-        # the derivation yields lib.<crate>.src.*, never compiler.*, so the
-        # comparison is vacuous here anyway.
-        var admit_path_rest = canonical_path
-        if admit_path_rest.starts_with("src/"):
-            admit_path_rest = admit_path_rest.substring(4)
-        else:
-            val src_at = admit_path_rest.index_of("/src/")
-            if src_at >= 0:
-                admit_path_rest = admit_path_rest.substring(src_at + 5)
-        val admit_is_mirror_layout = admit_path_rest.starts_with("lib/") and admit_path_rest.contains("/src/")
-        if admit_in_src_tree and not admit_is_mirror_layout:
-            val admit_derived = module_surface_fold_std_alias(
-                module_surface_logical_name_from_path(canonical_path))
-            if module_surface_fold_std_alias(module_name) != admit_derived:
-                return Err("module surface name disagrees with its path derivation: path={canonical_path} module_name={module_name} derived={admit_derived}")
         val surface_index = self.surfaces.len()
         val name_result = self.add_indexed_canonical_identity(
-            module_name, surface_index, surface.canonical_name)
+            module_name, surface_index)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
         self.surfaces = self.surfaces.push(surface)
-        self.index_by_path_record(canonical_path, surface_index)
+        self.index_by_path[canonical_path] = surface_index
         Ok(())
 
     me add_alias(source: SourceFile) -> Result<(), text>:
@@ -274,30 +152,18 @@ impl ModuleSurfaceBuilder:
     ) -> Result<(), text>:
         if self.frozen:
             return Err("module surface builder is frozen")
-        # NO admission name validation in the alias lane, deliberately:
-        # module_surface_numbered_path_spec pins derivation-divergent alias
-        # names as legal (std.editor.alias_types admitted for the
-        # types.spl path, fold-std derivation lib.editor.alias_types), and
-        # the entry-closure dual-tree import walk depends on them (a lib-tree
-        # file walked under a compiler.* import spelling registers exactly
-        # such an alias row). The cross-map row observed in cycle-37
-        # (facade path + compiler.mir_opt.optimization_passes, surf_idx 871)
-        # is registry-indistinguishable from those legal rows -- any
-        # derivation check here breaks the spec. See the canonical-lane
-        # comment in add_surface_canonical_identity and the bug doc.
-        val alias_slot = self.index_by_path_lookup(canonical_path)
-        if alias_slot < 0:
+        if not self.index_by_path.contains_key(canonical_path):
             return Err("missing physical module surface for alias: {canonical_path}")
-        val surface_index = self.index_by_path_values[alias_slot]
+        val surface_index = self.index_by_path[canonical_path]
         if surface_index < 0 or surface_index >= self.surfaces.len():
             return Err("invalid physical module surface index for alias: path={canonical_path} index={surface_index} len={self.surfaces.len()}")
-        val surface: ModuleSurface = self.surfaces[surface_index]
+        val surface = self.surfaces[surface_index]
         if (surface.canonical_path != canonical_path or
             surface.content_length != content.len() or
             surface.content_hash != rt_hash_text(content)):
             return Err("conflicting physical source: {canonical_path}")
         val name_result = self.add_indexed_canonical_identity(
-            module_name, surface_index, surface.canonical_name)
+            module_name, surface_index)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
         Ok(())
@@ -378,7 +244,7 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
         return Err("unable to allocate module surface builder")
     var source_index = 0
     while source_index < sources.len():
-        val source: SourceFile = sources[source_index]
+        val source = sources[source_index]
         # Source-map entries cross the parser/driver ownership boundary.  A
         # native nil must be reported with its stable position, never consumed
         # by the first `source.module_name` field access below.
@@ -386,17 +252,15 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
             return Err("invalid source entry at index: {source_index}")
         if not modules.contains_key(source.module_name):
             return Err("missing parsed module for source: {source.module_name}")
-        val module: ParserModule = modules[source.module_name]
+        val module = modules[source.module_name]
         # A parser-map entry is transport data at this boundary.  Never let an
         # invalid entry become an anonymous native nil-receiver trap during a
         # self-hosted build: preserve the source identity for the driver error.
         if module == nil:
             return Err("invalid parsed module for source: {source.module_name}")
-        # Membership and nil guards establish a concrete ParserModule value.
-        # Optional-pattern unwrapping here can reinterpret the record as i64.
         val canonical_path = module_surface_canonical_path(source.path)
         if builder.has_canonical_path(canonical_path):
-            val surface = builder.surfaces[builder.index_by_path_lookup_index(canonical_path)]
+            val surface = builder.surfaces[builder.index_by_path[canonical_path]]
             if not module_surface_declaration_matches(surface, module):
                 return Err("conflicting declaration metadata for physical source: {canonical_path}")
             val alias_result = builder.add_alias_canonical(source, canonical_path)
@@ -411,20 +275,16 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
     for alias in modules.keys():
         if builder.index_by_name.contains_key(alias):
             continue
-        val module: ParserModule = modules[alias]
+        val module = modules[alias]
         if module == nil:
             return Err("invalid parsed module alias: {alias}")
-        # The alias dictionary likewise stores concrete ParserModule values.
         # Parsed aliases retain the physical source path in ParserModule.name.
         # Resolve that identity before declaration-shape matching: unrelated
         # physical modules may expose the same API.
         val parsed_path = module_surface_canonical_path(module.name)
-        val parsed_slot = builder.index_by_path_lookup(parsed_path)
-        if parsed_slot >= 0:
-            val physical_index = builder.index_by_path_values[parsed_slot]
+        if builder.index_by_path.contains_key(parsed_path):
             val canonical_result = builder.add_indexed_canonical_identity(
-                alias, physical_index,
-                builder.surfaces[physical_index].canonical_name)
+                alias, builder.index_by_path[parsed_path])
             if canonical_result.is_err():
                 return Err(canonical_result.unwrap_err())
             continue
@@ -439,8 +299,7 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
         if matching_index < 0:
             return Err("parsed module has no source surface: {alias}")
         val alias_result = builder.add_indexed_canonical_identity(
-            alias, matching_index,
-            builder.surfaces[matching_index].canonical_name)
+            alias, matching_index)
         if alias_result.is_err():
             return Err(alias_result.unwrap_err())
     val origin_result = builder.resolve_export_origins()
@@ -455,31 +314,31 @@ pub fn module_surface_promote(surface: ModuleSurface) -> bool:
     # Dict<text, aggregate> is construction-only; retained declaration payload
     # arrays are the required follow-up owner before Stage 3 can be admitted.
     val origin_index = surface.export_origin_index
-    var roots: [ModuleSurfaceRoot] = []
-    roots.push(ModuleSurfaceRoot.Imports(surface.imports))
-    roots.push(ModuleSurfaceRoot.Exports(surface.exports))
-    roots.push(ModuleSurfaceRoot.Texts(surface.composite_names))
-    roots.push(ModuleSurfaceRoot.Texts(surface.enum_names))
-    roots.push(ModuleSurfaceRoot.Texts(surface.trait_names))
-    roots.push(ModuleSurfaceRoot.Texts(surface.callable_names))
-    roots.push(ModuleSurfaceRoot.Texts(surface.type_alias_names))
-    roots.push(ModuleSurfaceRoot.Texts(surface.constant_names))
-    roots.push(ModuleSurfaceRoot.Ints(surface.import_item_offsets))
-    roots.push(ModuleSurfaceRoot.Texts(surface.import_item_names))
-    roots.push(ModuleSurfaceRoot.Texts(surface.import_item_aliases))
-    roots.push(ModuleSurfaceRoot.Bools(surface.import_item_has_alias))
-    roots.push(ModuleSurfaceRoot.Callables(surface.callable_values))
-    roots.push(ModuleSurfaceRoot.Composites(surface.composite_values))
-    roots.push(ModuleSurfaceRoot.Enums(surface.enum_values))
-    roots.push(ModuleSurfaceRoot.Traits(surface.trait_values))
-    roots.push(ModuleSurfaceRoot.TypeAliases(surface.type_alias_values))
-    roots.push(ModuleSurfaceRoot.Constants(surface.constant_values))
-    roots.push(ModuleSurfaceRoot.Impls(surface.impls))
-    roots.push(ModuleSurfaceRoot.Texts(origin_index.names))
-    roots.push(ModuleSurfaceRoot.Texts(origin_index.owner_modules))
-    roots.push(ModuleSurfaceRoot.Texts(origin_index.source_names))
-    roots.push(ModuleSurfaceRoot.Texts(origin_index.resolution_kinds))
-    roots.push(ModuleSurfaceRoot.Surface(surface))
+    var roots: [Any] = []
+    roots.push(surface.imports)
+    roots.push(surface.exports)
+    roots.push(surface.composite_names)
+    roots.push(surface.enum_names)
+    roots.push(surface.trait_names)
+    roots.push(surface.callable_names)
+    roots.push(surface.type_alias_names)
+    roots.push(surface.constant_names)
+    roots.push(surface.import_item_offsets)
+    roots.push(surface.import_item_names)
+    roots.push(surface.import_item_aliases)
+    roots.push(surface.import_item_has_alias)
+    roots.push(surface.callable_values)
+    roots.push(surface.composite_values)
+    roots.push(surface.enum_values)
+    roots.push(surface.trait_values)
+    roots.push(surface.type_alias_values)
+    roots.push(surface.constant_values)
+    roots.push(surface.impls)
+    roots.push(origin_index.names)
+    roots.push(origin_index.owner_modules)
+    roots.push(origin_index.source_names)
+    roots.push(origin_index.resolution_kinds)
+    roots.push(surface)
     module_surface_promote_roots(roots)
 
 fn module_surface_promote_fields(surface: ModuleSurface):
@@ -517,7 +376,7 @@ fn module_surface_promote_fields(surface: ModuleSurface):
 
     So the promotes are the work and stay; no per-field failure signal exists to
     report. Fail-closed coverage is not lost: the registry root carrier below is
-    a freshly built `[ModuleSurfaceRoot]` whose promote verdict IS meaningful, and the driver
+    a freshly built `[Any]` whose promote verdict IS meaningful, and the driver
     runs `module_surfaces_retained_alignment_error` AFTER
     `_sffi_transient_array_scope_end()`, which reads the names back out of the
     dead scope — the real post-condition, at the only moment it means anything.
@@ -536,7 +395,7 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     COUNT: 24 individual promote calls per surface, each paying that O(N)
     scan, is 24x more expensive than it needs to be. `module_surface_promote`
     (a few lines above) already proves the batched shape is safe for exactly
-    this promote function: collect many roots into ONE `[ModuleSurfaceRoot]` array and
+    this promote function: collect many roots into ONE `[Any]` array and
     promote it once — the reachability walk inside `rt_transient_heap_promote`
     already recurses into an array's elements via `transient_heap_children`,
     so a single call over an array of all 24 fields promotes the same set of
@@ -545,31 +404,31 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     `module_surface_promote_freeze_names` below does the same). Pinned by
     `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`.
     """
-    var fields: [ModuleSurfaceRoot] = []
-    fields.push(ModuleSurfaceRoot.Texts(surface.composite_names))
-    fields.push(ModuleSurfaceRoot.Texts(surface.enum_names))
-    fields.push(ModuleSurfaceRoot.Texts(surface.trait_names))
-    fields.push(ModuleSurfaceRoot.Texts(surface.callable_names))
-    fields.push(ModuleSurfaceRoot.Texts(surface.type_alias_names))
-    fields.push(ModuleSurfaceRoot.Texts(surface.constant_names))
-    fields.push(ModuleSurfaceRoot.Composites(surface.composite_values))
-    fields.push(ModuleSurfaceRoot.Enums(surface.enum_values))
-    fields.push(ModuleSurfaceRoot.Traits(surface.trait_values))
-    fields.push(ModuleSurfaceRoot.Callables(surface.callable_values))
-    fields.push(ModuleSurfaceRoot.TypeAliases(surface.type_alias_values))
-    fields.push(ModuleSurfaceRoot.Constants(surface.constant_values))
-    fields.push(ModuleSurfaceRoot.Ints(surface.import_target_indices))
-    fields.push(ModuleSurfaceRoot.Texts(surface.import_target_names))
-    fields.push(ModuleSurfaceRoot.Traces(surface.import_resolution_traces))
-    fields.push(ModuleSurfaceRoot.Ints(surface.import_item_offsets))
-    fields.push(ModuleSurfaceRoot.Texts(surface.import_item_names))
-    fields.push(ModuleSurfaceRoot.Texts(surface.import_item_aliases))
-    fields.push(ModuleSurfaceRoot.Bools(surface.import_item_has_alias))
-    fields.push(ModuleSurfaceRoot.Texts(surface.export_route_sources))
-    fields.push(ModuleSurfaceRoot.Texts(surface.export_route_locals))
-    fields.push(ModuleSurfaceRoot.Ints(surface.export_route_target_indices))
-    fields.push(ModuleSurfaceRoot.Texts(surface.export_route_target_names))
-    fields.push(ModuleSurfaceRoot.Bools(surface.export_route_is_glob))
+    var fields: [Any] = []
+    fields.push(surface.composite_names)
+    fields.push(surface.enum_names)
+    fields.push(surface.trait_names)
+    fields.push(surface.callable_names)
+    fields.push(surface.type_alias_names)
+    fields.push(surface.constant_names)
+    fields.push(surface.composite_values)
+    fields.push(surface.enum_values)
+    fields.push(surface.trait_values)
+    fields.push(surface.callable_values)
+    fields.push(surface.type_alias_values)
+    fields.push(surface.constant_values)
+    fields.push(surface.import_target_indices)
+    fields.push(surface.import_target_names)
+    fields.push(surface.import_resolution_traces)
+    fields.push(surface.import_item_offsets)
+    fields.push(surface.import_item_names)
+    fields.push(surface.import_item_aliases)
+    fields.push(surface.import_item_has_alias)
+    fields.push(surface.export_route_sources)
+    fields.push(surface.export_route_locals)
+    fields.push(surface.export_route_target_indices)
+    fields.push(surface.export_route_target_names)
+    fields.push(surface.export_route_is_glob)
     val _promoted = rt_transient_heap_promote(fields)
 
 fn module_surface_promote_scope_sentinel() -> bool:
@@ -577,12 +436,12 @@ fn module_surface_promote_scope_sentinel() -> bool:
 
     `rt_transient_heap_promote` answers false unconditionally when the transient
     array scope is not both ACTIVE and PAUSED (runtime_native.c:2430) — the same
-    `false` a genuinely unpromotable field produces. A fresh `[ModuleSurfaceRoot]` is the same
+    `false` a genuinely unpromotable field produces. A fresh `[Any]` is the same
     shape as the `roots` carrier the tail already promotes, so a false here means
     the scope state (or a split runtime copy under `--mode=dynload`) is at fault
     and no field name would be meaningful. Reported, never fatal on its own.
     """
-    var probe: [i64] = []
+    var probe: [Any] = []
     probe.push(0)
     val ok = rt_transient_heap_promote(probe)
     rt_array_free(probe)
@@ -592,7 +451,7 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
     """Promote the registry graph; return "" on success, else a named reason.
 
     Fail-closed: the one route that can answer a meaningful `false` — the
-    registry root carrier, a freshly built `[ModuleSurfaceRoot]` — returns a non-empty text
+    registry root carrier, a freshly built `[Any]` — returns a non-empty text
     naming it plus the scope sentinel, rather than the bare `false` the driver
     used to surface as an unattributed phase-2 failure.
 
@@ -610,14 +469,14 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
     owning scope is paused, then retain the registry carriers.
     """
     val sentinel = module_surface_promote_scope_sentinel()
-    var roots: [ModuleSurfaceRoot] = []
+    var roots: [Any] = []
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         val surface = registry.surfaces[surface_index]
         module_surface_promote_fields(surface)
         module_surface_promote_freeze_names(surface)
         surface_index = surface_index + 1
-    roots.push(ModuleSurfaceRoot.Registry(registry))
+    roots.push(registry)
     if not module_surface_promote_roots(roots):
         return "registry root carrier (scope sentinel promote={sentinel}, surfaces={registry.surfaces.len()} names={registry.ordered_names.len()} indices={registry.ordered_indices.len()} dict={registry.index_by_name.len()})"
     ""
@@ -667,7 +526,7 @@ fn module_surface_promote_freeze_names(surface: ModuleSurface):
     from the dead scope (module_surface_registry_index.spl:321).
 
     Linux S3-1 (2026-09-14, BOOT-18): briefly batched into one
-    `rt_transient_heap_promote` call over a constructed `[ModuleSurfaceRoot]` array, the same
+    `rt_transient_heap_promote` call over a constructed `[Any]` array, the same
     shape as `module_surface_promote_fields` above (each call pays an O(N)
     native scan over the whole transient-scope tracking vector — see
     doc/08_tracking/bug/stage3_phase2_surface_stall_after_huffman_46gb_2026-09-14.md

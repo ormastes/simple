@@ -3,7 +3,6 @@
 # Core types used throughout the test runner.
 
 use std.common.perf.execution_metrics.{ResourceUsage}
-use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
 
 val TEST_OUTPUT_CAPTURE_BYTES: i64 = 4 * 1024 * 1024
 
@@ -148,7 +147,6 @@ struct TestOptions:
     fork_mode: bool
     # Resource governor options
     resource_limit_pct: i64
-    worker_memory_mb: i64 = 0  # Aggregate child RSS admission budget, MiB; zero uses legacy policy
     # Manifest/cache options
     no_cache: bool
     refresh_manifest: bool
@@ -168,10 +166,6 @@ struct TestOptions:
     batch_size: i64
     batch_manifest: text
     batch_result: text
-    # Explicit AOT backend; empty preserves the legacy SMF execution contract.
-    native_backend: text = ""
-    # Ordered finite native-build source selectors; the first root wins.
-    native_source_roots: [text] = []
 
 fn doctest_discovery_scope_path(options: TestOptions) -> text:
     """Return the explicit doctest target, or empty for repository scope.
@@ -230,10 +224,6 @@ struct TestFileResult:
     # Examples neutralised by `# @tag:in-development` are distinct from
     # environment skips. Defaulted to keep existing producers compatible.
     in_development: i64 = 0
-    # Non-empty only when the file was NOT RUN because a build feature it
-    # requires (`# @tag:requires-<feature>`, std.spec.requires_feature) is
-    # off; holds the reason. Recorded as its own DB status, never "passed".
-    feature_gated: text = ""
     # Bounded child-to-parent MC/DC evidence carrier. Empty means unavailable.
     mcdc_evidence_v1: text = ""
     # Non-empty only when MC/DC instrumentation was skipped for this spec
@@ -267,11 +257,6 @@ struct TestFileResult:
     cohort_id: text = ""
     budget_status: text = "incomplete"
     anomaly_status: text = "incomplete"
-    process_completion: Option<ProcessCompletionV1> = nil
-    # Raw opt-in framework event transport. Syntax is checked, but a valid
-    # prefix may be incomplete; this is diagnostic evidence, never a receipt.
-    # Empty means disabled or unavailable.
-    trace_case_events_sdn: text = ""
 
 impl TestFileResult:
     # Routed through the single classifier below rather than re-deriving the
@@ -295,24 +280,18 @@ struct TestRunResult:
     total_duration_ms: i64
     total_setup_ms: i64
     total_cached: i64
-    # True only for a `--resume` whose checkpoint already covers every selected
-    # file: the totals are a real verdict carried from the interrupted run, so
-    # `files: []` here is NOT a preflight abort and NOT an empty selection.
-    carried_from_checkpoint: bool = false
 
 impl TestRunResult:
     # The aggregate counters are NOT sufficient. A CRASHED / TERMINATED /
     # NOT_RUN unit, or a unit whose error carries an unrecognised class token,
     # can leave total_failed and total_timed_out both at 0 -- which is exactly
     # how "All tests passed!" was printed over a run that never verified
-    # anything. Every file must classify OK, or SKIP (feature-gated: not run,
-    # not a failure; the summary refuses to call an all-SKIP run a pass).
+    # anything. Every file must classify OK.
     fn is_ok() -> bool:
         if self.total_failed != 0 or self.total_timed_out != 0:
             return false
         for file_result in self.files:
-            val cls = test_file_result_outcome_class(file_result)
-            if cls != "OK" and cls != "SKIP":
+            if test_file_result_outcome_class(file_result) != "OK":
                 return false
         true
 
@@ -320,10 +299,6 @@ fn classify_test_run_result(result: TestRunResult, empty_is_success: bool) -> Te
     if result.total_timed_out > 0:
         return TestRunOutcome.TimeoutResourceFailure
     if result.files.len() == 0:
-        if result.carried_from_checkpoint:
-            if result.total_failed > 0:
-                return TestRunOutcome.AssertionOrChildFailure
-            return TestRunOutcome.Pass
         if result.total_failed > 0:
             return TestRunOutcome.InternalError
         if not empty_is_success:
@@ -376,7 +351,7 @@ fn test_outcome_class_token(err: text) -> text:
     head.trim().upper().replace("_", " ")
 
 # Total: every TestFileResult maps to exactly one of
-# OK / SKIP / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN / VACUOUS.
+# OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN.
 fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
     val token = test_outcome_class_token(file_result.error)
     if token == "CRASHED":
@@ -391,19 +366,10 @@ fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
         return "UNSUPPORTED"
     if token == "NOT EXECUTED" or token == "NOT RUN":
         return "NOT_RUN"
-    if token == "VACUOUS":
-        # Examples ran and exited clean, but evaluated zero expectations: the
-        # file verified nothing. A real failure (never a pass, never
-        # unverified) so an exit code and a FAIL tag follow it. BUG-02 / T12.
-        return "VACUOUS"
     if token != "":
         # A non-empty error with an unrecognised class token is a REAL failure.
         # It must never fall through to OK -- that is the silent-green shape.
         return "ERROR"
-    if file_result.feature_gated != "":
-        # Not run: a required build feature is off. Neither a pass (nothing
-        # was verified) nor a failure; every printer must say SKIP, not PASS.
-        return "SKIP"
     if file_result.timed_out:
         return "TIMEOUT"
     if file_result.failed > 0:
@@ -486,7 +452,7 @@ fn execution_mode_base_runtime(mode: TestExecutionMode) -> text:
         case Smf: "smf"
         case Native: "native"
         case Compile: "compile"
-        case TestExecutionMode.Composite(spec):
+        case Composite(spec):
             val first_paren = spec.find("(")
             if first_paren > 0:
                 spec[0:first_paren].trim()
@@ -496,13 +462,13 @@ fn execution_mode_base_runtime(mode: TestExecutionMode) -> text:
 fn execution_mode_is_composite(mode: TestExecutionMode) -> bool:
     """Check if this is a composite platform spec."""
     match mode:
-        case TestExecutionMode.Composite(_): true
+        case Composite(_): true
         case _: false
 
 fn execution_mode_has_layer(mode: TestExecutionMode, layer: text) -> bool:
     """Check if spec contains a specific layer."""
     match mode:
-        case TestExecutionMode.Composite(spec): spec.contains(layer)
+        case Composite(spec): spec.contains(layer)
         case _: false
 
 fn execution_mode_is_remote(mode: TestExecutionMode) -> bool:
@@ -520,7 +486,7 @@ fn execution_mode_is_container(mode: TestExecutionMode) -> bool:
 fn execution_mode_target_arch(mode: TestExecutionMode) -> text:
     """Extract target architecture from spec."""
     match mode:
-        case TestExecutionMode.Composite(spec):
+        case Composite(spec):
             val archs = ["riscv32", "arm32", "x86_64", "aarch64", "mips"]
             var i = 0
             while i < archs.len():
@@ -537,7 +503,7 @@ fn execution_mode_to_string(mode: TestExecutionMode) -> text:
         case Smf: "smf"
         case Native: "native"
         case Compile: "compile"
-        case TestExecutionMode.Composite(spec): spec
+        case Composite(spec): spec
 
 # =========================================================================
 # Exports

@@ -22,7 +22,6 @@
 
 #include "runtime.h"
 #include "simple_gpu_provider_abi_v1.h"
-#include "simple_gpu_provider_identity_v1.h"
 
 #include <stdatomic.h>
 #include <limits.h>
@@ -130,27 +129,13 @@ static int simple_dynload_unique_snapshot_linux_v1(int snapshot) {
 }
 #endif
 
-/* Shared UTF-8 loader belongs to both the registry and legacy wrappers. */
+/* Forward declaration: the definition is Windows-only and lives near the
+ * bottom of this file, but simple_gpu_open() below calls it. Without this
+ * clang-cl emits an implicit declaration returning int and then errors with
+ * "conflicting types for 'runtime_dynload_open_utf8'" at the real HMODULE
+ * definition, which broke the Windows MSVC stage 2 runtime probe. */
 #ifdef _WIN32
-static HMODULE runtime_dynload_open_utf8(const char *path) {
-    int wide_len;
-    wchar_t *wide_path;
-    HMODULE handle;
-    if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
-    handle = LoadLibraryW(wide_path);
-    free(wide_path);
-    return handle;
-}
+static HMODULE runtime_dynload_open_utf8(const char *path);
 #endif
 
 static void *simple_gpu_open(const char *path) {
@@ -1225,6 +1210,7 @@ int64_t rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session_token,
                 receipt.provider_identity != identity ||
                 receipt.device_identity != device || receipt.resource == 0 ||
                 receipt.resource != provider_resource ||
+                receipt.checksum == 0 ||
                 receipt.device_elapsed_ns == 0)
             status = SIMPLE_GPU_STATUS_INCOMPATIBLE;
         else {
@@ -1334,81 +1320,6 @@ int64_t rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session_token,
     }
     simple_gpu_unlock();
     free(staging);
-    simple_gpu_call_release_v1(&pin);
-    return status;
-}
-
-int64_t rt_gpu_provider_device_identity_raw(int64_t backend_bit,
-        int64_t session_token, int64_t completion_token, int64_t identity_ptr) {
-    SimpleGpuCallPinV1 pin;
-    const SimpleGpuProviderAbiV1 *api;
-    SimpleGpuProviderDeviceIdentityFnV1 query;
-    SimpleGpuOwnedSessionV1 *session;
-    SimpleGpuOwnedCompletionV1 *completion;
-    SimpleGpuProviderDeviceIdentityV1 identity;
-    uint64_t provider_session, provider_completion;
-    SimpleGpuStatusV1 status;
-    size_t i;
-    int device_nonzero = 0, driver_nonzero = 0;
-    if (session_token <= 0 || completion_token <= 0 || identity_ptr == 0)
-        return SIMPLE_GPU_STATUS_INVALID;
-    if (((SimpleGpuProviderDeviceIdentityV1 *)(uintptr_t)identity_ptr)->struct_size <
-            sizeof(SimpleGpuProviderDeviceIdentityV1))
-        return SIMPLE_GPU_STATUS_INVALID;
-    if (!simple_gpu_api_acquire_v1(backend_bit, &pin, &api))
-        return SIMPLE_GPU_STATUS_UNAVAILABLE;
-    (void)api;
-    simple_gpu_lock();
-    query = (SimpleGpuProviderDeviceIdentityFnV1)simple_gpu_symbol(
-        pin.state->handle, "simple_gpu_provider_device_identity_v1");
-    if (!query) {
-        simple_gpu_unlock(); simple_gpu_call_release_v1(&pin);
-        return SIMPLE_GPU_STATUS_UNAVAILABLE;
-    }
-    session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
-    completion = session ? simple_gpu_completion_locked_v1(
-        session, (uint64_t)completion_token) : NULL;
-    if (!session || !completion || session->state != pin.state ||
-            session->generation != pin.generation || session->quarantined ||
-            session->busy || completion->quarantined || completion->busy ||
-            !completion->terminal || !completion->readback_observed ||
-            completion->readback_length == 0) {
-        simple_gpu_unlock(); simple_gpu_call_release_v1(&pin);
-        return SIMPLE_GPU_STATUS_INVALID;
-    }
-    session->busy = 1;
-    completion->busy = 1;
-    provider_session = session->provider_handle;
-    provider_completion = completion->provider_handle;
-    simple_gpu_unlock();
-    memset(&identity, 0, sizeof(identity));
-    identity.struct_size = sizeof(identity);
-    status = query(provider_session, provider_completion, &identity);
-    if (status == SIMPLE_GPU_STATUS_OK) {
-        for (i = 0; i < 16; i++) {
-            device_nonzero |= identity.device_uuid[i] != 0;
-            driver_nonzero |= identity.driver_uuid[i] != 0;
-        }
-        if (identity.struct_size != sizeof(identity) ||
-                identity.version != SIMPLE_GPU_PROVIDER_DEVICE_IDENTITY_VERSION_V1 ||
-                identity.reserved != 0 || !device_nonzero || !driver_nonzero ||
-                identity.api_version == 0 || identity.device_type == 0)
-            status = SIMPLE_GPU_STATUS_INCOMPATIBLE;
-    }
-    simple_gpu_lock();
-    session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
-    completion = session ? simple_gpu_completion_locked_v1(
-        session, (uint64_t)completion_token) : NULL;
-    if (!session || !completion || session->state != pin.state ||
-            session->generation != pin.generation ||
-            !completion->terminal || !completion->readback_observed) {
-        status = SIMPLE_GPU_STATUS_INCOMPATIBLE;
-    }
-    if (completion) completion->busy = 0;
-    if (session) session->busy = 0;
-    simple_gpu_unlock();
-    if (status == SIMPLE_GPU_STATUS_OK)
-        memcpy((void *)(uintptr_t)identity_ptr, &identity, sizeof(identity));
     simple_gpu_call_release_v1(&pin);
     return status;
 }
@@ -1661,9 +1572,6 @@ int64_t rt_gpu_provider_unload(int64_t backend_bit) {
     return 1;
 }
 
-/* Hosted Rust native-all uses this complete registry/state owner while keeping
- * its existing legacy GPU and generic dynamic-library ABI implementations. */
-#ifndef SIMPLE_GPU_PROVIDER_REGISTRY_ONLY
 #define GPU_CALL0(ret, name, bit, provider_name, unavailable) \
     ret name(void) { typedef ret (*Fn)(void); SimpleGpuCallPinV1 pin; ret result; \
         if (!simple_gpu_call_acquire_v1(bit, provider_name, &pin)) return unavailable; \
@@ -2000,7 +1908,27 @@ int64_t rt_metal_set_bytes(int64_t encoder, int64_t array_value, int64_t request
     return result;
 }
 
-
+#ifdef _WIN32
+static HMODULE runtime_dynload_open_utf8(const char *path) {
+    int wide_len;
+    wchar_t *wide_path;
+    HMODULE handle;
+    if (!path || !path[0]) return NULL;
+    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            path, -1, wide_path, wide_len) != wide_len) {
+        free(wide_path);
+        return NULL;
+    }
+    handle = LoadLibraryW(wide_path);
+    free(wide_path);
+    return handle;
+}
+#endif
 
 int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
 #if defined(__linux__)
@@ -2123,4 +2051,3 @@ int64_t spl_dlclose(int64_t handle) {
     return (int64_t)dlclose((void*)(intptr_t)handle);
 #endif
 }
-#endif /* !SIMPLE_GPU_PROVIDER_REGISTRY_ONLY */

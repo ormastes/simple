@@ -121,7 +121,7 @@ for each widget in [47 widgets]:
 
 **Test Cases Per Widget:**
 
-```simple:skip
+```spl
 describe "GUI Widget Parametrized Rendering":
   # Matrix: 47 widgets × 8 layouts × 5 systems × 3 devices
   
@@ -239,7 +239,7 @@ test/03_system/check/
 
 ## Parametrized Test Template
 
-```simple:skip
+```spl
 # GUI Widget Parametrized Test Template
 
 use std.spec

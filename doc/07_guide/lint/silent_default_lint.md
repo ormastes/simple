@@ -39,7 +39,7 @@ It blocked the bootstrap six times before anyone looked at the `unwrap_or`.
 `.unwrap_or(<const>)` is *usually fine*. It is a defect only when the constant is
 **indistinguishable from a legitimate result**:
 
-```simple:skip
+```simple
 trimmed.index_of("(").unwrap_or(0)     # DEFECT — 0 is a VALID index, so
                                        # "no paren" becomes "paren at col 0"
 trimmed.index_of("(").unwrap_or(-1)    # SAFE — -1 is outside the index domain,
@@ -77,7 +77,7 @@ sharp enough that scoping it would only hide real defects.
 
 ## Suppression
 
-```simple:skip
+```simple
 val idx = s.index_of("(").unwrap_or(0)  # lint:allow(silent_default) caller
                                         # already tested contains("(")
 ```
@@ -122,7 +122,7 @@ than silently.
 Change exactly one line in
 `src/compiler/90.tools/lint/_LintMain/config_and_model.spl`:
 
-```text
+```simple
 levels["silent_default"] = "warn"   ->   levels["silent_default"] = "deny"
 ```
 

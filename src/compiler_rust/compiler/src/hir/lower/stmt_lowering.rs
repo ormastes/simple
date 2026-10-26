@@ -148,95 +148,14 @@ impl Lowerer {
         Self::declared_type_struct_name(declared).map(|(name, _)| name)
     }
 
-    /// Preserve only an exact declared trait identity for a local receiver.
-    /// This does not change the runtime value or DI/security type-name hints.
-    pub(super) fn declared_trait_dispatch(&self, declared: &ast::Type) -> Option<HirTraitDispatch> {
-        let ast::Type::Simple(name) = declared else { return None; };
-        self.trait_declaration_for_current_owner(name)
-    }
-
-    /// `x: Trait?` — remember the payload's declared trait on the slot side
-    /// map (never on `x` itself, whose own methods are Option methods).
-    pub(super) fn record_optional_trait_payload(
-        &self, declared: Option<&ast::Type>, local_index: usize, ctx: &mut FunctionContext,
-    ) {
-        let Some(ast::Type::Optional(inner)) = declared else { return; };
-        if let Some(dispatch) = self.declared_trait_dispatch(inner) {
-            ctx.optional_trait_payloads.insert(local_index, dispatch);
-        }
-    }
-
-    /// The if-let / match subject temp inherits the payload trait of the
-    /// `Option<Trait>` local it was read from.
-    pub(super) fn carry_optional_trait_subject(&self, subject: &Expr, subject_idx: usize, ctx: &mut FunctionContext) {
-        let Expr::Identifier(name) = subject else { return; };
-        let Some(dispatch) = ctx.lookup(name).and_then(|index| ctx.optional_trait_payloads.get(&index)).cloned() else {
-            return;
-        };
-        ctx.optional_trait_payloads.insert(subject_idx, dispatch);
-    }
-
-    /// Give the PAYLOAD binding of an `Option<Trait>` subject its declared
-    /// trait owner so `binding.method()` lowers to vtable dispatch instead of
-    /// a bare-name call. `if val x = opt` binds the payload (`allow_identifier`);
-    /// in a match arm a bare identifier binds the Option itself, so only
-    /// `Some(x)` qualifies there.
-    pub(crate) fn bind_optional_trait_payload(
-        &self, pattern: &Pattern, subject_idx: usize, allow_identifier: bool, ctx: &mut FunctionContext,
-    ) {
-        let Some(dispatch) = ctx.optional_trait_payloads.get(&subject_idx).cloned() else { return; };
-        let name = match pattern {
-            Pattern::Identifier(name) | Pattern::MutIdentifier(name) if allow_identifier => name,
-            Pattern::Enum { variant, payload: Some(payload), .. } if variant == "Some" && payload.len() == 1 => {
-                match &payload[0] {
-                    Pattern::Identifier(name) | Pattern::MutIdentifier(name) => name,
-                    _ => return,
-                }
-            }
-            _ => return,
-        };
-        if let Some(local) = ctx.lookup(name).and_then(|index| ctx.locals.get_mut(index)) {
-            local.trait_dispatch_owner = Some(dispatch);
-        }
-    }
-
-    pub(super) fn trait_declaration_for_current_owner(&self, authored_name: &str) -> Option<HirTraitDispatch> {
-        self.trait_declaration_in_file(authored_name, self.current_file.as_deref())
-    }
-
-    pub(super) fn trait_declaration_in_file(&self, authored_name: &str, file: Option<&std::path::Path>) -> Option<HirTraitDispatch> {
-        let owner = file.map(crate::interpreter::normalize_path_key)
-            .unwrap_or_else(|| std::path::PathBuf::from("<local-module>"));
-        self.trait_declared_owners.get(&owner)?.get(authored_name).cloned()
-    }
-
-    fn declared_local_trait_owner(
-        &self, annotation: Option<&ast::Type>, init: Option<&Expr>, ctx: &FunctionContext,
-    ) -> Option<HirTraitDispatch> {
-        if let Some(annotation) = annotation {
-            return self.declared_trait_dispatch(annotation);
-        }
-        let key = match init? {
-            Expr::Call { callee, .. } => match callee.as_ref() {
-                Expr::Identifier(name) if ctx.lookup(name).is_none() => name.clone(),
-                Expr::Path(parts) => parts.join("."),
-                _ => return None,
-            },
-            Expr::MethodCall { receiver, method, .. } => match receiver.as_ref() {
-                Expr::Identifier(name) if ctx.lookup(name).is_none() => format!("{}.{}", name, method),
-                _ => return None,
-            },
-            _ => return None,
-        };
-        // A local declaration (including a None tombstone) wins over an alias.
-        // Unknown global-return strings lack owner identity and are not trusted.
-        self.declared_function_returns.get(&key).or_else(|| {
-            self.resolve_import_alias(&key).and_then(|resolved| self.declared_function_returns.get(resolved))
-        }).cloned().flatten()
-    }
-
-    /// Like `static_call_return_type_name`, also reports return wrappers.
-    /// Wrapped returns contribute a name only, never a bare payload TypeId.
+    /// Like `static_call_return_type_name`, but also reports whether the
+    /// declared return type WRAPPED the struct (`-> T?`, `-> mut T`, `-> *T`).
+    ///
+    /// The distinction is load-bearing and the caller must honour it: for an
+    /// unwrapped `-> T` the binding's TypeId may be upgraded to T outright, but
+    /// for `-> T?` the VALUE is an optional, so typing the local as bare `T`
+    /// makes every field read address the payload's slots through the wrapper
+    /// and return garbage. A wrapped return therefore contributes the NAME only.
     fn static_call_return_type_name_parts(&self, init: &Expr) -> Option<(String, bool)> {
         let (type_name, method) = match init {
             Expr::Call { callee, .. } => match callee.as_ref() {
@@ -373,7 +292,6 @@ impl Lowerer {
                 let subject_ty = subject.ty;
                 let subject_idx = ctx.locals.len();
                 ctx.add_local("$if_let_subject_elif".to_string(), subject_ty, Mutability::Immutable);
-                self.carry_optional_trait_subject(condition_expr, subject_idx, ctx);
                 let store = HirStmt::Let {
                     local_index: subject_idx,
                     ty: subject_ty,
@@ -620,12 +538,7 @@ impl Lowerer {
                         }
                     }
                 }
-                let trait_dispatch_owner = self.declared_local_trait_owner(
-                    let_stmt.ty.as_ref().or(pattern_type), let_stmt.value.as_ref(), ctx,
-                );
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
-                ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
-                self.record_optional_trait_payload(let_stmt.ty.as_ref().or(pattern_type), local_index, ctx);
                 if let Some(result_payload_types) = result_projection_type {
                     ctx.result_projection_types.insert(local_index, result_payload_types);
                 }
@@ -839,7 +752,6 @@ impl Lowerer {
                     // 2. Create temp local for subject value
                     let subject_idx = ctx.locals.len();
                     ctx.add_local("$if_let_subject".to_string(), subject_ty, Mutability::Immutable);
-                    self.carry_optional_trait_subject(condition_expr, subject_idx, ctx);
 
                     let store_stmt = HirStmt::Let {
                         local_index: subject_idx,
@@ -986,7 +898,6 @@ impl Lowerer {
 
                     let subject_idx = ctx.locals.len();
                     ctx.add_local("$while_let_subject".to_string(), subject_ty, Mutability::Immutable);
-                    self.carry_optional_trait_subject(condition_expr, subject_idx, ctx);
                     let store_stmt = HirStmt::Let {
                         local_index: subject_idx,
                         ty: subject_ty,
@@ -1254,26 +1165,6 @@ impl Lowerer {
             }
 
             Node::Expression(expr) => {
-                // The lexer intentionally treats assert( as a callable spelling.
-                // Unshadowed statement calls use the existing assertion owner;
-                // never emit a bare C call that can bind libc's __assert.
-                if let Expr::Call { callee, args } = expr {
-                    if matches!(callee.as_ref(), Expr::Identifier(name) if name == "assert")
-                        && ctx.lookup("assert").is_none()
-                        && self.resolve_import_alias("assert").is_none()
-                        && self.named_callable_value_type("assert").is_none()
-                        && !self.globals.contains_key("assert")
-                        && args.len() == 1
-                        && args[0].name.is_none()
-                    {
-                        let condition = self.lower_condition(&args[0].value, ctx)?;
-                        return Ok(vec![HirStmt::Assert {
-                            condition,
-                            message: None,
-                            span: None,
-                        }]);
-                    }
-                }
                 if matches!(expr, Expr::String(_) | Expr::TypedString(_, _)) {
                     return Ok(vec![]);
                 }
@@ -1676,7 +1567,6 @@ impl Lowerer {
         // Create a temporary local to hold the subject value
         let subject_idx = ctx.locals.len();
         ctx.add_local("$match_subject".to_string(), subject_ty, Mutability::Immutable);
-        self.carry_optional_trait_subject(&match_stmt.subject, subject_idx, ctx);
 
         // Store the subject value
         let store_stmt = HirStmt::Let {
@@ -1764,7 +1654,6 @@ impl Lowerer {
         bindings: &[(String, TypeId)],
         ctx: &mut FunctionContext,
     ) -> Vec<HirStmt> {
-        self.bind_optional_trait_payload(pattern, subject_idx, true, ctx);
         if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = pattern {
             let mut binding_stmts = Vec::new();
             if bindings.iter().any(|(binding, _)| binding == name) {
@@ -1780,15 +1669,7 @@ impl Lowerer {
                 // the JIT lane, silently). The local's declared type must
                 // agree, or the raw value would be stored into a tagged slot.
                 // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
-                let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or_else(|| {
-                    match self.module.types.get(subject_ty) {
-                        // Presence guards the optional subject; a bound bool is
-                        // its value, not another optional-presence condition.
-                        Some(HirType::Pointer { kind: PointerKind::Shared, inner, .. })
-                            if *inner == TypeId::BOOL => TypeId::BOOL,
-                        _ => subject_ty,
-                    }
-                });
+                let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or(subject_ty);
                 if binding_ty != subject_ty {
                     if let Some(local) = ctx.locals.get_mut(local_index) {
                         local.ty = binding_ty;
@@ -1822,7 +1703,6 @@ impl Lowerer {
         bindings: &[(String, TypeId)],
         ctx: &mut FunctionContext,
     ) -> Vec<HirStmt> {
-        self.bind_optional_trait_payload(arm_pattern, subject_idx, false, ctx);
         // An or-pattern whose alternatives destructure a payload must bind per
         // alternative. Binding from the FIRST alternative only (the previous
         // behaviour) emitted that alternative's extraction shape for every
@@ -4000,24 +3880,5 @@ mod nested_struct_pattern_in_enum_payload_tests {
             }
             other => panic!("expected FieldAccess for x, got {:?}", other),
         }
-    }
-}
-
-#[cfg(test)]
-mod optional_bool_binding_tests {
-    use super::super::lower;
-    use crate::hir::types::TypeId;
-    use simple_parser::Parser;
-
-    #[test]
-    fn if_val_binds_bool_payload_as_bool_not_optional_presence() {
-        let source = "fn inspect(value: bool?) -> i64:\n    if val opened = value:\n        return if opened: 19 else: 23\n    -17\n";
-        let ast = Parser::new(source).parse().expect("optional bool fixture parses");
-        let module = lower(&ast).expect("optional bool fixture lowers");
-        let function = module.functions.iter().find(|function| function.name == "inspect")
-            .expect("inspect function exists");
-        let binding = function.locals.iter().find(|local| local.name == "opened")
-            .expect("if-val binding exists");
-        assert_eq!(binding.ty, TypeId::BOOL, "payload condition must inspect bool value, not presence");
     }
 }

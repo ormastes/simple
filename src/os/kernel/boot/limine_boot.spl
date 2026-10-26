@@ -254,18 +254,46 @@ fn _parse_memory_map() -> [BootMemoryRegion]:
 # Framebuffer Parsing
 # ============================================================================
 
+val LIMINE_FB_MIN_DIM: u64 = 1
+val LIMINE_FB_MAX_DIM: u64 = 16384
+val LIMINE_FB_BPP_24: u64 = 24
+val LIMINE_FB_BPP_32: u64 = 32
+
+fn limine_framebuffer_fields_valid(width: u64, height: u64, pitch: u64, bpp: u64, address: u64) -> bool:
+    """Sanity-check raw Limine framebuffer fields before trusting them.
+
+    Pure function (no MMIO) so it is directly unit-testable: rejects a zero
+    address, out-of-range width/height, unsupported bpp, and a pitch too
+    small to hold one scanline at the reported width/bpp.
+    """
+    if address == 0:
+        return false
+    if width < LIMINE_FB_MIN_DIM or width > LIMINE_FB_MAX_DIM:
+        return false
+    if height < LIMINE_FB_MIN_DIM or height > LIMINE_FB_MAX_DIM:
+        return false
+    if bpp != LIMINE_FB_BPP_24 and bpp != LIMINE_FB_BPP_32:
+        return false
+    val bytes_per_pixel = bpp / 8
+    if pitch < width * bytes_per_pixel:
+        return false
+    true
+
+fn _no_framebuffer() -> FramebufferInfo:
+    FramebufferInfo(
+        addr: PhysAddr(addr: 0),
+        width: 0,
+        height: 0,
+        pitch: 0,
+        bpp: 0
+    )
+
 fn _parse_framebuffer() -> FramebufferInfo:
     """Parse Limine framebuffer response."""
     val resp_ptr = framebuffer_request.response
     if resp_ptr == 0:
         log_raw_println("[BOOT] WARNING: No framebuffer response from Limine")
-        return FramebufferInfo(
-            addr: PhysAddr(addr: 0),
-            width: 0,
-            height: 0,
-            pitch: 0,
-            bpp: 0
-        )
+        return _no_framebuffer()
 
     val _revision = mmio_read64(resp_ptr)
     val fb_count = mmio_read64(resp_ptr + 8)
@@ -273,13 +301,7 @@ fn _parse_framebuffer() -> FramebufferInfo:
 
     if fb_count == 0:
         log_raw_println("[BOOT] WARNING: No framebuffers available")
-        return FramebufferInfo(
-            addr: PhysAddr(addr: 0),
-            width: 0,
-            height: 0,
-            pitch: 0,
-            bpp: 0
-        )
+        return _no_framebuffer()
 
     # Use first framebuffer
     val fb_ptr_addr = fbs_ptr
@@ -289,16 +311,21 @@ fn _parse_framebuffer() -> FramebufferInfo:
     val width = mmio_read64(fb_ptr + 8)
     val height = mmio_read64(fb_ptr + 16)
     val pitch = mmio_read64(fb_ptr + 24)
-    val bpp = mmio_read64(fb_ptr + 32)      # Actually u16, but read full word
+    val bpp_raw = mmio_read64(fb_ptr + 32)      # Actually u16, but read full word
+    val bpp = bpp_raw & 0xFFFF
 
     log_raw_println("[BOOT] Framebuffer: {width}x{height} bpp={bpp} pitch={pitch}")
+
+    if not limine_framebuffer_fields_valid(width, height, pitch, bpp, address):
+        log_raw_println("[BOOT] WARNING: rejecting bogus framebuffer descriptor addr=0x{address} {width}x{height} bpp={bpp} pitch={pitch}, falling back to no-framebuffer")
+        return _no_framebuffer()
 
     FramebufferInfo(
         addr: PhysAddr(addr: address),
         width: width as u32,
         height: height as u32,
         pitch: pitch as u32,
-        bpp: (bpp & 0xFFFF) as u32
+        bpp: bpp as u32
     )
 
 # ============================================================================

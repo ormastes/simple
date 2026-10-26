@@ -264,11 +264,7 @@ output_dir=$(canonical_dir "$output_arg" 2>/dev/null) || {
   finish refused output-dir-not-canonical 1
 }
 case "$output_dir" in "$source_root"/build/*) ;; *) finish refused output-dir-outside-source-build 1 ;; esac
-recovery_git_root=$(git -C "$source_root" rev-parse --show-toplevel 2>/dev/null) || \
-  finish refused source-root-not-git-worktree 1
-# Git for Windows uses drive paths; compare both roots in the shell's form.
-recovery_git_root=$(CDPATH= cd -- "$recovery_git_root" && pwd -P) || \
-  finish refused source-root-not-git-worktree 1
+recovery_git_root=$(git -C "$source_root" rev-parse --show-toplevel 2>/dev/null || true)
 [ "$recovery_git_root" = "$source_root" ] || finish refused source-root-not-git-worktree 1
 
 # Live ownership is resolved before any Stage 2 artifact or Stage 3 candidate is
@@ -456,15 +452,7 @@ k1_policy=$(policy_value k1_policy "$policy_manifest" 2>/dev/null || true)
 abi_policy=$(policy_value simple_abi_policy "$policy_manifest" 2>/dev/null || true)
 manifest_policy=$(policy_value plugin_manifest_policy "$policy_manifest" 2>/dev/null || true)
 coverage_policy=$(policy_value coverage_cutover_policy "$policy_manifest" 2>/dev/null || true)
-k1_policy_alternate=$(policy_value k1_policy_alternates "$policy_manifest" 2>/dev/null || true)
-[ "$k1_policy" = llvm-cranelift ] && [ "$k1_policy_alternate" = llvm ] || finish refused k1-policy-drift 1
-# The transcript names the K1 policy the stage was composed from: canonical
-# or the manifest-pinned LLVM-only alternate (no Cranelift link).
-case "$(bootstrap_stage3_transcript_explicit_env_value "$transcript" SIMPLE_KERNEL_K1_POLICY 2>/dev/null || true)" in
-  "$k1_policy_alternate") k1_policy=$k1_policy_alternate ;;
-  "$k1_policy"|"") ;;
-  *) finish refused k1-policy-drift 1 ;;
-esac
+[ "$k1_policy" = llvm-cranelift ] || finish refused k1-policy-drift 1
 [ "$abi_policy" = v1 ] || finish refused abi-policy-drift 1
 [ "$manifest_policy" = simple-sdn ] || finish refused manifest-policy-drift 1
 [ "$coverage_policy" = atomic-apk-only ] || finish refused coverage-policy-drift 1
@@ -472,7 +460,7 @@ esac
   finish refused admission-abi-policy-mismatch 1
 
 backend=$(bootstrap_stage3_transcript_argv_value_after "$transcript" --backend 2>/dev/null || true)
-case "$backend" in llvm|llvm-lib) ;; cranelift) [ "$k1_policy" = llvm-cranelift ] || finish refused backend-policy-mismatch 1 ;; *) finish refused backend-invalid 1 ;; esac
+case "$backend" in llvm|llvm-lib) [ "$k1_policy" = llvm-cranelift ] || finish refused backend-policy-mismatch 1 ;; cranelift) ;; *) finish refused backend-invalid 1 ;; esac
 [ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" --target 2>/dev/null || true)" = "$platform" ] || \
   finish refused stage2-target-binding-mismatch 1
 [ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" --cache-dir 2>/dev/null || true)" = "$stage2_cache" ] || \
@@ -504,20 +492,9 @@ for env_binding in \
   [ "$(bootstrap_stage3_transcript_explicit_env_value "$transcript" "$env_name" 2>/dev/null || true)" = \
     "$env_expected" ] || finish refused "stage2-transcript-${env_name}-mismatch" 1
 done
-stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$transcript") || \
-  finish refused stage2-transcript-cold-init-invalid 1
-stage2_preflight_context=$(bootstrap_stage3_stage2_transcript_preflight_context "$transcript") || \
-    finish refused stage2-transcript-preflight-context-invalid 1
-stage2_recorded_ceiling=$(bootstrap_stage3_transcript_compiler_ceiling "$transcript" 2>/dev/null || true)
-stage2_recorded_env_names=$(transcript_explicit_env_names "$transcript" 2>/dev/null || true)
-stage2_recorded_preflight_names=
-case " $stage2_recorded_env_names " in
-    *' SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1 '*)
-        stage2_recorded_preflight_names=SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1 ;;
-esac
-expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform" "$stage2_recorded_cold_init" "$stage2_recorded_ceiling" "" "$stage2_recorded_preflight_names") || \
+expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform") || \
   finish refused stage2-canonical-environment-unavailable 1
-[ "$stage2_recorded_env_names" = "$expected_env_names" ] || \
+[ "$(transcript_explicit_env_names "$transcript" 2>/dev/null || true)" = "$expected_env_names" ] || \
   finish refused stage2-transcript-environment-set-mismatch 1
 stage2_args_sha=$(transcript_args_sha256 "$transcript" 2>/dev/null || true)
 is_sha256 "$stage2_args_sha" || finish refused stage2-transcript-invalid 1

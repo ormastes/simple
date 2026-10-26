@@ -10,7 +10,6 @@ use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
-use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
@@ -20,7 +19,7 @@ use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}  # exp
 # ModuleSurfaceParam) :293, hir_surface_callable_to_header(callable:
 # ModuleSurfaceCallable) :298, hir_surface_trait_to_trait(surface_trait:
 # ModuleSurfaceTrait, ...) :313, hir_surface_enum_to_enum(surface_enum:
-# ModuleSurfaceEnum) :327.
+# ModuleSurfaceEnum, ...) :327.
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum, ModuleSurfaceCallable, ModuleSurfaceParam, ModuleSurfaceTrait}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_route_arrays_aligned}
 use compiler.hir.hir_lowering.expressions.*
@@ -31,7 +30,7 @@ use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
-extern fn rt_enum_discriminant<T>(value: T) -> i64
+extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
@@ -250,7 +249,7 @@ fn hir_module_item_terminal_kind(m: ModuleSurface, name: text) -> text:
         # be an alias, so the re-entry can only reach a composite / enum /
         # trait / callable / const branch, never back here. `type A = B` /
         # `type B = A` fails the non-alias test and stays "type_alias".
-        val alias_decl: ModuleSurfaceTypeAlias = m.type_alias_values[alias_position]
+        val alias_decl = m.type_alias_values[alias_position]
         val alias_target = parser_type_kind_named_name(alias_decl.type_.kind)
         val alias_target_args = parser_type_kind_named_args(alias_decl.type_.kind)
         if alias_decl.type_params.len() == 0 and alias_target != "" and alias_target_args.len() == 0:
@@ -332,11 +331,8 @@ fn hir_surface_trait_to_trait(surface_trait: ModuleSurfaceTrait, local_name: tex
         visibility: surface_trait.visibility, is_public: surface_trait.is_public,
         has_doc_comment: false, doc_comment: "", span: surface_trait.span)
 
-fn hir_surface_enum_to_enum(surface_enum: ModuleSurfaceEnum) -> ParserEnum:
-    # Runtime identity follows the declaring enum, not a consumer's import
-    # alias. The imported-enum table remains keyed by local_name at its call
-    # sites; only this declaration payload keeps its canonical source name.
-    ParserEnum(name: surface_enum.name, type_params: surface_enum.type_params,
+fn hir_surface_enum_to_enum(surface_enum: ModuleSurfaceEnum, local_name: text) -> ParserEnum:
+    ParserEnum(name: local_name, type_params: surface_enum.type_params,
         variants: surface_enum.variants, visibility: surface_enum.visibility,
         is_public: surface_enum.is_public, has_doc_comment: false,
         doc_comment: "", span: surface_enum.span, attributes: [])
@@ -395,7 +391,7 @@ impl HirLowering:
         var owners: {text: [i64]} = {}
         var surface_index = 0
         while surface_index < self.module_surfaces.surfaces.len():
-            val surface: ModuleSurface = self.module_surfaces.surfaces[surface_index]
+            val surface = self.module_surfaces.surfaces[surface_index]
             var kind_index = 0
             while kind_index < 6:
                 val names: [text] = match kind_index:
@@ -427,51 +423,6 @@ impl HirLowering:
                 kind_index = kind_index + 1
             surface_index = surface_index + 1
         self.surface_decl_owners = owners
-        # BOOT-20 read authority (restores b488a271c48, lost in a later
-        # restore while its fields stayed): one (name, surface) pair per
-        # frozen decl name -- the same six arrays module_surface_declares_item
-        # reads -- with scalar hash chains over the pairs. No class-field Dict
-        # membership is trusted, so the miss path needs no registry sweep.
-        var pair_names: [text] = []
-        var pair_surfaces: [i64] = []
-        var pair_surface = 0
-        while pair_surface < self.module_surfaces.surfaces.len():
-            val decl_surface = self.module_surfaces.surfaces[pair_surface]
-            var decl_kind = 0
-            while decl_kind < 6:
-                val decl_names: [text] = match decl_kind:
-                    case 0: decl_surface.callable_names
-                    case 1: decl_surface.composite_names
-                    case 2: decl_surface.enum_names
-                    case 3: decl_surface.trait_names
-                    case 4: decl_surface.type_alias_names
-                    case _: decl_surface.constant_names
-                var decl_index = 0
-                while decl_index < decl_names.len():
-                    pair_names = pair_names.push(decl_names[decl_index])
-                    pair_surfaces = pair_surfaces.push(pair_surface)
-                    decl_index = decl_index + 1
-                decl_kind = decl_kind + 1
-            pair_surface = pair_surface + 1
-        var bucket_count: i64 = 64
-        while bucket_count < pair_names.len() * 2:
-            bucket_count = bucket_count * 2
-        var hash_buckets: [i64] = []
-        while hash_buckets.len() < bucket_count:
-            hash_buckets = hash_buckets.push(-1)
-        val hash_mask = bucket_count - 1
-        var hash_next: [i64] = []
-        var hash_pair = 0
-        while hash_pair < pair_names.len():
-            val bucket = hash_text(pair_names[hash_pair]) & hash_mask
-            hash_next = hash_next.push(hash_buckets[bucket])
-            hash_buckets[bucket] = hash_pair
-            hash_pair = hash_pair + 1
-        self.surface_decl_pair_names = pair_names
-        self.surface_decl_pair_surfaces = pair_surfaces
-        self.surface_decl_pair_hash_buckets = hash_buckets
-        self.surface_decl_pair_hash_next = hash_next
-        self.surface_decl_pair_hash_mask = hash_mask
         self.surface_decl_index_built = true
 
     me surface_decl_owner_indices(name: text) -> [i64]:
@@ -480,26 +431,10 @@ impl HirLowering:
         question once per consumer."""
         if not self.surface_decl_index_built:
             self.build_surface_decl_index()
-        # The full-registry sweep that used to back a Dict miss cost one
-        # 6-list scan of every surface per unbound name: ~70% of the Windows
-        # stage2 full-CLI HIR samples at module 1300 (2026-10-18). Chains are
-        # newest-first; a name repeated across one surface's decl kinds yields
-        # adjacent equal surfaces, so dedupe on the last one and reverse to
-        # the ascending order the sweep returned.
-        var newest_first: [i64] = []
-        var pair_index = self.surface_decl_pair_hash_buckets[hash_text(name) & self.surface_decl_pair_hash_mask]
-        while pair_index >= 0:
-            if self.surface_decl_pair_names[pair_index] == name:
-                val owner = self.surface_decl_pair_surfaces[pair_index]
-                if newest_first.len() == 0 or newest_first[newest_first.len() - 1] != owner:
-                    newest_first = newest_first.push(owner)
-            pair_index = self.surface_decl_pair_hash_next[pair_index]
-        var owners: [i64] = []
-        var back = newest_first.len() - 1
-        while back >= 0:
-            owners = owners.push(newest_first[back])
-            back = back - 1
-        owners
+        if self.surface_decl_owners.contains_key(name):
+            return self.surface_decl_owners[name]
+        val empty: [i64] = []
+        empty
 
     me build_package_sibling_index():
         """One pass over the registry KEYS: canonical package name -> the

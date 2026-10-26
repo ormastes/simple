@@ -263,10 +263,7 @@ impl<'a> MirLowerer<'a> {
                     return self.lower_builtin_call_expr("rt_string_char_code_at", &args, TypeId::I64);
                 }
                 "hash" if effective_ty == TypeId::STRING => {
-                    // Text receivers are tagged RuntimeValues. rt_str_hash also
-                    // names the raw C-string ABI in core-c-bootstrap, so using
-                    // it hashes object metadata instead of the text bytes.
-                    return self.lower_builtin_call_expr("rt_hash_text", std::slice::from_ref(receiver), TypeId::I64);
+                    return self.lower_builtin_call_expr("rt_str_hash", std::slice::from_ref(receiver), TypeId::I64);
                 }
                 "unwrap" => {
                     if let Some(payload_ty) = self
@@ -1746,15 +1743,6 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U8))
         {
-            // The typed push stores the argument's low byte. An `ANY` element
-            // (`out.push(block_out[k])` with `block_out` from an `[Any]` slot)
-            // is a TAGGED word, so the byte stored was the tag word's (104 ->
-            // 0x40) and the JIT inflate decoder produced garbage. Decode first.
-            let arg_regs = if args[0].ty == TypeId::ANY {
-                vec![self.unbox_scalar_for_raw_slot(TypeId::U8, TypeId::ANY, arg_regs[0])?]
-            } else {
-                arg_regs
-            };
             // FAM freestanding push ABI: capture the possibly relocated
             // header and rebind it (see the general rt_array_push site below).
             if self.array_push_returns_header {
@@ -2252,11 +2240,11 @@ impl<'a> MirLowerer<'a> {
         };
 
         let declared_trait_owner = match &receiver.kind {
-            crate::hir::HirExprKind::Local(index) => self.local_trait_dispatch.get(index)
-                .map(|dispatch| dispatch.owner.clone())
-                .or_else(|| self.local_type_name_hints.get(index)
-                    .filter(|name| self.trait_infos.is_some_and(|infos| infos.contains_key(name.as_str())))
-                    .cloned()),
+            crate::hir::HirExprKind::Local(index) => self
+                .local_type_name_hints
+                .get(index)
+                .filter(|name| self.trait_infos.is_some_and(|infos| infos.contains_key(name.as_str())))
+                .cloned(),
             _ => None,
         };
 
@@ -2342,19 +2330,7 @@ impl<'a> MirLowerer<'a> {
                 // concrete classes that merely share a method name with a trait
                 // get static dispatch instead of a bogus vtable load.
                 let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
-                let declared_dispatch = match &receiver.kind {
-                    crate::hir::HirExprKind::Local(index) => self.local_trait_dispatch.get(index),
-                    _ => None,
-                };
-                let trait_lookup = if let Some(dispatch) = declared_dispatch {
-                    let info = &dispatch.info;
-                    // This signature was captured from the exact declaration
-                    // owner, not re-resolved through a colliding bare name.
-                    info.get_method(method).filter(|sig| sig.param_types.len() == args.len())
-                        .map(|sig| (sig.vtable_slot, sig.param_types.clone(), sig.return_type))
-                } else {
-                    self.find_trait_for_method_on_receiver(method, recv_type_name, args.len())
-                };
+                let trait_lookup = self.find_trait_for_method_on_receiver(method, recv_type_name, args.len());
                 // Duck-typed trait (no `impl Trait for ...` anywhere in the
                 // unit, e.g. game2d's `App`/`GameBackend`): there is no vtable
                 // to dispatch through, so the old lowering emitted the

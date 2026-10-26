@@ -1,0 +1,155 @@
+use std.spec.*
+use compiler.semantics.enum_contract.contract_model.{EnumContractKind, EnumContract}
+use compiler.semantics.enum_contract.attribute_source.{
+    enum_contract_table_from_source, parse_named_arg, repr_bits_of
+}
+use compiler.semantics.enum_contract.declaration_check.{
+    EnumVariantShape, check_enum_declaration
+}
+use compiler.semantics.enum_contract.match_check.{check_evolving_match, check_match_for_contract}
+use compiler.semantics.match_exhaustiveness.{build_match_coverage}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+
+fn evolving(name: text, bits: i64, unknown: text) -> EnumContract:
+    EnumContract(enum_name: name,
+                 kind: EnumContractKind.Evolving(repr_bits: bits, unknown_variant: unknown))
+
+fn known(name: text, value: i64) -> EnumVariantShape:
+    EnumVariantShape(name: name, payload_names: [], payload_types: [],
+                     has_discriminant: true, discriminant: value)
+
+fn unknown_variant(name: text, ty: text) -> EnumVariantShape:
+    EnumVariantShape(name: name, payload_names: ["raw"], payload_types: [ty],
+                     has_discriminant: false, discriminant: 0)
+
+describe "@evolving enum contract (S3)":
+    describe "attribute recovery":
+        it "reads repr and unknown out of the decorator":
+            val table = enum_contract_table_from_source(
+                "@evolving(repr: u16, unknown: Unknown)\nenum MessageKind:\n    Start = 1\n")
+            assert_true(table.has("MessageKind"))
+            val c = table.lookup_or("MessageKind", evolving("x", 0, ""))
+            expect(c.repr_bits()).to_equal(16)
+            expect(c.unknown_variant_name()).to_equal("Unknown")
+
+        it "parses a named argument out of a decorator argument list":
+            expect(parse_named_arg("repr: u8, unknown: Other", "unknown")).to_equal("Other")
+
+        it "rejects a non-unsigned repr spelling with width 0":
+            expect(repr_bits_of("i16")).to_equal(0)
+
+    describe "E-EVOLVING-001 unknown variant shape":
+        it "reports a missing unknown variant":
+            # REPRODUCE: decorator names Unknown, the enum never declares it.
+            val diags = check_enum_declaration(evolving("MessageKind", 16, "Unknown"),
+                [known("Start", 1), known("Stop", 2)])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-001")
+            expect(diags[0].detail).to_contain("Unknown")
+
+        it "reports an unknown variant whose payload width differs from the repr":
+            # NEIGHBOUR: variant exists but cannot round-trip a u16.
+            val diags = check_enum_declaration(evolving("MessageKind", 16, "Unknown"),
+                [known("Start", 1), unknown_variant("Unknown", "u8")])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-001")
+            expect(diags[0].detail).to_contain("u8")
+
+        it "reports an unknown variant with no payload at all":
+            # NEIGHBOUR: a unit Unknown discards the raw value it exists to keep.
+            val diags = check_enum_declaration(evolving("MessageKind", 16, "Unknown"),
+                [known("Start", 1),
+                 EnumVariantShape(name: "Unknown", payload_names: [], payload_types: [],
+                                  has_discriminant: false, discriminant: 0)])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-001")
+
+        it "reports a repr that is not an unsigned width":
+            val diags = check_enum_declaration(evolving("MessageKind", 0, "Unknown"),
+                [known("Start", 1), unknown_variant("Unknown", "u16")])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-001")
+
+        it "accepts a well-formed evolving enum":
+            val diags = check_enum_declaration(evolving("MessageKind", 16, "Unknown"),
+                [known("Start", 1), known("Stop", 2), unknown_variant("Unknown", "u16")])
+            expect(diags.len()).to_equal(0)
+
+    describe "E-EVOLVING-002 discriminant representability":
+        it "reports a known discriminant that overflows the declared repr":
+            # REPRODUCE: 300 does not fit in u8, so a decoded unknown could
+            # never be told apart from Big on the wire.
+            val diags = check_enum_declaration(evolving("Small", 8, "Unknown"),
+                [known("Big", 300), unknown_variant("Unknown", "u8")])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-002")
+            expect(diags[0].detail).to_contain("300")
+
+        it "reports a negative discriminant on an unsigned repr":
+            val diags = check_enum_declaration(evolving("Small", 8, "Unknown"),
+                [known("Neg", -1), unknown_variant("Unknown", "u8")])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-002")
+
+        it "accepts a discriminant exactly at the repr ceiling":
+            val diags = check_enum_declaration(evolving("Small", 8, "Unknown"),
+                [known("Max", 255), unknown_variant("Unknown", "u8")])
+            expect(diags.len()).to_equal(0)
+
+    describe "E-EVOLVING-003 unknown arm must be named":
+        it "reports a match that leaves the unknown variant to a wildcard":
+            # REPRODUCE: Unknown (id 2) is not covered; `case _:` swallows it.
+            val cov = build_match_coverage(1, 9, "MessageKind", [0, 1, 2],
+                                           ["Start", "Stop", "Unknown"], [0, 1], true)
+            val diags = check_evolving_match(evolving("MessageKind", 16, "Unknown"), cov)
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-003")
+            expect(diags[0].detail).to_equal("Unknown")
+
+        it "accepts a match that names the unknown variant explicitly":
+            val cov = build_match_coverage(1, 9, "MessageKind", [0, 1, 2],
+                                           ["Start", "Stop", "Unknown"], [0, 1, 2], false)
+            val diags = check_evolving_match(evolving("MessageKind", 16, "Unknown"), cov)
+            expect(diags.len()).to_equal(0)
+
+        it "accepts a named unknown arm alongside a wildcard over the known variants":
+            val cov = build_match_coverage(1, 9, "MessageKind", [0, 1, 2],
+                                           ["Start", "Stop", "Unknown"], [2], true)
+            val diags = check_evolving_match(evolving("MessageKind", 16, "Unknown"), cov)
+            expect(diags.len()).to_equal(0)
+
+        it "fires through the dispatcher at the critical profile":
+            val cov = build_match_coverage(1, 9, "MessageKind", [0, 1, 2],
+                                           ["Start", "Stop", "Unknown"], [0, 1], true)
+            val diags = check_match_for_contract(evolving("MessageKind", 16, "Unknown"),
+                                                 cov, AssuranceStrictness.Critical)
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-003")
+
+        it "stays silent through the dispatcher below the critical profile":
+            # The obligation to spell Unknown out is critical-code-only; a
+            # moderate build keeps today's behaviour.
+            val cov = build_match_coverage(1, 9, "MessageKind", [0, 1, 2],
+                                           ["Start", "Stop", "Unknown"], [0, 1], true)
+            val diags = check_match_for_contract(evolving("MessageKind", 16, "Unknown"),
+                                                 cov, AssuranceStrictness.Moderate)
+            expect(diags.len()).to_equal(0)
+
+    describe "E-EVOLVING-001 unknown payload field name":
+        it "reports an unknown payload field not named raw":
+            val diags = check_enum_declaration(evolving("MessageKind", 16, "Unknown"),
+                [known("Start", 1),
+                 EnumVariantShape(name: "Unknown", payload_names: ["value"],
+                                  payload_types: ["u16"],
+                                  has_discriminant: false, discriminant: 0)])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-001")
+            expect(diags[0].detail).to_contain("value")
+
+        it "accepts a positional unknown payload":
+            val diags = check_enum_declaration(evolving("MessageKind", 16, "Unknown"),
+                [known("Start", 1),
+                 EnumVariantShape(name: "Unknown", payload_names: [""],
+                                  payload_types: ["u16"],
+                                  has_discriminant: false, discriminant: 0)])
+            expect(diags.len()).to_equal(0)

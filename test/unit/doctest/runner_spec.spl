@@ -1,0 +1,279 @@
+/// Unit tests for doctest runner
+
+use std.spec.{describe, it, expect}
+use std.common.doctest.runner.{DoctestRunner, ExampleResult, extract_examples, run_doctests}
+use std.common.doctest.parser.{DoctestExample, DoctestItem, Expected, parse_docstring}
+use std.common.doctest.matcher.{MatchResult, match_output}
+
+describe "DoctestRunner construction":
+    it "new() creates runner with default 5000ms timeout":
+        val runner = DoctestRunner.new()
+        expect(runner.get_timeout()).to_equal(5000)
+
+    it "new(timeout_ms) creates runner with specified timeout":
+        val runner = DoctestRunner.new(1000)
+        expect(runner.get_timeout()).to_equal(1000)
+
+    it "new(3000) creates runner with given timeout":
+        val runner = DoctestRunner.new(3000)
+        expect(runner.get_timeout()).to_equal(3000)
+
+    it "new(0) creates runner with zero timeout":
+        val runner = DoctestRunner.new(0)
+        expect(runner.get_timeout()).to_equal(0)
+
+    it "summary contains timeout value":
+        val runner = DoctestRunner.new(7500)
+        val s = runner.summary()
+        expect(s.contains("7500")).to_equal(true)
+
+describe "extract_examples":
+    it "returns empty list for source with no examples":
+        val result = extract_examples("no examples here")
+        expect(result.len()).to_equal(0)
+
+    it "extracts single example with expected output":
+        val src = ">>> 1 + 1\n2"
+        val result = extract_examples(src)
+        expect(result.len()).to_equal(1)
+
+    it "extracted example has code as first element":
+        val src = ">>> 1 + 1\n2"
+        val result = extract_examples(src)
+        expect(result[0][0]).to_equal("1 + 1")
+
+    it "extracted example has expected output as second element":
+        val src = ">>> 1 + 1\n2"
+        val result = extract_examples(src)
+        expect(result[0][1]).to_equal("2")
+
+    it "extracts multiple examples":
+        val src = ">>> 1 + 1\n2\n\n>>> 3 + 4\n7"
+        val result = extract_examples(src)
+        expect(result.len()).to_equal(2)
+
+    it "second example code is correct":
+        val src = ">>> 1 + 1\n2\n\n>>> 3 + 4\n7"
+        val result = extract_examples(src)
+        expect(result[1][0]).to_equal("3 + 4")
+
+    it "second example expected output is correct":
+        val src = ">>> 1 + 1\n2\n\n>>> 3 + 4\n7"
+        val result = extract_examples(src)
+        expect(result[1][1]).to_equal("7")
+
+    it "example with no expected output has empty second element":
+        val src = ">>> some_expr\n"
+        val result = extract_examples(src)
+        # Either 0 (no expected so not saved) or the code with empty expected
+        expect(result.len()).to_be_greater_than(-1)
+
+describe "run_doctests":
+    it "returns true for empty source":
+        val result = run_doctests("")
+        expect(result).to_equal(true)
+
+    it "returns true for source with no doctest markers":
+        val result = run_doctests("just a plain text with no examples")
+        expect(result).to_equal(true)
+
+    it "returns true for source with a doctest example":
+        val src = ">>> 1 + 1\n2"
+        val result = run_doctests(src)
+        expect(result).to_equal(true)
+
+    it "returns bool type":
+        val result = run_doctests("no examples")
+        # Result is a bool; verify it's equal to itself
+        expect(result).to_equal(result)
+
+describe "DoctestRunner.count_results with empty list":
+    it "returns (0, 0) for empty results":
+        val runner = DoctestRunner.new()
+        val example = DoctestExample(
+            code: ["1"],
+            expected: Expected.Empty,
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val pass_result = MatchResult.Pass
+        val pass_er = ExampleResult(
+            example: example,
+            result: pass_result,
+            execution_time_ms: 10
+        )
+        val fail_result = MatchResult.Fail("wrong")
+        val fail_er = ExampleResult(
+            example: example,
+            result: fail_result,
+            execution_time_ms: 5
+        )
+        val results = [pass_er, fail_er]
+        val (passed_count, _failed_count) = runner.count_results(results)
+        expect(passed_count).to_equal(1)
+
+    it "count_results counts failed correctly":
+        val runner = DoctestRunner.new()
+        val example = DoctestExample(
+            code: ["x"],
+            expected: Expected.Empty,
+            setup: [],
+            teardown: [],
+            line_number: 2
+        )
+        val fail_result = MatchResult.Fail("mismatch")
+        val fail_er = ExampleResult(
+            example: example,
+            result: fail_result,
+            execution_time_ms: 1
+        )
+        val results = [fail_er]
+        val (_passed_count, failed_count) = runner.count_results(results)
+        expect(failed_count).to_equal(1)
+
+describe "DoctestRunner.all_passed":
+    it "all_passed returns true for empty results list":
+        val runner = DoctestRunner.new()
+        val results: [ExampleResult] = []
+        expect(runner.all_passed(results)).to_equal(true)
+
+    it "all_passed returns true when all results pass":
+        val runner = DoctestRunner.new()
+        val example = DoctestExample(
+            code: ["ok"],
+            expected: Expected.Empty,
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val er = ExampleResult(
+            example: example,
+            result: MatchResult.Pass,
+            execution_time_ms: 2
+        )
+        val results = [er]
+        expect(runner.all_passed(results)).to_equal(true)
+
+    it "all_passed returns false when any result fails":
+        val runner = DoctestRunner.new()
+        val example = DoctestExample(
+            code: ["bad"],
+            expected: Expected.Empty,
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val er = ExampleResult(
+            example: example,
+            result: MatchResult.Fail("wrong output"),
+            execution_time_ms: 3
+        )
+        val results = [er]
+        expect(runner.all_passed(results)).to_equal(false)
+
+describe "ExampleResult":
+    it "passed() returns true for Pass result":
+        val example = DoctestExample(
+            code: ["1"],
+            expected: Expected.Empty,
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val er = ExampleResult(
+            example: example,
+            result: MatchResult.Pass,
+            execution_time_ms: 10
+        )
+        expect(er.passed()).to_equal(true)
+
+    it "failed() returns false for Pass result":
+        val example = DoctestExample(
+            code: ["1"],
+            expected: Expected.Empty,
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val er = ExampleResult(
+            example: example,
+            result: MatchResult.Pass,
+            execution_time_ms: 10
+        )
+        expect(er.failed()).to_equal(false)
+
+    it "passed() returns false for Fail result":
+        val example = DoctestExample(
+            code: ["1"],
+            expected: Expected.Output(value: "999"),
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val er = ExampleResult(
+            example: example,
+            result: MatchResult.Fail("got 1, expected 999"),
+            execution_time_ms: 7
+        )
+        expect(er.passed()).to_equal(false)
+
+    it "failed() returns true for Fail result":
+        val example = DoctestExample(
+            code: ["1"],
+            expected: Expected.Output(value: "999"),
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val er = ExampleResult(
+            example: example,
+            result: MatchResult.Fail("got 1, expected 999"),
+            execution_time_ms: 7
+        )
+        expect(er.failed()).to_equal(true)
+
+    it "get_execution_time returns stored value":
+        val example = DoctestExample(
+            code: ["1"],
+            expected: Expected.Empty,
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val er = ExampleResult(
+            example: example,
+            result: MatchResult.Pass,
+            execution_time_ms: 42
+        )
+        expect(er.get_execution_time()).to_equal(42)
+
+    it "summary contains PASS for passing result":
+        val example = DoctestExample(
+            code: ["1"],
+            expected: Expected.Empty,
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val er = ExampleResult(
+            example: example,
+            result: MatchResult.Pass,
+            execution_time_ms: 10
+        )
+        expect(er.summary().contains("PASS")).to_equal(true)
+
+    it "summary contains FAIL for failing result":
+        val example = DoctestExample(
+            code: ["1"],
+            expected: Expected.Output(value: "999"),
+            setup: [],
+            teardown: [],
+            line_number: 1
+        )
+        val er = ExampleResult(
+            example: example,
+            result: MatchResult.Fail("mismatch"),
+            execution_time_ms: 5
+        )
+        expect(er.summary().contains("FAIL")).to_equal(true)

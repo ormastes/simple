@@ -205,12 +205,7 @@ fn extract_struct_fields(source: text, name: text) -> [FieldDecl]:
         if colon < 0:
             continue
         val fname = trimmed.substring(0, colon).trim()
-        var ftype = trimmed.substring(colon + 1, trimmed.len()).trim()
-        # An initializer is not part of a field's type. Type syntax contains
-        # no assignment operator; retaining `= []` misclassifies a node list.
-        val default_start = ftype.find("=")
-        if default_start >= 0:
-            ftype = ftype.substring(0, default_start).trim()
+        val ftype = trimmed.substring(colon + 1, trimmed.len()).trim()
         if fname == "" or ftype == "" or fname.find(" ") >= 0:
             continue
         out.push(FieldDecl(fname, ftype))
@@ -478,20 +473,6 @@ fn _one_call(mode: text, type_name: text, v: text) -> text:
 fn _recurse_lines(u: DeclUniverse, type_text: text, v: text, indent: text, mode: text, idx: i64) -> text:
     """Emit the traversal for one field value `v`, for visit/children/hash."""
     val c = u.classify(type_text)
-    if type_text.trim().ends_with("?") and (c.cat == "node" or c.cat == "list" or c.cat == "pair" or (c.cat == "prim" and mode == "hash")):
-        val trimmed = type_text.trim()
-        val bare = trimmed.substring(0, trimmed.len() - 1).trim()
-        val inner = _recurse_lines(u, bare, "opt{idx}", indent + "        ", mode, idx)
-        var out = indent + "match " + v + ":\n"
-        out = out + indent + "    case Some(opt{idx}):\n"
-        if mode == "hash":
-            out = out + indent + "        h = _hir_mix_i64(h, 1)\n"
-        out = out + inner
-        if mode == "hash":
-            out = out + indent + "    case nil: h = _hir_mix_i64(h, 0)\n"
-        else:
-            out = out + indent + "    case nil: pass\n"
-        return out
     if c.cat == "node":
         return indent + _one_call(mode, c.a, v) + "\n"
     if c.cat == "list":
@@ -517,14 +498,6 @@ fn _recurse_frame_lines_reverse(
 ) -> text:
     """Push one field in reverse so a LIFO consumer observes schema order."""
     val c = u.classify(type_text)
-    if type_text.trim().ends_with("?") and (c.cat == "node" or c.cat == "list" or c.cat == "pair"):
-        val trimmed = type_text.trim()
-        val bare = trimmed.substring(0, trimmed.len() - 1).trim()
-        var out = indent + "match " + v + ":\n"
-        out = out + indent + "    case Some(opt{idx}):\n"
-        out = out + _recurse_frame_lines_reverse(u, bare, "opt{idx}", indent + "        ", idx)
-        out = out + indent + "    case nil: pass\n"
-        return out
     if c.cat == "node":
         return indent + _one_frame_call(c.a, v) + "\n"
     if c.cat == "list":
@@ -540,13 +513,9 @@ fn _recurse_frame_lines_reverse(
         out = out + indent + "    ri{idx} = ri{idx} - 1\n"
         out = out + indent + "    val (ka{idx}, kb{idx}) = " + v + "[ri{idx}]\n"
         if c.b != "":
-            # Schema-declared nominal types survive the older bootstrap
-            # producer's tuple destructuring without guessing a payload owner.
-            out = out + indent + "    val frame_b{idx}: " + c.b + " = kb{idx}\n"
-            out = out + indent + "    " + _one_frame_call(c.b, "frame_b{idx}") + "\n"
+            out = out + indent + "    " + _one_frame_call(c.b, "kb{idx}") + "\n"
         if c.a != "":
-            out = out + indent + "    val frame_a{idx}: " + c.a + " = ka{idx}\n"
-            out = out + indent + "    " + _one_frame_call(c.a, "frame_a{idx}") + "\n"
+            out = out + indent + "    " + _one_frame_call(c.a, "ka{idx}") + "\n"
         return out
     ""
 
@@ -799,8 +768,7 @@ fn emit_children_file(u: DeclUniverse) -> text:
     out = out + "# children of a Call are its callee and argument expressions, not opaque\n"
     out = out + "# argument records.\n\n"
     out = out + "use compiler.hir.hir_definitions.*\n"
-    out = out + "use compiler.hir.hir_types.*\n"
-    out = out + "use compiler.hir.generated.hir_visit.{{hir_visit_nothing, unreachable_hir_variant}}\n\n"
+    out = out + "use compiler.hir.hir_types.*\n\n"
     out = out + "enum HirNode:\n"
     out = out + "    \"\"\"One HIR node of any base carrier kind.\"\"\"\n"
     out = out + "    Expr(node: HirExpr)\n    Stmt(node: HirStmt)\n    Type_(node: HirType)\n    Pattern(node: HirPattern)\n\n"
@@ -896,8 +864,7 @@ fn emit_hash_file(u: DeclUniverse) -> text:
     out = out + "# ids, spans, operator enums) are deliberately NOT folded in: they are\n"
     out = out + "# not structural.\n\n"
     out = out + "use compiler.hir.hir_definitions.*\n"
-    out = out + "use compiler.hir.hir_types.*\n"
-    out = out + "use compiler.hir.generated.hir_visit.{{unreachable_hir_variant}}\n\n"
+    out = out + "use compiler.hir.hir_types.*\n\n"
     out = out + "val HIR_HASH_SEED = 1469598103\n"
     out = out + "val HIR_HASH_MOD = 1000000007\n\n"
     out = out + "fn _hir_mix_text(h: i64, s: text) -> i64:\n"
@@ -948,15 +915,7 @@ fn emit_init_file() -> text:
 fn generate_visitors_into(repo_root: text, out_dir: text) -> i64:
     """Write the three generated files. Returns the number of visitor
     functions emitted (three per reachable declaration)."""
-    generate_visitors_prepared(DeclUniverse.load(repo_root), out_dir)
-
-fn generate_visitors_prepared(u: DeclUniverse, out_dir: text) -> i64:
-    """Emit from the retained universe preflighted with sibling generators."""
-    for pair in base_pairs():
-        val kind = pair[1]
-        if not u.is_enum(kind) or u.decl_of(kind).variants.len() == 0:
-            print "compiler_schema: refusing empty carrier schema {kind}"
-            return -1
+    val u = DeclUniverse.load(repo_root)
     dir_create_all(out_dir)
     file_write(out_dir + "/hir_visit.spl", emit_visit_file(u))
     file_write(out_dir + "/hir_children.spl", emit_children_file(u))
@@ -969,7 +928,7 @@ fn visitor_kind_count(repo_root: text) -> i64:
     emit_order(u).len()
 
 export emit_order, emit_visit_file, emit_children_file, emit_hash_file
-export emit_init_file, generate_visitors_into, generate_visitors_prepared, visitor_kind_count
+export emit_init_file, generate_visitors_into, visitor_kind_count
 export GEN_HEADER, FieldDecl, FieldClass, NodeDecl, DeclUniverse
 export base_pairs, decl_sources, opaque_types, prim_types
 export extract_struct_fields, parse_payload_fields, node_closure

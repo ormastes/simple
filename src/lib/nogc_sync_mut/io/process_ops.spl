@@ -2,8 +2,7 @@
 # Extracted from mod.spl for modularity
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
-use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
-use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
 use std.common.process.observation_v1.{
     ProcessObservationProviderV1, ObservedProcessStartStatusV1,
     ObservedProcessPollStatusV1, ObservedProcessResultStatusV1,
@@ -39,8 +38,6 @@ extern fn rt_stderr_write(s: text)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 @unsafe(reason: "raw bounded process capture; exit_code -1 is the failure sentinel and output is contract-bounded", capabilities: [ffi])
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
-@unsafe(reason: "raw bounded process bytes are admitted by the caller's explicit text codec", capabilities: [ffi])
-extern fn rt_process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64)
 
 # Owned-process V3 opaque bridge declarations.  The runtime owns the adapter
 # table and the underlying RtOwnedProcessTokenV2; the only authority visible
@@ -298,9 +295,7 @@ pub class OwnedProcessLease:
         val words = _owned_v3_words(raw, OWNED_PROCESS_V3_RESULT_WORDS, "result")?
         Ok(_owned_v3_result_from_words(words))
 
-    # Public owner acknowledgement: callers retain the lease and must collect
-    # a reaped process before releasing its native record.
-    pub me fn collect() -> Result<OwnedProcessResult, text>:
+    me fn collect() -> Result<OwnedProcessResult, text>:
         val handle = _owned_v3_live_handle(self)?
         val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_collect_value(handle)
         val words = _owned_v3_words(raw, OWNED_PROCESS_V3_RESULT_WORDS, "collect")?
@@ -310,9 +305,7 @@ pub class OwnedProcessLease:
             self.released = true
         Ok(result)
 
-    # Explicitly release a terminal lease. Running leases remain owned and
-    # cannot be released until collection has reaped the child.
-    pub me fn release() -> Result<bool, text>:
+    me fn release() -> Result<bool, text>:
         if self.released:
             return Ok(true)
         val handle = _owned_v3_live_handle(self)?
@@ -557,17 +550,15 @@ pub(package) fn process_observation_owner_start_v1(
             provider, ObservedProcessStartStatusV1.InvalidRequest,
             ObservedProcessFailureReasonV1.InvalidRequest)
     if request.pin_executable:
-        # Preserve receiver types through native helper HIR/MIR transport.
-        # Bug: native_helper_provider_globals_and_receivers_2026-10-05.
-        val pin_result: Result<OwnedExecutablePin, text> = OwnedExecutablePin.pin(request.command)
+        val pin_result = OwnedExecutablePin.pin(request.command)
         if pin_result.is_err():
             return _process_observation_empty_start_v1(
                 provider, ObservedProcessStartStatusV1.ExecFailed,
                 ObservedProcessFailureReasonV1.ExecFailed)
-        val pin: OwnedExecutablePin = pin_result.unwrap()
-        val digest_result: Result<[u8], text> = pin.digest()
+        val pin = pin_result.unwrap()
+        val digest_result = pin.digest()
         if digest_result.is_err():
-            val _closed: Result<bool, text> = pin.close()
+            val _closed = pin.close()
             return _process_observation_empty_start_v1(
                 provider, ObservedProcessStartStatusV1.ProviderFailed,
                 ObservedProcessFailureReasonV1.PinFailed)
@@ -576,7 +567,7 @@ pub(package) fn process_observation_owner_start_v1(
                 pin.handle, request.args, [], request.deadline_ms,
                 request.term_grace_ms,
                 request.stdout_limit + request.stderr_limit)
-        val _closed: Result<bool, text> = pin.close()
+        val _closed = pin.close()
         return _process_observation_finish_start_v1(
             provider, request, raw, true, digest_result.unwrap())
     val raw = unsafe(capabilities: [ffi]):
@@ -599,7 +590,7 @@ pub(package) fn process_observation_owner_start_pinned_v1(
         return _process_observation_empty_start_v1(
             provider, ObservedProcessStartStatusV1.InvalidRequest,
             ObservedProcessFailureReasonV1.InvalidRequest)
-    val digest_result: Result<[u8], text> = pin.digest()
+    val digest_result = pin.digest()
     if digest_result.is_err():
         return _process_observation_empty_start_v1(
             provider, ObservedProcessStartStatusV1.ExecFailed,
@@ -812,7 +803,7 @@ use std.io_runtime.{env_get, env_get_nullable, read_file_text_result}
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
-extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 @unsafe(reason: "raw owned-child wait; -2 is timeout and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 @unsafe(reason: "raw owned-child termination status; false sentinel means absent or termination failure", capabilities: [ffi])
@@ -829,8 +820,6 @@ extern fn rt_process_write_stdin_some(pid: i64, data: text, data_len: i64, offse
 extern fn rt_process_read_stdout(pid: i64) -> text
 @unsafe(reason: "raw piped-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_alive(pid: i64) -> bool
-@unsafe(reason: "raw stdout stream state; distinguishes open, observed EOF, and terminal failure", capabilities: [ffi])
-extern fn rt_process_stdout_state(pid: i64) -> i64
 @unsafe(reason: "raw piped-child close status; false sentinel means absent or cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped(pid: i64) -> bool
 
@@ -861,19 +850,20 @@ pub fn process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_spawn_pinned_piped(executable_handle, args)
 
-# Stdout drain state is independent of child liveness: 0=open/deferred,
-# 1=observed EOF with buffered tail delivered, -1=terminal read error/unknown.
-# Exited children retain their stdout owner until drain completion or close.
+# Result-carrying stdout drain, composed in pure Simple from the real
+# rt_process_read_stdout (non-blocking drain, "" sentinel = no new data
+# right now) and rt_process_is_alive primitives already backing
+# process_read_stdout/process_is_piped_alive below: Ok(Some(chunk)) for new
+# output, Ok(nil) when the child is still alive with nothing new yet, and
+# Err("process_stdout_eof") once the child is gone — the caller
+# (host_join_exact) reads that Err as "drain finished, parse the join".
 pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
     val chunk = process_read_stdout(pid)
     if chunk.len() > 0:
         return Ok(Some(chunk))
-    val state = _process_stdout_state_raw(pid)
-    if state == 1:
-        return Err("process_stdout_eof")
-    if state < 0:
-        return Err("process_stdout_read_failed")
-    Ok(nil)
+    if process_is_piped_alive(pid):
+        return Ok(nil)
+    Err("process_stdout_eof")
 
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use std.io_runtime.{file_delete}
@@ -946,7 +936,7 @@ fn _process_is_running_raw(pid: i64) -> bool:
 fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
     val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_spawn_async_value(host_path_native(rcmd), rargs)
+        rt_process_spawn_async(host_path_native(rcmd), rargs)
 
 fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
     unsafe(capabilities: [ffi]):
@@ -973,10 +963,6 @@ fn _process_read_stdout_raw(pid: i64) -> text:
     unsafe(capabilities: [ffi]):
         rt_process_read_stdout(pid)
 
-fn _process_stdout_state_raw(pid: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_process_stdout_state(pid)
-
 fn _process_is_alive_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_is_alive(pid)
@@ -987,9 +973,13 @@ fn _process_close_piped_raw(pid: i64) -> bool:
 
 use std.nogc_sync_mut.io.file_ops.{file_read_text_at, file_size}
 
-# Use the canonical runtime host decision even in sanitized environments.
+# Platform detection - inlined to avoid bootstrap runtime limitations
 fn _is_windows_platform() -> bool:
-    host_is_windows_host()
+    val os_env = env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
 
 # ============================================================================
 # Process Result struct
@@ -1338,9 +1328,9 @@ pub fn process_inspection_owner_start_pinned_v1(
     if active:
         val initial_words = unsafe(capabilities: [ffi]):
             rt_process_inspection_v1_input_receipt_value(ticket)
-        val initial: Result<ProcessInspectionInputReceiptV1, text> = decode_process_inspection_input_v1(initial_words)
+        val initial = decode_process_inspection_input_v1(initial_words)
         if initial.is_ok():
-            val fact: ProcessInspectionInputReceiptV1 = initial.unwrap()
+            val fact = initial.unwrap()
             if fact.request_id_high == ticket[1] and
                     fact.request_id_low == ticket[2] and
                     fact.ticket_high == ticket[3] and fact.ticket_low == ticket[4] and
@@ -1430,38 +1420,6 @@ pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_
     val (stdout, stderr, exit_code) = _process_run_bounded_raw(resolved_cmd, args, timeout_ms, max_output_bytes)
     proc_slot_release()
     (stdout, stderr, exit_code)
-
-pub fn process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64):
-    proc_slot_acquire()
-    val result = unsafe(capabilities: [ffi]):
-        rt_process_run_bounded_bytes(host_path_native(cmd), args, timeout_ms, max_output_bytes)
-    proc_slot_release()
-    result
-
-pub fn process_windows_executable(cmd: text) -> text?:
-    if not host_is_windows_host() or cmd == "": return nil
-    if cmd.contains("/") or cmd.contains("\\") or cmd.contains(":"):
-        if file_exists(cmd): return Some(cmd)
-        for suffix in _windows_path_exts():
-            if file_exists(cmd + suffix): return Some(cmd + suffix)
-        return nil
-    var names: [text] = []
-    var has_extension = false
-    for suffix in _windows_path_exts():
-        if cmd.lower().ends_with(suffix.lower()): has_extension = true
-    if has_extension: names.push(cmd)
-    else:
-        for suffix in _windows_path_exts(): names.push(cmd + suffix)
-    var dirs: [text] = ["."]
-    val path = env_get("PATH") ?? ""
-    for raw in path.split(";"):
-        val dir = raw.trim().replace("\"", "")
-        if dir != "": dirs.push(dir)
-    for dir in dirs:
-        for name in names:
-            val candidate = "{dir}\\{name}"
-            if file_exists(candidate): return Some(candidate)
-    nil
 
 # --------------------------------------------------------------------------
 # Timeout-vs-kill discrimination for process_run_bounded results.
@@ -1651,16 +1609,10 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     incrementally. Where `stdbuf` is installed, `stdbuf -oL -eL` also disables
     the child's full buffering. Other hosts retain the child's buffering policy.
     """
-    # This live worker owner reserves zero for an explicit unlimited deadline.
-    # Negative values retain the legacy 120-second fallback.
     if _is_windows_platform():
-        if timeout_ms == 0:
-            # The bounded native owner defines 0 as no deadline on Windows.
-            val (out, err, code) = process_run_bounded(cmd, args, 0, 67108864)
-            return (out, err, code as i32)
         return process_run_timeout_windows(cmd, args, timeout_ms)
 
-    val effective_timeout = if timeout_ms < 0: 120000 else: timeout_ms
+    val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
     var temp_dir = env_get("TMPDIR")
     if temp_dir == nil or temp_dir == "":
@@ -1699,10 +1651,7 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     # A partial/malformed contract must never fall back to a detached session.
     val bootstrap_sid = env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_ID")
     val bootstrap_exec = env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_EXEC")
-    # FreeBSD base has no setsid(1) and minimal hosts have no perl; there POSIX
-    # sh job control (set -m) gives the background child its own process group
-    # and `wait` returns its status, which is all the pgid kill path needs.
-    var sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; elif command -v perl >/dev/null 2>&1; then exec perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 125; exec @ARGV or exit 127' -- \"$@\"; else set -m; \"$@\" & wait $!; exit $?; fi; }; "
+    var sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; else exec perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 125; exec @ARGV or exit 127' -- \"$@\"; fi; }; "
     if bootstrap_sid != nil or bootstrap_exec != nil:
         sid_fn = "sid(){ case \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" in /*) ;; *) exit 125 ;; esac; exec \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" -- \"$@\"; }; "
     val redirected_cmd = "{sid_fn}sid sh -c '{inner_cmd}' > '{stdout_path}' 2> '{stderr_path}'"
@@ -1732,11 +1681,9 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stderr_relayed = 0
     var exit_code: i64 = -2
     var relay_error = ""
-    while exit_code == -2 and (effective_timeout == 0 or elapsed_ms < effective_timeout):
+    while exit_code == -2 and elapsed_ms < effective_timeout:
         val remaining = effective_timeout - elapsed_ms
-        var quantum = poll_quantum_ms
-        if effective_timeout > 0 and remaining < quantum:
-            quantum = remaining
+        val quantum = if remaining < poll_quantum_ms: remaining else: poll_quantum_ms
         exit_code = _process_wait_raw(pid, quantum)
         # Real elapsed time, including the relay work below. Never a sum of
         # requested quanta -- see the note above the loop.
@@ -1768,13 +1715,8 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
                     exit_code = _process_wait_raw(pid, 5000)
                     break
 
-    var timed_out = false
-    if effective_timeout > 0:
-        timed_out = exit_code == -2 or (exit_code == -1 and _process_is_running_raw(pid))
+    val timed_out = exit_code == -2 or (exit_code == -1 and _process_is_running_raw(pid))
     if timed_out:
-        _process_kill_raw(pid)
-    elif exit_code == -1 and _process_is_running_raw(pid):
-        # A wait failure in unlimited mode is still a failed process owner.
         _process_kill_raw(pid)
     proc_slot_release()
     if exit_code != 0:
@@ -2089,16 +2031,6 @@ fn process_spawn_async(cmd: text, args: [text]) -> i64:
     """
     _process_spawn_async_raw(cmd, args)
 
-fn process_spawn_redirected(cmd: text, args: [text], stdout_path: text,
-        stderr_path: text, timeout_ms: i64, capture_limit: i64) -> i64:
-    """Windows exact argv/file capture with owned JobObject lifecycle.
-
-    Returns a nonreused tagged token accepted by wait/is_running/kill. Off
-    Windows this platform-specific operation refuses without starting a child.
-    """
-    if not host_is_windows_host(): return -1
-    windows_redirected_spawn(cmd, args, stdout_path, stderr_path, timeout_ms, capture_limit)
-
 fn process_wait(pid: i64, timeout_ms: i64) -> i64:
     """
     Wait for a process to complete.
@@ -2114,8 +2046,6 @@ fn process_wait(pid: i64, timeout_ms: i64) -> i64:
     """
     if pid <= 0:
         return -1
-    if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
-        return windows_redirected_wait(pid, timeout_ms)
     _process_wait_raw(pid, timeout_ms)
 
 fn process_is_running(pid: i64) -> bool:
@@ -2124,8 +2054,6 @@ fn process_is_running(pid: i64) -> bool:
 
     Returns: true if running, false if exited or invalid pid
     """
-    if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
-        return windows_redirected_is_running(pid)
     _process_is_running_raw(pid)
 
 fn process_kill(pid: i64) -> bool:
@@ -2139,8 +2067,6 @@ fn process_kill(pid: i64) -> bool:
     """
     if pid <= 1:
         return false
-    if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
-        return windows_redirected_kill(pid)
     _process_kill_raw(pid)
 
 # ============================================================================

@@ -42,7 +42,7 @@ print(result.stdout)
 ### `serial_ffi.spl` — Raw serial port
 
 ```simple
-use std.nogc_sync_mut.io.serial_sffi.{SerialPort, serial_open, serial_read, serial_write, serial_close, serial_flush, serial_set_timeout}
+use std.nogc_sync_mut.io.serial_ffi.{SerialPort, serial_open, serial_read, serial_write, serial_close, serial_flush, serial_set_timeout}
 
 # Open a serial port in raw mode
 val port = serial_open("/dev/ttyUSB0", 115200)

@@ -43,41 +43,6 @@ pub(crate) fn call_method_on_value(
 ) -> Result<Value, CompileError> {
     let recv_val = recv_val.deref_pointer();
 
-    // Packed `[u8]` in chained position (e.g. `result.unwrap().len()`): answer
-    // the metadata ops without widening, and give every other method the same
-    // boxed `u8` elements the Array arms below handle. Before `[u8]` bindings
-    // became packed this receiver was rare; it errored "method 'len' not found
-    // on value of type array in nested call context".
-    if let Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) = &recv_val {
-        match method {
-            "len" | "length" => return Ok(Value::Int(bytes.len() as i64)),
-            "is_empty" => return Ok(Value::Bool(bytes.is_empty())),
-            _ => {}
-        }
-        let elements: Vec<Value> = bytes
-            .iter()
-            .map(|byte| Value::UInt {
-                value: u64::from(*byte),
-                width: 8,
-            })
-            .collect();
-        let widened = if matches!(recv_val, Value::FrozenByteArray(_)) {
-            Value::frozen_array(elements)
-        } else {
-            Value::array(elements)
-        };
-        return call_method_on_value(
-            widened,
-            method,
-            _args,
-            _env,
-            _functions,
-            _classes,
-            _enums,
-            _impl_methods,
-        );
-    }
-
     // Handle common methods for chained calls
     match &recv_val {
         // String methods
@@ -85,7 +50,7 @@ pub(crate) fn call_method_on_value(
             "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
             "is_empty" => return Ok(Value::Bool(s.is_empty())),
             "to_string" => return Ok(Value::shared_text(s.clone())),
-            "chars" => return Ok(Value::array(s.chars().map(|c| Value::text(c.to_string())).collect::<Vec<Value>>())),
+            "chars" => return Ok(Value::array(s.chars().map(|c| Value::text(c.to_string())).collect())),
             "trim" | "strip" => return Ok(Value::text(s.trim().to_string())),
             "to_upper" | "upper" | "uppercase" => return Ok(Value::text(s.to_uppercase())),
             "to_lower" | "lower" | "lowercase" => return Ok(Value::text(s.to_lowercase())),
@@ -141,7 +106,7 @@ pub(crate) fn call_method_on_value(
                 } else {
                     s.split(&sep).map(str::to_string).collect()
                 };
-                return Ok(Value::array(raw_parts.into_iter().map(Value::text).collect::<Vec<Value>>()));
+                return Ok(Value::array(raw_parts.into_iter().map(Value::text).collect()));
             }
             "find_str" | "find" | "index_of" => {
                 // Keep nested temporary-text dispatch aligned with the ordinary
@@ -167,21 +132,6 @@ pub(crate) fn call_method_on_value(
                     });
                 }
                 return Ok(Value::Int(-1));
-            }
-            "slice" | "substring" => {
-                // Same BYTE-indexed contract as the ordinary string-method path
-                // (interpreter_method/string.rs) and the native `rt_slice`:
-                // `raw.trim().substring(n)` used to hit METHOD_NOT_FOUND here
-                // although binding the trimmed text first dispatched correctly.
-                let bytes = s.as_bytes();
-                let start_raw = _args.first().and_then(|v| v.as_int().ok()).unwrap_or(0);
-                let end_raw = _args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(bytes.len() as i64);
-                let end = (end_raw.max(0) as usize).min(bytes.len());
-                let start = (start_raw.max(0) as usize).min(end);
-                if start == 0 && end == bytes.len() {
-                    return Ok(Value::shared_text(s.clone()));
-                }
-                return Ok(Value::text_from_bytes(bytes[start..end].to_vec()));
             }
             "to_i64" | "to_int" => {
                 return Ok(s.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Nil));
@@ -305,12 +255,6 @@ pub(crate) fn call_method_on_value(
 
         // Array methods
         Value::Array(arr) => match method {
-            "push" | "append" => {
-                return Ok(crate::interpreter::interpreter_method::collections::array_push_value(
-                    arr,
-                    _args.first().cloned().unwrap_or(Value::Nil),
-                ));
-            }
             "len" | "length" => return Ok(Value::Int(arr.len() as i64)),
             "is_empty" => return Ok(Value::Bool(arr.is_empty())),
             "first" => {
@@ -1174,27 +1118,6 @@ mod tests {
         .expect("chained replace should dispatch");
 
         assert_eq!(chained, Value::text("HEllo".to_string()));
-    }
-
-    #[test]
-    fn nested_substring_dispatches_byte_indexed_on_temporary_text() {
-        let mut env = Env::new();
-        let mut functions = HashMap::new();
-        let mut classes = HashMap::new();
-        let enums = HashMap::new();
-        let impl_methods = HashMap::new();
-        let mut call = |recv: Value, method: &str, args: &[Value]| {
-            call_method_on_value(recv, method, args, &mut env, &mut functions, &mut classes, &enums, &impl_methods)
-                .expect("nested text slice should dispatch")
-        };
-
-        let trimmed = call(Value::text("  # Re-exported from a.spl ".to_string()), "trim", &[]);
-        assert_eq!(call(trimmed.clone(), "substring", &[Value::Int(19)]), Value::text("a.spl".to_string()));
-        assert_eq!(call(trimmed.clone(), "slice", &[Value::Int(2), Value::Int(4)]), Value::text("Re".to_string()));
-        assert_eq!(call(trimmed.clone(), "substring", &[Value::Int(50)]), Value::text(String::new()));
-        assert_eq!(call(trimmed.clone(), "substring", &[Value::Int(-3)]), trimmed);
-        // Byte offsets, matching `len`/`index_of` and native `rt_slice`.
-        assert_eq!(call(Value::text("caféZ".to_string()), "substring", &[Value::Int(5)]), Value::text("Z".to_string()));
     }
 
     #[test]

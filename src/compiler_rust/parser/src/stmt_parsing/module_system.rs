@@ -816,14 +816,8 @@ impl<'a> Parser<'a> {
                 }));
             }
 
-            // Not a module path - parse as identifier list. Each item may carry
-            // an alias (`export impl_name as public_name`), the same surface the
-            // pure-Simple parser accepts (parser_decls_use.spl parse_export_decl).
-            // Without this the `as public_name` tail was left behind and parsed
-            // as a separate statement -- a call to a function named `as` -- so
-            // any module containing an aliased bare export failed to load in the
-            // interpreter with `semantic: function `as` not found`.
-            let mut items = vec![self.parse_bare_export_item(first_item)?];
+            // Not a module path - parse as identifier list
+            let mut items = vec![first_item];
 
             let mut export_indent_depth = 0;
             while self.check(&TokenKind::Comma) {
@@ -841,8 +835,7 @@ impl<'a> Parser<'a> {
                 if self.check(&TokenKind::Dedent) || self.is_at_end() || self.check(&TokenKind::From) {
                     break;
                 }
-                let item = self.expect_path_segment()?;
-                items.push(self.parse_bare_export_item(item)?);
+                items.push(self.expect_path_segment()?);
             }
             // Consume matching dedents
             for _ in 0..export_indent_depth {
@@ -863,6 +856,8 @@ impl<'a> Parser<'a> {
                 let module_path = self.parse_module_path()?;
 
                 // Create export use statement with group import
+                let targets: Vec<ImportTarget> = items.into_iter().map(ImportTarget::Single).collect();
+
                 Ok(Node::ExportUseStmt(ExportUseStmt {
                     span: Span::new(
                         start_span.start,
@@ -871,13 +866,13 @@ impl<'a> Parser<'a> {
                         start_span.column,
                     ),
                     path: module_path,
-                    target: ImportTarget::Group(items),
+                    target: ImportTarget::Group(targets),
                 }))
             } else {
-                // Style 3: bare export (export X, Y, Z / export X as Y)
+                // Style 3: bare export (export X, Y, Z)
                 // Create export use statement with empty path
                 // This marks the symbols for export without importing them
-                let targets = items;
+                let targets: Vec<ImportTarget> = items.into_iter().map(ImportTarget::Single).collect();
 
                 Ok(Node::ExportUseStmt(ExportUseStmt {
                     span: Span::new(
@@ -891,16 +886,6 @@ impl<'a> Parser<'a> {
                 }))
             }
         }
-    }
-
-    /// One item of a bare export list: `name` or `name as alias`.
-    fn parse_bare_export_item(&mut self, name: String) -> Result<ImportTarget, ParseError> {
-        if self.check(&TokenKind::As) {
-            self.advance(); // consume 'as'
-            let alias = self.expect_path_segment()?;
-            return Ok(ImportTarget::Aliased { name, alias });
-        }
-        Ok(ImportTarget::Single(name))
     }
 
     /// Parse auto import: auto import router.route

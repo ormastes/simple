@@ -91,9 +91,9 @@ fn strip_ansi(s: text) -> text:
                 in_escape = false  # End of escape sequence
             i = i + 1
             continue
-        # Only ESC starts an ANSI sequence. Ordinary brackets (error[E1002],
-        # indexed values, and labels) must remain intact.
-        if ch == "\u{1b}" and i + 1 < s.len():
+        # Check for ESC character (appears as a special char in strings)
+        # Since we can't directly check char code, look for the [ after ESC
+        if i + 1 < s.len():
             val next = s[i + 1:i + 2]
             if next == "[":
                 # Could be ESC[, check if followed by digits and letter
@@ -259,23 +259,11 @@ fn file_has_ignored_test(file_path: text) -> bool:
     val content = read_file_content(file_path)
     content.contains("tag: \"skip\"") or content.contains("tag: 'skip'") or content.contains("# @pending") or content.contains("tag: \"pending\"") or content.contains("tag: 'pending'")
 
-fn content_has_tag(content: text, tag: text) -> bool:
-    """True when the spec source carries `tag` via `tag: "x"`, `tag("x")`,
-    or a `# @x` / `# @tag:x` header line (exact name, not a prefix)."""
-    if content.contains("tag: \"{tag}\"") or content.contains("tag: '{tag}'"):
-        return true
-    if content.contains("tag(\"{tag}\")"):
-        return true
-    for line in content.split("\n"):
-        val t = line.trim()
-        if t == "# @{tag}" or t == "# @tag:{tag}" or t.starts_with("# @{tag} ") or t.starts_with("# @tag:{tag} "):
-            return true
-    false
-
 fn file_has_tag(file_path: text, tag: text) -> bool:
     if tag == "":
         return true
-    content_has_tag(read_file_content(file_path), tag)
+    val content = read_file_content(file_path)
+    content.contains("tag: \"{tag}\"") or content.contains("tag: '{tag}'")
 
 fn file_has_di_test_tag(file_path: text) -> bool:
     """Check if file has # @di_test tag, allowing DI modifications in system tests."""
@@ -348,32 +336,6 @@ fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
 # Fast Test File Discovery (manifest-based)
 # =========================================================================
 
-fn print_convention_exclusions(fuzz: i64, chaos: i64, deploy: i64, security: i64, remote: i64, baremetal: i64):
-    """Say out loud which spec files directory discovery left out by convention.
-
-    `/fuzz/`, `/resilience/`, `/deploy/`, `/security/`, `/remote/` and
-    `/baremetal/` specs are skipped on a host directory run. Dropping them with
-    no trace made a directory run read "N discovered, N executed" while whole
-    subtrees never ran. Name each class and how to run it.
-    """
-    val total = fuzz + chaos + deploy + security + remote + baremetal
-    if total == 0:
-        return
-    var parts: [text] = []
-    if fuzz > 0:
-        parts.push("fuzz={fuzz} (--fuzz)")
-    if chaos > 0:
-        parts.push("resilience={chaos} (--chaos)")
-    if deploy > 0:
-        parts.push("deploy={deploy} (--deploy)")
-    if security > 0:
-        parts.push("security={security} (--security)")
-    if remote > 0:
-        parts.push("remote={remote} (name the .../remote directory)")
-    if baremetal > 0:
-        parts.push("baremetal={baremetal} (name the .../baremetal directory or use a baremetal mode)")
-    print "  Excluded by directory convention, NOT run: {total} file(s): {parts.join(', ')}"
-
 fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bool) -> [text]:
     # Normalize path separators for Windows compatibility
     var base_path = base_path.replace("\\", "/")
@@ -382,15 +344,10 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         if file_exists(base_path) and is_test_file(base_path):
             if not options.only_skipped and file_has_pending_tag(base_path):
                 return []
-            # --tag applies to an explicit path too: a file that does not carry
-            # the tag is an empty selection (exit 4), not a silent full run.
-            if options.tag != "" and not file_has_tag(base_path, options.tag):
-                return []
             return [base_path]
         return []
 
-    # The manifest does not record spec tags, so a tag filter must scan content.
-    if not use_cache or options.tag != "":
+    if not use_cache:
         return discover_test_files_slow(base_path, options)
 
     # Try loading manifest
@@ -422,12 +379,6 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
     val start = time_now_unix_micros()
     val keep_legacy_mirror = targets_legacy_mirror(base_path)
     var test_files: [text] = []
-    var ex_fuzz = 0
-    var ex_chaos = 0
-    var ex_deploy = 0
-    var ex_security = 0
-    var ex_remote = 0
-    var ex_baremetal = 0
 
     for entry in manifest.entries:
         # Path prefix filter
@@ -449,16 +400,12 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
 
         # Advanced directory filters
         if not options.fuzz_mode and entry.is_fuzz:
-            ex_fuzz = ex_fuzz + 1
             continue
         if not options.chaos_mode and entry.is_chaos:
-            ex_chaos = ex_chaos + 1
             continue
         if not options.deploy_mode and entry.is_deploy:
-            ex_deploy = ex_deploy + 1
             continue
         if not options.security_mode and entry.is_security:
-            ex_security = ex_security + 1
             continue
 
         # Baremetal/remote filtering
@@ -466,10 +413,6 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         val is_host_mode = not execution_mode_is_composite(options.mode)
         if is_host_mode and not explicit_target:
             if entry.is_baremetal or entry.path.contains("/remote/"):
-                if entry.path.contains("/remote/"):
-                    ex_remote = ex_remote + 1
-                else:
-                    ex_baremetal = ex_baremetal + 1
                 continue
 
         # Platform tag filtering
@@ -521,7 +464,6 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         return verified
 
     print "  Discovery: {elapsed_ms}ms (from manifest, {manifest.entries.len()} indexed)"
-    print_convention_exclusions(ex_fuzz, ex_chaos, ex_deploy, ex_security, ex_remote, ex_baremetal)
 
     test_files
 
@@ -579,12 +521,6 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
     val needs_content = options.list_ignored or options.only_slow or options.only_skipped or options.tag != "" or not options.run_all
     val keep_legacy_mirror = targets_legacy_mirror(base_path)
     var test_files: [text] = []
-    var ex_fuzz = 0
-    var ex_chaos = 0
-    var ex_deploy = 0
-    var ex_security = 0
-    var ex_remote = 0
-    var ex_baremetal = 0
     for f in all_files:
         if not is_test_file(f):
             continue
@@ -602,16 +538,12 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
                 continue
         # Skip advanced test directories unless their mode flag is set
         if not options.fuzz_mode and f.contains("/fuzz/"):
-            ex_fuzz = ex_fuzz + 1
             continue
         if not options.chaos_mode and f.contains("/resilience/"):
-            ex_chaos = ex_chaos + 1
             continue
         if not options.deploy_mode and f.contains("/deploy/"):
-            ex_deploy = ex_deploy + 1
             continue
         if not options.security_mode and f.contains("/security/"):
-            ex_security = ex_security + 1
             continue
         # Option C: Directory convention filtering
         # Skip if user explicitly targeted baremetal/remote directory
@@ -619,10 +551,6 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
         val is_host_mode = not execution_mode_is_composite(options.mode)
         if is_host_mode and not explicit_target:
             if f.contains("/baremetal/") or f.contains("/remote/"):
-                if f.contains("/remote/"):
-                    ex_remote = ex_remote + 1
-                else:
-                    ex_baremetal = ex_baremetal + 1
                 continue
         elif not is_host_mode:
             # Composite mode: filter arch-specific baremetal dirs
@@ -660,7 +588,7 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
                     continue
             # Filter by --tag
             if options.tag != "":
-                if not content_has_tag(content, options.tag):
+                if not (content.contains("tag: \"{options.tag}\"") or content.contains("tag: '{options.tag}'")):
                     continue
 
         # Slow tests now run by default (session sharing makes them fast)
@@ -671,7 +599,6 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
     if options.seed_set:
         test_files = shuffle_files(test_files, options.seed)
 
-    print_convention_exclusions(ex_fuzz, ex_chaos, ex_deploy, ex_security, ex_remote, ex_baremetal)
     test_files
 
 # =========================================================================
@@ -773,10 +700,7 @@ fn extract_skip_feature_info(file_path: text) -> SkipFeatureInfo:
 fn print_skip_features(files: [text], planned_only: bool):
     var features: [SkipFeatureInfo] = []
     for f in files:
-        # Annotated binding: an unannotated local holding an imported-struct
-        # call result loses field provenance on the strict native lane
-        # (unresolved method call: lower/contains on info.status).
-        val info: SkipFeatureInfo = extract_skip_feature_info(f)
+        val info = extract_skip_feature_info(f)
         if planned_only:
             val s = info.status.lower()
             if s.contains("planned") or s.contains("tbd") or s == "unknown":

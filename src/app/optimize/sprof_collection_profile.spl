@@ -16,7 +16,7 @@ use std.nogc_sync_mut.src.collections.adaptive_set.{AdaptiveSet}
 use std.hash.Hash
 use std.nogc_sync_mut.src.collections.hashset.{HashSet}
 use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
-use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.io.{file_read}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.io_runtime.{hash_text}
 use compiler.frontend.core.collection_feedback.{collection_project_relative_path}
@@ -254,13 +254,11 @@ fn sprof_collection_record_from_map(map: AdaptiveTextMap) -> AdaptiveSetWorkload
     """Capture one text map's measured load using the same v2 sample shape."""
     map.workload_profile_sample()
 
-# @workaround bug=eq_ord_where_bound_unresolved_hir_2026_10_19 recover=b73c24d606e reason=HIR lowers builtin-trait where bounds Eq/Ord as types and fails unresolved type; bounds dropped (erased before 5b649fb61fe)
-fn sprof_collection_record_from_generic_map<K, V>(map: AdaptiveMap<K, V>) -> AdaptiveSetWorkloadProfile where K: Hash:
+fn sprof_collection_record_from_generic_map<K, V>(map: AdaptiveMap<K, V>) -> AdaptiveSetWorkloadProfile where K: Hash + Eq + Ord:
     """Capture a typed map without erasing its key or value semantics."""
     map.workload_profile_sample()
 
-# @workaround bug=eq_ord_where_bound_unresolved_hir_2026_10_19 recover=b73c24d606e reason=HIR lowers builtin-trait where bounds Eq/Ord as types and fails unresolved type; bounds dropped (erased before 5b649fb61fe)
-fn sprof_collection_record_from_generic_set<K>(set: AdaptiveSet<K>) -> AdaptiveSetWorkloadProfile where K: Hash:
+fn sprof_collection_record_from_generic_set<K>(set: AdaptiveSet<K>) -> AdaptiveSetWorkloadProfile where K: Hash + Eq + Ord:
     """Capture a typed set using the same admitted v2 sample shape."""
     set.workload_profile_sample()
 
@@ -283,12 +281,10 @@ fn sprof_collection_metrics_from_map(map: AdaptiveTextMap) -> [SprofCollectionMe
     """Map measured text-map state to the same collection metric names."""
     _sprof_collection_metrics_from_observation(map.observation())
 
-# @workaround bug=eq_ord_where_bound_unresolved_hir_2026_10_19 recover=b73c24d606e reason=HIR lowers builtin-trait where bounds Eq/Ord as types and fails unresolved type; bounds dropped (erased before 5b649fb61fe)
-fn sprof_collection_metrics_from_generic_map<K, V>(map: AdaptiveMap<K, V>) -> [SprofCollectionMetric] where K: Hash:
+fn sprof_collection_metrics_from_generic_map<K, V>(map: AdaptiveMap<K, V>) -> [SprofCollectionMetric] where K: Hash + Eq + Ord:
     _sprof_collection_metrics_from_observation(map.observation())
 
-# @workaround bug=eq_ord_where_bound_unresolved_hir_2026_10_19 recover=b73c24d606e reason=HIR lowers builtin-trait where bounds Eq/Ord as types and fails unresolved type; bounds dropped (erased before 5b649fb61fe)
-fn sprof_collection_metrics_from_generic_set<K>(set: AdaptiveSet<K>) -> [SprofCollectionMetric] where K: Hash:
+fn sprof_collection_metrics_from_generic_set<K>(set: AdaptiveSet<K>) -> [SprofCollectionMetric] where K: Hash + Eq + Ord:
     _sprof_collection_metrics_from_observation(set.observation())
 
 fn sprof_serialize_collection_profile(
@@ -603,17 +599,14 @@ fn sprof_build_collection_set_index(loaded: SprofCollectionLoad) -> SprofCollect
             metric_index, group.site_id, group.target_profile_id, "hash_collision_count")
         val paired = probes.found and collisions.found and probes.count == collisions.count and
             collisions.p95 <= probes.p95
-        # Missing both metrics is unmeasured. A partial or inconsistent pair
-        # must survive preparation as invalid evidence, not become unmeasured.
-        val invalid_pair = (probes.found or collisions.found) and not paired
         profiles.push(AdaptiveSetWorkloadProfile(
             site_id: group.site_id, target_profile_id: group.target_profile_id,
             sample_count: group.sizes.len(), size_p95: _collection_p95(group.sizes),
             lookup_count_p95: _collection_p95(group.lookups),
             hit_count_p95: _collection_p95(group.hits),
             miss_count_p95: _collection_p95(group.misses),
-            hash_probe_count_p95: if paired: probes.p95 else: if invalid_pair: -2 else: -1,
-            hash_collision_count_p95: if paired: collisions.p95 else: if invalid_pair: -2 else: -1
+            hash_probe_count_p95: if paired: probes.p95 else: -1,
+            hash_collision_count_p95: if paired: collisions.p95 else: -1
         ))
     SprofCollectionSetIndex(
         admitted: true, sample_count: loaded.samples.len(),

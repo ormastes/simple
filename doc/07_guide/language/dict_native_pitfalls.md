@@ -247,7 +247,7 @@ exposure — always also search for `: {`-style dict declarations.
 
 BAD:
 
-```simple:skip
+```simple
 if d.len() == 0:
     return
 
@@ -258,7 +258,7 @@ if entry != nil:
 
 GOOD:
 
-```simple:skip
+```simple
 if d.keys().len() == 0:
     return
 
@@ -269,13 +269,13 @@ if d.contains_key(name):
 
 BAD (Option needed downstream):
 
-```simple:skip
+```simple
 val maybe: Tr? = d.get(key)
 ```
 
 GOOD:
 
-```simple:skip
+```simple
 val maybe: Tr? = if d.contains_key(key): Some(d[key]) else: nil
 ```
 

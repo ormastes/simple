@@ -4,7 +4,7 @@ Create your own `xxx{}` block syntax in Simple with just 3 lines of code!
 
 ## Quick Start
 
-```text
+```simple
 use compiler.blocks.{define_block, register_block}
 use compiler.blocks.modes.{LexerMode}
 use compiler.blocks.value.{BlockValue}
@@ -33,7 +33,7 @@ Choose the complexity level that fits your needs:
 ### Tier 1: Minimal API (80% of use cases)
 
 **3 lines of code:**
-```simple:skip
+```simple
 val myblock = define_block("myblock", LexerMode.Raw, \text:
     Ok(BlockValue.Raw(text))
 )
@@ -45,7 +45,7 @@ register_block(myblock)
 ### Tier 2: Builder API (15% of use cases)
 
 **5-10 lines with features:**
-```text
+```simple
 val sql = BlockBuilder("sql")
     .raw_text()
     .simple_parser(\text: parse_sql(text))
@@ -60,7 +60,7 @@ register_block(sql)
 ### Tier 3: Full Trait (5% of use cases)
 
 **Complete control with 20+ methods:**
-```simple:skip
+```simple
 struct AdvancedBlock(BlockDefinition):
     fn kind() -> text: "advanced"
     fn parse_payload(payload, ctx): ...

@@ -29,13 +29,12 @@ pub use compiler.driver.driver_riscv_gen2_product.{
     compiler_driver_run_riscv_gen2_zca_trap_single_outstanding_product
 }
 
-use compiler.backend.interpreter.{InterpreterBackendImpl}
-use compiler.backend.sdn.{SdnBackendImpl}
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend.sdn.{SdnBackendImpl}
 use lazy compiler.backend.backend_types.{BackendResult}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 pub use compiler.driver.driver_compiler_type.{CompilerDriver}
-use compiler.driver.driver_compiler_type.{compiler_driver_next_identity_v1}
 use compiler.driver.driver_aot_output.*
 # driver_pipeline.spl extends CompilerDriver via `impl CompilerDriver:`
 # (lower_to_mir, jit_compile_and_run, weave_aop, apply_debug_trace, ...). It was
@@ -46,7 +45,6 @@ use compiler.driver.driver_aot_output.*
 use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_source_pipeline_impl.*
 use compiler.driver.driver_hir_pipeline_impl.*
-use compiler.driver.driver_collection_planner.*
 use compiler.driver.driver_aot_pipeline.*
 use compiler.driver.driver_orchestration.*
 use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default}
@@ -84,14 +82,17 @@ impl CompilerDriver:
         # Constructing a fresh concrete SdnBackendImpl and calling
         # process_module directly avoids the closure-field call entirely.
         val sdn_impl = SdnBackendImpl()
+        var results: Dict<text, Any> = {}
+
         for name in self.ctx.hir_modules.keys():
             val hir_module = self.ctx.hir_modules[name]
             match sdn_impl.process_module(hir_module):
-                case Ok(_): pass
+                case Ok(value):
+                    results[name] = value
                 case Err(e):
                     return CompileResult.RuntimeError("SDN error in {name}: {e.message}")
 
-        CompileResult.Success(None)
+        CompileResult.Success(results)
 
     # --------------------------------------------------------------------------
     # Mode: Interpret
@@ -102,6 +103,8 @@ impl CompilerDriver:
 
     fn interpret_pipeline() -> CompileResult:
         val log = self.ctx.logger
+        var last_result: Any = BackendResult.Unit
+        var has_result = false
 
         if self.ctx.sources.len() == 0:
             return CompileResult.RuntimeError("No source file specified for interpret mode")
@@ -117,7 +120,7 @@ impl CompilerDriver:
         # concrete InterpreterBackendImpl and calling process_module inline enters
         # the body correctly. See doc/08_tracking/bug/
         # stage4_codegen_compact_form_hazards_2026-07-02.md (Iteration 13/14).
-        val interp = InterpreterBackendImpl.with_program_args(self.ctx.options.program_args)
+        val interp = InterpreterBackendImpl.new()
 
         var src_idx = 0
         while src_idx < self.ctx.sources.len():
@@ -129,17 +132,20 @@ impl CompilerDriver:
                 continue
 
             match interp.interpret_hir_module(hir_module):
-                case Ok(_): pass
+                case Ok(value):
+                    last_result = value
+                    has_result = true
                 case Err(e):
                     return CompileResult.RuntimeError("Interpret error in {name}: {e.message}")
             src_idx = src_idx + 1
 
-        CompileResult.Success(None)
+        if has_result:
+            return CompileResult.Success(last_result)
+        CompileResult.Success(BackendResult.Unit)
 
 pub fn compiler_driver_create(options: CompileOptions) -> CompilerDriver:
     val ctx = CompileContext.create(options)
     CompilerDriver(
-        identity_id: compiler_driver_next_identity_v1(),
         ctx: ctx,
         streaming_module_surfaces_owner: ModuleSurfacesByName.empty(),
         streaming_surface_owner_ready: false,

@@ -16,14 +16,6 @@
 #   ERROR — nothing was checked     exit 2
 set -eu
 
-focused_configured_output=0
-case "${1:-}" in
-    --configured-output-only) focused_configured_output=1 ;;
-    --windows-candidate-only|--candidate-path-negative-only|--parent-refresh-only) ;;
-    "") ;;
-    *) echo "usage: $0 [--configured-output-only|--windows-candidate-only|--candidate-path-negative-only|--parent-refresh-only]" >&2; exit 2 ;;
-esac
-
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_VERSION_ROOT
@@ -64,7 +56,7 @@ replace_in_file() {
 # compiles all of src/app/cli and src/lib, turning receipt production into a
 # multi-gigabyte full-tree build before any bootstrap phase can start.
 grep -F -- '--entry-closure' "$producer" >/dev/null &&
-    grep -F -- '--entry "$planner_entry_rel"' "$producer" >/dev/null ||
+    grep -F -- '--entry "$planner_source"' "$producer" >/dev/null ||
     fail "producer does not constrain the planner build to its entry closure"
 checked=$((checked + 1))
 
@@ -92,34 +84,11 @@ set -eu
 }
 out=''
 prev=''
-entry=''
-runtime=''
-cache=''
-source_roots=''
 for a in "$@"; do
     if [ "$prev" = "-o" ]; then out=$a; fi
-    if [ "$prev" = "--entry" ]; then entry=$a; fi
-    if [ "$prev" = "--runtime-path" ]; then runtime=$a; fi
-    if [ "$prev" = "--cache-dir" ]; then cache=$a; fi
-    if [ "$prev" = "--source" ]; then source_roots="$source_roots|$a"; fi
     prev=$a
 done
 [ -n "$out" ] || { echo "fixture-cc: no -o" >&2; exit 1; }
-[ "$source_roots" = '|src/app/cli|src/lib' ] || {
-    echo "fixture-cc: entry-closure source roots must be checkout-relative" >&2; exit 1;
-}
-# Checkout-relative like the source roots: an absolute entry is spelled C:/...
-# in argv but C:\... by the parent's cwd on Windows, so the frozen cold-entry
-# route cannot map it into the SCV snapshot (artifact-unavailable).
-[ "$entry" = src/app/cli/bootstrap_reason_planner.spl ] &&
-    [ -f "$(pwd -P)/$entry" ] || {
-    echo "fixture-cc: planner entry must be checkout-relative" >&2; exit 1;
-}
-[ -d "$runtime" ] && [ "$runtime" = "${SIMPLE_RUNTIME_PATH:-}" ] || {
-    echo "fixture-cc: admitted runtime provider missing" >&2; exit 1;
-}
-case "$cache" in "$(dirname -- "$out")"/planner-cache) ;; *)
-    echo "fixture-cc: planner cache is not private" >&2; exit 1 ;; esac
 cat >"$out" <<'PLANNER'
 #!/bin/sh
 set -eu
@@ -303,7 +272,7 @@ run_producer() {
 }
 
 run_custom_output_producer() {
-    rp_root=$1 rp_output=${2:-$custom_output}
+    rp_root=$1 rp_output=$2
     SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$rp_output" \
     sh "$producer" --root="$rp_root" \
         --bootstrap-output="$rp_output" \
@@ -326,44 +295,6 @@ check_noncanonical_candidate_path() {
     checked=$((checked + 1))
 }
 
-# Exercise only the new parent-refresh admission route. It must validate the
-# existing complete evidence without building a planner or re-running probes.
-if [ "${1:-}" = --parent-refresh-only ]; then
-    refresh_root="$scratch/parent-refresh"
-    make_fixture "$refresh_root" 'stage2-provenance: pure-simple' strict
-    refresh_root=$(CDPATH= cd -- "$refresh_root" && pwd -P)
-    refresh_output="$refresh_root/build/bootstrap"
-    refresh_candidate="$refresh_output/stage2/fixture-triple/simple"
-    refresh_evidence="$refresh_output/provenance/fixture"
-    . "$root/scripts/bootstrap/admit-stage2-parent.shs"
-    validate_refresh() (
-        SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=$refresh_output
-        export SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
-        bootstrap_stage2_parent_admit "$refresh_candidate" "$root"
-    )
-    validate_refresh >"$scratch/refresh-valid.log" 2>&1 ||
-        fail "valid Phase-2 parent refresh rejected: $(tail -3 "$scratch/refresh-valid.log")"
-    [ ! -e "$refresh_output/admission" ] || fail "parent validation built a planner"
-    checked=$((checked + 1))
-    for refresh_input in \
-        "$refresh_candidate" \
-        "$refresh_evidence/source-inputs-before.txt" \
-        "$refresh_evidence/stage2-runtime-authority/deps/libspl_hosted_runtime-fixture.rlib" \
-        "$refresh_evidence/stage2-sanity.env.frontend-bootstrap-0.log"; do
-        cp -p -- "$refresh_input" "$scratch/refresh-original"
-        chmod u+w "$refresh_input"
-        printf '\nchanged after admission\n' >>"$refresh_input"
-        if validate_refresh >"$scratch/refresh-negative.log" 2>&1; then
-            fail "parent refresh admitted changed evidence: $refresh_input"
-        fi
-        cp -p -- "$scratch/refresh-original" "$refresh_input"
-        rm -f -- "$scratch/refresh-original"
-        checked=$((checked + 1))
-    done
-    echo "PASS — $checked fixture(s) checked (parent refresh only)"
-    exit 0
-fi
-
 # Allows a newly added negative case to be verified without replaying already
 # passing producer fixtures during an incremental bootstrap repair.
 if [ "${1:-}" = --candidate-path-negative-only ]; then
@@ -372,7 +303,7 @@ if [ "${1:-}" = --candidate-path-negative-only ]; then
     exit 0
 fi
 
-if [ "$focused_configured_output" -eq 0 ]; then
+if [ "${1:-}" != --configured-output-only ]; then
 # --- fixture 1: the gate is satisfiable -------------------------------------
 if [ "${1:-}" != --windows-candidate-only ]; then
 ok_root="$scratch/ok"
@@ -483,39 +414,22 @@ if bootstrap_planner_v2_verify "$custom_root/custom-output-receipt.env" \
 fi
 checked=$((checked + 1))
 
-# A configured parent must not borrow admission authority from a sibling output.
-sibling="$custom_root/build/bootstrap-sibling"
+# A valid receipt from a sibling output is not authority for this parent.
+sibling="$scratch/sibling-output"
 mkdir -p "$sibling"
 cp "$custom_admission" "$sibling/admission.env"
 sibling_receipt_esc=$(printf '%s' "$sibling/admission.env" | sed 's/[\/&]/\\&/g')
 for custom_receipt in "$custom_sanity" "$custom_provenance"; do
     replace_in_file "s/^admission_receipt_path=.*/admission_receipt_path=$sibling_receipt_esc/" "$custom_receipt"
 done
-if run_custom_output_producer "$custom_root" >"$scratch/sibling-output.log" 2>&1; then
+if run_custom_output_producer "$custom_root" "$custom_output" >"$scratch/sibling-output.log" 2>&1; then
     fail "configured output borrowed a sibling admission receipt"
 fi
-grep -q 'parent-stage2-admission-outside-bootstrap-output' "$scratch/sibling-output.log" ||
+grep -q 'parent-stage2-admission-outside-bootstrap' "$scratch/sibling-output.log" ||
     fail "sibling authority was not rejected at the output owner boundary"
 checked=$((checked + 1))
-
-# A Windows-suffixed parent emits and binds planner.exe through the actual producer.
-exe_root="$scratch/windows-suffix"
-make_fixture "$exe_root" 'stage2-provenance: pure-simple' strict .exe
-exe_root=$(CDPATH= cd -- "$exe_root" && pwd -P)
-sh "$producer" --root="$exe_root" \
-    --parent-compiler="$exe_root/build/bootstrap/stage2/fixture-triple/simple.exe" \
-    --runtime-dir="$exe_root/src/runtime" \
-    --target=//bootstrap:stage4 --reason=self-host-convergence-check \
-    --out="$exe_root/receipt.env" >"$scratch/windows-suffix.log" 2>&1 ||
-    fail "producer refused the Windows executable suffix fixture"
-bootstrap_planner_v2_verify "$exe_root/receipt.env" "$exe_root" >/dev/null 2>&1 ||
-    fail "Windows executable receipt failed canonical verification"
-exe_planner=$(bootstrap_planner_v2_field planner_path "$exe_root/receipt.env")
-case "$exe_planner" in */planner.exe) ;; *) fail "Windows planner lost executable suffix" ;; esac
-checked=$((checked + 1))
-
-if [ "$focused_configured_output" -eq 1 ]; then
-    echo "PASS — $checked configured-output/Windows fixture(s) checked"
+if [ "${1:-}" = --configured-output-only ]; then
+    echo "PASS — $checked fixture(s) checked (configured output ownership)"
     exit 0
 fi
 

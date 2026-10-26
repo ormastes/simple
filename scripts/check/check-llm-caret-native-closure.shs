@@ -6,8 +6,8 @@ set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)
-. "${REPO_ROOT}/scripts/lib/host-executable.shs"
-ARTIFACT_ROOT="${SIMPLE_CARET_ARTIFACT_ROOT:-${REPO_ROOT}/build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_native_closure}"
+ARTIFACT_ROOT="${REPO_ROOT}/build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_native_closure"
+OUTPUT="${ARTIFACT_ROOT}/caret-native-closure"
 STATUS_FILE="${ARTIFACT_ROOT}/status.txt"
 RUNTIME_PATH=""
 CORE_ARCHIVE=""
@@ -40,51 +40,8 @@ detect_host_target() {
         Darwin) printf '%s\n' "${closure_arch}-apple-darwin" ;;
         Linux) printf '%s\n' "${closure_arch}-unknown-linux-gnu" ;;
         FreeBSD) printf '%s\n' "${closure_arch}-unknown-freebsd" ;;
-        MSYS*|MINGW*|CYGWIN*|Windows*)
-            closure_target=$(simple_default_platform_triple) || return 1
-            case "$closure_target" in
-                *-pc-windows-msvc|*-pc-windows-gnu) printf '%s\n' "$closure_target" ;;
-                *) return 1 ;;
-            esac ;;
         *) return 1 ;;
     esac
-}
-
-# A stripped PE can have no nm symbols while still importing an unresolved
-# Caret ABI from a DLL. Inspect its actual import table on Windows.
-scan_closure_symbols() {
-    if [ "$HOST_FAMILY" = windows ]; then
-        command -v llvm-readobj >/dev/null 2>&1 || return 1
-        llvm-readobj --coff-imports "$OUTPUT_NATIVE" >"${ARTIFACT_ROOT}/undefined-symbols.txt" 2>"${ARTIFACT_ROOT}/nm.stderr.txt" || return 1
-        grep -Eq '^Format: COFF-' "${ARTIFACT_ROOT}/undefined-symbols.txt"
-    else
-        command -v nm >/dev/null 2>&1 || return 1
-        nm -u "$OUTPUT" >"${ARTIFACT_ROOT}/undefined-symbols.txt" 2>"${ARTIFACT_ROOT}/nm.stderr.txt"
-    fi
-}
-
-closure_has_forbidden_imports() {
-    LC_ALL=C grep -E \
-        '(_)?(rt_(dir_list|file_stat|stdin_read_byte|terminal_(enable_raw_mode|disable_raw_mode|get_size|is_tty|stdout_is_tty)|process_run_inherit|thread_(spawn_isolated_with_args|free))|process_run_inherit)' \
-        "${ARTIFACT_ROOT}/undefined-symbols.txt" >"${ARTIFACT_ROOT}/caret-abi-undefined.txt"
-}
-
-# Return 0 only for a successfully read clean input, 1 for forbidden content,
-# and 2 for a checker/read error. grep's exit 2 is never a clean result.
-closure_validate_imports() {
-    if closure_has_forbidden_imports; then return 1; else closure_check_rc=$?; fi
-    [ "$closure_check_rc" -eq 1 ] && return 0
-    return 2
-}
-
-closure_validate_version() {
-    if LC_ALL=C grep -Ei 'bootstrap|seed' "${ARTIFACT_ROOT}/runtime.version.txt" "${ARTIFACT_ROOT}/runtime.version.stderr.txt" >/dev/null; then
-        return 1
-    else
-        closure_check_rc=$?
-    fi
-    [ "$closure_check_rc" -eq 1 ] && return 0
-    return 2
 }
 
 select_sha256_tool() {
@@ -99,14 +56,10 @@ select_sha256_tool() {
 
 sha256_file() {
     case "$1" in
-        shasum) closure_hash_output=$(shasum -a 256 "$2") || return 1 ;;
-        sha256sum) closure_hash_output=$(sha256sum "$2") || return 1 ;;
+        shasum) shasum -a 256 "$2" | awk '{print $1}' ;;
+        sha256sum) sha256sum "$2" | awk '{print $1}' ;;
         *) return 1 ;;
     esac
-    closure_hash=$(printf '%s\n' "$closure_hash_output" | awk '{print $1}') || return 1
-    [ "${#closure_hash}" -eq 64 ] || return 1
-    case "$closure_hash" in *[!0-9a-fA-F]*) return 1 ;; esac
-    printf '%s\n' "$closure_hash"
 }
 
 source_commit() {
@@ -125,22 +78,11 @@ case "${1:-}" in
 esac
 
 mkdir -p "${ARTIFACT_ROOT}" 2>/dev/null || fail artifact_directory_unavailable
-ARTIFACT_ROOT=$(CDPATH= cd -- "$ARTIFACT_ROOT" && pwd) || fail artifact_directory_unavailable
-STATUS_FILE="${ARTIFACT_ROOT}/status.txt"
-cd "$REPO_ROOT" || fail repository_directory_unavailable
 : >"${ARTIFACT_ROOT}/build.stdout.txt"
 : >"${ARTIFACT_ROOT}/build.stderr.txt"
 printf '%s\n' not_started >"${ARTIFACT_ROOT}/build.exit.txt"
 
 HOST_TARGET=$(detect_host_target) || fail host_target_undetermined
-case "$HOST_TARGET" in
-    *-pc-windows-*) HOST_FAMILY=windows ;;
-    *) HOST_FAMILY=$(simple_host_family) ;;
-esac
-EXE_SUFFIX=$(simple_exe_suffix "$HOST_FAMILY")
-OUTPUT="${ARTIFACT_ROOT}/caret-native-closure${EXE_SUFFIX}"
-OUTPUT_NATIVE=$(simple_native_exec_path "$OUTPUT" "$HOST_FAMILY") || fail native_output_path_unavailable
-CACHE_NATIVE=$(simple_native_exec_path "${ARTIFACT_ROOT}/native-cache" "$HOST_FAMILY") || fail native_cache_path_unavailable
 if [ -n "${SIMPLE_SIMPLE_CORE_PATH:-}" ] && [ -n "${SIMPLE_CORE_RUNTIME_PATH:-}" ] && \
    [ "${SIMPLE_SIMPLE_CORE_PATH}" != "${SIMPLE_CORE_RUNTIME_PATH}" ]; then
     fail simple_core_archive_ambiguous
@@ -149,21 +91,15 @@ CORE_ARCHIVE=${SIMPLE_SIMPLE_CORE_PATH:-${SIMPLE_CORE_RUNTIME_PATH:-}}
 [ -n "${CORE_ARCHIVE}" ] || fail simple_core_archive_not_supplied
 [ -f "${CORE_ARCHIVE}" ] || fail simple_core_archive_missing
 
-RUNTIME_PATH=${SIMPLE_CARET_RUNTIME_PATH:-"${REPO_ROOT}/bin/release/${HOST_TARGET}/simple${EXE_SUFFIX}"}
+RUNTIME_PATH=${SIMPLE_CARET_RUNTIME_PATH:-"${REPO_ROOT}/bin/release/${HOST_TARGET}/simple"}
 [ -x "${RUNTIME_PATH}" ] || fail self_hosted_runtime_missing_or_not_executable
-RUNTIME_NATIVE=$(simple_native_exec_path "$RUNTIME_PATH" "$HOST_FAMILY") || fail native_runtime_path_unavailable
-CORE_NATIVE=$(simple_native_exec_path "$CORE_ARCHIVE" "$HOST_FAMILY") || fail native_core_path_unavailable
-"${RUNTIME_NATIVE}" --version >"${ARTIFACT_ROOT}/runtime.version.txt" 2>"${ARTIFACT_ROOT}/runtime.version.stderr.txt"
+"${RUNTIME_PATH}" --version >"${ARTIFACT_ROOT}/runtime.version.txt" 2>"${ARTIFACT_ROOT}/runtime.version.stderr.txt"
 runtime_version_exit=$?
 printf '%s\n' "${runtime_version_exit}" >"${ARTIFACT_ROOT}/runtime.version.exit.txt"
 [ "${runtime_version_exit}" -eq 0 ] || fail self_hosted_runtime_version_probe_failed
-closure_validate_version
-version_check_rc=$?
-case "$version_check_rc" in
-    0) : ;;
-    1) fail bootstrap_or_seed_runtime_rejected ;;
-    *) fail runtime_version_scan_failed ;;
-esac
+if LC_ALL=C grep -Eqi 'bootstrap|seed' "${ARTIFACT_ROOT}/runtime.version.txt" "${ARTIFACT_ROOT}/runtime.version.stderr.txt"; then
+    fail bootstrap_or_seed_runtime_rejected
+fi
 
 SHA256_TOOL=$(select_sha256_tool) || fail sha256_utility_missing
 RUNTIME_SHA256=$(sha256_file "${SHA256_TOOL}" "${RUNTIME_PATH}") || fail runtime_sha256_unavailable
@@ -171,11 +107,11 @@ CORE_ARCHIVE_SHA256=$(sha256_file "${SHA256_TOOL}" "${CORE_ARCHIVE}") || fail si
 SOURCE_COMMIT=$(source_commit) || fail source_commit_unavailable
 
 printf '%s\n' \
-    "${RUNTIME_NATIVE}" native-build \
+    "${RUNTIME_PATH}" native-build \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure --entry src/app/llm_caret/main.spl \
-    --runtime-bundle simple-core --target "$HOST_TARGET" --cache-dir "$CACHE_NATIVE" \
-    --strip --output "${OUTPUT_NATIVE}" \
+    --runtime-bundle simple-core --cache-dir "${ARTIFACT_ROOT}/native-cache" \
+    --strip --output "${OUTPUT}" \
     >"${ARTIFACT_ROOT}/build.args.txt"
 printf '%s\n' \
     "source_commit=${SOURCE_COMMIT}" \
@@ -189,35 +125,34 @@ printf '%s\n' \
     'entry=src/app/llm_caret/main.spl' \
     'entry_closure=true' \
     'source_roots=src/compiler,src/app,src/lib' \
-    "cache_dir=${ARTIFACT_ROOT}/native-cache" \
+    'cache_dir=build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_native_closure/native-cache' \
     'simple_no_stub_fallback=1' \
     >"${ARTIFACT_ROOT}/provenance.txt"
 
-SIMPLE_SIMPLE_CORE_PATH="${CORE_NATIVE}" \
-SIMPLE_CORE_RUNTIME_PATH="${CORE_NATIVE}" \
+SIMPLE_SIMPLE_CORE_PATH="${CORE_ARCHIVE}" \
+SIMPLE_CORE_RUNTIME_PATH="${CORE_ARCHIVE}" \
 SIMPLE_NO_STUB_FALLBACK=1 \
-"${RUNTIME_NATIVE}" native-build \
+"${RUNTIME_PATH}" native-build \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure --entry src/app/llm_caret/main.spl \
-    --runtime-bundle simple-core --target "$HOST_TARGET" --cache-dir "$CACHE_NATIVE" \
-    --strip --output "${OUTPUT_NATIVE}" \
+    --runtime-bundle simple-core --cache-dir "${ARTIFACT_ROOT}/native-cache" \
+    --strip --output "${OUTPUT}" \
     >"${ARTIFACT_ROOT}/build.stdout.txt" 2>"${ARTIFACT_ROOT}/build.stderr.txt"
 build_exit=$?
 printf '%s\n' "${build_exit}" >"${ARTIFACT_ROOT}/build.exit.txt"
 [ "${build_exit}" -eq 0 ] || fail native_entry_closure_build_failed
 [ -x "${OUTPUT}" ] || fail native_entry_closure_artifact_missing_or_not_executable
 
-scan_closure_symbols
+command -v nm >/dev/null 2>&1 || fail nm_utility_missing
+nm -u "${OUTPUT}" >"${ARTIFACT_ROOT}/undefined-symbols.txt" 2>"${ARTIFACT_ROOT}/nm.stderr.txt"
 nm_exit=$?
 printf '%s\n' "${nm_exit}" >"${ARTIFACT_ROOT}/nm.exit.txt"
 [ "${nm_exit}" -eq 0 ] || fail nm_undefined_symbol_scan_failed
-closure_validate_imports
-imports_check_rc=$?
-case "$imports_check_rc" in
-    0) : ;;
-    1) fail caret_abi_undefined_symbol_present ;;
-    *) fail caret_abi_undefined_symbol_scan_failed ;;
-esac
+if LC_ALL=C grep -E \
+    '(_)?(rt_(dir_list|file_stat|stdin_read_byte|terminal_(enable_raw_mode|disable_raw_mode|get_size|is_tty|stdout_is_tty)|process_run_inherit|thread_(spawn_isolated_with_args|free))|process_run_inherit)' \
+    "${ARTIFACT_ROOT}/undefined-symbols.txt" >"${ARTIFACT_ROOT}/caret-abi-undefined.txt"; then
+    fail caret_abi_undefined_symbol_present
+fi
 : >"${ARTIFACT_ROOT}/caret-abi-undefined.txt"
 OUTPUT_SHA256=$(sha256_file "${SHA256_TOOL}" "${OUTPUT}") || fail artifact_sha256_unavailable
 printf '%s\n' "artifact_path=${OUTPUT}" "artifact_sha256=${OUTPUT_SHA256}" >>"${ARTIFACT_ROOT}/provenance.txt"

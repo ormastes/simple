@@ -1,7 +1,3 @@
-#include "runtime_alloc_observer.h"
-#if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
-const volatile int rt_alloc_observer_memory_owner_v1 = 1;
-#endif
 /*
  * Simple Runtime — Memory FFI Functions
  *
@@ -99,7 +95,7 @@ static int rt_transient_raw_grow(void) {
         next_cap = rt_transient_raw_cap;
     }
     if (next_cap > SIZE_MAX / sizeof(RtTransientRawAlloc)) return 0;
-    RtTransientRawAlloc* fresh = (RtTransientRawAlloc*)rt_observed_calloc_v1(
+    RtTransientRawAlloc* fresh = (RtTransientRawAlloc*)calloc(
         next_cap, sizeof(RtTransientRawAlloc));
     if (!fresh) return 0;
     RtTransientRawAlloc* old = rt_transient_raw_allocs;
@@ -346,7 +342,7 @@ uint8_t* rt_alloc(int64_t size) {
     }
     if (rt_mem_harden_enabled()) {
         size_t total = (size_t)size + RT_MEM_HARDEN_HEADER_BYTES;
-        uint8_t* base = (uint8_t*)rt_observed_calloc_v1(1, total);
+        uint8_t* base = (uint8_t*)calloc(1, total);
         if (!base) return NULL;
         *(size_t*)base = (size_t)size;
         uint8_t* user = base + RT_MEM_HARDEN_HEADER_BYTES;
@@ -356,7 +352,7 @@ uint8_t* rt_alloc(int64_t size) {
         }
         return user;
     }
-    uint8_t* ptr = (uint8_t*)rt_observed_calloc_v1(1, (size_t)size);
+    uint8_t* ptr = (uint8_t*)calloc(1, (size_t)size);
     if (ptr && !rt_transient_raw_register(ptr, (size_t)size)) {
         free(ptr);
         return NULL;
@@ -443,7 +439,7 @@ static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
 static int rt_struct_alloc_resize(size_t next_cap) {
     if (next_cap > RT_STRUCT_ALLOC_MAX_CAP ||
             next_cap > SIZE_MAX / sizeof(RtStructAllocation)) return 0;
-    RtStructAllocation* fresh = (RtStructAllocation*)rt_observed_calloc_v1(
+    RtStructAllocation* fresh = (RtStructAllocation*)calloc(
         next_cap, sizeof(RtStructAllocation));
     if (!fresh) return 0;
     RtStructAllocation* old = rt_struct_allocs;
@@ -649,7 +645,7 @@ void* rt_realloc(void* ptr, int64_t size) {
         return next;
     }
 
-    void* next = rt_observed_realloc_v1(ptr, (size_t)size);
+    void* next = realloc(ptr, (size_t)size);
 #undef RT_PRESERVE_TRANSIENT_REALLOC
     return next;
 }

@@ -215,14 +215,6 @@ fn _web_render_budget_ms_env_override() -> i64:
 fn _web_phase_trace_enabled() -> bool:
     (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
 
-# Level-gated, default-off `[web-style-producer]` diagnostic receipts (CSS
-# custom-property stages, WM material-contract admission). They used to print
-# unconditionally and flooded every real-site render's stdout. Set
-# SIMPLE_WEB_STYLE_TRACE=1 to re-arm them. `budget-break` stays ungated: it is
-# a once-per-render truth signal that the rendered output is degraded.
-fn _web_style_trace_enabled() -> bool:
-    (env_get("SIMPLE_WEB_STYLE_TRACE") ?? "") == "1"
-
 # ---------------------------------------------------------------------------
 # Level-gated style-stage cost counters (SIMPLE_WEB_STYLE_COUNTERS=1).
 #
@@ -806,22 +798,13 @@ fn skip_wrap_spaces(txt: text, off: i32) -> i32:
     out
 
 fn find_from(s: text, needle: text, pos: i32) -> i32:
-    # Positional search, BYTE-indexed throughout: `pos` in, byte index out.
-    # Do not emulate this through substring(start).index_of(): native
-    # substring can be an untagged slice and index_of then returns a bogus
-    # near-zero offset for non-zero starts.
-    #
-    # The scan itself is the two-argument `index_of(needle, start)`, which the
-    # interpreter (interpreter_method/string.rs) and the compiled lane
-    # (`rt_text_find`) both implement as a native byte search from `start`.
-    # It used to be an interpreted byte loop over `s.bytes()`: every call
-    # copied the WHOLE haystack into a byte array before looking at a single
-    # byte, so the stylesheet scanners (thousands of calls over a ~300 KB
-    # sheet) were quadratic. Wikipedia's sheet took 13-16 s in CSS custom-
-    # property collection alone, exhausting the render budget before the
-    # first element was styled (0 pixels). The early returns below are kept
-    # so the edge cases answer exactly as before (an empty needle returns
-    # `start` even past the end, which native index_of would clamp).
+    # O(n*m) portable positional search. Do not emulate this through
+    # substring(start).index_of(): native substring can be represented as an
+    # untagged slice, while index_of expects tagged text and silently returns a
+    # bogus near-zero offset for non-zero starts. Keeping this in Simple also
+    # lets older deployed interpreters run current web-renderer source without
+    # requiring a newly added runtime extern.
+    # BYTE-indexed throughout: `pos` in, byte index out, matching `index_of`.
     val start = if pos < 0: 0 else: pos
     val nlen = needle.len() as i32
     if nlen == 0:
@@ -829,7 +812,30 @@ fn find_from(s: text, needle: text, pos: i32) -> i32:
     val slen = s.len() as i32
     if start >= slen or slen < nlen:
         return -1
-    s.index_of(needle, start) as i32
+    val limit = slen - nlen
+    # Decode both operands to bytes ONCE, then compare integers. Calling
+    # text_matches_at per probe would re-decode the whole haystack at every
+    # offset; the previous `char_code_at` form was worse still, since each
+    # `char_code_at(i)` re-walks the UTF-8 from byte 0, making the scan
+    # quadratic in the match position.
+    val hb = s.bytes()
+    val nb = needle.bytes()
+    val first = nb[0]
+    var i = start
+    while i <= limit:
+        if hb[i] == first:
+            var j = 1
+            var matched = true
+            while j < nlen:
+                if hb[i + j] != nb[j]:
+                    matched = false
+                    j = nlen
+                else:
+                    j = j + 1
+            if matched:
+                return i
+        i = i + 1
+    -1
 
 fn html_attr_name_byte_equal(actual: i64, expected: i64) -> bool:
     var actual_folded = actual
@@ -1416,7 +1422,7 @@ fn dec_val(c: text) -> i32:
     if c == "9": return 9
     10
 
-fn web_argb(r: i32, g: i32, b: i32) -> u32:
+fn argb(r: i32, g: i32, b: i32) -> u32:
     0xFF000000u32 | ((r.to_u32()) << 16) | ((g.to_u32()) << 8) | b.to_u32()
 
 fn parse_int_range(s: text, start: i32, end: i32) -> i32:
@@ -1440,38 +1446,21 @@ fn parse_color(raw: text) -> u32:
     val s = raw.trim().lower()
     if s.len() == 0 or s == "transparent" or s == "none" or s == "inherit":
         return 0u32
-    if s == "white": return web_argb(255, 255, 255)
-    if s == "black": return web_argb(0, 0, 0)
-    if s == "red": return web_argb(220, 50, 50)
-    # CSS Color 5 `light-dark(<light>, <dark>)`: this renderer paints the
-    # light color scheme, so the first top-level argument wins. Without this
-    # example.com's `background: light-dark(#eee,#222)` decoded as garbage.
-    if s.starts_with("light-dark(") and s.ends_with(")"):
-        val inner = s.slice(11, s.len() - 1)
-        var depth = 0
-        var i = 0
-        while i < inner.len():
-            val ch = inner.char_at(i)
-            if ch == "(":
-                depth = depth + 1
-            elif ch == ")":
-                depth = depth - 1
-            elif ch == "," and depth == 0:
-                return parse_color(inner.slice(0, i))
-            i = i + 1
-        return 0u32
+    if s == "white": return argb(255, 255, 255)
+    if s == "black": return argb(0, 0, 0)
+    if s == "red": return argb(220, 50, 50)
     if s.char_at(0) == "#":
         val h_len = s.len() - 1
         if h_len >= 6:
             val r = hex_val(s.char_at(1)) * 16 + hex_val(s.char_at(2))
             val g = hex_val(s.char_at(3)) * 16 + hex_val(s.char_at(4))
             val b = hex_val(s.char_at(5)) * 16 + hex_val(s.char_at(6))
-            return web_argb(r, g, b)
+            return argb(r, g, b)
         if h_len >= 3:
             val r = hex_val(s.char_at(1)) * 17
             val g = hex_val(s.char_at(2)) * 17
             val b = hex_val(s.char_at(3)) * 17
-            return web_argb(r, g, b)
+            return argb(r, g, b)
         return 0u32
     if s.len() >= 3 and text_matches_at(s, "rgb", 0):
         val lp = text_index_of(s, "(")
@@ -1480,7 +1469,7 @@ fn parse_color(raw: text) -> u32:
             val c1 = find_from(s, ",", lp + 1)
             val c2 = if c1 >= 0: find_from(s, ",", c1 + 1) else: -1
             if c1 >= 0 and c2 >= 0 and c2 < rp:
-                return web_argb(parse_int_range(s, lp + 1, c1), parse_int_range(s, c1 + 1, c2), parse_int_range(s, c2 + 1, rp))
+                return argb(parse_int_range(s, lp + 1, c1), parse_int_range(s, c1 + 1, c2), parse_int_range(s, c2 + 1, rp))
     _parse_color_delegated(s)
 
 fn _parse_color_delegated(lowered: text) -> u32:

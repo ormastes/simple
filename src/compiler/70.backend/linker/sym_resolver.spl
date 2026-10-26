@@ -5,7 +5,7 @@
 # are per-object and never enter the global table.
 
 use compiler.backend.linker.elf_parser.{
-    ElfObject, ElfSymbol, elf_symbol_binding, elf_symbol_type,
+    ElfObject, ElfSymbol, elf_symbol_binding,
     elf_defined_symbols, elf_undefined_symbols,
     SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK
 }
@@ -29,7 +29,6 @@ struct SymEntry:
     binding: SymBinding
     obj_idx: i64
     is_defined: bool
-    stype: i64 = 0
 
 struct SymResolution:
     defined: {text: SymEntry}
@@ -57,8 +56,7 @@ fn sym_entry_from_elf(sym: ElfSymbol, obj_idx: i64) -> SymEntry:
         size: sym.st_size,
         binding: elf_binding_to_sym(elf_symbol_binding(sym)),
         obj_idx: obj_idx,
-        is_defined: sym.st_shndx != SHN_UNDEF,
-        stype: elf_symbol_type(sym)
+        is_defined: sym.st_shndx != SHN_UNDEF
     )
 
 fn is_strong(entry: SymEntry) -> bool:
@@ -86,8 +84,7 @@ fn merge_common(existing: SymEntry, incoming: SymEntry) -> SymEntry:
     if is_strong(incoming):
         binding = incoming.binding
     SymEntry(name: existing.name, section_idx: SHN_COMMON, offset: alignment,
-        size: size, binding: binding, obj_idx: existing.obj_idx, is_defined: true,
-        stype: existing.stype)
+        size: size, binding: binding, obj_idx: existing.obj_idx, is_defined: true)
 
 # ============================================================================
 # Resolution
@@ -100,54 +97,6 @@ fn sym_resolution_new() -> SymResolution:
         errors: [],
         local_tables: []
     )
-
-class SymResolveState:
-    """Mutable accumulation for `sym_resolve_objects`. The maps are updated in
-    place; threading a SymResolution value through `sym_add_object` copied the
-    whole definition map once per input object."""
-    var defined: {text: SymEntry}
-    var errors: [text]
-    var local_tables: [[SymEntry]]
-
-    me add_object(obj: ElfObject, obj_idx: i64):
-        var locals: [SymEntry] = []
-        for sym in obj.symbols:
-            if sym.name == "":
-                continue
-
-            val entry = sym_entry_from_elf(sym, obj_idx)
-
-            if entry.binding == SymBinding.Local:
-                locals.push(entry)
-                continue
-
-            if not entry.is_defined:
-                continue
-
-            if self.defined.has(sym.name):
-                val existing = self.defined[sym.name]
-                if is_common(existing) and is_common(entry):
-                    self.defined[sym.name] = merge_common(existing, entry)
-                else if is_common(existing):
-                    # A regular strong definition overrides a tentative definition.
-                    if is_strong(entry):
-                        self.defined[sym.name] = entry
-                else if is_common(entry):
-                    # A tentative definition overrides a weak regular definition.
-                    if is_weak(existing):
-                        self.defined[sym.name] = entry
-                else if is_strong(existing) and is_strong(entry):
-                    self.errors.push("duplicate symbol: {sym.name} (object {existing.obj_idx} and {obj_idx})")
-                else if is_strong(entry) and is_weak(existing):
-                    self.defined[sym.name] = entry
-            else:
-                self.defined[sym.name] = entry
-
-        self.local_tables.push(locals)
-
-    me resolution(undefined: [text]) -> SymResolution:
-        SymResolution(defined: self.defined, undefined: undefined, errors: self.errors,
-            local_tables: self.local_tables)
 
 # reason: positional linker sym_resolver API
 fn sym_add_object(res: SymResolution, obj: ElfObject, obj_idx: i64) -> SymResolution:
@@ -221,12 +170,13 @@ fn sym_collect_undefined(res: SymResolution, objects: [ElfObject]) -> SymResolut
 
 # reason: positional linker sym_resolver API
 fn sym_resolve_objects(objects: [ElfObject]) -> SymResolution:
-    var state = SymResolveState(defined: {}, errors: [], local_tables: [])
+    var res = sym_resolution_new()
     var idx: i64 = 0
     for obj in objects:
-        state.add_object(obj, idx)
+        res = sym_add_object(res, obj, idx)
         idx = idx + 1
-    sym_collect_undefined(state.resolution([]), objects)
+    res = sym_collect_undefined(res, objects)
+    res
 
 fn sym_get(res: SymResolution, name: text) -> SymEntry?:
     if res.defined.has(name):

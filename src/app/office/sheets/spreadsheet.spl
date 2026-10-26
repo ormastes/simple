@@ -37,21 +37,11 @@ impl Sheet:
             hidden_rows: []
         )
 
-    me is_row_hidden(row: i64) -> bool:
-        """Is the given 1-based row number in `hidden_rows`? Every caller
-        (gui.spl, interactive.spl, formula.spl's hidden-rows model, sync.spl's
-        diff) has always called this method, but it was never defined here --
-        undefined `_Sheet.is_row_hidden` at the Stage-4 macOS final link
-        (2026-09-07). The `hidden_rows: [i64]` field it reads has existed on
-        `Sheet` all along; this just adds the missing reader."""
-        me.hidden_rows.contains(row)
-
     me get_cell(ref_str: text) -> Cell:
         """Get the cell at the given reference, or an empty cell if none exists."""
         val key = ref_str.upper()
-        val found = me.cells.get(key)
-        if found != nil:
-            return found
+        if me.cells.contains_key(key):
+            return me.cells[key]
         empty_cell()
 
     me set_cell(ref_str: text, cell: Cell):
@@ -114,8 +104,7 @@ impl Sheet:
             )
 
         val key = cell_ref_to_string(ref_val)
-        val found = me.cells.get(key)
-        if found == nil:
+        if not me.cells.contains_key(key):
             return SheetEditResult(
                 accepted: false,
                 reason: "missing-cell",
@@ -184,6 +173,54 @@ impl Sheet:
         val start_ref = CellRef(col: min_col, row: min_row)
         val end_ref = CellRef(col: max_col, row: max_row)
         "{cell_ref_to_string(start_ref)}:{cell_ref_to_string(end_ref)}"
+
+    me is_row_hidden(row: i64) -> bool:
+        """Whether the given 1-based row index is currently hidden."""
+        for r in me.hidden_rows:
+            if r == row:
+                return true
+        false
+
+    me hide_row(row: i64):
+        """Hide a single 1-based row index. Idempotent (hiding twice is a
+        no-op) and out-of-range rows (< 1 or beyond row_count) are ignored.
+        Mutates in place like set_cell/set_value; callers do not need to
+        reassign the Sheet."""
+        if row < 1 or row > me.row_count.to_i64():
+            return
+        if me.is_row_hidden(row):
+            return
+        var rows = me.hidden_rows
+        rows.push(row)
+        me.hidden_rows = rows
+
+    me unhide_row(row: i64):
+        """Unhide a single 1-based row index. No-op if it was not hidden."""
+        var rows = me.hidden_rows
+        var kept: [i64] = []
+        for r in rows:
+            if r != row:
+                kept.push(r)
+        me.hidden_rows = kept
+
+    me hide_rows(from: i64, to: i64):
+        """Hide every row in the inclusive range [from, to] (order-agnostic:
+        from > to is swapped). Each row goes through hide_row so the same
+        idempotency/range rules apply."""
+        var lo = from
+        var hi = to
+        if lo > hi:
+            val tmp = lo
+            lo = hi
+            hi = tmp
+        var r = lo
+        while r <= hi:
+            me.hide_row(r)
+            r = r + 1
+
+    me unhide_all_rows():
+        """Clear all row hiding (used by AutoFilter's clear-filter action)."""
+        me.hidden_rows = []
 
 # =========================================================================
 # Workbook

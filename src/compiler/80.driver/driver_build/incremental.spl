@@ -13,9 +13,6 @@ use compiler.driver.cache.integration.shadow_mode.{
     shadow_on_compile_done, shadow_report
 }
 use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_list}
-use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
-    file_is_regular_no_follow}
-use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_interface_fold}
 use compiler.driver.cache.reverse_reference_receipt.{
     REVERSE_REFERENCE_FAMILIES_V1, ReverseReferenceProjectionV1,
@@ -24,8 +21,6 @@ use compiler.driver.cache.reverse_reference_receipt.{
 }
 use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1}
 use std.common.crypto.sha256.{sha256_text}
-use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
-use std.common.binary_inspect.{byte_to_hex}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_snapshot_v1, reverse_reference_owner_mark_known_v1,
     reverse_reference_owner_register_source_alias_v1,
@@ -80,9 +75,6 @@ fn incremental_hash_text(content: text) -> i64:
 
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
 var _frontend_src_fingerprint_memo: text = "@@unset@@"
-var _frontend_portable_root_memo_v1: text = ""
-var _frontend_portable_authority_memo_v1: text = ""
-var _frontend_portable_digest_memo_v1: text = ""
 
 fn incremental_sift_down(mut values: [text], root_index: i64, heap_len: i64):
     var root = root_index
@@ -92,10 +84,10 @@ fn incremental_sift_down(mut values: [text], root_index: i64, heap_len: i64):
             return
 
         var largest = root
-        if canonical_identity_text_lt(values[largest], values[left]):
+        if values[largest] < values[left]:
             largest = left
         val right = left + 1
-        if right < heap_len and canonical_identity_text_lt(values[largest], values[right]):
+        if right < heap_len and values[largest] < values[right]:
             largest = right
         if largest == root:
             return
@@ -209,96 +201,6 @@ fn native_build_frontend_source_fingerprint() -> text:
             fp = "{digest.substring(0, 16)}n{lines.len()}"
     _frontend_src_fingerprint_memo = fp
     fp
-
-fn native_build_frontend_path_hex_v1(value: text) -> text:
-    var encoded = ""
-    for byte in value.bytes():
-        encoded = encoded + byte_to_hex(byte as i64)
-    encoded
-
-fn native_build_frontend_absolute_v1(path: text) -> bool:
-    val value = path.replace("\\", "/")
-    if value == "" or value.ends_with("/") or value.contains("..") or value.contains("\n") or
-            value.contains("\r") or value.contains("\0"):
-        return false
-    value.starts_with("/") or (value.len() > 2 and
-        value.substring(1, 2) == ":" and value.substring(2, 3) == "/")
-
-pub fn native_build_frontend_portable_source_digest_v1(source_root: text,
-        authority_path: text, authority_digest: text) -> text:
-    # The caller pins these three values from one admitted Stage2 authority.
-    # Verify the immutable file-hex snapshot and the exact parser subset before
-    # admitting any shared identity; arbitrary ambient roots cannot redirect
-    # this process to another parser tree. Never include the host root spelling
-    # or the Phase2 executable hash in the cross-OS fingerprint.
-    if source_root == _frontend_portable_root_memo_v1 and
-            authority_digest == _frontend_portable_authority_memo_v1 and
-            _frontend_portable_digest_memo_v1 != "":
-        return _frontend_portable_digest_memo_v1
-    if not native_build_frontend_absolute_v1(source_root) or
-            not native_build_frontend_absolute_v1(authority_path) or
-            authority_digest.len() != 64 or
-            not file_is_regular_no_follow(authority_path):
-        return ""
-    val authority = match file_read_regular_no_follow_bounded(authority_path,
-            67108864):
-        case Ok(value): value
-        case Err(_): return ""
-    if authority == "" or sha256_text(authority) != authority_digest:
-        return ""
-    val relative_root = "src/compiler/10.frontend"
-    val frontend_root = source_root.replace("\\", "/") + "/" + relative_root
-    if not dir_is_real_no_follow(frontend_root): return ""
-    val hex_prefix = native_build_frontend_path_hex_v1(relative_root + "/")
-    var authority_rows: Dict<text, bool> = {}
-    var authority_count = 0
-    for row in authority.split("\n"):
-        if not row.starts_with("file-hex:"): continue
-        val fields = row.split(":")
-        if fields.len() != 5 or not fields[2].starts_with(hex_prefix) or
-                not fields[2].ends_with("2e73706c"):
-            continue
-        if authority_rows.contains_key(row): return ""
-        authority_rows[row] = true
-        authority_count = authority_count + 1
-    var lines: [text] = []
-    var dirs: [text] = [frontend_root]
-    var cursor = 0
-    while cursor < dirs.len():
-        val dir = dirs[cursor]
-        cursor = cursor + 1
-        if not dir_is_real_no_follow(dir): return ""
-        val names = incremental_sorted_text(dir_list(dir) ?? [])
-        for name in names:
-            if name == "." or name == ".." or name.contains("/") or
-                    name.contains("\\"):
-                return ""
-            val full = dir + "/" + name
-            if dir_is_real_no_follow(full):
-                dirs = dirs.push(full)
-            elif rt_dir_exists(full):
-                return ""
-            elif name.ends_with(".spl"):
-                if not file_is_regular_no_follow(full): return ""
-                val relative = full.substring(source_root.replace("\\", "/").len() + 1,
-                    full.len())
-                val length = relative.bytes().len()
-                val digest = rt_file_hash_sha256(full)
-                val size = rt_file_size(full)
-                if digest.len() != 64 or size < 0: return ""
-                val row_base = "file-hex:{length}:" +
-                    native_build_frontend_path_hex_v1(relative) + ":"
-                if not authority_rows.contains_key(row_base + "0:" + digest) and
-                        not authority_rows.contains_key(row_base + "1:" + digest):
-                    return ""
-                lines = lines.push("{relative}|{size}|{digest}")
-    if lines.len() == 0 or lines.len() != authority_count: return ""
-    val identity = sha256_text(lines.join("\n"))
-    if identity.len() != 64: return ""
-    _frontend_portable_root_memo_v1 = source_root
-    _frontend_portable_authority_memo_v1 = authority_digest
-    _frontend_portable_digest_memo_v1 = identity
-    identity
 
 fn native_build_compiler_executable_hash() -> text:
     # Under `simple run <script>` rt_cli_get_args()[0] is the SCRIPT, not the
@@ -576,15 +478,7 @@ fn native_build_cache_scope_key(
         "compiler-bound-optimizer"
     else:
         "receipt:{optimizer_kernel_receipt_hash}"
-    val serial_scope = "lane={lane};backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity};provider={provider_identity};optimizer={optimizer_identity}"
-    # An independent lowering owns its complete canonical-ID map. Keep these
-    # object witnesses apart from legacy serial allocation histories, and pin
-    # the complete frozen declarations and semantic context. Scheduling and
-    # queue coordinates never authorize object reuse.
-    if (sosix_env_get_nullable("SIMPLE_MIR_SELECTIVE") ?? "") == "1":
-        val context = sosix_env_get_nullable("SIMPLE_MIR_SELECTIVE_OBJECT_CONTEXT") ?? ""
-        return serial_scope + ";mir-selective-object-owner-v1=" + context
-    serial_scope
+    "lane={lane};backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity};provider={provider_identity};optimizer={optimizer_identity}"
 
 fn incremental_mkdir_p(path: text) -> bool:
     dir_create_all(path)
@@ -718,16 +612,6 @@ fn incremental_reverse_reference_generation_identity_v1(
     val root_generation = sha256_text(generation_facts.join(""))
     (sha256_text("build-cache-state:{root_generation}"), root_generation)
 
-# Native hash failures may return a flat nil despite the extern's text type.
-# Check length before byte access: nil has runtime text length -1, not 0.
-pub fn incremental_fingerprint_digest_valid_v1(digest: text) -> bool:
-    if digest.len() != 64: return false
-    for index in 0..64:
-        val byte = digest.byte_at(index) as i64
-        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
-            return false
-    true
-
 struct FileFingerprint:
     """Content hash + metadata for a source file."""
     path: text
@@ -742,12 +626,17 @@ impl FileFingerprint:
         if not incremental_file_exists(path):
             return nil
 
-        # A fingerprint is SHA-256 of the file bytes regardless of whether
-        # a runtime admits those bytes as text. rt_hash_text is a decimal
-        # machine-word hash and cannot authenticate a native capsule receipt.
-        val hash = rt_file_hash_sha256(path)
-        if not incremental_fingerprint_digest_valid_v1(hash):
-            return nil
+        # Text read is nil for a missing OR non-UTF-8 file. Object files
+        # (.o, fingerprinted by the native capsule receipt) are binary, so
+        # fall back to a byte-level digest; only a vanished file is a miss.
+        var hash = ""
+        val content_opt = incremental_file_read_text(path)
+        if val content = content_opt:
+            hash = incremental_hash_text(content).to_text()
+        else:
+            hash = rt_file_hash_sha256(path)
+            if hash == "":
+                return nil
         val size = incremental_file_size(path)
         val mtime = 0
         Some(FileFingerprint(path: path, content_hash: hash,
@@ -824,8 +713,6 @@ impl DependencyEntry:
                 if val fresh_fingerprint = fresh:
                     if cached.is_stale(fresh_fingerprint):
                         return true
-                else:
-                    return true
         false
 
 # ============================================================================
@@ -1031,9 +918,7 @@ impl BuildCache:
                 if val entries_value_raw = entries_val:
                     val entries_value: SdnValue = entries_value_raw
                     val arr = entries_value.as_array()
-                    # @workaround bug=native_optional_array_pattern_binder_i64_2026_10_21 reason=preserve_declared_sdn_array_element_type_until_pattern_binder_lowering_is_rebuilt
-                    if val entries_array_raw = arr:
-                        val entries_array: [SdnValue] = entries_array_raw
+                    if val entries_array = arr:
                         for item_raw in entries_array:
                             val item: SdnValue = item_raw
                             val src = item.get("source")
@@ -1086,8 +971,7 @@ impl BuildCache:
                             if val deps_value_raw = deps_val:
                                 val deps_value: SdnValue = deps_value_raw
                                 val deps_arr = deps_value.as_array()
-                                if val dep_items_raw = deps_arr:
-                                    val dep_items: [SdnValue] = dep_items_raw
+                                if val dep_items = deps_arr:
                                     for d_raw in dep_items:
                                         val d: SdnValue = d_raw
                                         val ds = d.as_str()
@@ -1100,8 +984,7 @@ impl BuildCache:
                             if val outs_value_raw = outs_val:
                                 val outs_value: SdnValue = outs_value_raw
                                 val outs_arr = outs_value.as_array()
-                                if val out_items_raw = outs_arr:
-                                    val out_items: [SdnValue] = out_items_raw
+                                if val out_items = outs_arr:
                                     for o_raw in out_items:
                                         val o: SdnValue = o_raw
                                         val os = o.as_str()
@@ -1224,12 +1107,6 @@ impl BuildCache:
             if val fingerprint = fresh:
                 fresh_fingerprint = fingerprint
             else:
-                # An unavailable hash cannot certify an unchanged source.
-                if self.fingerprints.has(path):
-                    val kind = if incremental_file_exists(path): ChangeKind.Modified else: ChangeKind.Deleted
-                    changes = changes.add(path, kind)
-                else:
-                    changes = changes.add(path, ChangeKind.Added)
                 continue
             if not self.fingerprints.has(path):
                 changes = changes.add(path, ChangeKind.Added)
@@ -1552,7 +1429,7 @@ pub fn build_cache_persist(cache: BuildCache) -> bool:
 
 
 
-export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1, native_build_compiler_executable_hash, native_build_producer_identity
+export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_compiler_executable_hash, native_build_producer_identity
 # Path-based entry points: the BuildCache instance never crosses a module
 # boundary (the current self-hosted child binary erases class values that do,
 # losing both methods and fields). All parameters and results are plain data.

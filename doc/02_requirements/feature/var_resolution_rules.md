@@ -18,7 +18,7 @@ plan `doc/03_plan/compiler/module_resolution/var_resolution_plan.md`
 
 `var/` is a module-resolution overlay. Normal code imports stable names:
 
-```simple:skip
+```simple
 use crypto.provider
 use fs.path
 use app.gui.surface
@@ -26,7 +26,7 @@ use app.gui.surface
 
 Normal code must **not** import variant paths (rejected — E-VAR005):
 
-```text
+```simple
 use var.platform.mac.fs.path          # invalid
 use var.lib.crypto.openssl.crypto.provider  # invalid
 ```

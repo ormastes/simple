@@ -26,7 +26,7 @@ The interpreter DOES support wrapper imports when running via `bin/simple test`,
 4. ✅ Test runner pre-loads necessary modules - migration IS possible
 
 **Migration Pattern**:
-```simple:skip
+```simple
 # BEFORE:
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -151,7 +151,7 @@ All three tests FAILED due to interpreter limitation.
 The interpreter DOES support wrapper imports when running via `bin/simple test`. The test runner pre-loads necessary modules, enabling transitive extern declarations to work properly.
 
 **Migration Pattern Validated**:
-```simple:skip
+```simple
 # Step 1: Replace extern declarations with wrapper imports
 use app.io.file_ops.{file_read, file_write, file_exists}
 use app.io.dir_ops.{dir_create, dir_remove_all}

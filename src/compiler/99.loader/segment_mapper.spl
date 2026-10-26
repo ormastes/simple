@@ -103,8 +103,6 @@ struct SegmentSymbol:
     offset: i64
     size: i64
     address: i64
-    generation: i64 = 0
-    mapper_instance_id: text = ""
 
 """Observed mapping facts, the input to a LoadReceiptV1."""
 struct SegmentMapperStats:
@@ -343,18 +341,8 @@ impl SegmentMapper:
             return Err("Symbol {name} has negative segment offset {offset}")
         if size < 0:
             return Err("Symbol {name} has negative size {size}")
-        if offset > seg.size or size > seg.size - offset:
+        if offset + size > seg.size:
             return Err("Symbol {name} at offset {offset} size {size} exceeds segment {key} size {seg.size}")
-
-        if not self.record_generations.has(key):
-            return Err("Cannot bind {name}: segment {key} has no record generation")
-        if self.symbols.has(name):
-            val existing = self.symbols[name]
-            if self.is_symbol_current(existing) and existing.owner_id == owner_id and
-                    existing.section_index == section_index and existing.offset == offset and
-                    existing.size == size:
-                return Ok(existing.address)
-            return Err("Symbol {name} is already bound")
 
         val address = native_get_function_pointer(seg.base + offset)
         self.symbols[name] = SegmentSymbol(
@@ -363,9 +351,7 @@ impl SegmentMapper:
             section_index: section_index,
             offset: offset,
             size: size,
-            address: address,
-            generation: self.record_generations[key],
-            mapper_instance_id: self.instance_id
+            address: address
         )
         seg.symbol_count = seg.symbol_count + 1
         self.segments[key] = seg
@@ -380,22 +366,6 @@ impl SegmentMapper:
         if self.symbols.has(name):
             return Some(self.symbols[name])
         nil
-
-    """Check a symbol snapshot against this mapper's exact live segment."""
-    fn is_symbol_current(symbol: SegmentSymbol) -> bool:
-        if symbol.mapper_instance_id != self.instance_id or symbol.generation <= 0:
-            return false
-        val key = segment_key(symbol.owner_id, symbol.section_index)
-        if not self.segments.has(key) or not self.record_generations.has(key) or
-                not self.symbols.has(symbol.name):
-            return false
-        if self.record_generations[key] != symbol.generation:
-            return false
-        val current = self.symbols[symbol.name]
-        current.mapper_instance_id == symbol.mapper_instance_id and
-            current.generation == symbol.generation and current.owner_id == symbol.owner_id and
-            current.section_index == symbol.section_index and current.offset == symbol.offset and
-            current.size == symbol.size and current.address == symbol.address
 
     fn segment_base(owner_id: text, section_index: i32) -> i64:
         val key = segment_key(owner_id, section_index)
@@ -441,21 +411,6 @@ impl SegmentMapper:
         native_flush_icache(seg.base, seg.size)
         seg.protected_executable = true
         self.segments[key] = seg
-        Ok(())
-
-    """Seal every writable segment of one owner before publishing its symbols."""
-    me seal_owner(owner_id: text) -> Result<(), text>:
-        var found = false
-        for key in self.segments.keys():
-            val segment = self.segments[key]
-            if segment.owner_id == owner_id:
-                found = true
-                if not segment.protected_executable:
-                    match self.end_relocation(owner_id, segment.section_index):
-                        case Ok(_): pass
-                        case Err(message): return Err(message)
-        if not found:
-            return Err("Cannot seal unmapped owner " + owner_id)
         Ok(())
 
     """One munmap per segment, never per symbol."""

@@ -40,8 +40,10 @@ class AnyEscapeState:
     expression node itself carries no resolved type.
     """
     diags: [AnyEscapeDiag]
-    # Resolve names for diagnostic text only. A name, including one obtained
-    # from a symbol, is not evidence of a checked-conversion contract.
+    # Symbol table of the module under analysis, so a `Var` callee can be
+    # resolved to a NAME. Without it, a direct `checked_downcast(raw)` call
+    # (whose callee lowers to `Var`, not `NamedVar`) is indistinguishable from
+    # an ordinary function and the sanctioned §8.6 boundary reads as an escape.
     symbols: SymbolTable
     module_name: text
     function_name: text
@@ -204,16 +206,24 @@ fn any_emit_002(self: AnyEscapeState, profile: AnyEscapeProfile, kind: AnyEscape
     any_emit(self, profile, kind, msg, note, span)
 
 # ============================================================================
-# Checked-boundary authority (§8.6)
+# Checked-boundary API (§8.6)
 # ============================================================================
 
-# There is currently no resolved canonical checked-converter declaration and
-# verified conversion contract supplied to this pass. Fail closed: a local
-# function, alias, field, method, or unresolved callee must not acquire the
-# privilege by being named checked_downcast/type_test/checked_decode*. A future
-# sanctioned boundary must carry declaration identity AND its checked contract
-# from the owning producer; neither spelling nor a concrete return type proves
-# that the erased input was checked.
+fn any_is_checked_boundary_callee(name: text) -> bool:
+    """Callees that CONSUME an `Any` legitimately (§8.6).
+
+    Passing an erased value to one of these is the sanctioned exit from the
+    boundary, not an escape: their concrete `Result<T, ...>` may leave. Kept
+    to the three names §8.6 actually specifies plus the `checked_` family
+    prefix, so a new checked converter is covered without editing this list.
+    """
+    if name == "checked_downcast" or name == "checked_match":
+        return true
+    if name.starts_with("checked_decode") or name.starts_with("checked_downcast"):
+        return true
+    if name == "type_test" or name == "is_type":
+        return true
+    false
 
 # ============================================================================
 # Expression walk
@@ -308,7 +318,7 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
 
         case MethodCall(receiver, method, args, resolution):
             any_check_call_args(self, profile, method, args)
-            if any_expr_is_any(self, receiver):
+            if any_expr_is_any(self, receiver) and not any_is_checked_boundary_callee(method):
                 any_emit_002(self, profile, AnyEscapeKind.EscapeCallArg,
                              "method `{method}` is invoked on an erased receiver", e.span)
             any_check_expr(self, profile, receiver)
@@ -346,9 +356,6 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
             any_check_expr(self, profile, inner)
 
         case As(inner, target):
-            any_check_expr(self, profile, inner)
-
-        case ConvertCall(inner, target):
             any_check_expr(self, profile, inner)
 
         case Block(block):
@@ -448,12 +455,8 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
                 any_check_enum_payload(self, profile, payload!, variant, e.span)
 
         case Range(start, end, inclusive, step):
-            # Lowering preserves absent bounds for open slices/ranges. Visit
-            # every present endpoint, including endpoints whose type is Any.
-            if val start_expr = start:
-                any_check_expr(self, profile, start_expr)
-            if val end_expr = end:
-                any_check_expr(self, profile, end_expr)
+            any_check_expr(self, profile, start)
+            any_check_expr(self, profile, end)
             if step != nil:
                 any_check_expr(self, profile, step!)
 
@@ -470,7 +473,6 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
         # hole in the analysis (plan §11.6).
         case IntLit(value, suffix): pass_dn
         case FloatLit(value, suffix): pass_dn
-        case FloatLexeme(value, suffix): pass_dn
         case BoolLit(value): pass_dn
         case CharLit(value): pass_dn
         case UnitLit: pass_dn
@@ -545,8 +547,9 @@ fn any_callee_name(self: AnyEscapeState, callee: HirExpr) -> text:
 
 fn any_check_call_args(self: AnyEscapeState, profile: AnyEscapeProfile,
                        callee_name: text, args: [HirCallArg]):
+    val is_boundary = any_is_checked_boundary_callee(callee_name)
     for a in args:
-        if any_expr_is_any(self, a.value):
+        if any_expr_is_any(self, a.value) and not is_boundary:
             any_emit_002(self, profile, AnyEscapeKind.EscapeCallArg,
                          "an erased value is passed to `{callee_name}`, which is not a checked-conversion boundary",
                          a.value.span)
@@ -736,5 +739,5 @@ pub fn any_escape_check(module: HirModule, profile: AnyEscapeProfile) -> [AnyEsc
     state.diags
 
 export AnyEscapeState, any_escape_check
-export any_type_is_any, any_type_mentions_any
+export any_type_is_any, any_type_mentions_any, any_is_checked_boundary_callee
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

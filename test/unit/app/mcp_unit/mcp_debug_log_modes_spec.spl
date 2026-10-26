@@ -1,0 +1,57 @@
+use std.spipe.*
+use compiler.frontend.core.aop_debug_log.{DebugLogEntry}
+use std.nogc_async_mut.mcp.log_store.{log_tree_to_json_mode, format_log_tree_text_mode}
+
+fn _entry(entry_id: i64, group_id: i64, parent_group_id: i64, depth: i64, entry_type: text, fn_name: text, duration_ms: i64, message: text) -> DebugLogEntry:
+    DebugLogEntry(
+        entry_id: entry_id,
+        group_id: group_id,
+        parent_group_id: parent_group_id,
+        depth: depth,
+        entry_type: entry_type,
+        package_path: "app.test",
+        class_name: "",
+        function_name: fn_name,
+        line_number: 12,
+        timestamp_ms: 1000,
+        duration_ms: duration_ms,
+        params_text: "path=\"main.spl\"",
+        message: message,
+    )
+
+describe "MCP debug log modes":
+    it "emits fold metadata in JSON tree mode":
+        val entries = [
+            _entry(1, 10, 0, 0, "enter", "root", 0, ""),
+            _entry(2, 11, 10, 1, "enter", "child", 0, ""),
+            _entry(3, 11, 10, 1, "exit", "child", 7, ""),
+            _entry(4, 10, 0, 0, "exit", "root", 9, ""),
+        ]
+        val json = log_tree_to_json_mode(entries, "human")
+        expect(json).to_contain("\"mode\":\"human\"")
+        expect(json).to_contain("\"has_children\":true")
+        expect(json).to_contain("\"child_count\":1")
+        expect(json).to_contain("\"collapsed_count\":1")
+        expect(json).to_contain("\"fold_state\":\"collapsed\"")
+        expect(json).to_contain("\"package_path_delta\":\"\"")
+        expect(json).to_contain("\"repeated_package\":true")
+
+    it "opens error groups by default in JSON tree mode":
+        val entries = [
+            _entry(1, 20, 0, 0, "enter", "load_error", 0, "error: failed"),
+        ]
+        val json = log_tree_to_json_mode(entries, "human")
+        expect(json).to_contain("\"fold_state\":\"open\"")
+        expect(json).to_contain("\"default_open\":true")
+
+    it "renders compact LLM text mode":
+        val entries = [
+            _entry(1, 30, 0, 0, "enter", "root", 0, ""),
+            _entry(2, 31, 30, 1, "enter", "child", 0, ""),
+            _entry(3, 31, 30, 1, "exit", "child", 3, ""),
+        ]
+        val text = format_log_tree_text_mode(entries, [], "llm")
+        expect(text).to_contain("log_tree mode=llm entries=3")
+        expect(text).to_contain("- gid=30 depth=0 fn=app.test::root")
+        expect(text).to_contain("- gid=31 depth=1 fn=app.test::child")
+        expect(text.contains("<<")).to_equal(false)

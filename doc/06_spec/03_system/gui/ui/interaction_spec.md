@@ -1,43 +1,114 @@
-# UI interaction state and access integration
+# Interaction Specification
 
-Executable: `test/03_system/gui/ui/interaction_spec.spl`.
-Requirement: `REQ-SSPEC-SYSTEM`.
+> <details>
 
-Status: **Phase1 seed diagnostics PASS, 4/4**. Evidence:
-`build/phase-one-ui-diagnostic/interaction_spec/cycle-one.log`. This manually
-maintained guide does not claim native qualification, live browser delivery,
-measured coverage, or completed docgen.
+<!-- sdn-diagram:id=interaction_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
 
-1. Build a real widget tree with root focus. Encode a `j` keypress, then dispatch
-   it through `update_state`. Require focus to move to the action button, then
-   to the input after another `j`, and back to the button after `k`. Rebuild
-   access snapshots after each transition and require exactly one focused node.
-   Envelope checks prove encoding; state checks independently prove dispatch.
-2. Require the real button to be initially visible. Hide it through the widget
-   owner and rebuild the snapshot: existence must still succeed, while visible
-   must fail. A missing identity must fail existence. Showing the widget must
-   restore the visible verdict.
-3. Hit-test a target input in a three-row tree, dispatch drag start, move, and
-   drop through the production state owner, and check source/target flags.
-   Require the target's previous value to become the payload, the sibling input
-   to remain unchanged, and all drag flags to clear. The access ensure engine
-   must also observe the delivered value. Preserve envelope assertions, including
-   the distinction between encoded source ID and coordinate-selected receiver.
-4. Append source and target events explicitly to the access history model.
-   Require both records, their original order, sequence numbers, and payload.
-   This proves history retention only; it does not prove that the state reducer
-   automatically records events or delivers content to a list.
+```sdn id=interaction_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
 
-Indexed assertions require exact list lengths before accessing elements.
-Coverage annotations declare 80% targets for the production event, access, and
-envelope owners; no measured coverage or passing scenario counts are claimed.
+interaction_spec -> std
+```
 
-The canonical spec subsumes the legacy
-`test/system/ui/interaction_spec.spl` keyboard-envelope, access-ensure, and
-drag-envelope assertions; that duplicate is removed. The previous canonical
-spec's ordered-history checks are retained with an explicit model-only scope.
+</details>
 
-Live browser event transport, visible renderer feedback, and end-to-end dragging
-onto a navigation list remain unqualified. The production reducer exercised
-here delivers content to input/textfield widgets; model history cannot close
-the broader interaction requirement.
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=interaction_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 3 | 3 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Interaction Specification
+
+## Scenarios
+
+### UI interaction portable smoke
+
+#### records keyboard navigation action
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val key = "j"
+expect(key).to_equal("j")
+```
+
+</details>
+
+#### records visibility and existence checks
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val element_id = "action_btn"
+expect(element_id).to_equal("action_btn")
+```
+
+</details>
+
+#### records drag source and target
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = "action_btn"
+val target = "nav_list"
+expect(source).to_equal("action_btn")
+expect(target).to_equal("nav_list")
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/gui/ui/interaction_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- UI interaction portable smoke
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

@@ -18,9 +18,6 @@ operations and are commonly used for keys, tags, and enum-like values.
 val status = :ok
 val error = :not_found
 
-fn handle_success():
-    pass
-
 if status is :ok:
     handle_success()
 ```

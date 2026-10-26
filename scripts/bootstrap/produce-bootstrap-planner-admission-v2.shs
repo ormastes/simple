@@ -69,12 +69,10 @@ adm_fail() {
 
 usage() {
     echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--bootstrap-output=<path>] [--runtime-dir=<path>] [--out=<path>]" >&2
-    echo "       --validate-parent-only checks the complete existing Stage-2 authority and exits before planner compilation" >&2
     echo "       $0 --selftest" >&2
 }
 
 selftest=0
-validate_parent_only=0
 adm_target=''
 adm_reason=''
 adm_parent=''
@@ -92,7 +90,6 @@ adm_bootstrap_output=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --selftest) selftest=1 ;;
-        --validate-parent-only) validate_parent_only=1 ;;
         --target=*) adm_target=${1#*=} ;;
         --reason=*) adm_reason=${1#*=} ;;
         --parent-compiler=*) adm_parent=${1#*=} ;;
@@ -174,7 +171,7 @@ esac
 admission_file=$(parent_field "$sanity_file" admission_receipt_path || true)
 [ -n "$admission_file" ] && [ "$admission_file" = "$(parent_field "$prov_file" admission_receipt_path || true)" ] || adm_fail parent-stage2-admission-path-mismatch
 admission_file=$(bootstrap_planner_v2_canonical_file "$admission_file") || adm_fail parent-stage2-admission-unavailable
-case "$admission_file" in "$adm_bootstrap_output"/*) ;; *) adm_fail parent-stage2-admission-outside-bootstrap-output ;; esac
+case "$admission_file" in "$adm_bootstrap_output"/*) ;; *) adm_fail parent-stage2-admission-outside-bootstrap ;; esac
 admission_sha=$(bootstrap_planner_v2_hash_file "$admission_file")
 [ "$(parent_field "$sanity_file" admission_receipt_sha256 || true)" = "$admission_sha" ] || adm_fail parent-stage2-sanity-admission-mismatch
 [ "$(parent_field "$prov_file" admission_receipt_sha256 || true)" = "$admission_sha" ] || adm_fail parent-stage2-provenance-admission-mismatch
@@ -209,18 +206,6 @@ bootstrap_stage3_verify_stage2_admission_receipt \
     "$(dirname -- "$admission_receiver")/stage2-receiver.log" "$(dirname -- "$admission_receiver")/stage2-receiver.log" \
     "$root" || adm_fail parent-stage2-admission-invalid
 [ "$(bootstrap_planner_v2_hash_file "$admission_candidate")" = "$parent_sha" ] || adm_fail parent-stage2-admission-candidate-mismatch
-
-# Reuse the entire canonical parent verifier when refreshing a generation from
-# an admitted Phase 2. Do not synthesize a weaker runtime-provenance receipt or
-# compile a planner just to establish the already measured parent authority.
-if [ "$validate_parent_only" -eq 1 ]; then
-    printf 'parent_path=%s\nparent_sha256=%s\nparent_admission_receipt=%s\n' \
-        "$parent_file" "$parent_sha" "$admission_file"
-    printf 'parent_runtime_path=%s\nparent_runtime_snapshot=%s\nparent_runtime_snapshot_sha256=%s\n' \
-        "$admission_root/stage2-runtime-authority" "$admission_runtime" \
-        "$(bootstrap_planner_v2_hash_file "$admission_runtime")"
-    exit 0
-fi
 
 planner_source="$adm_root/src/app/cli/bootstrap_reason_planner.spl"
 bootstrap_planner_v2_canonical_file "$planner_source" >/dev/null || adm_fail planner-source-missing
@@ -283,27 +268,19 @@ git_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/git-state.txt")
 # one-file planner never calls. The closure is exactly what the closure snapshot
 # already records, so narrowing the compile set does not narrow the receipt.
 #
-# Source inventory admission owns paths relative to the real checkout. A fresh
-# temporary cwd makes every absolute source selector appear outside that owner.
-# Keep cwd at the measured checkout, with an explicit admitted runtime provider
-# and a private planner cache so ambient repo-root archives are never selected.
-# Closure receipts bind logical source roots, so selectors must be checkout-relative.
-# That includes --entry. On Windows an absolute "$planner_source" reaches the
-# parent as C:/... (MSYS argv conversion) while its cwd reads back as C:\...,
-# so the frozen cold-entry route cannot strip the checkout prefix and probes
-# <snapshot>/C:/... -> "frozen cold entry rejected: artifact-unavailable".
-planner_entry_rel=src/app/cli/bootstrap_reason_planner.spl
-[ "$adm_root/$planner_entry_rel" = "$planner_source" ] || adm_fail planner-entry-not-checkout-relative
-build_planner_out=$(bootstrap_planner_v2_planner_path "$adm_dir" "$parent_file") || adm_fail planner-path-invalid
-if ! ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" "$parent_file" \
-        native-build --source src/app/cli --source src/lib \
-        --runtime-path "$admission_root/stage2-runtime-authority" --runtime-bundle core-c-bootstrap \
-        --cache-dir "$adm_dir/planner-cache" \
-        --entry-closure --entry "$planner_entry_rel" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1; then
+# The build runs with cwd = "$stage" (a fresh mktemp dir) so the parent resolves
+# its relative `build/simple-core/libsimple_runtime.a` inside the staging dir and
+# builds that archive from the runtime tree that was just snapshotted. The
+# repo-root archive is a shared artifact that a concurrent lane can leave stale
+# at any moment; admission must not depend on, or mutate, it.
+build_planner_out="$adm_dir/planner"
+if ! ( cd "$stage" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" "$parent_file" \
+        native-build --source "$adm_root/src/app/cli" --source "$adm_root/src/lib" \
+        --entry-closure --entry "$planner_source" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1; then
     adm_fail planner-build-failed
 fi
-[ -x "$build_planner_out" ] || adm_fail planner-build-produced-no-executable
-planner_sha=$(bootstrap_planner_v2_hash_file "$build_planner_out")
+[ -x "$adm_dir/planner" ] || adm_fail planner-build-produced-no-executable
+planner_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/planner")
 
 # --- 5. execute under the canonical argv/env --------------------------------
 # The digests below are hashed from the argv/env actually used for this exec,
@@ -311,7 +288,7 @@ planner_sha=$(bootstrap_planner_v2_hash_file "$build_planner_out")
 # same two functions in the bound library, so they cannot drift apart.
 auth_path="$adm_dir/authorization.receipt"
 argv_text=$(bootstrap_planner_v2_canonical_argv_text \
-    "$build_planner_out" "$adm_reason" "$adm_target" \
+    "$adm_dir/planner" "$adm_reason" "$adm_target" \
     "$parent_sha" "$runtime_sha" "$closure_sha" "$planner_sha" "$auth_path")
 env_text=$(bootstrap_planner_v2_canonical_env_text "$adm_runtime")
 argv_sha=$(bootstrap_planner_v2_hash_text "$argv_text")
@@ -329,7 +306,7 @@ adm_env_excl_arg=''
 env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
     ${adm_env_excl_arg} \
     SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" \
-    "$build_planner_out" \
+    "$adm_dir/planner" \
     "--bootstrap-reason=$adm_reason" \
     "--bootstrap-target=$adm_target" \
     "--parent-compiler-sha256=$parent_sha" \
@@ -350,7 +327,7 @@ expected_auth=$(bootstrap_planner_v2_authorization_text \
 smoke_rc=0
 env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
     SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" \
-    "$build_planner_out" \
+    "$adm_dir/planner" \
     '--bootstrap-reason=none' \
     "--bootstrap-target=$adm_target" \
     "--parent-compiler-sha256=$parent_sha" \
@@ -374,7 +351,7 @@ auth_sha=$(bootstrap_planner_v2_hash_file "$auth_path")
 # describes one consistent instant rather than a drifting tree.
 [ "$(bootstrap_planner_v2_hash_file "$parent_file")" = "$parent_sha" ] || adm_fail parent-compiler-changed-during-admission
 [ "$(bootstrap_planner_v2_hash_file "$planner_source")" = "$planner_source_sha" ] || adm_fail planner-source-changed-during-admission
-[ "$(bootstrap_planner_v2_hash_file "$build_planner_out")" = "$planner_sha" ] || adm_fail planner-changed-during-admission
+[ "$(bootstrap_planner_v2_hash_file "$adm_dir/planner")" = "$planner_sha" ] || adm_fail planner-changed-during-admission
 [ "$(bootstrap_planner_v2_hash_file "$adm_dir/runtime.snapshot")" = "$runtime_sha" ] || adm_fail runtime-snapshot-changed-during-admission
 
 if [ -z "$adm_out" ]; then adm_out="$adm_dir/planner-admission-v2.env"; fi
@@ -405,7 +382,7 @@ platform=$(uname -m 2>/dev/null || echo unknown)
     printf 'build_argv_sha256=%s\n' "$argv_sha"
     printf 'build_env_sha256=%s\n' "$env_sha"
     printf 'cache_scope_key=%s\n' "$scope_key"
-    printf 'planner_path=%s\n' "$build_planner_out"
+    printf 'planner_path=%s\n' "$adm_dir/planner"
     printf 'planner_sha256=%s\n' "$planner_sha"
     printf 'planner_smoke_path=%s\n' "$adm_dir/planner-smoke.txt"
     printf 'planner_smoke_sha256=%s\n' "$smoke_sha"

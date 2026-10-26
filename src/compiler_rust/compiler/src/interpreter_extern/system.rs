@@ -50,11 +50,14 @@ fn resolve_command_path(cmd: &str) -> &str {
 fn configure_timeout_child_process_group(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
 
-    // Express the group through spawn attributes rather than a pre_exec hook.
-    // The hook forces fork on FreeBSD, transiently duplicating a large
-    // interpreter's RSS in the process-tree budget before exec. This keeps
-    // the same group-leader/timeout cleanup contract and permits posix_spawn.
-    command.process_group(0);
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 #[cfg(not(unix))]
@@ -1010,15 +1013,15 @@ unsafe extern "C" {
 /// interpreter therefore returns the exact unavailable receipt instead of
 /// throwing while all lease-bearing V3 operations continue to fail closed.
 pub fn rt_process_owned_v3_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::array(vec![
+    Ok(Value::Array(std::sync::Arc::new(vec![
         Value::Int(1),
         Value::Int(0),
         Value::Int(0),
-    ]))
+    ])))
 }
 
 pub fn rt_process_observation_v4_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::array(vec![
+    Ok(Value::Array(std::sync::Arc::new(vec![
         Value::Int(4),
         Value::Int(8),
         Value::Int(0),
@@ -1027,7 +1030,7 @@ pub fn rt_process_observation_v4_capabilities_unavailable(_args: &[Value]) -> Re
         Value::Int(0),
         Value::Int(0),
         Value::Int(95),
-    ]))
+    ])))
 }
 
 /// Process Observation V4 never falls back to the V1/V3 process providers.
@@ -1161,7 +1164,7 @@ pub fn rt_process_run_owned_observed_bounded_value(args: &[Value]) -> Result<Val
     Ok(Value::Tuple(vec![
         Value::text(String::from_utf8_lossy(&out[..stdout_kept]).into_owned()),
         Value::text(String::from_utf8_lossy(&err[..stderr_kept]).into_owned()),
-        Value::array(fields.into_iter().map(Value::Int).collect::<Vec<Value>>()),
+        Value::array(fields.into_iter().map(Value::Int).collect()),
     ]))
 }
 
@@ -1643,21 +1646,11 @@ pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
     if let Some(stdout) = map.get_mut(&pid).and_then(|c| c.stdout.as_mut()) {
         let mut buf = [0u8; 8192];
         loop {
-            // Windows anonymous pipes have no O_NONBLOCK: a read with nothing
-            // pending blocks until the child writes. Ask how much is waiting
-            // and read only that, so "no data yet" is "" here too.
-            #[cfg(windows)]
-            let want = match piped_bytes_available(stdout) {
-                0 => break,
-                n => n.min(buf.len()),
-            };
-            #[cfg(not(windows))]
-            let want = buf.len();
-            match stdout.read(&mut buf[..want]) {
+            match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     out.extend_from_slice(&buf[..n]);
-                    if n < want {
+                    if n < buf.len() {
                         break;
                     }
                 }
@@ -1668,39 +1661,6 @@ pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
     Ok(Value::text(String::from_utf8_lossy(&out).into_owned()))
-}
-
-/// Bytes waiting in a child's stdout pipe; 0 when empty or on any error
-/// (a broken pipe means the child is gone, which is also "nothing to read").
-#[cfg(windows)]
-fn piped_bytes_available(stdout: &std::process::ChildStdout) -> usize {
-    use std::os::windows::io::AsRawHandle;
-    unsafe extern "system" {
-        fn PeekNamedPipe(
-            pipe: *mut std::ffi::c_void,
-            buffer: *mut std::ffi::c_void,
-            size: u32,
-            read: *mut u32,
-            available: *mut u32,
-            left: *mut u32,
-        ) -> i32;
-    }
-    let mut available: u32 = 0;
-    let ok = unsafe {
-        PeekNamedPipe(
-            stdout.as_raw_handle() as *mut std::ffi::c_void,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            &mut available,
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        0
-    } else {
-        available as usize
-    }
 }
 
 /// Is a piped child still running?
@@ -1838,15 +1798,6 @@ pub fn rt_exit(args: &[Value]) -> Result<Value, CompileError> {
         _ => 1,
     };
     std::process::exit(code);
-}
-
-/// `rt_debug_exit_success()`: hosted equivalent of the baremetal QEMU
-/// isa-debug-exit "success" write — flush and exit 0.
-pub fn rt_debug_exit_success(_args: &[Value]) -> Result<Value, CompileError> {
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-    std::process::exit(0);
 }
 
 #[cfg(unix)]
@@ -1993,7 +1944,7 @@ mod tests {
     fn async_spawn_rejects_non_text_arguments() {
         let result = rt_process_spawn_async(&[
             Value::text(if cfg!(windows) { "cmd.exe" } else { "/bin/true" }.to_string()),
-            Value::array(vec![Value::Int(7)]),
+            Value::Array(Arc::new(vec![Value::Int(7)])),
         ]);
         assert!(result.is_err());
     }
@@ -2003,10 +1954,10 @@ mod tests {
     fn process_wait_timeout_keeps_child_tracked_until_killed() {
         let pid = rt_process_spawn_async(&[
             Value::text("/bin/sh".to_string()),
-            Value::array(vec![
+            Value::Array(Arc::new(vec![
                 Value::text("-c".to_string()),
                 Value::text("sleep 30".to_string()),
-            ]),
+            ])),
         ])
         .expect("spawn")
         .as_int()
@@ -2096,13 +2047,13 @@ mod tests {
         }
         let result = rt_process_run(&[
             Value::text("/bin/sh".to_string()),
-            Value::array(vec![
+            Value::Array(Arc::new(vec![
                 Value::text("-c".to_string()),
                 Value::text(
                     "if env | grep '^_SIMPLE_STACK_SET=' >/dev/null; then printf present; else printf unset; fi"
                         .to_string(),
                 ),
-            ]),
+            ])),
         ])
         .expect("rt_process_run should succeed");
 
@@ -2135,9 +2086,9 @@ mod tests {
         };
         let result = rt_process_run_bounded(&[
             Value::text(cmd.to_string()),
-            Value::array(
-                script.into_iter().map(|s| Value::text(s.to_string())).collect::<Vec<Value>>(),
-            ),
+            Value::Array(Arc::new(
+                script.into_iter().map(|s| Value::text(s.to_string())).collect(),
+            )),
             Value::Int(0),
             Value::Int(-1),
         ])
@@ -2152,7 +2103,7 @@ mod tests {
         assert!(stdout.contains("bounded-ok"), "stdout: {}", stdout);
         assert!(rt_process_run_bounded(&[
             Value::text(cmd.to_string()),
-            Value::array(vec![]),
+            Value::Array(Arc::new(vec![])),
             Value::Int(0),
             Value::Int(-2),
         ])
@@ -2164,13 +2115,13 @@ mod tests {
     fn process_run_bounded_drains_flooding_streams_with_head_and_tail() {
         let result = rt_process_run_bounded(&[
             Value::text("/bin/sh".to_string()),
-            Value::array(vec![
+            Value::Array(Arc::new(vec![
                 Value::text("-c".to_string()),
                 Value::text(
                     "printf HEAD; head -c 10000 /dev/zero | tr '\\0' x; printf TAIL; printf HEAD >&2; head -c 10000 /dev/zero | tr '\\0' y >&2; printf TAIL >&2"
                         .to_string(),
                 ),
-            ]),
+            ])),
             Value::Int(5_000),
             Value::Int(64),
         ])
@@ -2194,7 +2145,7 @@ mod tests {
     fn process_run_bounded_accepts_unsigned_nonnegative_output_limit() {
         let result = rt_process_run_bounded(&[
             Value::text("/bin/true".to_string()),
-            Value::array(vec![]),
+            Value::Array(Arc::new(vec![])),
             Value::Int(5_000),
             Value::UInt { value: 64, width: 64 },
         ])
@@ -2218,10 +2169,10 @@ mod tests {
     fn process_run_bounded_timeout_kills_descendant_process_group() {
         let result = rt_process_run_bounded(&[
             Value::text("/bin/sh".to_string()),
-            Value::array(vec![
+            Value::Array(Arc::new(vec![
                 Value::text("-c".to_string()),
                 Value::text("sleep 30 & child=$!; printf '%s' \"$child\"".to_string()),
-            ]),
+            ])),
             Value::Int(100),
             Value::Int(128),
         ])
@@ -2295,7 +2246,7 @@ mod tests {
     fn owned_process_v3_capability_query_reports_unavailable_in_interpreter() {
         assert_eq!(
             rt_process_owned_v3_capabilities_unavailable(&[]).unwrap(),
-            Value::array(vec![Value::Int(1), Value::Int(0), Value::Int(0),])
+            Value::Array(Arc::new(vec![Value::Int(1), Value::Int(0), Value::Int(0),]))
         );
     }
 

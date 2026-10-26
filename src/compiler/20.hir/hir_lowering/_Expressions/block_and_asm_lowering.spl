@@ -7,16 +7,8 @@ use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{raw_asm_rejected_directive, is_known_asm_clobber}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.types.{hir_heap_ref_wellformed}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-
-# FORMATION probe for a heap-typed field word: answers 1 for a word outside the
-# zero page (runtime_native.c rt_heap_ref_wellformed). Not a liveness proof.
-# Called directly, never through a Simple wrapper: a struct-typed PARAMETER of
-# a Simple function is deep-cloned on entry, and that clone dereferences the
-# very word this probe exists to validate. An extern argument is passed as the
-# raw word.
-@unsafe(reason: "raw heap-reference formation probe; false is not a liveness proof", capabilities: [ffi])
-extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 
 impl HirLowering:
     me strip_discarded_string_interps(s: Stmt) -> Stmt:
@@ -40,7 +32,7 @@ impl HirLowering:
                     case ExprKind.StringLit(sval, sinterps):
                         if sinterps.?:
                             return Stmt(
-                                kind: StmtKind.Expr(Expr(kind: ExprKind.StringLit(sval, None), span: e_t.span)),
+                                kind: StmtKind.Expr(Expr(kind: ExprKind.StringLit(sval, nil), span: e_t.span)),
                                 span: s.span
                             )
                     case _: ()
@@ -69,9 +61,9 @@ impl HirLowering:
         # miscompiles.
         var stmts: [HirStmt] = []
         var block_has_value = false
-        var block_value_expr: HirExpr = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: b.span)
+        var block_value_expr: HirExpr = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span)
         val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(block_value_expr))
-        val return_expr_disc = rt_enum_discriminant(HirExprKind.Return(None))
+        val return_expr_disc = rt_enum_discriminant(HirExprKind.Return(nil))
         val stmt_count = b.stmts.len()
         var stmt_idx = 0
         while stmt_idx < stmt_count:
@@ -98,7 +90,7 @@ impl HirLowering:
                 # Lower exactly once. A final statement is classified by its
                 # lowered HIR kind, not its source kind: multiple source
                 # statement variants legitimately lower to HirStmtKind.Expr.
-                val lowered_scalar: HirStmt = self.lower_hir_stmt(src_stmt)
+                val lowered_scalar = self.lower_hir_stmt(src_stmt)
                 if stmt_idx == stmt_count - 1:
                     if rt_enum_discriminant(lowered_scalar.kind) == expr_stmt_disc:
                         match lowered_scalar.kind:
@@ -107,10 +99,10 @@ impl HirLowering:
                                     stmts = stmts.push(lowered_scalar)
                                 else:
                                     block_has_value = true
-                                    val type_ok = expr.has_type_ and rt_heap_ref_wellformed(expr.type_)
+                                    val type_ok = expr.has_type_ and hir_heap_ref_wellformed(expr.type_)
                                     if expr.has_type_ and not type_ok:
                                         eprint("E-HIR-BLOCK-VALUE-TYPE-MALFORMED: block tail expression claims has_type_ but its type_ word is not a well-formed heap reference")
-                                    val span_ok = rt_heap_ref_wellformed(expr.span)
+                                    val span_ok = hir_heap_ref_wellformed(expr.span)
                                     if not span_ok:
                                         eprint("E-HIR-BLOCK-VALUE-SPAN-MALFORMED: block tail expression span word is not a well-formed heap reference; falling back to the block span")
                                     if span_ok:
@@ -124,7 +116,7 @@ impl HirLowering:
                                 # future HIR representation regression also fails
                                 # closed rather than fabricating a missing return.
                                 self.error("HIR expression statement payload is malformed", src_stmt.span)
-                                stmts = stmts.push(HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: nil, span: src_stmt.span)), span: src_stmt.span))
+                                stmts = stmts.push(HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: src_stmt.span)), span: src_stmt.span))
                     else:
                         # Assignment expressions intentionally lower to Assign and
                         # remain statements; any other future non-Expr lowering is
@@ -139,7 +131,7 @@ impl HirLowering:
             val lowered_count = lowered_list.len()
             var li = 0
             while li < lowered_count:
-                val lowered: HirStmt = lowered_list[li]
+                val lowered = lowered_list[li]
                 if stmt_idx == stmt_count - 1 and li == lowered_count - 1:
                     # Guard the exact Expr discriminator before the qualified
                     # payload match. Bare or unguarded enum matching can accept
@@ -168,7 +160,7 @@ impl HirLowering:
                                     # must never be interpreted, so re-form it as
                                     # a known-good one rather than carrying an
                                     # arbitrary word into a deref.
-                                    val type_ok = expr.has_type_ and rt_heap_ref_wellformed(expr.type_)
+                                    val type_ok = expr.has_type_ and hir_heap_ref_wellformed(expr.type_)
                                     if expr.has_type_ and not type_ok:
                                         eprint("E-HIR-BLOCK-VALUE-TYPE-MALFORMED: block tail expression claims has_type_ but its type_ word is not a well-formed heap reference")
                                     # CONTAINMENT: never carry a FOREIGN HirType
@@ -189,7 +181,7 @@ impl HirLowering:
                                     # authoritative) and is already the common
                                     # case — 88 of 141 HirExpr constructions in
                                     # src/compiler pass `type_: nil`.
-                                    val span_ok = rt_heap_ref_wellformed(expr.span)
+                                    val span_ok = hir_heap_ref_wellformed(expr.span)
                                     # Level-gated capture probe: prints the
                                     # ACTUAL presence bit / wellformedness of the
                                     # tail type_ and span words at CAPTURE, so a
@@ -239,8 +231,8 @@ impl HirLowering:
         # stderr to truncation, hiding the genuine diagnostics underneath.
         # Probe the span (the word this function actually carries forward), and
         # the type only when `has_type_` claims one is present.
-        val b_type_ok = (not block_value_expr.has_type_) or rt_heap_ref_wellformed(block_value_expr.type_)
-        if block_has_value and not (b_type_ok and rt_heap_ref_wellformed(block_value_expr.span)):
+        val b_type_ok = (not block_value_expr.has_type_) or hir_heap_ref_wellformed(block_value_expr.type_)
+        if block_has_value and not (b_type_ok and hir_heap_ref_wellformed(block_value_expr.span)):
             eprint("E-HIR-BLOCK-VALUE-TYPE-DECAYED: block tail expression type_/span word became a non-well-formed heap reference between capture and HirBlock construction; substituting a placeholder")
             # `b.span` unconditionally: probe B also covers the span word, so
             # re-reading `block_value_expr.span` here could be the very thing
@@ -250,7 +242,7 @@ impl HirLowering:
         if block_has_value:
             HirBlock(stmts: stmts, has: true, value: block_value_expr, span: b.span)
         else:
-            HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: b.span), span: b.span)
+            HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
     # Lower a block that is NOT in value position (a Unit-returning function body,
     # e.g. `fn main(): print(...)`). Every statement — INCLUDING a trailing
@@ -288,7 +280,7 @@ impl HirLowering:
                     boot_stmts = boot_stmts.push(self.lower_hir_stmt(boot_stmt))
                 boot_idx = boot_idx + 1
             self.symbols.pop_scope()
-            return HirBlock(stmts: boot_stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: b.span), span: b.span)
+            return HirBlock(stmts: boot_stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
         self.symbols.push_scope(ScopeKind.Block)
         var stmts: [HirStmt] = []
@@ -310,7 +302,7 @@ impl HirLowering:
             stmt_idx = stmt_idx + 1
         self.symbols.pop_scope()
 
-        HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: b.span), span: b.span)
+        HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
     me lower_asm(asm_node: AsmExpr) -> HirAsm:
         # Design A.3.4 / A.4: raw blocks (no operand constraints) may not
@@ -352,9 +344,7 @@ impl HirLowering:
 
     me lower_asm_match_arms(arms: [AsmMatchArm]) -> [HirAsmMatchArm]:
         var result: [HirAsmMatchArm] = []
-        for raw_arm in arms:
-            # ANY-transport hazard sweep round 3: annotated rebind.
-            val arm: AsmMatchArm = raw_arm
+        for arm in arms:
             var has_body = arm.has_asm_body
             var hir_body = if has_body:
                 self.lower_asm(arm.asm_body)

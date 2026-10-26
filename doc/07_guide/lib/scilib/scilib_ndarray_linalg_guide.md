@@ -75,7 +75,7 @@ val w = array_i64([Int64.new(10), Int64.new(20), Int64.new(30)])
 
 ### 3.2 Shape and dtype
 
-```simple:skip
+```simple
 a.shape   # -> Shape.new([Index.new(4)])
 a.len()   # -> Index.new(4)
 a.dtype   # -> DType.F64  (or DType.I64)
@@ -99,7 +99,7 @@ m.get_at([Index.new(1), Index.new(2)])  # row 1, col 2
 
 For Float64 arrays, `get_f64` returns a typed scalar directly:
 
-```simple:skip
+```simple
 val x = solve(a_matrix, b_vec).unwrap()
 x.get_f64(Index.new(0))   # -> Float64.new(...)
 ```
@@ -111,7 +111,7 @@ x.get_f64(Index.new(0))   # -> Float64.new(...)
 `std.common.science_math.linalg` provides a lower-level `Matrix` struct and
 free functions for row-major matrix arithmetic.
 
-```simple:skip
+```simple
 use std.common.science_math.linalg.*
 
 val z = mat_zeros(2, 3)            # 2x3 zero Matrix
@@ -137,7 +137,7 @@ implementers and tests; callers should prefer the typed facade when possible.
 
 `y = alpha * x + y`
 
-```simple:skip
+```simple
 val x = [1.0, 2.0, 3.0]
 val y = [4.0, 5.0, 6.0]
 val result = blas_axpy_f64(2.0, x, y)  # -> Ok([6.0, 9.0, 12.0])
@@ -147,19 +147,19 @@ Requires `x.len() == y.len()`; returns `Err(BlasProviderError.DimensionMismatch)
 
 ### 5.2 dot — inner product
 
-```simple:skip
+```simple
 val d = blas_dot_f64([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])  # -> Ok(32.0)
 ```
 
 ### 5.3 scal — scale in place
 
-```simple:skip
+```simple
 val scaled = blas_scal_f64(3.0, [1.0, 2.0, 4.0])  # -> Ok([3.0, 6.0, 12.0])
 ```
 
 ### 5.4 nrm2 — Euclidean norm
 
-```simple:skip
+```simple
 val n = blas_nrm2_f64([3.0, 4.0])  # -> 5.0  (always unwrapped)
 ```
 
@@ -167,7 +167,7 @@ val n = blas_nrm2_f64([3.0, 4.0])  # -> 5.0  (always unwrapped)
 
 `y = alpha * A * x + beta * y`  where A is m×n.
 
-```simple:skip
+```simple
 val a  = [1.0, 2.0, 3.0, 4.0]  # 2x2 row-major
 val x  = [1.0, 1.0]
 val y0 = [0.0, 0.0]
@@ -181,7 +181,7 @@ Signature: `blas_gemv_f64(alpha, a, m, n, x, beta, y)`
 
 `C = alpha * A * B + beta * C`  where A is m×k, B is k×n, C is m×n.
 
-```simple:skip
+```simple
 val a   = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]      # 2x3
 val b   = [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]    # 3x2
 val c_in = [0.0, 0.0, 0.0, 0.0]                 # 2x2
@@ -197,7 +197,7 @@ in the natural (row-major) order shown above.
 
 ### 5.7 copy and swap
 
-```simple:skip
+```simple
 val copy = blas_copy_f64(x)                  # -> Ok([f64])
 val sw   = blas_swap_f64(x, y)               # -> Ok(SwapResult { x, y })
 ```
@@ -223,7 +223,7 @@ Returns `Err(LinalgError.Singular(info))` when A is singular,
 
 ### 6.2 inv — matrix inverse
 
-```simple:skip
+```simple
 val inv_a = lapack_inv_f64(n, a_flat)  # -> Result<[f64], LinalgError>
 ```
 
@@ -231,7 +231,7 @@ Internally calls `gesv` once per identity column.
 
 ### 6.3 det — determinant
 
-```simple:skip
+```simple
 val d = lapack_det_f64(n, a_flat)  # -> Result<f64, LinalgError>
 ```
 

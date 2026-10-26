@@ -146,12 +146,7 @@ impl<'a> Parser<'a> {
     /// This wrapper is kept as a named call site for readability/documentation
     /// at each of the four `elif`/`else if` locations below.
     fn parse_elif_or_else_if_body(&mut self) -> Result<Block, ParseError> {
-        // An inline elif body may be followed by `else:` on the same line.
-        if self.check(&TokenKind::Newline) {
-            self.parse_inline_or_block()
-        } else {
-            self.parse_without_cast_else(|p| p.parse_inline_or_block())
-        }
+        self.parse_inline_or_block()
     }
 
     pub(crate) fn parse_if(&mut self) -> Result<Node, ParseError> {
@@ -172,7 +167,7 @@ impl<'a> Parser<'a> {
             // These don't require an else clause since they're control flow statements
             if self.is_inline_statement() {
                 // Parse inline statement like match_arm does
-                let stmt = self.parse_without_cast_else(|p| p.parse_item())?;
+                let stmt = self.parse_item()?;
                 // bug: parser_trailing_operator_line_continuation_2026-07-13.
                 // A condition that used a trailing-operator line continuation
                 // left a pseudo-INDENT whose compensating DEDENT is still in
@@ -269,9 +264,7 @@ impl<'a> Parser<'a> {
             // (`if cond:\n    d[k] = v`) has always worked. An assignment is
             // not an expression, so such an `if` can only be statement-form
             // and is finished by a separate path below.
-            // `as T` in this arm must not claim the `else:` as its cast
-            // fallback (`if c: x as i64 else: 7`).
-            let then_node = self.parse_without_cast_else(|p| p.parse_expression_or_assignment())?;
+            let then_node = self.parse_expression_or_assignment()?;
             // Same reconciliation as the inline-statement arm above: an
             // expression-bodied `if cond_continued: expr` carries the same
             // pending pseudo-dedent.
@@ -355,18 +348,6 @@ impl<'a> Parser<'a> {
                             self.advance();
                         }
                         Some(Box::new(Expr::DoBlock(stmts)))
-                    } else if self.check(&TokenKind::Return)
-                        || self.check(&TokenKind::Break)
-                        || self.check(&TokenKind::Continue)
-                    {
-                        // Diverging statement in else branch: `else: return nil`.
-                        // Without this guard `parse_expression` below treated
-                        // `return` as a plain identifier and codegen emitted a
-                        // global load of an undeclared `return` symbol, failing
-                        // the link with undefined `_return` (stage2 bootstrap,
-                        // 2026-10-14). Mirrors the guard in `parse_if_expr`.
-                        let stmt = self.parse_item()?;
-                        Some(Box::new(Expr::DoBlock(vec![stmt])))
                     } else {
                         Some(Box::new(self.parse_expression()?))
                     }
@@ -1394,16 +1375,6 @@ impl<'a> Parser<'a> {
             statements: vec![then_stmt],
         };
 
-        self.finish_inline_statement_if_block(start_span, let_pattern, condition, then_block)
-    }
-
-    fn finish_inline_statement_if_block(
-        &mut self,
-        start_span: Span,
-        let_pattern: Option<Pattern>,
-        condition: Expr,
-        then_block: Block,
-    ) -> Result<Node, ParseError> {
         // Only consume the separating newlines when elif/else actually
         // follows; otherwise they belong to the enclosing block parser.
         if self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) {
@@ -1424,16 +1395,15 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::Colon)?;
             let nested = if self.check(&TokenKind::Newline) {
                 let block = self.parse_block()?;
-                self.finish_inline_statement_if_block(elif_span, elif_pattern, elif_condition, block)?
-            } else if self.check(&TokenKind::Return)
-                || self.check(&TokenKind::Break)
-                || self.check(&TokenKind::Continue)
-            {
-                // Diverging inline elif body (`elif cond: return x`): a bare
-                // `parse_expression_or_assignment` parsed `return` as an
-                // identifier, emitting an undeclared `return` global load.
-                let stmt = self.parse_item()?;
-                self.finish_inline_statement_if(elif_span, elif_pattern, elif_condition, stmt)?
+                Node::If(IfStmt {
+                    span: elif_span,
+                    let_pattern: elif_pattern,
+                    condition: elif_condition,
+                    then_block: block,
+                    elif_branches: Vec::new(),
+                    else_block: None,
+                    is_suspend: false,
+                })
             } else {
                 let stmt = self.parse_expression_or_assignment()?;
                 self.finish_inline_statement_if(elif_span, elif_pattern, elif_condition, stmt)?
@@ -1455,19 +1425,6 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::Colon)?;
                 if self.check(&TokenKind::Newline) {
                     Some(self.parse_block()?)
-                } else if self.check(&TokenKind::Return)
-                    || self.check(&TokenKind::Break)
-                    || self.check(&TokenKind::Continue)
-                {
-                    // Diverging inline else body (`else: return x`): a bare
-                    // `parse_expression_or_assignment` parsed `return` as an
-                    // identifier, emitting an undeclared `return` global load
-                    // (stage2 link failure, 2026-10-14).
-                    let stmt = self.parse_item()?;
-                    Some(Block {
-                        span: self.previous.span,
-                        statements: vec![stmt],
-                    })
                 } else {
                     let stmt = self.parse_expression_or_assignment()?;
                     Some(Block {

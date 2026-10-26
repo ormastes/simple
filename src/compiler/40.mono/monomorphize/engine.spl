@@ -10,7 +10,6 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use monomorphize.type_subst.*
 use .types (SpecializationKey, ConcreteType, concretetype_Named)
-use compiler.mono.mono_invocation_policy_v1.MonoInvocationBudgetV1
 
 
 fn concrete_types_to_text(types: [ConcreteType]) -> text:
@@ -43,12 +42,12 @@ fn concrete_type_to_text(ty: ConcreteType) -> text:
 
 class MonomorphizationTable:
     """Tracks pending and completed specializations."""
-    pending_functions: [(SpecializationKey, HirFunction)]
-    pending_structs: [(SpecializationKey, HirStruct)]
-    pending_classes: [(SpecializationKey, HirClass)]
-    specialized_functions: {text: HirFunction}
-    specialized_structs: {text: HirStruct}
-    specialized_classes: {text: HirClass}
+    pending_functions: [(SpecializationKey, Any)]
+    pending_structs: [(SpecializationKey, Any)]
+    pending_classes: [(SpecializationKey, Any)]
+    specialized_functions: {text: Any}
+    specialized_structs: {text: Any}
+    specialized_classes: {text: Any}
     processed: [text]
 
 
@@ -63,15 +62,23 @@ fn monomorphizationtable_create() -> MonomorphizationTable:
             processed: [])
 
 
+me monomorphizationtable_request_function(self: MonomorphizationTable, name: text, type_args: [ConcreteType], func: Any) -> text:
+        val key = SpecializationKey(name: name, type_args: type_args)
+        val mangled = spec_key_mangled_name(key)
+        if not self.processed.contains(mangled):
+            self.pending_functions = self.pending_functions.push((key, func))
+        mangled
+
+
 # ============================================================================
 # Monomorphizer
 # ============================================================================
 
 class Monomorphizer:
     """Monomorphization engine that creates specialized versions of generics."""
-    generic_functions: {text: HirFunction}
-    generic_structs: {text: HirStruct}
-    generic_classes: {text: HirClass}
+    generic_functions: {text: Any}
+    generic_structs: {text: Any}
+    generic_classes: {text: Any}
     table: MonomorphizationTable
 
 
@@ -94,13 +101,13 @@ fn spec_key_mangled_name(key: SpecializationKey) -> text:
         "{key.name}${args_str}"
 
 impl Monomorphizer:
-    me register_generic_function(name: text, func: HirFunction):
+    me register_generic_function(name: text, func: Any):
         self.generic_functions[name] = func
 
-    me register_generic_struct(name: text, s: HirStruct):
+    me register_generic_struct(name: text, s: Any):
         self.generic_structs[name] = s
 
-    me register_generic_class(name: text, c: HirClass):
+    me register_generic_class(name: text, c: Any):
         self.generic_classes[name] = c
 
     me specialize_function_call(name: text, args: [ConcreteType]) -> text:
@@ -125,16 +132,29 @@ impl Monomorphizer:
             self.table.processed = self.table.processed.push(mangled)
         self.table.pending_functions = []
 
-    fn get_specialized_functions() -> {text: HirFunction}:
+    fn get_specialized_functions() -> {text: Any}:
         self.table.specialized_functions
+
+
+fn monomorphizer_specialize_function_internal(self: Monomorphizer, key: SpecializationKey, func: Any) -> Any:
+        """Specialize a single function with concrete type arguments.
+
+        This creates a new function with:
+        - Type parameters substituted with concrete types
+        - Mangled name for uniqueness
+        - All type references in body updated
+        """
+        # The func is stored as Any but should be HirFunction
+        # For now, return as-is since we need proper type casting
+        # The actual specialization will be done when we have proper HirFunction
+        func
 
 
 # ============================================================================
 # Function Specialization with HirFunction
 # ============================================================================
 
-fn specialize_function_with_types(func: HirFunction, type_args: [HirType],
-    include_retained_defaults: bool = false, budget: MonoInvocationBudgetV1? = nil) -> HirFunction:
+fn specialize_function_with_types(func: HirFunction, type_args: [HirType]) -> HirFunction:
     """Create a specialized version of a generic function.
 
     Args:
@@ -144,13 +164,6 @@ fn specialize_function_with_types(func: HirFunction, type_args: [HirType],
     Returns:
         A new HirFunction with type parameters replaced by concrete types
     """
-    # The isolated pass certifies/reserves the template and type-argument
-    # expansion before this call. Charge local map/name construction before
-    # allocation as well; recursive substitution uses this same ledger.
-    if val ledger = budget:
-        val parameter_count = if func.type_params == nil: 0 else: func.type_params.len()
-        val argument_count = if type_args == nil: 0 else: type_args.len()
-        if not ledger.charge_v1(parameter_count + argument_count + 1): return nil
     # Create substitution map from type parameters to concrete types
     val subst = typesubstitution_from_params(func.type_params, type_args)
 
@@ -158,7 +171,7 @@ fn specialize_function_with_types(func: HirFunction, type_args: [HirType],
     val mangled = generate_mangled_name(func.name, type_args)
 
     # Apply substitution to create specialized function
-    substitute_function(func, subst, mangled, include_retained_defaults, budget)
+    substitute_function(func, subst, mangled)
 
 fn generate_mangled_name(base_name: text, type_args: [HirType]) -> text:
     """Generate a unique mangled name for a specialization."""

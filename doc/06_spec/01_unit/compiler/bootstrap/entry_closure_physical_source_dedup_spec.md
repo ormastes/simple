@@ -365,8 +365,8 @@ expect(cli_entry).to_contain("use lazy app.test_runner_new.json_wrapper.{run_tes
 expect(cli_entry).to_contain(r"use lazy compiler.tools.leak_check.main.{run_leak_check}")
 expect(cli_entry).to_contain("return run_test_cli()")
 expect(cli_entry).to_contain("elif str_eq(first, \"leak-check\"):\n        return run_leak_check()")
-expect(json_wrapper).to_contain("run_test_sdn_wrapper(sdn_args) as i64")
-expect(json_wrapper).to_not_contain("TEST_JSON_WORKER_ARG")
+expect(json_wrapper).to_contain("return [\"run\", \"src/app/test_runner_new/main.spl\", TEST_JSON_WORKER_ARG] + test_args")
+expect(json_wrapper).to_not_contain("return [\"run\", arg, \"test\", TEST_JSON_WORKER_ARG]")
 ```
 
 </details>

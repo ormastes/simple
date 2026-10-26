@@ -1,4 +1,4 @@
-use std.spec.*
+use std.test.*
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -9,13 +9,12 @@ describe "actor runtime ABI closure":
         val cranelift = rt_file_read_text("src/compiler_rust/compiler/src/codegen/instr/async_ops.rs") ?? ""
         val llvm = rt_file_read_text("src/compiler_rust/compiler/src/codegen/llvm/emitter.rs") ?? ""
         val interpreter = rt_file_read_text("src/compiler/95.interp/mir_interpreter.spl") ?? ""
-        val intrinsics = rt_file_read_text("src/compiler/95.interp/mir_interp_runtime.spl") ?? ""
+        val intrinsics = rt_file_read_text("src/compiler/95.interp/mir_interp_intrinsics.spl") ?? ""
         val hooks = rt_file_read_text("src/lib/nogc_sync_mut/concurrent/actor_hooks.spl") ?? ""
 
         expect(runtime_sffi).to_contain("RuntimeFuncSpec::new(\"rt_actor_spawn\", &[I64, I64], &[I64])")
         expect(runtime_sffi).to_contain("RuntimeFuncSpec::new(\"rt_actor_recv\", &[], &[I64])")
-        expect(runtime_sffi).to_contain("RuntimeFuncSpec::new(\"rt_actor_send\", &[I64, I64], &[])")
-        expect(runtime_sffi).to_contain("RuntimeFuncSpec::new(\"rt_actor_try_send\", &[I64, I64], &[I64])")
+        expect(runtime_sffi).to_contain("RuntimeFuncSpec::new(\"rt_actor_send_result\", &[I64, I64], &[I64])")
         expect(actor_runtime).to_contain("Option<extern \"C\" fn(RuntimeValue)>")
         expect(actor_runtime).to_contain("f(callback_ctx)")
         expect(actor_runtime.contains("as_heap_ptr() as *const u8")).to_equal(false)
@@ -23,23 +22,19 @@ describe "actor runtime ABI closure":
         expect(llvm).to_contain("LLVM actor spawn is unsupported: outlined actor callback address is unavailable")
         expect(llvm.contains("self.call_runtime(\"rt_actor_spawn\"")).to_equal(false)
         expect(llvm).to_contain("self.call_runtime(\"rt_actor_recv\", &[])")
-        expect(interpreter).to_contain("export use compiler.interp.mir_interp_runtime.{mir_interp_call_runtime_fn,")
-        expect(intrinsics).to_contain("extern fn rt_actor_spawn(handler: i64, context: i64) -> i64")
-        expect(intrinsics).to_contain("extern fn rt_actor_try_send(target: i64, message: i64) -> i64")
+        expect(interpreter).to_contain("extern fn rt_actor_spawn(handler: i64, ctx: i64) -> i64")
+        expect(interpreter).to_contain("extern fn rt_actor_send_result(target: i64, message: i64) -> i64")
+        expect(interpreter).to_contain("extern fn rt_actor_recv() -> i64")
+        expect(interpreter).to_contain("rt_actor_spawn(args[0], 0)")
+        expect(interpreter).to_contain("rt_actor_send_result(args[0], args[1])")
+        expect(interpreter).to_contain("case \"__simple_runtime_receive\":\n                rt_actor_recv()")
+        expect(intrinsics).to_contain("extern fn rt_actor_spawn(handler: i64, ctx: i64) -> i64")
+        expect(intrinsics).to_contain("extern fn rt_actor_send_result(target: i64, message: i64) -> i64")
         expect(intrinsics).to_contain("extern fn rt_actor_recv() -> i64")
-        expect(intrinsics).to_contain("rt_actor_spawn(handler, 0)")
-        expect(intrinsics).to_contain("rt_actor_try_send(target, message)")
-        expect(intrinsics).to_contain("_mir_interp_actor_send_raw(args[0], args[1])")
-        expect(intrinsics).to_contain("case \"__simple_runtime_receive\":\n            _mir_interp_actor_recv_raw()")
-        expect(intrinsics.contains("extern fn rt_actor_send(")).to_equal(false)
-        expect(intrinsics.contains("rt_actor_send(target, message)")).to_equal(false)
-        # The old generic hooks cannot represent this raw ABI. Their legacy
-        # entry points must refuse calls rather than pass Any across FFI.
-        expect(hooks.contains("extern fn rt_actor_")).to_equal(false)
-        expect(hooks).to_contain("fn actor_hook_spawn<H>(handler: H) -> i64:")
-        expect(hooks).to_contain("fn actor_hook_send<M>(actor_id: i64, message: M) -> bool:")
-        expect(hooks).to_contain("fn actor_hook_stop(actor_id: i64) -> bool:")
-        expect(hooks).to_contain("fn actor_hook_recv<R>(actor_id: i64) -> R:")
-        expect(hooks.count("panic(\"E-SFFI-ACTOR-LEGACY-ABI:")).to_equal(4)
+        expect(hooks).to_contain("extern fn rt_actor_spawn(handler: Any, ctx: Any) -> i64")
+        expect(hooks).to_contain("extern fn rt_actor_send_result(actor_id: i64, message: Any) -> i64")
+        expect(hooks).to_contain("extern fn rt_actor_recv() -> Any")
+        expect(hooks).to_contain("rt_actor_spawn(handler, nil)")
+        expect(hooks).to_contain("rt_actor_recv()")
         expect(hooks.contains("rt_actor_recv(actor_id)")).to_equal(false)
         expect(hooks.contains("extern fn rt_actor_send(actor_id")).to_equal(false)

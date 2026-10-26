@@ -51,7 +51,7 @@ Successfully implemented Features 1-2 of Phase 2.3 TreeSitter Integration:
 - `node_line_range(node: Node) -> (i64, i64)`
 
 **Data Structures:**
-```simple:skip
+```simple
 struct Point:
     row: i64      # Zero-indexed line number
     column: i64   # Zero-indexed column number
@@ -109,7 +109,7 @@ Complete API guide with:
 #### src/lib/parser/__init__.spl
 
 Updated module exports to include:
-```text
+```simple
 use std.parser.treesitter_node.{Node, Point}
 ```
 
@@ -120,14 +120,14 @@ use std.parser.treesitter_node.{Node, Point}
 The implementation follows the Simple FFI (SFFI) two-tier wrapper pattern:
 
 **Tier 1: FFI Declarations**
-```text
+```simple
 extern fn rt_ts_node_start_byte(node_handle: i64) -> i64
 extern fn rt_ts_node_end_byte(node_handle: i64) -> i64
 # ... 15 total FFI functions
 ```
 
 **Tier 2: High-Level API**
-```text
+```simple
 impl Node:
     fn start_byte() -> i64:
         rt_ts_node_start_byte(self.handle)

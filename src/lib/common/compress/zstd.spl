@@ -10,7 +10,6 @@ use std.common.compress.lz4.{CompressionOptions}
 use std.nogc_sync_mut.compression.zstd.decoder.{zstd_decode}
 use std.common.compress.zstd_dict.{_zstd_decompress_frame_for_tier_with_dictionary}
 use std.common.compress.zstd_frame.{_zstd_xxh64_bytes_for_tier}
-use std.common.compress.zstd_enc.{zstd_enc_find_sequences, zstd_enc_tables, zstd_enc_block}
 
 # Re-export test utilities for specs that import from std.common.compress.zstd
 pub use std.common.compress.zstd_literals.{zstd_parse_fse_huffman_weights, zstd_huf_build_table_for_test, zstd_huf_decode_stream_for_test}
@@ -23,7 +22,6 @@ pub use std.common.compress.zstd_seq.{zstd_execute_sequences_for_test}
 
 val ZSTD_MAGIC: i64 = 0xFD2FB528          # Frame magic (LE)
 val ZSTD_SKIP_MAGIC_BASE: i64 = 0x184D2A50 # Skippable frame magic range start
-val ZSTD_MAX_BLOCK_SIZE: i64 = 131072     # Block_Maximum_Size (128 KiB)
 
 # ============================================================================
 # Helpers
@@ -96,17 +94,19 @@ fn _zstd_append_content_size(out: [u8], content_size: i64) -> [u8]:
         return _zstd_append(out, _zstd_write_le32(content_size))
     _zstd_append(out, _zstd_write_le64(content_size))
 
-fn _zstd_range_all_same(data: [u8], start: i64, end: i64) -> bool:
-    val first = data[start]
-    var i = start + 1
-    while i < end:
+fn _zstd_all_same(data: [u8]) -> bool:
+    if data.len() == 0:
+        return true
+    val first = data[0]
+    var i = 1
+    while i < data.len():
         if data[i] != first:
             return false
         i = i + 1
     true
 
 pub fn zstd_compress_frame(data: [u8], opts: CompressionOptions) -> [u8]:
-    """Compress `data` as a single-segment Zstd frame of RLE / compressed / raw blocks (<=128 KiB each).
+    """Compress `data` as a single-segment Zstd frame (raw or RLE block).
 
     Uses single-segment encoding so the content size fits in 1–4 bytes with
     no separate Window_Descriptor.  Chooses RLE block when all input bytes
@@ -123,47 +123,17 @@ pub fn zstd_compress_frame(data: [u8], opts: CompressionOptions) -> [u8]:
         out = out.push(0x00 as u8)
         out = out.push(0x00 as u8)
     else:
-        # Block_Maximum_Size is 128 KiB: emit <=128 KiB blocks, Last_Block=1 only on the final one.
-        # Each block is RLE, a real Compressed_Block (type 2) when strictly smaller, else Raw.
-        val seqs = zstd_enc_find_sequences(data, opts.level.value)
-        val tabs = zstd_enc_tables()
-        var si = 0
-        var pos = 0
-        while pos < n:
-            var end = pos + ZSTD_MAX_BLOCK_SIZE
-            if end > n:
-                end = n
-            val size = end - pos
-            val last = if end == n: 1 else: 0
-            val all_same = _zstd_range_all_same(data, pos, end)
-            var sj = si
-            while sj < seqs.starts.len() and seqs.starts[sj] < end:
-                sj = sj + 1
-            var comp: [u8] = []
-            if not all_same:
-                comp = zstd_enc_block(data, pos, end, seqs, si, sj, tabs)
-            si = sj
-            if comp.len() > 0 and comp.len() < size:
-                val hdr_c = last | (2 << 1) | (comp.len() << 3)
-                out.push((hdr_c & 0xFF) as u8)
-                out.push(((hdr_c >> 8) & 0xFF) as u8)
-                out.push(((hdr_c >> 16) & 0xFF) as u8)
-                out = _zstd_append(out, comp)
-            else:
-                val btype = if all_same: 1 else: 0
-                # RLE block header size = regenerated count; raw block size = content length. Both = size.
-                val hdr_val = last | (btype << 1) | (size << 3)
-                out.push((hdr_val & 0xFF) as u8)
-                out.push(((hdr_val >> 8) & 0xFF) as u8)
-                out.push(((hdr_val >> 16) & 0xFF) as u8)
-                if all_same:
-                    out.push(data[pos])
-                else:
-                    var i = pos
-                    while i < end:
-                        out.push(data[i])
-                        i = i + 1
-            pos = end
+        val all_same = _zstd_all_same(data)
+        val btype = if all_same: 1 else: 0
+        # RLE block header size = regenerated count; raw block size = content length. Both = n.
+        val hdr_val = 1 | (btype << 1) | (n << 3)
+        out = out.push((hdr_val & 0xFF) as u8)
+        out = out.push(((hdr_val >> 8) & 0xFF) as u8)
+        out = out.push(((hdr_val >> 16) & 0xFF) as u8)
+        if all_same:
+            out = out.push(data[0])
+        else:
+            out = _zstd_append(out, data)
     if opts.checksum:
         val hash = _zstd_xxh64_bytes_for_tier(data, 0u64, CompressionSimdTier.scalar)
         val h32 = (hash & 0xFFFFFFFFu64).to_u32()

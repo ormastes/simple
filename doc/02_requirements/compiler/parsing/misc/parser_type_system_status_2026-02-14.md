@@ -22,7 +22,7 @@
 - **Severity:** HIGH - Blocks 2,117 lines (Pure Simple DL library)
 - **Issue:** Cannot access fields on parameters with generic class types inside generic functions
 - **Example:**
-  ```simple:skip
+  ```simple
   fn get_value<T>(box: Box<T>) -> T:
       box.value  # ← Parse error: "expected identifier for tensor name, found Dot"
   ```

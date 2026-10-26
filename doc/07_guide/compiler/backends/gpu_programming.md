@@ -38,7 +38,7 @@ returned. Keep the executable contract and generated manual in sync:
 ## Quick Start: Runtime API (Works Now)
 
 ```simple
-use std.nogc_sync_mut.gpu_runtime.{gpu_available, gpu_alloc_zeros, gpu_tensor_is_cuda}
+use std.gpu_runtime.{gpu_available, gpu_alloc_zeros, gpu_tensor_is_cuda}
 
 fn main():
     if not gpu_available():
@@ -98,7 +98,7 @@ bin/simple examples/gpu/runtime_example.spl
 
 ### Kernel Syntax
 
-```text
+```simple
 @gpu_kernel
 fn vector_add(a: GpuArray<f32>, b: GpuArray<f32>, out: GpuArray<f32>, n: i32):
     val idx = gpu_thread_id_x() + gpu_block_id_x() * gpu_block_dim_x()
@@ -108,7 +108,7 @@ fn vector_add(a: GpuArray<f32>, b: GpuArray<f32>, out: GpuArray<f32>, n: i32):
 
 ### Device and Memory Management
 
-```text
+```simple
 use std.gpu.{Context, GpuArray}
 
 fn main():
@@ -140,7 +140,7 @@ fn main():
 
 ### Shared Memory
 
-```text
+```simple
 @gpu_kernel
 fn reduce_sum(input: GpuArray<f32>, output: GpuArray<f32>, n: i32):
     val shared = gpu_shared_mem<f32>(256)
@@ -192,7 +192,7 @@ vulkaninfo --summary
 
 ### Vulkan Kernel
 
-```text
+```simple
 @vulkan_kernel
 fn saxpy(a: f32, x: Buffer<f32>, y: Buffer<f32>, result: Buffer<f32>):
     val idx = vulkan_global_id_x()
@@ -201,7 +201,7 @@ fn saxpy(a: f32, x: Buffer<f32>, y: Buffer<f32>, result: Buffer<f32>):
 
 ### Vulkan API
 
-```text
+```simple
 use std.gpu.vulkan.{VulkanContext, Buffer}
 
 fn main():
@@ -342,7 +342,7 @@ acceleration:
 
 ### Platform Detection
 
-```text
+```simple
 use std.simd.{simd_supported, SimdLevel}
 
 fn main():
@@ -356,7 +356,7 @@ fn main():
 
 ### Vector Types
 
-```text
+```simple
 use std.simd.{f32x8, i32x8}
 
 fn simd_add(a: List<f32>, b: List<f32>) -> List<f32>:
@@ -392,7 +392,7 @@ fn simd_add(a: List<f32>, b: List<f32>) -> List<f32>:
 ### Async Batch Processing
 
 ```simple
-use std.nogc_sync_mut.gpu_runtime.{gpu_stream_create, gpu_async_upload_batch, gpu_stream_sync}
+use std.gpu_runtime.{gpu_stream_create, gpu_async_upload_batch, gpu_stream_sync}
 
 fn process_batches(num_batches: i64):
     val stream = gpu_stream_create(0)
@@ -407,7 +407,7 @@ fn process_batches(num_batches: i64):
 ### Multi-GPU
 
 ```simple
-use std.nogc_sync_mut.gpu_runtime.{gpu_device_count, gpu_alloc_zeros}
+use std.gpu_runtime.{gpu_device_count, gpu_alloc_zeros}
 
 fn multi_gpu():
     val num_gpus = gpu_device_count()
@@ -419,7 +419,7 @@ fn multi_gpu():
 
 ### Training Loop
 
-```text
+```simple
 fn train(epochs: i64, batches: i64):
     val stream = gpu_stream_create(0)
 

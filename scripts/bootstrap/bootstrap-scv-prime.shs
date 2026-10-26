@@ -4,7 +4,7 @@
 # Every full-CLI entrypoint that compiles (`check`, `run`, `test`, ...) passes
 # compiler_entrypoint_admit_v1 (src/app/compiler_entrypoint/admission.spl),
 # which fails closed with `SCV-E-ADMISSION: compile-event-journal-missing`
-# until a current source-inventory cursor exists in the source root. A fresh
+# until build/scv/compile-events/CURRENT exists in the source root. A fresh
 # bootstrap worktree has none, so every spec child of the phase test matrix
 # failed (Windows stage-2, bootstrap35, 2026-09-25). CI and the FreeBSD lane
 # export SIMPLE_SCV_INVENTORY_COLD_INIT=1 into the whole run instead, which
@@ -15,39 +15,21 @@
 # Sourced by bootstrap-phase-verification.shs. `sh bootstrap-scv-prime.shs
 # --selftest` exercises the skip / prime / fail-closed paths with fixtures.
 
-# Warm refresh requires the v3 membership cursor. Current publication binds
-# it to the inventory digest in source-inventory/CURRENT (ten lines); the
-# legacy separate cursor has nine. v1/v2 need a cold migration, not a warm
-# attempt that inevitably fails untracked-membership-cursor-missing.
+# Mirrors compiler_inventory_cursor_decode_v1 (inventory_events.spl): exactly
+# six lines, the v1 magic, a 40/64-hex git head, integer rows, two 64-char
+# digests and an integer generation.
 bootstrap_scv_journal_valid() {
     [ -f "$1" ] || return 1
     awk '
-        function digest(v) { return length(v) == 64 && v ~ /^[0-9a-f]+$/ }
-        BEGIN { ok = 1; offset = 0 }
         { sub(/\r$/, "") }
-        NR == 1 && $0 != "simple-compile-event-cursor-v3" { bound = $0; offset = 1; ok = digest(bound); next }
-        NR-offset == 1 { ok = ok && $0 == "simple-compile-event-cursor-v3" }
-        NR-offset == 2 { v = $0; ok = ok && sub(/^git_head=/, "", v) && (length(v) == 40 || length(v) == 64) && v ~ /^[0-9a-f]+$/ }
-        NR-offset == 3 { v = $0; ok = ok && sub(/^filesystem_rows=/, "", v) && v ~ /^[0-9]+$/ }
-        NR-offset == 4 { v = $0; ok = ok && sub(/^filesystem_digest=/, "", v) && digest(v) }
-        NR-offset == 5 { v = $0; ok = ok && sub(/^inventory_digest=/, "", v) && digest(v) && (!offset || v == bound) }
-        NR-offset == 6 { v = $0; ok = ok && sub(/^inventory_generation=/, "", v) && v ~ /^[0-9]+$/ }
-        NR-offset == 7 { v = $0; ok = ok && sub(/^untracked_src_digest=/, "", v) && digest(v) }
-        NR-offset == 8 { v = $0; ok = ok && sub(/^untracked_test_digest=/, "", v) && digest(v) }
-        NR-offset == 9 { v = $0; ok = ok && sub(/^untracked_membership_digest=/, "", v) && digest(v) }
-        END { exit !(ok && NR-offset == 9) }
+        NR == 1 { ok = ($0 == "simple-compile-event-cursor-v1") }
+        NR == 2 { v = $0; ok = ok && sub(/^git_head=/, "", v) && (length(v) == 40 || length(v) == 64) }
+        NR == 3 { v = $0; ok = ok && sub(/^filesystem_rows=/, "", v) && v ~ /^[0-9]+$/ }
+        NR == 4 { v = $0; ok = ok && sub(/^filesystem_digest=/, "", v) && length(v) == 64 }
+        NR == 5 { v = $0; ok = ok && sub(/^inventory_digest=/, "", v) && length(v) == 64 }
+        NR == 6 { v = $0; ok = ok && sub(/^inventory_generation=/, "", v) && v ~ /^[0-9]+$/ }
+        END { exit !(ok && NR == 6) }
     ' "$1"
-}
-
-bootstrap_scv_cursor_path() {
-    bsp_pointer="$1/build/scv/source-inventory/CURRENT"
-    # The compiler uses the separate cursor only for a legacy one-line
-    # pointer. Never fall back from a malformed combined publication.
-    if [ -f "$bsp_pointer" ] && awk 'NR == 2 { found=1 } END { exit !found }' "$bsp_pointer"; then
-        printf '%s\n' "$bsp_pointer"
-    else
-        printf '%s\n' "$1/build/scv/compile-events/CURRENT"
-    fi
 }
 
 # bootstrap_scv_prime <source_root> <cli> <home> <tmp> <log>
@@ -90,42 +72,25 @@ bsp_run_cli() {
         exec "$bsp_cli" check --help
     ) >"$2" 2>&1
 }
-# Parser tracing can print source string literals containing the diagnostic
-# code. Only an emitted diagnostic at the start of a log line is admission
-# failure evidence. Keep the selection shared by detection and reporting.
-bootstrap_scv_admission_diagnostic() {
-    LC_ALL=C grep -m1 -E '^(error: )?SCV-E-ADMISSION:[[:blank:]]*[^[:space:]]' "$1"
-}
-
-bootstrap_scv_snapshot_index_drift_diagnostic() {
-    case "$1" in
-        'SCV-E-ADMISSION: snapshot-index-drift:'*|\
-        'error: SCV-E-ADMISSION: snapshot-index-drift:'*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 bootstrap_scv_prime() {
     bsp_root=$1 bsp_cli=$2 bsp_home=$3 bsp_tmp=$4 bsp_log=$5
-    bsp_cursor=$(bootstrap_scv_cursor_path "$bsp_root")
-    bsp_reprime=0
+    bsp_cursor="$bsp_root/build/scv/compile-events/CURRENT"
     # A cursor that records filesystem rows while .scv/journal/events.log is
     # absent can never be refreshed (filesystem-event-journal-missing); older
     # binaries wrote rows=1 for an empty journal. Apply the error's own remedy.
     if bootstrap_scv_journal_valid "$bsp_cursor" && \
        ! grep -q '^filesystem_rows=0' "$bsp_cursor" && \
        [ ! -f "$bsp_root/.scv/journal/events.log" ]; then
-        echo "scv-inventory-prime: re-priming unrefreshable cursor (retaining cache and snapshots)" >&2
-        bsp_reprime=1
+        echo "scv-inventory-prime: clearing unrefreshable cache (rows recorded, no .scv journal)" >&2
+        rm -rf "$bsp_root/build/scv"
     fi
     bsp_start=$(date +%s)
     bsp_cold=skipped
     # 1. Cold inventory init, only when no valid journal exists. The journal,
     #    not the check verdict, is the evidence for this step.
-    if [ "$bsp_reprime" = 1 ] || ! bootstrap_scv_journal_valid "$bsp_cursor"; then
+    if ! bootstrap_scv_journal_valid "$bsp_cursor"; then
         bsp_run_cli 1 "$bsp_log"
         bsp_rc=$?
-        bsp_cursor=$(bootstrap_scv_cursor_path "$bsp_root")
         if ! bootstrap_scv_journal_valid "$bsp_cursor"; then
             echo "scv-inventory-prime: FAILED after $(( $(date +%s) - bsp_start ))s (rc=$bsp_rc): no valid $bsp_cursor; every full-CLI child would fail SCV-E-ADMISSION. Log: $bsp_log" >&2
             return 1
@@ -138,36 +103,11 @@ bootstrap_scv_prime() {
     #    pay for it. Cheap (~seconds) when both already exist. Evidence: no
     #    SCV-E-ADMISSION line and no crash/timeout exit.
     bsp_warm_start=$(date +%s)
-    bsp_warm_log="$bsp_log.warm"
-    bsp_run_cli 0 "$bsp_warm_log"
+    bsp_run_cli 0 "$bsp_log.warm"
     bsp_rc=$?
-    bsp_diagnostic_rc=0
-    bsp_diagnostic=$(bootstrap_scv_admission_diagnostic "$bsp_warm_log") || bsp_diagnostic_rc=$?
-    # A syntactically valid same-HEAD cursor can still name a dirty source
-    # version that was later restored without an SCV filesystem event. The
-    # snapshot byte guard correctly rejects that state. Rebuild the inventory
-    # once, then retry the ordinary warm admission once; never retry any other
-    # diagnostic, timeout, crash, or a second drift.
-    if [ "$bsp_rc" -lt 124 ] && [ "$bsp_diagnostic_rc" -eq 0 ] && \
-       bootstrap_scv_snapshot_index_drift_diagnostic "$bsp_diagnostic"; then
-        echo "scv-inventory-prime: rebuilding drifted inventory once" >&2
-        bsp_run_cli 1 "$bsp_log.drift-cold"
-        bsp_cold_rc=$?
-        bsp_cursor=$(bootstrap_scv_cursor_path "$bsp_root")
-        if [ "$bsp_cold_rc" -ge 124 ] || ! bootstrap_scv_journal_valid "$bsp_cursor"; then
-            echo "scv-inventory-prime: FAILED drift recovery after $(( $(date +%s) - bsp_start ))s (rc=$bsp_cold_rc): cold inventory did not complete with a valid $bsp_cursor. Log: $bsp_log.drift-cold" >&2
-            return 1
-        fi
-        bsp_warm_log="$bsp_log.drift-warm"
-        bsp_run_cli 0 "$bsp_warm_log"
-        bsp_rc=$?
-        bsp_diagnostic_rc=0
-        bsp_diagnostic=$(bootstrap_scv_admission_diagnostic "$bsp_warm_log") || bsp_diagnostic_rc=$?
-        bsp_cold="drift recovery ran (rc=$bsp_cold_rc)"
-    fi
     bsp_warm=$(( $(date +%s) - bsp_warm_start ))
-    if [ "$bsp_diagnostic_rc" -eq 0 ] || [ "$bsp_diagnostic_rc" -gt 1 ] || [ "$bsp_rc" -ge 124 ]; then
-        echo "scv-inventory-prime: FAILED warm admission after ${bsp_warm}s (rc=$bsp_rc): $bsp_diagnostic. Log: $bsp_warm_log" >&2
+    if grep -q 'SCV-E-ADMISSION' "$bsp_log.warm" || [ "$bsp_rc" -ge 124 ]; then
+        echo "scv-inventory-prime: FAILED warm admission after ${bsp_warm}s (rc=$bsp_rc): $(grep -m1 'SCV-E-ADMISSION' "$bsp_log.warm"). Log: $bsp_log.warm" >&2
         return 1
     fi
     echo "scv-inventory-prime: ready in $(( $(date +%s) - bsp_start ))s (cold init: $bsp_cold; warm admission ${bsp_warm}s, admission probe rc=$bsp_rc)"
@@ -178,34 +118,26 @@ bootstrap_scv_prime_selftest() {
     st=$(mktemp -d 2>/dev/null || mktemp -d -t scvprime)
     [ -n "$st" ] && [ -d "$st" ] || { echo "scv-prime selftest: ERROR — no temp dir"; return 2; }
     fails=0
-    checks=0
     head40=0123456789abcdef0123456789abcdef01234567
     d64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     write_cursor() {
         mkdir -p "$1/build/scv/compile-events"
-        printf 'simple-compile-event-cursor-v3\ngit_head=%s\nfilesystem_rows=0\nfilesystem_digest=%s\ninventory_digest=%s\ninventory_generation=%s\nuntracked_src_digest=%s\nuntracked_test_digest=%s\nuntracked_membership_digest=%s' \
-            "$head40" "$d64" "$d64" "${2:-0}" "$d64" "$d64" "$d64" >"$1/build/scv/compile-events/CURRENT"
+        printf 'simple-compile-event-cursor-v1\ngit_head=%s\nfilesystem_rows=0\nfilesystem_digest=%s\ninventory_digest=%s\ninventory_generation=%s' \
+            "$head40" "$d64" "$d64" "${2:-0}" >"$1/build/scv/compile-events/CURRENT"
     }
     expect() { # name expected_rc actual_rc
-        checks=$((checks + 1))
         if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1 (expected rc=$2, got $3)"; fails=$((fails + 1)); fi
     }
 
     # Each fake CLI appends "cold=<SIMPLE_SCV_INVENTORY_COLD_INIT>" per call.
     # good_cli: writes a valid cursor, exits 1 (check verdict is irrelevant).
-    printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/called"\nhead40=%s d64=%s\nmkdir -p build/scv/source-inventory\nprintf "$d64\\nsimple-compile-event-cursor-v3\\ngit_head=$head40\\nfilesystem_rows=0\\nfilesystem_digest=$d64\\ninventory_digest=$d64\\ninventory_generation=0\\nuntracked_src_digest=$d64\\nuntracked_test_digest=$d64\\nuntracked_membership_digest=$d64" >build/scv/source-inventory/CURRENT\nexit 1\n' \
+    printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/called"\nhead40=%s d64=%s\nmkdir -p build/scv/compile-events\nprintf "simple-compile-event-cursor-v1\\ngit_head=$head40\\nfilesystem_rows=0\\nfilesystem_digest=$d64\\ninventory_digest=$d64\\ninventory_generation=0" >build/scv/compile-events/CURRENT\nexit 1\n' \
         "$st" "$head40" "$d64" >"$st/good_cli"
     # bad_cli: writes nothing, admission itself passes; records its argv.
     printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/called"\necho "$*" >>"%s/argv"\nexit 0\n' "$st" "$st" >"$st/bad_cli"
     # admit_fail_cli: warm admission refused.
     printf '#!/bin/sh\necho "SCV-E-ADMISSION: package-index:publish-failed" >&2\nexit 1\n' >"$st/admit_fail_cli"
-    # drift_cli fails its first warm admission, rebuilds the cursor on the one
-    # cold retry, then admits. persistent_drift_cli proves the retry is bounded.
-    printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/drift_called"\nhead40=%s d64=%s\nif [ "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" = 1 ]; then mkdir -p build/scv/source-inventory; printf "$d64\\nsimple-compile-event-cursor-v3\\ngit_head=$head40\\nfilesystem_rows=0\\nfilesystem_digest=$d64\\ninventory_digest=$d64\\ninventory_generation=1\\nuntracked_src_digest=$d64\\nuntracked_test_digest=$d64\\nuntracked_membership_digest=$d64" >build/scv/source-inventory/CURRENT; exit 1; fi\nif [ ! -f "%s/drift_rebuilt" ]; then echo "SCV-E-ADMISSION: snapshot-index-drift:src/probe.spl" >&2; touch "%s/drift_rebuilt"; exit 1; fi\nexit 0\n' \
-        "$st" "$head40" "$d64" "$st" "$st" >"$st/drift_cli"
-    printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/persistent_called"\nif [ "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" = 1 ]; then exit 1; fi\necho "SCV-E-ADMISSION: snapshot-index-drift:src/probe.spl" >&2\nexit 1\n' \
-        "$st" >"$st/persistent_drift_cli"
-    chmod +x "$st/good_cli" "$st/bad_cli" "$st/admit_fail_cli" "$st/drift_cli" "$st/persistent_drift_cli"
+    chmod +x "$st/good_cli" "$st/bad_cli" "$st/admit_fail_cli"
 
     # 1. valid journal present -> cold step skipped, warm admission still runs
     mkdir -p "$st/r1"; write_cursor "$st/r1"; rm -f "$st/called" "$st/argv"
@@ -223,21 +155,6 @@ bootstrap_scv_prime_selftest() {
     # 2b. warm admission refused -> fail closed
     mkdir -p "$st/r2b"; write_cursor "$st/r2b"
     bootstrap_scv_prime "$st/r2b" "$st/admit_fail_cli" "$st" "$st" "$st/l2b" >/dev/null 2>&1; expect "warm SCV-E-ADMISSION -> fail closed" 1 $?
-    # 2c. Only snapshot index drift receives one bounded cold+warm retry.
-    mkdir -p "$st/r2c"; write_cursor "$st/r2c"; rm -f "$st/drift_called" "$st/drift_rebuilt"
-    bootstrap_scv_prime "$st/r2c" "$st/drift_cli" "$st" "$st" "$st/l2c" >/dev/null 2>&1; expect "snapshot drift -> one cold+warm recovery" 0 $?
-    [ "$(sed -n 1p "$st/drift_called")" = "cold=" ] && \
-        [ "$(sed -n 2p "$st/drift_called")" = "cold=1" ] && \
-        [ "$(sed -n 3p "$st/drift_called")" = "cold=" ] && \
-        [ "$(wc -l <"$st/drift_called" | tr -d ' ')" = 3 ]
-    expect "snapshot drift recovery is exactly warm/cold/warm" 0 $?
-    mkdir -p "$st/r2d"; write_cursor "$st/r2d"; rm -f "$st/persistent_called"
-    bootstrap_scv_prime "$st/r2d" "$st/persistent_drift_cli" "$st" "$st" "$st/l2d" >/dev/null 2>&1; expect "persistent snapshot drift -> fail after one retry" 1 $?
-    [ "$(sed -n 1p "$st/persistent_called")" = "cold=" ] && \
-        [ "$(sed -n 2p "$st/persistent_called")" = "cold=1" ] && \
-        [ "$(sed -n 3p "$st/persistent_called")" = "cold=" ] && \
-        [ "$(wc -l <"$st/persistent_called" | tr -d ' ')" = 3 ]
-    expect "persistent snapshot drift retry remains bounded" 0 $?
     # 3. no journal and CLI writes none -> fail closed
     mkdir -p "$st/r3"
     bootstrap_scv_prime "$st/r3" "$st/bad_cli" "$st" "$st" "$st/l3" >/dev/null 2>&1; expect "no journal after prime -> fail closed" 1 $?
@@ -251,36 +168,16 @@ bootstrap_scv_prime_selftest() {
     write_cursor "$st/r4"; sed 's/$/\r/' "$st/r4/build/scv/compile-events/CURRENT" >"$st/crlf" 2>/dev/null
     bootstrap_scv_journal_valid "$st/crlf"; expect "CRLF cursor is valid" 0 $?
 
-    # 6. rows recorded but no .scv journal -> cold refresh retains artifacts
+    # 6. rows recorded but no .scv journal -> cache cleared and re-primed
     mkdir -p "$st/r6"; write_cursor "$st/r6"
-    printf 'retained\n' >"$st/r6/build/scv/cached-artifact"
     sed 's/^filesystem_rows=0/filesystem_rows=1/' "$st/r6/build/scv/compile-events/CURRENT" >"$st/r6c" &&
         mv "$st/r6c" "$st/r6/build/scv/compile-events/CURRENT"; rm -f "$st/called"
-    bootstrap_scv_prime "$st/r6" "$st/good_cli" "$st" "$st" "$st/l6" >/dev/null 2>&1; expect "unrefreshable cursor is re-primed" 0 $?
+    bootstrap_scv_prime "$st/r6" "$st/good_cli" "$st" "$st" "$st/l6" >/dev/null 2>&1; expect "unrefreshable cursor is cleared and re-primed" 0 $?
     grep -q "^cold=1" "$st/called"; expect "re-prime runs cold init" 0 $?
-    [ "$(cat "$st/r6/build/scv/cached-artifact")" = retained ]; expect "re-prime preserves existing artifacts" 0 $?
-
-    # 7. Published combined v3 skips cold; malformed authority never falls
-    # back to a separately retained valid legacy cursor.
-    rm -f "$st/called"
-    bootstrap_scv_prime "$st/r2" "$st/bad_cli" "$st" "$st" "$st/l7" >/dev/null; expect "combined v3 warm admission succeeds" 0 $?
-    [ "$(cat "$st/called")" = 'cold=' ]; expect "combined v3 does not repeat cold initialization" 0 $?
-    write_cursor "$st/r2"
-    sed '1s/^./f/' "$st/r2/build/scv/source-inventory/CURRENT" >"$st/mismatched"
-    bootstrap_scv_journal_valid "$st/mismatched"; expect "combined pointer digest mismatch rejected" 1 $?
-    cp "$st/mismatched" "$st/r2/build/scv/source-inventory/CURRENT"
-    bootstrap_scv_prime "$st/r2" "$st/bad_cli" "$st" "$st" "$st/l8" >/dev/null 2>&1; expect "malformed combined record cannot fall back to separate cursor" 1 $?
-    for version in 1 2; do
-        if [ "$version" = 1 ]; then count=6; else count=8; fi
-        head -n "$count" "$st/r4/build/scv/compile-events/CURRENT" | sed "1s/v3/v$version/" >"$st/old"
-        bootstrap_scv_journal_valid "$st/old"; expect "v$version requires membership migration" 1 $?
-    done
-    sed 's/^untracked_membership_digest=./untracked_membership_digest=z/' "$st/r4/build/scv/compile-events/CURRENT" >"$st/nonhex"
-    bootstrap_scv_journal_valid "$st/nonhex"; expect "nonhex membership digest rejected" 1 $?
 
     rm -rf "$st"
     if [ "$fails" -eq 0 ]; then
-        echo "PASS — $checks scv-prime check(s)"
+        echo "PASS — 13 scv-prime check(s)"
         return 0
     fi
     echo "FAIL — $fails scv-prime check(s) failed"

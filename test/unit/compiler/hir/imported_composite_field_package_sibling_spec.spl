@@ -1,0 +1,70 @@
+"""
+# Imported Composite Field — Package-Sibling Dependency Unit Spec
+
+Regression guard for `unresolved type: HirImpl` (plus HirStaticAssert,
+HirAopAdvice, HirDiBinding, HirArchRule, HirMockDecl), which poisoned every
+Stage-1 module that imports `HirModule`.
+
+`HirModule` is declared in `20.hir/hir_types.spl` with fields typed
+`[HirImpl]` etc., while those six structs are declared in the SIBLING file
+`20.hir/hir_definitions.spl` — a file `hir_types.spl` structurally cannot
+import, because `hir_definitions.spl` already does `use compiler.hir.hir_types.*`
+and the reverse edge would be a cycle. Directory-package semantics
+(`resolve_package_sibling_symbols`) let the DECLARING module see them anyway,
+so `hir_types.spl` lowers fine. The IMPORTER side had no such fallback:
+`register_imported_symbol`'s composite-field walk resolved each field's element
+type against the declaring module's own declarations only, missed, and landed on
+the hard `unresolved type: {name}` error.
+
+The `Dict<SymbolId, HirConst>`-typed fields on the SAME struct never failed,
+because only `[T]`/scalar field shapes reach that walk — the error depended on
+the field's CONTAINER, not on anything the code does.
+"""
+
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_definitions.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn pkg_sibling_spec_logger() -> Logger:
+    Logger(level: 0)
+
+fn pkg_sibling_spec_surfaces(modules: Dict<text, Module>, sources: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(error):
+            assert_true(false)
+            ModuleSurfacesByName.empty()
+
+describe "imported composite field types declared by a package sibling":
+    """A public field's element type may live in a sibling file of the
+    declaring module's directory, with no import edge between them."""
+    it "resolves an array field element type declared in a package sibling":
+        val log = pkg_sibling_spec_logger()
+        # `holder` names `Leaf` with NO import: `leaf_defs` is its directory
+        # sibling. The reverse import edge exists, exactly as in
+        # hir_definitions.spl -> hir_types.spl, so `holder` cannot import back.
+        val holder_source = "struct Holder:\n    items: [Leaf]\n    tag: text"
+        val leaf_source = "use pkgdep.holder.*\n\nstruct Leaf:\n    n: i64"
+        val consumer_source = "use pkgdep.holder.\{Holder\}\n\nfn accept(value: Holder) -> Holder:\n    value"
+        val holder = parse_full_frontend(holder_source, "pkgdep.holder", "pkgdep.holder", log)
+        val leaf = parse_full_frontend(leaf_source, "pkgdep.leaf_defs", "pkgdep.leaf_defs", log)
+        val consumer = parse_full_frontend(consumer_source, "other.consumer", "other.consumer", log)
+
+        var modules: Dict<text, Module> = {}
+        modules["pkgdep.holder"] = holder
+        modules["pkgdep.leaf_defs"] = leaf
+        val sources = [
+            SourceFile(path: "pkgdep/holder.spl", content: holder_source, module_name: "pkgdep.holder"),
+            SourceFile(path: "pkgdep/leaf_defs.spl", content: leaf_source, module_name: "pkgdep.leaf_defs")
+        ]
+        val surfaces = pkg_sibling_spec_surfaces(modules, sources)
+        var lowering = hirlowering_for_module("other.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        # Pre-fix this reported `unresolved type: Leaf`, attributed to the
+        # CONSUMER rather than to `pkgdep.holder`, which actually names it.
+        expect(lowering.errors.len()).to_equal(0)

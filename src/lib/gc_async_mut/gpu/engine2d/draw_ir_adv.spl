@@ -6,7 +6,6 @@
 
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.common.ui.draw_ir.{
-    draw_ir_command_has_unsupported_v4_state,
     DRAW_IR_COMMAND_IMAGE,
     DRAW_IR_COMMAND_EDGE,
     DRAW_IR_COMMAND_PATH,
@@ -17,7 +16,6 @@ use std.common.ui.draw_ir.{
     DrawIrCommand,
     DrawIrPoint,
     DrawIrComposition,
-    DrawIrRect,
     DrawIrEmbeddingConfig,
     DrawIrStyleProp,
     Simple2dDrawIrCompositionPlan,
@@ -96,9 +94,6 @@ struct Engine2dDrawIrAdvResult:
     fallback_reason: text
     rendered_command_count: i32
     skipped_command_count: i32
-    # Part of skipped_command_count culled by an exact occlusion proof:
-    # invisible in the final frame, so the pixels are unaffected.
-    occluded_command_count: i32 = 0
     pixels: [u32]
     readback_source: text
     backend_handle: i64
@@ -258,11 +253,6 @@ struct Engine2dDrawIrRenderOutcome:
     glass_backend_handle: i64
     glass_device_identity: i64
     css_background_pixel_work_remaining: i64
-    # Logical operations culled because an exact occlusion proof showed later
-    # opaque fills cover them (`prove_occlusion`). Included in `skipped`, as
-    # damage culls are, and reported separately so a strict caller can tell
-    # a proven-invisible cull from a command that failed to render.
-    occluded: i32
 
 struct Engine2dDrawIrBoxOutcome:
     engine: Engine2D
@@ -286,11 +276,9 @@ fn _engine2d_draw_ir_render_outcome(
     glass_execution_target: text = "",
     glass_backend_handle: i64 = 0,
     glass_device_identity: i64 = 0,
-    css_background_pixel_work_remaining: i64 = -1,
-    occluded: i32 = 0
+    css_background_pixel_work_remaining: i64 = -1
 ) -> Engine2dDrawIrRenderOutcome:
     Engine2dDrawIrRenderOutcome(
-        occluded: occluded,
         engine: engine,
         rendered: rendered,
         skipped: skipped,
@@ -1189,8 +1177,6 @@ fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp])
     true
 
 fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32, allow_clipped: bool, allow_translucent_initializer: bool) -> bool:
-    if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
-        return false
     val right = command.x.to_i64() + command.width.to_i64()
     val bottom = command.y.to_i64() + command.height.to_i64()
     if (command.width <= 0 or command.height <= 0 or right <= 0 or bottom <= 0 or
@@ -1370,8 +1356,6 @@ fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: Dr
 # executor to turn images, effects, clipped child surfaces, or a CPU result
 # into a device receipt.
 fn _engine2d_draw_ir_strict_vulkan_box_bounded(command: DrawIrCommand, width: i32, height: i32) -> bool:
-    if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
-        return false
     val right = command.x.to_i64() + command.width.to_i64()
     val bottom = command.y.to_i64() + command.height.to_i64()
     command.width > 0 and command.height > 0 and
@@ -1393,10 +1377,6 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
         for command in batch.commands:
             if command.? == false or command.clip_rect.present:
                 return "strict-vulkan-command-preflight-required"
-            if command.fractional_geometry != nil:
-                return "fractional-geometry-unsupported"
-            if draw_ir_command_has_unsupported_v4_state(command):
-                return "affine-or-raster-policy-unsupported"
             if first and command.kind != DRAW_IR_COMMAND_RECT:
                 return "strict-vulkan-clear-first-required"
             if command.kind == DRAW_IR_COMMAND_RECT:
@@ -1641,17 +1621,8 @@ fn _engine2d_draw_ir_materialize_image_damage(
             width: 0, height: 0, pixels: [])
     val destination_x = clip.x - x
     val destination_y = clip.y - y
-    # Preallocate the exact crop size: the previous per-pixel push() built the
-    # buffer through amortized growth, recopying every boxed element on each
-    # capacity doubling. The i64 area guard keeps the absurd-size case on the
-    # old push path (which would fail the same allocation either way).
-    val crop_area = clip.width.to_i64() * clip.height.to_i64()
     var cropped: [u32] = []
-    val preallocated = crop_area > 0 and crop_area <= 2147483647
-    if preallocated:
-        cropped = [0u32; crop_area.to_i32()]
     var row = 0
-    var write_at = 0
     while row < clip.height:
         var col = 0
         while col < clip.width:
@@ -1661,13 +1632,8 @@ fn _engine2d_draw_ir_materialize_image_damage(
             val source_y = (
                 (destination_y + row).to_i64() * image.height.to_i64() /
                 command.height.to_i64()).to_i32()
-            if preallocated:
-                cropped[write_at] = image.pixels[
-                    source_y * image.width + source_x]
-                write_at += 1
-            else:
-                cropped.push(image.pixels[
-                    source_y * image.width + source_x])
+            cropped.push(image.pixels[
+                source_y * image.width + source_x])
             col += 1
         row += 1
     Engine2dClippedImage(
@@ -1676,8 +1642,6 @@ fn _engine2d_draw_ir_materialize_image_damage(
 
 fn _engine2d_draw_ir_plain_fill(command: DrawIrCommand) -> bool:
     if command.? == false:
-        return false
-    if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
         return false
     (command.kind == DRAW_IR_COMMAND_RECT and command.width > 0 and
      command.height > 0 and command.computed_style.len() == 0 and
@@ -1786,10 +1750,7 @@ fn _engine2d_draw_ir_command_geometry(command: DrawIrCommand,
         hit_rect: command.hit_rect, clip_rect: command.clip_rect,
         computed_style: command.computed_style, edge: command.edge,
         parent_id: command.parent_id, image_uri: command.image_uri,
-        points: command.points, glyph_run: command.glyph_run,
-        fractional_geometry: command.fractional_geometry,
-        affine_transform: command.affine_transform,
-        raster_policy: command.raster_policy)
+        points: command.points, glyph_run: command.glyph_run)
 
 fn engine2d_draw_ir_coalesce_plain_fills(commands: [DrawIrCommand]) -> Engine2dDrawIrCommandPlan:
     var merge_present = false
@@ -2103,7 +2064,6 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
     val surface_fb_h = eng.height()
     var rendered = 0
     var skipped = 0
-    var occluded = 0
     var unsupported_kinds = ""
     var cpu_composited_material_count = 0
     var metal_device_glass_material_count = 0
@@ -2128,14 +2088,6 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
         if command.? == false:
             skipped = skipped + 1
             continue
-        if command.fractional_geometry != nil:
-            skipped = skipped + command_weight
-            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, "fractional-geometry-unsupported")
-            continue
-        if draw_ir_command_has_unsupported_v4_state(command):
-            skipped = skipped + command_weight
-            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, "affine-or-raster-policy-unsupported")
-            continue
         val exact_bounds = _engine2d_draw_ir_exact_plain_bounds(
             command, offset_x, offset_y, active_clip,
             surface_fb_w, surface_fb_h)
@@ -2147,7 +2099,6 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                 ENGINE2D_DRAW_IR_OCCLUSION_PROOF_BUDGET)
             if proof.covered:
                 skipped = skipped + command_weight
-                occluded = occluded + command_weight
                 continue
         val command_kind: text = command.kind
         val x = offset_x + command.x
@@ -2236,7 +2187,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
             # upstream Style object (fixed in section 16.2) computed it
             # correctly. See doc/08_tracking/bug/
             # jit_run_file_pipeline_gaps_2026-07-30.md section 16.4.
-            if (env_get("SIMPLE_TRACE_FONT_STYLE") ?? "") == "1" and font_identity != "":
+            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil and font_identity != "":
                 print "[draw-ir-font-trace] font_identity={font_identity}"
             if font_identity != "":
                 font_ready = eng.select_font_identity(font_identity)
@@ -2427,8 +2378,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
         glass_execution_target,
         glass_backend_handle,
         glass_device_identity,
-        css_background_pixel_work_remaining,
-        occluded
+        css_background_pixel_work_remaining
     )
 
 fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
@@ -2531,18 +2481,24 @@ fn _engine2d_draw_ir_parent_region_pixels(
         row = row + 1
     region
 
-# D9: region-limited readback seam. Originally the DEFAULT implementation
-# lived here (read the full frame once, crop on the host) because no backend
-# exposed a device-side region read. The seam now reaches the backend
-# through RenderBackend.read_pixels_region: SoftwareBackend/CpuBackend copy
-# only the requested rows natively, and every other backend inherits the
-# trait default, which is exactly the old behavior this function had (one
-# whole-frame read + host crop with zero-fill-at-edge). Pixels are
-# pixel-for-pixel identical either way -- see
-# engine2d_read_pixels_region_equivalence_spec.spl.
+# D9: region-limited readback seam. No backend below exposes a device-side
+# region read yet (RenderBackend only has whole-framebuffer
+# read_pixels_with_source()), so this is the DEFAULT implementation: read the
+# full frame once, exactly as every call site already did, and crop on the
+# host with _engine2d_draw_ir_parent_region_pixels. Pixel-for-pixel identical
+# to a caller doing eng.read_pixels_with_source() then cropping itself by
+# hand -- see engine2d_read_pixels_region_equivalence_spec.spl -- so this
+# alone removes no work. What it buys: every "I only need this rect" call
+# site now asks a single seam for exactly its rect instead of the whole
+# framebuffer, so a future backend-specific region read (a real device-side
+# crop) can be dropped in behind this one function with no call-site changes.
 fn _engine2d_read_pixels_region(engine: Engine2D, x: i32, y: i32, width: i32, height: i32) -> Engine2DReadback:
     var eng = engine
-    eng.read_pixels_region(x, y, width, height)
+    val full = eng.read_pixels_with_source()
+    val cropped = _engine2d_draw_ir_parent_region_pixels(
+        full, eng.width(), eng.height(), x, y, width, height)
+    engine2d_readback_with_identity(
+        cropped, full.source, full.backend_handle, full.device_identity)
 
 fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
     var padding = 0
@@ -2725,8 +2681,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                     inner.glass_execution_target,
                     inner.glass_backend_handle,
                     inner.glass_device_identity,
-                    inner.css_background_pixel_work_remaining,
-                    inner.occluded)
+                    inner.css_background_pixel_work_remaining)
     if not use_embedded_surface:
         val apply_clip = embedding.clip and not fills_target_exactly
         if apply_clip:
@@ -2763,8 +2718,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             direct.glass_execution_target,
             direct.glass_backend_handle,
             direct.glass_device_identity,
-            direct.css_background_pixel_work_remaining,
-            direct.occluded
+            direct.css_background_pixel_work_remaining
         )
 
     # Seed-JIT compatibility (hot path): a mutable `Engine2D? = nil` binding
@@ -2852,8 +2806,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         inner.metal_device_glass_requested_count,
         inner.metal_device_glass_requested_count,
         _engine2d_draw_ir_unfulfilled_metal_receipts(batch),
-        "", 0, 0, inner.css_background_pixel_work_remaining,
-        inner.occluded
+        "", 0, 0, inner.css_background_pixel_work_remaining
     )
 
 fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
@@ -2878,7 +2831,6 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
         readback
     )
     result.cpu_composited_material_count = outcome.cpu_composited_material_count
-    result.occluded_command_count = outcome.occluded
     result.metal_device_glass_material_count = (
         outcome.metal_device_glass_material_count)
     result.metal_device_glass_requested_count = (
@@ -2925,7 +2877,7 @@ fn engine2d_draw_ir_adv_composition_window_present_with_images(engine: Engine2D,
     result.async_admission_reason = async_admission.reason
     result.async_packet_checksum = async_admission.packet.checksum
     result.async_claim = async_admission.async_claim
-    if result.fallback_required or result.skipped_command_count != result.occluded_command_count:
+    if result.fallback_required or result.skipped_command_count != 0:
         return result
     if not engine.present_window_device():
         result.fallback_required = true
@@ -3262,7 +3214,6 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     var eng = engine
     var rendered = 0
     var skipped = 0
-    var occluded = 0
     var unsupported_kinds = ""
     var cpu_composited_material_count = 0
     var metal_device_glass_material_count = 0
@@ -3292,7 +3243,6 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         eng = outcome.engine
         rendered = rendered + outcome.rendered
         skipped = skipped + outcome.skipped
-        occluded = occluded + outcome.occluded
         cpu_composited_material_count = (
             cpu_composited_material_count +
             outcome.cpu_composited_material_count
@@ -3365,7 +3315,6 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     # Single line: the parser needs the expression on the same line as `=`;
     # a newline straight after the assignment operator does not continue.
     result.cpu_composited_material_count = cpu_composited_material_count
-    result.occluded_command_count = occluded
     result.metal_device_glass_material_count = (
         metal_device_glass_material_count)
     result.metal_device_glass_requested_count = (

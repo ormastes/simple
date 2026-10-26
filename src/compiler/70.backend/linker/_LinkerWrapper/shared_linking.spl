@@ -1,5 +1,4 @@
 # Shared-library linking — link_to_shared and unix/windows/msvc/mingw backends.
-use compiler.traits.trait_impl.{ImplBlock}
 use compiler.backend.linker.linker_wrapper.*
 # Linker Wrapper - Unified Linking API
 #
@@ -23,10 +22,7 @@ use compiler.backend.linker.linker_wrapper.*
 
 use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
 use std.log.{debug, info}
-use compiler.backend.linker._LinkerWrapper.link_command_record.{record_link_command}
 use std.string_builder.{StringBuilder}
-use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
-use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker_path, linker_type_for_path, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
@@ -83,21 +79,10 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     "/bin/sh -c", which can never spawn on native Windows (CreateProcess has
     no /bin/sh), so every link died with exit -1 and no output. Direct argv
     also removes shell-quoting hazards in object paths."""
-    val argument_error = native_windows_strict_extra_args_error(config.extra_flags, config.allow_duplicate_definitions)
-    if argument_error != "": return Err(argument_error)
-    val cc = if native_tool_strict_requested_v1():
-        native_tool_strict_resolve_v1("cc")?
-    else: env_get("CC")
+    val cc = env_get("CC")
     if cc == "" or (not cc.ends_with("/clang") and not cc.ends_with("/clang.exe") and not cc.ends_with("\\clang") and not cc.ends_with("\\clang.exe")):
         return Err("Windows GNU linking requires bootstrap-owned clang through CC")
     var args: [text] = []
-    if native_tool_strict_requested_v1():
-        val linker = native_tool_strict_resolve_v1("linker")?
-        args.push("-fuse-ld=" + linker)
-        val argument_error = managed_native_extra_args_error_v1(config.extra_flags)
-        if argument_error != "": return Err(argument_error)
-        val path_argument_error = managed_native_input_args_error_v1(object_files + [output] + config.library_paths + config.libraries)
-        if path_argument_error != "": return Err(path_argument_error)
     args = args.push("--target=x86_64-w64-windows-gnu")
     for flag in native_retained_symbol_cc_args(config.retained_symbols, "windows-mingw"):
         args = args.push(flag)
@@ -142,10 +127,10 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     if config.strip_output:
         args = args.push("-Wl,-s")
 
-    # Duplicate forgiveness is an explicit caller policy, including on GNU
-    # Windows. Strict hosted links must diagnose conflicting definitions.
-    if config.allow_duplicate_definitions:
-        args = args.push("-Wl,--allow-multiple-definition")
+    # Same duplicate-definition tolerance the Linux/FreeBSD cc path gets from
+    # unresolved_symbol_flags_for_cc: runtime.o and runtime_native.o
+    # intentionally both carry a handful of rt_* fallback copies.
+    args = args.push("-Wl,--allow-multiple-definition")
 
     # Extra flags
     for flag in config.extra_flags:
@@ -154,7 +139,9 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     args = args.push("-o")
     args = args.push(mingw_driver_path(output))
 
-    val cmd_text = record_link_command(output, cc, args, config.verbose)
+    val cmd_text = cc + " " + args.join(" ")
+    if config.verbose:
+        print "[linker-wrapper] Windows GNU Clang command: {cmd_text}"
 
     val (link_out, link_err, link_code) = process_run(cc, args)
     if link_code == 0:
@@ -190,7 +177,7 @@ fn link_to_shared(object_files: [text], output: text, config: NativeLinkConfig) 
     # Shared/DLL links obey the same named runtime authority as executables.
     # Validate before platform dispatch so MSVC, MinGW, and Unix cannot silently
     # omit or replace an explicit provider bundle.
-    val msvc_runtime = os == "windows" and windows_link_flavor_for_config(config) == "msvc"
+    val msvc_runtime = os == "windows" and not _is_mingw_env()
     val provider_error = native_runtime_provider_selection_error_for_config_platform(
         config, msvc_runtime)
     if provider_error != "":
@@ -288,9 +275,8 @@ fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfi
         Err("Shared library linking failed: {err_msg}")
 
 fn _link_shared_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
-    """Link a shared library on Windows. The GNU/MSVC arm is decided from the
-    target (windows_link_flavor_for_config), never from MSYSTEM."""
-    if windows_link_flavor_for_config(config) == "gnu":
+    """Link a shared library on Windows."""
+    if _is_mingw_env():
         return _link_shared_mingw(object_files, output, config)
     _link_shared_msvc(object_files, output, config)
 
@@ -415,7 +401,10 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
 
     args = args.push("-o")
     args = args.push(mingw_driver_path(output))
-    val cmd_text = record_link_command(output, cc, args, config.verbose)
+    val cmd_text = cc + " " + args.join(" ")
+
+    if config.verbose:
+        print "[linker-wrapper] Windows GNU Clang DLL command: {cmd_text}"
 
     val (link_out, link_err, link_code) = process_run(cc, args)
     if link_code == 0:

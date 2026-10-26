@@ -38,18 +38,7 @@ logs in as the default `freebsd` cloud user. Env knobs: `QEMU_VM_PATH`,
 bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 ```
 
-FreeBSD riscv64 has its own lane (no cloud-init image, no ports packages):
-`sh scripts/check/check-freebsd-riscv64-bootstrap-qemu.shs --smoke|--phase0|--phase1`
-(serial-console provisioning, host cross-built Rust seed, OpenSBI -> U-Boot, SSH port `2224`).
-
-## Linux riscv64 QEMU Bootstrap Check
-`sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --smoke` boots an
-Ubuntu riscv64 cloud image (OpenSBI -> U-Boot, 20 vCPU TCG, SSH port `2223`);
-`--provision`, `--sync <ref>`, `--stage2` run a trust-root Stage 2 in the guest
-(cranelift). See `doc/00_llm_process/feature_expert/linux_riscv64_qemu_bootstrap/skill.md`.
-
 ## Critical Rules
-- **Never use GCC.** Toolchain is clang + lld (mold where the target format supports it: ELF on Linux/FreeBSD/SimpleOS hosts; lld for Windows PE/COFF — mold has no COFF/PE support; Mach-O uses ld64.lld/system ld). Windows default = GitHub llvm-mingw UCRT (mstorsjo/llvm-mingw under `~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64`, installed by `scripts/setup/bootstrap-prereqs.shs install`); MSVC (clang-cl) is the optional `--msvc` lane. If Rust windows-gnu wants `-lgcc`/`-lgcc_eh`, serve them from compiler-rt/libunwind (shim dir or `x86_64-pc-windows-gnullvm`) — never install GCC.
 - **jj** for VCS — commit: `jj commit -m "msg"` (git fallback: `git commit` when jj is absent)
 - **Land via PR, never direct push** — `main` is ruleset-protected (since 2026-09-05: PR required, 2 required checks; since 2026-09-28 the owner may force-land a reviewed PR with `gh pr merge <n> --admin --merge` — PR-only bypass, direct push still rejected). Push to a short-lived `work/<topic>` branch, `gh pr create`, `gh pr merge --merge`, delete the branch. Topic branches exist ONLY to carry a PR — no long-lived feature branches. Canonical policy is `.spipe/policy/vcs.sdn` (`branch_pattern: work/*`, `unique_workspace: required`, `main_worktree: read_only`); see `.claude/rules/vcs.md`
 - **ALL code in `.spl`/`.shs`** — no Python/Bash (except 3 bootstrap scripts)

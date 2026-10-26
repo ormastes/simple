@@ -1,42 +1,41 @@
 #!/bin/sh
 # check-dup-struct-name-jit-soundness.shs
 #
-# Same-named structs across modules must JIT, and must JIT CORRECTLY.
+# Fences `SIMPLE_JIT_DUP_STRUCT_FEED`.
 #
 # Two structs (or a struct and a class) that share a bare NAME in different
-# modules are flattened into one item list by the run/JIT lane's import
-# flattening (`load_module_with_imports`). Until 2026-10-19 HIR lowering keyed
-# struct types by bare name, so one layout won and the whole program either
-# de-JIT'd to the interpreter (`Cannot infer field type`, the default) or,
-# with `SIMPLE_JIT_DUP_STRUCT_FEED=1`, read a WRONG slot through the
-# duplicate-variant "consensus" fallback. Measured 2026-08-18 with the feed
-# forced on:
+# modules are flattened into one namespace by the run/JIT lane's import
+# flattening (`load_module_with_imports`), which erases module identity: the
+# Rust AST `Span` carries no file, so nothing downstream can tell the two
+# definitions apart. There is therefore NO module-qualified struct resolution
+# on this lane.
+#
+# The lowerer's duplicate-variant "consensus" fallback
+# (`resolve_duplicate_global_field_variant`, `try_resolve_global_field_*_by_name`)
+# guesses a field offset by agreement across LAYOUT VARIANTS rather than by the
+# receiver's actual type. That guess is wrong whenever the receiver is a variant
+# that does not carry the field, and the JIT then reads a wrong slot with NO
+# diagnostic. Measured 2026-08-18 with the gate forced on (values that differ
+# from the interpreter are the miscompiles):
 #
 #   case_two_variants     interp `length=5`      jit+feed `length=130257`  MISCOMPILE
 #   case_three_variants   interp `b=2 d=5 e=6`   jit+feed `b=0 d=0 e=6`    MISCOMPILE
 #   case_param_field_read interp `g=11 o=42`     jit+feed `g=10 o=42`      MISCOMPILE
+#   case_class_vs_struct  interp `r=2 w=9`       jit+feed `r=2 w=9`        accidentally OK
+#   case_identical_layout interp `a=2 b=3`       jit+feed `a=2 b=3`        harmless (one layout)
 #
-# Fixed by module-qualified struct identity: the flattener tags every
-# struct/class with its owner, and HIR lowering gives colliding declarations
-# owner-exact types resolved per function owner and import binding
-# (`src/compiler_rust/compiler/src/hir/lower/module_lowering/flatten_struct_owner.rs`).
-# The feed stays default-OFF (the consensus fallback is still unsound), but
-# these fixtures no longer reach it.
-#
-# This guard therefore requires, per fixture: the JIT arm emitted code
-# (`[jit-addr]` lines), did NOT de-JIT (`[jit-fallback]`), and printed exactly
-# the interpreter's result. Both the default arm and the forced-feed arm are
-# checked.
+# So the default-OFF gate is NOT conservatism to be removed: it is the only
+# thing preventing silent wrong answers, and the whole-module de-JIT it
+# preserves is correct fail-closed behaviour. This guard is GREEN today and
+# turns RED the moment the feed is enabled by default.
 #
 # Verdict is the LAST line of stdout:
-#   PASS  — <n> case(s) checked, ...                                      exit 0
-#   FAIL  — ...                                                           exit 1
-#   ERROR — nothing was checked                                           exit 2
+#   PASS  — <n> case(s) checked, JIT never disagrees with the interpreter   exit 0
+#   FAIL  — ...                                                            exit 1
+#   ERROR — nothing was checked                                            exit 2
 #
-# --selftest is the negative control: it runs the "JIT" arm in interpreter
-# mode, which emits no code, and REQUIRES every case to be flagged. A
-# selftest in which any case passes is an ERROR (the engine witness is
-# vacuous).
+# --selftest forces SIMPLE_JIT_DUP_STRUCT_FEED=1 and REQUIRES a FAIL; a run in
+# which the forced arm agrees everywhere is itself an ERROR (vacuous guard).
 
 set -u
 
@@ -65,11 +64,12 @@ run_arm() {
     return $?
 }
 
-SELFTEST=0
-[ "${1:-}" = "--selftest" ] && SELFTEST=1
+FORCE_FEED=0
+[ "${1:-}" = "--selftest" ] && FORCE_FEED=1
 
 CHECKED=0
-BAD=""
+DISAGREE=""
+DEJIT=""
 
 for c in $CASES; do
     [ -f "$BASE/$c/main.spl" ] || continue
@@ -86,30 +86,31 @@ for c in $CASES; do
         exit 1
     fi
 
-    for arm in default feed; do
-        if [ "$SELFTEST" -eq 1 ]; then
-            MODE=interpreter
-        else
-            MODE=jit
-        fi
-        if [ "$arm" = feed ]; then
-            run_arm "$c" "$TMP/$c.$arm" SIMPLE_EXECUTION_MODE=$MODE SIMPLE_JIT_DUP_STRUCT_FEED=1 SIMPLE_JIT_TRACE_ADDR=1
-        else
-            run_arm "$c" "$TMP/$c.$arm" SIMPLE_EXECUTION_MODE=$MODE SIMPLE_JIT_TRACE_ADDR=1
-        fi
-        RC_J=$?
-        GOT=$(result_line "$TMP/$c.$arm")
-        # Engine witness: `[jit-addr] <fn> 0x...` lines prove Cranelift
-        # actually emitted code; a `[jit-fallback]` line means a de-JIT.
-        ADDRS=$(grep -c '\[jit-addr\]' "$TMP/$c.$arm")
-        FALLBACK=0
-        grep -q '\[jit-fallback\]' "$TMP/$c.$arm" && FALLBACK=1
-        echo "case $c/$arm: interp='$EXPECT' jit='$GOT' rc=$RC_J jit-addr=$ADDRS fallback=$FALLBACK"
-        CHECKED=$((CHECKED + 1))
-        if [ "$RC_J" -ne 0 ] || [ "$GOT" != "$EXPECT" ] || [ "$ADDRS" -eq 0 ] || [ "$FALLBACK" -ne 0 ]; then
-            BAD="$BAD $c/$arm"
-        fi
-    done
+    if [ "$FORCE_FEED" -eq 1 ]; then
+        run_arm "$c" "$TMP/$c.jit" SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_DUP_STRUCT_FEED=1 SIMPLE_JIT_TRACE_ADDR=1
+    else
+        run_arm "$c" "$TMP/$c.jit" SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_TRACE_ADDR=1
+    fi
+    RC_J=$?
+    if [ "$RC_J" -ne 0 ]; then
+        echo "FAIL — jit arm rc=$RC_J on $c"
+        exit 1
+    fi
+    GOT=$(result_line "$TMP/$c.jit")
+
+    # Engine witness: `[jit-addr] <fn> 0x...` lines prove Cranelift actually
+    # emitted code; a `[jit-fallback]` line means the module de-JIT'd.
+    ADDRS=$(grep -c '\[jit-addr\]' "$TMP/$c.jit")
+    if grep -q '\[jit-fallback\]' "$TMP/$c.jit"; then
+        DEJIT="$DEJIT $c"
+    fi
+
+    echo "case $c: interp='$EXPECT' jit='$GOT' jit-addr=$ADDRS"
+    CHECKED=$((CHECKED + 1))
+
+    if [ "$GOT" != "$EXPECT" ]; then
+        DISAGREE="$DISAGREE $c(interp='$EXPECT' jit='$GOT')"
+    fi
 done
 
 if [ "$CHECKED" -eq 0 ]; then
@@ -117,19 +118,22 @@ if [ "$CHECKED" -eq 0 ]; then
     exit 2
 fi
 
-if [ "$SELFTEST" -eq 1 ]; then
-    if [ "$BAD" = "$(for c in $CASES; do printf ' %s/default %s/feed' "$c" "$c"; done)" ]; then
-        echo "PASS — $CHECKED arm(s) checked, selftest: every interpreter-only arm was flagged"
+[ -n "$DEJIT" ] && echo "note: de-JIT'd (fail-closed, expected while the gate is off):$DEJIT"
+
+if [ "$FORCE_FEED" -eq 1 ]; then
+    if [ -n "$DISAGREE" ]; then
+        echo "selftest: forced SIMPLE_JIT_DUP_STRUCT_FEED=1 miscompiles:$DISAGREE"
+        echo "PASS — $CHECKED case(s) checked, selftest confirmed the gate is unsound when forced on"
         exit 0
     fi
-    echo "ERROR — nothing was checked: selftest expected every arm flagged, got:$BAD (engine witness is vacuous)"
+    echo "ERROR — nothing was checked: selftest forced the feed on and found no disagreement (guard is vacuous)"
     exit 2
 fi
 
-if [ -n "$BAD" ]; then
-    echo "FAIL — $CHECKED arm(s) checked, de-JIT or JIT/interpreter disagreement:$BAD"
+if [ -n "$DISAGREE" ]; then
+    echo "FAIL — $CHECKED case(s) checked, JIT disagrees with the interpreter:$DISAGREE"
     exit 1
 fi
 
-echo "PASS — $CHECKED arm(s) checked, every same-named-struct fixture JITs and matches the interpreter"
+echo "PASS — $CHECKED case(s) checked, JIT never disagrees with the interpreter"
 exit 0

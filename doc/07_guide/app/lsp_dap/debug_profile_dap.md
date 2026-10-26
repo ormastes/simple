@@ -16,7 +16,7 @@ writing an implementation**).
 
 ## Entry points
 
-```simple:skip
+```simple
 target_dap_session_host(program)                                  # host lane, no probe
 target_dap_session_launch(launch_json, config, probe)             # testable: caller supplies config + probe
 target_dap_session_launch_with_opts(launch_json, config, probe, opts)   # + AttachOpts

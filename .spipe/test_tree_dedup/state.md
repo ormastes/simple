@@ -51,7 +51,7 @@ By tree, >50-line divergence: unit 210, system 23, integration 18.
     lean_workflow, memory_capabilities, naming, proof_reference, regeneration,
     report_rendering, tool_checker, toolchain_detection, unified_attrs,
     unsupported_construct, verification_diagnostics)
-  - `test/01_unit/compiler/parser_gap_array_repeat_mut_param_spec.spl`
+  - `test/unit/compiler/parser_gap_array_repeat_mut_param_spec.spl`
   - `test/system/coverage/*_spec.spl` (6: coverage_build, coverage_check_api,
     coverage_core, coverage_doc_stats, coverage_runtime_ffi, coverage_test_runner)
   - `test/system/database/server/db_server_tier_spec.spl`
@@ -140,7 +140,7 @@ this lane: 0 files, 0 lines.**
 | `test/02_integration/app/add_remove_log_modes_spec.spl` | **GREEN** 8 examples, 0 failures |
 | `test/02_integration/app/cli_dispatch_spec.spl` | **RED** 6 examples, 3 failures — pre-existing (`expected nil to equal false`); numbered-only, no mirror copy exists |
 | `test/03_system/net_connect_completion_spec.spl` | **RED** 4 examples, 1 failure — pre-existing |
-| `test/01_unit/compiler/verification/naming_spec.spl` (mirror ORPHAN) | **GREEN** 9 examples, 0 failures — **and has no numbered counterpart** |
+| `test/unit/compiler/verification/naming_spec.spl` (mirror ORPHAN) | **GREEN** 9 examples, 0 failures — **and has no numbered counterpart** |
 
 The last row is the decisive evidence: a mirror-only spec that passes today. Bulk
 deletion of the mirror would have silently destroyed 24 such live specs.

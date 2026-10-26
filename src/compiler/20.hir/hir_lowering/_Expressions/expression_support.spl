@@ -2,7 +2,6 @@
 #
 # This module handles lowering of expressions from AST to HIR.
 
-use std.io_runtime.{env_get_opt}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
@@ -15,19 +14,20 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.core.lexer_chars.{is_digit}
 use std.string_core.{char_code}
 
-use compiler.hir.hir_lowering._Expressions.runtime_observation.{hir_ast_expr_runtime_discriminant}
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_enum_discriminant(value: Any) -> i64
 @unsafe(reason: "raw retained-dictionary handle probe; the handle and key representation must match the active runtime", capabilities: [ffi])
-extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool
+extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
 # wrapper are OPTIONAL — every call site below already uses the optional-safe
 # `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
 # Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
 fn hir_expr_env_get(key: text) -> text?:
-    env_get_opt(key)
+    rt_env_get(key)
 
 fn hir_expr_kind_disc(k: ExprKind) -> i64:
-    hir_ast_expr_runtime_discriminant(k)
+    rt_enum_discriminant(k)
 
 fn is_tuple_positional_field(name: text) -> bool:
     """True iff `name` is composed entirely of ASCII digits -- the parser's
@@ -71,16 +71,7 @@ fn is_interp_builtin_fn(name: text) -> bool:
      # the same way. Kept in sync by
      # scripts/check/check-interp-builtin-list-sync.shs.
      name == "__assert" or name == "file_is_regular_no_follow" or
-     name == "rt_file_exists_probe_begin" or name == "rt_file_exists_probe_end" or
-     # `len(x)` free-function form: the HIR interpreter dispatches it by name
-     # (interpreter_calls.spl lookup_builtin_tag "len" arm) and the seed
-     # accepts it natively, but the allow-list omission made every UI/TUI
-     # module using the free form die at HIR with "unresolved name: len"
-     # (tui/layout.spl, tui/widget.spl, tui/widgets/* — 34 sites). The MIR
-     # native lane re-dispatches it as a MethodCall so it shares the
-     # receiver-provenanced rt_len/rt_string_len lowering (see the
-     # direct_name == "len" intercept in lower_call).
-     name == "len")
+     name == "rt_file_exists_probe_begin" or name == "rt_file_exists_probe_end")
 
 fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
     """`i32(x)`-style primitive casts: a fixed-width numeric type name used
@@ -137,7 +128,7 @@ fn hir_bootstrap_text_type(span: Span) -> HirType:
     HirType(kind: HirTypeKind.Str, span: span)
 
 fn hir_bootstrap_text_array_type(span: Span) -> HirType:
-    HirType(kind: HirTypeKind.Array(hir_bootstrap_text_type(span), None), span: span)
+    HirType(kind: HirTypeKind.Array(hir_bootstrap_text_type(span), nil), span: span)
 
 fn hir_bootstrap_unit_type(span: Span) -> HirType:
     HirType(kind: HirTypeKind.Unit, span: span)
@@ -307,15 +298,14 @@ impl HirLowering:
         if count == 1:
             return conditions[0]
         val left = self.combine_pattern_conditions(conditions, count - 1, op, span)
-        HirExpr(kind: HirExprKind.Binary(op, left, conditions[count - 1]), has_type_: false, type_: nil, span: span)
+        HirExpr(kind: HirExprKind.Binary(op, left, conditions[count - 1]), type_: nil, span: span)
 
     me lower_host_gpu_lane_payload(marker: Expr) -> i64:
         match marker.kind:
             case ExprKind.MethodCall(_receiver, method, args):
                 if method != "later":
                     return 0
-                for raw_arg in args:
-                    val arg: CallArg = raw_arg
+                for arg in args:
                     if arg.has_name and arg.name == "max_packet":
                         match arg.value.kind:
                             case ExprKind.IntLit(value):
@@ -384,7 +374,7 @@ impl HirLowering:
                         val body = self.lower_host_gpu_lane_body(lambda_body_t)
                         Some(HirExpr(
                             kind: HirExprKind.HostGpuLane(lane_code, payload_size, marker, body),
-                            has_type_: false, type_: nil,
+                            type_: nil,
                             span: e.span
                         ))
                     case _:

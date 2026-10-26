@@ -398,12 +398,6 @@ impl<'a> MirLowerer<'a> {
                                     .or_else(|| tr.get_array_element(value_ty))
                             })
                             .is_some();
-                    // A provably dead, uniquely owned source hands its buffer
-                    // over instead (`array_move.rs`): the JIT lane never frees
-                    // the copy, so `var o = st.output; ...; st = St(output: o)`
-                    // retained one stale copy per round-trip.
-                    let is_array_place_alias =
-                        is_array_place_alias && !self.array_move_sites.let_locals.contains(&local_idx);
                     let vreg = if is_array_place_alias {
                         self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
@@ -718,22 +712,6 @@ impl<'a> MirLowerer<'a> {
                             && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
                                 |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U64),
                             );
-                        let is_i64_array_set = value.ty == TypeId::I64
-                            && self.signed_word_lane
-                            && matches!(
-                                index.ty,
-                                TypeId::I8
-                                    | TypeId::I16
-                                    | TypeId::I32
-                                    | TypeId::I64
-                                    | TypeId::U8
-                                    | TypeId::U16
-                                    | TypeId::U32
-                                    | TypeId::U64
-                            )
-                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
-                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::I64),
-                            );
                         let is_text_array_set = value.ty == TypeId::STRING
                             && matches!(
                                 index.ty,
@@ -772,19 +750,6 @@ impl<'a> MirLowerer<'a> {
                                 block.instructions.push(MirInst::Call {
                                     dest: None,
                                     target: crate::mir::CallTarget::from_name("rt_typed_words_u64_set"),
-                                    args: vec![receiver_reg, index_reg, val_reg],
-                                });
-                            })?;
-                        } else if is_i64_array_set {
-                            // Layout-aware signed store: a value outside the
-                            // inline 61-bit range packs the array in place
-                            // instead of heap-boxing (and leaking) one box per
-                            // store.
-                            self.with_func(|func, current_block| {
-                                let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::Call {
-                                    dest: None,
-                                    target: crate::mir::CallTarget::from_name("rt_typed_words_i64_set"),
                                     args: vec![receiver_reg, index_reg, val_reg],
                                 });
                             })?;
@@ -1219,13 +1184,6 @@ impl<'a> MirLowerer<'a> {
                                 )
                             {
                                 Some("rt_typed_words_u64_push")
-                            } else if args[0].ty == TypeId::I64
-                                && self.signed_word_lane
-                                && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
-                                    |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::I64),
-                                )
-                            {
-                                Some("rt_typed_words_i64_push")
                             } else {
                                 None
                             };
@@ -1233,29 +1191,10 @@ impl<'a> MirLowerer<'a> {
                         if let Some(target) = typed_push_target {
                             let receiver_reg = self.lower_expr(receiver)?;
                             let value_reg = self.lower_expr(&args[0])?;
-                            // An `ANY` element is a TAGGED word; the typed byte
-                            // push stores its low byte (JIT inflate:
-                            // `out.push(block_out[k])` stored 104 as 0x40).
-                            let value_reg = if target == "rt_typed_bytes_u8_push" && args[0].ty == TypeId::ANY {
-                                self.unbox_scalar_for_raw_slot(TypeId::U8, TypeId::ANY, value_reg)?
-                            } else {
-                                value_reg
-                            };
-                            // The signed push has no known-slot variants: it always
-                            // takes (array, value), so skip the append-index proof.
-                            let is_i64_push = target == "rt_typed_words_i64_push";
-                            let append_ptrs = if is_i64_push {
-                                None
-                            } else {
-                                self.active_array_append_ptrs(receiver)
-                            };
-                            let append_index = if is_i64_push {
-                                None
-                            } else {
-                                append_ptrs
-                                    .map(|ptrs| ptrs.index_local_index)
-                                    .or_else(|| self.active_array_append_index(receiver))
-                            };
+                            let append_ptrs = self.active_array_append_ptrs(receiver);
+                            let append_index = append_ptrs
+                                .map(|ptrs| ptrs.index_local_index)
+                                .or_else(|| self.active_array_append_index(receiver));
                             let index_reg = if let Some(index_local_index) = append_index {
                                 Some(self.with_func(|func, current_block| {
                                     let addr = func.new_vreg();
@@ -1306,7 +1245,7 @@ impl<'a> MirLowerer<'a> {
                                     pushed
                                 })?;
                                 self.store_array_push_receiver_back(receiver, pushed)?;
-                                let ret_ty = self.expr_stmt_tail_ty()?;
+                                let ret_ty = self.with_func(|func, _| func.return_type)?;
                                 let result = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, pushed)?;
                                 let result = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, result)?;
                                 self.last_expr_value = Some(result);
@@ -1332,7 +1271,7 @@ impl<'a> MirLowerer<'a> {
                             // Keep that receiver just like lower_method_call;
                             // dropping it leaves value-returning helpers with
                             // an Unreachable terminator instead of a return.
-                            let ret_ty = self.expr_stmt_tail_ty()?;
+                            let ret_ty = self.with_func(|func, _| func.return_type)?;
                             let result = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, receiver_reg)?;
                             let result = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, result)?;
                             self.last_expr_value = Some(result);
@@ -1355,7 +1294,7 @@ impl<'a> MirLowerer<'a> {
                 // rescue it. `return 42` was already correct, which is what
                 // pinned the defect to this path.
                 // See doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
-                let ret_ty = self.expr_stmt_tail_ty()?;
+                let ret_ty = self.with_func(|func, _| func.return_type)?;
                 let vreg = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, vreg)?;
                 let vreg = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, vreg)?;
                 self.last_expr_value = Some(vreg);
@@ -1370,7 +1309,7 @@ impl<'a> MirLowerer<'a> {
             } => {
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_condition_expr(condition)?;
+                let cond_reg = self.lower_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for coverage (before branch)
@@ -1525,11 +1464,6 @@ impl<'a> MirLowerer<'a> {
                         let addr = func.new_vreg();
                         let array = func.new_vreg();
                         let data_ptr = func.new_vreg();
-                        let packed = func.new_vreg();
-                        let one = func.new_vreg();
-                        let packed_bit = func.new_vreg();
-                        let slot_bit = func.new_vreg();
-                        let u8_ptr = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::LocalAddr {
                             dest: addr,
@@ -1545,40 +1479,7 @@ impl<'a> MirLowerer<'a> {
                             target: CallTarget::from_name("rt_array_data_ptr"),
                             args: vec![array],
                         });
-                        // `[u8]` reads use a layout-tagged pointer, decided once
-                        // here: bit 0 set = slot layout (8-byte tagged elements),
-                        // clear = byte-packed. Bit 0 is free by contract: slot
-                        // buffers are `RuntimeValue`-aligned and packed byte
-                        // buffers are allocated 8-aligned (Rust runtime
-                        // `BYTE_ARRAY_DATA_ALIGN` in value/collections.rs; the C
-                        // runtime uses malloc, >= 8). Bug:
-                        // jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.
-                        block.instructions.push(MirInst::Call {
-                            dest: Some(packed),
-                            target: CallTarget::from_name("rt_array_is_byte_packed"),
-                            args: vec![array],
-                        });
-                        block.instructions.push(MirInst::ConstInt { dest: one, value: 1 });
-                        // Mask: the C twin returns a C `int`.
-                        block.instructions.push(MirInst::BinOp {
-                            dest: packed_bit,
-                            op: BinOp::BitAnd,
-                            left: packed,
-                            right: one,
-                        });
-                        block.instructions.push(MirInst::BinOp {
-                            dest: slot_bit,
-                            op: BinOp::BitXor,
-                            left: packed_bit,
-                            right: one,
-                        });
-                        block.instructions.push(MirInst::BinOp {
-                            dest: u8_ptr,
-                            op: BinOp::BitOr,
-                            left: data_ptr,
-                            right: slot_bit,
-                        });
-                        (data_ptr, u8_ptr)
+                        data_ptr
                     })?)
                 } else {
                     None
@@ -1636,7 +1537,7 @@ impl<'a> MirLowerer<'a> {
                 self.set_current_block(cond_id)?;
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_condition_expr(condition)?;
+                let cond_reg = self.lower_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for while condition coverage
@@ -1657,9 +1558,8 @@ impl<'a> MirLowerer<'a> {
                 self.emit_runtime_pool_safepoint()?;
                 if let Some(proof) = bound_proof {
                     self.active_array_len_bounds.push(proof);
-                    if let Some((data_ptr, u8_ptr)) = hoisted_data_ptr {
+                    if let Some(data_ptr) = hoisted_data_ptr {
                         self.active_array_data_ptrs.push((proof.array_local_index, data_ptr));
-                        self.active_array_u8_data_ptrs.push((proof.array_local_index, u8_ptr));
                     }
                 }
                 if let Some(proof) = append_bound_proof {
@@ -1681,7 +1581,6 @@ impl<'a> MirLowerer<'a> {
                     self.active_array_len_bounds.pop();
                     if hoisted_data_ptr.is_some() {
                         self.active_array_data_ptrs.pop();
-                        self.active_array_u8_data_ptrs.pop();
                     }
                 }
                 self.finalize_block_jump(cond_id)?;
@@ -1797,7 +1696,7 @@ impl<'a> MirLowerer<'a> {
                 // Lower the assertion condition
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_condition_expr(condition)?;
+                let cond_reg = self.lower_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assert condition coverage (#674)
@@ -2058,25 +1957,6 @@ impl<'a> MirLowerer<'a> {
                 // Body: get element, store to loop var, execute body, increment index
                 self.set_current_block(body_id)?;
 
-                // A statically-typed array iterable reads its elements with
-                // `rt_array_get(array, i64)` directly -- exactly the call
-                // `rt_index_get`'s Array arm makes with the same index, so the
-                // element (and the NIL answered past a body-shortened end) is
-                // identical. The generic `IndexGet` path validated the handle
-                // against the global heap registry TWICE per element (once in
-                // `rt_index_get`'s `heap_type()`, again in `rt_array_get`),
-                // a mutex + SipHash lookup each: a 3840x2160 `[u32]` for-in
-                // took ~1.3 s where the indexed `while` over the same array
-                // (already `rt_array_get`, see lower_index_expr) took ~40 ms.
-                // Text iterables (normalized by `rt_string_chars`) and dicts
-                // (an entries array from `rt_for_iterable`) are not statically
-                // `Array`, so they keep the generic path unchanged.
-                let iterable_is_array = !iterable_is_text
-                    && self
-                        .type_registry
-                        .and_then(|registry| registry.get(iterable.ty))
-                        .is_some_and(|ty| matches!(ty, HirType::Array { .. }));
-
                 // Determine element type for unboxing after IndexGet
                 let element_ty = if let Some(registry) = self.type_registry {
                     if let Some(crate::hir::HirType::Array { element, .. }) = registry.get(iterable.ty) {
@@ -2100,20 +1980,6 @@ impl<'a> MirLowerer<'a> {
                         | crate::hir::TypeId::BOOL
                 );
                 let needs_float_unbox = matches!(element_ty, crate::hir::TypeId::F32 | crate::hir::TypeId::F64);
-                // A typed `[u64]` reads its element with the same layout-aware
-                // raw accessor `a[i]` uses (lower_index_expr). `rt_array_get`
-                // + UnboxInt was wrong for a U64_PACKED array: the JIT's inline
-                // `rt_array_get` and the C `rt_array_get` both hand back the RAW
-                // word, so UnboxInt's `>> 3` turned 56 into 7.
-                let typed_u64_read = iterable_is_array && element_ty == crate::hir::TypeId::U64;
-                // A `[i64]` element is read through the layout-aware signed
-                // accessor too: an array that a wide store packed in place
-                // holds raw words, and `rt_array_get` + UnboxInt would box a
-                // wide word on every read. FAM freestanding targets keep the
-                // generic read (their arrays have a different layout).
-                let typed_i64_read =
-                    iterable_is_array && element_ty == crate::hir::TypeId::I64 && self.signed_word_lane;
-                let typed_word_read = typed_u64_read || typed_i64_read;
                 // FR-DRIVER-0002b: narrow after UnboxInt for [u8]/[u16]/[u32]/[i8]/[i16]/[i32]
                 // element types so the loop variable's value gets the correct narrow TypeId.
                 let narrow_to_signed: Option<(u8, bool)> = match element_ty {
@@ -2133,7 +1999,7 @@ impl<'a> MirLowerer<'a> {
                     let current_idx = func.new_vreg();
                     let boxed_idx = func.new_vreg();
                     let raw_element = func.new_vreg();
-                    let element = if (needs_int_unbox || needs_float_unbox) && !typed_word_read {
+                    let element = if needs_int_unbox || needs_float_unbox {
                         func.new_vreg()
                     } else {
                         raw_element
@@ -2161,38 +2027,21 @@ impl<'a> MirLowerer<'a> {
                         ty: crate::hir::TypeId::I64,
                     });
 
-                    if iterable_is_array {
-                        // Same element read as rt_index_get's Array arm, minus
-                        // the second registry validation (see iterable_is_array).
-                        let _ = boxed_idx;
-                        block.instructions.push(MirInst::Call {
-                            dest: Some(raw_element),
-                            target: crate::mir::CallTarget::from_name(if typed_i64_read {
-                                "rt_typed_words_i64_at"
-                            } else if typed_u64_read {
-                                "rt_typed_words_u64_at"
-                            } else {
-                                "rt_array_get"
-                            }),
-                            args: vec![collection_reg, current_idx],
-                        });
-                    } else {
-                        // Box the raw i64 index for rt_index_get (expects RuntimeValue)
-                        block.instructions.push(MirInst::BoxInt {
-                            dest: boxed_idx,
-                            value: current_idx,
-                        });
+                    // Box the raw i64 index for rt_index_get (expects RuntimeValue)
+                    block.instructions.push(MirInst::BoxInt {
+                        dest: boxed_idx,
+                        value: current_idx,
+                    });
 
-                        // Get element via IndexGet (which calls rt_index_get internally)
-                        block.instructions.push(MirInst::IndexGet {
-                            dest: raw_element,
-                            collection: collection_reg,
-                            index: boxed_idx,
-                        });
-                    }
+                    // Get element via IndexGet (which calls rt_index_get internally)
+                    block.instructions.push(MirInst::IndexGet {
+                        dest: raw_element,
+                        collection: collection_reg,
+                        index: boxed_idx,
+                    });
 
                     // Unbox element if it's a native type (rt_index_get returns RuntimeValue)
-                    if needs_int_unbox && !typed_word_read {
+                    if needs_int_unbox {
                         block.instructions.push(MirInst::UnboxInt {
                             dest: unboxed_intermediate,
                             value: raw_element,
@@ -2292,7 +2141,7 @@ impl<'a> MirLowerer<'a> {
                 // At runtime, we treat it as an assertion
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_condition_expr(condition)?;
+                let cond_reg = self.lower_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assume condition coverage (#674)

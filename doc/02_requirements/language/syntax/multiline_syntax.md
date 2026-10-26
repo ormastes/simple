@@ -15,7 +15,7 @@ multiple lines, array literals, and continuation lines.
 
 ## Syntax
 
-```simple:skip
+```simple
 # Multi-line function call
 val result = function_name(
     arg1,

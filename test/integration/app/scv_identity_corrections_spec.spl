@@ -1,0 +1,105 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-I-06 — identity corrections as LOGGED
+operations: `scv identity link|unlink|split|merge|trace`. Every correction
+appends a row to .scv/meta/identity_corrections.sdn (append-only) plus an
+identity edge with `correction:<op>:<seq>` evidence; superseded evidence is
+ALIASED by reference (`edge:<n>`), never rewritten. Terminal states mirror
+delete-is-terminal: split -> state=split, merge loser -> state=merged; a
+terminal id refuses further corrections and its id is never reused. `trace`
+overlays row + edge history + corrections.
+Audience: Maintainers of the SCV identity/corrections path.
+"""
+# @req: REQ-SCV-IDENTITY-CORRECTIONS-001
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _prelude(tag: text) -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-idc-{tag}.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "mkdir work && cd work",
+        "printf 'alpha\\n' > a.txt",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    expect(out == "" and err == "").to_equal(false)
+    combined
+
+describe "scv identity corrections (SCV-IMPL-I-06)":
+    # @manual scenario evidence
+    it "logs unlink+link as appended corrections aliasing superseded edges":
+        # @req: REQ-SCV-IDENTITY-CORRECTIONS-001
+        step("Snapshot a.txt, unlink it, link its id to b.txt, trace")
+        var lines = _prelude("linkun")
+        lines.push("scv identity unlink a.txt wrong-match")
+        lines.push("scv identity link file_1 b.txt actually-moved")
+        lines.push("scv identity trace file_1")
+        lines.push("echo '=== corrections log ==='")
+        lines.push("cat .scv/meta/identity_corrections.sdn")
+        val out = _run(lines)
+        step("Verify logged PASS verdicts, alias references, and append-only log rows")
+        expect(out).to_contain("PASS — identity unlink recorded: seq=1 file_1 detached from a.txt (supersedes edge:")
+        expect(out).to_contain("PASS — identity link recorded: seq=2 file_1 -> b.txt (supersedes edge:")
+        expect(out).to_contain("current_path: b.txt")
+        expect(out).to_contain("seq=1 op=unlink args=a.txt,file_1 supersedes=edge:")
+        expect(out).to_contain("seq=2 op=link args=file_1,b.txt supersedes=edge:")
+        expect(out).to_contain("1|unlink|a.txt|file_1|")
+        expect(out).to_contain("2|link|file_1|b.txt|")
+        expect(out).to_contain("exit=0")
+
+    it "split and merge are terminal, id-preserving, and refused on terminal ids":
+        # @req: REQ-SCV-IDENTITY-CORRECTIONS-001
+        step("Split file_1 into two ids, merge them, then try correcting terminals")
+        var lines = _prelude("splitmg")
+        lines.push("scv identity split file_1 c1.txt c2.txt two-files")
+        lines.push("scv identity merge file_2 file_3 same-file || true")
+        lines.push("scv identity link file_1 z.txt late || echo refused-link-rc=$?")
+        lines.push("scv identity trace file_1")
+        lines.push("scv identity trace file_3")
+        lines.push("echo '=== rows ==='")
+        lines.push("cat .scv/meta/file_identity.sdn")
+        val out = _run(lines)
+        step("Verify terminal states, refusal on terminal id, edges appended not rewritten")
+        expect(out).to_contain("PASS — identity split recorded: seq=1 file_1 -> file_2(c1.txt) + file_3(c2.txt); file_1 terminal (state=split)")
+        expect(out).to_contain("PASS — identity merge recorded: seq=2 file_3 merged into file_2; file_3 terminal (state=merged)")
+        expect(out).to_contain("FAIL — identity link refused: file_1 is terminal (state=split)")
+        expect(out).to_contain("refused-link-rc=1")
+        expect(out).to_contain("state: split")
+        expect(out).to_contain("state: merged")
+        # rows file keeps the terminal ids (never deleted, never reused):
+        expect(out).to_contain("|split")
+        expect(out).to_contain("|merged")
+        expect(out).to_contain("exit=0")
+
+    it "trace on an unknown id is a fail-closed ERROR, and the edge log is append-only across corrections":
+        # @req: REQ-SCV-IDENTITY-CORRECTIONS-001
+        step("Record one correction, capture the edge log, record another, re-capture")
+        var lines = _prelude("appendonly")
+        lines.push("scv identity unlink a.txt first >/dev/null")
+        lines.push("cp .scv/meta/identity_edges.sdn /tmp/edges-before-$$")
+        lines.push("scv identity link file_1 b.txt second >/dev/null")
+        lines.push("head -c $(wc -c < /tmp/edges-before-$$) .scv/meta/identity_edges.sdn > /tmp/edges-prefix-$$")
+        lines.push("cmp -s /tmp/edges-before-$$ /tmp/edges-prefix-$$ && echo PREFIX-PRESERVED")
+        lines.push("rm -f /tmp/edges-before-$$ /tmp/edges-prefix-$$")
+        lines.push("scv identity trace file_99 || echo trace-rc=$?")
+        val out = _run(lines)
+        step("Verify old edge bytes are a byte-identical prefix and unknown id is ERROR rc=2")
+        expect(out).to_contain("PREFIX-PRESERVED")
+        expect(out).to_contain("ERROR — nothing was checked (unknown file id: file_99)")
+        expect(out).to_contain("trace-rc=2")
+        expect(out).to_contain("exit=0")

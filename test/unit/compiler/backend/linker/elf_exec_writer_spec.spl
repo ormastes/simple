@@ -7,12 +7,21 @@
 # @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
 # @cover src/compiler/70.backend/linker/elf/elf_exec_writer.spl
 
-use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_static_link, elf_link, elf_link_configured, ElfLinkRequest, ELF_LINK_STATIC_EXEC
+}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf_inspect.{ElfHeader, ElfSectionHeader}
+use compiler.backend.linker.elf_parser.{ElfObject, ElfStringTable}
+use compiler.backend.linker.elf.merge_strings.{elf_merge_sections}
 use std.io_runtime.{file_read_bytes}
+use std.common.crypto.sha1.{sha1_bytes}
 
 val FIX: text = "test/fixtures/linker/elf"
 val PT_LOAD: i64 = 1
+val PT_TLS: i64 = 7
+val PT_NOTE: i64 = 4
+val PT_GNU_EH_FRAME: i64 = 0x6474e550
 
 fn load_fixture(name: text) -> [i64]:
     val raw = file_read_bytes("{FIX}/{name}")
@@ -31,6 +40,37 @@ fn rd32(b: [i64], o: i64) -> i64:
 
 fn rd64(b: [i64], o: i64) -> i64:
     rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn s32(v: i64) -> i64:
+    if v >= 0x80000000:
+        return v - 0x100000000
+    v
+
+fn count_bytes(b: [i64], needle: [i64]) -> i64:
+    var count: i64 = 0
+    var i: i64 = 0
+    while i + needle.len() <= b.len():
+        var same = true
+        var j: i64 = 0
+        while j < needle.len():
+            if b[i + j] != needle[j]:
+                same = false
+            j = j + 1
+        if same:
+            count = count + 1
+        i = i + 1
+    count
+
+fn has_section_shape(b: [i64], size: i64, flags: i64, alignment: i64,
+        entsize: i64) -> bool:
+    var i: i64 = 0
+    while i < rd16(b, 60):
+        val h = rd64(b, 40) + i * 64
+        if rd64(b, h + 8) == flags and rd64(b, h + 32) == size and
+                rd64(b, h + 48) == alignment and rd64(b, h + 56) == entsize:
+            return true
+        i = i + 1
+    false
 
 fn phdr_off(b: [i64], i: i64) -> i64:
     rd64(b, 32) + i * 56
@@ -63,6 +103,47 @@ fn load_offset_with_flags(b: [i64], flags: i64) -> i64:
         i = i + 1
     -1
 
+fn load_file_size_with_flags(b: [i64], flags: i64) -> i64:
+    var i: i64 = 0
+    while i < rd16(b, 56):
+        val p = phdr_off(b, i)
+        if rd32(b, p) == PT_LOAD and rd32(b, p + 4) == flags:
+            return rd64(b, p + 32)
+        i = i + 1
+    -1
+
+fn load_mem_size_with_flags(b: [i64], flags: i64) -> i64:
+    var i: i64 = 0
+    while i < rd16(b, 56):
+        val p = phdr_off(b, i)
+        if rd32(b, p) == PT_LOAD and rd32(b, p + 4) == flags:
+            return rd64(b, p + 40)
+        i = i + 1
+    -1
+
+fn merge_string_object(alignment: i64) -> ElfObject:
+    # ELF64 ET_REL with one SHF_ALLOC|SHF_MERGE|SHF_STRINGS section holding
+    # "ab\0cd\0" at 0x100; section headers at 0x200 carry sh_addralign and
+    # sh_entsize=1 (the parsed header struct does not carry either field).
+    var raw: [u8] = []
+    while raw.len() < 0x280:
+        raw = raw.push(0u8)
+    raw[4] = 2u8
+    raw[0x100] = 0x61u8
+    raw[0x101] = 0x62u8
+    raw[0x103] = 0x63u8
+    raw[0x104] = 0x64u8
+    raw[0x200 + 64 + 48] = alignment as u8
+    raw[0x200 + 64 + 56] = 1u8
+    val empty = ElfStringTable(data: [], offset: 0)
+    ElfObject(
+        header: ElfHeader(e_type: 1, e_machine: 62, e_entry: 0, e_phoff: 0,
+            e_shoff: 0x200, e_shnum: 2, e_shstrndx: 0),
+        sections: [
+            ElfSectionHeader(sh_name: 0, sh_type: 0, sh_flags: 0, sh_addr: 0, sh_size: 0, sh_info: 0),
+            ElfSectionHeader(sh_name: 0, sh_type: 1, sh_flags: 0x32, sh_addr: 0x100, sh_size: 6, sh_info: 0)],
+        symbols: [], relocations: [], strtab: empty, shstrtab: empty, raw: raw)
+
 fn link_a64() -> [i64]:
     val objs = [load_fixture("start_a64.o"), load_fixture("lib_a64.o")]
     val r = elf_static_link(objs, [], "_start", RelocArch.AArch64)
@@ -72,6 +153,40 @@ fn link_a64() -> [i64]:
     r.unwrap()
 
 describe "elf_exec_writer - two-object static aarch64 exec":
+    it "emits a GNU SHA-1 build-id note covering the complete zeroed image":
+        val b = link_a64()
+        var note_off: i64 = -1
+        var note_size: i64 = 0
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            if rd32(b, h + 4) == 7:
+                note_off = rd64(b, h + 24)
+                note_size = rd64(b, h + 32)
+            i = i + 1
+        expect(note_size).to_equal(36)
+        expect(rd32(b, note_off)).to_equal(4)
+        expect(rd32(b, note_off + 4)).to_equal(20)
+        expect(rd32(b, note_off + 8)).to_equal(3)
+        expect(rd32(b, note_off + 12)).to_equal(0x00554e47)
+        var zeroed = b
+        i = 0
+        while i < 20:
+            zeroed[note_off + 16 + i] = 0
+            i = i + 1
+        val digest = sha1_bytes(zeroed)
+        i = 0
+        while i < 20:
+            expect(b[note_off + 16 + i]).to_equal(digest.get(i))
+            i = i + 1
+        var has_note = false
+        i = 0
+        while i < rd16(b, 56):
+            if rd32(b, phdr_off(b, i)) == PT_NOTE:
+                has_note = true
+            i = i + 1
+        expect(has_note).to_equal(true)
+
     it "two-object static exec has PT_LOAD RX+RW and entry = _start":
         val b = link_a64()
         expect(b.len() > 64).to_equal(true)
@@ -101,6 +216,392 @@ describe "elf_exec_writer - two-object static aarch64 exec":
         expect((insn & 0x3ffffff) * 4).to_equal(0x3c - 0x24)
 
 describe "elf_exec_writer - two-object static x86_64 exec":
+    it "garbage-collects unreachable function and data sections":
+        val obj = load_fixture("gc_sections_x64.o")
+        val r = elf_static_link([obj], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(load_file_size_with_flags(b, 5)).to_equal(31)
+        expect(load_file_size_with_flags(b, 6)).to_equal(8)
+        expect(load_mem_size_with_flags(b, 6)).to_equal(16)
+
+    it "uses retained symbols as section-GC roots":
+        val obj = load_fixture("gc_sections_x64.o")
+        val req = ElfLinkRequest(objects: [obj], archives: [], shared: [], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC, interp: "")
+        val r = elf_link_configured(req, false, ["dead_function"])
+        expect(r.is_ok()).to_equal(true)
+        expect(load_file_size_with_flags(r.unwrap(), 6)).to_equal(16)
+
+    it "no-GC retains dead sections and therefore exposes their undefined symbols":
+        val req = ElfLinkRequest(objects: [load_fixture("gc_sections_x64.o")],
+            archives: [], shared: [], entry: "_start", target: RelocArch.X86_64,
+            mode: ELF_LINK_STATIC_EXEC, interp: "", gc_sections: false)
+        val r = elf_link(req)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("missing_dead_dependency")
+
+    it "prunes dead FDEs without letting unwind metadata retain dead code":
+        val r = elf_static_link([load_fixture("gc_unwind_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var ph: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = phdr_off(b, i)
+            if rd32(b, p) == PT_GNU_EH_FRAME:
+                ph = p
+            i = i + 1
+        val ho = rd64(b, ph + 8)
+        val hv = rd64(b, ph + 16)
+        expect(rd32(b, ho + 8)).to_equal(2)
+        val eh = hv + 4 + s32(rd32(b, ho + 4))
+        val text = load_vaddr_with_flags(b, 5)
+        expect(hv + s32(rd32(b, ho + 12))).to_equal(text)
+        expect(hv + s32(rd32(b, ho + 16))).to_equal(eh + 0x18)
+        expect(hv + s32(rd32(b, ho + 20))).to_equal(text + 0x10)
+        expect(hv + s32(rd32(b, ho + 24))).to_equal(eh + 0x2c)
+
+    it "indexes relocated FDEs through .eh_frame_hdr and PT_GNU_EH_FRAME":
+        val r = elf_static_link([load_fixture("unwind_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var ph: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = phdr_off(b, i)
+            if rd32(b, p) == PT_GNU_EH_FRAME:
+                ph = p
+            i = i + 1
+        expect(ph > 0).to_equal(true)
+        expect(rd64(b, ph + 32)).to_equal(28)
+        val ho = rd64(b, ph + 8)
+        val hv = rd64(b, ph + 16)
+        expect(rd32(b, ho)).to_equal(0x3b031b01)
+        expect(rd32(b, ho + 8)).to_equal(2)
+        val eh = hv + 4 + s32(rd32(b, ho + 4))
+        val text = load_vaddr_with_flags(b, 5)
+        expect(hv + s32(rd32(b, ho + 12))).to_equal(text)
+        expect(hv + s32(rd32(b, ho + 16))).to_equal(eh + 0x18)
+        expect(hv + s32(rd32(b, ho + 20))).to_equal(text + 5)
+        expect(hv + s32(rd32(b, ho + 24))).to_equal(eh + 0x2c)
+
+    it "emits PT_TLS spanning initialized .tdata and zero-file-byte .tbss":
+        val r = elf_static_link([load_fixture("tls_sections_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var tls: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = phdr_off(b, i)
+            if rd32(b, p) == PT_TLS:
+                tls = p
+            i = i + 1
+        expect(tls > 0).to_equal(true)
+        expect(rd64(b, tls + 32)).to_equal(8)
+        expect(rd64(b, tls + 40)).to_equal(16)
+        expect(rd64(b, tls + 48)).to_equal(8)
+
+    it "applies R_X86_64_TPOFF32 against the end of the local-exec TLS block":
+        val r = elf_static_link([load_fixture("tls_local_exec_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val text_o = load_offset_with_flags(b, 5)
+        expect(rd32(b, text_o + 5)).to_equal(0xfffffff8)
+
+    it "applies R_X86_64_TPOFF64 as a signed offset from the TLS block end":
+        val r = elf_static_link([load_fixture("tls_tpoff64_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(count_bytes(b, [0xf8, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff])).to_equal(1)
+
+    it "applies R_X86_64_SIZE32 and SIZE64 from the resolved symbol extent":
+        val r = elf_static_link([load_fixture("symbol_size_x64.o"),
+            load_fixture("symbol_size_def_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(count_bytes(b, [13, 0, 0, 0, 0, 0, 0, 0,
+            13, 0, 0, 0, 0, 0, 0, 0])).to_equal(1)
+
+    it "applies cross-object R_X86_64_PC64 as the full-width S plus A minus P delta":
+        val r = elf_static_link([load_fixture("pc64_x64.o"),
+            load_fixture("pc64_def_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var target_vaddr: i64 = -1
+        var slot_vaddr: i64 = -1
+        var slot_offset: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 2 and size == 1:
+                target_vaddr = rd64(b, h + 16)
+            if flags == 3 and size == 8:
+                slot_vaddr = rd64(b, h + 16)
+                slot_offset = rd64(b, h + 24)
+            i = i + 1
+        expect(target_vaddr >= 0).to_equal(true)
+        expect(slot_offset >= 0).to_equal(true)
+        expect(rd64(b, slot_offset)).to_equal(target_vaddr - slot_vaddr)
+
+    it "synthesizes the GOT base for R_X86_64_GOTPC32":
+        val r = elf_static_link([load_fixture("gotpc32_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_vaddr: i64 = -1
+        var text_offset: i64 = -1
+        var got_vaddr: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 6 and size == 5:
+                text_vaddr = rd64(b, h + 16)
+                text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 24:
+                got_vaddr = rd64(b, h + 16)
+            i = i + 1
+        expect(got_vaddr >= 0).to_equal(true)
+        expect(text_offset >= 0).to_equal(true)
+        expect(s32(rd32(b, text_offset))).to_equal(got_vaddr - text_vaddr)
+
+    it "writes R_X86_64_GOT32 as the symbol slot offset from the GOT base":
+        val r = elf_static_link([load_fixture("got32_x64.o")], [],
+            "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_offset: i64 = -1
+        var got_vaddr: i64 = -1
+        var gotplt_vaddr: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 6 and size == 5: text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 8: got_vaddr = rd64(b, h + 16)
+            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
+            i = i + 1
+        expect(text_offset >= 0).to_equal(true)
+        expect(got_vaddr >= 0).to_equal(true)
+        expect(gotplt_vaddr >= 0).to_equal(true)
+        expect(s32(rd32(b, text_offset))).to_equal(got_vaddr - gotplt_vaddr)
+
+    it "writes R_X86_64_GOT64 as a full-width offset from the GOT base":
+        val r = elf_static_link([load_fixture("got64_x64.o")], [],
+            "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_offset: i64 = -1
+        var got_vaddr: i64 = -1
+        var gotplt_vaddr: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 6 and size == 9: text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 8: got_vaddr = rd64(b, h + 16)
+            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
+            i = i + 1
+        expect(text_offset >= 0).to_equal(true)
+        expect(got_vaddr >= 0).to_equal(true)
+        expect(gotplt_vaddr >= 0).to_equal(true)
+        expect(rd64(b, text_offset)).to_equal(got_vaddr - gotplt_vaddr)
+
+    it "writes local R_X86_64_GOTPLT64 with the GOT64 formula":
+        var obj = load_fixture("got64_x64.o")
+        obj[0xa0] = 30
+        val r = elf_static_link([obj], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_offset: i64 = -1
+        var got_vaddr: i64 = -1
+        var gotplt_vaddr: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 6 and size == 9: text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 8: got_vaddr = rd64(b, h + 16)
+            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
+            i = i + 1
+        expect(text_offset >= 0).to_equal(true)
+        expect(got_vaddr >= 0).to_equal(true)
+        expect(gotplt_vaddr >= 0).to_equal(true)
+        expect(rd64(b, text_offset)).to_equal(got_vaddr - gotplt_vaddr)
+
+    it "writes R_X86_64_GOTPCREL64 as a full-width GOT-slot displacement":
+        val r = elf_static_link([load_fixture("gotpcrel64_x64.o")], [],
+            "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_vaddr: i64 = -1
+        var text_offset: i64 = -1
+        var got_vaddr: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 6 and size == 9:
+                text_vaddr = rd64(b, h + 16)
+                text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 8: got_vaddr = rd64(b, h + 16)
+            i = i + 1
+        expect(text_offset >= 0).to_equal(true)
+        expect(got_vaddr >= 0).to_equal(true)
+        expect(rd64(b, text_offset)).to_equal(got_vaddr - text_vaddr)
+
+    it "writes R_X86_64_CODE_4_GOTPCRELX as an unrelaxed GOT-slot displacement":
+        val r = elf_static_link([load_fixture("code4_gotpcrelx_x64.o")], [],
+            "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_vaddr: i64 = -1
+        var text_offset: i64 = -1
+        var got_vaddr: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 6 and size == 5:
+                text_vaddr = rd64(b, h + 16)
+                text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 8: got_vaddr = rd64(b, h + 16)
+            i = i + 1
+        expect(text_offset >= 0).to_equal(true)
+        expect(got_vaddr >= 0).to_equal(true)
+        expect(rd32(b, text_offset)).to_equal(got_vaddr - text_vaddr)
+
+    it "writes CODE_4 and CODE_6 GOTTPOFF through one initial-exec TLS slot":
+        val r = elf_static_link([load_fixture("code_gottpoff_x64.o")], [],
+            "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_vaddr: i64 = -1
+        var text_offset: i64 = -1
+        var got_vaddr: i64 = -1
+        var got_offset: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 6 and size == 9:
+                text_vaddr = rd64(b, h + 16)
+                text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 8:
+                got_vaddr = rd64(b, h + 16)
+                got_offset = rd64(b, h + 24)
+            i = i + 1
+        expect(text_offset >= 0).to_equal(true)
+        expect(got_offset >= 0).to_equal(true)
+        expect(rd32(b, text_offset)).to_equal(got_vaddr - text_vaddr)
+        expect(rd32(b, text_offset + 4)).to_equal(got_vaddr - text_vaddr - 4)
+        expect(rd64(b, got_offset)).to_equal(-8)
+
+    it "writes R_X86_64_GOTPC64 against the synthesized hosted GOT base":
+        val r = elf_static_link([load_fixture("gotpc64_x64.o")], [],
+            "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_vaddr: i64 = -1
+        var text_offset: i64 = -1
+        var gotplt_vaddr: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 6 and size == 9:
+                text_vaddr = rd64(b, h + 16)
+                text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
+            i = i + 1
+        expect(text_offset >= 0).to_equal(true)
+        expect(gotplt_vaddr >= 0).to_equal(true)
+        expect(rd64(b, text_offset)).to_equal(gotplt_vaddr - text_vaddr)
+
+    it "writes R_X86_64_GOTOFF64 from a data address to the hosted GOT base":
+        val r = elf_static_link([load_fixture("gotoff64_x64.o")], [],
+            "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_offset: i64 = -1
+        var data_vaddr: i64 = -1
+        var gotplt_vaddr: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            val align = rd64(b, h + 48)
+            if flags == 6 and size == 9: text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 8 and align == 1: data_vaddr = rd64(b, h + 16)
+            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
+            i = i + 1
+        expect(text_offset >= 0).to_equal(true)
+        expect(data_vaddr >= 0).to_equal(true)
+        expect(gotplt_vaddr >= 0).to_equal(true)
+        expect(rd64(b, text_offset)).to_equal(data_vaddr - gotplt_vaddr)
+
+    it "writes R_X86_64_PLTOFF64 from a function address to the hosted GOT base":
+        val r = elf_static_link([load_fixture("pltoff64_x64.o")], [],
+            "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var text_vaddr: i64 = -1
+        var text_offset: i64 = -1
+        var gotplt_vaddr: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            val flags = rd64(b, h + 8)
+            val size = rd64(b, h + 32)
+            if flags == 6 and size == 10:
+                text_vaddr = rd64(b, h + 16)
+                text_offset = rd64(b, h + 24)
+            if flags == 3 and size == 24: gotplt_vaddr = rd64(b, h + 16)
+            i = i + 1
+        expect(text_offset >= 0).to_equal(true)
+        expect(gotplt_vaddr >= 0).to_equal(true)
+        expect(rd64(b, text_offset)).to_equal(text_vaddr + 9 - gotplt_vaddr)
+
+    it "applies checked cross-object R_X86_64_PC16 and PC8 deltas":
+        val r = elf_static_link([load_fixture("pc_narrow_x64.o"),
+            load_fixture("pc_narrow_def_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(count_bytes(b, [3, 0, 1, 0x6b])).to_equal(1)
+
+    it "applies checked cross-object R_X86_64_16 and R_X86_64_8 values":
+        val r = elf_static_link([load_fixture("abs_narrow_x64.o"),
+            load_fixture("abs_narrow_def_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(count_bytes(b, [0x34, 0x12, 0x7f])).to_equal(1)
+
+    it "relaxes local-dynamic TLSLD and DTPOFF32 to local-exec offsets":
+        val r = elf_static_link([load_fixture("tls_local_dynamic_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val text_o = load_offset_with_flags(b, 5)
+        expect(b[text_o + 1]).to_equal(0x66)
+        expect(b[text_o + 2]).to_equal(0x66)
+        expect(b[text_o + 3]).to_equal(0x66)
+        expect(b[text_o + 4]).to_equal(0x64)
+        expect(b[text_o + 5]).to_equal(0x48)
+        expect(b[text_o + 6]).to_equal(0x8b)
+        expect(rd32(b, text_o + 16)).to_equal(0xfffffff0)
+        expect(rd32(b, text_o + 23)).to_equal(0xfffffff8)
+
     it "x86_64 exec has RX+RW loads, entry = _start and PLT32 patched as PC32":
         val objs = [load_fixture("start_x64.o"), load_fixture("lib_x64.o")]
         val r = elf_static_link(objs, [], "_start", RelocArch.X86_64)
@@ -116,3 +617,56 @@ describe "elf_exec_writer - two-object static x86_64 exec":
         val text_o = load_offset_with_flags(b, 5)
         val rel = rd32(b, text_o + 0x1d)
         expect(rel).to_equal(0x40 - 0x21)
+
+    it "deduplicates identical SHF_MERGE strings and remaps local-symbol relocations":
+        val r = elf_static_link([load_fixture("merge_strings_a_x64.o"),
+            load_fixture("merge_strings_b_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val text_o = load_offset_with_flags(b, 5)
+        val text_v = load_vaddr_with_flags(b, 5)
+        val first = text_v + 7 + s32(rd32(b, text_o + 3))
+        val second = text_v + 0x37 + s32(rd32(b, text_o + 0x33))
+        expect(first).to_equal(second)
+        expect(count_bytes(b, [0x70, 0x72, 0x65, 0x66, 0x69, 0x78, 0x2d,
+            0x73, 0x75, 0x66, 0x66, 0x69, 0x78, 0])).to_equal(1)
+        expect(has_section_shape(b, 14, 0x32, 1, 1)).to_equal(true)
+
+    it "keeps each merged string piece aligned to the section's sh_addralign":
+        # lld places every string piece of a .rodata.str1.8 section on an
+        # 8-byte boundary; compilers rely on that alignment for the literal.
+        val plan = elf_merge_sections([merge_string_object(8)], [[false, true]]).unwrap()
+        expect(plan.entries.len()).to_equal(2)
+        expect(plan.entries[0].output_offset).to_equal(0)
+        expect(plan.entries[1].output_offset).to_equal(8)
+        val packed = elf_merge_sections([merge_string_object(1)], [[false, true]]).unwrap()
+        expect(packed.entries[1].output_offset).to_equal(3)
+
+    it "deduplicates aligned fixed-size SHF_MERGE entities":
+        val r = elf_static_link([load_fixture("merge_const_a_x64.o"),
+            load_fixture("merge_const_b_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val text_o = load_offset_with_flags(b, 5)
+        val text_v = load_vaddr_with_flags(b, 5)
+        val first = text_v + 7 + s32(rd32(b, text_o + 3))
+        val second = text_v + 0x1b + s32(rd32(b, text_o + 0x17))
+        expect(first).to_equal(second)
+        expect(first % 8).to_equal(0)
+        expect(count_bytes(b, [0x88, 0x77, 0x66, 0x55,
+            0x44, 0x33, 0x22, 0x11])).to_equal(1)
+        expect(has_section_shape(b, 8, 0x12, 8, 8)).to_equal(true)
+
+    it "coalesces SHN_COMMON into zero-file-byte aligned BSS and applies its relocation":
+        val r = elf_static_link([load_fixture("common_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var checked = false
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = phdr_off(b, i)
+            if rd32(b, p) == PT_LOAD and rd32(b, p + 4) == 6:
+                expect(rd64(b, p + 40) - rd64(b, p + 32) >= 48).to_equal(true)
+                checked = true
+            i = i + 1
+        expect(checked).to_equal(true)

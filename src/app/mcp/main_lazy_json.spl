@@ -130,7 +130,7 @@ fn _find_json_value_start(json: text, key: text) -> i64:
     val search = Q() + key + Q()
     var offset = 0
     while offset < json.len():
-        val found = json.index_of(search, offset) ?? -1
+        val found = json.index_of(search, offset)
         if found < 0:
             return -1
         offset = found
@@ -346,8 +346,13 @@ export extract_json_string, extract_json_value, make_error_response, log_level_t
 export first_n_chars, strip_ansi, shell_cmd, mcp_run_argv
 
 # --- Shell helper ---
-# Uses process_run (returns tuple). Note: val (a,b) = expr is broken
-# in interpreter, so we use var + assignment destructuring instead.
+# Uses process_run (returns an anonymous (text, text, i64) tuple). Destructuring
+# assignment onto this tuple made the anonymous type's two `text` fields
+# ambiguous under standalone compilation ("anonymous multi-return tuple
+# contains repeated field types; add labels to disambiguate") — indexed
+# field access (.0/.1/.2) sidesteps both that and the older
+# "val (a,b) = expr is broken in interpreter" landmine the destructuring
+# style was originally worked around with.
 
 fn _mcp_detect_shell() -> text:
     # On Windows, /bin/sh doesn't resolve for native PE binaries.
@@ -355,11 +360,8 @@ fn _mcp_detect_shell() -> text:
     val os_env = env_get("OS") ?? ""
     if os_env.contains("Windows"):
         # Check for sh on PATH (Git Bash / MSYS2)
-        var sh_out = ""
-        var sh_err = ""
-        var sh_rc: i64 = 0
-        (sh_out, sh_err, sh_rc) = process_run("sh", ["-c", "echo ok"])
-        if sh_rc == 0 and sh_out.trim() == "ok":
+        val sh_result = process_run("sh", ["-c", "echo ok"])
+        if sh_result.2 == 0 and sh_result.0.trim() == "ok":
             return "sh"
         return "cmd"
     "/bin/sh"
@@ -415,18 +417,23 @@ fn _strip_timeout_prefix(command: text) -> text:
 
 fn shell_cmd(command: text) -> (text, i64):
     var stdout = ""
-    var stderr = ""
     var code: i64 = 0
     val shell = _get_shell()
     if shell == "cmd":
         # Strip Unix timeout prefix — cmd.exe doesn't have coreutils timeout
         val cmd = _strip_timeout_prefix(command)
-        (stdout, stderr, code) = process_run("cmd", ["/C", cmd])
+        val result = process_run("cmd", ["/C", cmd])
+        stdout = result.0
+        code = result.2
     elif shell == "sh":
         # Windows Git Bash: < /dev/null breaks piped commands, so omit it
-        (stdout, stderr, code) = process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
+        val result = process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
+        stdout = result.0
+        code = result.2
     else:
-        (stdout, stderr, code) = process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+        val result = process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+        stdout = result.0
+        code = result.2
     if stdout != "":
         stdout = strip_ansi(stdout)
     (stdout, code)

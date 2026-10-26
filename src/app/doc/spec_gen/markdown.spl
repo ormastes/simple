@@ -3,64 +3,11 @@
 
 use app.io
 use app.utils.markdown.{MarkdownBuilder}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use app.doc.spec_gen.types.{SpecFile, TestCase}
-use app.doc.spec_gen.semantic_links.{semantic_doc_symbol_map_v1, semantic_doc_symbol_map_from_file_v1}
-use compiler.semantics.symbol_id.semantic_link_source.{SemanticLinkDocumentV1, semantic_link_read_revision_v1}
-use compiler.semantics.symbol_id.semantic_link.{SemanticLinkErrorV1}
 
 
 fn generate_markdown(spec: SpecFile, output_path: text) -> bool:
-    """Generate Markdown with the existing unbound symbol presentation."""
-    generate_markdown_with_symbol_links_v1(spec, output_path, {})
-
-fn generate_markdown_semantic_v1(spec: SpecFile, output_path: text, document: SemanticLinkDocumentV1, revision: text) -> Result<bool, SemanticLinkErrorV1>:
-    """Verify explicit spl: symbols as a batch before writing the document.
-
-    The caller owns package/module configuration and an exact source revision;
-    heuristic symbol names remain plain text and never acquire guessed targets.
-    """
-    val links = semantic_doc_symbol_map_v1(spec, document, revision)?
-    write_semantic_markdown_v1(spec, output_path, links, document.file, revision)
-
-fn generate_markdown_semantic_from_file_v1(spec: SpecFile, output_path: text, package: text, module_path: text, file: text, revision: text) -> Result<bool, SemanticLinkErrorV1>:
-    val links = semantic_doc_symbol_map_from_file_v1(spec, package, module_path, file, revision)?
-    write_semantic_markdown_v1(spec, output_path, links, file, revision)
-
-fn write_semantic_markdown_v1(spec: SpecFile, output_path: text, links: Dict<text, text>, source_file: text, revision: text) -> Result<bool, SemanticLinkErrorV1>:
-    val content = render_markdown_with_symbol_links_v1(spec, links)
-    publish_semantic_markdown_content_v1(content, output_path, source_file, revision)
-
-pub fn publish_semantic_markdown_content_v1(content: text, output_path: text, source_file: text, revision: text) -> Result<bool, SemanticLinkErrorV1>:
-    """Publish rendered bytes for an explicit source revision snapshot.
-
-    Recheck after rendering, adjacent to atomic output replacement. This is
-    not a cross-file transaction or a lock on arbitrary external source writers;
-    the artifact records the exact revision it represents. Callers must resolve
-    semantic links before rendering. A later source edit makes that receipt stale.
-    """
-    if output_path.len() == 0:
-        return Ok(false)
-    # Existing provider owns same-filesystem staging, complete write/flush,
-    # mode preservation, rename, and failed-staging cleanup. Never unlink the
-    # previous document before a new verified document can be published.
-    val snapshot_content = "<!-- semantic-source-revision-sha256: " + revision + " -->\n" + content
-    semantic_link_read_revision_v1(source_file, revision)?
-    val written = file_atomic_write(output_path, snapshot_content)
-    if written:
-        print "✅ Generated: {output_path}"
-    Ok(written)
-
-fn generate_markdown_with_symbol_links_v1(spec: SpecFile, output_path: text, links: Dict<text, text>) -> bool:
-    val content = render_markdown_with_symbol_links_v1(spec, links)
-    if output_path.len() > 0:
-        if file_write(output_path, content):
-            print "✅ Generated: {output_path}"
-            return true
-    false
-
-fn render_markdown_with_symbol_links_v1(spec: SpecFile, links: Dict<text, text>) -> text:
-    """Render the existing document using a caller-validated symbol map."""
+    """Generate markdown documentation from parsed spec"""
     var md = MarkdownBuilder(content: "")
 
     # Header
@@ -111,7 +58,7 @@ fn render_markdown_with_symbol_links_v1(spec: SpecFile, links: Dict<text, text>)
     md.append("---\n\n")
 
     # Symbol table
-    val symbol_table = generate_symbol_table_with_links_v1(spec, links)
+    val symbol_table = generate_symbol_table(spec)
     if symbol_table.len() > 0:
         md.append(symbol_table)
         md.append("---\n\n")
@@ -126,7 +73,7 @@ fn render_markdown_with_symbol_links_v1(spec: SpecFile, links: Dict<text, text>)
         var i = 1
         for tc in spec.test_cases:
             val desc = tc.short_description()
-            val symbols_str = format_symbols_with_links_v1(tc.symbols, 3, links)
+            val symbols_str = format_symbols(tc.symbols, 3)
             md.append("| {i} | [{tc.name}](#{tc.name}) | {tc.section} | {symbols_str} |\n")
             i = i + 1
 
@@ -154,7 +101,7 @@ fn render_markdown_with_symbol_links_v1(spec: SpecFile, links: Dict<text, text>)
             md.append("**Linked Symbols:**\n")
             val limit = if tc.symbols.len() > 10: 10 else: tc.symbols.len()
             for j in 0..limit:
-                md.append("- " + markdown_symbol_v1(tc.symbols[j], links) + "\n")
+                md.append("- `{tc.symbols[j]}`\n")
             if tc.symbols.len() > 10:
                 val more = tc.symbols.len() - 10
                 md.append("- ... and {more} more\n")
@@ -185,7 +132,13 @@ fn render_markdown_with_symbol_links_v1(spec: SpecFile, links: Dict<text, text>)
     md.append("*This file was auto-generated from the executable specification.*\n")
     md.append("*Source: `{spec.path}`*\n\n")
 
-    md.to_string()
+    # Write to file
+    if output_path.len() > 0:
+        file_write(output_path, md.to_string())
+        print "✅ Generated: {output_path}"
+        return true
+
+    false
 
 fn generate_quick_toc(spec: SpecFile) -> text:
     """Generate quick navigation TOC"""
@@ -204,9 +157,6 @@ fn generate_quick_toc(spec: SpecFile) -> text:
     toc_parts.join("")
 
 fn generate_symbol_table(spec: SpecFile) -> text:
-    generate_symbol_table_with_links_v1(spec, {})
-
-fn generate_symbol_table_with_links_v1(spec: SpecFile, links: Dict<text, text>) -> text:
     """Generate symbol index table showing which tests use which symbols"""
     # Build symbol -> tests mapping using parallel arrays
     var sym_names = []
@@ -244,8 +194,7 @@ fn generate_symbol_table_with_links_v1(spec: SpecFile, links: Dict<text, text>) 
         val symbol = sym_names[ei]
         val tests = sym_tests[ei]
         val test_links = format_test_links(tests)
-        val symbol_text = markdown_symbol_v1(symbol, links)
-        table_parts.push("| {symbol_text} | {test_links} |\n")
+        table_parts.push("| `{symbol}` | {test_links} |\n")
         ei = ei + 1
 
     table_parts.push("\n")
@@ -267,15 +216,7 @@ fn extract_section(docstring: text, section_name: text) -> text:
 
     after_marker.trim()
 
-fn markdown_symbol_v1(symbol: text, links: Dict<text, text>) -> text:
-    if links.contains_key(symbol):
-        return links[symbol]
-    "`{symbol}`"
-
 fn format_symbols(symbols: [text], limit: i64) -> text:
-    format_symbols_with_links_v1(symbols, limit, {})
-
-fn format_symbols_with_links_v1(symbols: [text], limit: i64, links: Dict<text, text>) -> text:
     """Format symbol list with limit"""
     if symbols.len() == 0:
         return ""
@@ -284,7 +225,7 @@ fn format_symbols_with_links_v1(symbols: [text], limit: i64, links: Dict<text, t
     val actual_limit = if symbols.len() < limit: symbols.len() else: limit
 
     for i in 0..actual_limit:
-        parts.push(markdown_symbol_v1(symbols[i], links))
+        parts.push("`{symbols[i]}`")
 
     var result = parts.join(", ")
 

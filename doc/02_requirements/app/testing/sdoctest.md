@@ -25,7 +25,7 @@ synchronized without manual effort.
 ## Usage
 
     
-    ```simple:skip
+    ```simple
 
 ## Behavior
 
@@ -40,13 +40,13 @@ Verifies that SDoctest correctly discovers and collects documentation
 Multiplies two numbers.
 
             Example 1:
-            ```text
+            ```simple
             val r = multiply(3, 4)
             expect r == 12
             ```
 
             Example 2:
-            ```text
+            ```simple
             val r = multiply(0, 100)
             expect r == 0
             ```

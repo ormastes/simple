@@ -113,15 +113,11 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         code = emit_u32_le(code, 0xD65F03C0)
 
     elif inst.opcode == A64_OP_MOV:
-        # MOV involving SP aliases ADD-immediate #0: register 31 in ORR
-        # denotes XZR, so ORR cannot establish or restore a stack frame.
-        # General register moves still alias ORR Xd, XZR, Xn.
+        # MOV Xd, Xn -> ORR Xd, XZR, Xn
+        # 0xAA0003E0 | (((Xn) << 16)) | Xd
         val rd = get_phys_reg_id(inst.operands[0])
         val rn = get_phys_reg_id(inst.operands[1])
-        val encoding = if rd == AARCH64_SP or rn == AARCH64_SP:
-            0x91000000 | (rn << 5) | rd
-        else:
-            0xAA0003E0 | (rn << 16) | rd
+        val encoding = 0xAA0003E0 | (((rn) << 16)) | rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_MOVZ:
@@ -333,29 +329,25 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_STP:
-        # The selector's four-operand frame save is preindexed with writeback;
-        # the three-operand Mem form is an ordinary offset pair store.
+        # STP Rt1, Rt2, [Xn, #off]
+        # 0xA9000000 | ((off/bitwise_and(8, 0x7F)) << 15) | (((Rt2) << 10)) | (((Rn) << 5)) | Rt1
         val rt1 = get_phys_reg_id(inst.operands[0])
         val rt2 = get_phys_reg_id(inst.operands[1])
-        val writeback = inst.operands.len() == 4
-        val base = if writeback: get_phys_reg_id(inst.operands[2]) else: get_mem_base_id(inst.operands[2])
-        val offset = if writeback: get_imm_value(inst.operands[3]) else: get_mem_offset(inst.operands[2])
-        val opcode = if writeback: 0xA9800000 else: 0xA9000000
+        val base = get_mem_base_id(inst.operands[2])
+        val offset = get_mem_offset(inst.operands[2])
         val simm7 = (offset / 8) & 0x7F
-        val encoding = opcode | (simm7 << 15) | (rt2 << 10) | (base << 5) | rt1
+        val encoding = 0xA9000000 | (((simm7) << 15)) | (((rt2) << 10)) | (((base) << 5)) | rt1
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_LDP:
-        # The selector's four-operand frame restore is postindexed with writeback;
-        # the three-operand Mem form is an ordinary offset pair load.
+        # LDP Rt1, Rt2, [Xn, #off]
+        # 0xA9400000 | ((off/bitwise_and(8, 0x7F)) << 15) | (((Rt2) << 10)) | (((Rn) << 5)) | Rt1
         val rt1 = get_phys_reg_id(inst.operands[0])
         val rt2 = get_phys_reg_id(inst.operands[1])
-        val writeback = inst.operands.len() == 4
-        val base = if writeback: get_phys_reg_id(inst.operands[2]) else: get_mem_base_id(inst.operands[2])
-        val offset = if writeback: get_imm_value(inst.operands[3]) else: get_mem_offset(inst.operands[2])
-        val opcode = if writeback: 0xA8C00000 else: 0xA9400000
+        val base = get_mem_base_id(inst.operands[2])
+        val offset = get_mem_offset(inst.operands[2])
         val simm7 = (offset / 8) & 0x7F
-        val encoding = opcode | (simm7 << 15) | (rt2 << 10) | (base << 5) | rt1
+        val encoding = 0xA9400000 | (((simm7) << 15)) | (((rt2) << 10)) | (((base) << 5)) | rt1
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_B:

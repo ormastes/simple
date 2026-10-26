@@ -67,7 +67,7 @@ backend state with managed sessions.
 ### Types
 
 #### GpuBackend
-```simple:skip
+```simple
 enum GpuBackend:
     Cuda       # NVIDIA CUDA backend
     Vulkan     # Vulkan compute backend
@@ -79,7 +79,7 @@ enum GpuBackend:
 ```
 
 #### Gpu
-```simple:skip
+```simple
 struct Gpu:
     backend: GpuBackend
     device_id: i64
@@ -128,7 +128,7 @@ struct Gpu:
 **Import:** `use std.gpu.device.*`
 
 ### GpuDeviceEntry
-```simple:skip
+```simple
 struct GpuDeviceEntry:
     backend: GpuBackend
     device_id: i64
@@ -145,7 +145,7 @@ struct GpuDeviceEntry:
 ### Types
 
 #### GpuBuffer
-```simple:skip
+```simple
 struct GpuBuffer:
     backend: GpuBackend
     cuda_ptr: CudaPtr?
@@ -169,7 +169,7 @@ struct GpuBuffer:
 | `raw_handle()` | `i64` | Get Vulkan handle (0 for CUDA) |
 
 #### GpuArray\<T\>
-```simple:skip
+```simple
 struct GpuArray<T>:
     buffer: GpuBuffer
     len: i64
@@ -186,7 +186,7 @@ struct GpuArray<T>:
 | `copy_to_host(data: [u8])` | `bool` | Copy to host |
 
 #### GpuMemoryPool
-```simple:skip
+```simple
 struct GpuMemoryPool:
     gpu: Gpu
     chunk_size: i64
@@ -233,7 +233,7 @@ struct GpuMemoryPool:
 ### Types
 
 #### GpuKernel
-```simple:skip
+```simple
 struct GpuKernel:
     name: text
     cuda_module: CudaModule?
@@ -245,7 +245,7 @@ struct GpuKernel:
 ```
 
 #### KernelLaunch
-```simple:skip
+```simple
 struct KernelLaunch:
     grid: (i64, i64, i64)
     block: (i64, i64, i64)
@@ -292,7 +292,7 @@ struct KernelLaunch:
 ### Types
 
 #### GpuStream
-```simple:skip
+```simple
 struct GpuStream:
     backend: GpuBackend
     cuda_stream: CudaStream?
@@ -307,7 +307,7 @@ struct GpuStream:
 | `destroy()` | `bool` | Destroy stream |
 
 #### GpuEvent
-```simple:skip
+```simple
 struct GpuEvent:
     backend: GpuBackend
     vulkan_fence: i64?
@@ -324,7 +324,7 @@ struct GpuEvent:
 | `destroy()` | `bool` | Destroy event |
 
 #### GpuMemoryScope
-```simple:skip
+```simple
 enum GpuMemoryScope:
     Device     # All threads on device
     Workgroup  # Threads in same workgroup
@@ -369,7 +369,7 @@ enum GpuMemoryScope:
 ### Types
 
 #### CudaDeviceInfo
-```simple:skip
+```simple
 struct CudaDeviceInfo:
     id: i64
     name: text
@@ -378,7 +378,7 @@ struct CudaDeviceInfo:
 ```
 
 #### CudaPtr
-```simple:skip
+```simple
 struct CudaPtr:
     ptr: i64
     size: i64
@@ -386,14 +386,14 @@ struct CudaPtr:
 ```
 
 #### CudaModule
-```simple:skip
+```simple
 struct CudaModule:
     handle: i64
     is_valid: bool
 ```
 
 #### CudaKernel
-```simple:skip
+```simple
 struct CudaKernel:
     handle: i64
     module: CudaModule
@@ -402,7 +402,7 @@ struct CudaKernel:
 ```
 
 #### CudaLaunchConfig
-```simple:skip
+```simple
 struct CudaLaunchConfig:
     grid: (i64, i64, i64)
     block: (i64, i64, i64)
@@ -410,7 +410,7 @@ struct CudaLaunchConfig:
 ```
 
 #### CudaStream
-```simple:skip
+```simple
 struct CudaStream:
     handle: i64
     is_valid: bool
@@ -471,7 +471,7 @@ struct CudaStream:
 ### Types
 
 #### VulkanDeviceType
-```simple:skip
+```simple
 enum VulkanDeviceType:
     Discrete     # Dedicated GPU
     Integrated   # Integrated GPU
@@ -481,7 +481,7 @@ enum VulkanDeviceType:
 ```
 
 #### VulkanDeviceInfo
-```simple:skip
+```simple
 struct VulkanDeviceInfo:
     id: i64
     name: text
@@ -491,7 +491,7 @@ struct VulkanDeviceInfo:
 ```
 
 #### VulkanBufferUsage
-```simple:skip
+```simple
 enum VulkanBufferUsage:
     Storage        # Storage buffer
     Uniform        # Uniform buffer
@@ -500,7 +500,7 @@ enum VulkanBufferUsage:
 ```
 
 #### VulkanBuffer
-```simple:skip
+```simple
 struct VulkanBuffer:
     handle: i64
     size: i64
@@ -509,14 +509,14 @@ struct VulkanBuffer:
 ```
 
 #### VulkanShader
-```simple:skip
+```simple
 struct VulkanShader:
     handle: i64
     is_valid: bool
 ```
 
 #### VulkanPipeline
-```simple:skip
+```simple
 struct VulkanPipeline:
     handle: i64
     shader: VulkanShader
@@ -525,7 +525,7 @@ struct VulkanPipeline:
 ```
 
 #### VulkanDescriptorSet
-```simple:skip
+```simple
 struct VulkanDescriptorSet:
     handle: i64
     pipeline: VulkanPipeline
@@ -533,14 +533,14 @@ struct VulkanDescriptorSet:
 ```
 
 #### VulkanCommandBuffer
-```simple:skip
+```simple
 struct VulkanCommandBuffer:
     handle: i64
     is_valid: bool
 ```
 
 #### VulkanDispatchConfig
-```simple:skip
+```simple
 struct VulkanDispatchConfig:
     workgroups: (i64, i64, i64)
     local_size: (i64, i64, i64)
@@ -661,7 +661,7 @@ Maps Simple types to SPIR-V types.
 
 ### BackendKind
 
-```simple:skip
+```simple
 enum BackendKind:
     Cranelift   # Cranelift code generation
     Llvm        # LLVM code generation
@@ -674,7 +674,7 @@ enum BackendKind:
 
 ### CodegenTarget
 
-```simple:skip
+```simple
 enum CodegenTarget:
     X86_64
     AArch64
@@ -747,7 +747,7 @@ Qualcomm profile helpers:
 
 ### Quick Start
 
-```simple:skip
+```simple
 use std.gpu.engine3d.engine.{Engine3D}
 use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D}
 
@@ -810,7 +810,7 @@ engine.shutdown()
 
 `ResourcePool3D` (`resource_pool.spl`) tracks all GPU resources with frame-age garbage collection. Each handle carries an `id` (pool index) and a `gpu_id` (backend resource ID).
 
-```simple:skip
+```simple
 use std.gpu.engine3d.resource_pool.{ResourcePool3D, TextureHandle3D, BufferHandle3D, ShaderHandle3D, PipelineHandle3D}
 
 # Textures

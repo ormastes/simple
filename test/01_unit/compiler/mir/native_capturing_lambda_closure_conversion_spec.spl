@@ -116,28 +116,6 @@ fn errors_joined(errs: [MirError]) -> text:
         out = out + e.message + "\n"
     out
 
-fn count_typed_callback_returns(mir: MirModule, expected_kind: text) -> i64:
-    var count = 0
-    for function in mir.functions.values():
-        for block in function.blocks:
-            for instruction in block.instructions:
-                match instruction.kind:
-                    case MirInstKind.CallIndirect(_, _, _, signature):
-                        match signature.return_type.kind:
-                            case MirTypeKind.Struct(_):
-                                if expected_kind == "record": count = count + 1
-                            case MirTypeKind.Tuple(fields):
-                                if fields.len() == 2 and expected_kind == "text":
-                                    val first_is_text_pointer = match fields[0].kind:
-                                        case MirTypeKind.Ptr(pointee, mutable):
-                                            pointee.kind == MirTypeKind.U8 and not mutable
-                                        case _: false
-                                    if first_is_text_pointer and fields[1].kind == MirTypeKind.U64:
-                                        count = count + 1
-                            case _: ()
-                    case _: ()
-    count
-
 describe "capturing lambda MIR closure conversion", tag: ["only-compiled"]:
     # @manual scenario evidence
     it "lowers a val-bound capturing lambda call without 'undefined variable'":
@@ -173,42 +151,6 @@ describe "capturing lambda MIR closure conversion", tag: ["only-compiled"]:
         val errs = errors_joined(lowering_errors(src))
         expect_not(errs.contains("unresolved method call: f"))
         expect_not(errs.contains("E-MIR-EXPR-Lambda"))
-
-    it "retains a typed parameter owner for a record-returning callback":
-        val src = "struct Answer:\n    value: i64\nstruct Port:\n    execute_fn: fn(i64) -> Answer\nfn apply(port: Port) -> i64:\n    val observed = port.execute_fn(7)\n    observed.value\n"
-        val errs = errors_joined(lowering_errors(src))
-        expect(errs.contains("unresolved method call: execute_fn")).to_equal(false)
-        expect(errs).to_equal("")
-        expect(count_typed_callback_returns(lower_source(src), "record")).to_equal(2)
-
-    it "uses the declared text return of a function-valued field":
-        val src = "struct Port:\n    tag_fn: fn() -> text\nfn tag(port: Port) -> text:\n    port.tag_fn()\n"
-        expect(errors_joined(lowering_errors(src))).to_equal("")
-        expect(count_typed_callback_returns(lower_source(src), "text")).to_equal(2)
-
-    it "captures a value but not the declaration of its returned record":
-        val src = "struct Answer:\n    value: i64\n    label: text\nstruct Port:\n    execute_fn: fn(i64) -> Answer\nfn run() -> i64:\n    val offset = 13\n    val port = Port(execute_fn: \\value: Answer(value: value + offset, label: \"captured\"))\n    val observed = port.execute_fn(7)\n    observed.value\n"
-        val errs = errors_joined(lowering_errors(src))
-        expect(errs).to_equal("")
-        val mir = lower_source(src)
-        expect(count_direct_calls_named(mir, "rt_closure_set_capture")).to_equal(1)
-        expect(count_direct_calls_named(mir, "rt_closure_get_capture")).to_equal(1)
-
-    it "lifts a while callback with body-local shadowing and no captures":
-        val src = "fn make_callback() -> fn() -> i64:\n    \\:\n        var shadow = 99\n        var i = 0\n        while i < 2:\n            val shadow = i + 5\n            i = i + 1\n        i + shadow\n"
-        expect(errors_joined(lowering_errors(src))).to_equal("")
-        val mir = lower_source(src)
-        expect(has_function_prefix(mir, "__lambda_lift_")).to_equal(true)
-        expect(count_direct_calls_named(mir, "rt_closure_new")).to_equal(0)
-
-    it "captures a while condition and body without leaking body-local bindings":
-        val src = "fn make_callback(limit: i64, step: i64) -> fn() -> i64:\n    \\:\n        var i = 0\n        var total = 0\n        while i < limit:\n            val limit = step\n            total = total + limit\n            i = i + 1\n        total\n"
-        expect(errors_joined(lowering_errors(src))).to_equal("")
-        val mir = lower_source(src)
-        expect(has_function_prefix(mir, "__lambda_lift_")).to_equal(true)
-        expect(count_direct_calls_named(mir, "rt_closure_new")).to_equal(1)
-        expect(count_direct_calls_named(mir, "rt_closure_set_capture")).to_equal(2)
-        expect(count_direct_calls_named(mir, "rt_closure_get_capture")).to_equal(2)
 
 describe "capturing lambdas native-build dual-run", tag: ["only-compiled", "slow"]:
     it "native-builds all six capture shapes and matches the interpreter lane":

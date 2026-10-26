@@ -399,11 +399,6 @@ impl<'a> MirLowerer<'a> {
             .type_registry
             .and_then(|tr| recovered_receiver_ty.and_then(|ty| tr.get(ty)))
             .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U64));
-        let receiver_is_i64_array = self.signed_word_lane
-            && self
-                .type_registry
-                .and_then(|tr| recovered_receiver_ty.and_then(|ty| tr.get(ty)))
-                .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::I64));
         let element_expr_ty = if expr_ty == TypeId::ANY {
             self.type_registry
                 .and_then(|tr| tr.get(receiver_ty))
@@ -454,26 +449,20 @@ impl<'a> MirLowerer<'a> {
                     | TypeId::U64
             )
         {
-            // Hoisted `[u8]` reads go through the layout-tagged pointer the
-            // loop preheader computed (bit 0 = slot layout), never the raw data
-            // pointer: a slot-layout `[u8]` (8-byte tagged elements, e.g. a `[]`
-            // literal in a struct field) read as packed bytes returned slot-word
-            // bytes. Bug: jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.
-            let u8_data_ptr = self.active_array_u8_data_ptr(receiver, index);
             return self.with_func(|func, current_block| {
                 let raw_byte = func.new_vreg();
                 let narrowed = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(raw_byte),
-                    target: CallTarget::from_name(if u8_data_ptr.is_some() {
+                    target: CallTarget::from_name(if hoisted_data_ptr.is_some() {
                         "rt_typed_bytes_u8_data_at"
                     } else if has_loop_len_bound {
                         "rt_typed_bytes_u8_unchecked"
                     } else {
                         "rt_typed_bytes_u8_at"
                     }),
-                    args: vec![u8_data_ptr.unwrap_or(receiver_reg), index_reg],
+                    args: vec![receiver_reg, index_reg],
                 });
                 block.instructions.push(MirInst::UnitNarrow {
                     dest: narrowed,
@@ -522,39 +511,6 @@ impl<'a> MirLowerer<'a> {
                     overflow: UnitOverflowBehavior::Wrap,
                 });
                 narrowed
-            });
-        } else if receiver_is_i64_array
-            && matches!(
-                index_ty,
-                TypeId::I8
-                    | TypeId::I16
-                    | TypeId::I32
-                    | TypeId::I64
-                    | TypeId::U8
-                    | TypeId::U16
-                    | TypeId::U32
-                    | TypeId::U64
-            )
-        {
-            // Layout-aware signed read: returns the raw i64 word for both the
-            // tagged layout (inline or heap-boxed wide) and the in-place packed
-            // layout, with no BoxInt/UnboxInt round trip.
-            // A hoisted loop pointer replaced `receiver_reg` with the raw data
-            // buffer; the accessor needs the array itself.
-            let array_reg = if hoisted_data_ptr.is_some() {
-                self.lower_expr(receiver)?
-            } else {
-                receiver_reg
-            };
-            return self.with_func(|func, current_block| {
-                let raw_word = func.new_vreg();
-                let block = func.block_mut(current_block).unwrap();
-                block.instructions.push(MirInst::Call {
-                    dest: Some(raw_word),
-                    target: CallTarget::from_name("rt_typed_words_i64_at"),
-                    args: vec![array_reg, index_reg],
-                });
-                raw_word
             });
         } else if receiver_is_u64_array
             && matches!(

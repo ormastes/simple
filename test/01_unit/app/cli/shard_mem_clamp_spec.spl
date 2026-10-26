@@ -1,7 +1,6 @@
 use std.spec
-use app.cli.shard_mem_clamp.{shard_mem_available_kb, shard_mem_available_kb_from_field, shard_threads_cap_for, shard_threads_tree_cap_for, shard_worker_budget_kb, shard_host_threads_cap, shard_host_worker_budget_kb, shard_host_budget_floor_kb, shard_cgroup_v2_path_from_proc, shard_cgroup_memory_max_paths, shard_cgroup_memory_max_kb_from_fields, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for, shard_threads_mem_cap}
-use app.io.env_ops.{env_get, env_set}
-use app.cli.shard_mem_clamp.{shard_threads_parent_cap_for}
+use std.io_runtime.{platform_name}
+use app.cli.shard_mem_clamp.{shard_mem_available_kb, shard_mem_available_kb_from_field, shard_threads_cap_for, shard_worker_budget_kb}
 
 # Mechanism pin for the MemAvailable-derived shard concurrency clamp.
 # Pre-fix the clamp did not exist: the thread count came from host_cpus/2 alone,
@@ -18,16 +17,20 @@ use app.cli.shard_mem_clamp.{shard_threads_parent_cap_for}
 # doc/09_report/build_parallelism_memory_audit_2026-08-23.md
 describe "shard memory clamp":
 
-    it "reads real host memory headroom on Windows and Linux":
+    it "parses MemAvailable out of a real /proc/meminfo":
         val kb = shard_mem_available_kb()
-        expect(kb > 0).to_be_true()
+        if platform_name() == "windows":
+            # No /proc on Windows: the reader must return the no-clamp
+            # sentinel rather than guess a concurrency from absent evidence.
+            expect(kb).to_equal(0)
+        else:
+            # This spec runs on Linux hosts; a plausible non-zero value proves the
+            # reader is live rather than silently returning the no-clamp sentinel.
+            expect(kb > 0).to_be_true()
 
-    it "returns unknown for missing junk negative or overflowing memory fields":
+    it "returns 0 for a missing or junk MemAvailable field, so the clamp is skipped":
         expect(shard_mem_available_kb_from_field("")).to_equal(0)
         expect(shard_mem_available_kb_from_field("not-a-number")).to_equal(0)
-        expect(shard_mem_available_kb_from_field("-1")).to_equal(0)
-        expect(shard_mem_available_kb_from_field("9223372036854775808")).to_equal(0)
-        expect(shard_mem_available_kb_from_field("9223372036854775807")).to_equal(9223372036854775807)
         expect(shard_mem_available_kb_from_field("  16000000  ")).to_equal(16000000)
 
     it "clamps 16 requested workers down when memory is short":
@@ -40,50 +43,10 @@ describe "shard memory clamp":
         expect(shard_threads_cap_for(8, 1650000, 125000000)).to_equal(8)
         expect(shard_threads_cap_for(2, 1650000, 125000000)).to_equal(2)
 
-    it "uses the sequential path when memory or the worker estimate is unknown":
+    it "never returns 0 workers, and never clamps when memory is unknown":
         expect(shard_threads_cap_for(16, 3000000, 1000)).to_equal(1)
-        expect(shard_threads_cap_for(16, 3000000, 0)).to_equal(1)
-        expect(shard_threads_cap_for(16, 3000000, -1)).to_equal(1)
-        expect(shard_threads_cap_for(16, 0, 16000000)).to_equal(1)
-
-    it "reserves space for the parent when a large host has a small tree cap":
-        expect(shard_threads_tree_cap_for(40, 1650000, 68000000, 5859375, true)).to_equal(2)
-        expect(shard_threads_tree_cap_for(40, 3000000, 68000000, 5859375, true)).to_equal(1)
-        expect(shard_threads_tree_cap_for(40, 1650000, 2000000, 5859375, true)).to_equal(1)
-
-    it "bounds an undeclared tree budget by measured host headroom, never unlimited":
-        # No enclosing cap declared: 0.6 * 68 GB / 1.65 GB = 24, not 40, not 1.
-        # Enforcing owners declare their cap through the RSS watchdog
-        # (scripts/bootstrap/tests/watchdog-shard-budget-export-test.shs).
-        expect(shard_threads_tree_cap_for(40, 1650000, 68000000, 0, true)).to_equal(24)
-        expect(shard_threads_tree_cap_for(40, 1650000, 68000000, -1, true)).to_equal(24)
-        # A low-memory host still drops to the sequential path.
-        expect(shard_threads_tree_cap_for(40, 1650000, 2000000, 0, true)).to_equal(1)
-        # Unknown host memory is still sequential, with or without a tree cap.
-        expect(shard_threads_tree_cap_for(40, 1650000, 0, 5859375, true)).to_equal(1)
-        expect(shard_threads_tree_cap_for(40, 1650000, 0, 0, true)).to_equal(1)
-
-    it "honours host max_threads and lets worker_mem_mib only raise a budget":
-        expect(shard_host_threads_cap(40, "8")).to_equal(8)
-        expect(shard_host_threads_cap(4, "8")).to_equal(4)
-        expect(shard_host_threads_cap(40, "")).to_equal(40)
-        expect(shard_host_threads_cap(40, "0")).to_equal(40)
-        expect(shard_host_worker_budget_kb("1000")).to_equal(1024000)
-        expect(shard_host_worker_budget_kb("")).to_equal(0)
-        expect(shard_host_worker_budget_kb("9223372036854775807")).to_equal(0)
-        # 1000 MiB must not replace the 3 GB HIR default; 4000 MiB may raise it.
-        expect(shard_host_budget_floor_kb(1024000, 3000000)).to_equal(3000000)
-        expect(shard_host_budget_floor_kb(4096000, 3000000)).to_equal(4096000)
-        expect(shard_host_budget_floor_kb(0, 3000000)).to_equal(3000000)
-
-    it "keeps a known tree cap when the host estimate is explicitly disabled":
-        expect(shard_threads_tree_cap_for(40, 1650000, 0, 5859375, false)).to_equal(2)
-        expect(shard_threads_tree_cap_for(40, 1650000, 0, 0, false)).to_equal(40)
-
-    it "does not overflow a positive i64 memory bound or raise a serial request":
-        expect(shard_threads_cap_for(40, 1650000, 9223372036854775807)).to_equal(40)
-        expect(shard_threads_tree_cap_for(1, 1650000, 0, 0, true)).to_equal(1)
-        expect(shard_threads_tree_cap_for(0, 1650000, 0, 0, true)).to_equal(0)
+        expect(shard_threads_cap_for(16, 3000000, 0)).to_equal(16)
+        expect(shard_threads_cap_for(16, 0, 16000000)).to_equal(16)
 
     it "clamps HIR shards harder than parse shards at the same memory":
         # HIR children still spawn the full worker closure; parse children run
@@ -95,107 +58,3 @@ describe "shard memory clamp":
 
     it "takes the per-phase budget default when no env override is set":
         expect(shard_worker_budget_kb("SIMPLE_SHARD_BUDGET_UNSET_XYZ", 1650000)).to_equal(1650000)
-
-    # cgroup v2 memory.max (systemd-run -p MemoryMax=, container limits) is an
-    # enforced tree cap that no wrapper exports as SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB.
-    # Sizing fanout from host MemAvailable inside such a cgroup over-admits
-    # workers and the whole tree is OOM-killed (bug
-    # shard_mem_clamp_ignores_enclosing_cgroup_memory_max_2026-10-19).
-    it "finds the cgroup v2 path of this process and ignores v1-only tables":
-        expect(shard_cgroup_v2_path_from_proc("0::/user.slice/user-1000.slice/run-1.scope\n")).to_equal("/user.slice/user-1000.slice/run-1.scope")
-        expect(shard_cgroup_v2_path_from_proc("12:memory:/docker/abc\n11:cpu:/docker/abc\n")).to_equal("")
-        expect(shard_cgroup_v2_path_from_proc("")).to_equal("")
-        expect(shard_cgroup_v2_path_from_proc("0::/")).to_equal("/")
-
-    it "walks memory.max from the leaf cgroup up to the root":
-        expect(shard_cgroup_memory_max_paths("/a/b.scope")).to_equal([
-            "/sys/fs/cgroup/a/b.scope/memory.max",
-            "/sys/fs/cgroup/a/memory.max",
-            "/sys/fs/cgroup/memory.max"])
-        expect(shard_cgroup_memory_max_paths("/")).to_equal(["/sys/fs/cgroup/memory.max"])
-        expect(shard_cgroup_memory_max_paths("")).to_equal([])
-
-    it "takes the smallest numeric memory.max on the chain in kB and treats max as unlimited":
-        # systemd-run -p MemoryMax=24G on the leaf, parents unlimited: 24 GiB.
-        expect(shard_cgroup_memory_max_kb_from_fields(["25769803776", "max", "max"])).to_equal(25165824)
-        # The tightest ancestor wins, not the leaf.
-        expect(shard_cgroup_memory_max_kb_from_fields(["max", "8589934592", "25769803776"])).to_equal(8388608)
-        expect(shard_cgroup_memory_max_kb_from_fields(["max", "max"])).to_equal(0)
-        expect(shard_cgroup_memory_max_kb_from_fields([])).to_equal(0)
-        # Junk and unreadable levels are ignored, never read as a bound of 0.
-        expect(shard_cgroup_memory_max_kb_from_fields(["", "junk", "-5", "1048576"])).to_equal(1024)
-        expect(shard_cgroup_memory_max_kb_from_fields(["9223372036854775807"])).to_equal(9007199254740991)
-
-    it "reads the live cgroup chain without failing on hosts that have none":
-        expect(shard_cgroup_memory_max_kb() >= 0).to_be_true()
-
-    # Live pin, opt-in from an enforcing wrapper, e.g.
-    #   systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 \
-    #     env SIMPLE_SPEC_EXPECT_CGROUP_MEMORY_MAX_KB=8388608 \
-    #         SIMPLE_SPEC_EXPECT_CGROUP_THREADS=1 bin/simple test <this spec>
-    # 0.6 * 8 GiB / 3 GB = 1 HIR worker for a request of 8.
-    it "sizes HIR fanout from the enclosing cgroup cap when one is enforced":
-        val expected_kb = (env_get("SIMPLE_SPEC_EXPECT_CGROUP_MEMORY_MAX_KB") ?? "").to_i64() ?? 0
-        if expected_kb > 0:
-            expect(shard_cgroup_memory_max_kb()).to_equal(expected_kb)
-            val expected_threads = (env_get("SIMPLE_SPEC_EXPECT_CGROUP_THREADS") ?? "").to_i64() ?? 0
-            if expected_threads > 0:
-                expect(shard_threads_mem_cap(8, 3000000)).to_equal(expected_threads)
-        else:
-            expect(expected_kb).to_equal(0)
-
-    it "lets an enclosing cgroup cap only tighten the declared tree budget":
-        # No declared budget: the cgroup cap is the tree budget.
-        expect(shard_tree_budget_kb_for(0, 25165824)).to_equal(25165824)
-        # Declared budget inside a smaller cgroup: the cgroup wins.
-        expect(shard_tree_budget_kb_for(45088768, 25165824)).to_equal(25165824)
-        # Declared budget below the cgroup cap stays binding.
-        expect(shard_tree_budget_kb_for(5859375, 25165824)).to_equal(5859375)
-        # No cgroup cap: unchanged, including "undeclared".
-        expect(shard_tree_budget_kb_for(5859375, 0)).to_equal(5859375)
-        expect(shard_tree_budget_kb_for(0, 0)).to_equal(0)
-        # 24 GiB cgroup, 3 GB HIR workers: 0.6 * 24 GiB / 3 GB = 5, not 8.
-        expect(shard_threads_tree_cap_for(8, 3000000, 108000000, shard_tree_budget_kb_for(0, 25165824), true)).to_equal(5)
-
-    it "scales HIR estimates with the parent while preserving deliberate overrides":
-        val key = "SIMPLE_SPEC_HIR_PARENT_BUDGET"
-        val old = env_get(key) ?? ""
-        val old_host = env_get("SIMPLE_HOST_WORKER_MEM_MIB") ?? ""
-        env_set("SIMPLE_HOST_WORKER_MEM_MIB", "")
-        env_set(key, "")
-        expect(shard_worker_budget_kb(key, 3000000, 6522576)).to_equal(6522576)
-        expect(shard_worker_budget_kb(key, 3000000, 100000)).to_equal(3000000)
-        for invalid in ["invalid", "0", "-1", "9223372036854775808"]:
-            env_set(key, invalid)
-            expect(shard_worker_budget_kb(key, 3000000, 6522576)).to_equal(6522576)
-        env_set("SIMPLE_HOST_WORKER_MEM_MIB", "8000")
-        expect(shard_worker_budget_kb(key, 3000000, 6522576)).to_equal(8192000)
-        env_set(key, "1000000")
-        expect(shard_worker_budget_kb(key, 3000000, 6522576)).to_equal(1000000)
-        env_set(key, old)
-        env_set("SIMPLE_HOST_WORKER_MEM_MIB", old_host)
-
-    it "bounds the failed HIR fixture with a workload-sensitive estimate":
-        # Actual sampled parent/worker figures are not exact future peaks.
-        val parent = 6522576
-        val budget = 67108864
-        val admitted = shard_threads_parent_cap_for(20, parent, 115183228, budget, true, parent)
-        expect(admitted).to_equal(6)
-        expect(parent + admitted * parent <= budget).to_equal(true)
-        expect(shard_threads_parent_cap_for(20, 3000000, 115183228, budget, true, 100000)).to_equal(13)
-
-    it "admits exact estimated fits and rejects one-under even for serial isolation":
-        expect(shard_threads_parent_cap_for(20, 3, 0, 10, false, 4)).to_equal(2)
-        expect(shard_threads_parent_cap_for(20, 3, 0, 9, false, 4)).to_equal(1)
-        expect(shard_threads_parent_cap_for(1, 3, 0, 7, false, 4)).to_equal(1)
-        expect(shard_threads_parent_cap_for(1, 3, 0, 6, false, 4)).to_equal(0)
-        expect(shard_threads_parent_cap_for(20, 1, 0, 10, false, 10)).to_equal(0)
-
-    it "retains host caps and handles invalid or maximal arithmetic without overflow":
-        expect(shard_threads_parent_cap_for(8, 0, 100, 100, true, 1)).to_equal(0)
-        expect(shard_threads_parent_cap_for(0, 1, 100, 100, true, 1)).to_equal(0)
-        expect(shard_threads_parent_cap_for(8, 3, 0, 0, true, 0)).to_equal(1)
-        expect(shard_threads_parent_cap_for(8, 3, 0, 0, false, 0)).to_equal(8)
-        expect(shard_threads_parent_cap_for(8, 3, 10, 100, true, 1)).to_equal(2)
-        expect(shard_threads_parent_cap_for(8, 1, 0, 9223372036854775807, false, 9223372036854775806)).to_equal(1)
-        expect(shard_threads_parent_cap_for(8, 1, 0, 9223372036854775807, false, 9223372036854775807)).to_equal(0)

@@ -2,9 +2,6 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_s
 export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_decl_apply.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_css_property_id.*
-use std.gc_async_mut.gpu.browser_engine.simple_web_box_geometry_provenance.{
-    web_box_geometry_capture_tokens, web_box_geometry_tokens_reason,
-    web_fractional_capture_authored_decls}
 
 fn sticky_top_inset_value(
     raw: text, parsed: i32, position_sticky: bool
@@ -102,89 +99,13 @@ fn _padding_integer_px(token: text) -> i32:
         index = index + 1
     number
 
-# Viewport for vw/vh lengths (gap D, 2026-10-05). Set by
-# compute_styles_with_material for exactly one cascade pass (and part of the
-# cascade memo key); -1 outside a pass, where vw/vh stay unsupported.
-var _css_cascade_viewport_w: i32 = -1
-var _css_cascade_viewport_h: i32 = -1
-
-fn css_cascade_viewport_set(viewport_w: i32, viewport_h: i32):
-    _css_cascade_viewport_w = viewport_w
-    _css_cascade_viewport_h = viewport_h
-
-# Non-negative decimal "12", "1.5", ".25" -> thousandths; -1 when malformed.
-fn _padding_decimal_milli(digits: text) -> i64:
-    if digits == "" or digits == ".":
-        return -1
-    var whole: i64 = 0
-    var frac: i64 = 0
-    var frac_digits = 0
-    var seen_dot = false
-    var index = 0
-    while index < digits.len():
-        val ch = digits.char_at(index)
-        if ch == ".":
-            if seen_dot:
-                return -1
-            seen_dot = true
-        else:
-            val digit = dec_val(ch)
-            if digit >= 10:
-                return -1
-            if seen_dot:
-                if frac_digits < 3:
-                    frac = frac * 10 + digit
-                    frac_digits = frac_digits + 1
-            else:
-                if whole > 1000000:
-                    return -1
-                whole = whole * 10 + digit
-        index = index + 1
-    while frac_digits < 3:
-        frac = frac * 10
-        frac_digits = frac_digits + 1
-    whole * 1000 + frac
-
-# One padding token -> px. px (integer, as before), 0, em (element font
-# size), rem (16px root), vw/vh (cascade viewport). -1 rejects the token,
-# which drops the whole declaration, as before.
-fn _padding_length_px(token: text, font_px: i32) -> i32:
-    val value = token.trim().lower()
-    if value.ends_with("px"):
-        return _padding_integer_px(value)
-    var unit_suffix = ""
-    var basis: i64 = 0
-    if value.ends_with("rem"):
-        unit_suffix = "rem"
-        basis = 16
-    elif value.ends_with("em"):
-        unit_suffix = "em"
-        basis = font_px as i64
-    elif value.ends_with("vh"):
-        unit_suffix = "vh"
-        basis = _css_cascade_viewport_h as i64
-    elif value.ends_with("vw"):
-        unit_suffix = "vw"
-        basis = _css_cascade_viewport_w as i64
-    if unit_suffix == "":
-        return _padding_integer_px(value)
-    if basis <= 0:
-        return -1
-    val milli = _padding_decimal_milli(value.substring(0, value.len() - unit_suffix.len()))
-    if milli < 0:
-        return -1
-    val scaled = if unit_suffix == "vh" or unit_suffix == "vw": basis * milli / 100000 else: basis * milli / 1000
-    if scaled > 1000000:
-        return -1
-    scaled as i32
-
-fn _padding_integer_px_values(raw: text, maximum: i32, font_px: i32 = 16) -> [i32]:
+fn _padding_integer_px_values(raw: text, maximum: i32) -> [i32]:
     val tokens = ws_tokens(raw.trim().lower())
     var values: [i32] = []
     if tokens.len() == 0 or tokens.len() > maximum:
         return values
     for token in tokens:
-        val value = _padding_length_px(token, font_px)
+        val value = _padding_integer_px(token)
         if value < 0:
             return []
         values.push(value)
@@ -192,7 +113,7 @@ fn _padding_integer_px_values(raw: text, maximum: i32, font_px: i32 = 16) -> [i3
 
 fn _resolve_authored_padding(
     decl_tbl: [text], initial_top: i32, initial_right: i32,
-    initial_bottom: i32, initial_left: i32, font_px: i32 = 16
+    initial_bottom: i32, initial_left: i32
 ) -> (i32, i32, i32, i32):
     var top = initial_top
     var right = initial_right
@@ -203,7 +124,7 @@ fn _resolve_authored_padding(
         val name = decl_tbl[index]
         val raw = decl_tbl[index + 1]
         if name == "padding":
-            val values = _padding_integer_px_values(raw, 4, font_px)
+            val values = _padding_integer_px_values(raw, 4)
             if values.len() > 0:
                 top = values[0]
                 right = values[0]
@@ -221,45 +142,45 @@ fn _resolve_authored_padding(
                     bottom = values[2]
                     left = values[3]
         elif name == "padding-top":
-            val values = _padding_integer_px_values(raw, 1, font_px)
+            val values = _padding_integer_px_values(raw, 1)
             if values.len() == 1:
                 top = values[0]
         elif name == "padding-right":
-            val values = _padding_integer_px_values(raw, 1, font_px)
+            val values = _padding_integer_px_values(raw, 1)
             if values.len() == 1:
                 right = values[0]
         elif name == "padding-bottom":
-            val values = _padding_integer_px_values(raw, 1, font_px)
+            val values = _padding_integer_px_values(raw, 1)
             if values.len() == 1:
                 bottom = values[0]
         elif name == "padding-left":
-            val values = _padding_integer_px_values(raw, 1, font_px)
+            val values = _padding_integer_px_values(raw, 1)
             if values.len() == 1:
                 left = values[0]
         elif name == "padding-block":
-            val values = _padding_integer_px_values(raw, 2, font_px)
+            val values = _padding_integer_px_values(raw, 2)
             if values.len() > 0:
                 top = values[0]
                 bottom = if values.len() == 2: values[1] else: values[0]
         elif name == "padding-block-start":
-            val values = _padding_integer_px_values(raw, 1, font_px)
+            val values = _padding_integer_px_values(raw, 1)
             if values.len() == 1:
                 top = values[0]
         elif name == "padding-block-end":
-            val values = _padding_integer_px_values(raw, 1, font_px)
+            val values = _padding_integer_px_values(raw, 1)
             if values.len() == 1:
                 bottom = values[0]
         elif name == "padding-inline":
-            val values = _padding_integer_px_values(raw, 2, font_px)
+            val values = _padding_integer_px_values(raw, 2)
             if values.len() > 0:
                 left = values[0]
                 right = if values.len() == 2: values[1] else: values[0]
         elif name == "padding-inline-start":
-            val values = _padding_integer_px_values(raw, 1, font_px)
+            val values = _padding_integer_px_values(raw, 1)
             if values.len() == 1:
                 left = values[0]
         elif name == "padding-inline-end":
-            val values = _padding_integer_px_values(raw, 1, font_px)
+            val values = _padding_integer_px_values(raw, 1)
             if values.len() == 1:
                 right = values[0]
         index = index + 2
@@ -641,11 +562,6 @@ fn _apply_decls_dispatch(
             val cv = parse_color(col)
             if cv != 0u32:
                 st.fg = cv
-            elif col.trim().lower() == "transparent":
-                # parse_color returns 0 both for "transparent" and for an
-                # unparsable value; only the keyword sets the fully
-                # transparent color (alpha 0), which paint then skips.
-                st.fg = 0u32
     if css_prop_mask_has(mask, CSS_PROP_WIDTH):
         css_probe_note()
         val width_raw = decl_tbl_get(decl_tbl, "width")
@@ -844,7 +760,7 @@ fn _apply_decls_dispatch(
     if css_prop_mask_has(mask, CSS_PROP_PADDING):
         css_probe_note()
         val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
-            decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l, st.font_size
+            decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l
         )
         st.pad_t = resolved_pad_t
         st.pad_r = resolved_pad_r
@@ -1244,14 +1160,6 @@ fn _apply_decls_on_writing_mode(
         return st
     # One table owns ordinary values, Grid values, and authored metadata.
     val table = decl_table_build(decls)
-    # Capture winning authored lengths before either integer declaration path
-    # can truncate them. Later declarations replace the same property slot.
-    val geometry_tokens = web_box_geometry_capture_tokens(
-        st.box_geometry_raw_tokens, table)
-    val geometry_unresolved = web_box_geometry_tokens_reason(
-        geometry_tokens) != ""
-    val fractional_decls = web_fractional_capture_authored_decls(
-        st.fractional_authored_decls, table)
     val has_grid_declaration = (
         decl_tbl_last_index(table, "grid-template-columns") >= 0 or
         decl_tbl_last_index(table, "grid-template-rows") >= 0 or
@@ -1265,13 +1173,9 @@ fn _apply_decls_on_writing_mode(
         val ordinary = _apply_decls_without_grid(
             st, decls, table, em_base, logical_writing_mode, apply_display
         )
-        var result = apply_authored_style_metadata(
+        return apply_authored_style_metadata(
             ordinary, st, table, logical_writing_mode
         )
-        result.box_geometry_raw_tokens = geometry_tokens
-        result.box_geometry_unresolved = geometry_unresolved
-        result.fractional_authored_decls = fractional_decls
-        return result
     val columns = st.grid_template_columns
     val rows = st.grid_template_rows
     val column = st.grid_column
@@ -1290,12 +1194,7 @@ fn _apply_decls_on_writing_mode(
     result.grid_area = area
     result.grid_auto_flow_column = auto_flow_column
     apply_grid_decls(result, table)
-    result = apply_authored_style_metadata(
-        result, st, table, logical_writing_mode)
-    result.box_geometry_raw_tokens = geometry_tokens
-    result.box_geometry_unresolved = geometry_unresolved
-    result.fractional_authored_decls = fractional_decls
-    result
+    apply_authored_style_metadata(result, st, table, logical_writing_mode)
 
 fn apply_decls_on_writing_mode(
     st: Style, decls: text, em_base: i32, logical_writing_mode: text
@@ -1411,8 +1310,8 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         st.font_style_italic = true
     elif tag == "mark":
         display_v = "inline"
-        st.bg = web_argb(255, 255, 0)
-        fg_v = web_argb(0, 0, 0)
+        st.bg = argb(255, 255, 0)
+        fg_v = argb(0, 0, 0)
     elif tag == "sub" or tag == "sup":
         # Selected medium-UA profile: `smaller` is 5/6 of the inherited size,
         # rounded half up. The inherited zero line-height sentinel stays normal.
@@ -1421,7 +1320,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         vertical_align_v = if tag == "sub": "sub" else: "super"
     elif tag == "hr":
         var rule = st
-        val rule_color = web_argb(128, 128, 128)
+        val rule_color = argb(128, 128, 128)
         rule.display = if st.display == "none": "none" else: "block"
         rule.margin_t = 8
         rule.margin_b = 8
@@ -1477,7 +1376,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         st.border_t = 2
         st.border_r = 2
         st.border_b = 2
-        st.border_color = web_argb(118, 118, 118)
+        st.border_color = argb(118, 118, 118)
         st.border_color_l = st.border_color
         st.border_color_t = st.border_color
         st.border_color_r = st.border_color
@@ -1522,7 +1421,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
     elif tag == "a":
-        fg_v = web_argb(0, 0, 238)
+        fg_v = argb(0, 0, 238)
         underline_v = true
     elif tag == "ul" or tag == "ol" or tag == "menu":
         display_v = "block"

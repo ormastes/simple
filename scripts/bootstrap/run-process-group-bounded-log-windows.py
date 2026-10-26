@@ -23,22 +23,6 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def reap_root_until(wait, process, deadline, clock=time.monotonic, last_error=None):
-    """Reap within the shared cleanup budget; never retry a failed Win32 API."""
-    code = 258  # WAIT_TIMEOUT, including an already exhausted deadline.
-    while True:
-        remaining = deadline - clock()
-        if remaining <= 0:
-            return "deadline", code, 0
-        code = wait(process, max(1, min(1000, int(remaining * 1000))))
-        if code == 0:  # WAIT_OBJECT_0
-            return "reaped", code, 0
-        if code == 0xFFFFFFFF:  # WAIT_FAILED
-            return "wait-failed", code, last_error() if last_error else ct.get_last_error()
-        if code != 258:
-            return "unexpected-wait-result", code, 0
-
-
 def main():
     if os.name != "nt":
         raise RuntimeError("Windows adapter requires native Windows Python")
@@ -54,7 +38,7 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else []
-    if not command or args.max_bytes <= 0 or args.timeout_seconds < 0 or args.term_grace_seconds < 0:
+    if not command or args.max_bytes <= 0 or args.timeout_seconds <= 0 or args.term_grace_seconds < 0:
         raise RuntimeError("invalid command or limits")
     environment_text = None
     if args.command_environment == "clean-prefix":
@@ -193,10 +177,6 @@ def main():
             command_line = ct.create_unicode_buffer(subprocess.list2cmdline(command))
             environment_block = ct.create_unicode_buffer(environment_text) if environment_text is not None else None
             reason, raw_status, native_status = "exec-failure", 127, "not-run"
-            receipt_status = "complete"
-            cleanup_status = "not-needed"
-            cleanup_wait_code = cleanup_last_error = "not-observed"
-            bound_raw_status = "not-observed"
             spawned = create_process(None, command_line, None, None, True,
                                      0x00000004 | 0x08000000 | 0x00000400, environment_block, None,
                                      ct.byref(startup), ct.byref(process))
@@ -219,7 +199,7 @@ def main():
             root_exit_members = "not-observed"
             log_hash = hashlib.sha256()
             started = time.monotonic()
-            deadline = started + args.timeout_seconds if args.timeout_seconds else float("inf")
+            deadline = started + args.timeout_seconds
             read_handle = msvcrt.get_osfhandle(read_fd)
 
             def active_processes():
@@ -317,22 +297,11 @@ def main():
                     if time.monotonic() >= cleanup_deadline:
                         raise RuntimeError("job cleanup deadline")
                     time.sleep(0.01)
-                cleanup_status, cleanup_wait_code, cleanup_last_error = reap_root_until(
-                    wait, process.process, cleanup_deadline)
-                if cleanup_status == "reaped":
-                    native = wt.DWORD()
-                    require(exit_code(process.process, ct.byref(native)), "read terminated child exit")
-                    native_status = native.value
-                else:
-                    # Keep the bounded log and primary bound event, but reject
-                    # this receipt: root termination has not been proven.
-                    receipt_status = "aborted"
-                    bound_raw_status = raw_status
-                    raw_status = 126
-                    print(f"bounded-log-error: root reap {cleanup_status}; "
-                          f"bound_reason={reason}; bound_raw_status={bound_raw_status}; "
-                          f"wait_code={cleanup_wait_code}; win32_error={cleanup_last_error}",
-                          file=sys.stderr)
+                if wait(process.process, 1000) != 0:
+                    raise RuntimeError("root reap deadline")
+                native = wt.DWORD()
+                require(exit_code(process.process, ct.byref(native)), "read terminated child exit")
+                native_status = native.value
             os.fsync(log.fileno())
         if digest(helper) != args.helper_sha256:
             raise RuntimeError("collector helper mutated during execution")
@@ -340,10 +309,8 @@ def main():
         # temporary + MOVEFILE_WRITE_THROUGH retains the log if receipt publication fails.
         require(move(str(log_tmp), str(log_path), 0x8), "publish log without replacement")
         values = {
-            "schema": "simple-bounded-process-log-v1", "status": receipt_status,
+            "schema": "simple-bounded-process-log-v1", "status": "complete",
             "reason": reason, "raw_status": raw_status, "native_exit_status": native_status,
-            "cleanup_status": cleanup_status, "cleanup_wait_code": cleanup_wait_code,
-            "cleanup_last_error": cleanup_last_error, "bound_raw_status": bound_raw_status,
             "max_bytes": args.max_bytes, "bytes_captured": captured,
             "timeout_seconds": args.timeout_seconds, "term_grace_seconds": args.term_grace_seconds,
             "combined_stream": "stdout-stderr", "process_group": "windows-job",

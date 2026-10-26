@@ -372,9 +372,8 @@ pub(super) fn eval_collection_expr(
             }
             // Evaluate the value once and clone it
             let val = evaluate_expr(value, env, functions, classes, enums, impl_methods)?;
-            // Large in-domain repeats (`[0u32; w * h]` framebuffers) are stored
-            // packed; reads give back exactly the repeated value either way.
-            Ok(Some(Value::array(crate::value::ArrayData::repeat(val, count_int as usize))))
+            let arr: Vec<Value> = std::iter::repeat_n(val, count_int as usize).collect();
+            Ok(Some(Value::array(arr)))
         }
         Expr::Tuple(items) => {
             let mut tup = Vec::new();
@@ -534,7 +533,7 @@ pub(super) fn eval_collection_expr(
                     } else {
                         raw_idx as usize
                     };
-                    arr.get_value(idx).ok_or_else(|| {
+                    arr.get(idx).cloned().ok_or_else(|| {
                         // E3002 - Index Out Of Bounds
                         if std::env::var("SIMPLE_INTERP_OOB_DEBUG").is_ok() {
                             let recv_dbg = format!("{:?}", receiver);
@@ -670,7 +669,9 @@ pub(super) fn eval_collection_expr(
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
                     // Return nil for missing keys instead of erroring
-                    Ok(crate::interpreter::module_dict_get(&map, &key)
+                    Ok(map
+                        .get(&key)
+                        .cloned()
                         .map(|stored| Value::unwrap_dict_entry(&idx_val, stored))
                         .unwrap_or(Value::Nil))
                 }

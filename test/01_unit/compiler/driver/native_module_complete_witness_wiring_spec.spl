@@ -1,4 +1,5 @@
 use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
@@ -57,7 +58,7 @@ describe "native AOT complete module witness wiring":
         val layouts = native_external_layout_facts_from_mir_v1(module, true)
         val config = NativeModuleConfigFactV1(
             compiler_identity: "compiler-v1", target_identity: "x86_64",
-            options_identity: "opt=2", provider_identity: "builtin-native", emitter_scheme: "pure-simple-dotted-v1")
+            options_identity: "opt=2", provider_identity: "builtin-native")
         val complete_facts = native_module_cache_fact_set_merge_v1(
             dependencies, resolutions, layouts)
         # Keep this call receiver-free: native method dispatch can misclassify
@@ -84,7 +85,7 @@ describe "native AOT complete module witness wiring":
             complete_facts.resolutions, complete_facts.layouts,
             NativeModuleConfigFactV1(
                 compiler_identity: "compiler-v1", target_identity: "aarch64",
-                options_identity: "opt=2", provider_identity: "builtin-native", emitter_scheme: "pure-simple-dotted-v1"))
+                options_identity: "opt=2", provider_identity: "builtin-native"))
         expect(witness.dependency_fold == changed_dependency.dependency_fold).to_equal(false)
         expect(witness.config_fingerprint == changed_config.config_fingerprint).to_equal(false)
 
@@ -104,3 +105,38 @@ describe "native AOT complete module witness wiring":
                 invalid_facts.resolutions, invalid_facts.layouts, config)
         expect(refused.valid).to_equal(false)
         expect(refused.reason).to_equal("fixture-incomplete-complete-facts")
+
+        val wiring = file_read(
+            "src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(wiring).to_contain("native_direct_dependency_facts_v1")
+        expect(wiring).to_contain("native_resolution_facts_v1")
+        expect(wiring).to_contain("native_external_layout_facts_from_mir_v1")
+        expect(wiring).to_contain("native_module_cache_fact_set_merge_v1")
+        expect(wiring).to_contain("module_cache_config")
+        expect(wiring).to_contain("capsule.module_witness")
+
+        val witness_start = wiring.index_of(
+            "fn driver_native_shadow_witness_v1(")
+        val witness_end = wiring.index_of(
+            "fn driver_native_shadow_bounded_module", witness_start)
+        val witness_body = wiring.slice(witness_start, witness_end)
+        val free_call = witness_body.index_of(
+            "native_module_cache_witness_v1(")
+        expect(free_call).to_be_greater_than(-1)
+        expect(witness_body.contains("complete_facts.witness(")).to_equal(false)
+        val module_arg = witness_body.index_of(
+            "complete_facts.module_id", free_call)
+        val mir_arg = witness_body.index_of("mir_identity", module_arg)
+        val dependencies_arg = witness_body.index_of(
+            "complete_facts.dependencies", mir_arg)
+        val resolutions_arg = witness_body.index_of(
+            "complete_facts.resolutions", dependencies_arg)
+        val layouts_arg = witness_body.index_of(
+            "complete_facts.layouts", resolutions_arg)
+        val config_arg = witness_body.index_of("config", layouts_arg)
+        expect(module_arg).to_be_greater_than(free_call)
+        expect(mir_arg).to_be_greater_than(module_arg)
+        expect(dependencies_arg).to_be_greater_than(mir_arg)
+        expect(resolutions_arg).to_be_greater_than(dependencies_arg)
+        expect(layouts_arg).to_be_greater_than(resolutions_arg)
+        expect(config_arg).to_be_greater_than(layouts_arg)

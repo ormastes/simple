@@ -1,7 +1,5 @@
 # MIR instruction graph and function/module owners.
 
-use std.common.math.math.{math_pow}
-
 use compiler.hir.hir_types.{SymbolId, HirType}
 use compiler.hir.hir_definitions.{HirContractBlock}
 use compiler.common.diagnostics.span.{Span}
@@ -11,15 +9,9 @@ use compiler.mir.mir_types.*
 use compiler.mir.mir_instruction_support.*
 use compiler.mir.mir_instruction_kinds.*
 # Preserve terminal providers when this graph is re-exported by mir_data.
-use compiler.mir.mir_types.{MirType, MirConstValue}
-use compiler.mir.mir_instruction_support.{mir_operand_const_int, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
-use compiler.mir.mir_enum_semantic_types.{MirEnumMatchSemanticV1, MirEnumDeclarationIdentityV1}
-
-# Match runtime.h: integer folding uses the existing signed i64 power ABI.
-# An explicit call also records the extern signature for older LLVM producers.
-@unsafe(reason: "existing integer power runtime ABI", capabilities: [ffi])
-extern fn __simple_pow(base: i64, exp: i64) -> i64
 
 struct MirInst:
     """MIR instruction."""
@@ -112,7 +104,6 @@ impl MirInst:
                     case Const(const_value, _):
                         match const_value:
                             case Int(_): 1
-                            case FloatLexeme(_): 2
                             case Float(_): 2
                             case Bool(_): 3
                             case Str(_): 4
@@ -130,7 +121,6 @@ impl MirInst:
                     case Const(const_value, _):
                         match const_value:
                             case Int(v): "{v}"
-                            case FloatLexeme(v): v
                             case Float(v): "{v}"
                             case Bool(v): if v: "1" else: "0"
                             case Str(v): v
@@ -153,78 +143,71 @@ impl MirBlock:
         """Project the nested block identifier through the MirBlock owner."""
         self.id.id
 
-    # @workaround bug=mir_ret_optional_operand_owner_2026_10_11 reason=preserve optional operand and enum owners through staged coalescing
     fn bootstrap_ret_kind() -> i64:
         """Return 0=nil, 1=Copy, 2=Move, 3=Const, or -1=not Ret."""
         match self.terminator:
-            case MirTerminator.Ret(value):
+            case Ret(value):
                 if value == nil:
                     0
                 else:
-                    val payload: MirOperand = value ?? mir_operand_const_int(0)
+                    val payload = value ?? mir_operand_const_int(0)
                     match payload.kind:
-                        case MirOperandKind.Copy(_): 1
-                        case MirOperandKind.Move(_): 2
-                        case MirOperandKind.Const(_, _): 3
+                        case Copy(_): 1
+                        case Move(_): 2
+                        case Const(_, _): 3
             case _: -1
 
-    # Name every operand variant: future enum additions must be classified.
-    # @workaround bug=mir_ret_optional_operand_owner_2026_10_11 reason=preserve optional operand and enum owners through staged coalescing
     fn bootstrap_ret_local_id() -> i64:
         match self.terminator:
-            case MirTerminator.Ret(value):
+            case Ret(value):
                 if value != nil:
-                    val payload: MirOperand = value ?? mir_operand_const_int(0)
+                    val payload = value ?? mir_operand_const_int(0)
                     match payload.kind:
-                        case MirOperandKind.Copy(local) | MirOperandKind.Move(local): local.id
-                        case MirOperandKind.Const(_, _): -1
+                        case Copy(local) | Move(local): local.id
+                        case _: -1
                 else:
                     -1
             case _: -1
 
-    # @workaround bug=mir_ret_optional_operand_owner_2026_10_11 reason=preserve optional operand and enum owners through staged coalescing
     fn bootstrap_ret_const_kind() -> i64:
         """Return 1=Int, 2=Float, 3=Bool, 4=Str, 5=Zero, 6=Array, 7=Tuple, 8=Struct."""
         match self.terminator:
-            case MirTerminator.Ret(value):
+            case Ret(value):
                 if value != nil:
-                    val payload: MirOperand = value ?? mir_operand_const_int(0)
+                    val payload = value ?? mir_operand_const_int(0)
                     match payload.kind:
-                        case MirOperandKind.Const(const_value, _):
+                        case Const(const_value, _):
                             match const_value:
-                                case MirConstValue.Int(_): 1
-                                case MirConstValue.FloatLexeme(_): 2
-                                case MirConstValue.Float(_): 2
-                                case MirConstValue.Bool(_): 3
-                                case MirConstValue.Str(_): 4
-                                case MirConstValue.Zero: 5
-                                case MirConstValue.Array(_): 6
-                                case MirConstValue.Tuple(_): 7
-                                case MirConstValue.Struct(_): 8
-                        case MirOperandKind.Copy(_) | MirOperandKind.Move(_): 0
+                                case Int(_): 1
+                                case Float(_): 2
+                                case Bool(_): 3
+                                case Str(_): 4
+                                case Zero: 5
+                                case Array(_): 6
+                                case Tuple(_): 7
+                                case Struct(_): 8
+                        case _: 0
                 else:
                     0
             case _: 0
 
-    # @workaround bug=mir_ret_optional_operand_owner_2026_10_11 reason=preserve optional operand and enum owners through staged coalescing
     fn bootstrap_ret_const_scalar_text() -> text:
         match self.terminator:
-            case MirTerminator.Ret(value):
+            case Ret(value):
                 if value != nil:
-                    val payload: MirOperand = value ?? mir_operand_const_int(0)
+                    val payload = value ?? mir_operand_const_int(0)
                     match payload.kind:
-                        case MirOperandKind.Const(const_value, _):
+                        case Const(const_value, _):
                             match const_value:
-                                case MirConstValue.Int(v): "{v}"
-                                case MirConstValue.FloatLexeme(v): v
-                                case MirConstValue.Float(v): "{v}"
-                                case MirConstValue.Bool(v): if v: "1" else: "0"
-                                case MirConstValue.Str(v): v
-                                case MirConstValue.Zero: "0"
-                                case MirConstValue.Array(_): "zeroinitializer"
-                                case MirConstValue.Tuple(_): "zeroinitializer"
-                                case MirConstValue.Struct(_): "zeroinitializer"
-                        case MirOperandKind.Copy(_) | MirOperandKind.Move(_): "0"
+                                case Int(v): "{v}"
+                                case Float(v): "{v}"
+                                case Bool(v): if v: "1" else: "0"
+                                case Str(v): v
+                                case Zero: "0"
+                                case Array(_): "zeroinitializer"
+                                case Tuple(_): "zeroinitializer"
+                                case Struct(_): "zeroinitializer"
+                        case _: "0"
                 else:
                     "0"
             case _: "0"
@@ -299,11 +282,6 @@ struct MirFunction:
     simd_req_level: text = ""    # "" | must | prefer | error_not | warn_not
     simd_req_backend: text = ""  # "" | simd | avx2 | avx512 | sse | neon | ...
     simd_disabled: bool = false  # @simd(disable) — pass must not vectorize
-    nogc_strict: bool = false
-    short_call_contracts: Dict<text, [text]> = {}
-
-    # Opt-in producer-owned semantic transport; ordinary lowering leaves empty.
-    enum_matches: [MirEnumMatchSemanticV1] = []
 
 impl MirFunction:
     # update field list when MirFunction gains fields — spread operator fails cross-module
@@ -341,12 +319,7 @@ impl MirFunction:
             is_global: func.is_global,
             simd_req_level: func.simd_req_level,
             simd_req_backend: func.simd_req_backend,
-            simd_disabled: func.simd_disabled,
-            # Preserve the original binding; changed bodies must fail consumer
-            # validation until the producer's actual finalizer revalidates.
-            enum_matches: func.enum_matches,
-            nogc_strict: func.nogc_strict,
-            short_call_contracts: func.short_call_contracts
+            simd_disabled: func.simd_disabled
         )
 
 """Function body wrapper for borrow checking."""
@@ -356,17 +329,13 @@ struct MirBody:
     locals: [MirLocal]
     arg_count: i64
     return_ty: MirType
-    nogc_strict: bool = false
-    short_call_contracts: Dict<text, [text]> = {}
 
 impl MirBody:
     static fn from_bootstrap_parts(
         name: text,
         blocks: [MirBlock],
         locals: [MirLocal],
-        arg_count: i64,
-        nogc_strict: bool = false,
-        short_call_contracts: Dict<text, [text]> = {}
+        arg_count: i64
     ) -> MirBody:
         """Create a flat-bootstrap body without crossing a MirType ABI."""
         MirBody(
@@ -374,9 +343,7 @@ impl MirBody:
             blocks: blocks,
             locals: locals,
             arg_count: arg_count,
-            return_ty: MirType.unit(),
-            nogc_strict: nogc_strict,
-            short_call_contracts: short_call_contracts
+            return_ty: MirType.unit()
         )
 
     static fn from_parts(
@@ -384,9 +351,7 @@ impl MirBody:
         blocks: [MirBlock],
         locals: [MirLocal],
         arg_count: i64,
-        return_ty: MirType,
-        nogc_strict: bool = false,
-        short_call_contracts: Dict<text, [text]> = {}
+        return_ty: MirType
     ) -> MirBody:
         """Create MirBody through its owner layout."""
         MirBody(
@@ -394,9 +359,7 @@ impl MirBody:
             blocks: blocks,
             locals: locals,
             arg_count: arg_count,
-            return_ty: return_ty,
-            nogc_strict: nogc_strict,
-            short_call_contracts: short_call_contracts
+            return_ty: return_ty
         )
 
     static fn from_function(func: MirFunction) -> MirBody:
@@ -406,9 +369,7 @@ impl MirBody:
             blocks: func.blocks,
             locals: func.locals,
             arg_count: func.signature.params.len(),
-            return_ty: func.signature.return_type,
-            nogc_strict: func.nogc_strict,
-            short_call_contracts: func.short_call_contracts
+            return_ty: func.signature.return_type
         )
 
     me bootstrap_return_type() -> MirType:
@@ -421,7 +382,7 @@ impl MirBody:
 
 fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> MirConstValue?:
     match (left, right):
-        case (MirConstValue.Int(l), MirConstValue.Int(r)):
+        case (Int(l), Int(r)):
             var has_result = true
             var result = 0
             match op:
@@ -438,9 +399,7 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
                         result = l % r
                     else:
                         has_result = false
-                case Pow:
-                    unsafe(capabilities: [ffi]):
-                        result = __simple_pow(l, r)
+                case Pow: result = l ** r
                 case BitAnd: result = l & r
                 case BitOr: result = l | r
                 case BitXor: result = l xor r
@@ -457,7 +416,7 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
                 return nil
             Some(MirConstValue.Int(result))
 
-        case (MirConstValue.Float(l), MirConstValue.Float(r)):
+        case (Float(l), Float(r)):
             var has_result = true
             var result = 0.0
             match op:
@@ -469,7 +428,7 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
                         result = l / r
                     else:
                         has_result = false
-                case Pow: result = math_pow(l, r)
+                case Pow: result = l ** r
                 case _: has_result = false
             if not has_result:
                 return nil
@@ -477,58 +436,6 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
 
         case _:
             nil
-
-# Canonical emission order for module contents. On the native runtime,
-# Dict<SymbolId, _> iterates in key-ADDRESS hash order (rt_core_dict_hash
-# falls back to the pointer word for heap keys), so emission order permuted
-# between identical native-build runs: four byte-identical planner builds of
-# the same source/cache produced four distinct binaries with the module's
-# functions laid out in different orders (2026-10-19, release_phase3 stage2
-# planner admission). Sort by name so emitted bytes are reproducible; the
-# symbol id breaks the (impossible for valid MIR) same-name tie.
-pub fn mir_module_functions_sorted(module: MirModule) -> [MirFunction]:
-    var ids: [i64] = []
-    var funcs: [MirFunction] = []
-    for symbol in module.functions.keys():
-        ids = ids.push(symbol.id)
-        funcs = funcs.push(module.functions[symbol])
-    var i = 0
-    while i < funcs.len():
-        var j = i + 1
-        while j < funcs.len():
-            if funcs[j].name < funcs[i].name or
-                    (funcs[j].name == funcs[i].name and ids[j] < ids[i]):
-                val tmp_fn = funcs[i]
-                funcs[i] = funcs[j]
-                funcs[j] = tmp_fn
-                val tmp_id = ids[i]
-                ids[i] = ids[j]
-                ids[j] = tmp_id
-            j = j + 1
-        i = i + 1
-    funcs
-
-pub fn mir_module_statics_sorted(module: MirModule) -> [MirStatic]:
-    var ids: [i64] = []
-    var statics: [MirStatic] = []
-    for symbol in module.statics.keys():
-        ids = ids.push(symbol.id)
-        statics = statics.push(module.statics[symbol])
-    var i = 0
-    while i < statics.len():
-        var j = i + 1
-        while j < statics.len():
-            if statics[j].name < statics[i].name or
-                    (statics[j].name == statics[i].name and ids[j] < ids[i]):
-                val tmp_static = statics[i]
-                statics[i] = statics[j]
-                statics[j] = tmp_static
-                val tmp_id = ids[i]
-                ids[i] = ids[j]
-                ids[j] = tmp_id
-            j = j + 1
-        i = i + 1
-    statics
 
 # Keep MirModule last.  The bootstrap parser currently leaves declaration
 # parsing in expression mode after generic Dict fields, which corrupts the
@@ -541,8 +448,5 @@ struct MirModule:
     constants: Dict<SymbolId, MirConstant>
     types: Dict<SymbolId, MirTypeDef>
     external_layout_traces: [MirExternalLayoutTraceV1] = []
-    collection_plan_explanations: [text] = []
-    enum_semantic_declarations: [MirEnumDeclarationIdentityV1] = []
 
 export MirInst, MirBlock, MirFunction, MirBody, MirModule, mir_fold_binop
-export mir_module_functions_sorted, mir_module_statics_sorted

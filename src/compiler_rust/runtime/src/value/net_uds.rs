@@ -242,13 +242,6 @@ pub unsafe extern "C" fn rt_unix_socket_connect(path_ptr: i64, path_len: i64) ->
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rt_unix_socket_connect_timeout(
-    _path_ptr: i64, _path_len: i64, _timeout_ms: i64,
-) -> i64 {
-    NEG_EINVAL
-}
-
 #[cfg(test)]
 mod uds_tests {
     use super::*;

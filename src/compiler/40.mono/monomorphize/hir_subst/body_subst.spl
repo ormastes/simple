@@ -224,8 +224,7 @@ fn hs_asm(asm_node: HirAsm, ctx: HirSubstCtx) -> HirAsm:
 fn hs_interpolations(interps: [HirInterpolation]?, ctx: HirSubstCtx) -> [HirInterpolation]?:
     if interps == nil:
         return nil
-    # Preserve nil above, but unwrap a present cached Some(list) here.
-    val list: [HirInterpolation] = interps ?? []
+    val list: [HirInterpolation] = interps
     var out: [HirInterpolation] = []
     for i in list:
         val it: HirInterpolation = i
@@ -266,14 +265,9 @@ fn subst_hir_stmt(stmt: HirStmt, ctx: HirSubstCtx) -> HirStmt:
             out.kind = HirStmtKind.Expr(subst_hir_expr(et, ctx))
             handled = true
         case HirStmtKind.Let(symbol, ty, init):
-            # An unannotated binding lowers with a nil type slot; only a
-            # written annotation can mention a type parameter.
-            var new_ty = ty
-            if ty != nil:
-                val lt: HirType = ty
-                new_ty = hs_type(lt, ctx)
+            val lt: HirType = ty
             val li: HirExpr = init
-            out.kind = HirStmtKind.Let(symbol, new_ty, subst_hir_expr(li, ctx))
+            out.kind = HirStmtKind.Let(symbol, hs_type(lt, ctx), subst_hir_expr(li, ctx))
             handled = true
         case HirStmtKind.Assign(target, op, value):
             val at: HirExpr = target
@@ -367,8 +361,6 @@ fn subst_hir_expr(expr: HirExpr, ctx: HirSubstCtx) -> HirExpr:
         case HirExprKind.IntLit(value, suffix):
             handled = true
         case HirExprKind.FloatLit(value, suffix):
-            handled = true
-        case HirExprKind.FloatLexeme(value, suffix):
             handled = true
         case HirExprKind.StringLit(value, interpolations):
             out.kind = HirExprKind.StringLit(value, hs_interpolations(interpolations, ctx))
@@ -555,19 +547,6 @@ fn subst_hir_expr(expr: HirExpr, ctx: HirSubstCtx) -> HirExpr:
             val te: HirExpr = inner
             out.kind = HirExprKind.Try(subst_hir_expr(te, ctx))
             handled = true
-        case HirExprKind.TryCatch(body, clauses, finally_):
-            var substituted_clauses: [HirCatchClause] = []
-            for clause in clauses:
-                val original: HirCatchClause = clause
-                var rewritten = original
-                if original.has_pattern:
-                    rewritten.pattern = subst_hir_pattern(original.pattern, ctx)
-                if original.has_type_:
-                    rewritten.type_ = hs_type(original.type_, ctx)
-                rewritten.body = subst_hir_block(original.body, ctx)
-                substituted_clauses = substituted_clauses.push(rewritten)
-            out.kind = HirExprKind.TryCatch(subst_hir_block(body, ctx), substituted_clauses, hs_block_opt(finally_, ctx))
-            handled = true
         case HirExprKind.Await(inner):
             val ae: HirExpr = inner
             out.kind = HirExprKind.Await(subst_hir_expr(ae, ctx))
@@ -595,16 +574,10 @@ fn subst_hir_expr(expr: HirExpr, ctx: HirSubstCtx) -> HirExpr:
             val ast: HirType = target
             out.kind = HirExprKind.As(subst_hir_expr(ase, ctx), hs_type(ast, ctx))
             handled = true
-        case HirExprKind.ConvertCall(inner, target):
-            val cve: HirExpr = inner
-            val cvt: HirType = target
-            out.kind = HirExprKind.ConvertCall(subst_hir_expr(cve, ctx), hs_type(cvt, ctx))
-            handled = true
-        case HirExprKind.TypeTest(value, type_name):
-            out.kind = HirExprKind.TypeTest(subst_hir_expr(value, ctx), type_name)
-            handled = true
         case HirExprKind.Range(start, end, inclusive, step):
-            out.kind = HirExprKind.Range(hs_expr_opt(start, ctx), hs_expr_opt(end, ctx), inclusive, hs_expr_opt(step, ctx))
+            val rs: HirExpr = start
+            val re: HirExpr = end
+            out.kind = HirExprKind.Range(subst_hir_expr(rs, ctx), subst_hir_expr(re, ctx), inclusive, hs_expr_opt(step, ctx))
             handled = true
         case HirExprKind.Comprehension(kind, inner, clauses):
             val ce2: HirExpr = inner

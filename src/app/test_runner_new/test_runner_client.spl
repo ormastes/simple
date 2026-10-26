@@ -1,19 +1,17 @@
 # Lightweight daemon client for explicit single-file `simple test`.
 
-use std.sffi.cli_args.{cli_get_args}
+use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded}
-use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use app.io.cli_ops.{cli_current_exe_path}
-use app.test_runner_new.client_arg_shape.{client_flag_consumes_value, client_select_tagged}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs, resolve_timeout_secs, timeout_value_is_well_formed}
-use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests, daemon_claim_wait_expired, daemon_platform_bypass}
+use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
-use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
-use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestFileResult, TestRunResult}
+use std.test_runner.test_runner_output.{test_run_result_json}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
-use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
-use app.test_runner_new.sdn_wrapper.{run_test_sdn_wrapper}
 use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT, light_response_client_result, light_request_encode_v2, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, early_death_verdict_line, bounded_run_classification, has_verdict_line, exit_code_reason}
 use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1, test_daemon_environment_can_reuse_v1}
 
@@ -57,10 +55,6 @@ val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 # client can tell whether the daemon lane would silently substitute a different
 # compiler for the one the caller invoked.
 val LIGHT_BINARY: text = ".build/test_daemon_light/daemon.binary"
-# run_one_via_daemon result: the request was withdrawn unclaimed (busy worker);
-# the caller runs the spec directly. Distinct from every real exit code and
-# from LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT.
-val LIGHT_DAEMON_WITHDRAWN_RESULT: i64 = -750076
 
 struct ClientRun:
     # First requested path. Retained for error reporting only; execution
@@ -99,7 +93,7 @@ fn count_positional_args(args: [text]) -> i64:
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if client_flag_consumes_value(arg) and i + 1 < args.len():
+        if arg == "--timeout" and i + 1 < args.len():
             i = i + 2
             continue
         if arg.starts_with("-"):
@@ -136,9 +130,6 @@ fn parse_client_run(args: [text]) -> ClientRun:
             if timeout_value_is_well_formed(arg[10:]):
                 timeout_secs = resolve_timeout_secs(arg[10:], "")
             i = i + 1
-            continue
-        if client_flag_consumes_value(arg) and i + 1 < args.len():
-            i = i + 2
             continue
         if not arg.starts_with("-"):
             paths.push(arg)
@@ -333,9 +324,6 @@ fn ensure_daemon() -> bool:
         return true
     report_stale_lock()
     file_delete(LIGHT_LOCK)
-    # The binary record belongs to the dead lock holder; clear it so the wait
-    # below can only be satisfied by the daemon spawned here.
-    file_delete(LIGHT_BINARY)
     val binary = simple_binary()
     val (_daemon_out, _daemon_err, daemon_code) = process_run(
         "/bin/sh",
@@ -344,13 +332,9 @@ fn ensure_daemon() -> bool:
     if daemon_code != 0:
         file_write("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
         return false
-    # The daemon claims LIGHT_LOCK first and publishes LIGHT_BINARY right
-    # after. Returning on the lock alone raced that publish: the caller then
-    # read no binary record, reported "identity unavailable or mismatched" and
-    # bypassed the daemon it had just started. Wait for both.
     var waits = 0
     while waits < 40:
-        if file_exists(LIGHT_LOCK) and file_exists(LIGHT_BINARY):
+        if file_exists(LIGHT_LOCK):
             return true
         thread_sleep(50)
         waits = waits + 1
@@ -376,6 +360,59 @@ fn fail_closed_on_no_examples(path: text, body: text, code: i64) -> i64:
     print timeout_verdict_line(path, "no-examples-executed", 0)
     no_examples_exit_code(body, code)
 
+# --json mode: rows collected from each file's real SPEC FILE VERDICT line,
+# emitted at the end through the pinned stdlib emitter (test_run_result_json,
+# groups + done_pct included). Planned markers print "(planned)" and are
+# counted as pending, not skipped.
+var json_mode = false
+var json_files: [TestFileResult] = []
+
+fn record_json_row(path: text, combined: text):
+    if not json_mode:
+        return
+    var passed = 0
+    var failed = 0
+    var skipped = 0
+    # The spipe matcher preprocessor runs a rewritten copy named
+    # `.spipe_matchers_<pid>_<ts>_<basename>`, so the verdict line carries
+    # that temp name, not the requested path. Match on the basename suffix.
+    val slash = path.rfind("/")
+    val base = if slash >= 0: path[slash + 1:path.len()] else: path
+    for line in combined.split("\n"):
+        if line.contains("SPEC FILE VERDICT:") and line.contains(base):
+            for tok in line.split(" "):
+                if tok.starts_with("passed="):
+                    passed = tok[7:tok.len()].to_i64() ?? 0
+                elif tok.starts_with("failed="):
+                    failed = tok[7:tok.len()].to_i64() ?? 0
+                elif tok.starts_with("skipped="):
+                    skipped = tok[8:tok.len()].to_i64() ?? 0
+    var pending = 0
+    for line in combined.split("\n"):
+        if line.contains("(planned)"):
+            pending = pending + 1
+    if pending > skipped:
+        pending = skipped
+    json_files.push(TestFileResult(
+        path: path, passed: passed, failed: failed, skipped: skipped - pending,
+        pending: pending, duration_ms: 0, setup_ms: 0, error: "",
+        timed_out: false, cached: false))
+
+fn print_json_summary():
+    var tp = 0
+    var tf = 0
+    var ts = 0
+    var tpe = 0
+    for f in json_files:
+        tp = tp + f.passed
+        tf = tf + f.failed
+        ts = ts + f.skipped
+        tpe = tpe + f.pending
+    val r = TestRunResult(files: json_files, total_passed: tp, total_failed: tf,
+        total_skipped: ts, total_pending: tpe, total_timed_out: 0,
+        total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+    print "{\"success\":" + (if tf == 0: "true" else: "false") + ",\"spec\":" + test_run_result_json(r) + ",\"spl_doctest\":null,\"sdoctest\":null}"
+
 fn print_response(path: text, content: text) -> i64:
     val newline = content.find("\n")
     if newline < 0:
@@ -386,6 +423,7 @@ fn print_response(path: text, content: text) -> i64:
     val client_result = light_response_client_result(code, body)
     if client_result == LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT:
         return client_result
+    record_json_row(path, body)
     if body != "":
         print body
     fail_closed_on_no_examples(path, body, code)
@@ -483,6 +521,7 @@ fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
         TEST_OUTPUT_CAPTURE_BYTES
     )
     val elapsed_ms = (time_now_unix_micros() - started_micros) / 1000
+    record_json_row(path, out + "\n" + err)
     if out != "":
         print out
     if err != "":
@@ -529,28 +568,11 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
         print "ERROR: test daemon request write failed: {req_path}"
         return 1
     val deadline = expiry_micros + (LIGHT_REQUEST_RESPONSE_GRACE_MS * 1000)
-    val submitted_micros = time_now_unix_micros()
-    var claimed = false
     while time_now_unix_micros() < deadline:
         if file_exists(resp_path):
             val content = read_file_text(resp_path)
             file_delete(resp_path)
             return print_response(path, content)
-        if not claimed:
-            # The worker claims by renaming our `.req` away. Unclaimed after
-            # the claim window means it is busy with another spec; every
-            # further millisecond in the queue is taken from this spec's own
-            # budget. Withdraw (rename our own `.req`) and run directly with
-            # the full budget. Rename is atomic, so exactly one of the
-            # worker's claim and our withdrawal wins.
-            if not file_exists(req_path):
-                claimed = true
-            elif daemon_claim_wait_expired((time_now_unix_micros() - submitted_micros) / 1000):
-                val withdrawn_path = "{req_path}.withdrawn"
-                if file_rename(req_path, withdrawn_path):
-                    file_delete(withdrawn_path)
-                    return LIGHT_DAEMON_WITHDRAWN_RESULT
-                claimed = true
         thread_sleep(100)
     # No response inside the budget + grace. Emit a verdict so the spec reads
     # BROKEN, not UNRUN, and name the lock + the one-line remedy: the most
@@ -655,54 +677,32 @@ fn _test_env_gate_names() -> text:
 
 fn main() -> i64:
     val raw_cleaned = clean_args()
-    val parsed_modes = parse_private_sdn_worker_args(raw_cleaned, false)
-    if parsed_modes.is_err():
-        eprint "ERROR: {parsed_modes.unwrap_err()}"
-        return 2
-    val mode_args = parsed_modes.unwrap()
-    if mode_args.public_sdn_requested:
-        return run_test_sdn_wrapper(raw_cleaned) as i64
-    val cleaned = mode_args.forwarded_args
+    var cleaned: [text] = []
+    var jf = 0
+    while jf < raw_cleaned.len():
+        if raw_cleaned[jf] == "--json":
+            json_mode = true
+        elif raw_cleaned[jf] == "--format" and jf + 1 < raw_cleaned.len() and raw_cleaned[jf + 1] == "json":
+            json_mode = true
+            jf = jf + 1
+        else:
+            cleaned.push(raw_cleaned[jf])
+        jf = jf + 1
     if has_spl_doctest_flag(cleaned):
         return run_scoped_spl_doctest(cleaned)
-    # Same usage validator and exit code (2) as the directory lane. This lane
-    # used to drop every flag but --timeout, so `--format junit` ran the spec
-    # and printed a text PASS: a flag that is not honoured is rejected here.
-    val usage_error = test_args_validation_error(cleaned)
-    if usage_error != "":
-        eprint "ERROR: {usage_error}"
-        return 2
-    val client_options = parse_test_args(cleaned)
-    if client_options.resume:
-        eprint "ERROR: --resume resumes a directory run's checkpoint; it is not supported with explicit spec paths"
-        return 2
-    # This lane has no instrumented-wrapper build, so --coverage used to run the
-    # spec uninstrumented, print no coverage report and exit 0 (bug
-    # test_coverage_wrapper_native_build_refused_by_scv_admission_2026_10_19).
-    # A flag that is not honoured is rejected, like --resume above.
-    if client_options.coverage:
-        eprint "ERROR: --coverage needs a directory target (the instrumented coverage build runs in the directory lane); run: simple test <dir> --coverage"
-        return 2
-    if client_options.format == "doc":
-        print "note: --format doc: spipe doc generation runs in the directory lane only; this single-spec run prints text"
     val run = parse_client_run(cleaned)
     if not run.valid:
-        eprint "ERROR: {run.error}: {run.path}"
+        print "Simple Test Runner client"
+        print "error: {run.error}: {run.path}"
         return 1
+    val requested = run.paths
     val requested_count = count_positional_args(cleaned)
     # Fail closed: a positional path that never became a run target is a
     # dropped spec, and a dropped spec must never report success.
-    if run.paths.len() != requested_count:
+    if requested.len() != requested_count:
         print "Simple Test Runner client"
-        print "ERROR: dropped spec path(s) while parsing arguments: {requested_count} requested, {run.paths.len()} parsed"
+        print "ERROR: dropped spec path(s) while parsing arguments: {requested_count} requested, {requested.len()} parsed"
         return 1
-    val requested = client_select_tagged(run.paths, client_options.tag)
-    if requested.len() == 0:
-        print "No tests selected."
-        print "--tag {client_options.tag}: none of the {run.paths.len()} explicit spec path(s) carries the tag"
-        return test_run_outcome_exit_code(TestRunOutcome.EmptySelection)
-    if requested.len() < run.paths.len():
-        print "--tag {client_options.tag}: selected {requested.len()} of {run.paths.len()} explicit spec path(s)"
     val candidate_binary = simple_binary()
     if candidate_binary == "":
         print "ERROR: test-runner: canonical invoking candidate identity is unavailable or SIMPLE_BINARY does not match it"
@@ -784,10 +784,8 @@ fn main() -> i64:
     # daemon predating this record has unavailable identity and must not serve
     # qualification work.
     val invoker = candidate_binary
-    val daemon_host = host_os()
-    val daemon_host_bypass = daemon_platform_bypass(daemon_host)
-    val daemon_binary = if daemon_host_bypass: "" else: daemon_recorded_binary()
-    val daemon_was_alive = not daemon_host_bypass and daemon_lock_alive()
+    val daemon_binary = daemon_recorded_binary()
+    val daemon_was_alive = daemon_lock_alive()
     val invoker_bypass = daemon_was_alive and daemon_binary != invoker
     val environment_bypass = daemon_was_alive and not test_daemon_environment_can_reuse_v1(
         caller_environment, lock_environment_digest())
@@ -810,9 +808,9 @@ fn main() -> i64:
     # OWN request -- and, worse, on leftover `.resp`/lock names. That is what
     # `count_pending_requests` exists for; it was pinned by a unit spec but had
     # zero production call sites. This is that wiring.
-    val backlog_pending = if not daemon_host_bypass and file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
+    val backlog_pending = if file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
     val backlog_bypass = daemon_backlog_bypass(backlog_pending)
-    var daemon_ok = if daemon_host_bypass or cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
+    var daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
     if daemon_ok:
         val active_daemon_binary = daemon_recorded_binary()
         if active_daemon_binary == "" or active_daemon_binary != candidate_binary:
@@ -824,9 +822,7 @@ fn main() -> i64:
             daemon_ok = false
     var binary = ""
     if not daemon_ok:
-        if daemon_host_bypass:
-            print "test-daemon: light daemon requires Linux /proc; running directly on {daemon_host}"
-        elif cov_bypass:
+        if cov_bypass:
             print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
         elif require_gpu_bypass:
             print "require-gpu: SIMPLE_REQUIRE_GPU set; bypassing test daemon so the requirement reaches the spec"
@@ -877,9 +873,6 @@ fn main() -> i64:
                 daemon_ok = false
                 binary = candidate_binary
                 code = run_one_direct(binary, p, run.timeout_secs)
-            elif code == LIGHT_DAEMON_WITHDRAWN_RESULT:
-                print "daemon-busy: the single test-daemon worker did not claim the request; running directly"
-                code = run_one_direct(candidate_binary, p, run.timeout_secs)
         else:
             code = run_one_direct(binary, p, run.timeout_secs)
         executed = executed + 1
@@ -895,4 +888,6 @@ fn main() -> i64:
     if executed != requested.len():
         print "ERROR: executed {executed} of {requested.len()} requested spec file(s); some were skipped"
         return 1
+    if json_mode:
+        print_json_summary()
     worst

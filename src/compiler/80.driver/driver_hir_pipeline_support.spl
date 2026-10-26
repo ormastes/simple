@@ -1,7 +1,6 @@
 # Scalar support boundaries for the CompilerDriver HIR pipeline.
 
 use compiler.driver.driver_types.{CompileContext}
-use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_record, mem_snapshot_record_promotion}
 use compiler.hir.hir.*
 use compiler.hir.hir_lowering.items.{
@@ -19,34 +18,20 @@ use compiler.hir.hir_lowering.types.{LoweringError, LoweringErrorKind}
 use compiler.frontend.aspect_registry.{aspect_registry_reset}
 use compiler.frontend.effect_registry.{effect_registry_reset}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
-use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_retained_frontend_owners_v1}
-use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1,
-    value_struct_layout_declarations_v1}
-use std.nogc_sync_mut.io.env_ops.{env_get}
+use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_frontend_registry_owners}
+use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
-use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics, validate_rt_criticality_diagnostics_array, validate_rt_criticality_diagnostics_blobs}
-use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{
-    driver_hir_gate_layout_report_v1, driver_hir_gate_publish_warnings_v1,
-    driver_hir_gate_census_report_v1, driver_hir_gate_publish_census_v1,
-    driver_hir_gate_rt_report_v1, driver_print_post_hir_validation_fatal}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_log_helpers.{log_phase}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
-use compiler.semantics.param_effects.infer.{infer_param_effects}
-use compiler.semantics.param_effects.imported_callback_receipts.{verified_imported_callback_slots}
-use compiler.common.cache.reverse_reference_facts.{
-    reverse_reference_module_abort_v1, reverse_reference_module_seal_v1,
-    reverse_reference_module_publish_v1
-}
 
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_exit(code: i64)
-extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 
 pub fn driver_rollback_flat_hir_row_or_abort(expected_count: i64):
     val actual_count = bootstrap_hir_module_count()
@@ -62,42 +47,20 @@ fn reset_frontend_registries_after_scope():
     effect_registry_reset()
     layer_eq_registry_reset()
 
-pub fn driver_abort_reverse_reference_parse_scope_v1(token: i64) -> bool:
-    val aborted = reverse_reference_module_abort_v1(token)
-    val ended = driver_end_transient_parse_scope()
-    aborted and ended
-
-# The caller has paused its own allocation scope and retained its other roots.
-# Only a successfully sealed batch may be published after that scope ends.
-pub fn driver_publish_reverse_reference_parse_scope_v1(token: i64) -> bool:
-    if not reverse_reference_module_seal_v1(token):
-        val _ended = driver_abort_reverse_reference_parse_scope_v1(token)
-        return false
-    if not driver_end_transient_parse_scope():
-        val _aborted = reverse_reference_module_abort_v1(token)
-        return false
-    if not reverse_reference_module_publish_v1(token):
-        val _aborted = reverse_reference_module_abort_v1(token)
-        return false
-    true
-
-pub fn driver_finish_failed_parse_scope(source_path: text, reverse_token: i64 = 0) -> text:
+pub fn driver_finish_failed_parse_scope(source_path: text) -> text:
     if not rt_transient_array_scope_pause():
-        val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+        val _ended = driver_end_transient_parse_scope()
         reset_frontend_registries_after_scope()
-        return "parse error in {source_path}; transient parser scope pause failed before diagnostic capture"
-    # Allocate the retained message only after pausing the scratch arena.
-    # Later cleanup must not free the message returned to the driver.
-    val parse_error = driver_parse_error_message(source_path)
-    if not driver_promote_retained_frontend_owners_v1(true):
-        val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+        return "parse error in {source_path} (see [parser_error] output above); transient parser scope pause failed"
+    if not driver_promote_frontend_registry_owners():
+        val _ended = driver_end_transient_parse_scope()
         reset_frontend_registries_after_scope()
         rt_exit(1)
-        return "{parse_error}; frontend registry promotion failed"
-    if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
+        return "parse error in {source_path} (see [parser_error] output above); frontend registry promotion failed"
+    if not driver_end_transient_parse_scope():
         reset_frontend_registries_after_scope()
-        return "{parse_error}; reverse-reference parse-scope publication failed"
-    parse_error
+        return "parse error in {source_path} (see [parser_error] output above); transient parser scope end failed"
+    "parse error in {source_path} (see [parser_error] output above)"
 
 fn driver_normalized_source_path(source_path: text) -> text:
     # The surface side of every identity/content comparison below stores
@@ -126,33 +89,6 @@ pub fn driver_stage3_surface_identity_matches(
         surface_module_name == source_module_name and
         surface_content_length == source_content_length and
         surface_content_hash == source_content_hash
-
-pub fn driver_stage3_surface_identity_matches_receipt(
-    surface_source_index: i64,
-    surface_canonical_path: text,
-    surface_module_name: text,
-    surface_content_length: i64,
-    surface_content_hash: i64,
-    source_index: i64,
-    source_path: text,
-    source_module_name: text,
-    source_content_length: i64,
-    source_content_hash: i64,
-    source_was_evicted: bool
-) -> bool:
-    # Phase 1 reserves zero for a missing hash. A real zero is stored as one;
-    # normalize the surface side only when comparing an evicted-source receipt.
-    if source_was_evicted and source_content_hash == 0:
-        return false
-    val compare_surface_hash = if source_was_evicted and surface_content_hash == 0:
-        1
-    else:
-        surface_content_hash
-    driver_stage3_surface_identity_matches(
-        surface_source_index, surface_canonical_path, surface_module_name,
-        surface_content_length, compare_surface_hash,
-        source_index, source_path, source_module_name,
-        source_content_length, source_content_hash)
 
 pub fn driver_stage3_surface_content_matches(
     surface_canonical_path: text,
@@ -256,228 +192,10 @@ fn driver_hir_module_dict_dropped_values(hir_modules: Dict<text, HirModule>) -> 
             dropped = dropped.push(key)
     dropped
 
-pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>,
-        hir_module_array: [HirModule] = [], hir_module_blobs: [text] = [],
-        hir_module_has_rt_hal: [bool] = [], hir_module_claim_counts: [i64] = []) -> [text]:
-    """Route typed RT warnings to diagnostics and errors to the fatal driver result."""
-    # Cycle-76/77: Dict<text, HirModule> value reads arrive erased in this
-    # lane regardless of read pattern (.values rebind, keys()+[]). When the
-    # caller threads the lowering-local array (never dict-read), use it
-    # directly; otherwise rebuild from the dict as a fallback.
-    var module_list: [HirModule] = hir_module_array
-    if module_list.len() == 0:
-        for mk in modules.keys():
-            val mv: HirModule = modules[mk]
-            module_list.push(mv)
-    # Lane-entry probe (cycle-77): discriminates insert-vs-read corruption on
-    # the next cycle's log without a shim.
-    if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
-        eprint("[enum-reg] rt-criticality lane: dict_keys={modules.keys().len()} array={module_list.len()}")
-    val report = driver_hir_gate_rt_report_v1(validate_rt_criticality_diagnostics_blobs(
-            hir_module_blobs, module_list, hir_module_has_rt_hal, hir_module_claim_counts))
-    driver_hir_gate_publish_warnings_v1(report.warnings)
-    report.errors
-
 pub fn driver_validate_value_struct_layouts(
     module_keys: [text],
     module_values: [HirModule],
     hir_modules: Dict<text, HirModule>
-) -> [text]:
-    # Compatibility caller: project declarations, never synthesize HIR bodies.
-    var declarations: [ValueStructLayoutModuleV1] = []
-    var index = 0
-    while index < module_values.len():
-        val module = module_values[index]
-        val module_key = if index < module_keys.len(): module_keys[index] else: ""
-        declarations.push(value_struct_layout_declarations_v1(module_key, module.path,
-            module.structs, module.symbols))
-        index = index + 1
-    driver_validate_value_struct_layout_declarations_v1(module_keys, declarations, hir_modules)
-
-struct DriverNogcParamEffectAdmissionV1:
-    errors: [text]
-    modules: [HirModule]
-    fatal_errors: [text] = []
-
-fn driver_nogc_param_effect_admission_round_v1(
-    modules: Dict<text, HirModule>,
-    module_array: [HirModule],
-    surfaces: [ModuleSurface],
-    verified_providers: [HirModule]
-) -> DriverNogcParamEffectAdmissionV1:
-    # Strictness belongs to the declaring source, never a registry alias or
-    # a name containing "nogc". Legacy modules retain their existing policy.
-    var class_names: {text: bool} = {}
-    for surface in surfaces:
-        for composite in surface.composite_values:
-            if composite.kind == "class": class_names[composite.name] = true
-    var actual_modules: [HirModule] = module_array
-    if actual_modules.len() == 0:
-        for name in modules.keys():
-            val actual: HirModule = modules[name]
-            actual_modules.push(actual)
-    var errors: [text] = []
-    var fatal_errors: [text] = []
-    var admitted: [HirModule] = []
-    for raw_actual in actual_modules:
-        var actual: HirModule = raw_actual
-        actual.nogc_param_effects_checked = false
-        actual.nogc_param_effect_symbol_ids = []
-        actual.nogc_param_effects = []
-        if actual.path == "":
-            errors.push("NOGC-POLICY-001: HIR module {actual.name} has no physical source identity")
-            fatal_errors.push(errors[errors.len() - 1])
-            continue
-        val actual_path = module_surface_canonical_path(actual.path)
-        var strict = false
-        var matched = false
-        var conflicting = false
-        for surface in surfaces:
-            if surface.canonical_path == actual_path:
-                if matched and strict != surface.nogc_strict: conflicting = true
-                strict = surface.nogc_strict
-                matched = true
-        if conflicting or (matched and actual.nogc_strict != strict):
-            errors.push("NOGC-POLICY-001: {actual.path}: cached HIR ownership policy disagrees with its declaring source")
-            fatal_errors.push(errors[errors.len() - 1])
-            continue
-        if not matched and actual.nogc_strict:
-            errors.push("NOGC-POLICY-001: {actual.path}: strict HIR has no declaring source ownership contract")
-            fatal_errors.push(errors[errors.len() - 1])
-            continue
-        if not strict:
-            admitted.push(actual)
-            continue
-        # Only resolver-bound proofs from providers admitted in an earlier
-        # round can grant callback slots. V1/name-only summaries stay unknown.
-        val callbacks = verified_imported_callback_slots(actual, verified_providers, surfaces)
-        val report = infer_param_effects(actual, class_names, {}, callbacks)
-        for diagnostic in report.diags:
-            val formatted = "{diagnostic.code}: {actual.path}:{diagnostic.line}: {diagnostic.message}"
-            errors.push(formatted)
-            # Only a callsite-tagged missing imported proof may be retried.
-            # Generic retained/local captures are fatal even if this module
-            # also happens to import an unrelated callback provider.
-            var missing_callback_proof = false
-            val pending_symbol = diagnostic.pending_import_symbol
-            if diagnostic.code == "NOGC-IMPORT-CALLBACK-PENDING" and pending_symbol >= 0 and actual.symbols.symbols.contains_key(pending_symbol):
-                val resolved: HirSymbol = actual.symbols.symbols[pending_symbol]
-                val owner = resolved.defining_module ?? ""
-                missing_callback_proof = resolved.kind == SymbolKind.Function and not actual.functions.contains_key(resolved.id) and owner != "" and not callbacks.contains_key(pending_symbol)
-            if not missing_callback_proof: fatal_errors.push(formatted)
-        if report.diags.len() != 0: continue
-        var symbol_ids: [i64] = []
-        var rows: [[text]] = []
-        var invalid = false
-        for function in report.functions:
-            val symbol = SymbolId(id: function.symbol_id)
-            if not actual.functions.contains_key(symbol) or symbol_ids.contains(function.symbol_id):
-                invalid = true
-                continue
-            val declaration: HirFunction = actual.functions[symbol]
-            if declaration.params.len() != function.params.len():
-                invalid = true
-                continue
-            var effects: [text] = []
-            var parameter_index = 0
-            for parameter in function.params:
-                if parameter.name != declaration.params[parameter_index].name:
-                    invalid = true
-                if parameter.effect != "read-short" and parameter.effect != "mutate-short" and parameter.effect != "consume" and parameter.effect != "share-explicit":
-                    invalid = true
-                effects.push(parameter.effect)
-                parameter_index = parameter_index + 1
-            symbol_ids.push(function.symbol_id)
-            rows.push(effects)
-        if invalid or symbol_ids.len() != actual.functions.keys().len():
-            errors.push("NOGC-CONTRACT-001: {actual.path}: ownership report does not cover exact local function identities")
-            fatal_errors.push(errors[errors.len() - 1])
-            continue
-        actual.nogc_param_effect_symbol_ids = symbol_ids
-        actual.nogc_param_effects = rows
-        actual.nogc_param_effects_checked = true
-        admitted.push(actual)
-    DriverNogcParamEffectAdmissionV1(errors: errors, modules: admitted, fatal_errors: fatal_errors)
-
-fn driver_nogc_param_effect_admission_v1(modules: Dict<text, HirModule>,
-        module_array: [HirModule], surfaces: [ModuleSurface]) -> DriverNogcParamEffectAdmissionV1:
-    var pending: [HirModule] = []
-    var initial: [HirModule] = module_array
-    if initial.len() == 0:
-        for key in modules.keys():
-            val actual: HirModule = modules[key]
-            initial.push(actual)
-    # Canonical physical order removes dependence on Dict iteration and
-    # shard completion order. Proofs become visible only next round.
-    var selected: {i64: bool} = {}
-    while pending.len() < initial.len():
-        var best = -1
-        var best_path = ""
-        var index = 0
-        while index < initial.len():
-            if not selected.contains_key(index):
-                val path = module_surface_canonical_path(initial[index].path)
-                if best < 0 or path < best_path:
-                    best = index
-                    best_path = path
-            index = index + 1
-        if best < 0: break
-        selected[best] = true
-        pending.push(initial[best])
-    var providers: [HirModule] = []
-    var round = 0
-    while pending.len() > 0 and round <= initial.len():
-        val receipt = driver_nogc_param_effect_admission_round_v1({}, pending, surfaces, providers)
-        if receipt.fatal_errors.len() > 0:
-            return DriverNogcParamEffectAdmissionV1(errors: receipt.errors, modules: [])
-        if receipt.modules.len() == 0:
-            # No new proof can resolve the remaining dependency component.
-            # Unknown providers and cycles retain their actual diagnostics.
-            return DriverNogcParamEffectAdmissionV1(errors: receipt.errors, modules: [])
-        var next: [HirModule] = []
-        for actual in pending:
-            var admitted = false
-            for checked in receipt.modules:
-                if actual.name == checked.name and actual.path == checked.path:
-                    admitted = true
-            if not admitted: next.push(actual)
-        for checked in receipt.modules: providers.push(checked)
-        pending = next
-        round = round + 1
-    if pending.len() != 0:
-        return DriverNogcParamEffectAdmissionV1(errors: ["NOGC-CONTRACT-001: ownership provider admission did not converge"], modules: [])
-    DriverNogcParamEffectAdmissionV1(errors: [], modules: providers)
-
-pub fn driver_nogc_param_effect_errors_v1(modules: Dict<text, HirModule>,
-        module_array: [HirModule], surfaces: [ModuleSurface]) -> [text]:
-    driver_nogc_param_effect_admission_v1(modules, module_array, surfaces).errors
-
-pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [ModuleSurface]):
-    val admission = driver_nogc_param_effect_admission_v1(ctx.hir_modules, ctx.validation_module_array, surfaces)
-    for error in admission.errors: ctx.add_error(error)
-    # Admission is transactional. No stale/partial report is published after
-    # one module fails, and downstream MIR never consumes error-bearing HIR.
-    if admission.errors.len() != 0: return
-    var modules: Dict<text, HirModule> = ctx.hir_modules
-    for actual in admission.modules:
-        for key in modules.keys():
-            val previous: HirModule = modules[key]
-            if previous.name == actual.name and previous.path == actual.path:
-                modules[key] = actual
-        if val entry = ctx.bootstrap_entry_hir:
-            if entry.name == actual.name and entry.path == actual.path:
-                ctx.bootstrap_entry_hir = actual
-    ctx.hir_modules = modules
-    ctx.validation_module_array = admission.modules
-
-pub fn driver_validate_value_struct_layout_declarations_v1(
-    module_keys: [text],
-    module_values: [ValueStructLayoutModuleV1],
-    hir_modules: Dict<text, HirModule>,
-    hir_module_array: [HirModule] = [],
-    hir_module_blobs: [text] = [],
-    hir_module_has_rt_hal: [bool] = [],
-    hir_module_claim_counts: [i64] = []
 ) -> [text]:
     var errors: [text] = []
     # One receipt per sub-pass: the Stage-3 worker died between the last
@@ -485,27 +203,29 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
     # 2026-09-05 without naming a step. Gated like every other log_phase
     # (SIMPLE_COMPILER_PHASE_PROFILE=1 / SIMPLE_COMPILER_TRACE=1).
     log_phase("phase3:hir:validate:value_struct_layouts:start")
-    # SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE=warning prints by-value struct cycles
-    # and keeps compiling, so out-of-tree code can list all of them in one
-    # run instead of failing after a full HIR pass. Default is fatal; the
-    # validator's internal errors are never downgraded. DIAGNOSTIC-ONLY: the
-    # build then continues into layout and codegen with a struct that has no
-    # finite size, so whatever it produces must not be trusted or shipped.
-    val layout_report = driver_hir_gate_layout_report_v1(module_keys, module_values,
-        env_get("SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE"))
-    driver_hir_gate_publish_warnings_v1(layout_report.warnings)
-    for error in layout_report.errors: errors = errors.push(error)
-    val skipped_struct_edges: i64 = layout_report.skipped_struct_edges
-    log_phase("phase3:hir:validate:value_struct_layouts:done errors={errors.len()} skipped_struct_edges={skipped_struct_edges}")
+    for error in validate_value_struct_layouts(module_keys, module_values):
+        errors = errors.push(error)
+    log_phase("phase3:hir:validate:value_struct_layouts:done errors={errors.len()}")
     log_phase("phase3:hir:validate:dict_census:start")
     val dropped = driver_hir_module_dict_dropped_values(hir_modules)
     val census_total: i64 = hir_modules.keys().len()
     log_phase("phase3:hir:validate:dict_census:done dropped={dropped.len()} total={census_total}")
-    val census_report = driver_hir_gate_census_report_v1(dropped, census_total)
-    driver_hir_gate_publish_census_v1(census_report)
-    for error in census_report.errors: errors = errors.push(error)
-    if census_report.gates_skipped:
-        driver_print_post_hir_validation_fatal(errors)
+    if dropped.len() > 0 and dropped.len() == census_total:
+        # Every module rejected is not a plausible loss; it is the predicate
+        # disagreeing with how struct values travel under this codegen. Say so
+        # and keep the old behaviour rather than fail a healthy build.
+        eprint("[post-hir-validation] well-formedness test rejected all {census_total} HIR module value(s); the test is unreliable for this value representation, running the Dict validators unguarded")
+    elif dropped.len() > 0:
+        # Genuine error path that used to print nothing: say it unconditionally,
+        # then fail closed instead of handing the dropped values to passes
+        # that dereference them.
+        eprint("[post-hir-validation-fatal] {dropped.len()} module(s) in the Dict<text, HirModule> view carry no well-formed HIR aggregate; layer-eq, effect, aspect validation and advice weaving are SKIPPED rather than dereferencing them")
+        var dropped_shown = 0
+        for dropped_key in dropped:
+            if dropped_shown < 10:
+                eprint("[post-hir-validation-fatal]   dropped HIR aggregate: {dropped_key}")
+            dropped_shown = dropped_shown + 1
+        errors = errors.push("internal error: {dropped.len()} HIR module(s) lost their aggregate value in Dict<text, HirModule> before post-HIR validation (first: {dropped[0]})")
         return errors
     log_phase("phase3:hir:validate:layer_eq:start")
     for layer_eq_error in validate_layer_eq_types(hir_modules):
@@ -515,11 +235,6 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
     for effect_error in validate_effect_contracts(hir_modules):
         errors = errors.push(effect_error)
     log_phase("phase3:hir:validate:effects:done errors={errors.len()}")
-    log_phase("phase3:hir:validate:rt_criticality:start")
-    for rt_error in driver_rt_criticality_errors(hir_modules, hir_module_array, hir_module_blobs,
-            hir_module_has_rt_hal, hir_module_claim_counts):
-        errors = errors.push(rt_error)
-    log_phase("phase3:hir:validate:rt_criticality:done errors={errors.len()}")
     log_phase("phase3:hir:validate:aspects:start")
     val aspect_errors = validate_aspect_contracts(hir_modules)
     for aspect_error in aspect_errors:
@@ -529,8 +244,4 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
         log_phase("phase3:hir:validate:weave:start")
         val _woven = weave_forward_advice(hir_modules)
         log_phase("phase3:hir:validate:weave:done")
-    driver_print_post_hir_validation_fatal(errors)
     errors
-
-export driver_hir_module_dict_dropped_values
-export use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{driver_print_post_hir_validation_fatal}

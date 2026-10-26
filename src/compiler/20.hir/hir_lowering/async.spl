@@ -1,5 +1,3 @@
-use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
-use compiler.hir.hir_lowering.concat_copy_v1.{async_text_concat_copy_v1, async_error_concat_copy_v1}
 # HIR Lowering - Async/Await Support
 #
 # This module provides HIR integration for async/await features:
@@ -30,10 +28,6 @@ use compiler.hir.hir_lowering.async_errors.{
 # ================================================================
 # Future<T> Type Support
 # ================================================================
-
-# Preserve the declared aggregate owner through the constructor boundary.
-fn _hir_future_named_payload(symbol: SymbolId, inner: HirType, span: Span) -> HirType:
-    HirType(kind: HirTypeKind.Named(symbol, [inner]), span: span)
 
 impl HirLowering:
     me is_future_type(hir_type: HirType) -> bool:
@@ -70,7 +64,10 @@ impl HirLowering:
 
         if val future_symbol = future_symbol_opt:
             # Create Future<T> as Named type with type argument
-            _hir_future_named_payload(future_symbol, inner, span)
+            HirType(
+                kind: HirTypeKind.Named(future_symbol, [inner]),
+                span: span
+            )
         else:
             # Future symbol not found - create detailed error
             val detailed_error = future_type_not_found(span)
@@ -187,20 +184,16 @@ impl HirLowering:
             )
             if not poll_check.is_valid:
                 check.is_valid = false
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                check.errors = async_text_concat_copy_v1(check.errors, poll_check.errors)
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                check.detailed_errors = async_error_concat_copy_v1(check.detailed_errors, poll_check.detailed_errors)
+                check.errors = check.errors.concat(poll_check.errors)
+                check.detailed_errors = check.detailed_errors.concat(poll_check.detailed_errors)
 
         # Check 3: State enum validation (if present)
         if state_enum.?:
             val enum_check = self.check_state_enum_structure(state_enum, func.span)
             if not enum_check.is_valid:
                 check.is_valid = false
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                check.errors = async_text_concat_copy_v1(check.errors, enum_check.errors)
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                check.detailed_errors = async_error_concat_copy_v1(check.detailed_errors, enum_check.detailed_errors)
+                check.errors = check.errors.concat(enum_check.errors)
+                check.detailed_errors = check.detailed_errors.concat(enum_check.detailed_errors)
 
         check
 

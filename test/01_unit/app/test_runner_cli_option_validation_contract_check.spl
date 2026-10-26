@@ -1,6 +1,7 @@
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
-use std.test_runner.test_runner_output.{test_run_result_sdn}
+use std.test_runner.test_runner_output.{test_run_result_json}
 use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+use std.common.json.parser.{json_parse}
 use std.io.{process_run_bounded}
 use app.io.cli_ops.{_cli_source_entry_executable, cli_current_exe_path}
 
@@ -22,15 +23,11 @@ val empty_mode = test_args_validation_error(["--mode="])
 val signed_value = test_args_validation_error(["--timeout", "-1"])
 val trailing_equals_value = test_args_validation_error(["--sdoctest-env=KEY="])
 val text_format = test_args_validation_error(["--format", "text"])
-# dec3b361c19 retired JSON output: the production validator rejects --format
-# json with an actionable SDN pointer instead of accepting it.
 val json_format = test_args_validation_error(["--format", "json"])
-val sdn_format = test_args_validation_error(["--format", "sdn"])
 val doc_format = test_args_validation_error(["--format", "doc"])
 val xml_format = test_args_validation_error(["--format", "xml"])
-# The retired json spelling must not be honored: parsing falls back to text.
 val parsed_json = parse_test_args(["--format", "json"])
-val result_sdn = test_run_result_sdn(TestRunResult(
+val result_json = test_run_result_json(TestRunResult(
     files: [TestFileResult(
         path: "quote\"spec.spl",
         passed: 1,
@@ -120,23 +117,11 @@ val (forged_source_stdout, forged_source_stderr, forged_source_code) = process_r
     4194304
 )
 
-# 5830d26f209 restored json_wrapper.spl as a shim retired onto the SDN
-# result-file transport: it reports the --test-sdn-worker marker and delegates
-# to run_test_sdn_wrapper; the old JSON worker protocol is gone. The runner
-# entrypoint authorizes its private worker through SIMPLE_TEST_SDN_WORKER_AUTH.
-# `simple test --format json` now translates to --sdn and answers with a
-# single-line SDN envelope (SDN canonical is not JSON). The failing fixture
-# keeps the exit nonzero in every transport state. A forged --test-json-worker
-# is rejected by the SDN argument parser: via the CLI shim it surfaces as an
-# SDN failure envelope (exit 1); via the runner entrypoint it is a hard
-# preflight error (exit 2).
 if (unknown == "" or missing_tag == "" or tag_swallows_unknown == "" or
     tag_swallows_unit == "" or empty_tag == "" or empty_mode == "" or
     signed_value != "" or trailing_equals_value != "" or text_format != "" or
-    not json_format.contains("JSON test output is retired") or
-    sdn_format != "" or doc_format != "" or xml_format == "" or
-    parsed_json.format != "json" or result_sdn.is_err() or
-    not (result_sdn.unwrap()).contains("success: true") or
+    json_format != "" or doc_format != "" or xml_format == "" or
+    parsed_json.format != "json" or json_parse(result_json) == nil or
     configured_source_binary != "/repo/bin/simple" or
     missing_source_binary != "/repo/src/app/test_runner_new/main.spl" or
     compiled_binary != "/repo/bin/simple" or
@@ -144,20 +129,25 @@ if (unknown == "" or missing_tag == "" or tag_swallows_unknown == "" or
     not cli_source.contains("if _depth < 1:") or
     not cli_source.contains("env_set(\"SIMPLE_TEST_DEPTH\", \"1\")") or
     cli_source.contains("env_set(\"SIMPLE_TEST_DEPTH\", (_depth + 1).to_text())") or
-    not runner_source.contains("parse_private_sdn_worker_args(get_cli_args(), env_get(\"SIMPLE_TEST_SDN_WORKER_AUTH\") == \"1\")") or
-    not runner_source.contains("env_set(\"SIMPLE_TEST_SDN_WORKER_AUTH\", \"\")") or
-    not wrapper_source.contains("use app.test_runner_new.sdn_wrapper.\{run_test_sdn_wrapper}") or
-    not wrapper_source.contains("args.contains(\"--test-sdn-worker\")") or
-    not wrapper_source.contains("run_test_sdn_wrapper(sdn_args) as i64") or
-    wrapper_source.contains("TEST_JSON_WORKER_ARG") or
-    cli_executable == "" or cli_code == 0 or
+    not runner_source.contains("if env_get(\"SIMPLE_TEST_JSON_WORKER_AUTH\") != \"1\":") or
+    not runner_source.contains("env_set(\"SIMPLE_TEST_JSON_WORKER_AUTH\", \"\")") or
+    not wrapper_source.contains("if depth >= 1:\n        print _test_json_failure(\"test recursion guard triggered\", 1)") or
+    not wrapper_source.contains("env_set(\"SIMPLE_TEST_DEPTH\", \"1\")") or
+    not wrapper_source.contains("val TEST_JSON_OUTPUT_BYTES = 4194304") or
+    not wrapper_source.contains("env_set(\"SIMPLE_TEST_JSON_WORKER_AUTH\", \"1\")") or
+    cli_executable == "" or cli_code == 0 or json_parse(trimmed_cli_stdout) == nil or
     not trimmed_cli_stdout.starts_with("{") or not trimmed_cli_stdout.ends_with("}") or
-    not trimmed_cli_stdout.contains("schema:") or
-    not trimmed_cli_stdout.contains("success: false") or
-    forged_code != 1 or
-    not (forged_stdout + forged_stderr).contains("JSON test output is retired") or
+    not trimmed_cli_stdout.starts_with("{\"success\":false,") or
+    not trimmed_cli_stdout.contains("\"spec\":") or
+    not trimmed_cli_stdout.contains("\"spl_doctest\":") or
+    not trimmed_cli_stdout.contains("\"sdoctest\":") or
+    not trimmed_cli_stdout.contains("font_evidence_runner_fail_spec.spl") or
+    not trimmed_cli_stdout.contains("\"total_failed\":1") or
+    trimmed_cli_stdout.contains("\"worker_exit_code\":") or
+    forged_code != 2 or
+    not (forged_stdout + forged_stderr).contains("unauthorized private test JSON worker marker") or
     forged_source_code != 2 or
-    not (forged_source_stdout + forged_source_stderr).contains("JSON test output is retired")):
+    not (forged_source_stdout + forged_source_stderr).contains("unauthorized private test JSON worker marker")):
     print "FAIL: test runner option preflight did not fail closed"
     print "child rc: {cli_code}"
     print "child stdout tail:"
@@ -166,5 +156,5 @@ if (unknown == "" or missing_tag == "" or tag_swallows_unknown == "" or
     print json_contract_tail(cli_stderr)
     rt_exit(1)
 
-print "PASS: retired JSON test requests fail closed into one SDN envelope"
+print "PASS: test runner emits one valid aggregate JSON object for all enabled lanes"
 rt_exit(0)

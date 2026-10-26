@@ -246,7 +246,6 @@ const RT_KEEP: &[&str] = &[
     "rt_tls_client_read_checked",
     "rt_tls_client_write_timeout",
     "rt_tls_client_read_timeout_checked",
-    "rt_tls_client_read_bytes_timeout_checked",
     "rt_tls_client_close",
     "rt_tls_get_protocol_version",
     "rt_io_udp_bind",
@@ -715,7 +714,7 @@ static inline int64_t _rt_wall_nanos(void) {{
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }}
 #endif
-/* Epoch contract, pinned by test/01_unit/runtime/time_epoch_convergence_spec.spl:
+/* Epoch contract, pinned by test/unit/runtime/time_epoch_convergence_spec.spl:
  * rt_time_now_nanos/micros are MONOTONIC (durations), rt_time_now_unix_micros
  * is WALL-CLOCK (absolute). Until 2026-08-10 all three read CLOCK_REALTIME
  * here, so the two monotonic names were wall-clock in this lane only. */

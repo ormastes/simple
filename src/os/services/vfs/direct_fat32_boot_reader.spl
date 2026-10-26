@@ -1,5 +1,3 @@
-use os.services.vfs.nvme_boot_runtime_owner.{nvme_boot_runtime_alloc_dma, nvme_boot_runtime_read_system_shared}
-use os.services.vfs.vfs_boot_state.{_vfs_bytes_to_text, _bytes_have_elf_magic}
 # Direct FAT32 boot reader. FAT geometry and DMA scratch ownership are confined to DirectFat32BootReader.
 use common.string_core.{char_from_code}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
@@ -186,7 +184,7 @@ fn _vfs_boot_init_direct_fat32_reader_from_addr(addr: u64) -> bool:
     g_direct_fat32_boot_reader.data_start_lba = reserved.to_u64() + (fats.to_u64() * fat_size.to_u64())
     g_direct_fat32_boot_reader.total_sectors = total_sectors
     _vfs_boot_serial_println("[vfs-init] fat32 scratch alloc begin")
-    val scratch_alloc = nvme_boot_runtime_alloc_dma(4096u64)
+    val scratch_alloc = g_nvme.alloc_dma(4096u64)
     if scratch_alloc.is_err():
         _vfs_boot_serial_println("[vfs-init] fat32 scratch alloc failed")
         return false
@@ -310,7 +308,7 @@ fn _vfs_boot_fat32_next_cluster(cluster: u32) -> u32:
         owner: DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8),
         allocation_id: 2u64
     )
-    val read = nvme_boot_runtime_read_system_shared(fat_lba, 1u32, scratch)
+    val read = g_nvme.read_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, fat_lba, 1u32, scratch)
     if read.is_err():
         _vfs_boot_serial_println("[vfs-init] fat next read failed c={cluster} lba={fat_lba}")
         return 0x0FFFFFFFu32
@@ -504,7 +502,7 @@ fn _vfs_boot_read_cluster_to_scratch(cluster: u32) -> bool:
         owner: DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8),
         allocation_id: 2u64
     )
-    val read = nvme_boot_runtime_read_system_shared(_vfs_boot_fat32_cluster_lba(cluster), g_direct_fat32_boot_reader.sectors_per_cluster, scratch)
+    val read = g_nvme.read_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, _vfs_boot_fat32_cluster_lba(cluster), g_direct_fat32_boot_reader.sectors_per_cluster, scratch)
     if read.is_err():
         _vfs_boot_serial_println("[vfs-init] scalar scratch read failed cluster={cluster}")
         return false
@@ -887,7 +885,7 @@ pub fn vfs_boot_read_pure_nvme_fat32_path_bytes(path: text) -> [u8]:
 fn _seed_direct_fat32_app_registry():
     val manifest_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes("/SYS/APPS/APPIDX.TXT")
     if manifest_bytes.len() > 0:
-        val manifest_text = _vfs_bytes_to_text(manifest_bytes, manifest_bytes.len().to_i64())
+        val manifest_text = _vfs_bytes_to_text(manifest_bytes, manifest_bytes.len().to_u64())
         app_registry_load(manifest_text)
         log_raw_println("[vfs-init] app-registry loaded from pure-Simple direct FAT32 manifest")
     else:

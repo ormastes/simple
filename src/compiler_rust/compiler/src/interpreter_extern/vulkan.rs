@@ -188,7 +188,6 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_select_device", Ret::I, "i"),
     ("rt_vulkan_selected_device_driver_identity", Ret::T, ""),
     ("rt_vulkan_selected_device_driver_identity_hash", Ret::I, ""),
-    ("rt_vulkan_selected_device_identity_v1", Ret::T, "i"),
     ("rt_vulkan_selected_device_name", Ret::T, ""),
     ("rt_vulkan_selected_device_type", Ret::T, ""),
     ("rt_vulkan_set_scissor", Ret::I, "iiiii"),

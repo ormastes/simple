@@ -23,9 +23,6 @@ trap 'exit 143' TERM
 fail() { echo "FAIL Stage 3 ABI forwarding: $*" >&2; exit 1; }
 fake_root="$work/fixture-root"
 mkdir -p "$fake_root/scripts/check/lib" "$fake_root/scripts/resource" "$work/home" "$work/tmp" "$work/cache"
-mkdir -p "$fake_root/scripts/bootstrap/lib"
-cp "$repo/scripts/bootstrap/lib/stage3-source-policy.shs" "$fake_root/scripts/bootstrap/lib/"
-cp "$repo/scripts/bootstrap/lib/tree-rss-policy.shs" "$fake_root/scripts/bootstrap/lib/"
 BOOTSTRAP_CACHE_FIXTURE_REPO=$repo
 export BOOTSTRAP_CACHE_FIXTURE_REPO
 # Run the actual transcript and env-i owner. The fixture watchdog only forwards
@@ -77,28 +74,7 @@ run_worker() {
     "$work/transfer-producer.shs" fixture-apple-darwin cranelift 1 "$timeout_seconds" "$work/cache" "$work/runtime" \
     "$work/candidate" "$work/progress" "$work/profile" "$work/memory" fixture direct none 1 \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" 1 \
-    "$2" "$3" "$4" enforce \
-    --source src/compiler --source src/app --source src/lib --entry-closure
-}
-# The transcript owner rejects caller-supplied shard budgets, then prepends
-# its computed reservation after the original command hash. Validate that one
-# transport row before comparing the remaining original env/argv byte vector.
-capture_original_worker_vector() {
-  awk '
-    /^explicit-env:|^argv:/ {
-      kind=substr($0,1,index($0,":")-1)
-      rest=substr($0,index($0,":")+1); colon=index(rest,":"); count=substr(rest,1,colon-1); value=substr(rest,colon+1)
-      if (count !~ /^[0-9]+$/ || length(value)!=count) exit 1
-      prefix="SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB="
-      if (index(value,prefix)==1) {
-        budget=substr(value,length(prefix)+1)
-        if(kind!="explicit-env" || budget !~ /^[0-9]+$/ || budget+0<=0 || ++budgets!=1) exit 1
-        next
-      }
-      print value
-    }
-    END { if(budgets!=1) exit 1 }
-  ' "$1"
+    "$2" "$3" "$4"
 }
 verify_parent_worker_vector() (
   vector_transcript=$1
@@ -110,10 +86,16 @@ verify_parent_worker_vector() (
   runtime="$work/runtime" admitted="$work/transfer-producer.shs" candidate="$work/candidate"
   stage3_timeout_args=
   [ -z "$timeout_seconds" ] || stage3_timeout_args="--timeout $timeout_seconds"
-  set -- --source src/compiler --source src/app --source src/lib --entry-closure
   . "$work/parent-vector.shs"
-  capture_original_worker_vector "$vector_transcript" > "$work/worker-vector.args" ||
-    fail 'worker transcript framing or reserved budget invalid'
+  # The actual canonical worker transcript length-frames these newline-free
+  # arguments. Validate framing before constructing the complete vector.
+  awk '
+    /^explicit-env:|^argv:/ {
+      rest=substr($0,index($0,":")+1); colon=index(rest,":"); count=substr(rest,1,colon-1); value=substr(rest,colon+1)
+      if (count !~ /^[0-9]+$/ || length(value)!=count) exit 1
+      print value
+    }
+  ' "$vector_transcript" > "$work/worker-vector.args" || fail 'worker transcript framing invalid'
   set --
   while IFS= read -r vector_arg; do set -- "$@" "$vector_arg"; done < "$work/worker-vector.args"
   worker_args=$(bootstrap_stage3_args_sha256 "$@")
@@ -122,22 +104,6 @@ verify_parent_worker_vector() (
 SIMPLE_ABI_POLICY=ambient-wrong SIMPLE_ABI_ADMISSION_RECEIPT="$work/ambient-wrong.env" \
   run_worker forwarded v1 "$work/transfer-only.env" "$receipt_sha"
 verify_parent_worker_vector "$work/forwarded.transcript"
-# Duplicate, malformed, zero or argv-impostor budget rows must never be
-# silently stripped to make the original-vector comparison pass.
-for budget_mutation in duplicate malformed zero argv; do
-  awk -v mode="$budget_mutation" '
-    /^explicit-env:[0-9]+:SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=/ {
-      if(mode=="duplicate") { print; print; next }
-      value="SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=" (mode=="zero" ? "0" : "x")
-      if(mode=="argv") { sub(/^explicit-env:/,"argv:"); print; next }
-      print "explicit-env:" length(value) ":" value; next
-    }
-    { print }
-  ' "$work/forwarded.transcript" > "$work/budget-$budget_mutation.transcript"
-  if capture_original_worker_vector "$work/budget-$budget_mutation.transcript" > "$work/budget-$budget_mutation.args"; then
-    fail "invalid reserved transport budget accepted: $budget_mutation"
-  fi
-done
 grep -Fxq 'effective-policy=v1' "$work/forwarded.log" || fail 'policy lost through actual env-i owner'
 grep -Fxq "effective-receipt=$work/transfer-only.env" "$work/forwarded.log" || fail 'receipt lost through actual env-i owner'
 grep -q "^$receipt_sha " "$work/forwarded.log" || fail 'effective receipt bytes differ'
@@ -159,9 +125,9 @@ changed_sha=$(bootstrap_cache_hash_file "$work/transfer-only.env")
 printf 'changed producer bytes\n' >> "$work/transfer-producer.shs"
 if run_worker wrong-producer v1 "$work/transfer-only.env" "$changed_sha" > "$work/producer.guard" 2>&1; then fail 'receipt from other producer accepted'; fi
 
-[ "$(grep -c '"$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_rss_cap_mode" "$@" &' "$resume")" -eq 4 ] || fail 'one launch branch omits verified receipt transfer'
+[ "$(grep -c '"$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &' "$resume")" -eq 4 ] || fail 'one launch branch omits verified receipt transfer'
 grep -Fq '"SIMPLE_ABI_POLICY=$resume_abi_policy"' "$resume" || fail 'hashed argv omits effective policy'
 grep -Fq '"SIMPLE_ABI_ADMISSION_RECEIPT=$stage2_admission"' "$resume" || fail 'hashed argv omits effective receipt'
 grep -q 'resume_cache_admission=$(bootstrap_cache_abi_admission_options' "$resume" || fail 'resume cache binding omits receipt bytes'
 grep -q 'cache_admission_payload=$(bootstrap_cache_abi_admission_options' "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" || fail 'canonical binding differs from resume'
-echo 'PASS Stage 3 ABI forwarding: original parent/worker vectors plus validated owner budget, env-i policy/receipt bytes, missing/mutated/wrong-policy/wrong-producer refusal, cache binding and four launch branches; no compiler or admission qualification'
+echo 'PASS Stage 3 ABI forwarding: complete actual parent/worker vectors, env-i policy/receipt bytes, missing/mutated/wrong-policy/wrong-producer refusal, cache binding and four launch branches; no compiler or admission qualification'

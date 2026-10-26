@@ -107,7 +107,7 @@ This section is the signature authority for every plan, test, and implementation
 lane. Unversioned aliases such as `FrameDecoder`, `Encoder`, `RequestControl`,
 `WorkMachine`, and `SessionOwner` are not contracts.
 
-```simple:skip
+```simple
 ProviderByteIoStatusV1 = data | timeout | eof | error
 
 trait ProviderByteStreamPort:

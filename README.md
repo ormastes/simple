@@ -230,7 +230,7 @@ simple watch app.spl
 
 ### Variables & Types
 
-```text
+```sdoctest
 # Variables - immutable by default, mutable with var
 >>> x = 10
 >>> x
@@ -265,7 +265,7 @@ Hello, world!
 
 ### Control Flow
 
-```text
+```sdoctest
 # If/else with indentation
 >>> var x = 5
 >>> if x > 0:
@@ -291,7 +291,7 @@ positive
 
 ### Functions
 
-```text
+```sdoctest
 >>> fn add(a: i64, b: i64) -> i64:
 ...     a + b  # Implicit return
 
@@ -337,7 +337,7 @@ alice.greet()
 
 ### Collections
 
-```text
+```sdoctest
 # Arrays - short form (no val)
 >>> nums = [1, 2, 3, 4, 5]
 >>> first = nums[0]
@@ -385,7 +385,7 @@ alice.greet()
 
 Type-safe units prevent mixing incompatible values:
 
-```text
+```simple
 # Define measurement unit families with postfix syntax
 unit length(base: f64):
     mm = 0.001, cm = 0.01, m = 1.0, km = 1000.0
@@ -420,7 +420,7 @@ print("ETA: {travel_time.to_min()} minutes")
 
 ### Pattern Matching
 
-```text
+```simple
 enum Shape:
     Circle(radius: f64)
     Rectangle(width: f64, height: f64)
@@ -458,7 +458,7 @@ fn get_radius(opt: Option<f64>) -> f64:
 
 Simple macros are contract-first and LL(1) parseable - the IDE can provide autocomplete without expanding the macro:
 
-```text
+```simple
 # Macro declares what it introduces in the contract header
 macro define_counter(NAME: Str const) -> (
   returns result: (init: Int, step: Int),
@@ -482,7 +482,7 @@ class Demo:
 
 **Built-in macros:**
 
-```text
+```simple
 # Print with formatting
 println!("Hello, {name}!")           # Print with newline
 print!("Value: {x}")                 # Print without newline
@@ -505,7 +505,7 @@ panic!("Something went wrong: {err}")
 
 **Const-unrolled macro (generate multiple functions):**
 
-```text
+```simple
 # Generate accessor functions for each axis
 macro gen_axes(BASE: Str const, N: Int const) -> (
   intro axes:
@@ -526,7 +526,7 @@ class Point3D:
 
 Predicate-based pointcuts with compile-time weaving as the default execution model:
 
-```text
+```simple
 # Before advice — runs before matching functions
 on pc{ execution(* handle_request(..)) } use log_entry before priority 10
 
@@ -577,7 +577,7 @@ rate_limits |endpoint, requests, window|
 
 Load SDN in Simple:
 
-```text
+```simple
 config = sdn::load("app.sdn")
 print("Server port: {config.server.port}")
 ```
@@ -586,14 +586,14 @@ print("Server port: {config.server.port}")
 
 Executable examples are part of the maintained test surface. Simple supports both demonstration blocks and verified `sdoctest` blocks, with `sdoctest` intended for examples that must run and match output.
 
-```text
+```sdoctest
 >>> factorial(5)
 120
 >>> factorial(0)
 1
 ```
 
-```text
+```simple
 ## Stack data structure with LIFO semantics
 struct Stack:
     items: [i64]
@@ -618,7 +618,7 @@ sdoctests from the production `src/lib`, `src/compiler`, and `src/app` roots.
 
 ### Functional Update Operator (`->`)
 
-```text
+```simple
 # The -> operator calls a method and assigns result back
 var data = load_data()
 data->normalize()        # data = data.normalize()
@@ -630,7 +630,7 @@ data->normalize()->filter(min: 0)->save("out.txt")
 
 ### GPU Computing
 
-```text
+```simple
 import std.gpu
 
 # GPU kernel style 1: #[gpu] with explicit bounds check
@@ -669,7 +669,7 @@ fn main():
 
 **GPU Thread Indexers:**
 
-```text
+```simple
 #[gpu]
 fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
     # Multi-dimensional indexing
@@ -814,7 +814,7 @@ This follows the real Code Actions picker flow exercised by
 choose a row, and apply it with Enter. Keep the interaction and its visible
 selection contract together.
 
-```text
+```simple
 use std.spec.{describe, expect, it, step}
 
 describe "Code action picker":
@@ -848,7 +848,7 @@ same table-shaped contract useful for compression, storage/NVMe, security, and
 HTML test reports: stable columns, representative rows, and assertions over
 the generated surface.
 
-```text
+```simple
 use std.spec.{describe, expect, it, step}
 use app.dashboard.render.table.{render_html_table}
 

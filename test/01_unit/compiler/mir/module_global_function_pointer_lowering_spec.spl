@@ -2,7 +2,6 @@ use std.spec
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
-use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 
 fn lower_function_slot_source(src: text) -> MirModule:
@@ -130,46 +129,3 @@ describe "Module-global function pointer MIR lowering", tag: ["only-compiled"]:
         expect(saw_load_global).to_equal(true)
         expect(saw_indirect_call).to_equal(true)
         expect(saw_direct_cleanup_call).to_equal(false)
-
-# --- Merged from the legacy mirror copy (unit:compiler/mir/module_global_function_pointer_lowering_spec.spl), test dedup phase B: tests this copy lacked.
-
-describe "Module-global function pointer MIR lowering (merged from legacy copy)":
-    it "keeps an ordinary top-level function call direct":
-        val source = "fn helper() -> i64:\n    7\n\nfn caller() -> i64:\n    helper()\n"
-        val mir = lower_function_slot_source(source)
-        var saw_direct_helper_call = false
-        for function in mir.functions.values():
-            if function.name == "caller":
-                for block in function.blocks:
-                    for instruction in block.instructions:
-                        match instruction.kind:
-                            case MirInstKind.Call(_, operand, _):
-                                match operand.kind:
-                                    case MirOperandKind.Const(MirConstValue.Str(name), _):
-                                        if name == "helper":
-                                            saw_direct_helper_call = true
-                                    case _:
-                                        pass
-                            case _:
-                                pass
-        expect(saw_direct_helper_call).to_equal(true)
-
-    it "installs the slot's initial function pointer in a module initializer":
-        val source = "fn default_cleanup():\n    ()\n\nfn replacement_cleanup():\n    ()\n\nvar cleanup: fn() = default_cleanup\n\nfn install():\n    cleanup = replacement_cleanup\n\nfn invoke():\n    cleanup()\n"
-        val mir = lower_function_slot_source(source)
-        var saw_slot_static = false
-        for static_ in mir.statics.values():
-            if static_.name.ends_with("cleanup"):
-                saw_slot_static = true
-        var saw_init_store = false
-        for function in mir.functions.values():
-            if function.name != "install" and function.name != "invoke":
-                for block in function.blocks:
-                    for instruction in block.instructions:
-                        match instruction.kind:
-                            case MirInstKind.StoreGlobal(_, _):
-                                saw_init_store = true
-                            case _:
-                                pass
-        expect(saw_slot_static).to_equal(true)
-        expect(saw_init_store).to_equal(true)

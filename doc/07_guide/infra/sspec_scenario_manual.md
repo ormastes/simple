@@ -63,7 +63,7 @@ when maintaining older specs. New scenario manuals should prefer explicit
 
 Older specs may still use helper/checker methods with human step text:
 
-```text
+```simple
 @step "User opens the app"
 fn open_app():
     ...
@@ -79,7 +79,7 @@ fn Then_login_succeeds():
 
 Legacy scenario flow:
 
-```text
+```simple
 @capture
 it "user logs in":
     user.open_app()
@@ -103,7 +103,7 @@ scenario manuals, prefer `step("Login succeeds")` over `Given_*`, `When_*`, or
 Use comment-form `# @step: Text` or `# @step("Text")` before a call or
 executable setup line when the derived label is not good enough:
 
-```text
+```simple
 it "user logs in":
     user.open_app()
     # @step: Submit login form
@@ -116,7 +116,7 @@ Generated docs render `Submit login form` as the visible step and omit the
 `# @step` metadata from the folded executable source.
 Step-local capture metadata may sit between a step label and the action:
 
-```text
+```simple
 # @step: Submit login form
 # @capture(api)
 user.submit_login()
@@ -180,7 +180,7 @@ Current docgen supports comment metadata for manual visibility and previous
 scenario expansion. Use `# @inline` for reusable setup flows that should not
 appear as standalone manual sections:
 
-```text
+```simple
 # @inline
 it "app opens":
     user.open_app()
@@ -188,7 +188,7 @@ it "app opens":
 
 Scenario expansion uses `# @inline` plus `# @prev`:
 
-```text
+```simple
 # @inline
 it "app opens":
     user.open_app()
@@ -205,7 +205,7 @@ They show the expanded setup steps as part of the scenario.
 Use `# @include("scenario title")` only when an inline scenario must appear in
 the middle of another scenario:
 
-```text
+```simple
 # @inline
 it "user confirms dialog":
     user.confirm_dialog()
@@ -244,7 +244,7 @@ checker-linked evidence.
 
 Examples:
 
-```text
+```simple
 # @capture
 it "user logs in":
     user.open_app()
@@ -316,7 +316,7 @@ optional per-host features. Specs that exercise a lane must follow the
 
 ### Pattern: Probe, Skip, Execute
 
-```text
+```simple
 it "CUDA lane compiles and runs a kernel":
     # Probe: check if the lane is available on this host
     val status = CudaExecutor.probe()
@@ -352,7 +352,7 @@ Lane probing returns one of three status strings, shared with the test runner:
 The `NotebookExecutor` trait guarantees that `interrupt()` resolves within
 2×`timeout` worst-case. To verify this contract in your spec:
 
-```text
+```simple
 # @step: Interrupt resolves within timeout
 it "CUDA interrupt completes reliably":
     val executor = CudaExecutor.start(opts)

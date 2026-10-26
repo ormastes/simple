@@ -9,10 +9,9 @@
 # it is honest in either tier and is placed here purely so the hosts can share
 # it without the strict module growing a pixel dependency.
 #
-# SCOPE, stated plainly: RECT fills + RECT borders + 5x7 bitmap text +
-# MOVE/LINE/CLOSE PATH/EDGE polylines, with GROUP child offsets and GROUP clip
-# rects honoured (scroll batches stay inside their viewport). No curves, no
-# images. Fills are source-over alpha
+# SCOPE, stated plainly: RECT fills + RECT borders + 5x7 bitmap text, with
+# GROUP child offsets and GROUP clip rects honoured (scroll batches stay
+# inside their viewport). No paths, no images. Fills are source-over alpha
 # blended over the (opaque) ground: the glass theme's translucent row overlays
 # (rgba ~6% white) must not flatten to solid blocks -- they did when `put`
 # stored the raw ARGB word, washing the list area out to white and hiding the
@@ -28,10 +27,8 @@ use common.ui.draw_ir_v3.{
     draw_ir_v3_geometry_at, draw_ir_v3_paint_at, draw_ir_v3_text_run_at,
     draw_ir_v3_glyph_at, draw_ir_v3_has_flag,
     draw_ir_v3_clip_at, draw_ir_v3_transform_at,
-    draw_ir_v3_path_span_at, draw_ir_v3_path_point_at,
     DRAW_IR_V3_KIND_RECT, DRAW_IR_V3_KIND_TEXT, DRAW_IR_V3_KIND_EDGE,
-    DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_KIND_GROUP,
-    DRAW_IR_V3_VERB_MOVE, DRAW_IR_V3_VERB_LINE, DRAW_IR_V3_VERB_CLOSE,
+    DRAW_IR_V3_KIND_GROUP,
     DRAW_IR_V3_FLAG_HIDDEN, DRAW_IR_V3_NO_ID
 }
 use common.ui.glyph_bitmap_5x7.{glyph_row_bits}
@@ -53,15 +50,8 @@ class RasterSurface:
     var clip_y: i32
     var clip_w: i32
     var clip_h: i32
-    # Device pixels per logical unit. Every drawing call takes LOGICAL
-    # coordinates; width/height/pixels/clip are DEVICE pixels. 1 keeps the
-    # previous 1:1 behaviour byte for byte.
-    var scale: i32
 
     static fn new(width: i32, height: i32, bg: u32) -> RasterSurface:
-        RasterSurface.new_scaled(width, height, bg, 1)
-
-    static fn new_scaled(width: i32, height: i32, bg: u32, scale: i32) -> RasterSurface:
         var px: [u32] = []
         val n = width.to_i64() * height.to_i64()
         var i: i64 = 0
@@ -70,16 +60,14 @@ class RasterSurface:
             i = i + 1
         RasterSurface(
             width: width, height: height, pixels: px,
-            clip_x: 0, clip_y: 0, clip_w: width, clip_h: height,
-            scale: if scale < 1: 1 else: scale
+            clip_x: 0, clip_y: 0, clip_w: width, clip_h: height
         )
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
-        val s = self.scale
-        self.clip_x = x * s
-        self.clip_y = y * s
-        self.clip_w = w * s
-        self.clip_h = h * s
+        self.clip_x = x
+        self.clip_y = y
+        self.clip_w = w
+        self.clip_h = h
 
     me clear_clip():
         self.clip_x = 0
@@ -122,11 +110,6 @@ class RasterSurface:
         self.pixels[idx] = (4278190080 + r * 65536 + g * 256 + b).to_u32()
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
-        """LOGICAL rect; painted at the surface's device scale."""
-        val s = self.scale
-        self.fill_device_rect(x * s, y * s, w * s, h * s, color)
-
-    me fill_device_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if w <= 0 or h <= 0:
             return
         val alpha = ((color >> 24) & 255u32).to_i32()
@@ -188,7 +171,6 @@ class RasterSurface:
         (see _raster_text_run) and it lives at the call site."""
         if gi < 0:
             return
-        val s = self.scale
         var row = 0
         while row < RASTER_GLYPH_H:
             val bits = glyph_row_bits(gi, row)
@@ -196,12 +178,7 @@ class RasterSurface:
             while col < RASTER_GLYPH_W:
                 val mask = 1 << (RASTER_GLYPH_W - 1 - col)
                 if (bits & mask) != 0:
-                    if s == 1:
-                        self.put(x + col, y + row, color)
-                    else:
-                        # The 5x7 font has no finer source: one font cell
-                        # covers s x s device pixels.
-                        self.fill_device_rect((x + col) * s, (y + row) * s, s, s, color)
+                    self.put(x + col, y + row, color)
                 col = col + 1
             row = row + 1
 
@@ -237,93 +214,6 @@ fn _raster_text_run(surface: RasterSurface, scene: DrawIrV3Scene, cmd: DrawIrV3C
             # browser glyph path uses -- no second font mapping is invented
             # here. Glyph y is a BASELINE, so the cell top is baseline - h.
             surface.draw_glyph(glyph.glyph_id.to_i64() as i32, glyph.x + ox, glyph.y + oy - RASTER_GLYPH_H, run.color)
-        i = i + 1
-
-fn _raster_line(surface: RasterSurface, x0: i32, y0: i32, x1: i32, y1: i32, thickness: i32, color: u32):
-    """Bresenham segment; each step stamps a thickness x thickness square
-    through `put`, so clip and alpha blending stay honoured."""
-    var x = x0
-    var y = y0
-    val dx = if x1 >= x0: x1 - x0 else: x0 - x1
-    val dy = if y1 >= y0: y0 - y1 else: y1 - y0
-    val sx = if x0 < x1: 1 else: -1
-    val sy = if y0 < y1: 1 else: -1
-    var err = dx + dy
-    val half = (thickness - 1) / 2
-    while true:
-        if thickness <= 1:
-            surface.put(x, y, color)
-        else:
-            var ty = 0
-            while ty < thickness:
-                var tx = 0
-                while tx < thickness:
-                    surface.put(x - half + tx, y - half + ty, color)
-                    tx = tx + 1
-                ty = ty + 1
-        if x == x1 and y == y1:
-            return
-        val e2 = 2 * err
-        if e2 >= dy:
-            err = err + dy
-            x = x + sx
-        if e2 <= dx:
-            err = err + dx
-            y = y + sy
-
-fn _raster_path(surface: RasterSurface, scene: DrawIrV3Scene, cmd: DrawIrV3Command, ox: i32, oy: i32):
-    """PATH/EDGE as stroked polylines -- the same contract the web host
-    projects (host_web.web_path_html): MOVE starts a subpath, LINE strokes a
-    segment, CLOSE strokes back to the subpath start. Stroke colour/width come
-    from the paint's stroke when it has one, else fill_color at 1px. QUAD and
-    CUBIC carry one point per verb in v3, so their control points cannot be
-    recovered; a path using them is left unpainted rather than guessed."""
-    val span = draw_ir_v3_path_span_at(scene.path_points, cmd.path_span_id)
-    if not span.present or span.point_count == 0u32:
-        return
-    val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
-    if not paint.present:
-        return
-    val stroke_width = paint.stroke_width_milli / 1000
-    val color = if stroke_width > 0: paint.stroke_color else: paint.fill_color
-    # Strokes are rasterized at device resolution: endpoints and width scale.
-    val s = surface.scale
-    val thickness = (if stroke_width > 0: stroke_width else: 1) * s
-    var pen_x: i32 = 0
-    var pen_y: i32 = 0
-    var start_x: i32 = 0
-    var start_y: i32 = 0
-    var has_pen = false
-    var i: i64 = 0
-    val count = span.point_count.to_i64()
-    while i < count:
-        val point = draw_ir_v3_path_point_at(scene.path_points, span.point_start + i.to_u32())
-        if not point.present:
-            return
-        val px = (point.x + ox) * s
-        val py = (point.y + oy) * s
-        if point.verb == DRAW_IR_V3_VERB_MOVE:
-            pen_x = px
-            pen_y = py
-            start_x = px
-            start_y = py
-            has_pen = true
-        else if point.verb == DRAW_IR_V3_VERB_LINE:
-            if has_pen:
-                _raster_line(surface, pen_x, pen_y, px, py, thickness, color)
-            else:
-                start_x = px
-                start_y = py
-                has_pen = true
-            pen_x = px
-            pen_y = py
-        else if point.verb == DRAW_IR_V3_VERB_CLOSE:
-            if has_pen:
-                _raster_line(surface, pen_x, pen_y, start_x, start_y, thickness, color)
-                pen_x = start_x
-                pen_y = start_y
-        else:
-            return
         i = i + 1
 
 fn raster_scene_into(surface: RasterSurface, scene: DrawIrV3Scene) -> i64:
@@ -398,13 +288,6 @@ fn raster_scene_argb(scene: DrawIrV3Scene, width: i32, height: i32) -> [u32]:
     raster_scene_into(surface, scene)
     surface.pixels
 
-fn raster_scene_argb_scaled(scene: DrawIrV3Scene, device_w: i32, device_h: i32, scale: i32) -> [u32]:
-    """`scene` laid out in logical units, rasterized into a device_w x
-    device_h frame at `scale` device pixels per logical unit (HiDPI)."""
-    val surface = RasterSurface.new_scaled(device_w, device_h, RASTER_BG, scale)
-    raster_scene_into(surface, scene)
-    surface.pixels
-
 # =========================================================================
 # Capture helpers (used by the 2d host's framebuffer dump)
 # =========================================================================
@@ -453,5 +336,5 @@ fn raster_to_ppm_bytes(pixels: [u32], width: i32, height: i32) -> [u8]:
     out
 
 export RasterSurface, RASTER_BG, RASTER_GLYPH_W, RASTER_GLYPH_H
-export raster_scene_into, raster_scene_argb, raster_scene_argb_scaled
+export raster_scene_into, raster_scene_argb
 export raster_distinct_pixel_count, raster_to_ppm_bytes

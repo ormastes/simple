@@ -100,19 +100,12 @@ ordering scenarios below must be re-reviewed.
 # @manual_section: value-struct-cycle-validation
 
 use std.spec
-use compiler.common.attributes.{FunctionAttr}
-use compiler.hir.hir_definitions.{HirBlock, HirExpr, HirExprKind, HirField, HirFunction, HirStruct, HirTypeParam}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirField, HirStruct, HirTypeParam}
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
-use compiler.semantics.value_struct_layout.{value_struct_layout_declarations_v1,
-    value_struct_layout_declaration_report_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
-use compiler.semantics.value_struct_layout.{
-    validate_value_struct_layouts, value_struct_layout_snapshot_v1,
-    value_struct_layout_report, value_struct_layout_is_cycle_diagnostic,
-    value_struct_layout_cycle_is_fatal_for
-}
+use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 
 fn mk_span() -> Span:
     Span(start: 0, end: 0, line: 1, col: 1, file: "synthetic", length: 0)
@@ -206,52 +199,6 @@ fn mk_module(name: text, table: SymbolTable, structs: [HirStruct]) -> HirModule:
         types: []
     )
 
-describe "explicit body-free layout declaration graph":
-    it "retains cycle identity and locations while leaving complete original field defaults intact":
-        var table = SymbolTable.new()
-        val symbol = table.define("DefaultNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val initial_value = HirExpr(kind: HirExprKind.IntLit(37, nil),
-            has_type_: true, type_: i64_type(), span: mk_span())
-        val default_body = HirBlock(stmts: [], has: true, value: initial_value, span: mk_span())
-        val field = HirField(..mk_field("value", i64_type()), has_default: true,
-            default: HirExpr(kind: HirExprKind.Block(default_body),
-                has_type_: true, type_: i64_type(), span: mk_span()))
-        val struct_ = mk_struct(symbol, "DefaultNode", [field, mk_field("next", named_type(symbol))], [])
-        val original = mk_module("default_projection", table, [struct_])
-        val declarations = value_struct_layout_declarations_v1(original.name, original.path,
-            original.structs, original.symbols)
-        expect(declarations.structs.len()).to_equal(1)
-        expect(declarations.structs[0].fields[0].named_symbol_id).to_equal(-1)
-        expect(declarations.structs[0].fields[1].named_symbol_id).to_equal(symbol.id)
-        expect(declarations.structs[0].fields[1].name).to_equal("next")
-        expect(declarations.structs[0].fields[1].span.file).to_equal("synthetic")
-        val retained = original.structs.values()[0]
-        expect(retained.fields[0].has_default).to_equal(true)
-        val original_default_value = match retained.fields[0].default.kind:
-            case HirExprKind.Block(body):
-                match body.value.kind:
-                    case HirExprKind.IntLit(value, _): value
-                    case _: -1
-            case _: -1
-        expect(original_default_value).to_equal(37)
-        val original_errors = validate_value_struct_layouts([original.name], [original])
-        expect(original_errors.len()).to_equal(1)
-        expect(original_errors[0]).to_contain("DefaultNode.next -> DefaultNode")
-        val report = value_struct_layout_declaration_report_v1([original.name], [declarations])
-        expect(report.errors).to_equal(original_errors)
-        expect(report.skipped_struct_edges).to_equal(0)
-
-    it "keeps indirect fields outside the direct by-value edge set":
-        var table = SymbolTable.new()
-        val symbol = table.define("IndirectNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val struct_ = mk_struct(symbol, "IndirectNode", [mk_field("next", optional_type(named_type(symbol)))], [])
-        val original = mk_module("indirect_projection", table, [struct_])
-        val declarations = value_struct_layout_declarations_v1(original.name, original.path,
-            original.structs, original.symbols)
-        expect(declarations.structs[0].fields[0].named_symbol_id).to_equal(-1)
-        expect(value_struct_layout_declaration_report_v1([original.name], [declarations]).errors.len()).to_equal(0)
-        expect(value_struct_layout_declaration_report_v1([], [declarations]).errors.len()).to_equal(1)
-
 describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
     it "flags a struct that embeds itself by value":
         # @req REQ-SEM-VSL-001
@@ -294,8 +241,8 @@ describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
         val hir = mk_module("vsl_chain_cycle", table, [a_struct, b_struct, c_struct])
         val errors = validate_value_struct_layouts(["vsl_chain_cycle"], [hir])
         expect(errors.len()).to_equal(1)  # oracle: 1 — one diagnostic for the whole chain
-        expect(errors[0].starts_with(
-            "recursive by-value struct layout: VslChainA.b -> VslChainB.c -> VslChainC.a -> VslChainA [")).to_equal(true)  # oracle: the walker names every hop in root insertion order, then the locations
+        expect(errors[0]).to_equal(
+            "recursive by-value struct layout: VslChainA.b -> VslChainB.c -> VslChainC.a -> VslChainA")  # oracle: the walker names every hop in root insertion order
 
     it "keeps root insertion order when more than one cycle exists":
         # @req REQ-SEM-VSL-004
@@ -308,9 +255,8 @@ describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
         val second_struct = mk_struct(second_sym, "VslSecondCycle", [mk_field("second", named_type(second_sym))], [])
         val hir = mk_module("vsl_cycle_order", table, [first_struct, second_struct])
         val errors = validate_value_struct_layouts(["vsl_cycle_order"], [hir])
-        expect(errors.len()).to_equal(2)  # oracle: 2 — every independent cycle is reported in one run
-        expect(errors[0]).to_contain("recursive by-value struct layout: VslFirstCycle.first -> VslFirstCycle")  # oracle: roots are reported in insertion order
-        expect(errors[1]).to_contain("recursive by-value struct layout: VslSecondCycle.second -> VslSecondCycle")
+        expect(errors).to_equal([
+            "recursive by-value struct layout: VslFirstCycle.first -> VslFirstCycle"])  # oracle: only the first-defined root is reported, deterministically
 
 describe "validate_value_struct_layouts accepts layouts that only look recursive":
     it "does not flag self-reference through an optional (T?) indirection — classic linked-list node":
@@ -440,8 +386,8 @@ describe "validate_value_struct_layouts aligned input boundary":
 
         val errors = validate_value_struct_layouts(
             ["physical.duplicate", "physical.duplicate"], [first_hir, second_hir])
-        expect(errors.len()).to_equal(1)
-        expect(errors[0]).to_contain("recursive by-value struct layout: VslDuplicate.self -> VslDuplicate")  # oracle: the LAST duplicate body wins, so the cycle from it is the one reported
+        expect(errors).to_equal([
+            "recursive by-value struct layout: VslDuplicate.self -> VslDuplicate"])  # oracle: the LAST duplicate body wins, so the cycle from it is the one reported
 
     it "resolves a by-value cycle through aligned physical module keys":
         # @req REQ-SEM-VSL-011
@@ -462,217 +408,6 @@ describe "validate_value_struct_layouts aligned input boundary":
         val errors = validate_value_struct_layouts(
             ["physical.left", "physical.right"], [left_hir, right_hir])
         expect(errors.len()).to_equal(1)  # oracle: 1 — physical-key resolution stitches the two halves into one cycle
-        val left_layout = value_struct_layout_snapshot_v1(
-            "physical.left", left_hir.path, left_hir.structs, left_hir.symbols)
-        val right_layout = value_struct_layout_snapshot_v1(
-            "physical.right", right_hir.path, right_hir.structs, right_hir.symbols)
-        val compact_errors = validate_value_struct_layouts(
-            ["physical.left", "physical.right"], [left_layout, right_layout])
-        expect(compact_errors).to_equal(errors)  # oracle: compact symbol rows preserve cross-module cycle ownership
-
-describe "validate_value_struct_layouts resolves edges for every symbol provenance the driver produces":
-    """
-    `SymbolTable.define` stores `defining_module` verbatim, and HIR lowering
-    passes the SOURCE PATH of the module (`HirLowering.module_filename`), while
-    the driver keys modules by LOGICAL name. Symbols registered from an import
-    surface carry the logical name instead. Before 2026-10-10 only the second
-    spelling resolved, so a self-embedding struct declared in the module being
-    lowered was silently accepted on the retained HIR path (phase 3 reported
-    `errors=0` for the same `TypeInfo.elem` cycle phase 4 rejected).
-    doc/08_tracking/bug/recursive_struct_layout_typeinfo_2026-10-10.md
-    """
-    it "flags a self-cycle whose struct symbol records the source path (retained-path shape)":
-        # @req REQ-SEM-VSL-014
-        step("Declare the struct the way declare_module_symbols does: defining_module is the file path")
-        var table = SymbolTable.new()
-        val node_sym = table.define("VslPathNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "synthetic/vsl_path_self.spl")
-        val node_struct = mk_struct(node_sym, "VslPathNode", [mk_field("has_next", i64_type()), mk_field("next", named_type(node_sym))], [])
-        val hir = mk_module("vsl_path_self", table, [node_struct])
-        val errors = validate_value_struct_layouts(["pkg.vsl_path_self"], [hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — the path-spelled owner must not hide a struct declared in that module
-        expect(errors[0]).to_contain("recursive by-value struct layout: VslPathNode.next -> VslPathNode")
-
-    it "flags the same self-cycle when the symbol records the logical module name (streaming-surface shape)":
-        # @req REQ-SEM-VSL-014
-        step("Declare the struct the way a prebound surface symbol does: defining_module is the module key")
-        var table = SymbolTable.new()
-        val node_sym = table.define("VslLogicalNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "pkg.vsl_logical_self")
-        val node_struct = mk_struct(node_sym, "VslLogicalNode", [mk_field("next", named_type(node_sym))], [])
-        val hir = mk_module("vsl_logical_self", table, [node_struct])
-        val errors = validate_value_struct_layouts(["pkg.vsl_logical_self"], [hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — both provenance spellings report the identical cycle
-        expect(errors[0]).to_contain("recursive by-value struct layout: VslLogicalNode.next -> VslLogicalNode")
-
-    it "flags a self-cycle whose symbol names an owner the validator has never seen":
-        # @req REQ-SEM-VSL-014
-        step("Give the struct symbol an owner text that matches no module key and no module path")
-        var table = SymbolTable.new()
-        val node_sym = table.define("VslForeignOwnerNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "C:/snapshots/rev-1/src/main.spl")
-        val node_struct = mk_struct(node_sym, "VslForeignOwnerNode", [mk_field("next", named_type(node_sym))], [])
-        val hir = mk_module("vsl_foreign_owner", table, [node_struct])
-        val errors = validate_value_struct_layouts(["main"], [hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — the symbol id of the struct identifies it without any owner text
-
-    it "stitches a cross-module cycle whose imported symbols record source paths":
-        # @req REQ-SEM-VSL-014
-        step("Split a mutual cycle across two modules whose symbols carry file paths, not module keys")
-        var left_table = SymbolTable.new()
-        val left_sym = left_table.define("VslPathLeft", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "synthetic/vsl_path_left.spl")
-        val right_import = left_table.define("VslPathRight", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "synthetic/vsl_path_right.spl")
-        val left_struct = mk_struct(left_sym, "VslPathLeft", [mk_field("right", named_type(right_import))], [])
-        val left_hir = mk_module("vsl_path_left", left_table, [left_struct])
-        var right_table = SymbolTable.new()
-        val right_sym = right_table.define("VslPathRight", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "synthetic/vsl_path_right.spl")
-        val left_import = right_table.define("VslPathLeft", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "synthetic/vsl_path_left.spl")
-        val right_struct = mk_struct(right_sym, "VslPathRight", [mk_field("left", named_type(left_import))], [])
-        val right_hir = mk_module("vsl_path_right", right_table, [right_struct])
-        val errors = validate_value_struct_layouts(["pkg.left", "pkg.right"], [left_hir, right_hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — one cycle, reported once from its first root
-        expect(errors[0]).to_contain("VslPathLeft.right -> VslPathRight.left -> VslPathLeft")
-
-    it "does not flag a path-spelled by-value field that closes no cycle":
-        # @req REQ-SEM-VSL-014
-        step("Embed a leaf struct by value with path provenance and confirm resolution alone is not an error")
-        var table = SymbolTable.new()
-        val leaf_sym = table.define("VslPathLeaf", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "synthetic/vsl_path_leaf.spl")
-        val holder_sym = table.define("VslPathHolder", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "synthetic/vsl_path_leaf.spl")
-        val leaf_struct = mk_struct(leaf_sym, "VslPathLeaf", [mk_field("x", i64_type())], [])
-        val holder_struct = mk_struct(holder_sym, "VslPathHolder", [mk_field("leaf", named_type(leaf_sym)), mk_field("more", array_type(named_type(holder_sym)))], [])
-        val hir = mk_module("vsl_path_leaf", table, [leaf_struct, holder_struct])
-        val errors = validate_value_struct_layouts(["pkg.vsl_path_leaf"], [hir])
-        expect(errors.len()).to_equal(0)  # oracle: 0 — resolving more edges must not invent cycles
-
-describe "validate_value_struct_layouts diagnostics":
-    it "names the declaring module and the file:line of the struct and of the embedding field":
-        # @req REQ-SEM-VSL-015
-        step("Give the struct and its field real line numbers and read the location suffix")
-        var table = SymbolTable.new()
-        val node_sym = table.define("VslLocNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        var next_field = mk_field("next", named_type(node_sym))
-        next_field.span = Span(start: 0, end: 0, line: 429, col: 5, file: "", length: 0)
-        var node_struct = mk_struct(node_sym, "VslLocNode", [mk_field("value", i64_type()), next_field], [])
-        node_struct.span = Span(start: 0, end: 0, line: 413, col: 1, file: "", length: 0)
-        val hir = mk_module("vsl_loc", table, [node_struct])
-        val errors = validate_value_struct_layouts(["pkg.vsl_loc"], [hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1
-        expect(errors[0]).to_equal(
-            "recursive by-value struct layout: VslLocNode.next -> VslLocNode [struct VslLocNode in module pkg.vsl_loc at synthetic/vsl_loc.spl:413, field next at synthetic/vsl_loc.spl:429]")  # oracle: module key, then file:line of the struct, then of the field
-
-    it "reports every independent cycle in one run, each mutual cycle once":
-        # @req REQ-SEM-VSL-016
-        step("Build two self-cycles and one mutual pair in one module and count the diagnostics")
-        var table = SymbolTable.new()
-        val one_sym = table.define("VslAllOne", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val a_sym = table.define("VslAllA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val b_sym = table.define("VslAllB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val two_sym = table.define("VslAllTwo", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val one_struct = mk_struct(one_sym, "VslAllOne", [mk_field("me", named_type(one_sym))], [])
-        val a_struct = mk_struct(a_sym, "VslAllA", [mk_field("b", named_type(b_sym))], [])
-        val b_struct = mk_struct(b_sym, "VslAllB", [mk_field("a", named_type(a_sym))], [])
-        val two_struct = mk_struct(two_sym, "VslAllTwo", [mk_field("me", named_type(two_sym))], [])
-        val hir = mk_module("vsl_all", table, [one_struct, a_struct, b_struct, two_struct])
-        val errors = validate_value_struct_layouts(["vsl_all"], [hir])
-        expect(errors.len()).to_equal(3)  # oracle: 3 — two self-cycles plus ONE diagnostic for the A/B pair
-        expect(errors[0]).to_contain("VslAllOne.me -> VslAllOne")
-        expect(errors[1]).to_contain("VslAllA.b -> VslAllB.a -> VslAllA")
-        expect(errors[2]).to_contain("VslAllTwo.me -> VslAllTwo")
-
-describe "value_struct_layout_report counts edges it could not walk":
-    it "counts a by-value struct field whose struct is in no validated module, once":
-        # @req REQ-SEM-VSL-017
-        step("Embed a struct symbol owned by a module that is not passed to the validator, from two roots")
-        var table = SymbolTable.new()
-        val missing_import = table.define("VslMissing", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "pkg.not_validated")
-        val holder_sym = table.define("VslSkipHolder", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val outer_sym = table.define("VslSkipOuter", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val holder_struct = mk_struct(holder_sym, "VslSkipHolder", [mk_field("gone", named_type(missing_import))], [])
-        val outer_struct = mk_struct(outer_sym, "VslSkipOuter", [mk_field("holder", named_type(holder_sym))], [])
-        val hir = mk_module("vsl_skip", table, [holder_struct, outer_struct])
-        val report = value_struct_layout_report(["pkg.vsl_skip"], [hir])
-        expect(report.errors.len()).to_equal(0)  # oracle: 0 — an unwalkable edge is not evidence of a cycle
-        expect(report.skipped_struct_edges).to_equal(1)  # oracle: 1 — the field is reached from two roots but is one edge
-
-    it "reports zero skipped edges when every by-value struct field resolves":
-        # @req REQ-SEM-VSL-017
-        step("Walk a fully resolvable two-struct module")
-        var table = SymbolTable.new()
-        val point_sym = table.define("VslSkipPoint", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "synthetic/vsl_skip_none.spl")
-        val line_sym = table.define("VslSkipLine", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "synthetic/vsl_skip_none.spl")
-        val point_struct = mk_struct(point_sym, "VslSkipPoint", [mk_field("x", i64_type())], [])
-        val line_struct = mk_struct(line_sym, "VslSkipLine", [mk_field("p1", named_type(point_sym))], [])
-        val hir = mk_module("vsl_skip_none", table, [point_struct, line_struct])
-        val report = value_struct_layout_report(["pkg.vsl_skip_none"], [hir])
-        expect(report.errors.len()).to_equal(0)  # oracle: 0
-        expect(report.skipped_struct_edges).to_equal(0)  # oracle: 0 — nothing was left unwalked
-
-describe "value struct cycle severity policy (SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE)":
-    it "stays fatal unless the value is exactly warning":
-        # @req REQ-SEM-VSL-018
-        step("Evaluate the policy for unset, the downgrade value, and near misses")
-        expect(value_struct_layout_cycle_is_fatal_for("")).to_equal(true)  # oracle: unset is fatal
-        expect(value_struct_layout_cycle_is_fatal_for("warning")).to_equal(false)  # oracle: the one downgrade spelling
-        expect(value_struct_layout_cycle_is_fatal_for("WARNING")).to_equal(true)  # oracle: a near miss must not weaken the check
-        expect(value_struct_layout_cycle_is_fatal_for("off")).to_equal(true)  # oracle: there is no off switch
-        expect(value_struct_layout_cycle_is_fatal_for("1")).to_equal(true)  # oracle: truthy noise is not a downgrade
-
-    it "lets only cycle diagnostics be downgraded, never the validator's internal errors":
-        # @req REQ-SEM-VSL-018
-        step("Classify a real cycle diagnostic and a real internal error")
-        var table = SymbolTable.new()
-        val node_sym = table.define("VslSeverityNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val node_struct = mk_struct(node_sym, "VslSeverityNode", [mk_field("me", named_type(node_sym))], [])
-        val hir = mk_module("vsl_severity", table, [node_struct])
-        val cycle_errors = validate_value_struct_layouts(["vsl_severity"], [hir])
-        val internal_errors = validate_value_struct_layouts(["vsl_orphan_key"], [])
-        expect(cycle_errors.len()).to_equal(1)  # oracle: 1
-        expect(internal_errors.len()).to_equal(1)  # oracle: 1
-        expect(value_struct_layout_is_cycle_diagnostic(cycle_errors[0])).to_equal(true)  # oracle: a cycle may be downgraded
-        expect(value_struct_layout_is_cycle_diagnostic(internal_errors[0])).to_equal(false)  # oracle: a broken validator input may not
-
-describe "validate_value_struct_layouts when a local struct reuses an imported symbol id":
-    """
-    `SymbolTable.define_with_binding` is first-write-wins for type names
-    (`hir_types.spl`, "Already registered — return the existing id"): a module
-    that imports `Foo` and then declares its own `struct Foo` can get the
-    IMPORTED symbol id back, so `HirStruct.symbol` of the local struct and
-    every unqualified `Foo` field in that module share one id whose
-    `defining_module` names the other module. An unqualified name means the
-    local declaration (that is the shadowing `define_own_module_type` enforces
-    on the declaration path), so the edge belongs to the LOCAL struct. The
-    validator resolves it that way, by symbol id; resolving by owner text
-    would walk the imported struct instead.
-    """
-    it "binds the edge to the local struct: a local self-cycle is reported in the local module":
-        # @req REQ-SEM-VSL-019
-        step("Declare a local self-embedding Foo under the id of an imported, cycle-free Foo")
-        var local_table = SymbolTable.new()
-        val shared_id = local_table.define("VslShadowFoo", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "pkg.remote")
-        val local_struct = mk_struct(shared_id, "VslShadowFoo", [mk_field("next", named_type(shared_id))], [])
-        val local_hir = mk_module("vsl_shadow_local", local_table, [local_struct])
-        var remote_table = SymbolTable.new()
-        val remote_sym = remote_table.define("VslShadowFoo", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "pkg.remote")
-        val remote_struct = mk_struct(remote_sym, "VslShadowFoo", [mk_field("x", i64_type())], [])
-        val remote_hir = mk_module("vsl_shadow_remote", remote_table, [remote_struct])
-        val errors = validate_value_struct_layouts(["pkg.local", "pkg.remote"], [local_hir, remote_hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — the local Foo embeds itself; the owner text must not redirect the edge
-        expect(errors[0]).to_contain("struct VslShadowFoo in module pkg.local at")
-
-    it "binds the edge to the local struct: a cycle that exists only in the imported struct is not charged to the local holder":
-        # @req REQ-SEM-VSL-019
-        step("Declare a cycle-free local Foo under the id of an imported self-embedding Foo, and embed it locally")
-        var local_table = SymbolTable.new()
-        val shared_id = local_table.define("VslShadowBar", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "pkg.remote")
-        val holder_sym = local_table.define("VslShadowHolder", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val local_struct = mk_struct(shared_id, "VslShadowBar", [mk_field("x", i64_type())], [])
-        val holder_struct = mk_struct(holder_sym, "VslShadowHolder", [mk_field("bar", named_type(shared_id))], [])
-        val local_hir = mk_module("vsl_shadow_local2", local_table, [local_struct, holder_struct])
-        var remote_table = SymbolTable.new()
-        val remote_sym = remote_table.define("VslShadowBar", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "pkg.remote")
-        val remote_struct = mk_struct(remote_sym, "VslShadowBar", [mk_field("me", named_type(remote_sym))], [])
-        val remote_hir = mk_module("vsl_shadow_remote2", remote_table, [remote_struct])
-        val errors = validate_value_struct_layouts(["pkg.local", "pkg.remote"], [local_hir, remote_hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — only the imported struct's own cycle
-        expect(errors[0]).to_contain("struct VslShadowBar in module pkg.remote at")
 
 describe "value struct layout membership-index source contract":
     it "keeps ordered traversal arrays and uses dictionaries only for membership":
@@ -698,50 +433,3 @@ describe "value struct layout membership-index source contract":
         expect(never_linear_scans_roots).to_equal(false)  # oracle: a linear root scan would regress the index contract
         expect(never_linear_scans_visited).to_equal(false)  # oracle: a linear visited scan would regress the index contract
         expect(no_third_membership_set).to_equal(false)  # oracle: exactly two membership structures are sanctioned
-
-describe "value struct layout retained validation snapshot":
-    it "preserves cycle detection while dropping non-struct symbols and HIR payloads":
-        # @req REQ-SEM-VSL-013
-        step("Build a cyclic struct module plus an unrelated function symbol, then snapshot only layout inputs")
-        var table = SymbolTable.new()
-        val node_sym = table.define("VslCompactNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
-        val unrelated_fn = table.define("VslUnrelatedFunction", SymbolKind.Function, nil, mk_span(), Visibility.Public, false, nil)
-        val node_struct = mk_struct(node_sym, "VslCompactNode", [mk_field("self", named_type(node_sym))], [])
-        var hir = mk_module("vsl_compact_snapshot", table, [node_struct])
-        hir.functions[unrelated_fn] = HirFunction(
-            symbol: unrelated_fn,
-            name: "VslUnrelatedFunction",
-            type_params: [],
-            params: [],
-            return_type: i64_type(),
-            body: HirBlock(stmts: [], has: true, value: nil_expr(), span: mk_span()),
-            effects: [],
-            visibility: Visibility.Public,
-            is_async: false,
-            is_static: false,
-            is_public: true,
-            is_method: false,
-            is_mutable: false,
-            is_const: false,
-            is_extern: false,
-            func_attr: FunctionAttr.default(),
-            has_export_attr: false,
-            export_attr: nil,
-            has_driver_manifest_attr: false,
-            driver_manifest_attr: nil,
-            has_suspension: false,
-            has_vhdl_metadata: false,
-            vhdl_metadata: nil,
-            has_doc_comment: false,
-            doc_comment: "",
-            span: mk_span())
-        val snapshot = value_struct_layout_snapshot_v1(
-            hir.name, hir.path, hir.structs, hir.symbols)
-        val full_errors = validate_value_struct_layouts(["vsl_compact_snapshot"], [hir])
-        val snapshot_errors = validate_value_struct_layouts(["vsl_compact_snapshot"], [snapshot])
-        expect(snapshot.functions.len()).to_equal(0)  # oracle: function HIR is not retained for layout validation
-        expect(snapshot.classes.len()).to_equal(0)  # oracle: class HIR is not retained for layout validation
-        expect(snapshot.structs.len()).to_equal(1)  # oracle: struct layout data remains available
-        expect(snapshot.symbols.symbols.has(node_sym.id)).to_equal(true)  # oracle: struct symbols remain resolvable
-        expect(snapshot.symbols.symbols.has(unrelated_fn.id)).to_equal(false)  # oracle: unrelated symbol rows are dropped
-        expect(snapshot_errors).to_equal(full_errors)  # oracle: compact and full module inputs report the same cycle

@@ -9,11 +9,6 @@
 
 include!(concat!(env!("OUT_DIR"), "/runtime_symbol_entries.rs"));
 
-// Keep the selected provider linked into this crate's cdylib too: the
-// generated symbol table takes its ABI addresses before the compiler links.
-#[cfg(feature = "hosted-webgpu-provider")]
-extern crate spl_hosted_runtime;
-
 #[cfg(all(target_os = "macos", not(feature = "native-all-provider")))]
 mod cocoa_dynload_owner;
 
@@ -76,7 +71,6 @@ pub mod executor;
 pub mod fiber_identity;
 pub mod gemm_runtime;
 pub mod gpu_provider_twins;
-pub mod webgpu_backfill_twins;
 pub mod gui_html_session_twins;
 pub mod host_gpu_lane;
 pub mod memory;
@@ -149,7 +143,6 @@ pub mod security_runtime;
 pub mod text_slice_audit;
 pub mod value;
 mod file_view;
-mod fd_stat_v1;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime
 // symbol registration is enabled. Tiny standalone binaries do not need these
@@ -457,14 +450,6 @@ fn runtime_symbol_table_contains_vulkan_discard_command() {
         .any(|entry| entry.name == "rt_vulkan_discard_command" && !entry.ptr.is_null()));
 }
 
-#[cfg(all(test, feature = "runtime-symbol-table", target_os = "linux"))]
-#[test]
-fn runtime_symbol_table_contains_bootstrap_directory_provider() {
-    assert!(RUNTIME_SYMBOL_ENTRIES
-        .iter()
-        .any(|entry| entry.name == "rt_dir_is_real_no_follow" && !entry.ptr.is_null()));
-}
-
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
 fn runtime_symbol_table_contains_processing_wire_helpers() {
@@ -518,7 +503,6 @@ fn runtime_symbol_table_excludes_disabled_tls_providers() {
         "rt_tls_client_read_checked",
         "rt_tls_client_write_timeout",
         "rt_tls_client_read_timeout_checked",
-        "rt_tls_client_read_bytes_timeout_checked",
         "rt_tls_client_close",
         "rt_tls_get_protocol_version",
         "rt_tls_get_cipher_suite",
@@ -924,8 +908,6 @@ pub use value::{
     rt_array_get_i64_raw,
     rt_array_get_text,
     rt_array_len,
-    rt_arm_array_get_byte_u32,
-    rt_arm_array_len_u32,
     rt_array_new,
     rt_array_pop,
     rt_array_push,
@@ -937,7 +919,6 @@ pub use value::{
     rt_collection_set,
     rt_typed_bytes_u8_push,
     rt_typed_bytes_u8_data_at,
-    rt_array_is_byte_packed,
     rt_typed_words_u32_at,
     rt_typed_words_u32_data_at,
     rt_typed_words_u32_push,
@@ -968,8 +949,6 @@ pub use value::{
     rt_closure_func_ptr,
     rt_closure_get_capture,
     rt_closure_new,
-    rt_closure_release,
-    rt_closure_retain,
     rt_closure_set_capture,
     // Dict operations
     rt_dict_entries,
@@ -982,7 +961,6 @@ pub use value::{
     // Enum operations
     rt_enum_check_discriminant,
     rt_enum_check_variant,
-    rt_try_is_absent,
     rt_enum_discriminant,
     rt_enum_id,
     rt_enum_new,
@@ -1019,9 +997,6 @@ pub use value::{
     rt_bytes_u8_set,
     rt_typed_words_u32_set,
     rt_typed_words_u64_set,
-    rt_typed_words_i64_at,
-    rt_typed_words_i64_push,
-    rt_typed_words_i64_set,
     rt_for_iterable,
     rt_index_get,
     rt_index_set,
@@ -1049,8 +1024,6 @@ pub use value::{
     rt_slice,
     // String operations
     rt_any_add,
-    rt_tagged_add,
-    rt_transient_array_scope_state_v1,
     rt_cstring_to_text,
     rt_string_byte_at,
     rt_string_char_code_at,
@@ -1129,8 +1102,7 @@ pub use value::{
 #[cfg(feature = "runtime-tls")]
 pub use value::{
     rt_tls_client_close, rt_tls_client_connect, rt_tls_client_connect_with_sni,
-    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_read_bytes_timeout_checked, rt_tls_client_read_checked,
-    rt_tls_client_read_timeout_checked,
+    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_read_checked, rt_tls_client_read_timeout_checked,
     rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
     rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept, rt_tls_server_close_connection,
     rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_read_checked, rt_tls_server_shutdown,

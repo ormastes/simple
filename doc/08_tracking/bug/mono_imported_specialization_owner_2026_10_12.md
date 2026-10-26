@@ -63,12 +63,3 @@ The final repaired function body matches the tested proposal; import placement
 and removal of the now-unreferenced old helper are the only cleanup changes.
 Selective local application commit: `f26793b4a88`.
 Remote landing remains gated on the user's Phase 3 buildability requirement.
-
-Port note (release_phase3 sync 2026-10-19): upstream had independently replaced
-`mono_requalify` with `specialization_callee_name_v1`, which names the callee
-from the template owner and its signature's global linkage in both body modes.
-The port keeps that structure and applies only the missing piece of this fix:
-the owner is canonicalized with `hir_symbol_owner_module` before qualifying.
-The `spec_module`-based E-MONO-034 rejections were not ported, because upstream's
-rewrite path no longer consults `spec_module`; their two spec cases were removed.
-The ported spec has not been re-executed on the upstream base.

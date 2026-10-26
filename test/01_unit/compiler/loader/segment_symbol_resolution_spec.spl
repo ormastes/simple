@@ -171,9 +171,7 @@ describe "bounds and lifecycle stay correct":
         val stale = mapper.get_symbol("generation_bound").unwrap()
         assert_true(mapper.is_symbol_current(stale))
         assert_eq(mapper.unmap_owner("reuse"), 1)
-        # BUG-PHASE1-OPTION-ASSERT-20261011: compare absence in the typed
-        # expression; the cached producer's generic helper sees Option::None.
-        assert_true(mapper.lookup("generation_bound") == nil)
+        assert_eq(mapper.lookup("generation_bound"), nil)
         assert_eq(mapper.is_symbol_current(stale), false)
 
         _ = mapper.map_segment("reuse", 0, three_fn_segment(), 16)
@@ -198,49 +196,3 @@ describe "bounds and lifecycle stay correct":
         # @req REQ-SSPEC-UNIT
         step("builds a stable segment key")
         assert_eq(segment_key("mod", 3), "mod#3")
-
-    it "keeps repeated identical binding idempotent and refuses a changed extent":
-        var mapper = SegmentMapper.new()
-        _ = mapper.map_segment("idempotent", 0, three_fn_segment(), 16)
-        val first = mapper.bind_symbol("idempotent", 0, "same", 0, 6).unwrap()
-        assert_eq(mapper.bind_symbol("idempotent", 0, "same", 0, 6).unwrap(), first)
-        assert_true(mapper.bind_symbol("idempotent", 0, "same", SLOT, 6).is_err())
-        assert_eq(mapper.stats().symbol_count, 1)
-        assert_eq(mapper.get_symbol("same").unwrap().offset, 0)
-        _ = mapper.unmap_owner("idempotent")
-
-    it "rejects extents whose addition would overflow without publishing a symbol":
-        var mapper = SegmentMapper.new()
-        _ = mapper.map_segment("overflow", 0, three_fn_segment(), 16)
-        assert_true(mapper.bind_symbol("overflow", 0, "oversized", 1,
-            9223372036854775807).is_err())
-        assert_true(mapper.bind_symbol("overflow", 0, "huge-offset",
-            9223372036854775807, 1).is_err())
-        assert_eq(mapper.stats().symbol_count, 0)
-        _ = mapper.unmap_owner("overflow")
-
-    it "binds symbol freshness to the owning mapper instance":
-        var first = SegmentMapper.new()
-        var second = SegmentMapper.new()
-        _ = first.map_segment("same-owner", 0, three_fn_segment(), 16)
-        _ = second.map_segment("same-owner", 0, three_fn_segment(), 16)
-        _ = first.bind_symbol("same-owner", 0, "same-name", 0, 6)
-        _ = second.bind_symbol("same-owner", 0, "same-name", 0, 6)
-        val snapshot = first.get_symbol("same-name").unwrap()
-        assert_true(first.is_symbol_current(snapshot))
-        assert_eq(second.is_symbol_current(snapshot), false)
-        _ = first.unmap_owner("same-owner")
-        _ = second.unmap_owner("same-owner")
-
-    it "seals writable owner segments once and refuses an unknown owner":
-        var mapper = SegmentMapper.new()
-        assert_true(mapper.seal_owner("missing").is_err())
-        _ = mapper.map_segment_writable("writable", 0, three_fn_segment(), 16)
-        _ = mapper.bind_symbol("writable", 0, "sealed-return", 0, 6)
-        assert_eq(mapper.stats().protection_transitions, 0)
-        assert_true(mapper.seal_owner("writable").is_ok())
-        assert_eq(mapper.stats().protection_transitions, 1)
-        assert_true(mapper.seal_owner("writable").is_ok())
-        assert_eq(mapper.stats().protection_transitions, 1)
-        assert_eq(call_mapped_0(mapper.lookup("sealed-return").unwrap()), 11)
-        _ = mapper.unmap_owner("writable")

@@ -13,7 +13,7 @@ to handle calls to undefined methods at runtime through a catch-all handler.
 
 ## Syntax
 
-```simple:skip
+```simple
 class DynamicHandler:
     fn method_missing(name: text, args: List) -> Any:
         # Handle undefined method calls

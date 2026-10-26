@@ -1,0 +1,251 @@
+# @cover src/compiler/99.loader/completeness_seal/seal.spl 60%
+# @cover src/compiler/99.loader/completeness_seal/manifest.spl 60%
+# @cover src/compiler/99.loader/completeness_seal/required_interfaces.spl 60%
+"""
+# Completeness seal — manifest admission and sealing
+
+**Category:** Compiler / Loader / Completeness seal
+
+## Overview
+
+A `complete` semantic universe closes at seal time, not at compile time. This
+scenario walks the seal path an operator actually exercises: read the shipped
+example manifests, admit the valid one, and watch the two negative fixtures be
+rejected with the exact diagnostics the hardening plan specifies.
+
+Covered:
+- the §13.2 `extension:` and §16.4 `module:` manifest shapes round-trip from SDN
+- a complete, dynloaded, first-use module seals in a critical build
+- a constructor missing `serialize` fails with the §17.4 `E-COMPLETE-021` shape
+- an open `dyn` module in a critical build fails with the §17.6 `E-MC-DYN-001`
+  shape
+- a normalization barrier is the ONLY thing that makes a downstream operation
+  NotApplicable
+- the seal hash is order-independent: the same manifests in two discovery
+  orders produce the same hash and the same dense tags
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file}
+use compiler.loader.completeness_seal.manifest.{
+    ExtensionManifest,
+    ModuleManifest,
+    TransitionDecl,
+    parse_manifest_text
+}
+use compiler.loader.completeness_seal.required_interfaces.{
+    required_operations,
+    effective_required_operations,
+    missing_operations
+}
+use compiler.loader.completeness_seal.seal.{
+    SealConfig,
+    SealError,
+    seal,
+    default_capacity,
+    seal_error_code,
+    seal_error_text
+}
+
+val FIXTURE_DIR = "spec/compiler_schema/extensions/"
+val CORE_ABI = "core-abi-v1"
+
+fn load(name: text) -> (([ExtensionManifest], [ModuleManifest]), text):
+    val source = read_file(FIXTURE_DIR + name)
+    match parse_manifest_text(source, FIXTURE_DIR + name):
+        case Ok(doc):
+            ((doc.extensions, doc.modules), "")
+        case Err(errs):
+            var detail = ""
+            for e in errs:
+                detail = detail + "|"
+            (([], []), detail)
+
+fn config_for(name: text, critical: bool, verified: [text]) -> SealConfig:
+    val loaded = load(name)
+    val parts = loaded.0
+    SealConfig(
+        critical: critical,
+        core_abi_hash: CORE_ABI,
+        extensions: parts.0,
+        modules: parts.1,
+        verified_sealed_modules: verified,
+        capacity: default_capacity()
+    )
+
+describe "completeness seal — manifest loading":
+    it "reads the §13.2 extension shape and the §16.4 module shape from one file":
+        val loaded = load("hir_async.sdn")
+        assert_equal(loaded.1, "")
+        val exts = loaded.0.0
+        val mods = loaded.0.1
+        expect(exts.len()).to_equal(1)
+        expect(mods.len()).to_equal(1)
+        expect(exts[0].owner_enum).to_equal("compiler.hir.HirExprKind")
+        expect(exts[0].constructor).to_equal("async.Await")
+        expect(exts[0].closure).to_equal("complete")
+        expect(exts[0].required_core_abi_hash).to_equal(CORE_ABI)
+        expect(exts[0].provider_module).to_equal("hir_async")
+        expect(exts[0].local_ordinal).to_equal(1)
+        expect(exts[0].schema_abi_version).to_equal(2)
+        expect(mods[0].id).to_equal("hir_async")
+        expect(mods[0].linkage).to_equal("dynload")
+        expect(mods[0].activation).to_equal("first_use")
+        expect(mods[0].extends_list.len()).to_equal(1)
+        expect(mods[0].extends_list[0].schema_abi).to_equal(2)
+        assert_true(mods[0].provides_interface("HirSerialize"))
+
+    it "resolves every §13.2 operation to its declared handler":
+        val loaded = load("hir_async.sdn")
+        val ext = loaded.0.0[0]
+        expect(required_operations(ext.owner_enum).len()).to_equal(8)
+        for op in required_operations(ext.owner_enum):
+            assert_true(ext.provides_op(op))
+        expect(missing_operations(ext).len()).to_equal(0)
+
+describe "completeness seal — happy path":
+    it "seals a complete dynloaded first-use module in a critical build":
+        val config = config_for("hir_async.sdn", true, ["hir_async"])
+        match seal(config):
+            case Ok(sealed):
+                expect(sealed.tags.sealed_count).to_equal(1)
+                expect(sealed.tags.static_count).to_equal(0)
+                expect(sealed.module_ids.len()).to_equal(1)
+                assert_true(sealed.seal_hash.starts_with("COMPLETESEALV1-"))
+                match sealed.tag_of(config.extensions[0]):
+                    case Some(t):
+                        expect(t).to_equal(0)
+                    case None:
+                        assert_true(false)
+            case Err(errs):
+                assert_equal(seal_error_text(errs[0]), "<expected a clean seal>")
+
+    it "rejects first_use activation for a module that was never verified and sealed":
+        val config = config_for("hir_async.sdn", true, [])
+        match seal(config):
+            case Ok(_):
+                assert_true(false)
+            case Err(errs):
+                expect(errs.len()).to_equal(1)
+                expect(seal_error_code(errs[0])).to_equal("E-MC-DYN-002")
+
+describe "completeness seal — E-COMPLETE-021 missing interface":
+    it "refuses to seal a constructor with no serialize handler":
+        val config = config_for("hir_async_missing_serialize.sdn", true, [])
+        match seal(config):
+            case Ok(_):
+                assert_true(false)
+            case Err(errs):
+                expect(errs.len()).to_equal(1)
+                expect(seal_error_code(errs[0])).to_equal("E-COMPLETE-021")
+                val rendered = seal_error_text(errs[0])
+                assert_contains(rendered, "E-COMPLETE-021:")
+                assert_contains(rendered, "complete extension async.Await cannot be sealed")
+                assert_contains(rendered, "required interface missing:")
+                assert_contains(rendered, "HirSerialize")
+                assert_contains(rendered, "hir_async")
+                assert_contains(rendered, "2d15aa0f9c31b7e4")
+
+describe "completeness seal — E-MC-DYN-001 open dyn in critical":
+    it "refuses an open dyn module in a critical build":
+        val config = config_for("ide_live_probe_dyn.sdn", true, ["ide_probe"])
+        match seal(config):
+            case Ok(_):
+                assert_true(false)
+            case Err(errs):
+                expect(seal_error_code(errs[0])).to_equal("E-MC-DYN-001")
+                val rendered = seal_error_text(errs[0])
+                assert_contains(rendered, "E-MC-DYN-001:")
+                assert_contains(rendered, "open dynamic semantic extension is reachable in a critical build")
+                assert_contains(rendered, "HirExprKind")
+                assert_contains(rendered, "ide_probe")
+
+    it "admits the same dyn module in a non-critical build":
+        val config = config_for("ide_live_probe_dyn.sdn", false, [])
+        match seal(config):
+            case Ok(sealed):
+                expect(sealed.module_ids.len()).to_equal(1)
+            case Err(errs):
+                assert_equal(seal_error_text(errs[0]), "<expected a non-critical seal>")
+
+describe "completeness seal — NotApplicable requires a normalization barrier":
+    it "keeps every operation required when no transition is declared":
+        val loaded = load("hir_async.sdn")
+        val ext = loaded.0.0[0]
+        expect(effective_required_operations(ext).len()).to_equal(8)
+
+    it "excuses downstream operations only for a normalized ast_to_hir transition":
+        val normalized = ExtensionManifest(
+            owner_enum: "compiler.hir.HirExprKind",
+            constructor: "sugar.Pipe",
+            closure: "complete",
+            payload_schema_hash: "aa",
+            module_abi_hash: "bb",
+            required_core_abi_hash: CORE_ABI,
+            provider_module: "hir_sugar",
+            local_ordinal: 1,
+            schema_abi_version: 1,
+            provided_ops: ["print", "type_check", "verify"],
+            provided_handlers: ["sugar.print", "sugar.type", "sugar.verify"],
+            transition: Some(TransitionDecl(
+                stage: "ast_to_hir",
+                state: "normalized",
+                target: "compiler.hir.HirExprKind.Call"
+            ))
+        )
+        expect(effective_required_operations(normalized).len()).to_equal(3)
+        expect(missing_operations(normalized).len()).to_equal(0)
+
+    it "does not excuse anything when the transition state is not normalized":
+        val staged = ExtensionManifest(
+            owner_enum: "compiler.hir.HirExprKind",
+            constructor: "sugar.Pipe",
+            closure: "complete",
+            payload_schema_hash: "aa",
+            module_abi_hash: "bb",
+            required_core_abi_hash: CORE_ABI,
+            provided_ops: ["print", "type_check", "verify"],
+            provider_module: "hir_sugar",
+            local_ordinal: 1,
+            schema_abi_version: 1,
+            provided_handlers: ["sugar.print", "sugar.type", "sugar.verify"],
+            transition: Some(TransitionDecl(
+                stage: "ast_to_hir",
+                state: "lowered",
+                target: "compiler.hir.HirExprKind.Call"
+            ))
+        )
+        expect(effective_required_operations(staged).len()).to_equal(8)
+        expect(missing_operations(staged).len()).to_equal(5)
+
+describe "completeness seal — determinism":
+    it "produces the same seal hash and tags for two discovery orders":
+        val async_parts = load("hir_async.sdn").0
+        val probe_parts = load("ide_live_probe_dyn.sdn").0
+        val forward = SealConfig(
+            critical: false,
+            core_abi_hash: CORE_ABI,
+            extensions: async_parts.0,
+            modules: async_parts.1 + probe_parts.1,
+            verified_sealed_modules: [],
+            capacity: default_capacity()
+        )
+        val reverse = SealConfig(
+            critical: false,
+            core_abi_hash: CORE_ABI,
+            extensions: async_parts.0,
+            modules: probe_parts.1 + async_parts.1,
+            verified_sealed_modules: [],
+            capacity: default_capacity()
+        )
+        match seal(forward):
+            case Ok(a):
+                match seal(reverse):
+                    case Ok(b):
+                        assert_equal(a.seal_hash, b.seal_hash)
+                        assert_equal(a.module_ids.join(","), b.module_ids.join(","))
+                        assert_equal(a.tags.seal_hash, b.tags.seal_hash)
+                    case Err(errs):
+                        assert_equal(seal_error_text(errs[0]), "<expected reverse order to seal>")
+            case Err(errs):
+                assert_equal(seal_error_text(errs[0]), "<expected forward order to seal>")

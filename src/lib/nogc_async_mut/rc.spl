@@ -236,26 +236,14 @@ class Weak:
     ptr: i64
     is_atomic: bool  # True for Arc-based, false for Rc-based
 
-    fn upgrade_rc() -> Rc?:
-        """Acquire a releasable owner from a single-threaded Rc weak handle.
-
-        Atomic weak handles require a compare-exchange-if-nonzero provider;
-        they cannot use this single-threaded check/increment protocol.
-        """
-        if self.is_atomic or self.ptr == 0:
-            return nil
-        val strong = rc_box_strong_count(self.ptr)
-        if strong == 0:
-            return nil
-        rc_box_inc_strong(self.ptr)
-        Some(Rc(self.ptr))
-
     fn upgrade() -> i64?:
-        """Legacy copied-i64 access; use upgrade_rc() for an owning Rc.
+        """Try to upgrade to Rc.
 
-        The Rc path copies the payload without acquiring a strong count.
-        The Arc path remains unqualified: its separate load/increment is not
-        an atomic upgrade and requires an ArcBox compare-exchange provider.
+        Returns:
+            Some(Rc) if data still alive
+            nil if data was deallocated
+
+        Thread-safe for Arc-based weak references.
         """
         val strong = if self.is_atomic:
             arc_box_strong_count(self.ptr)
@@ -274,9 +262,7 @@ class Weak:
             eprint("Warning: Weak.upgrade() returns inner value instead of Arc wrapper due to type system limitations")
             Some(arc_box_get_value(self.ptr))
         else:
-            # Compatibility API copies an i64 payload; it returns no owner
-            # that could release a new strong count. Use upgrade_rc() when
-            # the caller needs to keep the allocation alive.
+            rc_box_inc_strong(self.ptr)
             Some(rc_box_get_value(self.ptr))
 
     fn upgrade_arc() -> i64?:

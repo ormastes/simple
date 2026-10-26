@@ -1,0 +1,89 @@
+"""UNUSED001 function-scope and source-span regression oracles."""
+
+use app.cli.query_lint.{_collect_lint_diagnostics_json}
+use std.spec.step
+
+fn _unused_records(source: text) -> [text]:
+    val result = _collect_lint_diagnostics_json("unused_scope_probe.spl", source)
+    var records: [text] = []
+    for diagnostic in result.1:
+        if diagnostic.contains("\"code\":\"UNUSED001\""):
+            records.push(diagnostic)
+    records
+
+describe "query lint unused-variable scope":
+    it "does not let a sibling method use suppress an unused declaration":
+        step("Bound identifier counts to the declaring class method")
+        val source = (
+            "class ScopeProbe:\n" +
+            "    fn first():\n" +
+            "        val used_elsewhere = 1\n" +
+            "    fn second():\n" +
+            "        val copy = used_elsewhere\n")
+        val records = _unused_records(source)
+        expect(records.len()).to_equal(2)
+        expect(records[0]).to_contain("variable 'used_elsewhere' is declared but never used")
+        expect(records[0]).to_contain("\"line\":3")
+        expect(records[1]).to_contain("variable 'copy' is declared but never used")
+        expect(records[1]).to_contain("\"line\":5")
+
+    it "keeps a use inside its own method while isolating the sibling":
+        step("Preserve same-method uses only")
+        val source = (
+            "class ScopeProbe:\n" +
+            "    fn first():\n" +
+            "        val kept = 1\n" +
+            "        print kept\n" +
+            "    fn second():\n" +
+            "        val unused_b = 2\n")
+        val records = _unused_records(source)
+        expect(records.len()).to_equal(1)
+        expect(records[0]).to_contain("variable 'unused_b' is declared but never used")
+        expect(records[0].contains("variable 'kept'")).to_equal(false)
+
+    it "stops a method at a shallower module function":
+        step("Do not borrow uses across a class dedent")
+        val source = (
+            "class ScopeProbe:\n" +
+            "    fn first():\n" +
+            "        val method_only = 1\n" +
+            "fn module_fn():\n" +
+            "    print method_only\n")
+        val records = _unused_records(source)
+        expect(records.len()).to_equal(1)
+        expect(records[0]).to_contain("variable 'method_only' is declared but never used")
+
+    it "keeps blank lines and deeper blocks inside the method":
+        step("Do not terminate a method body early")
+        val source = (
+            "class ScopeProbe:\n" +
+            "    fn first():\n" +
+            "        val nested_use = 1\n\n" +
+            "        if true:\n" +
+            "            print nested_use\n")
+        val records = _unused_records(source)
+        expect(records.len()).to_equal(0)
+
+    it "recognizes representative public and asynchronous function headers":
+        step("Apply UNUSED001 to pub fn and async fn prefixes")
+        val source = (
+            "pub fn public_probe():\n" +
+            "    val public_unused = 1\n" +
+            "async fn async_probe():\n" +
+            "    val async_unused = 2\n")
+        val records = _unused_records(source)
+        expect(records.len()).to_equal(2)
+        expect(records[0]).to_contain("variable 'public_unused' is declared but never used")
+        expect(records[1]).to_contain("variable 'async_unused' is declared but never used")
+
+    it "reports the exact binding token rather than an earlier substring":
+        step("Preserve one-based columns from the original source line")
+        val source = (
+            "class ScopeProbe:\n" +
+            "    fn first():\n" +
+            "        val a = 1\n")
+        val records = _unused_records(source)
+        expect(records.len()).to_equal(1)
+        expect(records[0]).to_contain("variable 'a' is declared but never used")
+        expect(records[0]).to_contain("\"line\":3,\"col\":13")
+        expect(records[0]).to_contain("\"end_line\":3,\"end_col\":14")

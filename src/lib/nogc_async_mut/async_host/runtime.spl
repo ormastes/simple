@@ -105,42 +105,35 @@ class HostRuntime:
             case RuntimeMode.MultiThreaded: true
             case RuntimeMode.SingleThreaded: false
 
-    me _schedule_handle<T>(priority: Priority, poll_fn: fn() -> Poll<()>) -> HostTaskHandle<T>:
-        """Bind a handle to the scheduler's admitted lifetime, never a copy owner."""
-        match self.scheduler.try_schedule(priority, poll_fn):
-            case Err(message):
-                HostTaskHandle(task_id: 9223372036854775807,
-                    state: TaskState.Cancelled, result: nil,
-                    error: Some(AsyncError.CapacityExceeded),
-                    cancel_token: CancellationToken(token_id: -1, parent_id: -1),
-                    wakers: [], context: nil)
-            case Ok(id):
-                match self.scheduler.task_context(id):
-                    case Ok(context):
-                        HostTaskHandle(task_id: id, state: TaskState.Pending,
-                            result: nil, error: nil, cancel_token: context.lifetime,
-                            wakers: [], context: Some(context))
-                    case Err(message):
-                        self.scheduler.cancel_task(id)
-                        self.scheduler.reap_task(id)
-                        HostTaskHandle(task_id: id, state: TaskState.Cancelled,
-                            result: nil, error: Some(AsyncError.JoinError(message)),
-                            cancel_token: CancellationToken(token_id: -1, parent_id: -1),
-                            wakers: [], context: nil)
-
     me run_task<T>(f: fn() -> T) -> HostTaskHandle<T>:
         """Run task and return handle."""
         val poll_fn = \:
             f()
             Poll.Ready(())
-        self._schedule_handle<T>(Priority.Normal, poll_fn)
+        val id = self.scheduler.schedule(Priority.Normal, poll_fn)
+        HostTaskHandle(
+            task_id: id,
+            state: TaskState.Pending,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
 
     me run_task_with_priority<T>(f: fn() -> T, priority: Priority) -> HostTaskHandle<T>:
         """Run with specific priority."""
         val poll_fn = \:
             f()
             Poll.Ready(())
-        self._schedule_handle<T>(priority, poll_fn)
+        val id = self.scheduler.schedule(priority, poll_fn)
+        HostTaskHandle(
+            task_id: id,
+            state: TaskState.Pending,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
 
     me run_result_task<T>(f: fn() -> Result<T, text>) -> HostTaskHandle<T>:
         """Run a Result-returning task and surface errors on the handle (W2-5 H3).
@@ -153,8 +146,21 @@ class HostRuntime:
         val poll_fn = \:
             f()
             Poll.Ready(())
-        # Result publication remains the existing separate caller obligation.
-        self._schedule_handle<T>(Priority.Normal, poll_fn)
+        val id = self.scheduler.schedule(Priority.Normal, poll_fn)
+        # The task's Ok/Err outcome is NOT captured here. Closures capture by
+        # value and are read-only (a write to a captured local is a compile
+        # error), so the earlier `result_store` / `error_store` writes inside
+        # poll_fn were always lost. Callers surface an error explicitly with
+        # drain_result_errors(handle, error) after block_on() / run().
+        val handle = HostTaskHandle(
+            task_id: id,
+            state: TaskState.Pending,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+        handle
 
     me drain_result_errors<T>(handle: HostTaskHandle<T>, error_store: Option<text>) -> HostTaskHandle<T>:
         """Populate handle.error from error_store after task completion (W2-5 H3).

@@ -84,7 +84,7 @@ The backend provides a per-vertex Phong lighting rasterizer and a scanline trian
 
 The `Engine3DExtended` trait adds 20 methods that WebGPU-capable backends implement:
 
-```simple:skip
+```simple
 use std.gpu.engine3d.backend.{Engine3DExtended}
 
 # MSAA
@@ -129,7 +129,7 @@ The browser WebGPU context follows MDSOC+ capsule architecture. It manages the f
 
 Key flow:
 
-```simple:skip
+```simple
 # Request adapter
 val adapter = webgpu_context.request_adapter()
 
@@ -300,7 +300,7 @@ val desc_cube = TextureDescriptor3D(
 
 ### SamplerDescriptor3D
 
-```simple:skip
+```simple
 use std.gpu.engine3d.texture3d.{SamplerDescriptor3D}
 
 val sampler = SamplerDescriptor3D(
@@ -324,7 +324,7 @@ val sampler_id = engine.create_sampler(sampler)
 
 ### ShaderModule3D
 
-```simple:skip
+```simple
 use std.gpu.engine3d.shader3d.{ShaderModule3D, RenderPipelineDescriptor3D, ComputePipelineDescriptor3D}
 
 val shader = ShaderModule3D(
@@ -337,7 +337,7 @@ val shader_handle = engine.load_shader(shader.vertex_src, shader.fragment_src)
 
 ### Vertex Layout
 
-```simple:skip
+```simple
 use std.gpu.engine3d.shader3d.{VertexAttribute3D, VertexBufferLayout3D}
 use std.gpu.engine3d.shader3d.{VERTEX_FMT_FLOAT32X3, VERTEX_FMT_FLOAT32X2}
 
@@ -351,7 +351,7 @@ val layout = VertexBufferLayout3D(stride: 32, attributes: attrs)
 
 ### Render Pipeline
 
-```simple:skip
+```simple
 val desc = RenderPipelineDescriptor3D(
     shader_id: shader_handle.gpu_id,
     vertex_layout_id: 0,
@@ -365,7 +365,7 @@ val pipeline = engine.load_pipeline(shader_handle, true, 0, 1)
 
 ### Compute Pipeline
 
-```simple:skip
+```simple
 val compute = ComputePipelineDescriptor3D(
     shader_id: shader_handle.gpu_id,
     entry_point: "main"
@@ -380,7 +380,7 @@ engine.dispatch_compute(kernel_id, 64, 1, 1)
 
 Bind groups associate shader resource slots with GPU buffers, textures, and samplers.
 
-```simple:skip
+```simple
 use std.gpu.engine3d.bind_group3d.{BindGroupLayoutEntry3D, BindGroupEntry3D, BindGroup3D}
 use std.gpu.engine3d.bind_group3d.{VISIBILITY_VERTEX, VISIBILITY_FRAGMENT, VISIBILITY_COMPUTE}
 use std.gpu.engine3d.bind_group3d.{standard_mvp_layout, standard_material_layout, standard_lighting_layout}
@@ -477,7 +477,7 @@ is_compressed_texture_file(".ktx2")  # true — KTX2, Basis, DDS
 
 Browser canvas elements support WebGPU contexts via `CANVAS_CONTEXT_WEBGPU`. The browser engine detects 3D CSS transforms and routes compositing through `composite_to_gpu.spl`.
 
-```simple:skip
+```simple
 # Request a WebGPU context on a canvas element
 val ctx = canvas_element.get_context(CANVAS_CONTEXT_WEBGPU)
 

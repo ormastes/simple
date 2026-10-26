@@ -5,10 +5,7 @@
 #   manifest.sdn   — arch, pointer_width, endianness, event_count
 #   events.bin     — concatenated 80-byte ReplayEntry records
 
-use std.nogc_async_mut.sosix.host_facade.{
-    sosix_dir_create_all, sosix_file_atomic_write,
-    sosix_file_read_text_result, sosix_file_read_bytes_result, sosix_file_write_bytes
-}
+use std.nogc_sync_mut.io.process_ops.{shell}
 use std.nogc_sync_mut.replay.types.{Arch, Endian, TargetDesc}
 use std.nogc_sync_mut.replay.codec.{encode_entries, decode_entries}
 use std.nogc_sync_mut.replay.event_kinds.{ReplayEntry}
@@ -89,22 +86,34 @@ impl EventLog:
 # ============================================================================
 
 fn write_event_log(dir_path: text, log: EventLog) -> Result<Nil, text>:
-    if not sosix_dir_create_all(dir_path):
+    # Create trace directory
+    val mkdir_result = shell("mkdir -p '{dir_path}'")
+    if mkdir_result.exit_code != 0:
         return Err("failed to create trace directory: {dir_path}")
 
     # Write manifest.sdn
     val manifest_path = "{dir_path}/manifest.sdn"
     val sdn_content = log.header.to_sdn()
-    if not sosix_file_atomic_write(manifest_path, sdn_content):
+    val write_manifest = shell("cat > '{manifest_path}' << 'SREPLAY_EOF'\n{sdn_content}\nSREPLAY_EOF")
+    if write_manifest.exit_code != 0:
         return Err("failed to write manifest: {manifest_path}")
 
-    # Write every buffer, including empty, so replacement always truncates.
+    # Write events.bin as hex (workaround for binary I/O)
     val events_path = "{dir_path}/events.bin"
-    var bytes: [u8] = []
-    for byte in encode_entries(log.entries):
-        bytes.push(byte as u8)
-    if not sosix_file_write_bytes(events_path, bytes):
-        return Err("failed to write events: {events_path}")
+    val bytes = encode_entries(log.entries)
+    var hex_parts: [text] = []
+    for b in bytes:
+        val hi = hex_digit(b / 16)
+        val lo = hex_digit(b % 16)
+        hex_parts.push(hi)
+        hex_parts.push(lo)
+    val hex_str = hex_parts.join("")
+    if hex_str.len() > 0:
+        val write_events = shell("echo -n '{hex_str}' | xxd -r -p > '{events_path}'")
+        if write_events.exit_code != 0:
+            return Err("failed to write events: {events_path}")
+    else:
+        shell("touch '{events_path}'")
 
     print "[sreplay] Wrote {log.header.event_count} events to {dir_path}/"
     Ok(nil)
@@ -113,11 +122,14 @@ fn read_event_log(dir_path: text) -> Result<EventLog, text>:
     val manifest_path = "{dir_path}/manifest.sdn"
     val events_path = "{dir_path}/events.bin"
 
-    val manifest_content = sosix_file_read_text_result(manifest_path)?
+    # Read manifest
+    val manifest_result = shell("cat '{manifest_path}' 2>/dev/null")
+    if manifest_result.exit_code != 0:
+        return Err("manifest not found: {manifest_path}")
 
     # Parse arch from manifest
     var arch = Arch.X86_64
-    for line in manifest_content.split("\n"):
+    for line in manifest_result.stdout.split("\n"):
         val trimmed = line.trim()
         if trimmed.starts_with("arch:"):
             val arch_str = trimmed.replace("arch:", "").trim().replace("\"", "")
@@ -125,12 +137,70 @@ fn read_event_log(dir_path: text) -> Result<EventLog, text>:
 
     var log = EventLog.create(arch)
 
-    # Strict reads distinguish an existing empty file from a failed read.
-    val event_bytes = sosix_file_read_bytes_result(events_path)?
+    # Read events.bin as hex
+    val hex_result = shell("xxd -p '{events_path}' 2>/dev/null | tr -d '\\n'")
+    if hex_result.exit_code != 0 or hex_result.stdout.trim().len() == 0:
+        return Ok(log)
+
+    val hex_str = hex_result.stdout.trim()
     var bytes: [i32] = []
-    for byte in event_bytes:
-        bytes.push(byte as i32)
+    var i = 0
+    while i + 1 < hex_str.len():
+        val hi = hex_value(hex_str[i])
+        val lo = hex_value(hex_str[i + 1])
+        bytes.push(hi * 16 + lo)
+        i = i + 2
 
     log.entries = decode_entries(bytes)
     log.header.event_count = log.entries.len()
     Ok(log)
+
+# ============================================================================
+# Hex helpers
+# ============================================================================
+
+fn hex_digit(v: i32) -> text:
+    match v:
+        0: "0"
+        1: "1"
+        2: "2"
+        3: "3"
+        4: "4"
+        5: "5"
+        6: "6"
+        7: "7"
+        8: "8"
+        9: "9"
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        15: "f"
+        _: "0"
+
+fn hex_value(ch: text) -> i32:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "A": 10
+        "b": 11
+        "B": 11
+        "c": 12
+        "C": 12
+        "d": 13
+        "D": 13
+        "e": 14
+        "E": 14
+        "f": 15
+        "F": 15
+        _: 0

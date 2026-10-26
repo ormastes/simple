@@ -16,10 +16,6 @@ use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.expressions.*
-use compiler.hir.hir_lowering._Items.lowering_helpers.{
-    bootstrap_hir_modules_add, bootstrap_hir_functions_reset,
-    bootstrap_hir_functions_add, bootstrap_hir_function_count
-}
 use compiler.hir.hir_lowering.hir_phase_profile.{
     HIR_PROF_IMPORTS,
     HIR_PROF_DECLARE,
@@ -38,7 +34,7 @@ use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
-extern fn rt_enum_discriminant<T>(value: T) -> i64
+extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
@@ -48,7 +44,6 @@ use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.hir.hir_function_order.{hir_function_symbol_order}
 
 impl HirLowering:
     me lower_parser_module_unstub(module: ParserModule, is_entry: bool) -> HirModule:
@@ -121,9 +116,12 @@ impl HirLowering:
             # bootstrap accumulator loses the entry's functions under the
             # bootstrap ABI even though lower_module populated its Dict.
             var flat_functions: [HirFunction] = []
-            val flat_function_values: [HirFunction] = lowered_module.functions.values()
-            for function_index in hir_function_symbol_order(flat_function_values):
-                flat_functions = flat_functions.push(flat_function_values[function_index])
+            var flat_function_keys = lowered_module.functions.keys()
+            flat_function_keys.sort()
+            flat_idx = 0
+            while flat_idx < flat_function_keys.len():
+                flat_functions = flat_functions.push(lowered_module.functions[flat_function_keys[flat_idx]])
+                flat_idx = flat_idx + 1
             var flat_constants: [HirConst] = []
             var flat_constant_keys = lowered_module.constants.keys()
             flat_constant_keys.sort()
@@ -219,12 +217,6 @@ impl HirLowering:
         var enum_idx = 0
         while enum_idx < imported_names.len():
             val local_name = imported_names[enum_idx]
-            # A module that declares its own enum with this name shadows the
-            # import (seed semantics: the local declaration wins outright), so
-            # the foreign enum is neither lowered nor allowed to claim the name.
-            if module.enums.contains_key(local_name):
-                enum_idx = enum_idx + 1
-                continue
             val owner_module = self.imported_enum_owner_module(local_name)
             if owner_module == "":
                 self.error("imported enum `{local_name}` has no declaration owner", Span.empty())
@@ -239,15 +231,13 @@ impl HirLowering:
         enum_idx = 0
         while enum_idx < local_names.len():
             val local_name = local_names[enum_idx]
-            val hir_enum = self.lower_enum(module.enums[local_name], hir_module_logical_name_from_path(module.name))
-            lowered[hir_enum.symbol] = hir_enum
+            if not self.imported_enums.contains_key(local_name):
+                val hir_enum = self.lower_enum(module.enums[local_name], hir_module_logical_name_from_path(module.name))
+                lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
         lowered
 
     me lower_module(module: ParserModule) -> HirModule:
-        # Opt-in no-GC ownership-sigil mode, carried on the module by the flat
-        # bridge from `@no_gc(strict)` (memory.md).
-        self.nogc_strict = module.nogc_strict
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
         val bootstrap_mode = self.ambient_bootstrap_enabled()
         # Phase profiling records bounded phase boundaries. Per-item logging
@@ -303,9 +293,7 @@ impl HirLowering:
         var prescan_enum_idx = 0
         while prescan_enum_idx < prescan_enum_names.len():
             val prescan_enum: ParserEnum = module.enums[prescan_enum_names[prescan_enum_idx]]
-            for raw_prescan_variant in prescan_enum.variants:
-                # ANY-transport hazard sweep round 3: annotated rebind.
-                val prescan_variant: Variant = raw_prescan_variant
+            for prescan_variant in prescan_enum.variants:
                 self.enum_variant_names[prescan_variant.name] = true
             prescan_enum_idx = prescan_enum_idx + 1
         # Pass 0: pre-register imported type names so explicit `use` paths win
@@ -345,16 +333,6 @@ impl HirLowering:
         if bootstrap_diag:
             eprint("[hir-lower] declare:done module={module.name}")
 
-        # Function bodies precede lower_enum, so resolve bare unit patterns
-        # from declaration metadata now, including consumer-local imports.
-        for pattern_enum_name in module.enums.keys():
-            self.register_enum_unit_patterns(module.enums[pattern_enum_name], pattern_enum_name)
-        for pattern_import_name in self.imported_enums.keys():
-            # Own declarations shadow a same-named import; never let the
-            # foreign variants overwrite the module's own unit patterns.
-            if not module.enums.contains_key(pattern_import_name):
-                self.register_enum_unit_patterns(self.imported_enums[pattern_import_name], pattern_import_name)
-
         # Pass -1 (relocated): pre-scan struct/class field TYPES (name-keyed) before
         # ANY function body is lowered. Nested-field-access support (see
         # struct_field_types_by_name doc comment in types.spl) needs this
@@ -386,14 +364,14 @@ impl HirLowering:
         while prescan_idx < prescan_struct_names.len():
             val prescan_name = prescan_struct_names[prescan_idx]
             val prescan_struct: ParserStruct = module.structs[prescan_name]
-            self.prescan_composite_field_types(prescan_name, prescan_struct.fields, prescan_struct.type_params)
+            self.prescan_composite_field_types(prescan_name, prescan_struct.fields)
             prescan_idx = prescan_idx + 1
         val prescan_class_names = module.classes.keys()
         prescan_idx = 0
         while prescan_idx < prescan_class_names.len():
             val prescan_name = prescan_class_names[prescan_idx]
             val prescan_class: ParserClass = module.classes[prescan_name]
-            self.prescan_composite_field_types(prescan_name, prescan_class.fields, prescan_class.type_params)
+            self.prescan_composite_field_types(prescan_name, prescan_class.fields)
             prescan_idx = prescan_idx + 1
 
         # Second pass: lower definitions
@@ -424,19 +402,7 @@ impl HirLowering:
             eprint("[hir-lower] locals:constants:init module={module.name}")
         var constants: Dict<SymbolId, HirConst> = {}
 
-        # Only declaration payload slots are needed by patterns before bodies.
-        # Full enum symbol/discriminant lowering retains its original order.
-        self.declared_pattern_enum_slots = {}
-        for local_name in self.imported_enums.keys():
-            if not module.enums.contains_key(local_name):
-                val owner_module = self.imported_enum_owner_module(local_name)
-                if owner_module != "" and self.imported_enum_symbol_ids.contains_key(local_name):
-                    self.register_declared_pattern_enum_slots(self.imported_enums[local_name], SymbolId(id: self.imported_enum_symbol_ids[local_name]), owner_module, true)
-        for local_name in module.enums.keys():
-            self.register_declared_pattern_enum_slots(module.enums[local_name], self.symbols.lookup_or_invalid(local_name), hir_module_logical_name_from_path(module.name), false)
-
         var lower_idx = 0
-        var bootstrap_function_symbol_ids: Dict<i64, bool> = {}
         if bootstrap_mode:
             bootstrap_hir_functions_reset()
             # Lower the REAL parsed functions of the entry module. They are held
@@ -504,16 +470,9 @@ impl HirLowering:
                     gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
                     gpu_function_backend_orders[hir_fn.name] = hir_fn.gpu_backend_order
                     self.symbols.register_gpu_function_metadata(hir_fn.name, hir_fn.gpu_target, hir_fn.gpu_backend_order)
-                # MIR resolves a function key against HirFunction.symbol.
-                # Imported/declaration symbols consume IDs before this loop,
-                # so the traversal index is not the function's identity.
-                val fn_key: SymbolId = hir_fn.symbol
-                if fn_key.id < 0 or bootstrap_function_symbol_ids.has(fn_key.id):
-                    self.error("bootstrap HIR function identity invalid or duplicated: {hir_fn.name} ({fn_key.id})", hir_fn.span)
-                else:
-                    bootstrap_function_symbol_ids[fn_key.id] = true
-                    functions[fn_key] = hir_fn
-                    bootstrap_hir_functions_add(hir_fn)
+                val fn_key: SymbolId = SymbolId(id: lower_idx)
+                functions[fn_key] = hir_fn
+                bootstrap_hir_functions_add(hir_fn)
                 if bootstrap_diag:
                     eprint("[hir-lower] function:done module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 lower_idx = lower_idx + 1
@@ -627,18 +586,13 @@ impl HirLowering:
                 while bootstrap_impl_idx < module.impls.len():
                     impls = impls.push(self.lower_impl(module.impls[bootstrap_impl_idx]))
                     bootstrap_impl_idx = bootstrap_impl_idx + 1
-                # Methods share the function identity namespace. A count-based
-                # key can overwrite a declared function whose real ID equals
-                # that count after imports/declarations consumed earlier IDs.
-                val bootstrap_impl_functions: [HirFunction] = self.lowered_impl_functions.values()
-                for impl_index in hir_function_symbol_order(bootstrap_impl_functions):
-                    val impl_fn: HirFunction = bootstrap_impl_functions[impl_index]
-                    val impl_symbol: SymbolId = impl_fn.symbol
-                    if impl_symbol.id < 0 or bootstrap_function_symbol_ids.has(impl_symbol.id):
-                        self.error("bootstrap HIR function identity invalid or duplicated: {impl_fn.name} ({impl_symbol.id})", impl_fn.span)
-                    else:
-                        bootstrap_function_symbol_ids[impl_symbol.id] = true
-                        functions[impl_symbol] = impl_fn
+                # Native `Dict.len()` always returns -1, which would seed the
+                # synthetic keys at -1 and collide with the real SymbolIds.
+                # See doc/07_guide/language/dict_native_pitfalls.md
+                var bootstrap_impl_fn_key = functions.keys().len()
+                for bootstrap_impl_sym in self.lowered_impl_functions.keys():
+                    functions[SymbolId(id: bootstrap_impl_fn_key)] = self.lowered_impl_functions[bootstrap_impl_sym]
+                    bootstrap_impl_fn_key = bootstrap_impl_fn_key + 1
             # ParserModule-level `val` constants: this bootstrap early-return used to
             # hard-code `constants: {}`, so module globals never reached HIR ->
             # MIR and every reference lowered to an uninitialized alloca (stack
@@ -656,7 +610,7 @@ impl HirLowering:
                 bootstrap_constants[bootstrap_hir_const.symbol] = bootstrap_hir_const
                 bootstrap_const_idx = bootstrap_const_idx + 1
             if bootstrap_diag:
-                eprint("[hir-lower] bootstrap-functions:count module={module.name} count={bootstrap_hir_function_count()}")
+                eprint("[hir-lower] bootstrap-functions:count module={module.name} count={_bootstrap_hir_functions.len()}")
             # Avoid passing untyped empty aggregate literals through the
             # stage4 constructor ABI. The normal path below materializes these
             # collections with their concrete element types before building
@@ -692,10 +646,7 @@ impl HirLowering:
                 di_bindings: bootstrap_di_bindings,
                 arch_rules: bootstrap_arch_rules,
                 mock_decls: bootstrap_mock_decls,
-                types: bootstrap_types,
-                representation_declarations: module.representation_declarations,
-                extend_enums: [],
-                nogc_strict: module.nogc_strict
+                types: bootstrap_types
             )
 
         val lower_module_classes = module.classes
@@ -752,7 +703,7 @@ impl HirLowering:
         lower_idx = 0
         while lower_idx < lowered_impl_function_keys.len():
             val symbol_number = lowered_impl_function_keys[lower_idx]
-            val method: HirFunction = self.lowered_impl_functions[symbol_number]
+            val method = self.lowered_impl_functions[symbol_number]
             functions[method.symbol] = method
             lower_idx = lower_idx + 1
 
@@ -847,7 +798,5 @@ impl HirLowering:
             arch_rules: arch_rules,
             mock_decls: mock_decls,
             types: [],
-            extend_enums: hir_extend_enums,
-            representation_declarations: module.representation_declarations,
-            nogc_strict: module.nogc_strict
+            extend_enums: hir_extend_enums
         )

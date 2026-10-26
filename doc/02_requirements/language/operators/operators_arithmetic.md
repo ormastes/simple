@@ -119,7 +119,7 @@ val cubed = 2 ** 3       # 8
 
         Adding two integers produces an integer result.
 
-        ```text
+        ```simple
         val sum = 2 + 3  # 5
         ```
 
@@ -152,7 +152,7 @@ val cubed = 2 ** 3       # 8
 
         Adding two floats produces a float result.
 
-        ```text
+        ```simple
         val sum = 2.5 + 3.5  # 6.0
         ```
 
@@ -175,7 +175,7 @@ val cubed = 2 ** 3       # 8
 
         Adding Int and Float promotes Int to Float.
 
-        ```text
+        ```simple
         val sum = 10 + 3.5  # 13.5 (Float)
         ```
 
@@ -204,7 +204,7 @@ val cubed = 2 ** 3       # 8
 
         Subtracting two integers produces an integer result.
 
-        ```text
+        ```simple
         val diff = 10 - 3  # 7
         ```
 
@@ -271,7 +271,7 @@ val cubed = 2 ** 3       # 8
 
         Multiplying two integers produces an integer result.
 
-        ```text
+        ```simple
         val product = 4 * 5  # 20
         ```
 
@@ -349,7 +349,7 @@ val cubed = 2 ** 3       # 8
 
         Dividing two integers produces a numeric result.
 
-        ```text
+        ```simple
         val quotient = 20 / 4  # 5
         ```
 
@@ -416,7 +416,7 @@ val cubed = 2 ** 3       # 8
 
         Modulo with positive integers returns the remainder.
 
-        ```text
+        ```simple
         val remainder = 17 % 5  # 2
         ```
 
@@ -470,7 +470,7 @@ val cubed = 2 ** 3       # 8
 
         Raising an integer to an integer power.
 
-        ```text
+        ```simple
         val squared = 5 ** 2  # 25
         ```
 
@@ -517,7 +517,7 @@ val cubed = 2 ** 3       # 8
 
         Exponentiation is right-associative.
 
-        ```text
+        ```simple
         2 ** 3 ** 2  # 2 ** (3 ** 2) = 2 ** 9 = 512
         ```
 
@@ -542,7 +542,7 @@ val cubed = 2 ** 3       # 8
 
         Floor division with positive integers.
 
-        ```text
+        ```simple
         val result = 17 // 5  # 3
         ```
 
@@ -571,7 +571,7 @@ val cubed = 2 ** 3       # 8
 
         Negating an integer produces its opposite.
 
-        ```text
+        ```simple
         val neg = -42  # -42
         ```
 
@@ -614,7 +614,7 @@ val cubed = 2 ** 3       # 8
 
         Negating an expression.
 
-        ```text
+        ```simple
         val neg = -(5 + 3)  # -8
         ```
 
@@ -644,7 +644,7 @@ val cubed = 2 ** 3       # 8
 
         Multiplication has higher precedence than addition.
 
-        ```text
+        ```simple
         2 + 3 * 4  # 14, not 20
         ```
 
@@ -667,7 +667,7 @@ val cubed = 2 ** 3       # 8
 
         Exponentiation has higher precedence than multiplication.
 
-        ```text
+        ```simple
         2 * 3 ** 2  # 18, not 36
         ```
 

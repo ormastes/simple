@@ -50,7 +50,7 @@ use std.common.spec.evidence.evidence_comparator.{compare_evidence}
 
 Before (existing, untouched):
 
-```text
+```spl
 val evidence = capture_html(
     "Simple Lab fresh notebook page",
     html,
@@ -62,7 +62,7 @@ expect(evidence.mime).to_equal("text/html")
 
 After (added directly below, same `it` block):
 
-```text
+```spl
 val canonical = legacy_evidence_to_canonical(evidence)
 val oracle = oracle_spec_open("lab_fresh_notebook_page_evidence", [
     check_exact("kind", "html"),
@@ -81,7 +81,7 @@ unused `_evidence` binding to `page_evidence` so it could be referenced).
 
 Before (existing, untouched):
 
-```text
+```spl
 val artifact = capture_exec_response(
     "MCP stdio command",
     "simple_mcp_server --stdio",
@@ -96,7 +96,7 @@ expect(artifact.body).to_contain("stdout: initialize result")
 
 After (added directly below):
 
-```text
+```spl
 val canonical = legacy_evidence_to_canonical(artifact)
 val oracle = oracle_spec_open("capture_exec_response_evidence", [
     check_exact("kind", "exec"),
@@ -150,7 +150,7 @@ directly with `to_contain`/`to_equal`, with no evidence envelope at all.
 `src/lib/common/spec/evidence/untyped_capture.spl` is the adapter for exactly
 that shape:
 
-```text
+```spl
 use std.common.spec.evidence.untyped_capture.{untyped_capture, untyped_capture_to_canonical}
 use std.common.spec.evidence.model.{oracle_spec_open, check_exact, EvidenceStatus}
 use std.common.spec.evidence.evidence_comparator.{compare_evidence}
@@ -196,7 +196,7 @@ subprocess (`shell("echo hello")`) and asserts `result.stdout` with
 (actual child-process stdout), never wrapped in any evidence artifact. Added,
 additively, right after the existing assertion:
 
-```text
+```spl
 val capture = untyped_capture("shell echo stdout", result.stdout, "stdout")
 val evidence = untyped_capture_to_canonical(capture, "process_ops_shell_echo_hello")
 val comparison = compare_evidence(evidence, oracle_spec_open("process_ops_shell_echo_hello", [
@@ -251,7 +251,7 @@ These are worse than untyped captures, because they are **not checks at all**:
 Turn each `fn test_*` body into an `it` block and each `if`-guarded print into
 an `expect(...)` oracle. Keep the module-level type definitions as they are.
 
-```text
+```simple
 # before — executes zero examples, prints a verdict nobody enforces
 fn test_pane_area():
     val p = PaneId.create(0, 80, 24)
@@ -278,7 +278,7 @@ both copies identically or `check-test-tree-divergence` turns red. Verify with
 
 **Do not chain off a static factory.** Writing the natural compact form
 
-```text
+```simple
 expect(PaneId.create(0, 80, 24).area()).to_equal(1920)   # fails to resolve
 ```
 
@@ -308,7 +308,7 @@ An `it` closure captures a module-level `var` **by value**, so a direct read
 inside an example returns the initial value no matter how often a function
 mutated it. Reading through a function is correct:
 
-```text
+```simple
 var _counter: int = 0
 fn bump(): _counter = _counter + 1
 fn get_counter() -> int: return _counter

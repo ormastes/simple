@@ -144,7 +144,7 @@ Detects functions with too many parameters, which hurts readability and is often
 
 Fires when a function has more than 7 parameters (excluding `self`).
 
-```text
+```simple
 # WARNED — 8 parameters
 fn create_user(name: text, email: text, age: i64, role: text,
                dept: text, manager: text, office: text, phone: text):
@@ -157,7 +157,7 @@ Fires when a function has more than 12 parameters.
 
 ### What is NOT Flagged
 
-```text
+```simple
 # Constructors (need all struct fields)
 fn new(name: text, email: text, age: i64, role: text,
        dept: text, manager: text, office: text, phone: text) -> User:
@@ -177,7 +177,7 @@ extern fn rt_create_window(x: i64, y: i64, w: i64, h: i64,
 
 Group related parameters into a struct:
 
-```text
+```simple
 # Before (warns)
 fn create_user(name: text, email: text, age: i64, role: text,
                dept: text, manager: text, office: text, phone: text):
@@ -205,7 +205,7 @@ Detects functions with trivial/dummy implementations that may be unintentional s
 
 Fires when a function has parameters but its body is a single trivial expression that doesn't reference any of them.
 
-```text
+```simple
 # WARNED — params unused, returns bare 0
 fn gc_malloc(size: i64) -> i64: 0
 
@@ -224,7 +224,7 @@ fn run_backend(module: text) -> Result:
 
 Fires when a zero-parameter function returns a type-default value. Lower confidence since it could be a legitimate constant.
 
-```text
+```simple
 # INFO — returns default 0 (possible stub)
 fn get_count() -> i64: 0
 
@@ -243,12 +243,12 @@ fn is_enabled() -> bool: true
 Fires when non-test source uses a single whole-function placeholder body such as
 `pass_todo(...)`, `pass_do_nothing(...)`, or `pass_dn(...)`.
 
-```text
+```simple
 fn not_done(port: i64) -> i64:
     pass_todo("implement driver read path", "tracked by SIMPLE-123")
 ```
 
-```text
+```simple
 fn noop_handler(event: text):
     pass_do_nothing("event is intentionally ignored by this sink")
 ```
@@ -258,7 +258,7 @@ fn noop_handler(event: text):
 Required-comment lints are warning-first migration diagnostics for dangerous
 escape hatches:
 
-```text
+```simple
 pass_todo("what remains", "hint or issue")
 pass_do_nothing("why no-op is correct")
 todo("what remains", "hint or issue")
@@ -287,7 +287,7 @@ Use a real assertion against returned data, state, or capability status instead.
 
 Fires when a spec/example body contains:
 
-```text
+```simple
 pass_todo
 pass_do_nothing
 pass_dn
@@ -300,7 +300,7 @@ For environment/tooling gaps, use `skip:` or assert an explicit `skip:` /
 
 Fires on match-arm placeholders such as:
 
-```text
+```simple
 case Ok(_): expect(true).to_equal(true)
 case Err(_): pass_do_nothing
 ```
@@ -311,7 +311,7 @@ Match arms must assert concrete fields or messages, not a literal-success stand-
 
 Fires on print-and-return skip placeholders such as:
 
-```text
+```simple
 it "prints skip and returns":
     print "[skip] env unavailable"
     return
@@ -323,7 +323,7 @@ Use `skip:` for sanctioned environment skips instead of pretending the example p
 
 Fires when an `it` or `slow_it` body has no real assertion and no sanctioned `skip:`.
 
-```text
+```simple
 it "just calls helper":
     run_check()
 ```
@@ -335,21 +335,21 @@ Examples must either assert a concrete result or use `skip:` when the environmen
 Fires when a spec wraps a comparison inside `expect(...)` and then compares that
 boolean to `true` or `false`.
 
-```text
+```simple
 expect(code != 0).to_equal(true)
 expect(result_count > 1).to_be(true)
 ```
 
 Assert the underlying value directly instead:
 
-```text
+```simple
 expect(code).to_be_greater_than(0)
 expect(result_count).to_be_greater_than(1)
 ```
 
 ### What is NOT Flagged
 
-```text
+```simple
 # Already marked — pass_todo is explicit
 fn not_yet(data: text):
     pass_todo("implement later")
@@ -374,7 +374,7 @@ fn process(data: text) -> i64:
 
 For intentional stubs, add a marker:
 
-```text
+```simple
 # Before (warns)
 fn gc_malloc(size: i64) -> i64: 0
 
@@ -435,7 +435,7 @@ wildcard_match = "allow"
 
 Use attributes to override lint levels per-file:
 
-```text
+```simple
 #![allow(primitive_api, bare_bool)]   # Inner attribute — file-level
 
 #[allow(too_many_arguments)]          # Outer attribute — file-level (before first definition)
@@ -563,7 +563,7 @@ handle it. These rules push acquisition back into the composition root.
 Fires on a single-value capability-group acquisition in a function that is not
 marked `@init_phase`:
 
-```text
+```simple
 # WARNED — acquisition inside a control-loop function
 fn render_frame(src: Host):
     val g = GpuCaps.from(src)          # the static P0's `with` sugar generates

@@ -319,40 +319,6 @@ pub extern "C" fn rt_eprintln_value(v: RuntimeValue) {
     }
 }
 
-// ----------------------------------------------------------------------------
-// sffi/diag.spl externs (std.nogc_sync_mut.sffi.diag)
-//
-// C twins: src/runtime/runtime_native.c. Until 2026-10-11 these had no native
-// definition in either lane; see
-// doc/08_tracking/bug/stage2_link_undefined_diag_externs_2026-10-11.md.
-// ----------------------------------------------------------------------------
-
-/// `extern fn rt_print_err(msg: text)`: msg to stderr, no trailing newline.
-#[no_mangle]
-pub extern "C" fn rt_print_err(msg: RuntimeValue) {
-    rt_eprint_value(msg);
-}
-
-/// `extern fn rt_debug_exit_success()`: "run finished OK, terminate now".
-/// Baremetal x86 writes 0 to the QEMU isa-debug-exit port; a hosted process
-/// has no such port, so the equivalent is a flushed, clean exit(0).
-#[no_mangle]
-pub extern "C" fn rt_debug_exit_success() {
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-    std::process::exit(0);
-}
-
-/// `extern fn rt_perf_dump_sdn() -> text`: SDN dump of `rt_perf_region_*`
-/// stats. No native lane has a perf-region recorder (only the interpreter
-/// does, `interpreter_extern/time.rs`), so no region can have been recorded:
-/// return the empty table, byte-identical to the interpreter's empty output.
-#[no_mangle]
-pub extern "C" fn rt_perf_dump_sdn() -> RuntimeValue {
-    const EMPTY: &[u8] = b"perf_regions:\n  []\n";
-    crate::value::collections::rt_string_new(EMPTY.as_ptr(), EMPTY.len() as u64)
-}
-
 /// Convert a RuntimeValue to a string RuntimeValue.
 /// This is used for f-string interpolation in native compiled code.
 #[no_mangle]

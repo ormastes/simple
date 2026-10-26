@@ -12,7 +12,7 @@ the need for manual pattern matching in common cases while remaining type-safe.
 
 ## Syntax
 
-```simple:skip
+```simple
 opt unwrap or: default_value              # Use default if None
 opt unwrap else: \: lazy_default_expr     # Lazy evaluation of default
 result unwrap or_return: default_on_err   # Early return with default

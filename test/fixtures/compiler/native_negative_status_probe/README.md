@@ -1,1 +1,0 @@
-UNEXECUTED runtime prevention fixture. Expected lines: seven exact NTSTATUS labels in source order; two empty lines for -1 and 0; then 0,127,1,0 for POSIX boundary values. Uses actual owner functions; no surrogate implementation.

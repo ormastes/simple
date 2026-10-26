@@ -4,6 +4,7 @@ use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Signature};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
+use super::super::shared::platform_call_conv;
 use super::helpers::{
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, declare_named_bytes,
     get_vreg_or_default, inline_runtime_array_len_value, inline_runtime_len_value,
@@ -40,7 +41,7 @@ pub(super) fn wrap_value<M: Module>(
             // WHOLE MODULE to the interpreter (exit 0), so every `.contains()`
             // on an int-typed collection has been running interpreted. The
             // real tagging helper is `rt_value_int`.
-            let mut sig = Signature::new(ctx.module.isa().default_call_conv());
+            let mut sig = Signature::new(platform_call_conv());
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64));
             let func_id = ctx
@@ -52,7 +53,7 @@ pub(super) fn wrap_value<M: Module>(
             builder.inst_results(call)[0]
         }
         Some(TypeId::F32 | TypeId::F64) => {
-            let mut sig = Signature::new(ctx.module.isa().default_call_conv());
+            let mut sig = Signature::new(platform_call_conv());
             sig.params.push(AbiParam::new(types::F64));
             sig.returns.push(AbiParam::new(types::I64));
             // `rt_box_float` never existed either — see the rt_value_int note
@@ -176,17 +177,6 @@ pub(crate) fn compile_builtin_method<M: Module>(
             }
             return Ok(());
         }
-        // A nullable text value can retain Pointer<text> after `??`.
-        // Runtime dispatch parses its string handle and preserves genuine
-        // integer receivers; known primitive casts keep their width rules.
-        if matches!(method, "to_i64" | "to_int") && super::int_cast_needs_runtime_dispatch(from_ty) {
-            let converted = call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val);
-            if let Some(d) = dest {
-                ctx.vreg_values.insert(*d, converted);
-                ctx.vreg_types.insert(*d, TypeId::I64);
-            }
-            return Ok(());
-        }
         let converted = if from_ty == to_ty {
             receiver_val
         } else if actual_is_float && to_is_int {
@@ -247,7 +237,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
     }
     // FR-COMPILER-012: scalar float intrinsics — sqrt, abs, floor, ceil, round
     // These are first-class Cranelift instructions for IEEE 754 floats.
-    if (crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round")) {
+    if matches!(method, "sqrt" | "abs" | "floor" | "ceil" | "round") {
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {
@@ -256,6 +246,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
                 "abs" => builder.ins().fabs(receiver_val),
                 "floor" => builder.ins().floor(receiver_val),
                 "ceil" => builder.ins().ceil(receiver_val),
+                "round" => builder.ins().nearest(receiver_val),
                 _ => unreachable!(),
             };
             if let Some(d) = dest {
@@ -301,8 +292,31 @@ pub(crate) fn compile_builtin_method<M: Module>(
     // declared with the real `f64 -> f64` ABI in `codegen/runtime_sffi.rs`.
     // See doc/08_tracking/bug/float_and_int_math_methods_missing_on_numeric_receivers_2026-08-10.md.
     {
-        let unary_rt_name = crate::codegen::scalar_float_methods::rt_math_unary(method);
-        let binary_rt_name = crate::codegen::scalar_float_methods::rt_math_binary(method);
+        let unary_rt_name = match method {
+            "sin" => Some("rt_math_sin"),
+            "cos" => Some("rt_math_cos"),
+            "tan" => Some("rt_math_tan"),
+            "asin" => Some("rt_math_asin"),
+            "acos" => Some("rt_math_acos"),
+            "atan" => Some("rt_math_atan"),
+            "sinh" => Some("rt_math_sinh"),
+            "cosh" => Some("rt_math_cosh"),
+            "tanh" => Some("rt_math_tanh"),
+            "exp" => Some("rt_math_exp"),
+            "ln" => Some("rt_math_log"),
+            "log2" => Some("rt_math_log2"),
+            "log10" => Some("rt_math_log10"),
+            "cbrt" => Some("rt_math_cbrt"),
+            _ => None,
+        };
+        let binary_rt_name = match method {
+            "pow" | "powf" => Some("rt_math_pow"),
+            "max" => Some("rt_math_max"),
+            "min" => Some("rt_math_min"),
+            "atan2" => Some("rt_math_atan2"),
+            "hypot" => Some("rt_math_hypot"),
+            _ => None,
+        };
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {
@@ -536,7 +550,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
                 let func_id = if let Some(&existing) = ctx.func_ids.get(resolved.as_ref()) {
                     Ok(existing)
                 } else {
-                    let call_conv = ctx.module.isa().default_call_conv();
+                    let call_conv = platform_call_conv();
                     let mut sig = Signature::new(call_conv);
                     // receiver + args: all i64
                     for _ in 0..args.len() + 1 {

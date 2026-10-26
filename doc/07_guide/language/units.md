@@ -84,7 +84,7 @@ the closest registered unit.
 Two equivalent import paths resolve to the same module. Pick the shorter
 form unless you need to disambiguate between organisations:
 
-```text
+```simple
 # short form (default org)
 use unit.length.{km, m}
 use unit.velocity.{kmph}
@@ -105,7 +105,7 @@ both recognise it.
 Other organisations register units under `src/unit/<org>.com/`. The
 `.com` suffix is the on-disk marker; the import path omits it.
 
-```text
+```simple
 # src/unit/acme-corp.com/robotics/joint_angle.spl
 use unit.acme-corp.robotics.{joint_angle}
 ```
@@ -119,7 +119,7 @@ shadows the third-party import (canonical form wins).
 Composite (derived) units live in `src/unit/simple-lang/composite/` and
 are declared as ratios or products of atomic units:
 
-```text
+```simple
 # src/unit/simple-lang/composite/kmph.spl
 class Kmph:
     value: f64
@@ -137,7 +137,7 @@ export Kmph
 
 Arithmetic is dimension-aware:
 
-```text
+```simple
 val d = 100_km
 val t = 2_h
 val v: kmph = d / t       # => Kmph(value: 50.0)
@@ -159,7 +159,7 @@ Authoring pattern for a new composite:
 Passing a raw `i32`/`i64`/`f64` to a parameter declared with a unit
 type emits a **warning** (not an error) — migrations stay incremental.
 
-```text
+```simple
 fn move(d: km) -> text:
     "moved " + d.to_text()
 
@@ -172,7 +172,7 @@ move(km(10.0))     # ✓ ok — explicit construction
 
 Suppress locally with the attribute form:
 
-```text
+```simple
 #[allow(raw_unit)]
 move(10)           # ✓ no warning
 ```
@@ -195,7 +195,7 @@ warning: 'std.common.units.*' is deprecated; moved to
 Old tree `src/lib/std/src/units.disabled/` has been removed entirely.
 Update imports to the new paths at your convenience:
 
-```text
+```simple
 # before
 use std.common.units.length.{km, m}
 

@@ -1,0 +1,99 @@
+# Bitmap tier rasterization: exact per-pixel coverage through the 8x16 VGA
+# cell backed by the 5x7 glyph bitmaps (common.ui.glyph_bitmap_5x7), plus
+# metrics and buffer-bounds checks.
+use std.spec.*
+use std.nogc_sync_mut.text_layout.font_rasterizer.{rasterize_bitmap}
+use std.common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
+
+# Expected coverage for one pixel of the 8x16 cell, per the documented
+# mapping in rasterize_bitmap: rows 1..14 sample 5x7 source row (row-1)/2,
+# row bits are shifted left 2 into the 8-wide cell, mask 0x80 >> col.
+fn bitmap_mismatches(codepoint: i32) -> i32:
+    val g = rasterize_bitmap(codepoint, 16)
+    val gi = glyph_index_for_char_code(codepoint)
+    var bad = 0
+    var row = 0
+    while row < 16:
+        val source_row = (row - 1) / 2
+        val bits = if row > 0 and row < 15 and source_row < 7:
+            glyph_row_bits(gi, source_row) << 2
+        else:
+            0
+        var col = 0
+        while col < 8:
+            val px = g.pixels[row * 8 + col].to_i32()
+            val want = if (bits & (0x80 >> col)) != 0: 255 else: 0
+            if px != want:
+                bad = bad + 1
+            col = col + 1
+        row = row + 1
+    bad
+
+fn ink_count(pixels: [u8]) -> i32:
+    var n = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i].to_i32() > 0:
+            n = n + 1
+        i = i + 1
+    n
+
+describe "bitmap font rasterizer (8x16 VGA over 5x7 glyphs)":
+    it "renders 'A' with exact per-pixel coverage and metrics":
+        val g = rasterize_bitmap(65, 16)
+        expect(g.width).to_equal(8)
+        expect(g.height).to_equal(16)
+        expect(g.advance).to_equal(8)
+        expect(g.pixels.len()).to_equal(128)
+        expect(bitmap_mismatches(65)).to_equal(0)
+        assert_true(ink_count(g.pixels) > 0)
+
+    it "renders '1' with exact per-pixel coverage and nonzero ink":
+        val g = rasterize_bitmap(49, 16)
+        expect(g.pixels.len()).to_equal(128)
+        expect(bitmap_mismatches(49)).to_equal(0)
+        assert_true(ink_count(g.pixels) > 0)
+
+    it "renders '.' with ink confined to the lower half of the cell":
+        val g = rasterize_bitmap(46, 16)
+        expect(bitmap_mismatches(46)).to_equal(0)
+        assert_true(ink_count(g.pixels) > 0)
+        # no ink in the top half (rows 0..7)
+        var i = 0
+        var top_ink = 0
+        while i < 8 * 8:
+            if g.pixels[i].to_i32() > 0:
+                top_ink = top_ink + 1
+            i = i + 1
+        expect(top_ink).to_equal(0)
+
+    it "only writes 0 or 255 and never outside the glyph cell buffer":
+        val g = rasterize_bitmap(65, 16)
+        expect(g.pixels.len()).to_equal(g.width * g.height)
+        var i = 0
+        var bad = 0
+        while i < g.pixels.len():
+            val v = g.pixels[i].to_i32()
+            if v != 0 and v != 255:
+                bad = bad + 1
+            i = i + 1
+        expect(bad).to_equal(0)
+
+    it "scales 2x (font_size 32) by pixel doubling with doubled metrics":
+        val base = rasterize_bitmap(65, 16)
+        val big = rasterize_bitmap(65, 32)
+        expect(big.width).to_equal(16)
+        expect(big.height).to_equal(32)
+        expect(big.advance).to_equal(16)
+        expect(big.pixels.len()).to_equal(16 * 32)
+        var row = 0
+        var bad = 0
+        while row < 32:
+            var col = 0
+            while col < 16:
+                val want = base.pixels[(row / 2) * 8 + (col / 2)].to_i32()
+                if big.pixels[row * 16 + col].to_i32() != want:
+                    bad = bad + 1
+                col = col + 1
+            row = row + 1
+        expect(bad).to_equal(0)

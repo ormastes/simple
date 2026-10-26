@@ -258,26 +258,10 @@ fn extract_string(val: RuntimeValue) -> Option<String> {
     }
 }
 
-/// Windows grows a thread's committed stack through its guard page. A large
-/// frame must touch intervening pages before accessing locals below that page.
-/// Use Cranelift's inline probes: the SFFI runtime does not provide the outline
-/// `__cranelift_probestack` libcall. Keep other target policies unchanged.
-fn configure_target_stack_probes(flags: &mut settings::Builder, triple: &Triple) -> Option<()> {
-    if triple.architecture == target_lexicon::Architecture::X86_64
-        && triple.operating_system == target_lexicon::OperatingSystem::Windows
-    {
-        flags.set("enable_probestack", "true").ok()?;
-        flags.set("probestack_strategy", "inline").ok()?;
-        flags.set("probestack_size_log2", "12").ok()?;
-    }
-    Some(())
-}
-
 fn build_isa_for_triple(triple: Triple) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
     let mut flag_builder = settings::builder();
     flag_builder.set("opt_level", "speed").ok()?;
     flag_builder.set("is_pic", "true").ok()?;
-    configure_target_stack_probes(&mut flag_builder, &triple)?;
 
     let flags = settings::Flags::new(flag_builder);
     let isa_builder = cranelift_codegen::isa::lookup(triple.clone()).ok()?;
@@ -669,17 +653,14 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data(
 fn cranelift_data_linkage_from_code(code: i64) -> Option<Linkage> {
     match code {
         0 => Some(Linkage::Export),
-        1 => Some(Linkage::Import),
         2 => Some(Linkage::Local),
         3 => Some(Linkage::Hidden),
         _ => None,
     }
 }
 
-/// Declare writable scalar data with explicit source linkage and alignment.
-/// Import linkage (1) declares external storage without defining bytes and
-/// requires zero initial_bits. Other linkages define the scalar's bit pattern.
-/// An alignment of zero selects the scalar's natural alignment.
+/// Declare and define writable scalar data with explicit source linkage and
+/// alignment. An alignment of zero selects the scalar's natural alignment.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
     module: i64,
@@ -704,9 +685,6 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
     let Some(linkage) = cranelift_data_linkage_from_code(linkage_code) else {
         return 0;
     };
-    if linkage == Linkage::Import && initial_bits != 0 {
-        return 0;
-    }
     let natural_alignment = bytes.len().min(8) as u64;
     let requested_alignment = if alignment == 0 {
         natural_alignment
@@ -726,7 +704,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
                 Ok(id) => id,
                 Err(_) => return 0,
             };
-            if linkage != Linkage::Import && mod_ctx.module.define_data(id, &desc).is_err() {
+            if mod_ctx.module.define_data(id, &desc).is_err() {
                 return 0;
             }
             id
@@ -740,7 +718,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
                 Ok(id) => id,
                 Err(_) => return 0,
             };
-            if linkage != Linkage::Import && mod_ctx.module.define_data(id, &desc).is_err() {
+            if mod_ctx.module.define_data(id, &desc).is_err() {
                 return 0;
             }
             id
@@ -1702,9 +1680,6 @@ pub unsafe extern "C" fn spl_cranelift_new_aot_module_config_v2(
     if flags.set("opt_level", opt).is_err() || flags.set("is_pic", "true").is_err() {
         return 0;
     }
-    if configure_target_stack_probes(&mut flags, &triple).is_none() {
-        return 0;
-    }
     let mut builder = match cranelift_codegen::isa::lookup(triple.clone()) {
         Ok(builder) => builder,
         Err(_) => return 0,
@@ -2069,10 +2044,6 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
         rt_cranelift_function_addr_in_func as *const u8,
     );
 }
-
-#[cfg(all(test, target_arch = "x86_64"))]
-#[path = "cranelift_stack_probe_tests.rs"]
-mod stack_probe_tests;
 
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
@@ -2567,7 +2538,7 @@ mod tests {
             assert_eq!(cranelift_data_linkage_from_code(0), Some(Linkage::Export));
             assert_eq!(cranelift_data_linkage_from_code(2), Some(Linkage::Local));
             assert_eq!(cranelift_data_linkage_from_code(3), Some(Linkage::Hidden));
-            assert_eq!(cranelift_data_linkage_from_code(1), Some(Linkage::Import));
+            assert_eq!(cranelift_data_linkage_from_code(1), None);
 
             let module_name = "test_global_addr_v2";
             let module =

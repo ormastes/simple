@@ -6,27 +6,17 @@
 # - Structured error formatting helpers for type, borrow, coherence, and trait errors
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
-use std.io_runtime.{file_read_nullable, dir_exists, env_get_opt}
+use std.io_runtime.{file_read_nullable}
 use compiler.common.driver_core_types.{SourceFile, source_file_coverage_identity}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
-use compiler.common.source_root_resolution.{SourceRootResolutionV1,
-    source_root_numbered_candidate_v1, source_root_numbered_match_v1,
-    source_root_std_family_order_v1}
 use compiler.types.type_infer.*
-use compiler.types.type_infer.format_error.{format_type_infer_error_v1}
+use compiler.types.dim_constraints_types.{DimError}
 use compiler.borrow.borrow_check.*
 use compiler.borrow.borrow_check.nll.{NLLError, nllerror_format_related}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.traits.trait_coherence.{CoherenceError}
 use compiler.traits.trait_validation.{TraitError}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
-use std.common.crypto.sha256.{sha256_text}
-use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
-use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
-use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
-    driver_admitted_epoch_read_v1, driver_admitted_epoch_root_v1,
-    driver_admitted_epoch_normalize_v1, driver_admitted_epoch_declares_path_v1}
 
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -193,13 +183,6 @@ fn _driver_text_index_of(value: text, needle: text) -> i64:
         return -1
     value.split(needle)[0].len()
 
-fn _driver_resolver_path_exists_v1(path: text) -> bool:
-    # A declared dependency remains a required read after deletion; do not let
-    # filesystem probing silently resolve it to a different parent module.
-    if driver_admitted_epoch_declares_path_v1(path): return true
-    unsafe(capabilities: [ffi]):
-        rt_file_exists(path)
-
 pub fn _driver_should_skip_dir(name: text) -> bool:
     var i = 0
     while i < _skip_dirs.len():
@@ -262,14 +245,6 @@ pub fn _driver_physical_source_key(path: text) -> text:
     unsafe(capabilities: [ffi]):
         physical = rt_path_absolute(path) ?? ""
     _driver_canonical_source_path(if physical != "": physical else: path)
-
-pub fn _driver_physical_source_key_strict_v1(path: text) -> text:
-    # Full-inventory authority must not fall back to a lexical spelling when
-    # the host cannot resolve a reparse/symlink path.
-    var physical = ""
-    unsafe(capabilities: [ffi]):
-        physical = rt_path_absolute(path) ?? ""
-    if physical == "": "" else: _driver_canonical_source_path(physical)
 
 pub fn _driver_text_bucket_index(key: text, bucket_count: i64) -> i64:
     val raw = hm_hash_text(key) % bucket_count
@@ -435,7 +410,7 @@ fn _driver_module_name_from_repo_rel(rel: text) -> text:
         segs = segs.push(part)
     segs.join(".")
 
-fn _driver_physical_module_identity(path: text, fallback: text) -> (text, bool):
+fn _driver_physical_module_name(path: text, fallback: text) -> text:
     """Module name derived from the SYMLINK-RESOLVED path.
     `_driver_module_name_from_path` is lexical, so a file reached through
     `src/compiler/frontend` and the same file reached through
@@ -445,29 +420,23 @@ fn _driver_physical_module_identity(path: text, fallback: text) -> (text, bool):
     mis-split when the checkout itself lives under a `.../src/...` directory).
     Falls back to the lexical name whenever the file cannot be proven to be a
     repo-relative `src/` or `examples/` source — out-of-tree entries keep their
-    existing names. Return that root-membership decision with the name so
-    alias folding cannot mistake an external `/src/` substring for a repo
-    tier. Both values come from this one physical-root proof."""
+    existing names."""
     var resolved = ""
     unsafe(capabilities: [ffi]):
         resolved = rt_path_absolute(path) ?? ""
     if resolved == "":
-        return (fallback, false)
+        return fallback
     var root = ""
-    if driver_admitted_epoch_active_v1():
-        root = driver_admitted_epoch_root_v1()
-        resolved = driver_admitted_epoch_normalize_v1(resolved, host_is_windows_host())
-    else:
-        unsafe(capabilities: [ffi]):
-            root = rt_path_absolute(".") ?? ""
+    unsafe(capabilities: [ffi]):
+        root = rt_path_absolute(".") ?? ""
     if root == "":
-        return (fallback, false)
+        return fallback
     if not resolved.starts_with(root + "/"):
-        return (fallback, false)
+        return fallback
     val rel = resolved.substring(root.len() + 1)
     if not rel.starts_with("src/") and not rel.starts_with("examples/"):
-        return (fallback, false)
-    (_driver_module_name_from_repo_rel(rel), true)
+        return fallback
+    _driver_module_name_from_repo_rel(rel)
 
 fn _driver_push_unique_module_name(names: [text], name: text) -> [text]:
     """Append a spelling once. Alias lists are a handful of entries, so a linear
@@ -491,9 +460,6 @@ fn _driver_module_aliases_with_closure(
     module_name: text,
     entry_closure: bool
 ) -> [SourceFile]:
-    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_alias_closure_to_fault
-    if (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1":
-        eprint("[nscope-hir] aliases-enter path={path} content_len={content.len()} module={module_name}")
     """One physical file, one canonical module name, every other spelling an alias.
     ENTRY-CLOSURE ONLY. Symlinks (`src/compiler/frontend -> 10.frontend`,
     `src/std -> lib`, `src/app/lsp -> lib/nogc_sync_mut/lsp`, ...) mean the
@@ -518,17 +484,13 @@ fn _driver_module_aliases_with_closure(
     `_driver_entry_closure_mode`. The legacy branches further down therefore
     apply only when the mode is off."""
     if entry_closure:
-        val (physical, repository_source) = _driver_physical_module_identity(path, module_name)
-        # Fold numeric tier aliases only after the physical source has been
-        # proven to belong to the repository root. External `dot.1` / `dot.2`
-        # sources keep distinct names matching LLVM's requested entry name.
-        val canonical = if repository_source: _driver_canonical_module_name(physical) else: physical
+        val physical = _driver_physical_module_name(path, module_name)
+        val canonical = _driver_canonical_module_name(physical)
         var names: [text] = []
         names = _driver_push_unique_module_name(names, canonical)
         names = _driver_push_unique_module_name(names, module_name)
         names = _driver_push_unique_module_name(names, physical)
-        if repository_source:
-            names = _driver_push_unique_module_name(names, _driver_canonical_module_name(module_name))
+        names = _driver_push_unique_module_name(names, _driver_canonical_module_name(module_name))
         # `src/std -> lib`: a file actually walked THROUGH the symlink derives a
         # `std.*` spelling, and both twins must then exist so sibling lookup can
         # cross them. CONDITIONAL on this file really having a `std.` spelling
@@ -655,7 +617,6 @@ fn _driver_entry_import_line_needs_materialization(content: text, start: i64, en
         _driver_text_range_starts_with(content, first, end, "pub use ") or
         _driver_text_range_starts_with(content, first, end, "export use ") or
         _driver_text_range_starts_with(content, first, end, "import ") or
-        _driver_text_range_starts_with(content, first, end, "from ") or
         # `export a, b from M`: a re-export facade depends on M (see below).
         _driver_text_range_starts_with(content, first, end, "export "))
 
@@ -714,13 +675,6 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
             tail = line.substring(4)
         elif line.starts_with("import "):
             tail = line.substring(7)
-        elif line.starts_with("from "):
-            # The parser accepts `from M import {names}`. Keep M in the
-            # closure just like `use M.{names}`, including relative paths.
-            val import_at = _driver_text_index_of(line, " import ")
-            if import_at < 0:
-                continue
-            tail = line[5:import_at].trim()
         elif line.starts_with("export ") and line.contains(" from "):
             # `export a, b from M` re-exports M's items, so the facade needs M
             # loaded. Without this, a facade such as src/lib/io_runtime.spl
@@ -730,16 +684,6 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
             # 2026-09-25). The module path is the token after the last " from ".
             val from_at = line.last_index_of(" from ")
             tail = line.substring(from_at + 6).trim()
-            # A BARE source (`export X from mod`) is the sibling module of this
-            # package: parse_export_source_module (10.frontend/core/
-            # parser_decls_use.spl) emits it as ".mod". Collecting it bare let
-            # the source-root resolver bind `mod` to the first root owning a
-            # top-level mod.spl -- src/os/mod.spl -- which pulled ~480 SimpleOS
-            # modules into bootstrap_main's Stage 3 closure (borrow_check
-            # facade, doc/08_tracking/bug/
-            # bootstrap_main_closure_pulls_src_os_hir_failures_2026_10_20.md).
-            if tail != "" and not tail.contains("."):
-                tail = "." + tail
         else:
             continue
 
@@ -789,7 +733,7 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     result
 
 pub fn _driver_entry_import_module_paths(content: text) -> [text]:
-    """Dotted module paths of use/pub-use/export-use/import/from declarations in a
+    """Dotted module paths of the use/pub-use/export-use/import declarations in a
     source text. Name-less `use lazy` imports (`use lazy M`, `use lazy M.*`,
     `use lazy M as a`) are dynamic-by-design and skipped; NAMED lazy imports
     (`use lazy M.{a, b}`) declare static names that must resolve, so their
@@ -828,22 +772,8 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
 pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bool):
     """Read and scan one physical source at most once during build phase 1."""
     driver_closure_scan_phase_trace("cached_scan:start", path)
-    val key = if driver_admitted_epoch_active_v1():
-        _driver_physical_source_key_strict_v1(path)
-    else:
-        _driver_physical_source_key(path)
-    # An epoch owns membership, not an immutable filesystem. Verify every
-    # requested read, including cache hits, and parse the returned buffer.
-    # Task scan caches may be reset without discarding the epoch row map.
-    val epoch_active = driver_admitted_epoch_active_v1()
-    var epoch_content = ""
-    if epoch_active:
-        match driver_admitted_epoch_read_v1(path, key):
-            case Ok(content): epoch_content = content
-            case Err(epoch_error):
-                eprint("[epoch-read-fail] path={path} key={key} reason={epoch_error}")
-                return ("", [], [], false)
-    if not epoch_active and _g_entry_scan_content_by_path.contains_key(key):
+    val key = _driver_physical_source_key(path)
+    if _g_entry_scan_content_by_path.contains_key(key):
         _g_entry_scan_hit_count = _g_entry_scan_hit_count + 1
         driver_closure_scan_phase_trace("cached_scan:hit", path)
         return (
@@ -853,19 +783,16 @@ pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bo
             true)
     var content = ""
     driver_closure_scan_phase_trace("read:start", path)
-    content = if epoch_active: epoch_content else: file_read_nullable(path) ?? ""
+    content = file_read_nullable(path) ?? ""
     if _g_spec_prelude_entry_key != "" and key == _g_spec_prelude_entry_key:
         content = driver_spec_prelude_source(content)
     _g_entry_scan_read_count = _g_entry_scan_read_count + 1
     driver_closure_scan_phase_trace("read:done", path)
     driver_closure_scan_phase_trace("imports:start", path)
-    # Discover imports from the conditionally-selected text: a `use` inside an
-    # inactive @when/@cfg branch is not part of this target's closure.
-    val selected = _pp_preprocess_conditionals(content)
-    val imports = _driver_entry_import_module_paths(selected)
+    val imports = _driver_entry_import_module_paths(content)
     driver_closure_scan_phase_trace("imports:done", path)
     driver_closure_scan_phase_trace("siblings:start", path)
-    val siblings = _driver_entry_sibling_module_paths(selected)
+    val siblings = _driver_entry_sibling_module_paths(content)
     driver_closure_scan_phase_trace("siblings:done", path)
     _g_entry_scan_scan_count = _g_entry_scan_scan_count + 1
     _g_entry_scan_content_by_path[key] = content
@@ -893,13 +820,12 @@ fn _driver_entry_sibling_path(line: text) -> text:
 
 pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
     """Relative sibling paths from top-level `mod` and `export member.*`
-    declarations, and from generated facade export-origin comments. A frozen
-    origin must have its declaration owner in the entry closure."""
+    declarations. This rare compatibility syntax uses the allocation-based
+    scan only when a source can contain such a declaration."""
     if not content.contains("mod ") and not content.contains("export "):
         return []
     var result: [text] = []
     var in_doc = false
-    var generated_owner = ""
     var line_start: i64 = 0
     while line_start < content.len():
         val line_end = _driver_line_end(content, line_start)
@@ -917,114 +843,80 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
         if quote_count % 2 == 1:
             in_doc = not in_doc
         if was_in_doc or quote_count > 0:
-            generated_owner = ""
             continue
-        val line = scan_line.trim()
-        if raw_line.contains("# Re-exported from ") and
-           raw_line.contains(".spl") and
-           raw_line.trim().starts_with("# Re-exported from "):
-            val owner_parts = raw_line.trim().substring(19).split(".spl")
-            val candidate = owner_parts[0]
-            # The native walker resolves relative siblings itself, whereas
-            # phase 1 only admits direct child files. Reject traversal and
-            # malformed path components here so both walkers see the same
-            # safe generated-origin dependency set.
-            generated_owner = if candidate != "" and
-                not candidate.starts_with("/") and
-                not candidate.starts_with(".") and
-                not candidate.ends_with("/") and
-                not candidate.contains(".") and
-                not candidate.contains("//") and
-                not candidate.contains("\\") and
-                _driver_import_path_is_valid(candidate.replace("/", ".")):
-                candidate
-            else:
-                ""
-            continue
-        if generated_owner != "":
-            if line.starts_with("export "):
-                result.push("." + generated_owner.replace("/", "."))
-                generated_owner = ""
-            elif line != "" and not raw_line.trim().starts_with("#"):
-                generated_owner = ""
-        val sibling = _driver_entry_sibling_path(line)
+        val sibling = _driver_entry_sibling_path(scan_line.trim())
         if sibling != "":
             result = result.push(sibling)
     result
 
-fn _driver_numbered_child_dir(parent: text, segment: text) -> SourceRootResolutionV1:
-    if parent == "": return SourceRootResolutionV1.Missing
+fn _driver_numbered_child_dir(parent: text, segment: text) -> text:
+    if parent == "":
+        return ""
     var parent_exists = false
     unsafe(capabilities: [ffi]):
-        parent_exists = _driver_resolver_path_exists_v1(parent)
-    if not parent_exists: return SourceRootResolutionV1.Missing
-    var matched = SourceRootResolutionV1.Missing
+        parent_exists = rt_file_exists(parent)
+    if not parent_exists:
+        return ""
     unsafe(capabilities: [ffi]):
         for entry in rt_dir_list(parent):
-            if source_root_numbered_candidate_v1(entry, segment):
+            var prefix_len = 0
+            val entry_len = entry.len()
+            while prefix_len < entry_len and prefix_len < 3:
+                val code = entry.char_code_at(prefix_len)
+                if code < 48 or code > 57:
+                    break
+                prefix_len = prefix_len + 1
+            if prefix_len >= 1 and prefix_len <= 3 and prefix_len < entry_len and entry.char_at(prefix_len) == "." and entry.substring(prefix_len + 1) == segment:
                 val candidate = parent + "/" + entry
-                if dir_exists(candidate):
-                    matched = source_root_numbered_match_v1(matched, candidate, parent + "/" + segment)
-                    match matched:
-                        case SourceRootResolutionV1.Ambiguous(_): return matched
-                        case SourceRootResolutionV1.Found(_): ()
-                        case SourceRootResolutionV1.Missing: ()
-    matched
+                var candidate_exists = false
+                unsafe(capabilities: [ffi]):
+                    candidate_exists = rt_file_exists(candidate)
+                if candidate_exists:
+                    return candidate
+    ""
 
-pub fn _driver_try_numbered_entry_import_rel_checked_v1(root: text, rel: text) -> SourceRootResolutionV1:
+fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
     val parts = rel.split("/")
-    if parts.len() == 0: return SourceRootResolutionV1.Missing
+    if parts.len() == 0:
+        return ""
     var current = root
     var i = 0
     while i + 1 < parts.len():
         val direct = if current == "": parts[i] else: current + "/" + parts[i]
-        if dir_exists(direct):
+        var direct_exists = false
+        unsafe(capabilities: [ffi]):
+            direct_exists = rt_file_exists(direct)
+        if direct_exists:
             current = direct
         else:
-            match _driver_numbered_child_dir(current, parts[i]):
-                case SourceRootResolutionV1.Found(path): current = path
-                case SourceRootResolutionV1.Missing: return SourceRootResolutionV1.Missing
-                case SourceRootResolutionV1.Ambiguous(reason): return SourceRootResolutionV1.Ambiguous(reason)
+            val numbered = _driver_numbered_child_dir(current, parts[i])
+            if numbered == "":
+                return ""
+            current = numbered
         i = i + 1
     val base = if current == "": parts[parts.len() - 1] else: current + "/" + parts[parts.len() - 1]
     val spl_path = base + ".spl"
     var spl_exists = false
     unsafe(capabilities: [ffi]):
-        spl_exists = _driver_resolver_path_exists_v1(spl_path)
-    if spl_exists: return SourceRootResolutionV1.Found(spl_path)
-    var module_dir = base
-    if not dir_exists(module_dir):
-        match _driver_numbered_child_dir(current, parts[parts.len() - 1]):
-            case SourceRootResolutionV1.Found(path): module_dir = path
-            case SourceRootResolutionV1.Missing: return SourceRootResolutionV1.Missing
-            case SourceRootResolutionV1.Ambiguous(reason): return SourceRootResolutionV1.Ambiguous(reason)
+        spl_exists = rt_file_exists(spl_path)
+    if spl_exists:
+        return spl_path
     # __init__ owns package exports; mod.spl is a legacy fallback.
-    val init_path = module_dir + "/__init__.spl"
+    val init_path = base + "/__init__.spl"
     var init_exists = false
     unsafe(capabilities: [ffi]):
-        init_exists = _driver_resolver_path_exists_v1(init_path)
-    if init_exists: return SourceRootResolutionV1.Found(init_path)
-    val mod_path = module_dir + "/mod.spl"
+        init_exists = rt_file_exists(init_path)
+    if init_exists:
+        return init_path
+    val mod_path = base + "/mod.spl"
     var mod_exists = false
     unsafe(capabilities: [ffi]):
-        mod_exists = _driver_resolver_path_exists_v1(mod_path)
-    if mod_exists: return SourceRootResolutionV1.Found(mod_path)
-    SourceRootResolutionV1.Missing
-
-fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
-    # Legacy path probes retain their text result. Selected source roots use
-    # the checked result directly and must never collapse ambiguity to missing.
-    match _driver_try_numbered_entry_import_rel_checked_v1(root, rel):
-        case SourceRootResolutionV1.Found(path): path
-        case SourceRootResolutionV1.Missing: ""
-        case SourceRootResolutionV1.Ambiguous(_): ""
+        mod_exists = rt_file_exists(mod_path)
+    if mod_exists:
+        return mod_path
+    ""
 
 fn _driver_entry_import_checkout_prefix(entry_dir: text) -> text:
-    if driver_admitted_epoch_active_v1():
-        # An admitted worker keeps cwd in its manager-owned output directory.
-        # Resolution is rooted in the retained capsule; reads still validate
-        # membership and bytes, including paths reached through aliases.
-        return driver_admitted_epoch_root_v1() + "/"
     # Admission owns snapshot validation. An importer within that frozen tree
     # must resolve qualified imports in the same tree, including failed probes.
     # Keep ordinary checkout resolution unchanged outside the path boundary.
@@ -1047,19 +939,19 @@ fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:
         val spl_path = base + ".spl"
         var spl_exists = false
         unsafe(capabilities: [ffi]):
-            spl_exists = _driver_resolver_path_exists_v1(spl_path)
+            spl_exists = rt_file_exists(spl_path)
         if spl_exists:
             return spl_path
         val init_path = base + "/__init__.spl"
         var init_exists = false
         unsafe(capabilities: [ffi]):
-            init_exists = _driver_resolver_path_exists_v1(init_path)
+            init_exists = rt_file_exists(init_path)
         if init_exists:
             return init_path
         val mod_path = base + "/mod.spl"
         var mod_exists = false
         unsafe(capabilities: [ffi]):
-            mod_exists = _driver_resolver_path_exists_v1(mod_path)
+            mod_exists = rt_file_exists(mod_path)
         if mod_exists:
             return mod_path
     # Resolver-transparent `NN.name` directories are a fallback only: ordinary
@@ -1112,112 +1004,100 @@ fn _driver_resolve_relative_entry_import(module_path: text, entry_dir: text) -> 
     val rel = module_path.substring(dots).replace(".", "/")
     _driver_try_entry_import_rel(rel, base_dir)
 
-# One ordered compatibility mapping for both checkout and admitted-root lookup.
-# Full candidates must be exhausted before interpreting a suffix as an item.
-fn _driver_numbered_compiler_candidates_v1(module_path: text) -> [text]:
-    # The exact compiler.mir_opt facade is intentionally owned by src/lib.
-    if module_path == "compiler.mir_opt": return []
-    val is_numbered = module_path.starts_with("compiler.") or module_path == "monomorphize" or module_path.starts_with("monomorphize.") or module_path == "linker" or module_path.starts_with("linker.")
-    if not is_numbered: return []
-    var candidates: [text] = []
-    val mappings: [[text]] = [
-        ["compiler.common", "compiler/00.common"],
-        ["compiler.core", "compiler/10.frontend/core"],
-        ["compiler.frontend", "compiler/10.frontend"],
-        ["compiler.blocks.blocks", "compiler/15.blocks/blocks"],
-        ["compiler.blocks", "compiler/15.blocks/blocks"],
-        ["compiler.hir", "compiler/20.hir"],
-        ["compiler.traits", "compiler/25.traits"],
-        ["compiler.types", "compiler/30.types"],
-        ["compiler.semantics", "compiler/35.semantics"],
-        ["compiler.monomorphize", "compiler/40.mono/monomorphize"],
-        ["monomorphize", "compiler/40.mono/monomorphize"],
-        ["compiler.mir", "compiler/50.mir"],
-        ["compiler.borrow", "compiler/55.borrow"],
-        ["compiler.mir_opt", "compiler/60.mir_opt/mir_opt"],
-        # Parent level owns the module shims (optimization_passes, optimizer_manifest,
-        # optimizer_plugin, optimizer_kernel_contract, mir_opt_integration, and the
-        # _OptimizationPasses part package) -- files that exist ONLY here. Without
-        # this candidate, compiler.mir_opt.<name> for these fell through to the
-        # src/lib stub facade (all-zero declaration arrays; cycle-38 frontier:
-        # 3x 'no exported item' + consequences, surfaces idx 871/2183/2415).
-        # Listed AFTER the nested layout so every currently-resolving first-hit
-        # is preserved (the two levels share no file names).
-        ["compiler.mir_opt", "compiler/60.mir_opt"],
-        ["compiler.loader", "compiler/99.loader"],
-        ["compiler.backend", "compiler/70.backend"],
-        ["compiler.driver", "compiler/80.driver"],
-        ["compiler.shb", "compiler/80.driver/shb"],
-        ["compiler.interpreter", "compiler/95.interp/interpreter"],
-        ["linker", "compiler/70.backend/linker"],
-        ["compiler.backend", "compiler/70.backend/backend"],
-        ["compiler.loader", "compiler/99.loader/loader"]
-    ]
-    for mapping in mappings:
-        val prefix = mapping[0]
-        if module_path == prefix or module_path.starts_with(prefix + "."):
-            var relative = mapping[1]
-            if module_path.len() > prefix.len():
-                relative = relative + "/" + module_path.substring(prefix.len() + 1).replace(".", "/")
-            candidates = candidates.push(relative)
-    candidates
-
 fn _driver_resolve_numbered_compiler_import(module_path: text, entry_dir: text) -> text:
-    for relative in _driver_numbered_compiler_candidates_v1(module_path):
-        val selected = _driver_try_entry_import_rel(relative, entry_dir)
-        if selected != "": return selected
-    ""
-
-fn _driver_dotted_application_candidates_v1(module_path: text) -> [text]:
-    # Shared physical owners for checkout and declared-source-root closure.
-    # Keep longer overlapping package names before their parent.
-    var candidates: [text] = []
-    val mappings: [[text]] = [
-        ["app.ui.browser", "app/ui.browser"],
-        ["app.ui.render", "app/ui.render"],
-        ["app.ui.chromium.acid2", "app/ui.chromium.acid2"],
-        ["app.ui.chromium.devtools", "app/ui.chromium.devtools"],
-        ["app.ui.chromium", "app/ui.chromium"],
-        ["app.ui.cli", "app/ui.cli"],
-        ["app.ui.electron", "app/ui.electron"],
-        ["app.ui.ipc", "app/ui.ipc"],
-        ["app.ui.mcp", "app/ui.mcp"],
-        ["app.ui.none", "app/ui.none"],
-        ["app.ui.standalone", "app/ui.standalone"],
-        ["app.ui.tauri", "app/ui.tauri"],
-        ["app.ui.test_api", "app/ui.test_api"],
-        ["app.ui.tui_web", "app/ui.tui_web"],
-        ["app.ui.tui", "app/ui.tui"],
-        ["app.ui.vscode", "app/ui.vscode"],
-        ["app.ui.web", "app/ui.web"],
-        ["app.dashboard.render", "app/dashboard.render"],
-        ["app.dashboard.views", "app/dashboard.views"],
-        ["app.ffi_gen.specs", "app/ffi_gen.specs"],
-        ["app.ffi_gen.templates", "app/ffi_gen.templates"],
-        ["app.sffi_gen.templates", "app/sffi_gen.templates"],
-        ["app.game.breakout", "app/game.breakout"],
-        ["app.game.rollball", "app/game.rollball"],
-        ["app.package.registry", "app/package.registry"]
-    ]
-    for mapping in mappings:
-        val prefix = mapping[0]
-        if module_path == prefix or module_path.starts_with(prefix + "."):
-            var relative = mapping[1]
-            if module_path.len() > prefix.len():
-                relative = relative + "/" + module_path.substring(prefix.len() + 1).replace(".", "/")
-            candidates = candidates.push(relative)
-    candidates
-
+    # Compiler imports dominate Stage4's entry closure. Resolve their canonical
+    # numbered layout before probing every generic stdlib family.
+    # The exact compatibility facade is intentionally owned by src/lib.
+    # PERF NOTE (doc/08_tracking/bug/native_build_entry_closure_slow_2026-07-31.md):
+    # measured via a temporary rt_file_exists probe counter that this
+    # function is a complete no-op (0 probes, `is_numbered` always false)
+    # when called from the --entry-closure BFS in compile_targets.spl
+    # (_native_build_entry_closure -> _nb_resolve_segs -> _driver_resolve_entry_import).
+    # That caller builds module_path via `_nb_join_segments` (slash-joined,
+    # e.g. "compiler/driver/foo"), never the dotted form ("compiler.driver.foo")
+    # this function's `is_numbered` gate checks for -- so the up-to-18-candidate
+    # cascade below never runs a single rt_file_exists on that path; the BFS's
+    # numbered-directory resolution actually happens earlier, in
+    # _nb_resolve_under_root via _nb_resolve_segs's own fallback loop. This
+    # function is real (and does pay the full candidate-then-rt_file_exists
+    # cost) only for dotted-module_path callers elsewhere in the driver, e.g.
+    # the phase1:load_sources closure scan in driver_source_pipeline_loading.spl.
+    # Confirmed with 31/31 sampled BFS calls at 0 probes; not the BFS bottleneck.
+    if module_path == "compiler.mir_opt":
+        return ""
+    val is_numbered = module_path.starts_with("compiler.") or module_path == "monomorphize" or module_path.starts_with("monomorphize.") or module_path == "linker" or module_path.starts_with("linker.")
+    if not is_numbered:
+        return ""
+    var mapped = _driver_resolve_rewritten_import(module_path, "compiler.common", "compiler/00.common", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.core", "compiler/10.frontend/core", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.frontend", "compiler/10.frontend", entry_dir)
+    if mapped != "":
+        return mapped
+    # File-direct spelling `compiler.blocks.blocks.<m>` (= 15.blocks/blocks/<m>.spl,
+    # used by parser_types_expr.spl and friends to avoid the package facade)
+    # must be tried before `compiler.blocks`: otherwise it maps to the
+    # nonexistent 15.blocks/blocks/blocks/<m>.spl, the parent-strip fallback
+    # lands on 15.blocks/blocks.spl, and the alias collides with the real
+    # value.spl ("native module name collision ... compiler.blocks.blocks.value",
+    # stage-2 in-process run, 2026-09-25).
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.blocks.blocks", "compiler/15.blocks/blocks", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.blocks", "compiler/15.blocks/blocks", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.hir", "compiler/20.hir", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.traits", "compiler/25.traits", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.types", "compiler/30.types", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.semantics", "compiler/35.semantics", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.monomorphize", "compiler/40.mono/monomorphize", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "monomorphize", "compiler/40.mono/monomorphize", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.mir", "compiler/50.mir", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.borrow", "compiler/55.borrow", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.mir_opt", "compiler/60.mir_opt/mir_opt", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.backend", "compiler/70.backend", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.driver", "compiler/80.driver", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.shb", "compiler/80.driver/shb", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.interpreter", "compiler/95.interp/interpreter", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "linker", "compiler/70.backend/linker", entry_dir)
+    if mapped != "":
+        return mapped
+    _driver_resolve_rewritten_import(module_path, "compiler.backend", "compiler/70.backend/backend", entry_dir)
 
 fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> text:
     val relative = _driver_resolve_relative_entry_import(module_path, entry_dir)
     if relative != "":
         return relative
-    # A leading-dot path is importer-relative only. Falling through would turn
-    # `.string_core` into `/string_core` and probe absolute roots, binding a
-    # stale `mod` declaration to an unrelated `src/lib//string_core.spl`.
-    if module_path.starts_with("."):
-        return ""
 
     val rel = module_path.replace(".", "/")
     val direct = _driver_try_entry_import_rel(rel, entry_dir)
@@ -1234,19 +1114,19 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         val lib_spl_path = lib_base + ".spl"
         var lib_spl_exists = false
         unsafe(capabilities: [ffi]):
-            lib_spl_exists = _driver_resolver_path_exists_v1(lib_spl_path)
+            lib_spl_exists = rt_file_exists(lib_spl_path)
         if lib_spl_exists:
             return lib_spl_path
         val lib_init_path = lib_base + "/__init__.spl"
         var lib_init_exists = false
         unsafe(capabilities: [ffi]):
-            lib_init_exists = _driver_resolver_path_exists_v1(lib_init_path)
+            lib_init_exists = rt_file_exists(lib_init_path)
         if lib_init_exists:
             return lib_init_path
         val lib_mod_path = lib_base + "/mod.spl"
         var lib_mod_exists = false
         unsafe(capabilities: [ffi]):
-            lib_mod_exists = _driver_resolver_path_exists_v1(lib_mod_path)
+            lib_mod_exists = rt_file_exists(lib_mod_path)
         if lib_mod_exists:
             return lib_mod_path
         for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
@@ -1254,19 +1134,19 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
             val family_spl_path = family_base + ".spl"
             var family_spl_exists = false
             unsafe(capabilities: [ffi]):
-                family_spl_exists = _driver_resolver_path_exists_v1(family_spl_path)
+                family_spl_exists = rt_file_exists(family_spl_path)
             if family_spl_exists:
                 return family_spl_path
             val family_init_path = family_base + "/__init__.spl"
             var family_init_exists = false
             unsafe(capabilities: [ffi]):
-                family_init_exists = _driver_resolver_path_exists_v1(family_init_path)
+                family_init_exists = rt_file_exists(family_init_path)
             if family_init_exists:
                 return family_init_path
             val family_mod_path = family_base + "/mod.spl"
             var family_mod_exists = false
             unsafe(capabilities: [ffi]):
-                family_mod_exists = _driver_resolver_path_exists_v1(family_mod_path)
+                family_mod_exists = rt_file_exists(family_mod_path)
             if family_mod_exists:
                 return family_mod_path
     if module_path.starts_with("std."):
@@ -1274,19 +1154,19 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         val lib_spl_path = lib_base + ".spl"
         var lib_spl_exists = false
         unsafe(capabilities: [ffi]):
-            lib_spl_exists = _driver_resolver_path_exists_v1(lib_spl_path)
+            lib_spl_exists = rt_file_exists(lib_spl_path)
         if lib_spl_exists:
             return lib_spl_path
         val lib_init_path = lib_base + "/__init__.spl"
         var lib_init_exists = false
         unsafe(capabilities: [ffi]):
-            lib_init_exists = _driver_resolver_path_exists_v1(lib_init_path)
+            lib_init_exists = rt_file_exists(lib_init_path)
         if lib_init_exists:
             return lib_init_path
         val lib_mod_path = lib_base + "/mod.spl"
         var lib_mod_exists = false
         unsafe(capabilities: [ffi]):
-            lib_mod_exists = _driver_resolver_path_exists_v1(lib_mod_path)
+            lib_mod_exists = rt_file_exists(lib_mod_path)
         if lib_mod_exists:
             return lib_mod_path
         val lib_subpath = rel.substring(4)
@@ -1295,333 +1175,114 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
             val family_spl_path = family_base + ".spl"
             var family_spl_exists = false
             unsafe(capabilities: [ffi]):
-                family_spl_exists = _driver_resolver_path_exists_v1(family_spl_path)
+                family_spl_exists = rt_file_exists(family_spl_path)
             if family_spl_exists:
                 return family_spl_path
             val family_init_path = family_base + "/__init__.spl"
             var family_init_exists = false
             unsafe(capabilities: [ffi]):
-                family_init_exists = _driver_resolver_path_exists_v1(family_init_path)
+                family_init_exists = rt_file_exists(family_init_path)
             if family_init_exists:
                 return family_init_path
             val family_mod_path = family_base + "/mod.spl"
             var family_mod_exists = false
             unsafe(capabilities: [ffi]):
-                family_mod_exists = _driver_resolver_path_exists_v1(family_mod_path)
+                family_mod_exists = rt_file_exists(family_mod_path)
             if family_mod_exists:
                 return family_mod_path
 
-    # Frozen source capsules contain src/lib, not the checkout's src/std alias.
-    # Preserve every exact library/family probe above before resolving numbered
-    # directories in the physical library tree. The shared walker rejects
-    # ambiguous NN.name siblings and prefers an existing exact directory.
-    if module_path.starts_with("std."):
-        val lib_subpath = rel.substring(4)
-        val physical_library_root = library_root[0:library_root.len() - 1]
-        val numbered_library = _driver_try_numbered_entry_import_rel(physical_library_root, lib_subpath)
-        if numbered_library != "":
-            return numbered_library
-        for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
-            val numbered_family = _driver_try_numbered_entry_import_rel(library_root + family, lib_subpath)
-            if numbered_family != "":
-                return numbered_family
-
-    # Non-compiler rewrites retain generic library precedence.
-    for candidate in _driver_dotted_application_candidates_v1(module_path):
-        val mapped = _driver_try_entry_import_rel(candidate, entry_dir)
-        if mapped != "": return mapped
-    # Git may materialize the app/t32_cli symlink as a plain file on Windows.
-    # Resolve its physical owner only after ordinary module probes fail.
-    val t32_mapped = _driver_resolve_rewritten_import(module_path, "app.t32_cli", "examples/10_tooling/trace32_tools/t32_cli", entry_dir)
-    if t32_mapped != "":
-        return t32_mapped
-    _driver_resolve_rewritten_import(module_path, "cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp", entry_dir)
-
-fn _driver_nested_compiler_owner_rel_v1(module_path: text) -> text:
-    # These declared compiler families retain same-name nested owners behind
-    # their compatibility facades. Do not invent nested fallback for libraries
-    # or arbitrary packages, and do not duplicate an explicit nested spelling.
-    for family in ["blocks", "mir_opt", "backend", "loader"]:
-        val prefix = "compiler." + family + "."
-        if module_path.starts_with(prefix) and not module_path.starts_with(prefix + family + "."):
-            return family + "/" + family + "/" + module_path.substring(prefix.len()).replace(".", "/")
+    # Non-compiler application/tool rewrites retain generic library precedence.
+    #
+    # Every dot-named directory directly under src/app (e.g. `ui.web/`,
+    # `dashboard.render/`) needs its own entry here. Without one, a dotted
+    # `use app.ui.web.html.{...}` import falls through
+    # _driver_resolve_entry_import's "strip trailing dotted segment" fallback
+    # all the way to an ancestor package __init__.spl (e.g. src/app/ui/__init__.spl
+    # or src/app/__init__.spl, both of which exist as real packages). That
+    # produces a bogus SourceFile alias — same module_name as the real
+    # dot-dir file, different physical path — which
+    # _driver_module_name_collision then reports as
+    # "native module name collision after path sanitization". See
+    # doc/08_tracking/bug/dot_dir_entry_import_fallback_collision_2026-07-24.md.
+    var mapped = _driver_resolve_rewritten_import(module_path, "app.ui.browser", "app/ui.browser", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.render", "app/ui.render", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.chromium.acid2", "app/ui.chromium.acid2", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.chromium.devtools", "app/ui.chromium.devtools", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.chromium", "app/ui.chromium", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.cli", "app/ui.cli", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.electron", "app/ui.electron", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.ipc", "app/ui.ipc", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.mcp", "app/ui.mcp", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.none", "app/ui.none", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.standalone", "app/ui.standalone", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.tauri", "app/ui.tauri", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.test_api", "app/ui.test_api", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.tui_web", "app/ui.tui_web", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.tui", "app/ui.tui", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.vscode", "app/ui.vscode", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.web", "app/ui.web", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.dashboard.render", "app/dashboard.render", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.dashboard.views", "app/dashboard.views", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ffi_gen.specs", "app/ffi_gen.specs", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ffi_gen.templates", "app/ffi_gen.templates", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.sffi_gen.templates", "app/sffi_gen.templates", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.game.breakout", "app/game.breakout", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.game.rollball", "app/game.rollball", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.package.registry", "app/package.registry", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp", entry_dir)
+    if mapped != "":
+        return mapped
     ""
-
-pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roots: [text]) -> SourceRootResolutionV1:
-    _driver_resolve_source_root_entry_import_from_v1(module_path, source_roots, "")
-
-pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, source_roots: [text], entry_dir: text) -> SourceRootResolutionV1:
-    # Match native-build's ordered explicit-root contract before probing the
-    # checkout. A composition overlay is authoritative for the module it owns;
-    # re-resolving that name in src/ silently restores an excluded provider.
-    # Relative imports remain owned by their importing file, not overlays.
-    if module_path.starts_with("."): return SourceRootResolutionV1.Missing
-    var probe = module_path
-    while probe != "":
-        val segments = probe.split(".")
-        val nested = _driver_nested_compiler_owner_rel_v1(probe)
-        # Checkout answer for this spelling, computed only when an unprefixed
-        # root hit needs it (see _driver_direct_root_hit_defers_v1).
-        var checkout_probe = ""
-        var checkout_probed = false
-        for source_root in source_roots:
-            if source_root.ends_with(".spl"): continue
-            var root = source_root
-            while root.len() > 1 and root.ends_with("/"):
-                root = root.substring(0, root.len() - 1)
-            val root_parts = root.split("/")
-            if root_parts.len() == 0: continue
-            val root_name = root_parts[root_parts.len() - 1]
-            if segments.len() > 1 and (segments[0] == root_name or
-                    (root_name == "lib" and segments[0] == "std")):
-                val stripped = segments.slice(1, segments.len()).join("/")
-                val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, stripped)
-                match selected:
-                    case SourceRootResolutionV1.Found(path):
-                        if _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
-                    case SourceRootResolutionV1.Ambiguous(_): return selected
-                    case SourceRootResolutionV1.Missing: ()
-                # Probe the declared nested leaf before parent stripping can
-                # incorrectly alias its package facade to the requested leaf.
-                if root_name == "compiler" and nested != "":
-                    val nested_selected = _driver_try_numbered_entry_import_rel_checked_v1(root, nested)
-                    match nested_selected:
-                        case SourceRootResolutionV1.Found(_): return nested_selected
-                        case SourceRootResolutionV1.Ambiguous(_): return nested_selected
-                        case SourceRootResolutionV1.Missing: ()
-            val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, probe.replace(".", "/"))
-            match selected:
-                case SourceRootResolutionV1.Found(path):
-                    if not checkout_probed:
-                        checkout_probe = _driver_resolve_entry_import_exact(probe, entry_dir)
-                        checkout_probed = true
-                    if _driver_direct_root_hit_defers_v1(path, root, checkout_probe): ()
-                    elif _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
-                case SourceRootResolutionV1.Ambiguous(_): return selected
-                case SourceRootResolutionV1.Missing: ()
-            if nested != "":
-                val nested_selected = _driver_try_numbered_entry_import_rel_checked_v1(root, "compiler/" + nested)
-                match nested_selected:
-                    case SourceRootResolutionV1.Found(_): return nested_selected
-                    case SourceRootResolutionV1.Ambiguous(_): return nested_selected
-                    case SourceRootResolutionV1.Missing: ()
-        # Parent stripping (`use module.item`) must not outrank the checkout
-        # resolver at the SAME spelling. The checkout owns layout rewrites the
-        # roots cannot see (`compiler.backend.X` -> 70.backend/backend/X,
-        # `compiler.mir_opt.X` -> 60.mir_opt/mir_opt/X). Stripping first
-        # answered such a module with its ancestor facade
-        # (70.backend/__init__.spl) and bound the import spelling to it.
-        # Rule: a root wins for a spelling that exists under it; after
-        # stripping it may answer only with a module FILE (`use module.item`),
-        # never a package facade (_driver_source_root_hit_allowed_v1);
-        # once the checkout resolves the current spelling, report Missing so
-        # the fallback selects that file.
-        if not checkout_probed:
-            checkout_probe = _driver_resolve_entry_import_exact(probe, entry_dir)
-        if checkout_probe != "":
-            return SourceRootResolutionV1.Missing
-        # Dotted application packages are physical siblings (ui.render/),
-        # not nested ui/render/. Resolve the complete owner before parent-item
-        # fallback can alias it to app/ui/__init__.spl. Probe declared roots
-        # only: never restore an omitted plugin from the ambient checkout.
-        val application_candidates = _driver_dotted_application_candidates_v1(probe)
-        for source_root in source_roots:
-            if source_root.ends_with(".spl"): continue
-            var root = source_root
-            while root.len() > 1 and root.ends_with("/"):
-                root = root.substring(0, root.len() - 1)
-            for candidate in application_candidates:
-                val relative = if root == "app" or root.ends_with("/app"):
-                    candidate.substring(4)
-                else:
-                    candidate
-                val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, relative)
-                match selected:
-                    case SourceRootResolutionV1.Missing: ()
-                    case _: return selected
-        # Canonical nested compiler owners (e.g. mir_opt/mod and
-        # backend/codegen_types) must precede a shorter parent facade. Reuse
-        # the checkout resolver's mapping, but probe only declared authority.
-        # Every exact custom root above remains ahead of compatibility paths.
-        val compiler_candidates = _driver_numbered_compiler_candidates_v1(probe)
-        for source_root in source_roots:
-            if source_root.ends_with(".spl"): continue
-            var root = source_root
-            while root.len() > 1 and root.ends_with("/"):
-                root = root.substring(0, root.len() - 1)
-            for candidate in compiler_candidates:
-                val relative = if root == "compiler" or root.ends_with("/compiler"):
-                    candidate.substring(9)
-                else:
-                    candidate
-                val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, relative)
-                match selected:
-                    case SourceRootResolutionV1.Missing: ()
-                    case _: return selected
-        # Finish exact module lookup in the admitted library families before
-        # treating a terminal segment as an imported item. Otherwise
-        # std.crypto.sha3 is incorrectly aliased to the parent crypto.spl.
-        # All declared exact roots above remain ahead of family fallback.
-        if segments.len() > 1 and segments[0] == "std":
-            for source_root in source_roots:
-                var library_root = source_root
-                while library_root.len() > 1 and library_root.ends_with("/"):
-                    library_root = library_root.substring(0, library_root.len() - 1)
-                if library_root == "lib" or library_root.ends_with("/lib"):
-                    val relative = segments.slice(1, segments.len()).join("/")
-                    for family in source_root_std_family_order_v1():
-                        val selected = _driver_try_numbered_entry_import_rel_checked_v1(
-                            library_root + "/" + family, relative)
-                        match selected:
-                            case SourceRootResolutionV1.Missing: ()
-                            case _: return selected
-                    # Match the parent closure's first declared library root.
-                    break
-        probe = _driver_entry_import_parent(probe)
-    SourceRootResolutionV1.Missing
-
-fn _driver_source_root_hit_allowed_v1(path: text, exact_spelling: bool) -> bool:
-    # A stripped spelling names `module.item`. Its module is a file. A
-    # package facade reached that way is an ANCESTOR of the module that was
-    # asked for (`backend.env` -> 70.backend/__init__.spl): binding it pulls
-    # the whole facade into the closure under the wrong name.
-    if exact_spelling: return true
-    not (path.ends_with("/mod.spl") or path.ends_with("/__init__.spl"))
-
-fn _driver_direct_root_hit_defers_v1(hit: text, root: text, checkout: text) -> bool:
-    # A namespace root (`<...>/src/<name>`: app, lib, compiler, os, plugins)
-    # answers its own spelling through the stripped probe. Its UNPREFIXED hit
-    # is a cross-namespace guess and must not outrank the checkout resolver,
-    # which owns the language precedence (checkout, src/, the importer's own
-    # directory, then numbered/library rewrites). Without this, bare
-    # `use types` from a directory owning types.spl bound src/compiler/30.types,
-    # `common.string_builder` from src/lib/common bound
-    # src/app/common/string_builder.spl, and `compiler.mir_opt.X` bound a
-    # src/lib stub. Composition/overlay roots are not namespace roots: an
-    # unprefixed hit there is exactly what they exist for.
-    if checkout == "": return false
-    val parts = _driver_canonical_source_path(root).split("/")
-    if parts.len() < 2 or parts[parts.len() - 2] != "src": return false
-    _driver_physical_source_key(hit) != _driver_physical_source_key(checkout)
-
-pub fn driver_closure_file_from_selection_v1(
-    selected: SourceRootResolutionV1, module_path: text, importer_dir: text
-) -> SourceRootResolutionV1:
-    # Declared source roots answer first; Missing falls back to the checkout
-    # resolver (relative imports included). Shared by every closure walk.
-    match selected:
-        case SourceRootResolutionV1.Missing:
-            val checkout = _driver_resolve_entry_import(module_path, importer_dir)
-            if checkout == "": SourceRootResolutionV1.Missing
-            else: SourceRootResolutionV1.Found(checkout)
-        case _: selected
-
-pub fn driver_resolve_closure_import_v1(
-    module_path: text, source_roots: [text], importer_dir: text
-) -> SourceRootResolutionV1:
-    """THE closure-import resolver. The CLI coordinator walk
-    (_native_build_entry_closure) and the driver worker walk
-    (driver_source_pipeline_loading) must bind every spelling identically, or
-    they compile different module sets (2280-module Stage 3 closure,
-    doc/08_tracking/bug/bootstrap_main_closure_pulls_src_os_hir_failures_2026_10_20.md)."""
-    driver_closure_file_from_selection_v1(
-        _driver_resolve_source_root_entry_import_from_v1(
-            module_path, source_roots, importer_dir),
-        module_path, importer_dir)
-
-fn _driver_file_natively_owns_v1(path: text, module_name: text) -> bool:
-    for source in _driver_collect_explicit_compiler_source(path):
-        if source.module_name == module_name: return true
-    false
-
-pub fn driver_closure_native_owner_v1(file: text, module_name: text, importer_dir: text) -> text:
-    # A source-root hit whose native names omit the import spelling (a src/lib
-    # stub facade shadowing a compiler-tree owner) yields to a checkout file
-    # that natively owns the spelling. Genuine aliases keep the selected file.
-    if file == "" or _driver_file_natively_owns_v1(file, module_name): return file
-    # A file sitting at the spelling's own path under a root (a composition
-    # overlay such as compositions/cuda_disabled/plugins/...) is the owner.
-    val spelled = module_name.replace(".", "/")
-    if file.ends_with("/" + spelled + ".spl") or file.ends_with("/" + spelled + "/__init__.spl") or
-            file.ends_with("/" + spelled + "/mod.spl"):
-        return file
-    val native = _driver_resolve_entry_import(module_name, importer_dir)
-    if native != "" and native != file and _driver_file_natively_owns_v1(native, module_name):
-        return native
-    file
-
-pub fn driver_closure_importer_module_v1(path: text) -> text:
-    # Package a `.sibling` spelling expands under: the importer's canonical
-    # (first) closure name, without a trailing `.__init__`.
-    val sources = _driver_collect_explicit_compiler_source(path)
-    val name = if sources.len() > 0: sources[0].module_name else: _driver_module_name_from_path(path)
-    if name.ends_with(".__init__"): name[0:name.len() - 9] else: name
-
-pub fn driver_closure_import_specs_v1(path: text) -> [text]:
-    # Import spellings one closure node contributes: scanned imports, then
-    # `.sibling` declarations whose file exists (generated facades keep
-    # comments for moved owners; a missing hint is not an import).
-    val (_, imports, siblings, _) = _driver_cached_entry_source_scan(path)
-    var specs = imports
-    val dir = _driver_entry_import_dirname(path)
-    for sibling in siblings:
-        if sibling.starts_with(".") and not sibling.starts_with(".."):
-            val sibling_file = dir + "/" + sibling.substring(1).replace(".", "/") + ".spl"
-            var exists = false
-            unsafe(capabilities: [ffi]):
-                exists = _driver_resolver_path_exists_v1(sibling_file)
-            if exists:
-                specs = specs.push(sibling)
-    specs
-
-pub fn driver_closure_set_digest_v1(paths: [text]) -> text:
-    # Order-free identity of a closure: sorted unique physical paths.
-    var keys: [text] = []
-    var seen: Dict<text, bool> = {}
-    for path in paths:
-        val key = _driver_physical_source_key(path)
-        if not seen.contains_key(key):
-            seen[key] = true
-            keys = keys.push(key)
-    sha256_text(keys.sort().join("\n"))
-
-pub fn driver_closure_synthetic_spec_v1(spec: text) -> bool:
-    # Hidden ABI owners the driver walk adds without an authored import
-    # (rt_hal boundary, MC/DC probes). The CLI walk cannot see them.
-    spec == "std.nogc_sync_mut.rt_hal.boundary" or
-        spec == "std.nogc_sync_mut.rt_hal.process_task_arena" or
-        spec == "app.io.env_access_host" or
-        spec == "std.nogc_sync_mut.mcdc.dynamic_probe" or
-        spec == "std.nogc_sync_mut.mcdc.static_probe"
-
-pub fn driver_closure_parity_check_enabled_v1() -> bool:
-    # Explicit analysis mode only: a general debug flag must not change the
-    # build outcome.
-    (sosix_env_get_nullable("SIMPLE_CLOSURE_PARITY_CHECK") ?? "") == "1"
-
-pub fn driver_closure_parity_exempt_v1(exempt: Dict<text, bool>, path: text) -> bool:
-    val key = _driver_physical_source_key(path)
-    exempt.contains_key(key) and exempt[key]
-
-pub fn driver_closure_parity_error_v1(
-    scanned: [SourceFile], exempt: Dict<text, bool>, added: [text]
-) -> text:
-    """Debug/analysis assertion: the worker closure equals the coordinator's.
-    The CLI publishes SIMPLE_NATIVE_CLOSURE_COORDINATOR_DIGEST; a worker that
-    binds any spelling differently grows its closure and fails loudly here."""
-    if not driver_closure_parity_check_enabled_v1(): return ""
-    val expected = sosix_env_get_nullable("SIMPLE_NATIVE_CLOSURE_COORDINATOR_DIGEST") ?? ""
-    if expected == "": return ""
-    var paths: [text] = []
-    for source in scanned:
-        if not driver_closure_parity_exempt_v1(exempt, source.path):
-            paths = paths.push(source.path)
-    val actual = driver_closure_set_digest_v1(paths)
-    if actual == expected: return ""
-    var sample: [text] = []
-    for path in added:
-        if sample.len() < 8: sample = sample.push(path)
-    "CLOSURE_PARITY_MISMATCH: coordinator={expected} worker={actual} worker_files={paths.len()} added={added.len()} first_added=[" + sample.join(", ") + "]"
 
 pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     """File path backing a Simple import path, or "" when none exists.
@@ -1667,39 +1328,12 @@ pub fn _driver_collect_entry_import_source(p: text) -> [SourceFile]:
 pub fn _driver_collect_explicit_compiler_source(p: text) -> [SourceFile]:
     """Load an explicitly requested compiler input without packaging filters."""
     if not p.ends_with(".spl"):
-        eprint("[explicit-source] rejected non-spl path={p}")
         return []
     val (content, _, _, _) = _driver_cached_entry_source_scan(p)
     if content == "":
-        eprint("[explicit-source] empty content path={p}")
         return []
-    val aliases = _driver_module_aliases_with_closure(
+    _driver_module_aliases_with_closure(
         p, content, _driver_module_name_from_path(p), true)
-    if aliases.len() == 0:
-        eprint("[explicit-source] zero aliases path={p} content_len={content.len()}")
-    aliases
-
-pub fn _driver_collect_frozen_compiler_source_v1(
-    path: text, expected_digest: text, expected_bytes: i64
-) -> Result<[SourceFile], text>:
-    # The full-inventory cold route cannot use the scanner's following read:
-    # it must prove the exact no-follow frozen bytes selected by SCV.
-    if not path.ends_with(".spl") or expected_digest.len() != 64 or
-            expected_bytes < 0 or expected_bytes > 64 * 1024 * 1024:
-        return Err("frozen-source-input-invalid")
-    val loaded = file_read_regular_no_follow_bounded(
-        path, 64 * 1024 * 1024)
-    if val Err(_) = loaded:
-        return Err("frozen-source-unreadable")
-    val content = loaded.unwrap()
-    if content.len() != expected_bytes or
-            sha256_text(content) != expected_digest:
-        return Err("frozen-source-content-mismatch")
-    val sources = _driver_module_aliases_with_closure(
-        path, content, _driver_module_name_from_path(path), true)
-    if sources.len() == 0:
-        return Err("frozen-source-module-unavailable")
-    Ok(sources)
 
 fn _driver_collect_entry_import_source_with_policy(
     p: text,
@@ -1772,7 +1406,7 @@ fn _driver_bulk_source_candidate_allowed(path: text) -> bool:
 
 fn _driver_load_bulk_source_file(path: text, native_entry_active: bool) -> [SourceFile]:
     var content = ""
-    if native_entry_active or driver_admitted_epoch_active_v1():
+    if native_entry_active:
         val (cached_content, _, _, _) = _driver_cached_entry_source_scan(path)
         content = cached_content
     else:
@@ -1781,30 +1415,6 @@ fn _driver_load_bulk_source_file(path: text, native_entry_active: bool) -> [Sour
         return []
     _driver_module_aliases(path, content, _driver_module_name_from_path(path))
 
-pub fn _driver_is_explicit_native_entry_source(path: text, native_entry: text, cached_physical_entry: text = "") -> bool:
-    # Request authority applies to exactly one normalized source file, never
-    # its containing tree or similarly prefixed neighbors.
-    if native_entry == "" or not path.ends_with(".spl"):
-        return false
-    val normalized = _driver_canonical_source_path(path)
-    val requested = _driver_canonical_source_path(native_entry)
-    if normalized == requested:
-        return true
-    # The name prefilter avoids filesystem resolution for unrelated bulk
-    # inventory rows. Resolve aliases only for the selected file's basename.
-    val path_parts = normalized.split("/")
-    val entry_parts = requested.split("/")
-    if path_parts.len() == 0 or entry_parts.len() == 0 or
-            path_parts[path_parts.len() - 1].lower() != entry_parts[entry_parts.len() - 1].lower():
-        return false
-    val physical_path = _driver_physical_source_key_strict_v1(normalized)
-    val physical_entry = if cached_physical_entry != "": cached_physical_entry
-        else: _driver_physical_source_key_strict_v1(requested)
-    if physical_path == "" or physical_entry == "":
-        return false
-    if host_is_windows_host(): physical_path.lower() == physical_entry.lower()
-    else: physical_path == physical_entry
-
 pub fn _driver_collect_sources(p: text) -> [SourceFile]:
     """Collect source files from a path (file or directory). Returns list of SourceFile."""
     var result: [SourceFile] = []
@@ -1812,9 +1422,6 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         print "[collect_sources] path {p}"
     if p.ends_with(".spl"):
         _g_source_classification_count = _g_source_classification_count + 1
-        val selected_native_entry = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
-        if _driver_is_explicit_native_entry_source(p, selected_native_entry):
-            return _driver_collect_explicit_compiler_source(p)
         if _driver_source_trace_enabled():
             print "[collect_sources] file {p}"
         # It's a source file
@@ -1835,7 +1442,7 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         var content = ""
         var native_entry = ""
         native_entry = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
-        if native_entry != "" or driver_admitted_epoch_active_v1():
+        if native_entry != "":
             val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)
             content = cached_content
         else:
@@ -1861,16 +1468,11 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         var native_entry = ""
         native_entry = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         val native_entry_active = native_entry != ""
-        val physical_native_entry = if native_entry_active:
-                _driver_physical_source_key_strict_v1(_driver_canonical_source_path(native_entry))
-            else: ""
         for discovered_path in discovered:
             val path = discovered_path.trim()
-            val explicit_entry = _driver_is_explicit_native_entry_source(path, native_entry, physical_native_entry)
-            if not explicit_entry and not _driver_bulk_source_candidate_allowed(path):
+            if not _driver_bulk_source_candidate_allowed(path):
                 continue
-            val loaded = if explicit_entry: _driver_collect_explicit_compiler_source(path)
-                else: _driver_load_bulk_source_file(path, native_entry_active)
+            val loaded = _driver_load_bulk_source_file(path, native_entry_active)
             for s in loaded:
                 result = result.push(s)
     result
@@ -1891,7 +1493,43 @@ pub fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:
 # appended as "|||HELP:message".
 
 pub fn _format_type_infer_error(err: TypeInferError) -> text:
-    format_type_infer_error_v1(err)
+    """Format a TypeInferError into a structured error string with related info."""
+    val span = err.span()
+    val msg = err.message()
+    var result = "{span.line}:{span.col}: {msg}"
+    # Add related information based on error variant
+    match err:
+        case TypeInferError.Mismatch(expected, found, s):
+            if expected.span.line > 0:
+                result = result + "|||RELATED:{expected.span.line}:{expected.span.col}:expected type defined here"
+            if found.span.line > 0 and found.span.line != s.line:
+                result = result + "|||RELATED:{found.span.line}:{found.span.col}:found type originates here"
+        case TypeInferError.OccursCheck(var_id, ty, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:recursive type reference here"
+            result = result + "|||HELP:break the recursive type by using an explicit type annotation"
+        case TypeInferError.TraitNotImplemented(ty, trait_name, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:type that needs to implement '{trait_name}'"
+            result = result + "|||HELP:add an impl block: impl {trait_name} for {ty.kind}"
+        case TypeInferError.DimensionError(dim_err):
+            val de: DimError = dim_err
+            for note in de.notes:
+                match note.span:
+                    case Some(note_span):
+                        result = result + "|||RELATED:{note_span.line}:{note_span.col}:{note.message}"
+                    case nil:
+                        pass
+            match de.help:
+                case Some(help):
+                    result = result + "|||HELP:{help}"
+                case nil:
+                    pass
+        case TypeInferError.Undefined(name, s):
+            result = result + "|||HELP:check spelling or add an import for '{name}'"
+        case TypeInferError.Other(message, s):
+            pass_do_nothing
+    result
 
 pub fn _format_nll_error(err: NLLError) -> text:
     """Format an NLLError into a structured error string with related info."""

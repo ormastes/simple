@@ -440,13 +440,8 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
             expr.as_ref()
                 .map(|e| Box::new(substitute_expr_templates(e, const_bindings))),
         ),
-        Expr::New {
-            kind,
-            expr,
-            explicit_sigil,
-        } => Expr::New {
+        Expr::New { kind, expr } => Expr::New {
             kind: *kind,
-            explicit_sigil: *explicit_sigil,
             expr: Box::new(substitute_expr_templates(expr, const_bindings)),
         },
         Expr::Cast { expr, target_type } => Expr::Cast {

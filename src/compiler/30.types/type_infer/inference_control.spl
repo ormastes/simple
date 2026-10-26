@@ -1,6 +1,3 @@
-# @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
-use compiler.types.dim_constraints.{DimCheckTiming}
-use compiler.hir.hir_types.{HirTypeKind}
 # Pipeline, Dimension, Control Flow, and Effect Inference
 #
 # Implements advanced operator inference and program-level type checking:
@@ -21,9 +18,6 @@ use compiler.types.dim_constraints.*
 use compiler.traits.traits.*
 use type_infer_types.*
 use compiler.types.type_infer.inference_effects.*
-use compiler.types.type_infer.traits.*
-use compiler.types.type_infer.trait_collection.*
-use compiler.types.type_infer.generic_calls.*
 use compiler.types.type_infer_types.{HmInferContext}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
@@ -400,7 +394,7 @@ impl HmInferContext:
         for c in self.dim_solver.constraints:
             val timing = self.dim_solver.classify_constraint(c)
             match timing:
-                case DimCheckTiming.CompileTime | DimCheckTiming.Both:
+                case CompileTime | Both:
                     # Try to solve at compile time
                     match self.dim_solver.solve_constraint(c):
                         case Err(err):
@@ -581,7 +575,7 @@ impl HmInferContext:
             # Named scrutinees may be user enums whose variants happen to be
             # named Some or None. HIR does not yet expose enum ownership to the
             # inference context, so retain those until ownership is explicit.
-            case Named(_, _) | HirTypeKind.Any | HirTypeKind.Error:
+            case Named(_, _) | Any | Error:
                 Ok(())
             case _:
                 Err(TypeInferError.Other(
@@ -621,7 +615,7 @@ impl HmInferContext:
                 # user enum. Keep named owners untouched so a user enum may
                 # legitimately define Some/None variants.
                 val builtin_option_shape = match owner.kind:
-                    case HirTypeKind.Error | Optional(_): variant == "Some" or variant == "None"
+                    case Error | Optional(_): variant == "Some" or variant == "None"
                     case _: false
                 if builtin_option_shape:
                     self.infer_option_pattern(variant, payload, expected, pattern.span)
@@ -642,19 +636,12 @@ impl HmInferContext:
         This propagates the return type into the body, enabling better inference
         for lambdas and other expressions within the function.
         """
-        if fn_.is_extern: return
-        val saved_env = self.env
-        val saved_function_symbol = self.current_function_symbol
-        self.current_function_symbol = Some(fn_.symbol)
         self.enter_level()
 
         # Bind parameters and register their mutability for narrowing
-        for raw_p in fn_.params:
-            # ANY-transport hazard sweep round 3: annotated rebind.
-            val p: HirParam = raw_p
+        for p in fn_.params:
             val param: HirParam = p
             self.bind_mono(param.name, param.type_)
-            self.bind_mono(param.symbol.id.to_text(), param.type_)
             # Function parameters are immutable by default (val)
             self.register_symbol_mutability(param.symbol.id, false)
 
@@ -686,16 +673,12 @@ impl HmInferContext:
 
         self.current_return_type = saved_return_type
         self.current_fn_name = saved_fn_name
-        self.current_function_symbol = saved_function_symbol
-        self.env = saved_env
 
         self.exit_level()
 
         # Generalize function type
         var param_types: [HirType] = []
-        for raw_p in fn_.params:
-            # ANY-transport hazard sweep round 3: annotated rebind.
-            val p: HirParam = raw_p
+        for p in fn_.params:
             param_types = param_types.push(self.resolve(p.type_))
         val fn_ty = HirType(
             kind: HirTypeKind.Function(param_types, self.resolve(fn_.return_type), fn_.effects),
@@ -703,31 +686,20 @@ impl HmInferContext:
         )
         val scheme = self.generalize_all(fn_ty)
         self.bind_poly(fn_.name, scheme)
-        self.bind_poly(fn_.symbol.id.to_text(), scheme)
 
     me infer_module(module: HirModule):
         """Infer types for all functions in a module."""
         # Register symbol mutability from module symbol table for narrowing
-        val previous_errors = self.errors.len()
-        self.collect_function_bounds_from_module(module)
-        if self.errors.len() != previous_errors: return
-        self.trait_solver = TraitSolver.create_with_symbols(module.symbols)
-        self.collect_traits_from_module(module)
-        self.collect_impls_from_module(module)
         self._register_module_symbols(module)
 
         # Forward-declare every function's signature first so a body may call
         # a function declared later in the module (`undefined: <callee>`
         # otherwise depends on dict iteration order).
-        for dk_11 in module.functions.keys():
-            # ANY-transport hazard sweep round 3: annotated rebind.
-            val fn_: HirFunction = module.functions[dk_11]
+        for fn_ in module.functions.values():
             val symbol = module.symbols.get_symbol(fn_.symbol)
             if symbol.?:
                 var param_types: [HirType] = []
-                for raw_p in fn_.params:
-                    # ANY-transport hazard sweep round 3: annotated rebind.
-                    val p: HirParam = raw_p
+                for p in fn_.params:
                     param_types = param_types.push(p.type_)
                 val declared_ret = if fn_.return_type.kind != HirTypeKind.Infer(0, 0):
                     fn_.return_type
@@ -737,30 +709,17 @@ impl HmInferContext:
                     kind: HirTypeKind.Function(param_types, declared_ret, fn_.effects),
                     span: fn_.span
                 )
-                val scheme = self.generalize_all(sig_ty)
-                self.bind_poly(fn_.name, scheme)
-                self.bind_poly(fn_.symbol.id.to_text(), scheme)
+                self.bind_poly(fn_.name, self.generalize_all(sig_ty))
 
-        for dk_10 in module.functions.keys():
-            # ANY-transport hazard sweep round 3: annotated rebind.
-            val fn_: HirFunction = module.functions[dk_10]
+        for fn_ in module.functions.values():
             val symbol = module.symbols.get_symbol(fn_.symbol)
             if symbol.?:
                 self.infer_function(fn_)
-
-        self.finish_direct_function_bounds()
 
         # After all type inference, solve dimension constraints
         self.check_dim_constraints()
 
     me _register_module_symbols(module: HirModule):
         """Register all symbol mutability info from a module for narrowing analysis."""
-        for dk_9 in module.symbols.symbols.keys():
-            val sym: HirSymbol = module.symbols.symbols[dk_9]
+        for sym in module.symbols.symbols.values():
             self.register_symbol_mutability(sym.id.id, sym.is_mutable)
-            self.symbol_names[sym.id.id] = sym.name
-            self.symbol_kinds[sym.id.id] = match sym.kind:
-                case SymbolKind.Struct: "struct"
-                case SymbolKind.Class: "class"
-                case SymbolKind.Enum: "enum"
-                case _: "type"

@@ -9,7 +9,6 @@
 
 #include "runtime_simd_dispatch.h"
 #include <stdlib.h>
-#include <stdatomic.h>
 
 /* MSVC portability for the GCC/Clang attributes this file uses.
  *
@@ -328,18 +327,25 @@ static void neon_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) 
 #endif /* __aarch64__ */
 
 /* ================================================================
- * Dispatch Slot Upgrade — first use by the opt-in case provider only
+ * Dispatch Slot Upgrade — called via constructor to wire best kernels
  * ================================================================ */
 
-RT_SIMD_UNUSED static void simd_case_init(void) {
-    static atomic_int state = ATOMIC_VAR_INIT(0);
-    if (atomic_load_explicit(&state, memory_order_acquire) == 2) return;
-    int expected = 0;
-    if (!atomic_compare_exchange_strong_explicit(&state, &expected, 1,
-            memory_order_acquire, memory_order_acquire)) {
-        while (atomic_load_explicit(&state, memory_order_acquire) != 2) {}
-        return;
-    }
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((constructor(200)))
+static void simd_case_init(void) {
+#elif defined(_MSC_VER)
+/* Same .CRT$XCU idiom runtime_native.c already uses for its Windows stdio
+ * constructor: MSVC has no constructor attribute, so the initializer is
+ * registered by placing a pointer to it in the C run-time initializer
+ * section. GCC/Clang keep the priority-200 attribute unchanged. */
+#pragma section(".CRT$XCU", read)
+static void __cdecl simd_case_init(void);
+__declspec(allocate(".CRT$XCU"))
+void (__cdecl *simd_case_init_ptr)(void) = simd_case_init;
+static void __cdecl simd_case_init(void) {
+#else
+#error "no constructor mechanism for this compiler"
+#endif
     /* Ensure base dispatch table is initialized first */
     simd_text_init();
 
@@ -371,7 +377,6 @@ RT_SIMD_UNUSED static void simd_case_init(void) {
     g_simd_text.to_lower_ascii = neon_to_lower_ascii;
     g_simd_text.to_upper_ascii = neon_to_upper_ascii;
 #endif
-    atomic_store_explicit(&state, 2, memory_order_release);
 }
 
 /* ================================================================
@@ -414,7 +419,6 @@ RT_SIMD_UNUSED static void simd_case_init(void) {
  *   Caches the result in the reserved field.
  */
 int64_t rt_text_is_ascii(int64_t value) {
-    simd_case_init();
     RtCoreStringSimd* s = simd_as_string(value);
     if (!s) return 1; /* nil/non-string: vacuously ASCII */
 
@@ -437,7 +441,6 @@ int64_t rt_text_is_ascii(int64_t value) {
  *   Non-ASCII bytes are copied unchanged.
  */
 int64_t rt_text_to_upper_ascii(int64_t value) {
-    simd_case_init();
     RtCoreStringSimd* s = simd_as_string(value);
     if (!s || s->len == 0) return value;
 
@@ -464,7 +467,6 @@ int64_t rt_text_to_upper_ascii(int64_t value) {
  *   Non-ASCII bytes are copied unchanged.
  */
 int64_t rt_text_to_lower_ascii(int64_t value) {
-    simd_case_init();
     RtCoreStringSimd* s = simd_as_string(value);
     if (!s || s->len == 0) return value;
 

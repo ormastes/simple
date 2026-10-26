@@ -29,7 +29,7 @@ render/Draw IR stack). This doc is about the test access between them.
 
 New executable UI specs use canonical SPipe imports:
 
-```simple:skip
+```simple
 use std.spec
 ```
 

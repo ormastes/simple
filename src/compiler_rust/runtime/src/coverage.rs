@@ -25,12 +25,6 @@ pub struct CoverageData {
     pub paths: HashMap<(u32, Vec<u32>), u64>,
     /// Current path being traced: path_id -> block sequence
     path_traces: HashMap<u32, Vec<u32>>,
-    /// Report line for a decision whose identity is anchored elsewhere
-    /// (an `elif`, keyed by its parent `if`; an if-expression or a
-    /// standalone `and`/`or`, keyed by the enclosing function). Filled by
-    /// `register_decision` from the static site enumeration; `to_sdn` prints
-    /// this line instead of the anchor line. Absent -> the key line is printed.
-    display_lines: HashMap<u32, u32>,
 }
 
 impl CoverageData {
@@ -48,29 +42,6 @@ impl CoverageData {
         } else {
             entry.1 += 1;
         }
-    }
-
-    /// Register a statically-enumerated decision site with zero counts, so a
-    /// site that never executes is still in the denominator. Idempotent: an
-    /// already-recorded site keeps its counts.
-    pub fn register_decision(&mut self, decision_id: u32, file: &str, line: u32, column: u32, display_line: u32) {
-        self.decisions
-            .entry((decision_id, file.to_string(), line, column))
-            .or_insert((0, 0));
-        if display_line != line {
-            self.display_lines.insert(decision_id, display_line);
-        }
-    }
-
-    /// Register a statically-enumerated condition site with zero counts.
-    pub fn register_condition(&mut self, decision_id: u32, condition_id: u32, file: &str, line: u32, column: u32) {
-        self.conditions
-            .entry((decision_id, condition_id, file.to_string(), line, column))
-            .or_insert((0, 0));
-    }
-
-    fn report_line(&self, decision_id: u32, line: u32) -> u32 {
-        self.display_lines.get(&decision_id).copied().unwrap_or(line)
     }
 
     /// Record a condition probe (true or false outcome)
@@ -113,7 +84,6 @@ impl CoverageData {
         self.conditions.clear();
         self.paths.clear();
         self.path_traces.clear();
-        self.display_lines.clear();
     }
 
     /// Generate SDN format coverage report
@@ -128,12 +98,7 @@ impl CoverageData {
             for ((id, file, line, column), (true_count, false_count)) in &self.decisions {
                 output.push_str(&format!(
                     "    {}, {}, {}, {}, {}, {}\n",
-                    id,
-                    file,
-                    self.report_line(*id, *line),
-                    column,
-                    true_count,
-                    false_count
+                    id, file, line, column, true_count, false_count
                 ));
             }
             output.push('\n');
@@ -145,13 +110,7 @@ impl CoverageData {
             for ((decision_id, condition_id, file, line, column), (true_count, false_count)) in &self.conditions {
                 output.push_str(&format!(
                     "    {}, {}, {}, {}, {}, {}, {}\n",
-                    decision_id,
-                    condition_id,
-                    file,
-                    self.report_line(*decision_id, *line),
-                    column,
-                    true_count,
-                    false_count
+                    decision_id, condition_id, file, line, column, true_count, false_count
                 ));
             }
             output.push('\n');
@@ -267,47 +226,6 @@ pub unsafe extern "C" fn rt_coverage_condition_probe(
 
     if let Ok(mut data) = get_coverage_data().lock() {
         data.record_condition(decision_id, condition_id, result, file_str, line, column);
-    }
-}
-
-/// In-process (Rust caller) decision probe: same store as
-/// `rt_coverage_decision_probe`, without the C-string round trip.
-pub fn coverage_record_decision(decision_id: u32, result: bool, file: &str, line: u32, column: u32) {
-    if let Ok(mut data) = get_coverage_data().lock() {
-        data.record_decision(decision_id, result, file, line, column);
-    }
-}
-
-/// In-process (Rust caller) condition probe: same store as
-/// `rt_coverage_condition_probe`.
-pub fn coverage_record_condition(
-    decision_id: u32,
-    condition_id: u32,
-    result: bool,
-    file: &str,
-    line: u32,
-    column: u32,
-) {
-    if let Ok(mut data) = get_coverage_data().lock() {
-        data.record_condition(decision_id, condition_id, result, file, line, column);
-    }
-}
-
-/// Register statically-enumerated decision/condition sites (zero counts).
-/// `conditions` is the number of atomic `and`/`or` operands of the decision.
-pub fn coverage_register_site(
-    decision_id: u32,
-    file: &str,
-    line: u32,
-    column: u32,
-    display_line: u32,
-    conditions: u32,
-) {
-    if let Ok(mut data) = get_coverage_data().lock() {
-        data.register_decision(decision_id, file, line, column, display_line);
-        for c in 0..conditions {
-            data.register_condition(decision_id, c, file, line, column);
-        }
     }
 }
 
@@ -477,40 +395,6 @@ mod tests {
         assert!(data.conditions.is_empty());
         assert!(data.paths.is_empty());
         assert!(data.path_traces.is_empty());
-    }
-
-    #[test]
-    fn test_registered_site_counts_in_denominator() {
-        let mut data = CoverageData::new();
-        // Statically registered, never executed: in the denominator, uncovered.
-        data.register_decision(7, "a.spl", 3, 5, 3);
-        data.register_condition(7, 0, "a.spl", 3, 5);
-        data.register_condition(7, 1, "a.spl", 3, 5);
-        let sdn = data.to_sdn();
-        assert!(sdn.contains("total_decisions: 1"));
-        assert!(sdn.contains("covered_decisions: 0"));
-        assert!(sdn.contains("total_conditions: 2"));
-        assert!(sdn.contains("condition_percent: 0.0"));
-
-        // Probes land on the registered keys; re-registering keeps counts.
-        data.record_decision(7, true, "a.spl", 3, 5);
-        data.record_decision(7, false, "a.spl", 3, 5);
-        data.record_condition(7, 0, true, "a.spl", 3, 5);
-        data.record_condition(7, 0, false, "a.spl", 3, 5);
-        data.register_decision(7, "a.spl", 3, 5, 3);
-        let sdn = data.to_sdn();
-        assert!(sdn.contains("total_decisions: 1"));
-        assert!(sdn.contains("covered_decisions: 1"));
-        assert!(sdn.contains("covered_conditions: 1"));
-    }
-
-    #[test]
-    fn test_display_line_replaces_anchor_line() {
-        let mut data = CoverageData::new();
-        // Anchored on a function at line 10; the site itself is on line 14.
-        data.register_decision(9, "a.spl", 10, 1, 14);
-        let sdn = data.to_sdn();
-        assert!(sdn.contains("9, a.spl, 14, 1, 0, 0"));
     }
 
     #[test]

@@ -35,25 +35,3 @@ identity behavior. Until then, the canonical module-global identity probe uses
 `val initialized_value: i64 = initialize_value()`; this does not change its
 runtime identity assertion.
 
-
-## 2026-10-21 imported record constructor reproduction
-
-The noGC owned-lease native diagnostic reproduces this inference defect with
-imported record constructors, not only imported function calls:
-
-```simple
-use std.nogc_sync_mut.ptr.weak.{WeakLease}
-use std.nogc_sync_mut.ptr.lease.{LeaseView}
-var saved_view = LeaseView(view_id: -1, epoch: -1)
-var callback_lease = WeakLease(token_id: -1, generation: -1)
-```
-
-The first native lease diagnostic build failed at
-`test/fixtures/compiler/nogc_lease_view_probe.spl:6:18` and `:8:22` because the
-module-static initializer types remained unresolved. The diagnostic fixture
-now states `saved_view: LeaseView` and `callback_lease: WeakLease` explicitly,
-preserving the imported constructor, payload, lifetime checks, and exit-backed
-failure guards. This is a bounded verification workaround, not a compiler fix.
-The inferred source forms above remain OPEN pending a producer that propagates
-resolved imported constructor result types into module-static declarations.
-The annotated fixture retry was not run by this editing agent.

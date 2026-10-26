@@ -10,6 +10,8 @@ Source code for the Simple language compiler and standard library.
 | `compiler` | Unified compiler (numbered layers 00-99) |
 | `compiler_rust` | Rust seed compiler and vendor |
 | `generated` | Generated source files |
+| `hardware` | Hardware/FPGA bundle generators |
+| `i18n` | Internationalization |
 | `lib` | Standard library (`use std.X`) |
 | `os` | OS-specific code |
 | `runtime` | Native runtime and support libraries |

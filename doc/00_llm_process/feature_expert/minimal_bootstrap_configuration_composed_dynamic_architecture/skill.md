@@ -17,14 +17,6 @@ for build selection, provider/SCI boundaries, receipts, and bootstrap reasons.
   authorizes reuse.
 - Preserve self-host convergence and DDC as explicit release/trust targets.
 
-For Windows bootstrap orchestration changes, use the focused
-[host harness checks](../../../07_guide/tooling/bootstrap_failure_collection.md#windows-bootstrap-harness-prerequisites)
-before choosing a compiler rebuild. The PATH fixture accepts `--shell` for
-native Bash; the Cargo fixture exercises both production authority owners and
-the explicit Rust target. These checks substitute Cargo execution and cannot
-qualify a producer, provider image, or Phase4 candidate. Ownership and evidence
-boundaries are also indexed by the [bootstrap layer expert](../../layer_expert/bootstrap/skill.md#windows-harness-owner-contracts-2026-10-11).
-
 ## ABI-digest admission checklist
 
 - Treat the v1 provider result as exactly 84 bytes: the established 48-byte

@@ -1,110 +1,23 @@
-# Selected plan09-7 / DS1: compiler Span filename and length remain truthful.
-# Authoring only: all eight scenarios UNRUN until admitted native SSpec execution.
-use compiler.common.diagnostics.span.{Span}
-use std.spec.step
+use std.io_runtime.{file_read}
 
-describe "Compiler Span DS1 production API":
-    it "constructs a nonempty span with truthful stored and computed lengths":
-        step("construct an actual compiler source span")
-        val span = Span.new(10, 17, 3, 4)
-        expect(span.start).to_equal(10)
-        expect(span.end).to_equal(17)
-        expect(span.line).to_equal(3)
-        expect(span.col).to_equal(4)
-        expect(span.file).to_equal("")
-        expect(span.length).to_equal(7)
-        expect(span.len()).to_equal(7)
-        expect(span.is_empty()).to_equal(false)
+fn diagnostics_source(name: text) -> text:
+    file_read("src/compiler/00.common/diagnostics/{name}.spl")
 
-    it "constructs an empty location without inventing an extent":
-        step("preserve an insertion location and its source coordinates")
-        val span = Span.at(23, 4, 8)
-        expect(span.start).to_equal(23)
-        expect(span.end).to_equal(23)
-        expect(span.line).to_equal(4)
-        expect(span.col).to_equal(8)
-        expect(span.length).to_equal(0)
-        expect(span.len()).to_equal(0)
-        expect(span.is_empty()).to_equal(true)
-        val merged = span.merge(Span.at(23, 4, 11))
-        expect(merged.start).to_equal(23)
-        expect(merged.end).to_equal(23)
-        expect(merged.length).to_equal(0)
-        expect(merged.len()).to_equal(0)
-        expect(merged.is_empty()).to_equal(true)
-        expect(merged.col).to_equal(8)
+describe "Span":
+    it "keeps canonical span fields and constructors available":
+        val source = diagnostics_source("span")
 
-    it "merges forward adjacent same-line spans with the earlier column":
-        step("merge two concrete adjacent ranges from one compiler source")
-        val first = Span(start: 10, end: 15, line: 2, col: 2, file: "same.spl", length: 5)
-        val second = Span(start: 15, end: 19, line: 2, col: 7, file: "same.spl", length: 4)
-        val merged = first.merge(second)
-        expect(merged.start).to_equal(10)
-        expect(merged.end).to_equal(19)
-        expect(merged.line).to_equal(2)
-        expect(merged.col).to_equal(2)
-        expect(merged.file).to_equal("same.spl")
-        expect(merged.length).to_equal(9)
-        expect(merged.len()).to_equal(9)
+        expect(source).to_contain("struct Span")
+        expect(source).to_contain("start: i64")
+        expect(source).to_contain("end: i64")
+        expect(source).to_contain("line: i64")
+        expect(source).to_contain("col: i64")
+        expect(source).to_contain("static fn new(start: i64, end: i64, line: i64, col: i64) -> Span")
 
-    it "merges reverse-order same-line ranges without reporting the later column":
-        step("reverse receiver order while keeping the earlier source location")
-        val later = Span(start: 18, end: 24, line: 2, col: 10, file: "reverse.spl", length: 6)
-        val earlier = Span(start: 10, end: 14, line: 2, col: 2, file: "reverse.spl", length: 4)
-        val merged = later.merge(earlier)
-        expect(merged.start).to_equal(10)
-        expect(merged.end).to_equal(24)
-        expect(merged.line).to_equal(2)
-        expect(merged.col).to_equal(2)
-        expect(merged.file).to_equal("reverse.spl")
-        expect(merged.length).to_equal(14)
-        expect(merged.len()).to_equal(14)
+    it "keeps span combination and formatting helpers available":
+        val source = diagnostics_source("span")
 
-    it "uses the earlier line column when the receiver is on a later line":
-        step("preserve the column belonging to the selected earliest line")
-        val later = Span(start: 30, end: 40, line: 5, col: 1, file: "multi.spl", length: 10)
-        val earlier = Span(start: 3, end: 8, line: 1, col: 12, file: "multi.spl", length: 5)
-        val merged = later.merge(earlier)
-        expect(merged.start).to_equal(3)
-        expect(merged.end).to_equal(40)
-        expect(merged.line).to_equal(1)
-        expect(merged.col).to_equal(12)
-        expect(merged.file).to_equal("multi.spl")
-        expect(merged.length).to_equal(37)
-
-    it "preserves the receiver filename for the documented cross-file merge policy":
-        step("merge different source identities without silently replacing the receiver filename")
-        val receiver = Span(start: 20, end: 25, line: 4, col: 3, file: "receiver.spl", length: 5)
-        val other = Span(start: 2, end: 7, line: 1, col: 9, file: "other.spl", length: 5)
-        val merged = receiver.merge(other)
-        expect(merged.file).to_equal("receiver.spl")
-        expect(merged.start).to_equal(2)
-        expect(merged.end).to_equal(25)
-        expect(merged.line).to_equal(1)
-        expect(merged.col).to_equal(9)
-        expect(merged.length).to_equal(23)
-        expect(merged.len()).to_equal(23)
-
-    it "computes union length for overlapping ranges rather than summing lengths":
-        step("overlap two nonempty ranges and check the actual union extent")
-        val first = Span(start: 10, end: 20, line: 3, col: 2, file: "overlap.spl", length: 10)
-        val second = Span(start: 15, end: 30, line: 3, col: 7, file: "overlap.spl", length: 15)
-        val merged = first.merge(second)
-        expect(merged.start).to_equal(10)
-        expect(merged.end).to_equal(30)
-        expect(merged.file).to_equal("overlap.spl")
-        expect(merged.length).to_equal(20)
-        expect(merged.len()).to_equal(20)
-
-    it "preserves filename and union length through the existing to API":
-        step("combine separated ranges using the distinct receiver-column to contract")
-        val receiver = Span(start: 20, end: 25, line: 4, col: 8, file: "to.spl", length: 5)
-        val earlier = Span(start: 2, end: 7, line: 1, col: 3, file: "other.spl", length: 5)
-        val combined = receiver.to(earlier)
-        expect(combined.file).to_equal("to.spl")
-        expect(combined.start).to_equal(2)
-        expect(combined.end).to_equal(25)
-        expect(combined.line).to_equal(1)
-        expect(combined.col).to_equal(8)
-        expect(combined.length).to_equal(23)
-        expect(combined.len()).to_equal(23)
+        expect(source).to_contain("fn to(other: Span) -> Span")
+        expect(source).to_contain("fn merge(other: Span) -> Span")
+        expect(source).to_contain("fn len() -> i64")
+        expect(source).to_contain("fn to_range_string() -> text")

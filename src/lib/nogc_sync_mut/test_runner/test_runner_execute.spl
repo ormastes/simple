@@ -14,28 +14,20 @@
 #   - test_runner_execute.spl (this file): core execution modes (interpreter, SMF, native, safe)
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
-use std.test_runner.native_compile_contract.{native_test_request_error, native_test_compile_threads, native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt, native_test_source_roots_identity}
-use std.test_runner.native_owned_process.{ScopedChildRun, run_scoped_child as _run_scoped_child}
 export use std.nogc_sync_mut.test_runner.resource_policy.{safe_mode_caps}
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_decision_manifest_sdn}
-use std.test_runner.test_runner_metrics.{test_resource_class, test_execution_cohort_id, test_child_memory_bytes}
+use std.test_runner.test_runner_metrics.{test_resource_class, test_execution_cohort_id}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
-use std.nogc_sync_mut.env.variables.{env_unset}
 use nogc_sync_mut.io.crypto_sffi.{random_hex as test_runner_random_hex}
 use std.common.crypto.sha256.{sha256_text}
-use std.common.text.{escape_json}
-use std.io_runtime.{file_hash_sha256_or_empty, dir_create, dir_remove_all, cwd}
-use std.nogc_sync_mut.test_runner.native_test_source_stage.{NativeTestSourceStageV1,
-    native_test_stage_source_v1, native_test_cleanup_source_v1}
 use std.nogc_sync_mut.io.file_ops.{file_size_raw, file_modified_time}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.process_ops.{ProcessResult}
-use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope, run_in_owned_test_resource_scope}
-use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope}
 use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, ResourceBudget, DecisionStatus, TerminationCause, evaluate_resource_budget, decision_status_name}
 
 # Import from split-out files (same directory, but need use for re-export)
@@ -48,7 +40,7 @@ use std.test_runner.test_executor_parsing.{
     coverage_wrapper_suffix, build_coverage_wrapper,
     extract_coverage_sdn, strip_coverage_blocks,
     COVERAGE_BEGIN, COVERAGE_END,
-    extract_compiler_mcdc_obligation_manifest, mcdc_obligation_manifest_absent,
+    extract_compiler_mcdc_obligation_manifest,
     list_tests_static, extract_static_test_name,
     _tp_get_temp_dir
 }
@@ -61,8 +53,52 @@ export use nogc_sync_mut.test_runner.test_executor_parsing.{
     extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks
 }
 
+struct ScopedChildRun:
+    result: ProcessResult
+    usage: ResourceUsage?
+    budget_status: text
 
-fn _attach_scope_evidence(result: TestFileResult, usage: ResourceUsage?, budget_status: text, file_path: text, options: TestOptions, compile_ms: i64 = 0, execution_ms: i64 = 0, completion: Option<ProcessCompletionV1> = nil) -> TestFileResult:
+fn _run_scoped_child(resource_class: ExecutionResourceClass, cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_ms: i64, max_fds: i64, max_pids: i64, enforce_class_defaults: bool) -> ScopedChildRun:
+    val defaults = standard_resource_budget(resource_class)
+    val effective_memory = if memory_bytes > 0: memory_bytes elif enforce_class_defaults: defaults.max_tree_charge_bytes else: 0
+    val effective_cpu = if cpu_ms > 0: cpu_ms elif enforce_class_defaults: defaults.max_cpu_ms else: 0
+    val effective_fds = if max_fds > 0: max_fds elif enforce_class_defaults: defaults.max_fds else: 0
+    # The caller has already resolved the process policy. Zero means inherit
+    # the host limit, including when the other class defaults remain enabled.
+    val effective_pids = max_pids
+    val budget = ResourceBudget(
+        max_wall_ms: timeout_ms, max_cpu_ms: effective_cpu,
+        max_tree_charge_bytes: effective_memory, max_direct_child_rss_bytes: effective_memory,
+        max_io_read_bytes: if enforce_class_defaults: defaults.max_io_read_bytes else: 0,
+        max_io_write_bytes: if enforce_class_defaults: defaults.max_io_write_bytes else: 0,
+        max_pids: effective_pids,
+        max_fds: effective_fds)
+    val scope = execution_resource_scope_with_budget(resource_class, budget, TEST_OUTPUT_CAPTURE_BYTES)
+    val scoped = run_in_execution_resource_scope(scope, cmd, args)
+    val termination = scoped.process.usage.termination
+    val limit_type = if (termination == TerminationCause.MemoryMax or
+            (scoped.budget_decision.status == DecisionStatus.Failure and scoped.budget_decision.reason.contains("memory"))):
+        "memory"
+    elif (termination == TerminationCause.ProcessLimit or
+            (scoped.budget_decision.status == DecisionStatus.Failure and scoped.budget_decision.reason.contains("process"))):
+        "procs"
+    elif termination == TerminationCause.CpuLimit:
+        "cpu"
+    elif termination == TerminationCause.WallTimeout:
+        "timeout"
+    elif effective_fds > 0 and scoped.process.stderr.lower().contains("too many open files"):
+        "fds"
+    elif scoped.budget_decision.status == DecisionStatus.Failure:
+        "budget"
+    else:
+        ""
+    ScopedChildRun(
+        result: ProcessResult(stdout: scoped.process.stdout, stderr: scoped.process.stderr,
+            exit_code: scoped.process.usage.exit_code, limit_exceeded: limit_type != "", limit_type: limit_type),
+        usage: scoped.process.usage,
+        budget_status: decision_status_name(scoped.budget_decision.status))
+
+fn _attach_scope_evidence(result: TestFileResult, usage: ResourceUsage?, budget_status: text, file_path: text, options: TestOptions, compile_ms: i64 = 0, execution_ms: i64 = 0) -> TestFileResult:
     TestFileResult(
         path: result.path, passed: result.passed, failed: result.failed,
         skipped: result.skipped, pending: result.pending,
@@ -72,8 +108,7 @@ fn _attach_scope_evidence(result: TestFileResult, usage: ResourceUsage?, budget_
         resource_usage: usage,
         resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
         cohort_id: test_execution_cohort_id(file_path, options),
-        budget_status: budget_status, anomaly_status: "provisional",
-        process_completion: completion)
+        budget_status: budget_status, anomaly_status: "provisional")
 
 fn _combine_usage(first: ResourceUsage?, second: ResourceUsage?) -> ResourceUsage?:
     val left = match first:
@@ -155,16 +190,6 @@ fn limit_exceeded_message(result: ProcessResult, options: TestOptions) -> text:
 # `fail_fast = false` (src/app/test_runner_new/test_runner_main.spl:205) --
 # i.e. run to the END of both lists. See
 # doc/05_design/infra/test_runner/unstable_mode_scope_finding_2026-08-17.md.
-
-# The v1 evidence file and its `.expectations` tally sidecar are one unit:
-# std.spec writes both, so every cleanup removes both.
-fn remove_structured_evidence(evidence_path: text):
-    if evidence_path == "":
-        return
-    if file_exists(evidence_path):
-        file_delete(evidence_path)
-    if file_exists(evidence_path + ".expectations"):
-        file_delete(evidence_path + ".expectations")
 
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
     # Coverage probes are MIR-owned. The HIR tree interpreter never executes
@@ -254,7 +279,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     var exit_code = 0
     var observed_usage: ResourceUsage? = nil
     var budget_status = "incomplete"
-    val memory_bytes = test_child_memory_bytes(options)
+    val memory_bytes = if (options.max_mem_gb > 0 and not options.no_limits): options.max_mem_gb * 1024 * 1024 * 1024 else: 0
     val max_pids = if options.no_limits: 0 else: options.max_procs
     val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, child_args, timeout_ms, memory_bytes, 0, 0, max_pids, not options.no_limits)
     stdout = scoped_child.result.stdout
@@ -275,7 +300,8 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         if evidence_path != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: dur, setup_ms: setup_ms, error: "test-runner: cannot restore structured result environment", timed_out: false, cached: false)
-        remove_structured_evidence(evidence_path)
+        if evidence_path != "" and file_exists(evidence_path):
+            file_delete(evidence_path)
         return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
             duration_ms: dur, setup_ms: setup_ms, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false,
             execution_ms: dur, resource_usage: observed_usage,
@@ -311,7 +337,8 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         )
 
     if compiler_manifest_error != "":
-        remove_structured_evidence(evidence_path)
+        if evidence_path != "" and file_exists(evidence_path):
+            file_delete(evidence_path)
         return TestFileResult(
             path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: duration_ms, setup_ms: setup_ms,
@@ -319,7 +346,8 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         )
 
     val result = make_result_from_structured_evidence(file_path, stdout, stderr, exit_code, duration_ms, options.timeout, evidence_path)
-    remove_structured_evidence(evidence_path)
+    if evidence_path != "" and file_exists(evidence_path):
+        file_delete(evidence_path)
     TestFileResult(
         path: result.path, passed: result.passed, failed: result.failed,
         skipped: result.skipped, pending: result.pending,
@@ -374,7 +402,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
         var stdout = ""
         var stderr = ""
         var exit_code = 0
-        val memory_bytes = test_child_memory_bytes(options)
+        val memory_bytes = if (options.max_mem_gb > 0 and not options.no_limits): options.max_mem_gb * 1024 * 1024 * 1024 else: 0
         val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, run_args, timeout_ms, memory_bytes, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
         stdout = scoped_child.result.stdout
         stderr = scoped_child.result.stderr
@@ -863,41 +891,17 @@ fn preprocess_spipe_file(file_path: text) -> text:
         wrapped = coverage_source_marker + "\n" + wrapped
     val safe_name = file_path.replace("/", "_").replace("\\", "_").replace(":", "_")
     val tmp_path = _tp_get_temp_dir() + "/spipe_wrapped_" + getpid().to_text() + "_" + safe_name[0:safe_name.len() - 4] + "_native.spl"
-    if not file_write(tmp_path, wrapped): return ""
+    file_write(tmp_path, wrapped)
     tmp_path
 
 fn cleanup_native_generated_file(path: text, original_path: text, preserved_path: text, keep_artifacts: bool):
     if not keep_artifacts and path != "" and path != original_path and path != preserved_path and file_exists(path):
         file_delete(path)
 
-fn bounded_native_compile_output(output: text) -> text:
-    if output.len() > 4096:
-        return output[0:4096] + "...[truncated at 4096 characters]"
-    output
-
-fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_path: text, cleanup_path: text, original_path: text, keep_artifacts: bool, native_cache_path: text = "", quarantine_path: text = "") -> bool:
+fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_path: text, cleanup_path: text, original_path: text, keep_artifacts: bool):
     cleanup_native_generated_file(smf_path, original_path, "", keep_artifacts)
     cleanup_native_generated_file(source_path, original_path, wrapped_path, keep_artifacts)
     cleanup_native_generated_file(cleanup_path, original_path, "", keep_artifacts)
-    val native_prefix = _tp_get_temp_dir() + "/native-"
-    var cache_clean = true
-    if not keep_artifacts and native_cache_path != "" and native_cache_path == smf_path + ".cache" and smf_path.starts_with(native_prefix) and smf_path.ends_with(".exe"):
-        val native_leaf = smf_path[native_prefix.len():smf_path.len()]
-        if not native_leaf.contains("/") and not native_leaf.contains("\\"):
-            # A failed existence probe is not proof of absence (notably for
-            # Unicode paths with an ANSI-only provider). Require cleanup proof.
-            cache_clean = dir_remove_all(native_cache_path)
-        else:
-            cache_clean = false
-    elif not keep_artifacts and native_cache_path != "":
-        cache_clean = false
-    if not cache_clean and quarantine_path != "":
-        file_write(quarantine_path, "NATIVE-CACHE-CLEANUP-FAILED|" + native_cache_path)
-    if not cache_clean:
-        val cache_reason = native_cache_path.replace("\n", " ").replace("\r", " ")
-        val bounded_cache_reason = if cache_reason.len() > 512: cache_reason[0:512] else: cache_reason
-        print "error: NATIVE-CACHE-CLEANUP-FAILED: private cache {bounded_cache_reason}"
-    cache_clean
 
 # Graceful MC/DC-on / coverage-on degradation path: run the spec directly via
 # the interpreter (no coverage/MC/DC wrapper, no native SMF compile) when the
@@ -923,17 +927,13 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
         run_args.push("--gc-log")
     if options.gc_off:
         run_args.push("--gc=off")
-    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, run_args, timeout_ms, test_child_memory_bytes(options), 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, run_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
     val stdout = scoped_child.result.stdout
     val stderr = scoped_child.result.stderr
     val exit_code = scoped_child.result.exit_code
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
     print "[{fallback_tag}] {file_path}: {reason}"
-    # A budget kill arrives as a bare signal exit (143) with no TIMEOUT marker,
-    # so make_result_from_output would call it an unexplained signal death.
-    if scoped_child.result.limit_exceeded:
-        return scoped_limit_exceeded_result(file_path, scoped_child, options, duration_ms, reason, degrade_token)
     val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
     val evidenced = _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
     TestFileResult(
@@ -952,18 +952,6 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
         degraded_reason: degrade_token
     )
 
-# Outcome for a scoped child its resource scope killed (wall/memory/cpu/procs),
-# classified by the scope's limit_type -- the same classes the primary
-# interpreter path reports -- while keeping the fallback's skip/degrade tags.
-pub fn scoped_limit_exceeded_result(file_path: text, scoped_child: ScopedChildRun, options: TestOptions, duration_ms: i64, mcdc_skip_reason: text, degraded_reason: text) -> TestFileResult:
-    val result = scoped_child.result
-    TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
-        duration_ms: duration_ms, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false,
-        execution_ms: duration_ms, resource_usage: scoped_child.usage,
-        resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
-        cohort_id: test_execution_cohort_id(file_path, options), budget_status: scoped_child.budget_status, anomaly_status: "incomplete",
-        mcdc_skip_reason: mcdc_skip_reason, degraded_reason: degraded_reason)
-
 # --- coverage fail-closed gate (2026-08-31) -------------------------------
 # A coverage run whose instrumented wrapper will not compile has NOT executed
 # what the operator asked for. Reporting the unwrapped interpreter run as a
@@ -977,10 +965,6 @@ pub fn scoped_limit_exceeded_result(file_path: text, scoped_child: ScopedChildRu
 pub fn coverage_interpreter_fallback_opted_in(env_value: text) -> bool:
     env_value == "interpreter"
 
-# Same discipline for an absent MC/DC obligation manifest: only "degrade".
-pub fn mcdc_manifest_absent_degrade_opted_in(env_value: text) -> bool:
-    env_value == "degrade"
-
 pub fn coverage_wrapper_abort_error(diagnostic: text) -> text:
     "ABORTED BEFORE EXECUTION — coverage instrumentation wrapper failed to compile; the spec was NEVER run under the requested coverage path, so this is NOT a test result. Compiler diagnostic: " + diagnostic + " (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)"
 
@@ -992,17 +976,7 @@ fn first_line(text_value: text) -> text:
     # Prefer the first line that actually names an error; the compile output is
     # dominated by seed banners and lint warnings, and taking line 1 verbatim
     # masked the real diagnostic in every fail-closed/degrade message.
-    #
-    # Ranked, because "contains error" alone let advisories win (2026-10-19):
-    # a seed `[jit-fallback] HIR lowering error: ...` line (the module merely
-    # ran on the interpreter) masked the real `SCV-E-ADMISSION: ...` fatal.
-    #   1. a fatal-shaped line: `error:` / `error[` prefix, or an `XXX-E-YYY:`
-    #      admission code;
-    #   2. any other line mentioning error that is not a bracket-tagged log
-    #      line (`[jit-fallback]`, `[INFO]`, ...) or a `warning` line;
-    #   3. the first non-noise line.
     var first_non_noise = ""
-    var first_error_mention = ""
     for line in text_value.split("\n"):
         val trimmed = line.trim()
         # The seed binary prints a two-line "bootstrap seed only" banner on
@@ -1012,17 +986,11 @@ fn first_line(text_value: text) -> text:
             trimmed.starts_with("WARNING: this Rust-built Simple binary") or
             trimmed.starts_with("Build and use the pure-Simple"):
             continue
-        if trimmed.starts_with("error:") or trimmed.starts_with("error[") or
-            (trimmed.contains("-E-") and trimmed.contains(":") and not trimmed.starts_with("[")):
+        if trimmed.contains("error") or trimmed.contains("Error"):
             return trimmed
-        val advisory = trimmed.starts_with("[") or trimmed.starts_with("warning") or
-            trimmed.contains("warning\x1b[") or trimmed.contains("warning[")
-        if first_error_mention == "" and not advisory and
-            (trimmed.contains("error") or trimmed.contains("Error")):
-            first_error_mention = trimmed
         if first_non_noise == "":
             first_non_noise = trimmed
-    if first_error_mention != "": first_error_mention else: first_non_noise
+    first_non_noise
 
 # --- SMF-compile degrade token (2026-09-12) --------------------------------
 # The `degraded=` value recorded on a file's `SPEC FILE VERDICT:` line when its
@@ -1058,31 +1026,6 @@ pub fn smf_compile_degrade_token(compile_output: text) -> text:
 # than the whole budget on its own.
 val _DEGRADE_TOKEN_MAX: i64 = 160
 
-# --coverage builds the instrumented wrapper with `native-build
-# --refresh-source-authority`, whose SCV admission fails closed with
-# `compile-event-journal-missing` in a checkout that has never published a
-# source-inventory journal (bug
-# test_coverage_wrapper_native_build_refused_by_scv_admission_2026_10_19), so
-# every spec aborted and the report tracked 0 files. The compiler names the
-# sanctioned first-build path itself ("rerun with
-# SIMPLE_SCV_INVENTORY_COLD_INIT=1"). Take it for the FIRST wrapper build of
-# this run only, and only when no journal pointer exists: every later build is
-# warm, and admission stays strict (a present-but-invalid journal is still
-# refused with its named reason). A caller that set the variable keeps
-# control of it.
-var _coverage_scv_cold_init_attempted = false
-
-fn coverage_scv_cold_init_needed() -> bool:
-    if _coverage_scv_cold_init_attempted:
-        return false
-    if (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") != "":
-        return false
-    val scv_root = cwd() + "/build/scv"
-    if file_exists(scv_root + "/source-inventory/CURRENT") or file_exists(scv_root + "/compile-events/CURRENT"):
-        return false
-    _coverage_scv_cold_init_attempted = true
-    true
-
 fn verdict_degrade_token_field(diagnostic: text) -> text:
     # A compile diagnostic reads
     #   error: compile failed (<temp path>): semantic: <temp path>: <cause>
@@ -1102,42 +1045,10 @@ fn verdict_degrade_token_field(diagnostic: text) -> text:
         return flat
     "~" + flat[flat.len() - _DEGRADE_TOKEN_MAX:flat.len()]
 
-
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
-    val explicit_aot = options.native_backend != ""
-    val native_request_error = native_test_request_error(options.native_backend, options.coverage, options.safe_mode, options.native_source_roots)
-    if native_request_error != "":
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: 0, error: native_request_error,
-            timed_out: false, cached: false)
-    if explicit_aot and (env_get("SIMPLE_BINARY") ?? "") == "":
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: 0, error: "Native backend tests require an explicitly pinned SIMPLE_BINARY producer",
-            timed_out: false, cached: false)
-    val (native_threads, native_threads_error) = native_test_compile_threads(
-        if explicit_aot: env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? "" else: "")
-    if native_threads_error != "":
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: 0, error: native_threads_error,
-            timed_out: false, cached: false)
-    if explicit_aot:
-        env_set("SIMPLE_NO_STUB_FALLBACK", "1")
-    val producer_digest = if explicit_aot: file_hash_sha256_or_empty(binary) else: ""
-    val roots_digest = if explicit_aot: sha256_text(native_test_source_roots_identity(options.native_source_roots))[0:16] else: ""
-    if explicit_aot and producer_digest.len() != 64:
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: 0, error: "Native backend producer bytes cannot be fingerprinted",
-            timed_out: false, cached: false)
-    val native_quarantine_path = if explicit_aot:
-            _tp_get_temp_dir() + "/native-cache-quarantine-" + producer_digest + "-" + options.native_backend + ".env"
-        else: ""
-    if explicit_aot and file_exists(native_quarantine_path):
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: 0, error: "NATIVE-CACHE-CLEANUP-FAILED: further native admissions are quarantined",
-            timed_out: false, cached: false)
     val configured_mcdc_mode = env_get("SIMPLE_MCDC_MODE") ?? ""
     val mcdc_enabled = configured_mcdc_mode == "on" or
         configured_mcdc_mode == "dynamic"
@@ -1146,144 +1057,36 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     # so it uses the LLVM AOT path and the core-C coverage owner instead.
     # Step 1: Preprocess SPipe files (wrap in fn main())
     val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options)
-    val preprocessed_path = preprocess_spipe_file(wrapped_path)
-    var source_path = preprocessed_path
-    var generated_stage: Option<NativeTestSourceStageV1> = nil
-    if options.coverage or explicit_aot:
-        val staged = native_test_stage_source_v1(cwd(), preprocessed_path)
-        if staged.is_err():
-            cleanup_native_generated_files("", preprocessed_path, wrapped_path, cleanup_path,
-                file_path, options.keep_artifacts)
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
-                error: staged.unwrap_err(), timed_out: false, cached: false)
-        val stage = staged.unwrap()
-        source_path = stage.path
-        generated_stage = Some(stage)
-        # Only preprocessing's distinct output is owned here. Never remove the
-        # original input or the coverage owner's still-needed source.
-        if not options.keep_artifacts and preprocessed_path != file_path and
-                preprocessed_path != wrapped_path and file_exists(preprocessed_path):
-            if not file_delete(preprocessed_path):
-                val stage_clean = native_test_cleanup_source_v1(stage, false)
-                cleanup_native_generated_files("", "", wrapped_path, cleanup_path, file_path, false)
-                return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                    duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
-                    error: "native-test-source: preprocessing cleanup failed: " + preprocessed_path +
-                        (if stage_clean: "" else: "; staging cleanup failed: " + stage.directory),
-                    timed_out: false, cached: false)
+    val source_path = preprocess_spipe_file(wrapped_path)
 
     # Step 2: Compile to .smf via 'simple compile'. Artifact goes under the
     # temp dir, NOT beside the source: any interrupt between compile and the
     # cleanup below used to orphan a stub .smf next to the .spl, which then
     # shadowed the module and poisoned the smf cache (bug doc
     # smf_stub_shadowing_unresolved_describe_2026-07-24.md).
-    val artifact_suffix = if explicit_aot: "." + options.native_backend + "." + producer_digest + ".{start}.exe"
-        elif options.coverage: ".coverage-native"
+    val artifact_suffix = if options.coverage: ".coverage-native"
         elif mcdc_enabled: ".mcdc-native"
         else: ".smf"
-    val smf_path = if explicit_aot:
-            _tp_get_temp_dir() + "/native-" + sha256_text(file_path)[0:16] + "-" + options.native_backend + "-" + producer_digest[0:16] + "-" + roots_digest + "-{start}.exe"
-        else:
-            _tp_get_temp_dir() + "/" + file_path.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".spl", artifact_suffix)
+    val smf_path = _tp_get_temp_dir() + "/" + file_path.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".spl", artifact_suffix)
     var compile_args: [text] = []
-    if options.coverage or explicit_aot:
-        val selected_backend = if explicit_aot: options.native_backend else: "llvm"
-        compile_args = ["native-build", "--backend", selected_backend, "--refresh-source-authority", "--entry-closure", "--entry", source_path, "--runtime-bundle", "core-c-bootstrap", "--output", smf_path]
-        if explicit_aot:
-            compile_args = native_test_compile_args_with_threads(source_path, smf_path, options.native_backend, native_threads, options.native_source_roots)
-            val selected_runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
-            if selected_runtime_path != "":
-                compile_args.push("--runtime-path")
-                compile_args.push(selected_runtime_path)
+    if options.coverage:
+        compile_args = ["native-build", "--backend", "llvm", "--source", "src/lib", "--entry-closure", "--entry", source_path, "--runtime-bundle", "core-c-bootstrap", "--output", smf_path]
     else:
         compile_args = ["compile", source_path, "-o", smf_path]
     if options.verbose:
         compile_args.push("--verbose")
         print "[native] Compiling {file_path} to {smf_path}"
 
-    # Establish the owned cache before invoking the compiler. A compiler error
-    # before its first cache write must not be mistaken for cleanup failure.
-    if explicit_aot and not dir_create(smf_path + ".cache", false):
-        var stage_clean = true
-        if generated_stage.?:
-            stage_clean = native_test_cleanup_source_v1(generated_stage.unwrap(), options.keep_artifacts)
-        cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
-            error: "Native backend private cache creation failed" +
-                (if stage_clean: "" else: "; native-test-source: staging cleanup failed: " + source_path),
-            timed_out: false, cached: false)
     val compile_started = time_now_unix_micros()
-    if explicit_aot and options.verbose:
-        print native_test_invocation_receipt(options.native_backend, producer_digest, file_path,
-            smf_path, binary, compile_args)
-    val cold_init_once = options.coverage and not explicit_aot and coverage_scv_cold_init_needed()
-    if cold_init_once:
-        print "coverage: no SCV compile-event journal in this checkout; this first instrumented build runs the one-time inventory cold init (SIMPLE_SCV_INVENTORY_COLD_INIT=1 for this child only)"
-        env_set("SIMPLE_SCV_INVENTORY_COLD_INIT", "1")
-    # The instrumented/AOT wrapper compile is a whole-compiler native-build, not a
-    # unit spec: the Unit class tree-charge cap (3 GiB) kills it after ~20s. Give
-    # it the Large class budget explicitly; the cap stays enforced.
-    val compile_class = if options.coverage or explicit_aot: ExecutionResourceClass.Large else: test_resource_class(file_path)
-    val compile_scoped = _run_scoped_child(compile_class, binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits, options.coverage or explicit_aot)
-    if cold_init_once:
-        env_unset("SIMPLE_SCV_INVENTORY_COLD_INIT")
+    val compile_scoped = _run_scoped_child(test_resource_class(file_path), binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
     val compile_ms = (time_now_unix_micros() - compile_started) / 1000
     val compile_result = compile_scoped.result
     val compile_stdout = compile_result.stdout
     val compile_stderr = compile_result.stderr
     val compile_exit = compile_result.exit_code
     val compile_output = compile_stdout + "\n" + compile_stderr
-    if generated_stage.? and compile_scoped.completion.?:
-        val completion = compile_scoped.completion.unwrap()
-        if not completion.tree_reaped:
-            # A reported live tree can still own source/cache readers. Retain
-            # all evidence for its owner; never turn a wait failure into an
-            # unsafe cleanup attempt or a claimed successful compilation.
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
-                error: (if compile_exit != 0: "Native compilation failed: " + compile_output + "; " else: "") +
-                    "native-test-source: compiler tree not reaped; retained source " + source_path +
-                    "; retained artifact/cache " + smf_path,
-                timed_out: completion.timed_out, cached: false, compile_ms: compile_ms,
-                process_completion: compile_scoped.completion)
-    # The compiler process has completed. Its admitted immutable snapshot owns
-    # compilation bytes; executable execution does not need the live staging
-    # file. On platforms without a completion receipt this uses the existing
-    # synchronous provider contract, not a fabricated tree-reaped certificate.
-    # Retire this owner once here, before later result/fallback branches.
-    if generated_stage.?:
-        val stage = generated_stage.unwrap()
-        if not native_test_cleanup_source_v1(stage, options.keep_artifacts):
-            cleanup_native_generated_files(smf_path, "", wrapped_path, cleanup_path,
-                file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
-                error: (if compile_exit != 0: "Native compilation failed: " + compile_output + "; " else: "") +
-                    "native-test-source: staging cleanup failed: " + stage.directory,
-                timed_out: compile_result.limit_type.contains("timeout"), cached: false, compile_ms: compile_ms)
-    if explicit_aot and file_hash_sha256_or_empty(binary) != producer_digest:
-        cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
-            error: "Native backend producer changed while compiling", timed_out: false, cached: false)
 
     if compile_exit != 0:
-        if explicit_aot:
-            val completion_detail = match compile_scoped.completion:
-                case Some(receipt): "pid={receipt.pid}, generation={receipt.process_generation}, exit={receipt.exit_code}, signal={receipt.signal_number}, tree_reaped={receipt.tree_reaped}, timed_out={receipt.timed_out}, cancelled={receipt.cancelled}, stdout_digest={receipt.stdout_digest}, stderr_digest={receipt.stderr_digest}, transport_digest={receipt.transport_execution_digest}"
-                case _: "unavailable"
-            val compile_cache_clean = cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, smf_path + ".cache", native_quarantine_path)
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
-                error: (if compile_cache_clean: "" else: "NATIVE-CACHE-CLEANUP-FAILED: ") +
-                    "Native backend compilation failed: " + options.native_backend +
-                    " (exit={compile_exit}, limit={compile_result.limit_type}, budget={compile_scoped.budget_status}, completion={completion_detail})" +
-                    "; stdout: " + bounded_native_compile_output(compile_stdout) +
-                    "; stderr: " + bounded_native_compile_output(compile_stderr),
-                timed_out: compile_result.limit_type.contains("timeout"), cached: false, compile_ms: compile_ms,
-                process_completion: compile_scoped.completion)
         # MC/DC-forced standalone-SMF compilation is impossible for specs
         # that use interpreter-only constructs (TryOperator, PatternMatch,
         # CollectionLiteral, ...) -- "cannot compile to standalone SMF: N
@@ -1328,7 +1131,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         val wrapper_active = cleanup_path != ""
         val uncompilable_construct = compile_output.contains("cannot compile to standalone SMF")
         if mcdc_enabled and not options.coverage:
-            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
             val diagnostic = first_line(compile_output)
             val reason = if uncompilable_construct:
                     "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + diagnostic
@@ -1347,7 +1150,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         # then it is loudly tagged and never presented as coverage evidence.
         if options.coverage and wrapper_active and not coverage_interpreter_fallback_opted_in(env_get("SIMPLE_COVERAGE_FALLBACK") ?? ""):
             val end_abort = time_now_unix_micros()
-            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
             return TestFileResult(
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: (end_abort - start) / 1000, setup_ms: 0,
@@ -1370,14 +1173,14 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             # copy, not evidence the spec itself is broken -- the fallback
             # below runs the REAL, unwrapped spec and reports its real
             # pass/fail, so this cannot mask a genuine defect.
-            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
             val reason = "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + first_line(compile_output)
             return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "coverage-fallback", reason,
                 smf_compile_degrade_token(compile_output))
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         val error_msg = "Compilation failed: {compile_stderr}"
-        cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+        cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
         return TestFileResult(
             path: file_path,
             passed: 0,
@@ -1399,7 +1202,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         if not compiler_manifest_valid or not record_compiler_decision_manifest_sdn(compiler_manifest):
             val end = time_now_unix_micros()
             val duration_ms = (end - start) / 1000
-            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
             return TestFileResult(
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: duration_ms, setup_ms: 0,
@@ -1417,22 +1220,12 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             extract_compiler_mcdc_obligation_manifest(compile_output)
         if not mcdc_manifest_valid:
             cleanup_native_generated_files(smf_path, source_path, wrapped_path,
-                cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
-            # Only the pure-Simple compiler driver emits the manifest. Under that
-            # compiler an absent manifest is a regression, so this fails closed by
-            # default. A toolchain that cannot produce one (the Rust seed) may opt
-            # in explicitly with SIMPLE_MCDC_MANIFEST_ABSENT=degrade to run the
-            # spec on the interpreter. A present but malformed manifest always fails.
-            val manifest_absent = mcdc_obligation_manifest_absent(compile_output)
-            if manifest_absent and not options.coverage and mcdc_manifest_absent_degrade_opted_in(env_get("SIMPLE_MCDC_MANIFEST_ABSENT") ?? ""):
-                val absent_reason = "MC/DC instrumentation skipped (explicit SIMPLE_MCDC_MANIFEST_ABSENT=degrade opt-in): compiler emitted no MC/DC obligation manifest; degraded to plain interpreter execution, which reports this file's REAL pass/fail."
-                return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-fallback", absent_reason,
-                    "mcdc-obligation-manifest-absent")
+                cleanup_path, file_path, options.keep_artifacts)
             return TestFileResult(
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: (time_now_unix_micros() - start) / 1000,
                 setup_ms: 0,
-                error: if manifest_absent: "test-runner: missing MC/DC obligation manifest (compiler emitted none; a toolchain that cannot produce one may set SIMPLE_MCDC_MANIFEST_ABSENT=degrade)" else: "test-runner: missing or malformed MC/DC obligation manifest",
+                error: "test-runner: missing or malformed MC/DC obligation manifest",
                 timed_out: false, cached: false
             )
         mcdc_manifest = extracted_mcdc_manifest
@@ -1441,7 +1234,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         # predicting the handoff path before creation.
         var manifest_attempt = 0
         while manifest_attempt < 4 and mcdc_manifest_path == "":
-            val nonce = test_runner_random_hex(16)
+            val nonce = test_runner_random_hex(16) ?? ""
             if nonce != nil:
                 val candidate = _tp_get_temp_dir() + "/mcdc-" + nonce.unwrap() + ".obligations.sdn"
                 if rt_file_create_excl(candidate, mcdc_manifest):
@@ -1450,7 +1243,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         if mcdc_manifest_path == "" or rt_package_chmod(mcdc_manifest_path, 256) != 0:
             if mcdc_manifest_path != "" and file_exists(mcdc_manifest_path): file_delete(mcdc_manifest_path)
             cleanup_native_generated_files(smf_path, source_path, wrapped_path,
-                cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+                cleanup_path, file_path, options.keep_artifacts)
             return TestFileResult(
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: (time_now_unix_micros() - start) / 1000,
@@ -1462,8 +1255,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if options.verbose:
         print "[native] Running {smf_path}"
 
-    val run_binary = if options.coverage or explicit_aot: smf_path else: binary
-    var run_args: [text] = if options.coverage or explicit_aot: [] else: [smf_path]
+    val run_binary = if options.coverage: smf_path else: binary
+    var run_args: [text] = if options.coverage: [] else: [smf_path]
     if options.gc_log and not options.coverage:
         run_args.push("--gc-log")
     if options.gc_off and not options.coverage:
@@ -1474,9 +1267,9 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     var stdout = ""
     var stderr = ""
     var exit_code = 0
-    val memory_bytes = test_child_memory_bytes(options)
+    val memory_bytes = if (options.max_mem_gb > 0 and not options.no_limits): options.max_mem_gb * 1024 * 1024 * 1024 else: 0
     val run_started = time_now_unix_micros()
-    val run_scoped = _run_scoped_child(test_resource_class(file_path), run_binary, run_args, timeout_ms, memory_bytes, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits, owned_test: explicit_aot)
+    val run_scoped = _run_scoped_child(test_resource_class(file_path), run_binary, run_args, timeout_ms, memory_bytes, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
     val execution_ms = (time_now_unix_micros() - run_started) / 1000
     stdout = run_scoped.result.stdout
     stderr = run_scoped.result.stderr
@@ -1484,14 +1277,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if run_scoped.result.limit_exceeded:
         val end2 = time_now_unix_micros()
         val dur = (end2 - start) / 1000
-        cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+        cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
         return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(run_scoped.result.limit_type): 0 else: 1, skipped: 0, pending: 0,
             duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(run_scoped.result, options), timed_out: run_scoped.result.limit_type.contains("timeout"), cached: false,
             compile_ms: compile_ms, execution_ms: execution_ms,
             resource_usage: _combine_usage(compile_scoped.usage, run_scoped.usage),
             resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
-            cohort_id: test_execution_cohort_id(file_path, options), budget_status: run_scoped.budget_status, anomaly_status: "incomplete",
-            process_completion: run_scoped.completion)
+            cohort_id: test_execution_cohort_id(file_path, options), budget_status: run_scoped.budget_status, anomaly_status: "incomplete")
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
@@ -1499,7 +1291,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         file_delete(mcdc_manifest_path)
 
     # Clean up .smf artifact unless keeping
-    val final_cache_clean = cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+    cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
 
     if options.coverage:
         val combined = stdout + "\n" + stderr
@@ -1509,17 +1301,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         stderr = strip_coverage_blocks(stderr)
 
     val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
-    if explicit_aot and not final_cache_clean:
-        val cleanup_failed = TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: duration_ms, setup_ms: 0, error: "NATIVE-CACHE-CLEANUP-FAILED: private cache was quarantined",
-            timed_out: false, cached: false)
-        return _attach_scope_evidence(cleanup_failed, _combine_usage(compile_scoped.usage, run_scoped.usage), run_scoped.budget_status, file_path, options, compile_ms, execution_ms)
-    if explicit_aot and base_result.passed + base_result.failed == 0:
-        val empty_result = TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: duration_ms, setup_ms: 0, error: "Native backend executable reported no assertions: " + options.native_backend,
-            timed_out: false, cached: false)
-        return _attach_scope_evidence(empty_result, _combine_usage(compile_scoped.usage, run_scoped.usage), run_scoped.budget_status, file_path, options, compile_ms, execution_ms)
-    _attach_scope_evidence(base_result, _combine_usage(compile_scoped.usage, run_scoped.usage), run_scoped.budget_status, file_path, options, compile_ms, execution_ms, run_scoped.completion)
+    _attach_scope_evidence(base_result, _combine_usage(compile_scoped.usage, run_scoped.usage), run_scoped.budget_status, file_path, options, compile_ms, execution_ms)
 
 fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResult:
     """Compile mode: compile test file to .smf and run it.
@@ -1594,7 +1376,4 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 # Exports from this file
 export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
 export mcdc_manifest_transport_args
-export smf_compile_degrade_token, scoped_limit_exceeded_result, mcdc_manifest_absent_degrade_opted_in
-export native_test_request_error, native_test_compile_threads, native_test_compile_args
-export native_test_compile_args_with_threads, native_test_invocation_receipt
-export cleanup_native_generated_files
+export smf_compile_degrade_token

@@ -53,42 +53,22 @@ pub fn rt_array_new_with_cap_fn(_args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::array(vec![]))
 }
 
-/// Packed byte storage with `capacity` reserved, or `Nil` when the reservation
-/// fails (the C and Rust runtimes return NULL/NIL on allocation failure).
-fn interp_byte_array_with_len(name: &str, args: &[Value], zero_len: bool) -> Result<Value, CompileError> {
-    let requested = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                format!("{name} expects 1 argument"),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-    let n = requested.max(0) as usize;
-    let mut bytes: Vec<u8> = Vec::new();
-    // Both runtimes round capacity up to 4, so even capacity 0 owns storage.
-    if bytes.try_reserve_exact(n.max(4)).is_err() {
-        return Ok(Value::Nil);
-    }
-    if !zero_len {
-        bytes.resize(n, 0);
-    }
-    Ok(Value::byte_array(bytes))
-}
-
-/// `rt_byte_array_new(capacity)` — interpreter twin of the C/Rust runtimes:
-/// capacity is a reservation only, the logical length is ZERO.
+/// Create a typed byte array for interpreter mode.
 ///
 /// The interpreter stores `[u8]` as packed bytes.  Generic `[T]` arrays stay
 /// boxed, so this only changes the explicitly byte-typed SFFI boundary.
 pub fn rt_byte_array_new_fn(args: &[Value]) -> Result<Value, CompileError> {
-    interp_byte_array_with_len("rt_byte_array_new", args, true)
-}
-
-/// `rt_byte_array_new_len(len)` — `len` zero bytes, matching the runtimes.
-pub fn rt_byte_array_new_len_fn(args: &[Value]) -> Result<Value, CompileError> {
-    interp_byte_array_with_len("rt_byte_array_new_len", args, false)
+    let capacity = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_byte_array_new expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+    let len = capacity.max(0) as usize;
+    Ok(Value::byte_array(vec![0; len]))
 }
 
 /// Set array length when the interpreter already materialized the requested size.
@@ -859,7 +839,7 @@ mod tests {
     #[test]
     fn rt_array_concat_preserves_interpreter_array_values() {
         let result = rt_array_concat_fn(&[
-            Value::frozen_array(vec![Value::UInt { value: 1, width: 8 }]),
+            Value::FrozenArray(std::sync::Arc::new(vec![Value::UInt { value: 1, width: 8 }])),
             Value::FixedSizeArray {
                 size: 1,
                 data: vec![Value::UInt { value: 2, width: 8 }],

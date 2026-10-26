@@ -31,7 +31,7 @@ or the `sys.fault_detection` stdlib module.
 ## Usage
 
     
-    ```simple:skip
+    ```simple
     use std.sys.fault_detection.*
     
     enable_stack_overflow_detection()

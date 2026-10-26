@@ -133,7 +133,7 @@ this lane depends on them.
 | Spec | Result |
 |---|---|
 | `test/system/database/server/db_server_tier_spec.spl` | 30 examples, **0 failures** (was: unobservable past #4) |
-| `test/03_system/database/server/db_durability_spec.spl` | 16 examples, **0 failures** — unchanged |
+| `test/system/database/server/db_durability_spec.spl` | 16 examples, **0 failures** — unchanged |
 | `db_server_tier_notransport_spec.spl` (lane MATCHER's out-of-tree copy at `build/matcher_repro/`) | 29 examples, **0 failures** (was 28 pass / 1 fail; the 1 was the `.to_int()` session-id defect this lane fixed) |
 
 The notransport spec exists only as a workaround copy of the tier spec with the

@@ -333,7 +333,7 @@ fn has_list_container_ancestor(nodes: [HNode], i: i32) -> bool:
         cur = nodes[cur].parent as i32
     false
 
-fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true, viewport_w: i32 = -1, viewport_h: i32 = -1) -> [Style]:
+fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true) -> [Style]:
     var material_entries_unused: [text] = ["", ""]
     var material_counts_unused: [i64] = [0, 0]
     var cpu_material_nodes_unused: [i32] = []
@@ -341,8 +341,7 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
     compute_styles_with_material(
         nodes, rules, child_index, trace_stages, vector_fonts,
         material_entries_unused, material_counts_unused,
-        cpu_material_nodes_unused, solid_material_nodes_unused,
-        viewport_w, viewport_h)
+        cpu_material_nodes_unused, solid_material_nodes_unused)
 
 # Freestanding-safe material provenance channel: the realized solid-material
 # entries are built HERE from the loop-local style (before any aggregate
@@ -350,12 +349,7 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
 # Style field contents on the freestanding lane) and handed out through a
 # mutable text/count slots (the apply_advances idiom). Consumers derive the
 # material digest from these canonical entries instead of re-reading [Style].
-fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool, vector_fonts: bool, mut material_entries: [text], mut material_counts: [i64], mut cpu_material_nodes: [i32], mut solid_material_nodes: [i32], viewport_w: i32 = -1, viewport_h: i32 = -1) -> [Style]:
-    # Viewport for vw/vh lengths resolved at computed-value time (gap D).
-    # Set for exactly this pass and cleared below, so an apply_decls call
-    # outside a cascade never sees a stale viewport; unset (-1) drops a
-    # vw/vh declaration exactly as before.
-    css_cascade_viewport_set(viewport_w, viewport_h)
+fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool, vector_fonts: bool, mut material_entries: [text], mut material_counts: [i64], mut cpu_material_nodes: [i32], mut solid_material_nodes: [i32]) -> [Style]:
     var cpu_material_entry_count: i64 = 0
     var solid_material_entry_count: i64 = 0
     val material_channel_ready = (
@@ -421,18 +415,6 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
     # `_html_text_language` and get byte-identical answers.
     var node_lang: [text] = [""; node_count]
     var node_lang_exact: [bool] = [false; node_count]
-    # Ancestor-feature prefilter state (see selector_group_ancestor_keys in
-    # simple_web_html_layout_renderer_core_selectors.spl). `anc_stack` is the
-    # current node's `.parent` chain, root first; `anc_counts` is the multiset
-    # of the chain's feature keys. Per-rule group keys are derived lazily, once
-    # per rule per pass, from the same pre-parsed groups the matcher walks.
-    val rule_count = rules.group_parts.len()
-    var anc_counts: Dict<text, i32> = {}
-    var anc_stack: [i32] = []
-    var anc_stack_keys: [[text]] = []
-    var anc_filter_on = true
-    var group_anc_keys: [[[text]]] = [[]; rule_count]
-    var group_anc_ready: [bool] = [false; rule_count]
     var i = 0
     while i < node_count:  # cpu-lane-loop-ok: THE per-node cascade loop; bound is the document node count and it runs once per style invalidation, not per paint frame (simple_web_layout_rerender_retained gates compute_styles_with_material behind dirty_stage == "css" and reuses prior styles on paint-only frames)
         # Budget guard (outer): stop resolving further nodes on expiry; nodes not
@@ -544,41 +526,6 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         if _wsc_armed():
             _wsc_add_section(0, _wsc_now_us() - _wsc_t)
             _wsc_t = _wsc_now_us()
-        # Bring the ancestor multiset to exactly this node's `.parent` chain.
-        # In document order the parent is on the stack, so popping to it is
-        # enough; any other order empties the stack and the chain is rebuilt
-        # from `.parent` links, so the multiset never depends on node order.
-        val anc_parent: i32 = nd.parent as i32
-        while anc_stack.len() > 0 and anc_stack[anc_stack.len() - 1] != anc_parent:  # cpu-lane-loop-ok: pops the ancestor stack back to this node's parent; amortised O(1) per node over the pass since every node is pushed once
-            val popped_keys = anc_stack_keys[anc_stack_keys.len() - 1]
-            var pk = 0
-            while pk < popped_keys.len():  # cpu-lane-loop-ok: ONE popped node's feature keys; bound is its class count + 2
-                anc_counts[popped_keys[pk]] = anc_counts[popped_keys[pk]] - 1
-                pk = pk + 1
-            anc_stack.pop()
-            anc_stack_keys.pop()
-        if anc_filter_on and anc_parent >= 0 and anc_stack.len() == 0:
-            var anc_chain: [i32] = []
-            var anc_c = anc_parent
-            while anc_c >= 0 and anc_chain.len() <= node_count:  # cpu-lane-loop-ok: rebuild of one node's parent chain, only when the input is not in document order; bound is the tree depth (capped at node_count)
-                anc_chain.push(anc_c)
-                anc_c = nodes[anc_c].parent as i32
-            if anc_c >= 0:
-                # A parent cycle: the multiset cannot describe the chain, so
-                # the prefilter stays off for the rest of this pass.
-                anc_filter_on = false
-            else:
-                var anc_r = anc_chain.len() - 1
-                while anc_r >= 0:  # cpu-lane-loop-ok: pushes the rebuilt chain root-first; bound is the tree depth
-                    val chain_keys = selector_node_feature_keys(nodes[anc_chain[anc_r]])
-                    var ck = 0
-                    while ck < chain_keys.len():  # cpu-lane-loop-ok: ONE chain node's feature keys; bound is its class count + 2
-                        val ckey = chain_keys[ck]
-                        anc_counts[ckey] = (if anc_counts.has(ckey): anc_counts[ckey] else: 0) + 1
-                        ck = ck + 1
-                    anc_stack.push(anc_chain[anc_r])
-                    anc_stack_keys.push(chain_keys)
-                    anc_r = anc_r - 1
         val candidates_raw: [i32] = if nd.tag == "#text":
             []
         else:
@@ -594,15 +541,6 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             val specificity_rule = candidates_raw[specificity_i]
             val specificity_groups = rule_buckets.parsed_groups[specificity_rule]
             val precomputed_specificities = rules.group_specificities[specificity_rule]
-            if not group_anc_ready[specificity_rule]:
-                var rule_anc_keys: [[text]] = []
-                var rk = 0
-                while rk < specificity_groups.len():  # cpu-lane-loop-ok: derives each comma-group's ancestor keys ONCE per rule per pass; bound is that rule's group count
-                    rule_anc_keys.push(selector_group_ancestor_keys(specificity_groups[rk]))
-                    rk = rk + 1
-                group_anc_keys[specificity_rule] = rule_anc_keys
-                group_anc_ready[specificity_rule] = true
-            val rule_anc_groups = group_anc_keys[specificity_rule]
             var matched_specificity = -1
             var group_i = 0
             var specificity_expired = false
@@ -610,10 +548,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 if (selector_group_budget_count & 255) == 0 and _web_budget_expired():
                     specificity_expired = true
                     break
-                val anc_possible = not anc_filter_on or selector_ancestor_keys_present(
-                    anc_counts, rule_anc_groups[group_i]
-                )
-                if anc_possible and selector_group_matches_node_parsed(
+                if selector_group_matches_node_parsed(
                     nodes, selector_ctx, i, specificity_groups[group_i]
                 ):
                     val group_specificity = precomputed_specificities[group_i]
@@ -628,32 +563,10 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 break
             rule_specificities[specificity_rule] = matched_specificity
             specificity_i = specificity_i + 1
-        # This node is now an ancestor for everything until the walk leaves
-        # its subtree.
-        val own_anc_keys = selector_node_feature_keys(nd)
-        var ok_i = 0
-        while ok_i < own_anc_keys.len():  # cpu-lane-loop-ok: this node's feature keys; bound is its class count + 2
-            val okey = own_anc_keys[ok_i]
-            anc_counts[okey] = (if anc_counts.has(okey): anc_counts[okey] else: 0) + 1
-            ok_i = ok_i + 1
-        anc_stack.push(i as i32)
-        anc_stack_keys.push(own_anc_keys)
         if _wsc_armed():
             _wsc_add_sub(0, _wsc_now_us() - _sb_t0)
         val _sb_t1 = if _wsc_armed(): _wsc_now_us() else: 0
-        # Only rules that matched take part in the cascade below (every reader
-        # tests `rule_specificities[r] >= 0`). `_candidate_sort_before` is a
-        # total order on (specificity, rule id) and rule ids are unique, so
-        # sorting the matched subset yields exactly the matched elements of
-        # the full sort, in the same order -- without paying the merge sort on
-        # the unmatched majority (7.6 s on a google-shaped page).
-        var matched_raw: [i32] = []
-        var mr_i = 0
-        while mr_i < candidates_raw.len():  # cpu-lane-loop-ok: one pass over ONE node's candidate rule ids keeping the matched ones; bound is that node's candidate count
-            if rule_specificities[candidates_raw[mr_i]] >= 0:
-                matched_raw.push(candidates_raw[mr_i])
-            mr_i = mr_i + 1
-        val candidates = _sort_candidates_by_specificity(matched_raw, rule_specificities)
+        val candidates = _sort_candidates_by_specificity(candidates_raw, rule_specificities)
         if _wsc_armed():
             _wsc_add_sub(1, _wsc_now_us() - _sb_t1)
         if trace_stages:
@@ -800,7 +713,6 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             val memo_key = if memo_usable:
                 "{memo_parent}\n{nd.tag}\n{nested_list_ua}\n{em_base}\n" +
                     "{logical_writing_mode}\n" +
-                    "{viewport_w}x{viewport_h}\n" +
                     "{pres_decls.len()}:{pres_decls}\n{combined_decls}"
             else:
                 ""
@@ -1161,7 +1073,6 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         print "[web-style-producer] cpu-entries-ready count={cpu_material_entry_count} len={material_entries[0].len()}"
     if solid_material_entry_count > 0:
         print "[web-style-producer] solid-entries-ready count={solid_material_entry_count} len={material_entries[1].len()}"
-    css_cascade_viewport_set(-1, -1)
     styles
 
 # Debug-only equivalence oracle for the pre-parsed selector path (round 9).

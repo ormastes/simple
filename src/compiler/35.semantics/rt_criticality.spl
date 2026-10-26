@@ -24,24 +24,6 @@ struct RtCriticalFact:
     line: i64
     effect_units: Dict<i64, i64> = {}
 
-enum RtCriticalDiagnosticSeverity:
-    Warning
-    Error
-
-struct RtCriticalDiagnostic:
-    severity: RtCriticalDiagnosticSeverity
-    message: text
-
-fn rt_profile_assurance_rank(profile: text) -> i64:
-    """Return the RT declaration's assurance rank independently of global policy."""
-    if profile == "": return 3
-    val normalized = normalize_profile_name(profile)
-    if normalized == "verified": return 4
-    if normalized == "critical": return 3
-    if normalized == "robust": return 2
-    if normalized == "strict": return 1
-    0
-
 struct RtBoundCapability:
     subject_id: text
     closure_digest: text
@@ -60,63 +42,26 @@ fn rt_bound_manifest_clear():
     rt_bound_manifest_entries = []
     rt_bound_manifest_sealed = false
 
-# Exact gate consumption in a caller-owned scratch lease. Revoking visibility
-# needs no new array allocation and leaves no scratch child in the persistent
-# registry. The next real replace/closed clear owns its usual replacement.
-# This operation grants no capability and never restores a consumed grant.
-fn rt_bound_manifest_consume_v1():
-    rt_bound_manifest_sealed = false
-
 fn rt_bound_manifest_capabilities() -> [RtBoundCapability]:
     if not rt_bound_manifest_sealed: return []
     rt_bound_manifest_entries
 
 fn rt_sort_text(items: [text]) -> [text]:
-    # Independent buffers preserve caller ownership without depending on
-    # aggregate assignment aliasing. Each level performs O(N) indexed writes;
-    # no merge pass allocates another array or changes the text comparator.
     var out: [text] = []
-    var scratch: [text] = []
     for item in items:
-        out.push(item)
-        scratch.push(item)
-    val count = out.len()
-    var width = 1
-    while width < count:
-        var run = 0
-        while run < count:
-            val left_size = if width < count - run: width else: count - run
-            val middle = run + left_size
-            val right_size = if width < count - middle: width else: count - middle
-            val end = middle + right_size
-            var left = run
-            var right = middle
-            var dest = run
-            while left < middle and right < end:
-                # Equality takes the left element, matching insertion stability.
-                if out[right] < out[left]:
-                    scratch[dest] = out[right]
-                    right = right + 1
-                else:
-                    scratch[dest] = out[left]
-                    left = left + 1
-                dest = dest + 1
-            while left < middle:
-                scratch[dest] = out[left]
-                left = left + 1
-                dest = dest + 1
-            while right < end:
-                scratch[dest] = out[right]
-                right = right + 1
-                dest = dest + 1
-            run = end
+        var at = out.len()
         var i = 0
-        while i < count:
-            out[i] = scratch[i]
+        while i < out.len():
+            if item < out[i]:
+                at = i
+                break
             i = i + 1
-        # Avoid overflowing doubled indices even at the array-size limit.
-        if width >= count - width: break
-        width = width + width
+        out.push(item)
+        var j = out.len() - 1
+        while j > at:
+            out[j] = out[j - 1]
+            j = j - 1
+        out[at] = item
     out
 
 fn rt_closure_digest(root_name: text, facts: [RtCriticalFact]) -> text:
@@ -171,7 +116,7 @@ fn rt_effect_name(bit: i64) -> text:
     "unknown"
 
 fn rt_critical_profile(profile: text) -> bool:
-    rt_profile_assurance_rank(profile) >= 3
+    profile == "" or normalize_profile_name(profile) == "critical"
 
 fn rt_critical_profile_diagnostics(fn_name: text, profile: text, reason: text, implicit_as_error: bool) -> [text]:
     var out: [text] = []
@@ -186,7 +131,7 @@ fn rt_critical_profile_diagnostics(fn_name: text, profile: text, reason: text, i
         out.push("error[RT-E-UNKNOWN-PROFILE]: @rt declaration '" + fn_name +
             "' has unknown criticality profile '" + profile + "'")
         return out
-    if rt_profile_assurance_rank(normalized) < 3 and reason == "":
+    if normalized != "critical" and reason == "":
         out.push("error[RT-E-LOWER-TIER-REASON]: @rt declaration '" + fn_name +
             "' lowers criticality to '" + profile + "' without reason")
     out
@@ -265,43 +210,6 @@ fn rt_critical_closure(facts: [RtCriticalFact]) -> [i64]:
                     queued[caller] = 1
     masks
 
-fn rt_effective_assurance_closure(facts: [RtCriticalFact],
-    declared_ranks: Dict<text, i64>) -> [i64]:
-    """Propagate each callee's strongest declaration rank to its callers."""
-    val index = rt_fact_index(facts)
-    var reverse: [[i64]] = []
-    var ranks: [i64] = []
-    var queued: [i64] = []
-    var queue: [i64] = []
-    var i = 0
-    while i < facts.len():
-        reverse.push([])
-        ranks.push(declared_ranks[facts[i].name] ?? 0)
-        queued.push(1)
-        queue.push(i)
-        i = i + 1
-    i = 0
-    while i < facts.len():
-        for callee in facts[i].callees:
-            if index.contains_key(callee):
-                val ci = index[callee]
-                reverse[ci] = reverse[ci].push(i)
-        i = i + 1
-    # A scalar rank rises at most four times in the fixed assurance lattice.
-    # Reverse edges and queue flags bound propagation to O(V + E).
-    var head = 0
-    while head < queue.len():
-        val done = queue[head]
-        head = head + 1
-        queued[done] = 0
-        for caller in reverse[done]:
-            if ranks[done] > ranks[caller]:
-                ranks[caller] = ranks[done]
-                if queued[caller] == 0:
-                    queue.push(caller)
-                    queued[caller] = 1
-    ranks
-
 fn rt_critical_admit(root_name: text, facts: [RtCriticalFact]) -> [text]:
     var out: [text] = []
     val index = rt_fact_index(facts)
@@ -321,11 +229,8 @@ fn rt_critical_admit(root_name: text, facts: [RtCriticalFact]) -> [text]:
 export RT_EFFECT_ALLOC, RT_EFFECT_BLOCKING, RT_EFFECT_LOOP, RT_EFFECT_RECURSION
 export RT_EFFECT_DISPATCH, RT_EFFECT_LOGGING, RT_EFFECT_SYNC, RT_EFFECT_LOADER, RT_EFFECT_UNKNOWN
 export RtCriticalFact, rt_critical_profile, rt_critical_profile_diagnostics
-export RtCriticalDiagnosticSeverity, RtCriticalDiagnostic
-export rt_profile_assurance_rank, rt_effective_assurance_closure
 export RtBoundCapability, rt_reviewed_bound_mask, rt_effect_is_single
 export rt_bound_manifest_replace, rt_bound_manifest_clear, rt_bound_manifest_capabilities
-export rt_bound_manifest_consume_v1
 export rt_closure_digest, rt_observed_effect_units, rt_sort_text
 export rt_fact_observed_units
 export rt_critical_closure, rt_critical_admit, rt_effect_name

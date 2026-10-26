@@ -27,7 +27,6 @@
 use compiler.mir.mir_data.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions (MirModule, MirFunction, MirBlock)
-use compiler.common.diagnostics.span.{Span}
 use compiler.mir_opt.mod (MirPass)
 
 # ============================================================================
@@ -338,10 +337,6 @@ impl BodyOutlining:
         4. Remap block IDs in the outlined function
         """
         # Collect the actual cold blocks
-        # Creating a new callable boundary requires a newly verified short-
-        # parameter contract; copying the parent's identity cannot provide it.
-        if func.nogc_strict:
-            return func
         var cold_blocks: [MirBlock] = []
         var cold_set = {}
         for bid in group:
@@ -461,21 +456,14 @@ impl BodyOutlining:
                     for capture in captures:
                         call_args = call_args.push(mir_operand_copy(capture))
 
-                    # Preserve the original optional source span. A cold
-                    # group's entry may have no instructions of its own.
-                    var call_span: Span? = nil
-                    if block.instructions.len() > 0:
-                        val first_instruction: MirInst = block.instructions[0]
-                        call_span = first_instruction.span
-
                     # Create a call instruction to the outlined function
                     val call_inst = MirInst(
                         kind: MirInstKind.Call(
-                            dest: None,
+                            dest: nil,
                             func: mir_operand_const_int(0),  # Placeholder - resolved at codegen
                             args: call_args
                         ),
-                        span: call_span
+                        span: block.instructions[0].span ?? nil
                     )
 
                     # The call block keeps the original terminator's "exit" path
@@ -484,7 +472,7 @@ impl BodyOutlining:
 
                     val call_terminator = match exit_target:
                         case Some(target): MirTerminator.Goto(target)
-                        case nil: MirTerminator.Ret(None)
+                        case nil: MirTerminator.Ret(nil)
                     val call_block = MirBlock(
                         id: block.id,
                         label: Some("outlined_call"),
@@ -503,7 +491,7 @@ impl BodyOutlining:
         val new_term = match block.terminator:
             case Goto(target):
                 if not cold_set.has(target.id):
-                    MirTerminator.Ret(None)
+                    MirTerminator.Ret(nil)
                 else:
                     block.terminator
             case If(cond, then_, else_):
@@ -511,7 +499,7 @@ impl BodyOutlining:
                 val else_cold = cold_set.has(else_.id)
                 if not then_cold and not else_cold:
                     # Both exits leave the cold region - return
-                    MirTerminator.Ret(None)
+                    MirTerminator.Ret(nil)
                 else:
                     block.terminator
             case _:
@@ -563,7 +551,11 @@ fn get_terminator_successors(term: MirTerminator) -> [BlockId]:
                 [normal, unwind.unwrap()]
             else:
                 [normal]
-        case Ret(_) | Unreachable | Abort(_) | Throw(_, _) | Resume(_, _):
+        case Ret(_):
+            []
+        case Unreachable:
+            []
+        case Abort(_):
             []
 
 fn get_inst_dest(inst: MirInst) -> LocalId?:
@@ -680,9 +672,6 @@ fn get_terminator_uses(term: MirTerminator) -> [LocalId]:
             uses = add_operand_uses(uses, func)
             for arg in args:
                 uses = add_operand_uses(uses, arg)
-        case Throw(payload, type_tag) | Resume(payload, type_tag):
-            uses = add_operand_uses(uses, payload)
-            uses = add_operand_uses(uses, type_tag)
         case _:
             val no_terminator_uses = true
     uses

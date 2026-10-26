@@ -3,11 +3,7 @@
 # This is a pure Simple boundary. GPU execution is deliberately deferred to
 # backend plugins that consume these batches and report fallback decisions.
 
-use common.ui.draw_ir_v4_state.{DrawIrFractionalGeometry, DrawIrAffine2D, DRAW_IR_SCHEMA_VERSION_V4, DRAW_IR_RASTER_ALIASED_PIXEL_CENTER, DRAW_IR_RASTER_COVERAGE_AA, draw_ir_v4_payload_equal}
-export DrawIrFractionalGeometry, DrawIrAffine2D, DRAW_IR_SCHEMA_VERSION_V4, DRAW_IR_RASTER_ALIASED_PIXEL_CENTER, DRAW_IR_RASTER_COVERAGE_AA
-
-pub val DRAW_IR_SCHEMA_VERSION: text = "simple-draw-ir-v3"
-pub val DRAW_IR_SCHEMA_VERSION_V2: text = "simple-draw-ir-v2"
+pub val DRAW_IR_SCHEMA_VERSION: text = "simple-draw-ir-v2"
 pub val DRAW_IR_BACKEND_CPU: text = "cpu"
 pub val DRAW_IR_BACKEND_GPU: text = "gpu"
 pub val DRAW_IR_BACKEND_AUTO: text = "auto"
@@ -89,31 +85,6 @@ struct DrawIrCommand:
     image_uri: text
     points: [DrawIrPoint]
     glyph_run: DrawIrGlyphRunPayload
-    fractional_geometry: DrawIrFractionalGeometry? = nil
-    affine_transform: DrawIrAffine2D? = nil
-    raster_policy: text = "aliased-pixel-center"
-
-# This predicate describes the existing scalar Skia wire boundary. Fractional
-# geometry is independently supported there; legacy integer renderers must
-# additionally reject fractional_geometry before rasterizing.
-fn draw_ir_command_has_unsupported_v4_state(command: DrawIrCommand) -> bool:
-    command.affine_transform != nil or command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER
-
-fn draw_ir_composition_has_v4_state(composition: DrawIrComposition) -> bool:
-    for batch in composition.batches:
-        if draw_ir_commands_schema(batch.commands) == DRAW_IR_SCHEMA_VERSION_V4:
-            return true
-    false
-
-fn draw_ir_command_v4_equal(a: DrawIrCommand, b: DrawIrCommand) -> bool:
-    draw_ir_v4_payload_equal(a.fractional_geometry, a.affine_transform, a.raster_policy,
-        b.fractional_geometry, b.affine_transform, b.raster_policy)
-
-fn draw_ir_commands_schema(commands: [DrawIrCommand]) -> text:
-    for command in commands:
-        if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
-            return DRAW_IR_SCHEMA_VERSION_V4
-    DRAW_IR_SCHEMA_VERSION
 
 struct DrawIrSourceInfo:
     source_kind: text
@@ -197,12 +168,6 @@ fn draw_ir_point(x: i32, y: i32) -> DrawIrPoint:
 fn draw_ir_rect_bounds(x: i32, y: i32, width: i32, height: i32) -> DrawIrRect:
     DrawIrRect(present: true, x: x, y: y, width: width, height: height)
 
-fn draw_ir_fractional_geometry(x: f64, y: f64, width: f64, height: f64) -> DrawIrFractionalGeometry:
-    DrawIrFractionalGeometry(x: x, y: y, width: width, height: height)
-
-pub fn draw_ir_affine2d(a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64) -> DrawIrAffine2D:
-    DrawIrAffine2D(a: a, b: b, c: c, d: d, tx: tx, ty: ty)
-
 fn draw_ir_no_rect() -> DrawIrRect:
     DrawIrRect(present: false, x: 0, y: 0, width: 0, height: 0)
 
@@ -261,28 +226,6 @@ fn draw_ir_rect(component_id: text, x: i32, y: i32, width: i32, height: i32, col
     draw_ir_rect_clipped(
         component_id, x, y, width, height, color, draw_ir_no_rect(), parent_id
     )
-
-# REQ-2D-002: retain all four coordinates exactly in the versioned payload.
-# Zero legacy fields are deliberately not an approximation of fractional data.
-fn draw_ir_fractional_rect(component_id: text, x: f64, y: f64, width: f64, height: f64, color: u32, parent_id: text = "") -> DrawIrCommand:
-    var command = draw_ir_rect(component_id, 0, 0, 0, 0, color, parent_id)
-    command.fractional_geometry = draw_ir_fractional_geometry(x, y, width, height)
-    command
-
-# V4 draws a local rectangle through an explicit affine map. Legacy integer
-# fields stay zero and cannot be mistaken for a rounded transformed extent.
-pub fn draw_ir_affine_rect(component_id: text, width: f64, height: f64, color: u32, affine_transform: DrawIrAffine2D, raster_policy: text = "aliased-pixel-center", parent_id: text = "") -> DrawIrCommand:
-    if raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER and raster_policy != DRAW_IR_RASTER_COVERAGE_AA:
-        panic("unsupported Draw IR raster policy")
-    var command = draw_ir_fractional_rect(component_id, 0.0, 0.0, width, height, color, parent_id)
-    command.affine_transform = affine_transform
-    command.raster_policy = raster_policy
-    command
-
-# Legacy renderers/lowerers use this preflight before touching integer-only
-# command fields. The default policy alone is compatible with v3 commands.
-pub fn draw_ir_command_has_unsupported_v4_state(command: DrawIrCommand) -> bool:
-    command.affine_transform != nil or command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER
 
 fn draw_ir_rect_clipped(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32, clip_rect: DrawIrRect, parent_id: text = "") -> DrawIrCommand:
     DrawIrCommand(
@@ -568,7 +511,7 @@ fn draw_ir_source_html_ast(source_id: text, html_tag: text, html_node_id: text, 
 
 fn draw_ir_batch_with_source(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand], source: DrawIrSourceInfo) -> DrawIrBatch:
     DrawIrBatch(
-        schema: draw_ir_commands_schema(commands),
+        schema: DRAW_IR_SCHEMA_VERSION,
         batch_id: batch_id,
         backend_target: backend_target,
         source: source,
@@ -578,19 +521,6 @@ fn draw_ir_batch_with_source(batch_id: text, backend_target: text, embedding: Dr
 
 fn draw_ir_batch(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand]) -> DrawIrBatch:
     draw_ir_batch_with_source(batch_id, backend_target, embedding, commands, draw_ir_source_manual())
-
-pub fn draw_ir_batch_with_source_v4(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand], source: DrawIrSourceInfo) -> DrawIrBatch:
-    DrawIrBatch(
-        schema: DRAW_IR_SCHEMA_VERSION_V4,
-        batch_id: batch_id,
-        backend_target: backend_target,
-        source: source,
-        embedding: embedding,
-        commands: commands
-    )
-
-pub fn draw_ir_batch_v4(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand]) -> DrawIrBatch:
-    draw_ir_batch_with_source_v4(batch_id, backend_target, embedding, commands, draw_ir_source_manual())
 
 var _draw_ir_composition_generation: i64 = 0
 
@@ -606,22 +536,8 @@ pub fn draw_ir_next_composition_generation() -> i64:
     _draw_ir_composition_generation
 
 fn draw_ir_composition(composition_id: text, scene_key: text, backend_target: text, batches: [DrawIrBatch]) -> DrawIrComposition:
-    var schema = DRAW_IR_SCHEMA_VERSION
-    for batch in batches:
-        if batch.schema == DRAW_IR_SCHEMA_VERSION_V4 or draw_ir_commands_schema(batch.commands) == DRAW_IR_SCHEMA_VERSION_V4:
-            schema = DRAW_IR_SCHEMA_VERSION_V4
     DrawIrComposition(
-        schema: schema,
-        composition_id: composition_id,
-        scene_key: scene_key,
-        backend_target: backend_target,
-        batches: batches,
-        generation: draw_ir_next_composition_generation()
-    )
-
-pub fn draw_ir_composition_v4(composition_id: text, scene_key: text, backend_target: text, batches: [DrawIrBatch]) -> DrawIrComposition:
-    DrawIrComposition(
-        schema: DRAW_IR_SCHEMA_VERSION_V4,
+        schema: DRAW_IR_SCHEMA_VERSION,
         composition_id: composition_id,
         scene_key: scene_key,
         backend_target: backend_target,
@@ -846,17 +762,3 @@ fn simple_2d_draw_ir_adv_composition_plan(composition: DrawIrComposition, gpu_av
     )
 
 export DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_EDGE, DRAW_IR_COMMAND_GROUP, DRAW_IR_COMMAND_IMAGE, DRAW_IR_COMMAND_PATH, DRAW_IR_COMMAND_PORT, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_EDGE_BEZIER, DRAW_IR_EDGE_ORTHOGONAL, DRAW_IR_EDGE_STRAIGHT, DRAW_IR_SCHEMA_VERSION, DRAW_IR_SOURCE_GUI_AST, DRAW_IR_SOURCE_HTML_AST, DRAW_IR_SOURCE_MANUAL, DRAW_IR_SOURCE_WM_SCENE
-
-export draw_ir_command_has_unsupported_v4_state, draw_ir_command_v4_equal, draw_ir_commands_schema, draw_ir_composition_has_v4_state
-
-# Phase-2 strict-HIR batch (2026-10-11): 37 names below are declared in this
-# module and imported by name from engine2d/skia/web UI modules, but were
-# never exported. The seed tolerates importing non-exported names; the
-# strict HIR fails closed ("unresolved type/name" against the importing
-# module), which blocked every engine2d-dependent UI closure. Explicit
-# export list per the repo style rule (no 'export use *').
-export DrawEdge, DrawIrBatch, DrawIrCommand, DrawIrComposition, DrawIrEmbeddingConfig, DrawIrGlyphRunPayload, DrawIrPoint, DrawIrRect, DrawIrSourceInfo, DrawIrStyleProp, draw_edge, draw_ir_batch, draw_ir_batch_with_source, draw_ir_box_with_style, draw_ir_composition, draw_ir_edge_command, draw_ir_embed_composition, draw_ir_embedding_config, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload, draw_ir_image_command, draw_ir_next_composition_generation, draw_ir_no_rect, draw_ir_path_command, draw_ir_point, draw_ir_rect, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_rect_intersection, draw_ir_rect_translate, draw_ir_source_gui_ast, draw_ir_source_html_ast, draw_ir_source_info, draw_ir_source_manual, draw_ir_style_prop, draw_ir_text, draw_ir_text_resolved_font, draw_ir_text_shaped_font, draw_ir_text_styled, draw_ir_text_styled_clipped, simple_2d_draw_ir_adv_plan, Simple2dDrawIrCompositionPlan, Simple2dDrawIrPlan, simple_2d_draw_ir_adv_composition_plan
-
-# Session v3/v4 additions: v2 alias constant and the fractional/affine command
-# and v4 batch/composition constructors consumed by engine2d/web UI modules.
-export DRAW_IR_SCHEMA_VERSION_V2, draw_ir_affine2d, draw_ir_affine_rect, draw_ir_batch_with_source_v4, draw_ir_composition_v4, draw_ir_fractional_geometry

@@ -1,49 +1,18 @@
-use compiler.driver.cache.hir_tldr_cache_identity_v1.{hir_tldr_cache_closure_digest_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
-use compiler.driver.cache.hir_body_typecheck_lease_v1.{
-    HirBodyArchiveInputV1, HirBodyArchiveV1,
-    hir_body_archive_store_in_owned_scope_v1, hir_body_archive_matches_v1}
-use compiler.driver.cache.driver_hir_archive_authority_v1.{
-    DriverHirRuntimeStdArchiveSelectionV1,
-    driver_hir_archive_input_from_runtime_std_selection_v1}
-use compiler.mono.mono_archive_registration_v1.{
-    MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
-    mono_archive_collect_registration_in_owned_scope_v1}
-use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
-use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.{
-    DriverHirManagedRuntimeSelectionV1, driver_hir_archive_input_from_managed_runtime_selection_v1}
-use compiler.driver.cache.driver_hir_archive_schedule_v1.{driver_hir_archive_schedule_verify_streaming_owner_v1}
-use compiler.driver.cache.driver_hir_source_body_custody_identity_v1.{
-    DriverHirSourceBodyCustodyV1, driver_hir_source_body_context_in_owned_scope_v1,
-    driver_hir_source_body_lowerer_context_v1}
-use compiler.driver.cache.driver_hir_source_body_surfaces_v1.{driver_hir_source_body_replay_surfaces_v1}
-use std.io_runtime.{exit, hash_text, env_get_opt}
+use std.io_runtime.{exit, hash_text}
 use std.env.{env_get}
-use compiler.driver.driver_types.{CompileContext, driver_native_parsed_module_has_no_runtime_body_v1,
-    driver_native_parsed_objectless_proof_v1}
-use std.common.crypto.sha256.{sha256_text}
-use compiler.common.driver_core_types.{CompileMode}
-use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.driver.driver_types.{CompileContext}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
-    cold_hir_typed_receipts_from_lowered_sources_v1,
-    cold_hir_source_mismatch_evidence_v1
+    cold_hir_typed_receipts_from_lowered_sources_v1
 }
-use compiler.driver.smf.runtime_std_hir_emission_types_v1.{
-    RuntimeStdHirModuleEmissionV1
-}
-use compiler.driver.cache.driver_cold_hir_emission_lease_v1.{driver_cold_hir_emit_v1}
-use compiler.backend.backend_helpers.{get_effective_backend_name}
-use std.scv.compile_source_inventory.{compile_source_inventory_read_at_pointer_v1,
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1,
     CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
     compile_source_inventory_snapshot_cache_root_v1}
-use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
-use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_hir_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
-use compiler.driver.driver_hir_abi_interface.{driver_hir_abi_interface_digest_v1,
-    driver_hir_abi_interface_digest_in_owned_scope_v1}
+use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
 use compiler.hir.hir_lowering.items.{
     bootstrap_hir_modules_reset,
     bootstrap_hir_module_count,
@@ -52,194 +21,60 @@ use compiler.hir.hir_lowering.items.{
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
-use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
-use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
-use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_keys}
+use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_in_borrowed_scope}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
-use compiler.core.parser.{par_had_error_get, parser_initialization_generation_v1}
+use compiler.core.parser.{par_had_error_get}
 use compiler.frontend.parser_types.*
-use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_parse_scope, driver_promote_frontend_registry_owners, driver_promote_retained_frontend_owners_v1}
+use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_parse_scope, driver_promote_frontend_registry_owners}
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, bootstrap_entry_source_index}
-use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
-use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress, driver_phase_trace_enabled}
+use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
+use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_finish, mem_snapshot_finish_with_outcome, mem_snapshot_abort}
 use compiler.driver.driver_hir_pipeline_support.{
     driver_stage3_surface_identity_matches,
-    driver_stage3_surface_identity_matches_receipt,
     driver_stage3_surface_content_matches,
     driver_stage3_surface_identity_mismatch,
     driver_hir_mem_snapshot,
     driver_shown_fatal_count,
     driver_collect_hir_errors,
-    driver_admit_nogc_param_effects_v1,
     driver_dict_entry_count,
-    driver_validate_value_struct_layout_declarations_v1,
+    driver_validate_value_struct_layouts,
     driver_rollback_flat_hir_row_or_abort,
-    driver_finish_failed_parse_scope,
-    driver_abort_reverse_reference_parse_scope_v1,
-    driver_publish_reverse_reference_parse_scope_v1
+    driver_finish_failed_parse_scope
 }
 use compiler.driver.driver_hir_pipeline_passes.{
     run_typecheck_warn_pass,
     run_safety_warn_pass,
     run_any_escape_pass,
-    run_enum_contract_pass, run_representation_manifest_pass,
-    representation_invocation_context_index_v1, representation_bind_module_facts_v1,
-    publish_module_typecheck_receipt_v1
+    run_enum_contract_pass
 }
-use compiler.driver.hir_semantic_consumer_v1.{collect_module_representation_receipt_v1}
-use compiler.semantics.resolve.{resolve_methods, resolve_methods_module_owner}
-use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1, value_struct_layout_declarations_v1}
+use compiler.semantics.resolve.{resolve_methods}
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity_phased}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line, hir_module_has_rt_hal}
-use compiler.hir.hir_codec.{hir_module_first_fn_name_p_v1, hir_module_first_fn_name_wi_v1, hir_module_first_fn_name_via_decode_v1, hir_module_decode}
-use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1, hir_module_first_fn_name_v1, hir_module_first_fn_name_in_v1, hir_module_first_fn_name_ordered_in_v1, hir_module_blob_in_v1}
-use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
-use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
-use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
-use compiler.driver.driver_hir_cache.{hir_cache_misses, hir_cache_adoption_receipt_v1}
-use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_module_encode_retained_v1}
+use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
-    reverse_reference_owner_register_source_alias_v1, reverse_reference_module_begin_v1
+    reverse_reference_owner_register_source_alias_v1
 }
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
-extern fn rt_transient_heap_promote<T>(value: T) -> bool
-extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 extern fn rt_stdout_flush()
 
-struct DriverHirShardTransactionReceiptV1:
-    # 0: cache hit; 1: newly stored; 2: source diagnostic; 3: codec-refused,
-    # successfully reclaimed UNCACHED work. Negative values are infrastructure failures.
-    status: i64
-    archive: HirBodyArchiveV1?
-    declaration_registration: MonoArchiveRegistrationReceiptV1?
-
-# The only issuer is the actual selected-source transaction below. Neither an
-# archive store nor a journal publisher can populate these private lookups.
-struct DriverHirSourceLoweringOwnerV1:
-    lowering: HirLowering
-    serial: i64
-    context_key: text
-
-var _driver_source_body_custody_ready_v1: bool = false
-var _driver_source_body_lowerers_v1: Dict<i64, DriverHirSourceLoweringOwnerV1> = {}
-var _driver_source_body_custody_v1: Dict<text, DriverHirSourceBodyCustodyV1> = {}
-var _driver_source_body_serial_v1: i64 = 0
-
-fn driver_hir_source_body_lowerer_key_v1(driver: CompilerDriver, input: HirBodyArchiveInputV1) -> text:
-    driver_hir_source_body_lowerer_context_v1(driver, input,
-        driver_hir_explicit_semantic_policy(driver.ctx), driver_hir_forbids_written_any(driver.ctx))
-
-fn driver_hir_source_body_actual_lowerer_v1(driver: CompilerDriver,
-        input: HirBodyArchiveInputV1) -> Result<HirLowering, text>:
-    if transient_array_scope_state_v1() != 0 or not driver.streaming_surface_owner_ready:
-        return Err("source-body custody requires actual closed driver owner")
-    if val Some(schedule) = driver.hir_archive_schedule:
-        val verified = driver_hir_archive_schedule_verify_streaming_owner_v1(driver.ctx,
-            driver.streaming_module_surfaces_owner, driver.streaming_entry_source_index_owner, schedule)
-        if verified.is_err(): return Err(verified.unwrap_err())
-    else:
-        return Err("source-body custody actual driver schedule unavailable")
-    if not _driver_source_body_custody_ready_v1:
-        _driver_source_body_lowerers_v1 = {}
-        _driver_source_body_custody_v1 = {}
-        _driver_source_body_custody_ready_v1 = true
-    # CompilerDriver is a class handle. Actual MIR Cast preserves its reference
-    # as ptrtoint; the private serial and full context also bind every record.
-    val driver_word = driver.identity_id
-    val context_key = driver_hir_source_body_lowerer_key_v1(driver, input)
-    if driver_word == 0 or context_key == "": return Err("source-body custody identity unavailable")
-    if _driver_source_body_lowerers_v1.has(driver_word):
-        val owner: DriverHirSourceLoweringOwnerV1 = _driver_source_body_lowerers_v1[driver_word]
-        if owner.context_key != context_key: return Err("source-body custody selected driver context changed")
-        return Ok(owner.lowering)
-    val actual_surfaces = driver_hir_source_body_replay_surfaces_v1(driver)?
-    var actual = hirlowering_for_module("", actual_surfaces)
-    if driver_hir_explicit_semantic_policy(driver.ctx): actual.use_explicit_semantic_policy()
-    actual.forbid_written_any = driver_hir_forbids_written_any(driver.ctx)
-    _driver_source_body_serial_v1 = _driver_source_body_serial_v1 + 1
-    _driver_source_body_lowerers_v1[driver_word] = DriverHirSourceLoweringOwnerV1(
-        lowering: actual, serial: _driver_source_body_serial_v1, context_key: context_key)
-    Ok(actual)
-
-fn driver_hir_source_body_prepare_custody_in_owned_scope_v1(driver: CompilerDriver,
-        archive: HirBodyArchiveV1, source_index: i64) -> Result<DriverHirSourceBodyCustodyV1, text>:
-    val driver_word = driver.identity_id
-    if transient_array_scope_state_v1() != 1 or not _driver_source_body_custody_ready_v1 or
-            not _driver_source_body_lowerers_v1.has(driver_word): return Err("source-body custody private owner absent")
-    val owner: DriverHirSourceLoweringOwnerV1 = _driver_source_body_lowerers_v1[driver_word]
-    val context = driver_hir_source_body_context_in_owned_scope_v1(driver, archive, source_index,
-        driver_hir_explicit_semantic_policy(driver.ctx), driver_hir_forbids_written_any(driver.ctx))
-    if context == "" or owner.context_key != driver_hir_source_body_lowerer_key_v1(driver, archive.input):
-        return Err("source-body custody actual parsed source context differs")
-    Ok(DriverHirSourceBodyCustodyV1(archive: archive, driver_word: driver_word,
-        driver_serial: owner.serial, source_index: source_index, context_digest: context))
-
-fn driver_hir_source_body_custody_matches_in_owned_scope_v1(driver: CompilerDriver,
-        archive: HirBodyArchiveV1, source_index: i64) -> bool:
-    val driver_word = driver.identity_id
-    if transient_array_scope_state_v1() != 1 or not _driver_source_body_custody_ready_v1 or
-            not _driver_source_body_lowerers_v1.has(driver_word) or
-            not _driver_source_body_custody_v1.has("{driver_word}:{archive.archive_key}"): return false
-    if not hir_body_archive_matches_v1(archive, archive.input): return false
-    val actual: DriverHirSourceBodyCustodyV1 = _driver_source_body_custody_v1["{driver_word}:{archive.archive_key}"]
-    val owner: DriverHirSourceLoweringOwnerV1 = _driver_source_body_lowerers_v1[driver_word]
-    if actual.driver_word != driver_word or actual.driver_serial != owner.serial or actual.source_index != source_index or
-            actual.archive.source_key != archive.source_key or actual.archive.body_digest != archive.body_digest or
-            actual.archive.lowering_warnings_digest != archive.lowering_warnings_digest or
-            owner.context_key != driver_hir_source_body_lowerer_key_v1(driver, archive.input): return false
-    val context = driver_hir_source_body_context_in_owned_scope_v1(driver, archive, source_index,
-        driver_hir_explicit_semantic_policy(driver.ctx), driver_hir_forbids_written_any(driver.ctx))
-    # @workaround bug=BUG-2026-10-12-CONTEXT-COMPARISON recover=36df8df31c639e19d6b4947b3e5fa8aad0c32c75 reason=Rust seed treats a context comparison tail as a context statement
-    return context != "" and context == actual.context_digest
-
-fn driver_hir_failed_shard_receipt_v1(status: i64) -> DriverHirShardTransactionReceiptV1:
-    DriverHirShardTransactionReceiptV1(status: status,
-        archive: nil, declaration_registration: nil)
-
-pub fn driver_hir_shard_cache_stored_v1(status: i64) -> bool:
-    status == 0 or status == 1
-
-# The digest exists only for this trace line. Encoding the full typed ABI of
-# every module is not free (canon text + SHA-256 per module), so skip it when
-# log_phase would drop the line anyway. ABI failures still surface as hard
-# `cold-hir-abi-unresolved` errors in capture_cold_hir_typed_receipts_v1.
-#
-# Phase profiling alone no longer pays for it: measured on the r8 Stage-3
-# build (memory-snapshot-v1.3971529.events, 576 modules), the step after
-# hir-post-diagnostics -- this digest -- added 14.9 GB RSS (26.5 MB/module,
-# max 444 MB) and 189 s with zero tracked-heap change, while bootstrap runs
-# set SIMPLE_COMPILER_PHASE_PROFILE=1 by default. The [abi-interface] lines
-# are opt-in via SIMPLE_HIR_ABI_INTERFACE_TRACE=1 (on top of phase tracing).
-fn driver_hir_abi_interface_trace_enabled() -> bool:
-    driver_phase_trace_enabled() and (env_get("SIMPLE_HIR_ABI_INTERFACE_TRACE")) == "1"
-
 fn driver_log_typed_hir_abi_interface_v1(module: HirModule, path: text):
-    if not driver_hir_abi_interface_trace_enabled(): return
-    driver_log_typed_hir_abi_result_v1(module.name,
-        driver_hir_abi_interface_digest_v1(module), path)
-
-fn driver_log_typed_hir_abi_result_v1(module_name: text, result: Result<text, text>, path: text):
-    match result:
+    match hir_abi_interface_digest_v1(module):
         case Ok(digest):
-            log_phase("[abi-interface] source=typed-hir module={module_name} digest={digest} path={path}")
+            log_phase("[abi-interface] source=typed-hir module={module.name} digest={digest} path={path}")
         case Err(reason):
-            log_warn("[abi-interface-unavailable] source=typed-hir module={module_name} reason={reason} path={path}")
+            log_warn("[abi-interface-unavailable] source=typed-hir module={module.name} reason={reason} path={path}")
 
 fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
     (ctx.config["compiler_explicit_semantic_policy"] ?? "") == "1"
-
-fn driver_hir_forbids_written_any(ctx: CompileContext) -> bool:
-    """Robust/critical compiled code may write `Any` only inside `unsafe:`."""
-    ctx.options.mode != CompileMode.Interpret and
-        ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Robust)
 
 fn driver_hir_ambient_bootstrap_enabled(ctx: CompileContext) -> bool:
     not driver_hir_explicit_semantic_policy(ctx) and
@@ -256,54 +91,40 @@ fn driver_register_reverse_reference_name_v1(
     reverse_reference_owner_register_source_alias_v1(
         "{emitted_owner}__{name}", source)
 
-# @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_struct_transport_corrupts
-# Takes the flattened owner (a class: by-reference transport) instead of the
-# 30-limb ParserModule struct by value — the by-value copy read back garbage
-# handles (SIGSEGV in the functions.keys() loop). Same family as
-# ModuleSurfaceParserOwner's inline-struct field defect; element reads use
-# the annotated-rebind hazard-sweep pattern.
 fn driver_register_parser_module_source_aliases_v1(
-        owner: ModuleSurfaceParserOwner, source: text):
-    val module_name: text = owner.name
+        module: ParserModule, source: text):
     reverse_reference_owner_register_source_alias_v1(source, source)
-    reverse_reference_owner_register_source_alias_v1(module_name, source)
-    for name in owner.functions.keys():
-        driver_register_reverse_reference_name_v1(module_name, name, source)
-        val fn_binding: ParserFunction = owner.functions[name]
-        for raw_attribute in fn_binding.attributes:
-            val attribute: Attribute = raw_attribute
+    reverse_reference_owner_register_source_alias_v1(module.name, source)
+    for name in module.functions.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+        for attribute in module.functions[name].attributes:
             reverse_reference_owner_register_source_alias_v1(
                 attribute.name, source)
-    for name in owner.classes.keys():
-        driver_register_reverse_reference_name_v1(module_name, name, source)
-        val class_binding: ParserClass = owner.classes[name]
-        for method_name in class_binding.methods.keys():
+    for name in module.classes.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+        for method_name in module.classes[name].methods.keys():
             driver_register_reverse_reference_name_v1(
-                module_name, method_name, source)
-    for name in owner.actors.keys():
-        driver_register_reverse_reference_name_v1(module_name, name, source)
-        val actor_binding: ActorDef = owner.actors[name]
-        for method_name in actor_binding.methods.keys():
+                module.name, method_name, source)
+    for name in module.actors.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+        for method_name in module.actors[name].methods.keys():
             driver_register_reverse_reference_name_v1(
-                module_name, method_name, source)
-    for name in owner.structs.keys():
-        driver_register_reverse_reference_name_v1(module_name, name, source)
-    for name in owner.enums.keys():
-        driver_register_reverse_reference_name_v1(module_name, name, source)
-    for name in owner.traits.keys():
-        driver_register_reverse_reference_name_v1(module_name, name, source)
-        val trait_binding: ParserTrait = owner.traits[name]
-        for raw_method in trait_binding.methods:
-            val method: ParserFunction = raw_method
+                module.name, method_name, source)
+    for name in module.structs.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+    for name in module.enums.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+    for name in module.traits.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+        for method in module.traits[name].methods:
             driver_register_reverse_reference_name_v1(
-                module_name, method.name, source)
-    for name in owner.constants.keys():
-        driver_register_reverse_reference_name_v1(module_name, name, source)
-    for raw_impl in owner.impls:
-        val impl_block: Impl = raw_impl
+                module.name, method.name, source)
+    for name in module.constants.keys():
+        driver_register_reverse_reference_name_v1(module.name, name, source)
+    for impl_block in module.impls:
         for method_name in impl_block.methods.keys():
             driver_register_reverse_reference_name_v1(
-                module_name, method_name, source)
+                module.name, method_name, source)
 
 fn driver_register_reverse_reference_sources_v1(ctx: CompileContext):
     for source in ctx.sources:
@@ -312,65 +133,31 @@ fn driver_register_reverse_reference_sources_v1(ctx: CompileContext):
         reverse_reference_owner_register_source_alias_v1(
             source.module_name, source.path)
         if ctx.modules.contains_key(source.module_name):
-            # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=dict_value_read_needs_typed_bind
-            # Bind the Dict value to a typed local before it crosses any
-            # further boundary: the inline `ctx.modules[k]` form fed a corrupt
-            # copy (SIGSEGV in the aliases walk). The annotated rebind is the
-            # hazard-sweep primitive used everywhere else (cf.
-            # driver_orchestration.spl's source_module bind).
-            val module_binding: ParserModule = ctx.modules[source.module_name]
             driver_register_parser_module_source_aliases_v1(
-                ModuleSurfaceParserOwner.new(module_binding), source.path)
+                ctx.modules[source.module_name], source.path)
 
 impl CompilerDriver:
     # Capture before the streaming path frees source bodies and before the
     # later MIR path evicts HIR. Warm routes never read the inventory here.
     me capture_cold_hir_typed_receipts_v1() -> bool:
         self.ctx.cold_hir_typed_receipts = []
-        self.ctx.runtime_std_hir_emissions = {}
         self.ctx.cold_hir_native_object_paths = {}
         self.ctx.cold_hir_native_capsule_identities = {}
         self.ctx.cold_hir_objectless_modules = {}
         self.ctx.cold_hir_native_object_artifacts = []
-        val full_inventory_cold =
-            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") == "1"
         val compatibility_markers_present =
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
-        val cold_init = full_inventory_cold or
-            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
+        val cold_init = (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
             not compatibility_markers_present
         if not cold_init:
             return true
-        # A user entry compiled from the working tree (no frozen copy; see the
-        # non-strict fallback in driver_source_pipeline_loading.spl) is not a
-        # frozen-inventory source: its path lies outside SIMPLE_SCV_SNAPSHOT_ROOT
-        # and every receipt row would answer cold-hir-module-source-mismatch.
-        # Receipts are a frozen-pipeline cache, so capture nothing for it.
-        if not full_inventory_cold and
-                (self.ctx.config["cold_entry_working_tree"] ?? "") == "1":
-            return true
-        if full_inventory_cold and self.ctx.runtime_std_full_inventory_selection == nil:
-            self.ctx.add_error("full inventory typed HIR selection missing")
-            return false
         val source_root = sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
         val inventory_binding = CompileSourceInventoryBindingV1(
             snapshot_manifest_digest: sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
             source_inventory_digest: sosix_env_get_nullable("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "")
-        var typed_hir_artifact_root = ""
-        if full_inventory_cold:
-            val selection = self.ctx.runtime_std_full_inventory_selection!
-            typed_hir_artifact_root = selection.artifact_root
-            if typed_hir_artifact_root == "" or
-                    selection.snapshot_manifest_digest != inventory_binding.snapshot_manifest_digest or
-                    selection.source_inventory_digest != inventory_binding.source_inventory_digest:
-                self.ctx.add_error("full inventory typed HIR selection differs from SCV binding")
-                return false
         if source_root == "" and inventory_binding.snapshot_manifest_digest == "" and inventory_binding.source_inventory_digest == "":
-            if full_inventory_cold:
-                self.ctx.add_error("full inventory cold HIR authority missing")
-                return false
             return true
         if source_root == "" or inventory_binding.snapshot_manifest_digest == "" or inventory_binding.source_inventory_digest == "":
             self.ctx.add_error("cold HIR receipt authority incomplete")
@@ -381,10 +168,7 @@ impl CompilerDriver:
         if inventory_cache_root == "":
             self.ctx.add_error("cold HIR inventory snapshot owner invalid")
             return false
-        # Other build lanes may publish a newer CURRENT while this snapshot is
-        # lowering. Its admitted digest owns this read, not the moving pointer.
-        val admitted = compile_source_inventory_read_at_pointer_v1(
-            inventory_cache_root, inventory_binding.source_inventory_digest)
+        val admitted = compile_source_inventory_read_current_v1(inventory_cache_root)
         if not admitted.valid:
             self.ctx.add_error("cold HIR inventory admission failed: {admitted.reason}")
             return false
@@ -393,104 +177,19 @@ impl CompilerDriver:
         if binding_reason != "ok":
             self.ctx.add_error("cold HIR inventory admission failed: {binding_reason}")
             return false
-        val revision_id = sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? ""
-        val snapshot = scv_compile_snapshot_open_v1(
-            sosix_cwd(), source_root, revision_id,
-            sosix_env_get_nullable("SIMPLE_SCV_COMMIT_ID") ?? "",
-            sosix_env_get_nullable("SIMPLE_SCV_TREE_ID") ?? "",
-            inventory_binding.snapshot_manifest_digest)
-        if not snapshot.valid:
-            self.ctx.add_error("cold HIR snapshot admission failed: {snapshot.reason}")
-            return false
-        val inventory_generation_text = sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_GENERATION") ?? ""
-        # The snapshot digest covers selected source rows, while CURRENT also
-        # includes facets and tests. Validate both encodings independently.
-        val snapshot_inventory = match file_read_regular_no_follow_bounded(
-                "{source_root}/SCV_COMPILE_INVENTORY", 256 * 1024 * 1024):
-            case Ok(content): content
-            case Err(reason):
-                self.ctx.add_error("cold HIR snapshot inventory read failed: {reason}")
-                return false
         match admitted.inventory:
             case Some(inventory):
-                # The authority publisher writes str(inventory_generation).
-                # Compare that canonical text directly: native Stage 2 can
-                # retain the source text handle through to_i64() ?? -1.
-                if inventory.generation < 0 or
-                        inventory_generation_text != "{inventory.generation}":
-                    val bounded_generation_text = if inventory_generation_text.len() > 32:
-                        inventory_generation_text[:32]
-                    else:
-                        inventory_generation_text
-                    self.ctx.add_error(
-                        "cold HIR inventory generation mismatch: raw='{bounded_generation_text}' raw_len={inventory_generation_text.len()} admitted={inventory.generation} admitted_digest={admitted.digest}")
-                    return false
                 match cold_hir_typed_receipts_from_lowered_sources_v1(
-                        source_root, inventory_binding.source_inventory_digest,
-                        inventory,
-                        snapshot_inventory, inventory_binding.snapshot_manifest_digest,
+                        source_root, inventory_binding.source_inventory_digest, inventory,
                         self.ctx.source_paths_owner,
                         self.ctx.source_identities_owner,
                         self.ctx.source_byte_lengths_owner,
                         self.ctx.source_module_names_owner,
                         self.ctx.hir_modules):
                     case Err(reason):
-                        if reason == "cold-hir-module-source-mismatch":
-                            # Guarded evidence construction lives in
-                            # cold_hir_source_mismatch_evidence_v1 (bounds-checked
-                            # source/module iteration, hir_modules.has(name)
-                            # before any dict index, 256-char bounding).
-                            self.ctx.add_error(cold_hir_source_mismatch_evidence_v1(
-                                source_root, self.ctx.source_paths_owner,
-                                self.ctx.source_module_names_owner,
-                                self.ctx.hir_modules))
                         self.ctx.add_error("cold HIR receipt capture failed: {reason}")
                         return false
                     case Ok(receipts):
-                        if full_inventory_cold:
-                            val expected_count = (
-                                sosix_env_get_nullable(
-                                    "SIMPLE_PACKAGE_INDEX_EXPECTED_SOURCE_COUNT") ??
-                                "").to_i64() ?? -1
-                            if expected_count < 1 or
-                                    self.ctx.source_paths_owner.len() !=
-                                        expected_count or
-                                    receipts.len() != expected_count:
-                                self.ctx.add_error(
-                                    "full inventory cold HIR receipt count mismatch: expected={expected_count} sources={self.ctx.source_paths_owner.len()} receipts={receipts.len()}")
-                                return false
-                            var emitted: Dict<text, RuntimeStdHirModuleEmissionV1> = {}
-                            for receipt in receipts:
-                                val seed = receipt.seed
-                                if not self.ctx.runtime_std_cfg_decisions.has(seed.source_identity) or
-                                        not frontend_cfg_receipt_valid_v1(
-                                            self.ctx.runtime_std_cfg_decisions[seed.source_identity],
-                                            seed.source_identity, seed.source_digest,
-                                            self.ctx.native_target):
-                                    self.ctx.add_error("full inventory target cfg HIR source receipt mismatch: {seed.source_identity}")
-                                    return false
-                                if emitted.contains_key(seed.source_identity) or
-                                        not self.ctx.hir_modules.contains_key(seed.module_identity):
-                                    self.ctx.add_error("full inventory typed HIR emission owner mismatch: {seed.source_identity}")
-                                    return false
-                                val backend = get_effective_backend_name(
-                                    self.ctx.options.backend, self.ctx.options.release)
-                                match driver_cold_hir_emit_v1(
-                                        self.ctx.hir_modules[seed.module_identity],
-                                        seed.module_identity,
-                                        seed.source_identity, seed.source_digest,
-                                        typed_hir_artifact_root, self.ctx.native_target, backend):
-                                    case Err(failure):
-                                        if failure.kind == "owner":
-                                            self.ctx.add_error("full inventory typed HIR module identity changed: {seed.source_identity}")
-                                        elif failure.kind == "witness":
-                                            self.ctx.add_error("full inventory live HIR native emit witness failed: {failure.reason}")
-                                        else:
-                                            self.ctx.add_error("full inventory typed HIR emission failed: {failure.reason}")
-                                        return false
-                                    case Ok(value):
-                                        emitted[seed.source_identity] = value
-                            self.ctx.runtime_std_hir_emissions = emitted
                         self.ctx.cold_hir_typed_receipts = receipts
                         log_phase("phase3:cold-hir-receipts:done count={receipts.len()}")
                         return true
@@ -504,504 +203,96 @@ impl CompilerDriver:
     # and grows RSS once for every module.  Use the same pause/promote/end
     # protocol as the streaming reparse path, while deliberately keeping the
     # retained parser module itself outside this scope.
-    me native_parser_cache_record_v1(key: text, source: SourceFile, source_index: i64) -> text:
-        if not self.ctx.native_parsed_classifications.has(source.module_name): return ""
-        val binding = hir_cache_parser_binding_v1(key, source.module_name, source.path,
-            self.ctx.source_identities_owner[source_index])
-        if binding == "": return ""
-        val kind = if self.ctx.native_parsed_classifications[source.module_name]: "objectless:" else: "bodyful:"
-        kind + binding
-
-    me capture_native_parsed_objectless_v1(parsed_code_less: bool, source: SourceFile):
-        self.ctx.native_parsed_objectless_proofs.remove(source.module_name)
-        self.ctx.native_parsed_classifications[source.module_name] = parsed_code_less
-        if not parsed_code_less: return
-        val proof = driver_native_parsed_objectless_proof_v1(
-            source.module_name, source.path, sha256_text(source.content))
-        if proof != "": self.ctx.native_parsed_objectless_proofs[source.module_name] = proof
-
-    me lower_retained_surface_module(lowering: HirLowering, module: ParserModule, source_path: text, is_entry: bool, source: SourceFile) -> Result<HirModule, text>:
-        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_retained_hir_path_to_fault
-        val nscope_trace = (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1"
-        if nscope_trace: eprint("[nscope-hir] retained-enter path={source_path} entry={is_entry}")
+    me lower_retained_surface_module(lowering: HirLowering, module: ParserModule, source_path: text, is_entry: bool) -> Result<HirModule, text>:
         if not rt_transient_array_scope_begin():
             return Err("transient HIR scope unavailable for {source_path}")
-        val reverse_token = reverse_reference_module_begin_v1()
-        if reverse_token < 0:
-            val _ended = driver_end_transient_parse_scope()
-            return Err("transient HIR scope reverse-reference owner unavailable for {source_path}")
         val flat_row_count_before = bootstrap_hir_module_count()
-        val parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(module)
-        if nscope_trace: eprint("[nscope-hir] retained-pre-lower path={source_path}")
         val hir_module = lowering.lower_parser_module_unstub(module, is_entry)
-        if nscope_trace: eprint("[nscope-hir] retained-lowered path={source_path}")
         if not rt_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("transient HIR scope pause failed for {source_path}")
-        if nscope_trace: eprint("[nscope-hir] retained-paused path={source_path}")
         if not rt_transient_heap_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("HIR ownership promotion failed for {source_path}")
-        if nscope_trace: eprint("[nscope-hir] retained-promoted path={source_path}")
-        # Cycle-137 REVERT of the cycle-135 deep-promotion block: the
-        # runtime promote is a recursive plan walker (runtime_native.c:2776 --
-        # RAW structs scan words for children, DICT nodes walk every occupied
-        # entry's key and value, ARRAY nodes walk elements). The module
-        # promote above is already deep; re-promoting the now-persistent
-        # nested dicts fails their non-transient classify (root_class 0, not
-        # an immortal string) and would trip the ownership panic -- exactly
-        # what the cycle-137 cache-lane SIGABRT showed. The cycle-134/135
-        # shallow-promotion diagnosis was wrong; the fvals element fault has
-        # another cause.
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("HIR diagnostic ownership promotion failed for {source_path}")
         if not lowering.promote_phase_memo_transient_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("HIR phase memo ownership promotion failed for {source_path}")
         if not lowering.promote_symbol_table_transient_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("HIR symbol table ownership promotion failed for {source_path}")
         val flat_row_count_after = bootstrap_hir_module_count()
         if flat_row_count_after != flat_row_count_before:
             if (flat_row_count_after != flat_row_count_before + 1 or
                 not bootstrap_hir_modules_promote_last()):
                 driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-                val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+                val _ended = driver_end_transient_parse_scope()
                 return Err("flat HIR row ownership promotion failed for {source_path}")
         if not driver_promote_frontend_registry_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed during retained HIR lowering for {source_path}")
-        if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
+        if not driver_end_transient_parse_scope():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             return Err("transient HIR scope end failed for {source_path}")
-        # The transient owner has ended successfully; the scalar classification
-        # survives and all digest/map allocations now belong to the context.
-        self.capture_native_parsed_objectless_v1(parsed_code_less, source)
         Ok(hir_module)
 
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
-        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_noscope_hir_path_to_fault
-        val nscope_trace = (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1"
-        if nscope_trace: eprint("[nscope-hir] enter path={source.path} entry={is_entry}")
-        val parser_generation = parser_initialization_generation_v1()
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
-        # Reset module-local scratch inside the scope that owns this source's
-        # parser and HIR work. Retained HIR, diagnostics, symbol containers
-        # and phase-wide memos are promoted before that scope ends below.
-        lowering.begin_module(source.path)
-        val reverse_token = reverse_reference_module_begin_v1()
-        if reverse_token < 0:
-            val _ended = driver_end_transient_parse_scope()
-            return Err("transient parser scope reverse-reference owner unavailable for {source.path}")
-        # Reparse under the exact policy/provider/cache identity used to build
-        # the surface. Reference policy is not an implicit fallback here.
-        val selected = self.parse_full_frontend_in_borrowed_scope_selected_v1(
-            source.content, source.path, source.module_name)
-        if selected.is_err():
-            if not rt_transient_array_scope_pause():
-                val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
-                return Err("transient parser scope pause failed for {source.path}")
-            val error_ok = rt_transient_heap_promote(selected)
-            val owners_ok = driver_promote_retained_frontend_owners_v1(
-                parser_initialization_generation_v1() != parser_generation)
-            val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
-            if not (error_ok and owners_ok and ended):
-                return Err("transient parser scope error ownership failed for {source.path}")
-            return Err(selected.unwrap_err())
-        val module: ParserModule = selected.unwrap()
-        driver_register_parser_module_source_aliases_v1(
-            ModuleSurfaceParserOwner.new(module), source.path)
+        val module = parse_full_frontend_in_borrowed_scope(source.content, source.path, source.module_name, self.ctx.logger)
+        driver_register_parser_module_source_aliases_v1(module, source.path)
         if par_had_error_get():
-            return Err(driver_finish_failed_parse_scope(source.path, reverse_token))
-        if nscope_trace: eprint("[nscope-hir] parsed path={source.path}")
+            return Err(driver_finish_failed_parse_scope(source.path))
         val flat_row_count_before = bootstrap_hir_module_count()
-        val parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(module)
         val hir_module = lowering.lower_parser_module_unstub(module, is_entry)
-        if nscope_trace: eprint("[nscope-hir] lowered path={source.path}")
         # Keep the scope active through the complete lowering. The reparsed AST
         # and all lowering scratch graphs are transient; only the canonical HIR,
         # its diagnostics, and frontend registries escape this file boundary.
         if not rt_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source.path}")
         if not rt_transient_heap_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("HIR ownership promotion failed for {source.path}")
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("HIR diagnostic ownership promotion failed for {source.path}")
         if not lowering.promote_phase_memo_transient_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("HIR phase memo ownership promotion failed for {source.path}")
         if not lowering.promote_symbol_table_transient_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("HIR symbol table ownership promotion failed for {source.path}")
         val flat_row_count_after = bootstrap_hir_module_count()
         if flat_row_count_after != flat_row_count_before:
             if (flat_row_count_after != flat_row_count_before + 1 or
                 not bootstrap_hir_modules_promote_last()):
                 driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-                val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+                val _ended = driver_end_transient_parse_scope()
                 return Err("flat HIR row ownership promotion failed for {source.path}")
-        if not driver_promote_retained_frontend_owners_v1(
-                parser_initialization_generation_v1() != parser_generation):
+        if not driver_promote_frontend_registry_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed during HIR reparse for {source.path}")
-        if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
+        if not driver_end_transient_parse_scope():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             return Err("transient parser scope end failed for {source.path}")
-        # Never publish a proof from a failed lowering or a transient heap.
-        self.capture_native_parsed_objectless_v1(parsed_code_less, source)
         Ok(hir_module)
 
-    me lower_streaming_hir_shard_transaction_v1(
-        lowering: HirLowering, source: SourceFile, is_entry: bool, cache_key: text
-    ) -> i64:
-        # Existing shard/default route deliberately requests no bounded receipts.
-        val receipt = self.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, is_entry, cache_key, nil, nil, -1)
-        receipt.status
-
-    me lower_streaming_hir_archived_shard_transaction_v1(
-        lowering: HirLowering, source: SourceFile, source_index: i64, is_entry: bool,
-        selection: DriverHirRuntimeStdArchiveSelectionV1,
-        registration_owner: MonoArchiveRegistrationOwnerV1
-    ) -> Result<DriverHirShardTransactionReceiptV1, text>:
-        # Prerequisite only: no production main-loop selection is added.
-        if transient_array_scope_state_v1() != 0:
-            return Err("HIR archive driver lease already occupied")
-        if not self.streaming_surface_owner_ready:
-            return Err("HIR archive driver frozen surface owner unavailable")
-        val receipt = self.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, is_entry, "", Some(selection), Some(registration_owner), source_index)
-        # The caller publishes the declaration delta in its original collector
-        # order only AFTER this returned, closed transaction. No body escapes.
-        Ok(receipt)
-
-    me lower_streaming_hir_selected_archived_shard_transaction_v1(
-        lowering: HirLowering, source: SourceFile, source_index: i64, is_entry: bool,
-        registration_owner: MonoArchiveRegistrationOwnerV1
-    ) -> Result<DriverHirShardTransactionReceiptV1, text>:
-        if transient_array_scope_state_v1() != 0:
-            return Err("HIR archive driver lease already occupied")
-        if not self.streaming_surface_owner_ready:
-            return Err("HIR archive driver frozen surface owner unavailable")
-        if val Some(selected) = self.hir_archive_managed_runtime_selection:
-            Ok(self.lower_streaming_hir_shard_receipt_transaction_v1(
-                lowering, source, is_entry, "", nil, Some(registration_owner), source_index, Some(selected)))
-        else:
-            Err("HIR archive selected production provider owner unavailable")
-
-    me lower_streaming_hir_shard_receipt_transaction_v1(
-        lowering: HirLowering, source: SourceFile, is_entry: bool, cache_key: text,
-        archive_selection: DriverHirRuntimeStdArchiveSelectionV1?,
-        registration_owner: MonoArchiveRegistrationOwnerV1?, source_index: i64,
-        managed_selection: DriverHirManagedRuntimeSelectionV1? = nil
-    ) -> DriverHirShardTransactionReceiptV1:
-        val representation_contexts = representation_invocation_context_index_v1(self.ctx)
-        # 0 = validated cache hit, 1 = published full HIR, 2 = source diagnostic,
-        # 3 = codec-refused UNCACHED, -1 = infrastructure/ownership failure.
-        # No HirModule escapes this scope.
-        var archive_input: HirBodyArchiveInputV1? = nil
-        var actual_lowering: HirLowering = lowering
-        var transaction_cache_key = cache_key
-        if archive_selection != nil and managed_selection != nil:
-            self.ctx.add_error("HIR shard archive selected provider ambiguous")
-            return driver_hir_failed_shard_receipt_v1(-1)
-        if val Some(selection) = managed_selection:
-            if not self.streaming_surface_owner_ready:
-                self.ctx.add_error("HIR archive driver frozen surface owner unavailable")
-                return driver_hir_failed_shard_receipt_v1(-1)
-            val selected = driver_hir_archive_input_from_managed_runtime_selection_v1(
-                selection, source, self.streaming_module_surfaces_owner, source_index, is_entry,
-                get_effective_backend_name(self.ctx.options.backend, self.ctx.options.release),
-                self.ctx.native_target, env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? "")
-            if selected.is_err():
-                self.ctx.add_error(selected.unwrap_err())
-                return driver_hir_failed_shard_receipt_v1(-1)
-            val input = selected.unwrap()
-            transaction_cache_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry)
-            if transaction_cache_key == "":
-                self.ctx.add_error("HIR archive driver source key unavailable")
-                return driver_hir_failed_shard_receipt_v1(-1)
-            archive_input = Some(input)
-        if val Some(selection) = archive_selection:
-            if not self.streaming_surface_owner_ready:
-                self.ctx.add_error("HIR archive driver frozen surface owner unavailable")
-                return driver_hir_failed_shard_receipt_v1(-1)
-            val selected = driver_hir_archive_input_from_runtime_std_selection_v1(
-                selection, source, self.streaming_module_surfaces_owner, source_index, is_entry)
-            if selected.is_err():
-                self.ctx.add_error(selected.unwrap_err())
-                return driver_hir_failed_shard_receipt_v1(-1)
-            val input = selected.unwrap()
-            transaction_cache_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry)
-            if transaction_cache_key == "":
-                self.ctx.add_error("HIR archive driver source key unavailable")
-                return driver_hir_failed_shard_receipt_v1(-1)
-            archive_input = Some(input)
-        if val Some(input) = archive_input:
-            if source_index < 0 or source_index >= self.ctx.source_module_names_owner.len() or
-                    source_index >= self.ctx.source_paths_owner.len() or
-                    source_index >= self.ctx.source_identities_owner.len() or
-                    source_index >= self.ctx.source_authored_paths_owner.len() or
-                    source.module_name != self.ctx.source_module_names_owner[source_index] or
-                    input.source_path != self.ctx.source_paths_owner[source_index] or
-                    input.source_content_digest != self.ctx.source_identities_owner[source_index] or
-                    input.source_authored_path != self.ctx.source_authored_paths_owner[source_index] or
-                    input.is_entry != (source_index == self.streaming_entry_source_index_owner):
-                self.ctx.add_error("source-body custody logical source scheduling row differs")
-                return driver_hir_failed_shard_receipt_v1(-1)
-            val owned_lowerer = driver_hir_source_body_actual_lowerer_v1(self, input)
-            if owned_lowerer.is_err():
-                self.ctx.add_error(owned_lowerer.unwrap_err())
-                return driver_hir_failed_shard_receipt_v1(-1)
-            # Archive custody never trusts a caller-provided lowerer or a
-            # checksum-consistent public cache body. The real private owner
-            # is constructed from this actual frozen driver and reused.
-            actual_lowering = owned_lowerer.unwrap()
-        if not rt_transient_array_scope_begin():
-            self.ctx.add_error("HIR shard transient scope unavailable for {source.path}")
-            return driver_hir_failed_shard_receipt_v1(-1)
-        val reverse_token = reverse_reference_module_begin_v1()
-        if reverse_token < 0:
-            val ended = driver_end_transient_parse_scope()
-            self.ctx.add_error("HIR shard reverse-reference scope unavailable; cleanup={ended}")
-            return driver_hir_failed_shard_receipt_v1(-1)
-        val parser_generation = parser_initialization_generation_v1()
-        val flat_rows_before = bootstrap_hir_module_count()
-        actual_lowering.begin_module(source.path)
-        if archive_input != nil:
-            actual_lowering.prescan_type_parameters = {}
-            actual_lowering.declared_pattern_enum_slots = {}
-        var module: HirModule = nil
-        var cached = false
-        var stored = false
-        # Set when the verified-cache store was REFUSED for a non-I/O reason
-        # (codec encode-reject / selfcheck / unstable roundtrip). The blob is
-        # not admitted as a cache entry. The caller records PASS+UNCACHED;
-        # this worker reclaims its module and the main build lowers the source
-        # again on a cache miss. Archive callers still require their separate
-        # durable archive below. Tracked in a local because the cache's
-        # last-refusal reason is global state and goes stale across modules.
-        var store_refused_codec = false
-        var infrastructure_error = ""
-        var abi_receipt: (text, Result<text, text>) = ("", Err(""))
-        var errors: [text] = []
-        var warnings: [text] = []
-        var archived_body: HirBodyArchiveV1? = nil
-        var declaration_registration: MonoArchiveRegistrationReceiptV1? = nil
-        var source_body_custody: DriverHirSourceBodyCustodyV1? = nil
-        val parser_binding = hir_cache_parser_binding_v1(transaction_cache_key,
-            source.module_name, source.path, sha256_text(source.content))
-        var parsed_classification_known = false
-        var parsed_code_less = false
-        val cache_result = if archive_input == nil and parser_binding != "": hir_cache_load_in_owned_scope(transaction_cache_key, parser_binding) else: nil
-        if val found = cache_result:
-            parsed_classification_known = true
-            parsed_code_less = hir_cache_last_parser_objectless()
-            module = found
-            cached = true
-            warnings = hir_cache_last_warnings()
-        else:
-            val parsed = if archive_input != nil:
-                self.parse_full_frontend_in_borrowed_scope_selected_uncached_v1(source.content, source.path, source.module_name)
-            else:
-                self.parse_full_frontend_in_borrowed_scope_selected_v1(source.content, source.path, source.module_name)
-            if parsed.is_err():
-                errors.push(parsed.unwrap_err())
-            else:
-                val parser_module: ParserModule = parsed.unwrap()
-                driver_register_parser_module_source_aliases_v1(
-                    ModuleSurfaceParserOwner.new(parser_module), source.path)
-                if par_had_error_get():
-                    errors.push(driver_parse_error_message(source.path))
-                else:
-                    parsed_classification_known = true
-                    parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(parser_module)
-                    module = actual_lowering.lower_parser_module_unstub(parser_module, is_entry)
-                    var error_index = 0
-                    while error_index < actual_lowering.lowering_error_count():
-                        val message = actual_lowering.lowering_error_message_at(error_index, source.module_name)
-                        if actual_lowering.lowering_error_is_recovered_at(error_index):
-                            warnings.push(message)
-                        else:
-                            if errors.len() < 10:
-                                eprint("[hir-fatal] path={source.path} error_idx={error_index} text={message}")
-                            errors.push(message)
-                        error_index = error_index + 1
-                    if module == nil and errors.len() == 0:
-                        infrastructure_error = "HIR shard lowering returned no module"
-        if errors.len() == 0 and infrastructure_error == "":
-            module.representation_declarations = representation_bind_module_facts_v1(
-                representation_contexts, source.module_name, module)
-            val representation_receipt = collect_module_representation_receipt_v1(
-                source.module_name, module, self.ctx.assurance_policy.strictness)
-            for message in representation_receipt.warnings: warnings.push(message)
-            for message in representation_receipt.errors: errors.push(message)
-        if errors.len() == 0 and infrastructure_error == "":
-            if not cached and (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
-                val round_trip = hir_codec_roundtrip_selfcheck(module)
-                print hir_codec_roundtrip_line(round_trip, source.path)
-                module = round_trip.module
-            # This transaction already owns the scope. Retain only the receipt;
-            # reacquiring a scope here rejects every shard's ABI digest.
-            # Log-only receipt: skipped unless the ABI interface trace is on.
-            if driver_hir_abi_interface_trace_enabled():
-                abi_receipt = (module.name, driver_hir_abi_interface_digest_in_owned_scope_v1(module))
-            if cached:
-                stored = true
-            else:
-                # Reuse the existing atomic codec writer while OUR scope owns
-                # its scratch. hir_cache_store would try to nest a new scope.
-                val parser_record = if parsed_classification_known and parser_binding != "":
-                    (if parsed_code_less: "objectless:" else: "bodyful:") + parser_binding
-                else: ""
-                # The selected parser transaction publishes v4 in its private
-                # schema namespace even when it also issues a body archive.
-                # The archive publisher below retains its own generic contract.
-                if parser_record == "":
-                    # No store attempt means no current refusal reason. Never
-                    # classify a missing binding using another module's reason.
-                    infrastructure_error = "HIR shard parser binding unavailable for {source.path}"
-                else:
-                    stored = hir_cache_store_in_owned_scope(
-                        transaction_cache_key, module, warnings, parser_record)
-                    if not stored:
-                        if hir_cache_last_refusal_is_io_v1():
-                            infrastructure_error = "HIR shard cache publication failed for {source.path}"
-                        else:
-                            # Keep refusal local until scratch reclamation and
-                            # report status 3 to the actual ledger caller. No
-                            # full module escapes this worker transaction.
-                            store_refused_codec = true
-                            eprint("[hir-shard] cache store refused (codec, not I/O); module will be lowered by the main build: {source.path}")
-
-        if errors.len() == 0 and infrastructure_error == "":
-            if val Some(input) = archive_input:
-                # Preserve the actually produced physical HIR owner. Logical
-                # source/alias labels remain independently bound in custody
-                # and the ordered journal; they never rename this full body.
-                var produced_input = input
-                produced_input.module_name = module.name
-                val archived = hir_body_archive_store_in_owned_scope_v1(produced_input, module, warnings)
-                if archived.is_err():
-                    if hir_cache_last_refusal_is_io_v1():
-                        infrastructure_error = "HIR shard archive publication: {archived.unwrap_err()}"
-                    else:
-                        # Codec-class refusal (the body archive encodes through
-                        # the same verified-cache machinery): the module is
-                        # correct in memory, so finish PASS+UNCACHED like the
-                        # primary cache store above -- an all-refused draw
-                        # (e.g. the v20 registration-probe false reject) must
-                        # not fail the shard terminal. Only genuine I/O store
-                        # failures are infrastructure errors here.
-                        eprint("[hir-shard] archive store refused (codec, not I/O); module will be lowered by the main build: {source.path}")
-                else:
-                    val archive = archived.unwrap()
-                    archived_body = Some(archive)
-                    if val Some(owner) = registration_owner:
-                        val registered = mono_archive_collect_registration_in_owned_scope_v1(
-                            owner, module, module.name, archive)
-                        if registered.is_err():
-                            infrastructure_error = "HIR shard declaration registration: {registered.unwrap_err()}"
-                        else:
-                            declaration_registration = Some(registered.unwrap())
-                            val custody = driver_hir_source_body_prepare_custody_in_owned_scope_v1(self, archive, source_index)
-                            if custody.is_err():
-                                infrastructure_error = custody.unwrap_err()
-                            else:
-                                source_body_custody = Some(custody.unwrap())
-                    else:
-                        infrastructure_error = "HIR shard archive registration owner unavailable"
-
-        # Retain diagnostics and genuinely phase-wide memo/registry roots only.
-        # Module bodies and their symbol-table snapshots stay transient, including
-        # cache-hit decodes. A completed worker never needs these for MIR/codegen.
-        if not rt_transient_array_scope_pause():
-            driver_rollback_flat_hir_row_or_abort(flat_rows_before)
-            val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
-            # Retained memos may still reference this failed scope. Do not return
-            # to the driver or inspect the lowerer after reclamation.
-            eprint("HIR shard scope pause failed; cleanup={ended}")
-            exit(1)
-            return driver_hir_failed_shard_receipt_v1(-1)
-        val errors_owned = rt_transient_heap_promote(errors)
-        val warnings_owned = rt_transient_heap_promote(warnings)
-        val failure_owned = infrastructure_error == "" or rt_transient_heap_promote(infrastructure_error)
-        val abi_owned = rt_transient_heap_promote(abi_receipt)
-        val memos_owned = actual_lowering.promote_phase_memo_transient_owners()
-        val cfg_owned = archive_input == nil or self.promote_target_cfg_receipt_v1(source.path)
-        val frontend_owned = driver_promote_retained_frontend_owners_v1(
-            parser_initialization_generation_v1() != parser_generation)
-        val cache_reason_owned = hir_cache_promote_diagnostic_owner_v1()
-        # Exact additional escape set: archive descriptor and compact delta.
-        # Neither contains HirModule, full declaration bodies or SymbolTables.
-        val archive_owned = archived_body == nil or rt_transient_heap_promote(archived_body)
-        val registration_owned = declaration_registration == nil or rt_transient_heap_promote(declaration_registration)
-        val custody_owned = source_body_custody == nil or rt_transient_heap_promote(source_body_custody)
-        # Flat rows are unnecessary in a cache worker. Remove their references
-        # before reclaiming the graph; the final compiler loads the complete cache.
-        driver_rollback_flat_hir_row_or_abort(flat_rows_before)
-        # Reset all module-local owners while allocations are paused, so no field
-        # on the retained lowerer points into the scope about to be reclaimed.
-        actual_lowering.begin_module(source.path)
-        if archive_input != nil:
-            # These typed maps are omitted from the persistent 49 memo roots
-            # and are not cleared by begin_module in the existing owner.
-            actual_lowering.prescan_type_parameters = {}
-            actual_lowering.declared_pattern_enum_slots = {}
-            actual_lowering.lowered_trait_count_value = 0
-        hir_cache_clear_last_warnings()
-        if not (errors_owned and warnings_owned and failure_owned and abi_owned and memos_owned and frontend_owned and
-                cache_reason_owned and archive_owned and registration_owned and cfg_owned and custody_owned):
-            val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
-            # Partial root promotion cannot authorize another task in this
-            # process. The parent records an incomplete infrastructure failure.
-            eprint("HIR shard retained-root promotion failed; cleanup={ended}")
-            exit(1)
-            return driver_hir_failed_shard_receipt_v1(-1)
-        if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
-            self.ctx.add_error("HIR shard scope publication/reclamation failed for {source.path}")
-            return driver_hir_failed_shard_receipt_v1(-1)
-        # These context allocations happen AFTER scratch reclamation.
-        if abi_receipt.0 != "":
-            driver_log_typed_hir_abi_result_v1(abi_receipt.0, abi_receipt.1, source.path)
-        for message in warnings:
-            if not driver_hir_ambient_bootstrap_enabled(self.ctx):
-                self.ctx.add_warning(message)
-        for message in errors:
-            self.ctx.add_error(message)
-        if infrastructure_error != "":
-            self.ctx.add_error(infrastructure_error)
-            return driver_hir_failed_shard_receipt_v1(-1)
-        if errors.len() > 0: return driver_hir_failed_shard_receipt_v1(2)
-        if not stored and not store_refused_codec:
-            self.ctx.add_error("HIR shard completed without a durable module")
-            return driver_hir_failed_shard_receipt_v1(-1)
-        if val Some(custody) = source_body_custody:
-            # Install only after every ownership, reverse-reference and error
-            # gate succeeded and scratch closed. No full body is retained.
-            _driver_source_body_custody_v1["{custody.driver_word}:{custody.archive.archive_key}"] = custody
-        DriverHirShardTransactionReceiptV1(status: if cached: 0 elif stored: 1 else: 3,
-            archive: archived_body, declaration_registration: declaration_registration)
-
     me lower_and_check_streaming_surfaces_impl() -> bool:
-        val representation_contexts = representation_invocation_context_index_v1(self.ctx)
         if not self.streaming_surface_owner_ready:
             self.ctx.add_error("Streaming module surfaces missing after phase 2")
             return false
@@ -1015,39 +306,14 @@ impl CompilerDriver:
         if not rt_heap_ref_wellformed(surfaces):
             self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
             return false
-        # Fail-closed empty-surface abort (2026-08-24 zero-module incident):
-        # non-zero sources must produce a non-empty surface graph; typing an
-        # empty program through phase 3 SIGSEGV'd three phases downstream in
-        # MIR lowering with no diagnostic naming this phase.
-        if self.ctx.source_paths_owner.len() > 0 and surfaces.surfaces.len() == 0:
-            self.ctx.add_error("E-DRV-PHASE3-EMPTY-SURFACES]: streaming phase 3 received zero module surfaces from {self.ctx.source_paths_owner.len()} non-zero sources (the phase-2 surface carrier was lost before phase 3); refusing to type-check an empty program")
-            return false
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
-        lowering.tldr_entry_only = self.ctx.tldr_entry_only
-        lowering.tldr_imports = self.ctx.tldr_imports
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
-        lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
         var lowered_by_surface: Dict<i64, HirModule> = {}
-        var shard_completed_surfaces: Dict<i64, bool> = {}
         var poisoned_by_surface: Dict<i64, bool> = {}
-        # Duplicate-admission guard, keyed by the surface CANONICAL name
-        # (fold-std-alias of the logical name): the same file can be admitted
-        # twice under two source spellings (an SCV snapshot path row and its
-        # authored/alias module-name row). Two lowerings of the same module on
-        # parallel HIR shards each ran register_enum_unit_patterns on the
-        # shared symbol table, and the registration raced the consumer body
-        # lowering -- the SdnValue triple (undefined variable SdnValue /
-        # unresolved method call Float / B5b duplicate wildcard) at
-        # src/lib/common/sdn/value.spl:48. One lowering per canonical name
-        # removes the second registration entirely (doc/08_tracking/bug/
-        # sdn_value_enum_race_parallel_hir_ordering_2026-10-13).
-        var canonical_lowered_modules: Dict<text, HirModule> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var validation_module_keys: [text] = []
-        # Values are struct/symbol-only HirModule views, not second owners of
-        # the complete HIR stored in phase_hir_modules.
-        var validation_module_values: [ValueStructLayoutModuleV1] = []
+        var validation_module_values: [HirModule] = []
         var phase_entry_hir: HirModule? = nil
         var streaming_hir_module_count: i64 = self.ctx.hir_module_count_value
         val entry_source_index = self.streaming_entry_source_index_owner
@@ -1059,8 +325,8 @@ impl CompilerDriver:
         # in full before this loop (surface_freeze completes in phase 2), so
         # one digest over every surface is exactly what each module's
         # lowering can see, and the key stays sound.
-        val hir_closure_digest: text = if (not self.ctx.tldr_entry_only or self.ctx.tldr_imports.len() > 0) and (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
-            hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(surfaces), self.ctx.tldr_imports)
+        val hir_closure_digest: text = if (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
+            hir_cache_closure_digest(surfaces)
         else:
             ""
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
@@ -1083,12 +349,6 @@ impl CompilerDriver:
             hir_levels = hir_shard_levels(surfaces)
             hir_level_count = hir_shard_level_count(hir_levels)
         val hir_visit_order: [i64] = hir_shard_visit_order(self.ctx.source_module_names_owner, surfaces, hir_levels)
-        # Fail-closed visit-order abort: with non-zero sources the carrier
-        # proven present (the surfaces) must yield at least one module visit;
-        # an empty order would silently type-check zero modules again.
-        if not hir_shard_mode and self.ctx.source_paths_owner.len() > 0 and hir_visit_order.len() == 0:
-            self.ctx.add_error("E-DRV-PHASE3-EMPTY-VISIT]: streaming phase 3 produced an empty HIR visit order for {self.ctx.source_paths_owner.len()} non-zero sources; refusing to type-check an empty program")
-            return false
         var hir_loop_pos: i64 = 0
         val hir_bootstrap_mode_gate = driver_hir_ambient_bootstrap_enabled(self.ctx)
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
@@ -1119,21 +379,11 @@ impl CompilerDriver:
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
-            if hir_shard_mode and shard_completed_surfaces.contains_key(surface_index):
-                hir_loop_pos = hir_loop_pos + 1
-                continue
             if lowered_by_surface.contains_key(surface_index):
                 val alias_hir = lowered_by_surface[surface_index]
                 if not phase_hir_modules.contains_key(source.module_name):
                     streaming_hir_module_count = streaming_hir_module_count + 1
                 phase_hir_modules[source.module_name] = alias_hir
-                # Record the canonical name too: a later row of the same file
-                # under a THIRD spelling must also reuse (cycle-33 lane -- the
-                # alias branch previously recorded nothing, so the canonical
-                # guard could not fire for subsequent spellings).
-                val alias_canonical = surfaces.surfaces[surface_index].canonical_name
-                if alias_canonical != "" and not canonical_lowered_modules.contains_key(alias_canonical):
-                    canonical_lowered_modules[alias_canonical] = alias_hir
                 if not driver_hir_mem_snapshot(
                     "hir-alias-reuse", source_index, source.path,
                     streaming_hir_module_count,
@@ -1149,33 +399,6 @@ impl CompilerDriver:
                 # One physical file is lowered at most once. Compatibility
                 # aliases cannot retry a poisoned surface under another module
                 # spelling or replace its original diagnostic.
-                hir_loop_pos = hir_loop_pos + 1
-                continue
-            # Duplicate-admission reuse: a second source row whose surface
-            # canonical name was already lowered reuses that unit instead of
-            # lowering (and re-registering) a second copy. See the
-            # canonical_lowered_modules declaration above for the race this
-            # removes; keying is by surface canonical name, NOT by
-            # source.module_name, because the two rows of one admitted file
-            # differ exactly in that spelling.
-            val canonical_surface_name = surfaces.surfaces[surface_index].canonical_name
-            if canonical_surface_name != "" and canonical_lowered_modules.contains_key(canonical_surface_name):
-                if (sosix_env_get_nullable("SIMPLE_DBG_HIR_DEDUP") ?? "") == "1":
-                    eprint("[hir-dedup] reuse canonical={canonical_surface_name} as {source.module_name} path={source.path}\n")
-                val reused_hir = canonical_lowered_modules[canonical_surface_name]
-                lowered_by_surface[surface_index] = reused_hir
-                if not phase_hir_modules.contains_key(source.module_name):
-                    streaming_hir_module_count = streaming_hir_module_count + 1
-                phase_hir_modules[source.module_name] = reused_hir
-                if not driver_hir_mem_snapshot(
-                    "hir-canonical-reuse", source_index, source.path,
-                    streaming_hir_module_count,
-                    validation_module_keys.len(), validation_module_values.len(),
-                    lowering.lowered_trait_count_value):
-                    self.ctx.add_error("durable memory snapshot write failed at hir-canonical-reuse")
-                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
-                    mem_snapshot_abort()
-                    return false
                 hir_loop_pos = hir_loop_pos + 1
                 continue
             # Keep the retained surface in its canonical owner. ModuleSurface
@@ -1231,34 +454,8 @@ impl CompilerDriver:
                 if claim == 0:
                     hir_loop_pos = hir_loop_pos + 1
                     continue
-                val shard_status = self.lower_streaming_hir_shard_transaction_v1(
-                    lowering, source, is_requested_bootstrap_entry, hir_stream_key)
-                if shard_status < 0 or shard_status > 3:
-                    hir_shard_guard_block("HIR shard transaction failed before safe completion")
-                    return false
-                val source_failed = shard_status == 2
-                if not hir_shard_finish(source.path, if source_failed: "FAILED" else: "PASS", driver_hir_shard_cache_stored_v1(shard_status)):
-                    hir_shard_guard_block("HIR shard terminal receipt publication failed")
-                    self.ctx.add_error("HIR shard terminal receipt publication failed")
-                    return false
-                if source_failed:
-                    poisoned_by_surface[surface_index] = true
-                    var poison_ctx = self.ctx
-                    poison_ctx.mark_module_poisoned(source.module_name)
-                    if poison_ctx.poison_budget_exhausted(): return false
-                else:
-                    shard_completed_surfaces[surface_index] = true
-                    progress_hir_done = progress_hir_done + 1
-                    if shard_status == 1 or shard_status == 3: hir_shard_lowered = hir_shard_lowered + 1
-                # Poisoned modules are this row's failures; before 2026-10-19
-                # the count sat in the `cached` slot and `failed` was 0.
-                log_build_progress("hir", "modules", progress_hir_done,
-                    surfaces.surfaces.len(), source.module_name, 2, 6,
-                    self.ctx.poisoned_module_count_value, hir_cache_hits(), "running")
-                hir_loop_pos = hir_loop_pos + 1
-                continue
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
-                hir_cache_load_parsed_v1(hir_stream_key, hir_cache_parser_binding_v1(hir_stream_key, source.module_name, source.path, self.ctx.source_identities_owner[source_index]), source.path)
+                hir_cache_load(hir_stream_key)
             else:
                 nil
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
@@ -1273,25 +470,18 @@ impl CompilerDriver:
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
+            lowering.begin_module(source.path)
             log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
             # In-flight receipt, same reasoning as the parse loop: HIR lowering
             # is the phase that actually breaks (stack-exhaustion SIGSEGV,
             # 2026-08-17), so the module being lowered must be named BEFORE the
             # work starts or a hang here is unattributable.
-            # `cached` is the HIR cache hit count: until 2026-10-19 this was a
-            # literal 0, so a main build that adopted every shard entry
-            # (`[hir-cache] hits=2702 misses=0`) still logged `cached=0` on
-            # every row and was read as re-lowering serially.
             log_build_progress("hir", "modules", progress_hir_done,
                 surfaces.surfaces.len(), source.module_name,
-                2, 6, 0, hir_cache_hits(), "running")
+                2, 6, 0, 0, "running")
             var hir_module: HirModule = nil
             var hir_cache_stored: bool = hir_stream_cached != nil
             if hir_stream_cached != nil:
-                self.capture_native_parsed_objectless_v1(hir_cache_last_parser_objectless(), source)
-                # A cached HIR root is already persistent; preserve the reset
-                # without opening an otherwise unused parse scope.
-                lowering.begin_module(source.path)
                 hir_module = hir_stream_cached.unwrap()
                 val hir_registry_name = if is_requested_bootstrap_entry:
                     hir_module_logical_name_from_path(source.path)
@@ -1410,20 +600,9 @@ impl CompilerDriver:
                     print hir_codec_roundtrip_line(hir_round_trip, source.path)
                     hir_module = hir_round_trip.module
                 if hir_stream_key != "":
-                    val parser_record = self.native_parser_cache_record_v1(hir_stream_key, source, source_index)
-                    if parser_record != "" and hir_cache_store(hir_stream_key, hir_module, hir_module_warnings, parser_record):
+                    if hir_cache_store(hir_stream_key, hir_module, hir_module_warnings):
                         hir_shard_lowered = hir_shard_lowered + 1
                         hir_cache_stored = true
-            hir_module.representation_declarations = representation_bind_module_facts_v1(
-                representation_contexts, source.module_name, hir_module)
-            val representation_receipt = collect_module_representation_receipt_v1(
-                source.module_name, hir_module, self.ctx.assurance_policy.strictness)
-            publish_module_typecheck_receipt_v1(self.ctx, representation_receipt)
-            if representation_receipt.errors.len() > 0:
-                if not hir_shard_finish(source.path, "FAILED", false):
-                    hir_shard_guard_block("representation diagnostic receipt publication failed")
-                    self.ctx.add_error("representation diagnostic receipt publication failed")
-                return false
             if not driver_hir_mem_snapshot(
                 "hir-post-diagnostics", source_index, source.path,
                 streaming_hir_module_count,
@@ -1443,20 +622,12 @@ impl CompilerDriver:
             if not phase_hir_modules.contains_key(source.module_name):
                 streaming_hir_module_count = streaming_hir_module_count + 1
             phase_hir_modules[source.module_name] = hir_module
-            # Record the canonical name so a second admission spelling of this
-            # same file reuses this unit (see the canonical reuse guard above)
-            # instead of lowering -- and registering -- a duplicate.
-            val stored_canonical_name = surfaces.surfaces[surface_index].canonical_name
-            if stored_canonical_name != "":
-                canonical_lowered_modules[stored_canonical_name] = hir_module
             # An alias source reuses lowered_by_surface above and deliberately
             # does not create another value-layout graph node. The canonical
             # surface name preserves the defining-module provenance.
             validation_module_keys.push(
                 surfaces.surfaces[surface_index].logical_name)
-            validation_module_values.push(value_struct_layout_declarations_v1(
-                surfaces.surfaces[surface_index].logical_name,
-                source.path, hir_module.structs, hir_module.symbols))
+            validation_module_values.push(hir_module)
             if is_requested_bootstrap_entry:
                 phase_entry_hir = Some(hir_module)
             if not driver_hir_mem_snapshot(
@@ -1480,7 +651,7 @@ impl CompilerDriver:
             # multi-minute phase costs nothing measurable.
             log_build_progress("hir", "modules", progress_hir_done,
                 surfaces.surfaces.len(), source.module_name,
-                2, 6, 0, hir_cache_hits(), "running")
+                2, 6, 0, 0, "running")
             hir_loop_pos = hir_loop_pos + 1
 
         # Post-loop receipts (2026-09-05). The Stage-3 worker SEGV'd four times
@@ -1488,13 +659,8 @@ impl CompilerDriver:
         # the fault is somewhere between here and streaming_source_reclaim:done
         # below. Each step now leaves a marker so a crash names its own step.
         log_phase("phase3:hir:loop:done modules={progress_hir_done}")
-        # Always printed (task 8a): a disabled cache prints
-        # `[hir-cache] disabled reason=...`, so no build log is silent about it.
-        # The main build (not a shard) first says how much of the shard
-        # pre-pass it adopted; the summary stays the LAST `[hir-cache]` line.
-        if not hir_shard_mode:
-            print hir_cache_adoption_receipt_v1(hir_cache_hits(), hir_cache_misses())
-        print hir_cache_summary()
+        if hir_cache_enabled():
+            print hir_cache_summary()
         if hir_shard_mode:
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
             if not hir_shard_complete():
@@ -1540,26 +706,25 @@ impl CompilerDriver:
         # driver_orchestration.spl.
         if (self.ctx.error_count_value > 0):
             return false
-        log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()} array={self.ctx.validation_module_array.len()}")
+        log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()}")
         var validation_error_count: i64 = 0
-        driver_admit_nogc_param_effects_v1(self.ctx, surfaces.surfaces)
-        if self.ctx.error_count_value > 0: return false
-        for validation_error in driver_validate_value_struct_layout_declarations_v1(
+        for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
-                self.ctx.hir_modules, self.ctx.validation_module_array,
-                self.ctx.validation_module_blobs,
-                self.ctx.validation_module_has_rt_hal,
-                self.ctx.validation_module_claim_counts):
+                self.ctx.hir_modules):
+            if validation_error_count < 10:
+                eprint("[post-hir-validation-fatal] {validation_error}")
             validation_error_count = validation_error_count + 1
             self.ctx.add_error(validation_error)
+        if validation_error_count > 0:
+            var validation_errors_shown = validation_error_count
+            if validation_errors_shown > 10:
+                validation_errors_shown = 10
+            eprint("[post-hir-validation-fatal-count] count={validation_error_count} shown={validation_errors_shown}")
         log_phase("phase3:hir:validate:done errors={validation_error_count}")
         if (self.ctx.error_count_value > 0):
             return false
-        log_phase("phase3:hir:cold_receipts:start")
         if not self.capture_cold_hir_typed_receipts_v1():
-            log_phase("phase3:hir:cold_receipts:failed")
             return false
-        log_phase("phase3:hir:cold_receipts:done")
         ast_reset()
         log_phase("phase3:hir:ast_reset:done")
         self.ctx.modules = {}
@@ -1593,32 +758,11 @@ impl CompilerDriver:
         self.streaming_surface_owner_ready = false
         true
 
-    # Compatibility snapshot API. Production compilation consumes only the
-    # owner's boolean verdict and never reinstalls this aggregate snapshot.
     me lower_and_check_impl() -> (CompileContext, bool):
-        val ok = self.lower_and_check_retained_owner_impl()
-        (self.ctx, ok)
-
-    me lower_and_check_retained_owner_impl() -> bool:
         compiler_work_hir_schedule_v1(self.ctx.sources.len())
         dtrace("[DRV] lac-canary=entry")
         val log = self.ctx.logger
         driver_register_reverse_reference_sources_v1(self.ctx)
-
-        # Fail-closed phase-3 routing (doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md):
-        # the streaming readiness scalar is mutable native state that value
-        # semantics can drop across the phase boundary, so it can never route
-        # alone -- stable streaming configuration must participate on the same
-        # `if`, and the legacy module loop must abort on zero modules from
-        # non-zero sources instead of typing an empty program through to MIR.
-        val streaming_ready_flag = self.streaming_surface_owner_ready
-        val streaming_config_gate = driver_streaming_surface_enabled(self.ctx)
-        if streaming_ready_flag or streaming_config_gate:
-            val streamed_ok = self.lower_and_check_streaming_surfaces_impl()
-            return (self.ctx, streamed_ok)
-        if self.ctx.sources.len() > 0 and driver_dict_entry_count(self.ctx.modules) == 0:
-            self.ctx.add_error("E-DRV-PHASE3-EMPTY]: phase 3 legacy path received zero HIR modules from {self.ctx.sources.len()} non-zero sources (the phase-2 module set was lost before phase 3); refusing to type-check an empty program")
-            return (self.ctx, false)
 
         # Build module_name -> source_path map so each module gets the right
         # filename in module_filename (required for defining_module + visibility).
@@ -1649,7 +793,7 @@ impl CompilerDriver:
         # field, and would fail closed on every build including healthy ones.
         if self.ctx.module_surfaces != nil and not rt_heap_ref_wellformed(self.ctx.module_surfaces ?? ModuleSurfacesByName.empty()):
             self.ctx.add_error("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry (heap-typed payload word is 0 or in the zero page)")
-            return false
+            return (self.ctx, false)
         # NEVER `.unwrap()` here. Under the seed's native codegen a BARE
         # `unwrap` is rebound by name to whichever module in the entry closure
         # publishes one (`Poll.unwrap`, `FailSafeResult.unwrap`, ...); that
@@ -1667,7 +811,7 @@ impl CompilerDriver:
                 case Ok(value): value
                 case Err(error):
                     self.ctx.add_error("Module surface extraction error: {error}")
-                    return false
+                    return (self.ctx, false)
         else:
             ModuleSurfacesByName.empty()
         dtrace("[DRV] lac-canary=module-surfaces-after")
@@ -1675,9 +819,7 @@ impl CompilerDriver:
             dtrace("[DRV] lac-branch=modules-loop (sources<=0)")
             var bootstrap_hir_modules: Dict<text, HirModule> = {}
             var bootstrap_validation_module_keys: [text] = []
-            # Layout validation consumes compact module views; keep the full
-            # lowered modules only in bootstrap_hir_modules.
-            var bootstrap_validation_module_values: [ValueStructLayoutModuleV1] = []
+            var bootstrap_validation_module_values: [HirModule] = []
             val bootstrap_entry_name = bootstrap_entry_module_name(self.ctx)
             var bootstrap_lowering_errors: [LoweringError] = []
             var bootstrap_lowering_messages: [text] = []
@@ -1685,11 +827,8 @@ impl CompilerDriver:
             var bootstrap_lowering: HirLowering = hirlowering_for_module_with_diagnostics(
                 "", retained_module_surfaces, bootstrap_lowering_errors,
                 bootstrap_lowering_messages, bootstrap_lowering_recovered)
-            bootstrap_lowering.tldr_entry_only = self.ctx.tldr_entry_only
-            bootstrap_lowering.tldr_imports = self.ctx.tldr_imports
             if driver_hir_explicit_semantic_policy(self.ctx):
                 bootstrap_lowering.use_explicit_semantic_policy()
-            bootstrap_lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
             for module in self.ctx.modules.values():
                 val name = module.name
                 log_trace("processing module")
@@ -1699,10 +838,7 @@ impl CompilerDriver:
                 bootstrap_lowering.begin_module(name)
                 val hir_module: HirModule = bootstrap_lowering.lower_module(module)
                 driver_collect_hir_errors(self.ctx, name, bootstrap_lowering.errors)
-                val (_resolved_module_ignored, resolve_errors) = resolve_methods(hir_module)
-                # Cycle-130: the tuple's module slot corrupts at the native
-                # value ABI; the owner carries the authoritative copy.
-                val resolved_module: HirModule = resolve_methods_module_owner.?
+                val (resolved_module, resolve_errors) = resolve_methods(hir_module)
                 var err_idx = 0
                 while err_idx < resolve_errors.len():
                     val err = resolve_errors[err_idx]
@@ -1710,30 +846,23 @@ impl CompilerDriver:
                     err_idx = err_idx + 1
                 bootstrap_hir_modules[name] = resolved_module
                 bootstrap_validation_module_keys.push(name)
-                bootstrap_validation_module_values.push(value_struct_layout_declarations_v1(
-                    name, resolved_module.path, resolved_module.structs,
-                    resolved_module.symbols))
-            self.ctx.hir_modules = bootstrap_hir_modules
-            self.ctx.hir_module_count_value = bootstrap_validation_module_keys.len()
+                bootstrap_validation_module_values.push(resolved_module)
+            var bootstrap_ctx: CompileContext = self.ctx
+            bootstrap_ctx.hir_modules = bootstrap_hir_modules
+            bootstrap_ctx.hir_module_count_value = bootstrap_validation_module_keys.len()
             val bootstrap_entry_module = bootstrap_hir_modules[bootstrap_entry_name]
-            # bootstrap_entry_hir is already HirModule?: wrapping the Dict read in
-            # Some() double-boxes, and the consumer's concrete param then reads the
-            # inner Some header as a HirModule. Assign the optional directly.
             if bootstrap_entry_module != nil:
-                self.ctx.bootstrap_entry_hir = bootstrap_entry_module
+                bootstrap_ctx.bootstrap_entry_hir = Some(bootstrap_entry_module)
             log_debug("HIR lowering complete")
-            driver_admit_nogc_param_effects_v1(self.ctx, retained_module_surfaces.surfaces)
-            if self.ctx.error_count_value > 0: return false
-            for validation_error in driver_validate_value_struct_layout_declarations_v1(
+            for validation_error in driver_validate_value_struct_layouts(
                     bootstrap_validation_module_keys,
                     bootstrap_validation_module_values,
-                    self.ctx.hir_modules):
-                self.ctx.add_error(validation_error)
-            return self.ctx.error_count_value == 0
+                    bootstrap_ctx.hir_modules):
+                bootstrap_ctx.add_error(validation_error)
+            return (bootstrap_ctx, not bootstrap_ctx.has_errors())
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var validation_module_keys: [text] = []
-        # The side array owns only struct layout data and struct symbols.
-        var validation_module_values: [ValueStructLayoutModuleV1] = []
+        var validation_module_values: [HirModule] = []
         var phase_entry_hir: HirModule? = nil
         var retained_hir_module_count: i64 = self.ctx.hir_module_count_value
         val entry_source_index = bootstrap_entry_source_index(self.ctx)
@@ -1750,18 +879,15 @@ impl CompilerDriver:
             "", retained_module_surfaces, module_lowering_errors,
             module_lowering_diagnostic_messages,
             module_lowering_diagnostic_recovered)
-        lowering.tldr_entry_only = self.ctx.tldr_entry_only
-        lowering.tldr_imports = self.ctx.tldr_imports
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
-        lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
         val hir_bootstrap_mode_gate = driver_hir_ambient_bootstrap_enabled(self.ctx)
         if hir_bootstrap_mode_gate:
             bootstrap_hir_modules_reset()
         # HIR cache (driver_hir_cache.spl): one digest of every frozen surface
         # per build; a hit below replaces lowering for that module.
-        val hir_closure_digest: text = if (not self.ctx.tldr_entry_only or self.ctx.tldr_imports.len() > 0) and (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
-            hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(retained_module_surfaces), self.ctx.tldr_imports)
+        val hir_closure_digest: text = if (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
+            hir_cache_closure_digest(retained_module_surfaces)
         else:
             ""
         # HIR shard child (SIMPLE_HIR_SHARD, see driver_hir_cache.spl): visit
@@ -1773,7 +899,7 @@ impl CompilerDriver:
         if hir_shard_active() and not hir_shard_mode:
             hir_shard_guard_block("HIR cache identity unavailable for shard")
             self.ctx.add_error("HIR cache identity unavailable for shard")
-            return false
+            return (self.ctx, false)
         var hir_level_count: i64 = 0
         var hir_shard_lowered: i64 = 0
         var hir_levels: [i64] = []
@@ -1785,17 +911,10 @@ impl CompilerDriver:
             hir_order_names.push(hir_order_src.module_name)
         val hir_visit_order: [i64] = hir_shard_visit_order(hir_order_names, retained_module_surfaces, hir_levels)
         var hir_loop_pos: i64 = 0
-        # Same contract as the streaming path above: shard children inherit
-        # the parent's SIMPLE_MEM_SNAPSHOT_FILE and must not open its O_EXCL
-        # evidence descriptor. Unguarded, every worker of an 8-way Stage 3
-        # failed here, blocked the ledger, and the next claim reported "HIR
-        # shard ledger claim failed" (bug
-        # stage3_hir_shard_workers_collide_on_mem_snapshot_file_2026_10_19).
-        if not hir_shard_mode:
-            if mem_snapshot_begin() < 0:
-                hir_shard_guard_block("durable memory snapshot initialization failed")
-                self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
-                return false
+        if mem_snapshot_begin() < 0:
+            hir_shard_guard_block("durable memory snapshot initialization failed")
+            self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
+            return (self.ctx, false)
         if hir_shard_mode:
             var inventory_paths: [text] = []
             for inventory_source in self.ctx.sources:
@@ -1803,7 +922,7 @@ impl CompilerDriver:
             if not hir_shard_inventory(hir_closure_digest, inventory_paths):
                 hir_shard_guard_block("HIR frozen inventory publication failed")
                 self.ctx.add_error("HIR frozen inventory publication failed")
-                return false
+                return (self.ctx, false)
         while hir_loop_pos < hir_visit_order.len():
             source_idx = hir_visit_order[hir_loop_pos]
             val src = self.ctx.sources[source_idx]
@@ -1814,7 +933,7 @@ impl CompilerDriver:
                 if claim < 0 or hir_shard_key == "":
                     hir_shard_guard_block("HIR claim or cache identity unavailable")
                     self.ctx.add_error("HIR shard ledger claim failed")
-                    return false
+                    return (self.ctx, false)
                 if claim == 0:
                     hir_loop_pos = hir_loop_pos + 1
                     continue
@@ -1830,7 +949,7 @@ impl CompilerDriver:
             # hang or stack-exhaustion crash here names its own module. done is
             # the index already finished, current is the unit being worked on.
             log_build_progress("hir", "modules", source_idx,
-                self.ctx.sources.len(), name, 2, 6, 0, hir_cache_hits(), "running")
+                self.ctx.sources.len(), name, 2, 6, 0, 0, "running")
             if not driver_hir_mem_snapshot(
                 "hir-file-start", source_idx, src.path,
                 retained_hir_module_count,
@@ -1839,7 +958,7 @@ impl CompilerDriver:
                 self.ctx.add_error("durable memory snapshot write failed at hir-file-start")
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
-                return false
+                return (self.ctx, false)
             log_trace("processing module")
 
             # Set per-module filename so Symbol.defining_module is populated
@@ -1868,7 +987,7 @@ impl CompilerDriver:
             else:
                 ""
             val hir_cached: HirModule? = if hir_cache_key_value != "":
-                hir_cache_load_parsed_v1(hir_cache_key_value, hir_cache_parser_binding_v1(hir_cache_key_value, src.module_name, src.path, self.ctx.source_identities_owner[source_idx]), src.path)
+                hir_cache_load(hir_cache_key_value)
             else:
                 nil
             val hir_cache_hit: bool = hir_cached != nil
@@ -1876,7 +995,6 @@ impl CompilerDriver:
                 val hir_work = if hir_cache_hit: 0 else: 1
                 print "[M4 lower] module={name} work={hir_work}"
             if hir_cache_hit:
-                self.capture_native_parsed_objectless_v1(hir_cache_last_parser_objectless(), src)
                 # Replay the one global side effect lowering has besides its
                 # return value: the flat HIR rows the bootstrap MIR bridge
                 # reads (module_build.spl's bootstrap_flat_mode block).
@@ -1907,12 +1025,12 @@ impl CompilerDriver:
                 else:
                     self.ctx.modules[name]
                 val bootstrap_lower_result = self.lower_retained_surface_module(
-                    lowering, bootstrap_module_for_hir, src.path, is_bootstrap_entry, src)
+                    lowering, bootstrap_module_for_hir, src.path, is_bootstrap_entry)
                 if bootstrap_lower_result.is_err():
                     self.ctx.add_error(bootstrap_lower_result.unwrap_err())
                     hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                     mem_snapshot_abort()
-                    return false
+                    return (self.ctx, false)
                 bootstrap_lower_result.unwrap()
             elif unstub_hir and (self.ctx.modules[name] != nil):
                 # Reuse phase 2's parsed closure module. Re-parsing every source
@@ -1920,12 +1038,12 @@ impl CompilerDriver:
                 # object cache before code generation starts.
                 dtrace("[DRV] branch=unstub_cached")
                 val cached_lower_result = self.lower_retained_surface_module(
-                    lowering, self.ctx.modules[name], src.path, is_bootstrap_entry, src)
+                    lowering, self.ctx.modules[name], src.path, is_bootstrap_entry)
                 if cached_lower_result.is_err():
                     self.ctx.add_error(cached_lower_result.unwrap_err())
                     hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                     mem_snapshot_abort()
-                    return false
+                    return (self.ctx, false)
                 cached_lower_result.unwrap()
             elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
                 # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
@@ -1936,12 +1054,12 @@ impl CompilerDriver:
                 dtrace("[DRV] branch=unstub_reparse")
                 val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
                 val reparsed_lower_result = self.lower_retained_surface_module(
-                    lowering, entry_module_for_hir, src.path, is_bootstrap_entry, src)
+                    lowering, entry_module_for_hir, src.path, is_bootstrap_entry)
                 if reparsed_lower_result.is_err():
                     self.ctx.add_error(reparsed_lower_result.unwrap_err())
                     hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                     mem_snapshot_abort()
-                    return false
+                    return (self.ctx, false)
                 val lowered_hm: HirModule = reparsed_lower_result.unwrap()
                 dtrace("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
                 lowered_hm
@@ -1983,7 +1101,7 @@ impl CompilerDriver:
                 self.ctx.add_error("durable memory snapshot write failed at hir-post-lowering")
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
-                return false
+                return (self.ctx, false)
             val focused_future_driver_diag = src.path == "src/lib/nogc_async_mut/async/future.spl"
             if focused_future_driver_diag:
                 eprint("[driver-hir] returned future")
@@ -2033,7 +1151,7 @@ impl CompilerDriver:
                 self.ctx.add_error("durable memory snapshot write failed at hir-post-diagnostics")
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
-                return false
+                return (self.ctx, false)
             if focused_future_driver_diag:
                 eprint("[driver-hir] errors done")
 
@@ -2043,7 +1161,7 @@ impl CompilerDriver:
                 if not hir_shard_finish(src.path, "FAILED", false):
                     hir_shard_guard_block("HIR diagnostic receipt publication failed")
                     self.ctx.add_error("HIR diagnostic receipt publication failed")
-                    return false
+                    return (self.ctx, false)
                 # Fail LOUDLY rather than silently: the module is about to be
                 # poisoned and dropped. If the rise in error_count did not come
                 # from the diagnostic loop above, nothing has printed a reason,
@@ -2058,7 +1176,7 @@ impl CompilerDriver:
                 if poison_ctx.poison_budget_exhausted():
                     if not mem_snapshot_finish_with_outcome("hir-diagnostic"):
                         self.ctx.add_error("durable memory snapshot diagnostic terminal publication failed")
-                    return false
+                    return (self.ctx, false)
                 # Skip the shared-trait fold and the phase_hir_modules store
                 # below: neither may observe a poisoned module.
                 hir_loop_pos = hir_loop_pos + 1
@@ -2076,14 +1194,13 @@ impl CompilerDriver:
             driver_log_typed_hir_abi_interface_v1(hir_module, src.path)
             var hir_cache_stored: bool = hir_cache_hit
             if hir_cache_key_value != "" and not hir_cache_hit:
-                val parser_record = self.native_parser_cache_record_v1(hir_cache_key_value, src, source_idx)
-                if parser_record != "" and hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings, parser_record):
+                if hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings):
                     hir_shard_lowered = hir_shard_lowered + 1
                     hir_cache_stored = true
             if not hir_shard_finish(src.path, "PASS", hir_cache_stored):
                 hir_shard_guard_block("HIR completion receipt publication failed")
                 self.ctx.add_error("HIR completion receipt publication failed")
-                return false
+                return (self.ctx, false)
             val hir_function_count: i64 = driver_dict_entry_count(hir_module.functions)
             if focused_future_driver_diag:
                 eprint("[driver-hir] functions={hir_function_count}")
@@ -2101,7 +1218,7 @@ impl CompilerDriver:
                 self.ctx.add_error("durable memory snapshot write failed at hir-post-store")
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
-                return false
+                return (self.ctx, false)
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count_value}")
             if source_idx < 4:
@@ -2110,56 +1227,22 @@ impl CompilerDriver:
             # declarations on this frame. Passing any of them through a value
             # parameter duplicates the no-GC Stage-3 ownership graph.
             var validation_surface_index: i64 = -1
-            # --low-memory clears SourceFile.content after phase 2, while the
-            # frozen surface still carries the original bytes' identity. The
-            # phase-1 scalar receipts survive eviction, but contain resolver
-            # aliases and cannot be indexed by this physical source_index.
-            val validation_source_evicted = self.ctx.options.low_memory and src.content == ""
-            var validation_receipt_index: i64 = -1
-            if validation_source_evicted:
-                val receipt_count = self.ctx.source_paths_owner.len()
-                if (self.ctx.source_module_names_owner.len() == receipt_count and
-                    self.ctx.source_byte_lengths_owner.len() == receipt_count and
-                    self.ctx.source_content_hashes_owner.len() == receipt_count):
-                    var receipt_index: i64 = 0
-                    while receipt_index < receipt_count:
-                        if (self.ctx.source_paths_owner[receipt_index] == src.path and
-                            self.ctx.source_module_names_owner[receipt_index] == name):
-                            # Phase 1 includes resolver aliases. A second
-                            # exact row or a missing hash is not authority.
-                            if (validation_receipt_index >= 0 or
-                                self.ctx.source_content_hashes_owner[receipt_index] == 0):
-                                validation_receipt_index = -1
-                                break
-                            validation_receipt_index = receipt_index
-                        receipt_index = receipt_index + 1
-            if validation_source_evicted and validation_receipt_index < 0:
-                eprint("[hir-source-receipt-missing] source_idx={source_idx} path={src.path} module={name}")
-                self.ctx.add_error("Missing immutable source receipt for {name}")
-                return false
-            val validation_content_length: i64 = if validation_source_evicted:
-                self.ctx.source_byte_lengths_owner[validation_receipt_index]
-            else:
-                src.content.len()
-            val validation_content_hash: i64 = if validation_source_evicted:
-                self.ctx.source_content_hashes_owner[validation_receipt_index]
-            else:
-                hash_text(src.content)
+            val validation_content_length: i64 = src.content.len()
+            val validation_content_hash: i64 = hash_text(src.content)
             var validation_alias_index: i64 = 0
             while validation_alias_index < retained_module_surfaces.ordered_names.len() and
                   validation_alias_index < retained_module_surfaces.ordered_indices.len():
                 if retained_module_surfaces.ordered_names[validation_alias_index] == name:
                     val candidate_index: i64 = retained_module_surfaces.ordered_indices[validation_alias_index]
                     if candidate_index >= 0 and candidate_index < retained_module_surfaces.surfaces.len():
-                        if driver_stage3_surface_identity_matches_receipt(
+                        if driver_stage3_surface_identity_matches(
                             retained_module_surfaces.surfaces[candidate_index].source_index,
                             retained_module_surfaces.surfaces[candidate_index].canonical_path,
                             retained_module_surfaces.surfaces[candidate_index].module_name,
                             retained_module_surfaces.surfaces[candidate_index].content_length,
                             retained_module_surfaces.surfaces[candidate_index].content_hash,
                             source_idx, src.path, name,
-                            validation_content_length, validation_content_hash,
-                            validation_source_evicted):
+                            validation_content_length, validation_content_hash):
                             validation_surface_index = candidate_index
                     break
                 validation_alias_index = validation_alias_index + 1
@@ -2172,15 +1255,14 @@ impl CompilerDriver:
                 while validation_physical_index < retained_module_surfaces.surfaces.len():
                     val physical_source_index: i64 = retained_module_surfaces.surfaces[validation_physical_index].source_index
                     if physical_source_index == source_idx:
-                        if driver_stage3_surface_identity_matches_receipt(
+                        if driver_stage3_surface_identity_matches(
                             physical_source_index,
                             retained_module_surfaces.surfaces[validation_physical_index].canonical_path,
                             retained_module_surfaces.surfaces[validation_physical_index].module_name,
                             retained_module_surfaces.surfaces[validation_physical_index].content_length,
                             retained_module_surfaces.surfaces[validation_physical_index].content_hash,
                             source_idx, src.path, name,
-                            validation_content_length, validation_content_hash,
-                            validation_source_evicted):
+                            validation_content_length, validation_content_hash):
                             validation_surface_index = validation_physical_index
                             break
                     validation_physical_index = validation_physical_index + 1
@@ -2198,49 +1280,7 @@ impl CompilerDriver:
                         retained_module_surfaces.surfaces[validation_surface_index].logical_name)
                     if source_idx < 4:
                         log_phase("phase3:hir:validation:key-push:done index={source_idx}")
-                    validation_module_values = validation_module_values.push(
-                        value_struct_layout_declarations_v1(
-                            name, hir_module.path, hir_module.structs,
-                            hir_module.symbols))
-                    # Shards publish cache entries and exit before aggregate
-                    # validation. Keep identity/layout receipts above, but
-                    # avoid retaining this unused validation transport.
-                    if not hir_shard_mode:
-                        # ANY-transport: annotated rebind before the composite push
-                        # (cycle-78: pushing the bare local hit the codegen's
-                        # unpromoted global-load capture).
-                        # Cycle-78: carried on self.ctx (proven transport); the
-                        # local-var form hit an unpromoted-capture codegen path.
-                        val hir_module_copy: HirModule = hir_module
-                        self.ctx.validation_module_array = self.ctx.validation_module_array.push(hir_module_copy)
-                        # Codec transport twin: encoding happens HERE, in the lane
-                        # whose reads work (same lane as the HIR cache store).
-                        # workaround(p2_add): a codec refusal (encode "") must NOT
-                        # become a validation blob -- hir_module_decode("") is nil
-                        # and the RT blob gate fails the whole build on "module
-                        # blob 0" (repro: p2_add sanity, reason=codec,
-                        # RT-E-HIR-BLOB-DECODE, 2026-10-18). Skip the blob-family
-                        # entries together so the parallel arrays stay in sync;
-                        # when every blob refuses, the validator's empty-blobs
-                        # contract falls back to validation_module_array.
-                        val validation_blob: text = hir_module_encode_retained_v1(hir_module_copy)
-                        if validation_blob != "":
-                            self.ctx.validation_module_blobs = self.ctx.validation_module_blobs.push(validation_blob)
-                            # Cycle-81 CLEAN escalation (revised cycle-82): producer-side
-                            # scalar facts parallel to the blobs. Cycle-82 shim proved
-                            # even a support-unit callee's Dict value reads of
-                            # HirFunction arrive erased in this lane (fault at the
-                            # +120 field load on rt_index_get's result); the ONLY
-                            # context that demonstrably walks module.functions values
-                            # is the codec unit's (the generated encoder reads
-                            # node.functions[dk3] on every encode), so the extraction
-                            # lives there (hir_module_has_rt_hal). The blobs
-                            # validation entry must NEVER read a field off a decoded
-                            # HirModule.
-                            val validation_has_rt_hal: bool = hir_module_has_rt_hal(hir_module)
-                            self.ctx.validation_module_has_rt_hal = self.ctx.validation_module_has_rt_hal.push(validation_has_rt_hal)
-                            val validation_claim_count: i64 = rt_criticality_claim_keys().len()
-                            self.ctx.validation_module_claim_counts = self.ctx.validation_module_claim_counts.push(validation_claim_count)
+                    validation_module_values = validation_module_values.push(hir_module)
                     if source_idx < 4:
                         log_phase("phase3:hir:validation:value-push:done index={source_idx}")
             if focused_future_driver_diag:
@@ -2256,7 +1296,7 @@ impl CompilerDriver:
             # Completion receipt, one per module (see the parse loop for why a
             # cadence is not good enough).
             log_build_progress("hir", "modules", hir_loop_pos,
-                self.ctx.sources.len(), name, 2, 6, 0, hir_cache_hits(), "running")
+                self.ctx.sources.len(), name, 2, 6, 0, 0, "running")
 
         log_phase("phase3:hir:loop:done modules={hir_loop_pos}")
         # Step 3b: ParserTrait coherence checking (Check mode only)
@@ -2266,11 +1306,8 @@ impl CompilerDriver:
         # HirType formatting which is not yet available; trait solver errors
         # cover the primary use cases for now.
 
-        # Always printed (task 8a): a disabled cache prints
-        # `[hir-cache] disabled reason=...`, so no build log is silent about it.
-        if not hir_shard_mode:
-            print hir_cache_adoption_receipt_v1(hir_cache_hits(), hir_cache_misses())
-        print hir_cache_summary()
+        if hir_cache_enabled():
+            print hir_cache_summary()
         if hir_shard_mode:
             # Shard children exist only to fill the HIR cache. Everything after
             # this point is the real build's job and must not run N times.
@@ -2284,23 +1321,24 @@ impl CompilerDriver:
 
         if not mem_snapshot_finish():
             self.ctx.add_error("durable memory snapshot terminal publication failed")
-            return false
+            return (self.ctx, false)
 
         # Collect-all summary. This line is also the PROVENANCE MARKER for the
         # collect-all build: if a run reports errors without emitting it, the
         # binary predates this change and its error count is the old
         # stop-at-first-module number, not a family enumeration.
-        val poisoned_count = self.ctx.poisoned_module_count_value
+        val summary_ctx = self.ctx
+        val poisoned_count = summary_ctx.poisoned_module_count_value
         if poisoned_count > 0:
             eprint("[collect-all] {poisoned_count} module(s) poisoned, "
-                + "{self.ctx.error_count_value} error(s) collected across "
-                + "{self.ctx.sources.len()} source(s) in phase 3 (HIR lowering).")
+                + "{summary_ctx.error_count_value} error(s) collected across "
+                + "{summary_ctx.sources.len()} source(s) in phase 3 (HIR lowering).")
             eprint("[collect-all] Poisoned modules are DROPPED; downstream passes do not run. "
                 + "Diagnostics below are ROOT causes, not a cascade. "
                 + "Set SIMPLE_COMPILE_FAIL_FAST=1 for the old stop-at-first behavior.")
             var poisoned_idx = 0
-            while poisoned_idx < self.ctx.poisoned_modules.len():
-                eprint("[collect-all]   poisoned: {self.ctx.poisoned_modules[poisoned_idx]}")
+            while poisoned_idx < summary_ctx.poisoned_modules.len():
+                eprint("[collect-all]   poisoned: {summary_ctx.poisoned_modules[poisoned_idx]}")
                 poisoned_idx = poisoned_idx + 1
 
         # Commit through the canonical driver owner. Copying this closure-sized
@@ -2310,71 +1348,30 @@ impl CompilerDriver:
         self.ctx.hir_modules = phase_hir_modules
         self.ctx.hir_module_count_value = retained_hir_module_count
         self.ctx.bootstrap_entry_hir = phase_entry_hir
-        # SIMPLE_SDN_RACE_TRACE=1 (cycle-41 in-vivo discriminator): one line
-        # per module handed to the post-HIR passes, with its declared
-        # enum/class/function counts. The SdnValue triple fires at MIR with
-        # `undefined variable SdnValue` in lib.common.sdn.value's OWN body
-        # while HIR reports the module clean; this line decides where the
-        # declaration ownership is lost:
-        #   enums>=1 for lib.common.sdn.value here -> the module payload is
-        #     intact at handoff; the loss is in monomorphization or MIR's
-        #     scope build (next probe surface).
-        #   enums=0  -> the loss is INSIDE the HIR lowering/reuse lane (the
-        #     canonical-reuse guard handed another unit's payload under this
-        #     name); keying is the bug.
-        # Default off; zero cost beyond one env probe at handoff.
-        if (sosix_env_get_nullable("SIMPLE_SDN_RACE_TRACE") ?? "") == "1":
-            for race_key in phase_hir_modules.keys():
-                val race_mod: HirModule = phase_hir_modules[race_key]
-                # Cycle-134 length-first probe: print the functions-dict's
-                # VALUES length BEFORE the deep read (separate eprints, so
-                # the length survives a deep-read fault). values_len=0 would
-                # mean the dict handle fails the runtime's as_dict cast (the
-                # empty-array path), reconciling mono's successful dict-index
-                # reads with the .values()-array element faults.
-                eprint("[race-trace] hir-final module={race_key} enums={race_mod.enums.len()} classes={race_mod.classes.len()} functions={race_mod.functions.len()} fvals_len={hir_module_functions_at_v1(phase_hir_modules.values(), 0).values().len()}")
-                eprint("[race-trace] hir-final-idx first_fn_name={hir_module_first_fn_name_ordered_in_v1(phase_hir_modules, race_key)}")
-                eprint("[race-trace] hir-final-enc enc_len={hir_module_blob_in_v1(phase_hir_modules, race_key).len()} enc_digest={sha256_text(hir_module_blob_in_v1(phase_hir_modules, race_key))}")
-                eprint("[race-trace] hir-final-redecode redecoded_fn={hir_module_first_fn_name_p_v1(hir_module_decode(hir_module_blob_in_v1(phase_hir_modules, race_key)).unwrap())}")
-                eprint("[race-trace] hir-final-wi wi_fn={hir_module_first_fn_name_wi_v1(hir_module_decode(hir_module_blob_in_v1(phase_hir_modules, race_key)).unwrap())} ks_len={hir_module_decode(hir_module_blob_in_v1(phase_hir_modules, race_key)).unwrap().functions.keys().len()}")
-                eprint("[race-trace] hir-final-vd vd_fn={hir_module_first_fn_name_via_decode_v1(phase_hir_modules, race_key)}")
-                eprint("[race-trace] hir-final-deep first_fn_scalars={hir_fn_scalars_at_v1(hir_module_functions_at_v1(phase_hir_modules.values(), 0).values(), 0)[1]}")
         # Same post-loop receipts as the streaming path (see its loop:done
         # comment): a crash between the last file:done and the first pass
         # summary used to leave no marker at all.
         log_phase("phase3:hir:ctx_publish:done modules={retained_hir_module_count} errors={self.ctx.error_count_value}")
         if self.ctx.error_count_value > 0:
-            return false
-        log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()} array={self.ctx.validation_module_array.len()}")
+            return (self.ctx, false)
+        log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()}")
         var legacy_validation_error_count: i64 = 0
-        driver_admit_nogc_param_effects_v1(self.ctx, retained_module_surfaces.surfaces)
-        if self.ctx.error_count_value > 0: return false
-        for validation_error in driver_validate_value_struct_layout_declarations_v1(
+        for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
-                self.ctx.hir_modules, self.ctx.validation_module_array,
-                self.ctx.validation_module_blobs,
-                self.ctx.validation_module_has_rt_hal,
-                self.ctx.validation_module_claim_counts):
+                self.ctx.hir_modules):
             legacy_validation_error_count = legacy_validation_error_count + 1
             self.ctx.add_error(validation_error)
         log_phase("phase3:hir:validate:done errors={legacy_validation_error_count}")
-        log_phase("phase3:hir:post_validate_guard:start")
         if self.ctx.error_count_value > 0:
-            log_phase("phase3:hir:post_validate_guard:failed")
-            return false
-        log_phase("phase3:hir:post_validate_guard:done")
+            return (self.ctx, false)
 
         # Profile-gated HM type inference and visibility diagnostics. Advisory
         # remains log-only; robust warns; critical/verified fail the build.
-        log_phase("phase3:hir:typecheck_severity:start")
         val typecheck_enforcing = match typecheck_pass_severity():
             case TypecheckPassSeverity.Advisory: false
             case _: true
-        log_phase("phase3:hir:typecheck_severity:done")
         if ((env_get("SIMPLE_TYPECHECK_WARN")) == "1") or typecheck_enforcing:
-            log_phase("phase3:hir:typecheck:start")
             val tc_warnings = run_typecheck_warn_pass(self.ctx, phase_hir_modules)
-            log_phase("phase3:hir:typecheck:done")
             log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
             var tcw_idx = 0
             while tcw_idx < tc_warnings.len():
@@ -2384,15 +1381,11 @@ impl CompilerDriver:
         # Profile-gated unsafe-context pass. Advisory remains log-only; robust
         # warns; critical fails the build — unless SIMPLE_ASSURANCE_WARNING_PHASE
         # is on, which drops critical to warn (allocatable-MC migration step 1).
-        log_phase("phase3:hir:safety_severity:start")
         val safety_enforcing = match safety_pass_severity_phased():
             case SafetyPassSeverity.Advisory: false
             case _: true
-        log_phase("phase3:hir:safety_severity:done")
         if ((env_get("SIMPLE_SAFETY_WARN")) == "1") or safety_enforcing:
-            log_phase("phase3:hir:safety:start")
             val safety_warnings = run_safety_warn_pass(self.ctx, phase_hir_modules)
-            log_phase("phase3:hir:safety:done")
             log_warn("safety warn-only pass: {safety_warnings.len()} diagnostic(s)")
             var sw_idx = 0
             while sw_idx < safety_warnings.len():
@@ -2405,38 +1398,24 @@ impl CompilerDriver:
         # Severity is still profile-gated inside each pass -- `critical` raises
         # errors, every other profile raises warnings -- and each records a
         # receipt whether or not it found anything.
-        log_phase("phase3:hir:any_escape:start")
         val any_escape_warnings = run_any_escape_pass(self.ctx, phase_hir_modules)
-        log_phase("phase3:hir:any_escape:done")
         log_warn("any-escape pass: {any_escape_warnings.len()} diagnostic(s)")
         var ae_idx = 0
         while ae_idx < any_escape_warnings.len():
             log_warn(any_escape_warnings[ae_idx])
             ae_idx = ae_idx + 1
 
-        log_phase("phase3:hir:enum_contract:start")
-        val representation_messages = run_representation_manifest_pass(self.ctx, phase_hir_modules)
-        for message in representation_messages:
-            log_warn(message)
         val enum_contract_warnings = run_enum_contract_pass(self.ctx, phase_hir_modules)
-        log_phase("phase3:hir:enum_contract:done")
         log_warn("enum-contract pass: {enum_contract_warnings.len()} diagnostic(s)")
         var ec_idx = 0
         while ec_idx < enum_contract_warnings.len():
             log_warn(enum_contract_warnings[ec_idx])
             ec_idx = ec_idx + 1
 
-        log_phase("phase3:hir:cold_receipts_gate:start")
-        if self.ctx.error_count_value == 0:
-            log_phase("phase3:hir:cold_receipts:start")
-            if not self.capture_cold_hir_typed_receipts_v1():
-                log_phase("phase3:hir:cold_receipts:failed")
-                return false
-            log_phase("phase3:hir:cold_receipts:done")
-        else:
-            log_phase("phase3:hir:cold_receipts:skipped_prior_errors")
-        log_phase("phase3:hir:cold_receipts_gate:done")
-        self.ctx.error_count_value == 0
+        if self.ctx.error_count_value == 0 and
+                not self.capture_cold_hir_typed_receipts_v1():
+            return (self.ctx, false)
+        (self.ctx, self.ctx.error_count_value == 0)
 
     # --------------------------------------------------------------------------
     # Phase 3a: Lower to HIR (standalone, kept for compatibility)
@@ -2458,11 +1437,8 @@ impl CompilerDriver:
 
         var compatibility_lowering: HirLowering = hirlowering_for_module(
             "", retained_module_surfaces)
-        compatibility_lowering.tldr_entry_only = ctx.tldr_entry_only
-        compatibility_lowering.tldr_imports = ctx.tldr_imports
         if driver_hir_explicit_semantic_policy(ctx):
             compatibility_lowering.use_explicit_semantic_policy()
-        compatibility_lowering.forbid_written_any = driver_hir_forbids_written_any(ctx)
         for src2 in ctx.sources:
             val name = src2.module_name
             val module = ctx.modules[name]
@@ -2477,18 +1453,3 @@ impl CompilerDriver:
             ctx.hir_modules[name] = hir_module
         (ctx, not ctx.has_errors())
 use compiler.common.diagnostics.span.{Span}
-export DriverHirShardTransactionReceiptV1
-export driver_hir_source_body_custody_matches_in_owned_scope_v1
-
-# Phase-1 owner reset. No caller body/digest can create a replacement pin.
-pub fn driver_hir_source_body_revoke_driver_v1(driver: CompilerDriver) -> bool:
-    if transient_array_scope_state_v1() != 0: return false
-    if not _driver_source_body_custody_ready_v1: return true
-    val word = driver.identity_id
-    _driver_source_body_lowerers_v1.remove(word)
-    for key in _driver_source_body_custody_v1.keys():
-        if _driver_source_body_custody_v1[key].driver_word == word:
-            _driver_source_body_custody_v1.remove(key)
-    true
-
-export driver_hir_source_body_revoke_driver_v1

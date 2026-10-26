@@ -131,7 +131,7 @@ val output = llvm_output_for(\translator:
     translator.local_types[10] = "i64"
     translator.local_types[11] = "i64"
     translator.local_types[12] = "i64"
-    translator.llvm_intrinsic_impl(
+    translator.translate_intrinsic(
         Some(LocalId(id: 12)),
         "__simple_ssa_phi",
         [

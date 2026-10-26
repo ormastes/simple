@@ -6,9 +6,8 @@ use app.traceability.core.*
 # warnings for missing source/test links, missing backwards documentation links,
 # and uncovered REQ/NFR identifiers.
 
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
-use std.nogc_sync_mut.io.dir_ops.{dir_walk, is_dir}
-
+use app.io.mod (file_exists, file_read, dir_walk, is_dir)
+use common.text_advanced.{escape_json}
 
 struct TraceabilityConfig:
     generated_spec_root: text
@@ -62,22 +61,7 @@ fn load_traceability_config() -> TraceabilityConfig:
     val content = file_read(path)
     if content == "":
         return default_traceability_config()
-    traceability_config_from_captured_text_v1(content)
 
-pub fn traceability_config_validate_captured_v1(config: TraceabilityConfig) -> Result<bool, text>:
-    if config.warn_source_roots.len() > 4096:
-        return Err("structural configuration member budget exceeded")
-    var bytes = 0
-    for path in [config.generated_spec_root, config.legacy_requirement_root] + config.warn_source_roots:
-        if path.len() > 4096 or path.bytes().contains(0u8):
-            return Err("structural configuration path budget exceeded")
-        if path.len() > 65536 - bytes:
-            return Err("structural configuration byte budget exceeded")
-        bytes = bytes + path.len()
-    Ok(true)
-
-pub fn traceability_config_from_captured_text_v1(content: text) -> TraceabilityConfig:
-    """Parse supplied configuration without reading the mutable filesystem."""
     var cfg = default_traceability_config()
     var in_section = false
     val lines = content.split("\n")
@@ -137,11 +121,6 @@ fn analyze_virtual_files(files: [VirtualFile], scope: text, config: Traceability
         parsed.push(parse_trace_file(file))
     existing_paths = unique_texts(existing_paths)
 
-    analyze_parsed_traceability_v1(parsed, existing_paths, scope, config, enforce_source_roots)
-
-fn analyze_parsed_traceability_v1(parsed: [ParsedTraceFile], existing_paths: [text], scope: text,
-    config: TraceabilityConfig, enforce_source_roots: bool) -> [TraceabilityWarning]:
-
     var warnings: [TraceabilityWarning] = []
     warnings = extend_warnings(base: warnings, extra: analyze_generated_spec_layout(parsed, existing_paths, config, scope))
     warnings = extend_warnings(base: warnings, extra: analyze_specs(parsed, existing_paths, config, scope))
@@ -151,52 +130,6 @@ fn analyze_parsed_traceability_v1(parsed: [ParsedTraceFile], existing_paths: [te
         warnings = extend_warnings(base: warnings, extra: analyze_source_tests(parsed, existing_paths, config, scope))
 
     warnings
-
-pub fn analyze_virtual_files_bounded_v1(files: [VirtualFile], scope: text,
-    config: TraceabilityConfig, enforce_source_roots: bool, max_diagnostics: i64) -> Result<[TraceabilityWarning], text>:
-    """Bound warning construction before invoking the existing structural rules.
-
-    B = 6F + 2L + I + T, including duplicates. F counts files; L counts the
-    four companion-link arrays; I counts requirement/NFR IDs; T counts raw
-    test paths. Executable specs, requirements, backlinks and source anchors
-    emit no more than this reviewed upper bound. Budget refusal is incomplete
-    evaluation, never a completed violation. This does not bound analysis time.
-    """
-    if max_diagnostics < 0 or max_diagnostics > 100000:
-        return Err("invalid structural diagnostic budget")
-    traceability_config_validate_captured_v1(config)?
-    var bound = 0
-    var parsed: [ParsedTraceFile] = []
-    var existing_paths: [text] = []
-    for file in files:
-        if file.path.len() > 4096 or file.path.bytes().contains(0u8):
-            return Err("structural input path budget exceeded")
-        if max_diagnostics - bound < 6:
-            return Err("structural diagnostic budget exceeded before evaluation")
-        bound = bound + 6
-        val item = parse_trace_file(file)
-        for raw in [item.requirement_value, item.plan_value, item.design_value, item.research_value]:
-            if raw.len() > 4096:
-                return Err("structural header field budget exceeded")
-        for members in [item.requirement_paths, item.plan_paths, item.design_paths, item.research_paths,
-            item.req_ids, item.nfr_ids, item.raw_test_paths]:
-            for member in members:
-                if member.len() > 4096 or member.bytes().contains(0u8):
-                    return Err("structural link or identifier byte budget exceeded")
-        for links in [item.requirement_paths, item.plan_paths, item.design_paths, item.research_paths]:
-            if links.len() > (max_diagnostics - bound) / 2:
-                return Err("structural link diagnostic budget exceeded before evaluation")
-            bound = bound + 2 * links.len()
-        for members in [item.req_ids, item.nfr_ids, item.raw_test_paths]:
-            if members.len() > max_diagnostics - bound:
-                return Err("structural identifier diagnostic budget exceeded before evaluation")
-            bound = bound + members.len()
-        parsed.push(item)
-        existing_paths.push(file.path)
-    val warnings = analyze_parsed_traceability_v1(parsed, unique_texts(existing_paths), scope, config, enforce_source_roots)
-    if warnings.len() > bound or warnings.len() > max_diagnostics:
-        return Err("structural diagnostic bound violated")
-    Ok(warnings)
 
 fn analyze_generated_spec_layout(parsed: [ParsedTraceFile], existing_paths: [text], config: TraceabilityConfig, scope: text) -> [TraceabilityWarning]:
     if scope != "all" and scope != "spec":

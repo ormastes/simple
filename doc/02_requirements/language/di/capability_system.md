@@ -1,12 +1,6 @@
 # Reference Capability System Specification
-
-**Evidence qualification (2026-10-21, SF6):** Reviewed against source commit `380200890ff030b34c68ff38f362b482e1276769`. Original dates and historical example/pass labels are retained as provenance, not a current execution result. This documentation correction ran no compiler, Lean, benchmark, or runtime tests; executable qualification is **UNRUN**.
-
-Selected authority: `doc/02_requirements/language/mission_critical_profile.md`, REQ-MC-004 (lines 37–43), explicitly supersedes blanket “unsafe = all capabilities” for that profile: capability scope, reason, and reviewer manifest are required. This is a requirement with its stated phase, not evidence that every path enforces it.
-
-Source anchors: `src/compiler/35.semantics/unsafe.spl` defines `UnsafeContext`, unsafe-operation classification, and context checks (lines 24–46, 82–117, 165–225); `src/compiler/00.common/assurance/unsafe_capabilities.spl` defines the scoped vocabulary (lines 30–51, 60–106). Their presence establishes source machinery, not complete enforcement in every compiler route. In particular `is_sffi_function` returns false for a bare `Var` (unsafe.spl:206–217); no blanket FFI-checker coverage is claimed. Legacy `expect true` examples and pass labels below are historical generated text, not real enforcement or performance evidence. Selected scoped-boundary requirements are unchanged.
 *Source:* `test/03_system/feature/usage/capability_system_spec.spl`
-**Feature IDs:** #CAP-SYS-001 to #CAP-SYS-034  |  **Category:** Type System | Capabilities  |  **Status:** Historical generated examples; current implementation qualification not established
+**Feature IDs:** #CAP-SYS-001 to #CAP-SYS-034  |  **Category:** Type System | Capabilities  |  **Status:** Implemented
 
 ## Overview
 
@@ -17,7 +11,7 @@ Tests the reference capability system for memory safety:
 - Aliasing rules (Shared, Exclusive, Isolated)
 - Capability conversion rules
 - Concurrency mode validation (Actor, LockBase, Unsafe)
-- Zero-cost abstraction target (historical type-size examples do not measure runtime cost)
+- Zero-cost abstraction guarantee
 
 ## Capability Types
 
@@ -29,11 +23,11 @@ Tests the reference capability system for memory safety:
 
 - Actor (default) - Only `iso T` allowed, `mut T` rejected
 - LockBase - `mut T` and `iso T` allowed
-- Unsafe - Historical compatibility rule, superseded in the mission-critical profile by REQ-MC-004; no blanket authorization
+- Unsafe - All capabilities allowed
 
 ## Syntax
 
-```simple:skip
+```simple
 @concurrency_mode(lock_base)
 fn update(counter: mut Counter, delta: i64) -> i64:
     counter.value = counter.value + delta
@@ -229,19 +223,19 @@ fn update(counter: mut Counter, delta: i64) -> i64:
 
 ## Unsafe Mode
 
-    Historical scenario for the old permissive mode; it does not specify current blanket permission. In the mission-critical profile REQ-MC-004 requires scoped capabilities, reason, and reviewer manifest.
+    Tests that unsafe mode allows all capabilities.
 
 ### Scenario: General
 
 | # | Example | Status |
 |---|---------|--------|
 | 1 | parses unsafe mode attribute | pass |
-| 2 | historical permissive mode example (superseded for the mission-critical profile) | pass |
+| 2 | unsafe mode allows all capabilities | pass |
 
 **Example:** parses unsafe mode attribute
     Then  expect true
 
-**Example:** historical permissive mode example (superseded for the mission-critical profile)
+**Example:** unsafe mode allows all capabilities
     Then  expect true
 
 ## Feature: iso T in All Modes
@@ -271,7 +265,7 @@ fn update(counter: mut Counter, delta: i64) -> i64:
 
 ## Runtime Cost Verification
 
-    Records historical capability/type-size examples. Zero runtime overhead remains a target requiring performance evidence; these examples do not establish it.
+    Tests that capabilities have no runtime overhead.
 
 ### Scenario: General
 

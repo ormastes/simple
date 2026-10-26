@@ -56,12 +56,6 @@ pub fn rt_current_time_ms(_args: &[Value]) -> Result<Value, CompileError> {
     )))
 }
 
-/// Get Unix epoch milliseconds with the native clock's -1 failure sentinel.
-pub fn rt_time_now_unix_millis(_args: &[Value]) -> Result<Value, CompileError> {
-    let micros = simple_runtime::value::sffi::rt_time_now_unix_micros();
-    Ok(Value::Int(if micros < 0 { -1 } else { micros / 1000 }))
-}
-
 /// Get current time in milliseconds since Unix epoch (alias for web stack)
 ///
 /// Callable from Simple as: `rt_time_now_ms()`
@@ -350,7 +344,7 @@ fn interp_monotonic_nanos() -> i64 {
 
 /// Get monotonic time in nanoseconds.
 ///
-/// EPOCH CONTRACT (pinned by `test/01_unit/runtime/time_epoch_convergence_spec.spl`):
+/// EPOCH CONTRACT (pinned by `test/unit/runtime/time_epoch_convergence_spec.spl`):
 /// this is MONOTONIC, matching `runtime.h:251`, `runtime_time.c`,
 /// `runtime_native.c`, `platform/unix_common.h`, `platform/platform_win.h`, and
 /// the pure-Simple `src/runtime/simple_core/core_process.spl`. It returned

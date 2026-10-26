@@ -35,7 +35,7 @@ block comment
 
 ### Documentation Comments
 
-```text
+```simple
 ## Single-line doc comment
 fn example():
     pass
@@ -116,7 +116,7 @@ struct Example:
 
         A hash symbol begins a comment that lasts until newline.
 
-        ```text
+        ```simple
         val x = 42  # This is ignored
         ```
 
@@ -172,7 +172,7 @@ struct Example:
 
         Block comments can appear on a single line.
 
-        ```text
+        ```simple
         val x = /* comment */ 42
         ```
 
@@ -195,7 +195,7 @@ struct Example:
 
         Block comments can span multiple lines.
 
-        ```text
+        ```simple
         /*
         This is a
         multi-line comment
@@ -222,7 +222,7 @@ struct Example:
 
         Simple supports nested block comments, unlike C/C++.
 
-        ```text
+        ```simple
         /* outer /* inner */ outer */
         ```
 
@@ -252,7 +252,7 @@ struct Example:
 
         The `##` syntax creates a doc comment for the next item.
 
-        ```text
+        ```simple
         ## This documents the function
         fn example():
             pass
@@ -277,7 +277,7 @@ struct Example:
 
         The `/** */` syntax creates multi-line documentation.
 
-        ```text
+        ```simple
         /**
          * Comprehensive documentation
          * with multiple lines

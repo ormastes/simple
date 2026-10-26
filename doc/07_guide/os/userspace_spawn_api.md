@@ -4,7 +4,7 @@ Launch any executable by filesystem path with argument and environment vectors.
 
 ## Quick Start
 
-```simple:skip
+```spl
 use os.userlib.process.{spawn_path}
 
 # Spawn /usr/bin/editor with arguments
@@ -43,7 +43,7 @@ Compute the expected buffer size without allocating.
 
 ### Shell usage
 
-```simple:skip
+```spl
 use os.userlib.process.{spawn_path, wait_}
 
 val pid = spawn_path("/bin/ls", ["ls", "-la", "/home"], ["PATH=/bin"])
@@ -53,7 +53,7 @@ if val Ok(child) = pid:
 
 ### Programmatic spawn with environment
 
-```simple:skip
+```spl
 val envp: [text] = [
     "HOME=/home/user",
     "PATH=/bin:/usr/bin",
@@ -64,7 +64,7 @@ val result = spawn_path("/usr/bin/myapp", ["myapp", "--config", "/etc/app.conf"]
 
 ### Empty argv defaults to path
 
-```simple:skip
+```spl
 # argv becomes ["/bin/hello"] automatically
 val result = spawn_path("/bin/hello", [], [])
 ```

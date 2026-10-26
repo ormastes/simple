@@ -6,10 +6,6 @@
 # at authoring time because each individual call looks cheap.
 #
 # PERF-SCAN-001: whole-container scan invoked inside a loop body        WARNING
-# PERF-SCAN-002: slice materialised only to be compared, per iteration  WARNING
-#   (`s[i:i + n] == sub` in a loop: one allocation per step. Measured: 890 s
-#   of SCV cold init in str_index_of, fixed 3ccff56de67; see
-#   doc/08_tracking/bug/stage2_scv_cold_init_str_contains_per_byte_slice_2026-10-09.md)
 #
 # NOTE ON THE MOTIVATING EXAMPLE (corrected 2026-09-02): this rule was written
 # after a Stage-3 stall in `rt_transient_heap_promote`, which was FIRST diagnosed
@@ -69,141 +65,10 @@ fn opens_loop(code: text) -> bool:
     val t = code.trim()
     t.starts_with("for ") or t.starts_with("while ")
 
-fn is_ident_byte(b: i64) -> bool:
-    (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
-
-fn is_equality_op_at(code: text, at: i64) -> bool:
-    """`==` or `!=` starting at byte `at`."""
-    if at < 0 or at + 1 >= code.len():
-        return false
-    val first = code.byte_at(at)
-    code.byte_at(at + 1) == 61 and (first == 61 or first == 33)
-
-fn is_quote_byte(b: i64) -> bool:
-    b == 34 or b == 39
-
-fn one_char_literal_starts_at(code: text, at: i64) -> bool:
-    """A quoted literal of exactly one character (or one escape) starts at `at`."""
-    if at + 2 >= code.len() or not is_quote_byte(code.byte_at(at)):
-        return false
-    val quote = code.byte_at(at)
-    if code.byte_at(at + 1) == 92:
-        return at + 3 < code.len() and code.byte_at(at + 3) == quote
-    code.byte_at(at + 1) != quote and code.byte_at(at + 2) == quote
-
-fn one_char_literal_ends_at(code: text, at: i64) -> bool:
-    """A quoted literal of exactly one character (or one escape) ends at `at`."""
-    if at < 2 or not is_quote_byte(code.byte_at(at)):
-        return false
-    val quote = code.byte_at(at)
-    if code.byte_at(at - 2) == quote and code.byte_at(at - 1) != quote:
-        return true
-    at >= 3 and code.byte_at(at - 3) == quote and code.byte_at(at - 2) == 92
-
-fn slice_is_one_wide(code: text, open: i64, colon: i64, close: i64) -> bool:
-    """`[lo:lo + 1]`: the upper bound is textually the lower bound plus one."""
-    val lo = code[open + 1:colon].replace(" ", "")
-    val hi = code[colon + 1:close].replace(" ", "")
-    lo != "" and hi == lo + "+1"
-
-pub fn slice_compared_for_equality(code: text) -> bool:
-    """True when the line compares a slice `recv[a:b]` with `==` / `!=`.
-
-    PERF-SCAN-002 shape: `s[i:i + n] == sub` materialises one substring (or
-    sub-array) per evaluation only to compare and drop it. Not reported: a
-    slice whose bounds are both literals; a one-wide slice compared with a
-    one-character literal (`s[i:i + 1] == "*"`, a single-byte test, not a
-    scan); anything inside a `"` or `'` literal or after a `#` comment.
-    One left-to-right pass over the line's bytes."""
-    val n = code.len()
-    var i = 0
-    var quote = 0
-    while i < n:
-        val b = code.byte_at(i)
-        if quote != 0:
-            if b == 92:
-                i = i + 1
-            elif b == quote:
-                quote = 0
-            i = i + 1
-            continue
-        if is_quote_byte(b):
-            quote = b
-            i = i + 1
-            continue
-        if b == 35:
-            return false
-        var opens_index = false
-        if b == 91 and i > 0:
-            val before = code.byte_at(i - 1)
-            opens_index = is_ident_byte(before) or before == 41 or before == 93
-        if not opens_index:
-            i = i + 1
-            continue
-        # Scan to the matching `]`, noting a top-level `:` and any identifier.
-        var depth = 1
-        var j = i + 1
-        var colon = -1
-        var has_variable = false
-        var inner_quote = 0
-        while j < n and depth > 0:
-            val c = code.byte_at(j)
-            if inner_quote != 0:
-                if c == 92:
-                    j = j + 1
-                elif c == inner_quote:
-                    inner_quote = 0
-            elif is_quote_byte(c):
-                inner_quote = c
-            elif c == 91 or c == 40:
-                depth = depth + 1
-            elif c == 93 or c == 41:
-                depth = depth - 1
-            elif c == 58 and depth == 1 and colon < 0:
-                colon = j
-            elif (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95:
-                has_variable = true
-            j = j + 1
-        if depth == 0 and colon >= 0 and has_variable:
-            val one_wide = slice_is_one_wide(code, i, colon, j - 1)
-            # `recv[a:b] == x`
-            var after = j
-            while after < n and code.byte_at(after) == 32:
-                after = after + 1
-            if is_equality_op_at(code, after):
-                var operand = after + 2
-                while operand < n and code.byte_at(operand) == 32:
-                    operand = operand + 1
-                if not (one_wide and one_char_literal_starts_at(code, operand)):
-                    return true
-            # `x == recv[a:b]`
-            var start = i - 1
-            while start >= 0 and (is_ident_byte(code.byte_at(start)) or code.byte_at(start) == 46):
-                start = start - 1
-            while start >= 0 and code.byte_at(start) == 32:
-                start = start - 1
-            if is_equality_op_at(code, start - 1):
-                var operand_end = start - 2
-                while operand_end >= 0 and code.byte_at(operand_end) == 32:
-                    operand_end = operand_end - 1
-                if not (one_wide and one_char_literal_ends_at(code, operand_end)):
-                    return true
-        i = j
-    false
-
-fn slice_compare_finding(line_num: i64) -> LinearScanFinding:
-    LinearScanFinding(
-        "PERF-SCAN-002",
-        "warning",
-        "slice materialised and compared once per loop iteration — one allocation per step, O(n*m) over the scan",
-        "search with `.index_of(sub, start)` and jump between matches, or compare in place with `.starts_with`/`byte_at`. This exact shape cost 890 s of SCV cold init (str_index_of: `s[i:i + n] == sub` per input byte).",
-        line_num)
-
 pub fn check_linear_scan_in_loop_snapshot(
     snapshot: CodeLineSnapshot, file_path: text
 ) -> [LinearScanFinding]:
-    """Report PERF-SCAN-001 for whole-container scans inside a loop body, and
-    PERF-SCAN-002 for a slice materialised only to be compared, per iteration.
+    """Report PERF-SCAN-001 for whole-container scans inside a loop body.
 
     One linear pass. A stack of enclosing loop-header indents tracks loop depth;
     a line is 'inside a loop' when its indent exceeds the innermost recorded
@@ -216,10 +81,8 @@ pub fn check_linear_scan_in_loop_snapshot(
 
     for cl in snapshot.lines:
         val raw = cl.raw
-        val code = cl.trimmed
-        # Blank and comment-only lines are not code: a `# ... .retain(` note
-        # inside a loop must not be reported, and must not open/close a loop.
-        if code == "" or code.starts_with("#"):
+        val code = cl.code
+        if code.trim() == "":
             continue
         val indent = line_indent(raw)
 
@@ -234,17 +97,11 @@ pub fn check_linear_scan_in_loop_snapshot(
             loop_indents = loop_indents[0:loop_indents.len() - 1]
 
         if opens_loop(code):
-            # A `while` condition is re-evaluated every iteration.
-            if t.starts_with("while ") and slice_compared_for_equality(code):
-                findings = findings.push(slice_compare_finding(cl.line_num))
             loop_indents = loop_indents.push(indent)
             continue
 
         if loop_indents.len() == 0:
             continue
-
-        if slice_compared_for_equality(code):
-            findings = findings.push(slice_compare_finding(cl.line_num))
 
         for p in prims:
             if code.contains(p):

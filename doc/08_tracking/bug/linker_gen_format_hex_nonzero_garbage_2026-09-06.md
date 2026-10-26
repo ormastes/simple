@@ -1,13 +1,4 @@
 # linker_gen `format_hex` emits blank/control characters for any nonzero input
-
-## Repair candidate 2026-10-18 — execution pending
-
-The Item 4 generator branch replaces character-code conversion with a lookup
-of hexadecimal text digits. Regressions cover zero, nonzero RAM origin,
-alphabetic digits, nibble boundaries and the largest nonnegative `i64` address.
-The board renderer fixture now uses a real nonzero origin and section address.
-This bug remains OPEN until an admitted runtime executes those regressions.
-See `doc/09_report/item4_generator_2026-10-18.md`; no runtime PASS is claimed.
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

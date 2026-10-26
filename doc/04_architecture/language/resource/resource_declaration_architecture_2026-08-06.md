@@ -17,7 +17,7 @@
 
 A new nominal declaration kind:
 
-```simple:skip
+```simple
 @sffi(prefix: "rt_file", invalid: -1)
 resource File
 ```
@@ -45,7 +45,7 @@ implementation/SFFI metadata — never part of the public type. There is no
 `resource`. `class T` / `struct T` / GC semantics are unchanged — additive,
 not a reinterpretation of `T`.
 
-```simple:skip
+```simple
 val file = File.open("data.bin")?
 val count = file.read(buffer)
 # no close call needed; released exactly once at end of owning lifetime
@@ -103,7 +103,7 @@ for trait composition (`class C with Trait:`) and context-managers
 (`with X as f:`). The resource `with` form is one generic desugar over
 ownership + a nested scope — not per-library:
 
-```simple:skip
+```simple
 with File.open(path)? as file:
     file.read(buffer)
 # file definitely closed here

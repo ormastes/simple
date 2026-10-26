@@ -132,7 +132,7 @@ These wrap existing parsers with simpler APIs, no duplication of logic.
 
 ### Current (Before Merge)
 
-```simple:skip
+```simple
 # Compiler uses compiler lexer (correct)
 use compiler.lexer.{Lexer}
 
@@ -144,7 +144,7 @@ use app.parser.lexer.{Lexer}
 
 ### After Merge (Target State)
 
-```simple:skip
+```simple
 # All files use compiler lexer
 use compiler.lexer.{Lexer}
 
@@ -175,7 +175,7 @@ use compiler.lexer.{Lexer}
 - Any tool needing tokenization
 
 **API:**
-```simple:skip
+```simple
 impl Lexer:
     static fn new(source: text) -> Lexer
     static fn with_registry(source, registry) -> Lexer
@@ -226,7 +226,7 @@ impl Lexer:
 - Any tool needing full AST
 
 **API:**
-```simple:skip
+```simple
 impl Parser:
     static fn new(source: text) -> Parser
     static fn with_resolved_blocks(source, resolved) -> Parser
@@ -251,7 +251,7 @@ impl Parser:
 - `compiler/driver.spl` - Outline-only compilation
 
 **API:**
-```simple:skip
+```simple
 impl TreeSitter:
     static fn new(source: text) -> TreeSitter
     static fn with_fast_mode(fast_mode: bool) -> TreeSitter
@@ -281,7 +281,7 @@ impl TreeSitter:
 - IDE features (outline view, navigation)
 
 **API:**
-```simple:skip
+```simple
 class OutlineParser:
     static fn from_source(source: text) -> OutlineParser
     me parse() -> [OutlineItem]
@@ -313,7 +313,7 @@ package:
 - Data file parsing
 
 **API:**
-```simple:skip
+```simple
 fn parse(source: text) -> Result<SdnValue, SdnError>
 fn parse_file(path: text) -> Result<SdnValue, SdnError>
 ```
@@ -335,7 +335,7 @@ fn parse_file(path: text) -> Result<SdnValue, SdnError>
 - `std/sdn/parser.spl` - SDN parsing
 
 **API:**
-```simple:skip
+```simple
 impl Lexer:
     static fn from_source(source: text) -> Lexer
     me tokenize() -> [Token]
@@ -368,7 +368,7 @@ instruction Add:
 **Language:** Predicate logic (Simple sublanguage)
 
 **Example:**
-```simple:skip
+```simple
 fn sort<T where T: Ord>(items: [T]) -> [T]
 #           ^^^^^^^^^^^^^ predicate
 ```
@@ -385,7 +385,7 @@ fn sort<T where T: Ord>(items: [T]) -> [T]
 **Strategy:** Lightweight scanning (no full parse)
 
 **What It Extracts:**
-```simple:skip
+```simple
 use std.io.file
 import parser.treesitter.{Tree}
 common use std.collections.*
@@ -403,7 +403,7 @@ common use std.collections.*
 **Strategy:** Line-based scanning (no AST)
 
 **What It Extracts:**
-```simple:skip
+```simple
 @Lib(rust: "reqwest", version: "0.11")
 extern class HttpClient:
     static fn new() -> HttpClient
@@ -430,12 +430,12 @@ extern class HttpClient:
 **Purpose:** Thin wrapper for interpreter to use TreeSitter
 
 **What It Wraps:**
-```simple:skip
+```simple
 import parser.treesitter.parser.{TreeSitterParser}
 ```
 
 **API:**
-```simple:skip
+```simple
 impl SimpleParser:
     static fn new() -> SimpleParser
     fn parse(source: String) -> Result<Tree, ParseError>
@@ -511,7 +511,7 @@ grep -r "app\.parser\.lexer" src/ test/
 
 ### "I want to tokenize Simple code"
 
-```simple:skip
+```simple
 use compiler.lexer.{Lexer}
 
 val lexer = Lexer.new("fn main(): print 'Hello'")
@@ -520,7 +520,7 @@ val tokens = lexer.tokenize()
 
 ### "I want to parse Simple code (full AST)"
 
-```simple:skip
+```simple
 use compiler.parser.{Parser}
 
 val parser = Parser.new(source)
@@ -529,7 +529,7 @@ val module = parser.parse()
 
 ### "I want to get outline only (fast)"
 
-```simple:skip
+```simple
 use compiler.treesitter.{TreeSitter}
 
 val ts = TreeSitter.new(source)
@@ -539,7 +539,7 @@ val outline = ts.parse_outline()
 
 ### "I want to parse SDN config file"
 
-```simple:skip
+```simple
 use std.sdn.parser.{parse_file}
 
 match parse_file("config.sdn"):
@@ -549,7 +549,7 @@ match parse_file("config.sdn"):
 
 ### "I want to extract imports from .spl file"
 
-```simple:skip
+```simple
 use app.depgraph.parser.{extract_imports}
 
 val imports = extract_imports(source)

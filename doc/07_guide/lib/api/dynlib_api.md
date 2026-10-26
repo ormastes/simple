@@ -18,7 +18,7 @@ dylib_registry.spl  -- kernel handle table (ELF/SMF)
 
 ## Quick Start
 
-```simple:skip
+```spl
 use os.posix.dynlib.{dynlib_open, dynlib_symbol, dynlib_close, dynlib_is_valid}
 use os.posix.dynlib_sffi.{dynlib_call_1}
 

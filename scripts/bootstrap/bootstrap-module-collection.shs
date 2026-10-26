@@ -2,24 +2,7 @@
 # Diagnostic object compilation. Caller owns source inventory and admission;
 # this scheduler never substitutes a producer or promotes diagnostic output.
 
-bootstrap_module_documentation_only() {
-  # Deliberately narrower than a facade classifier: import/export/type/string
-  # syntax needs real frontend/closure validation. Only ordinary blank lines
-  # and full-line comments can prove there is no object-producing syntax.
-  # Unreadable, symlinked, missing, or unusual input stays on the compile path.
-  [ "$#" -eq 1 ] && [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ] || return 1
-  LC_ALL=C awk '
-    /^[[:space:]]*$/ { next }
-    /^[[:space:]]*#/ { next }
-    { exit 1 }
-  ' "$1"
-}
-
 bootstrap_module_object_valid() {
-  if [ -n "${MODULE_PROGRESS_TARGET:-}" ]; then
-    python3 "$MODULE_PROGRESS_HELPER" object "$1" "$MODULE_PROGRESS_TARGET"
-    return $?
-  fi
   # Check the output kind independently of the compiler's status or suffix.
   # ELF ET_REL, COFF (no PE optional header), and Mach-O MH_OBJECT are the
   # supported host object containers. This is not a full object-file verifier.
@@ -48,20 +31,10 @@ run_module_compile_inventory() (
   mc_manifest=$1 mc_work=$2 mc_cache_root=$3 mc_workers=$4 mc_threads=$5
   mc_run=$6 mc_validate=$7 mc_summary=$8
   case "$mc_workers:$mc_threads" in *[!0-9:]*|0:*|*:0|:*|*:) return 2 ;; esac
-  mc_stop_file=${SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE:-}
-  mc_systemic_file=${SIMPLE_MODULE_SYSTEMIC_STOP_FILE:-}
-  for mc_marker in "$mc_stop_file" "$mc_systemic_file"; do
-    [ -z "$mc_marker" ] || { case "$mc_marker" in /*) ;; *) return 2 ;; esac; }
-  done
-  mc_abort_requested() {
-    if [ -n "$mc_stop_file" ] && [ -e "$mc_stop_file" ]; then mc_abort_rc=143; return 0; fi
-    if [ -n "$mc_systemic_file" ] && [ -e "$mc_systemic_file" ]; then mc_abort_rc=74; return 0; fi
-    return 1
-  }
   [ -f "$mc_manifest" ] || return 2
   mkdir -p "$mc_work" "$mc_cache_root" || return 2
   mc_attempt=$(mktemp -d "$mc_work/attempt.XXXXXX") || return 2
-  mc_failed=0 mc_count=0 mc_batch=0 mc_jobs= mc_blocked=0 mc_block_log= mc_abort_rc=0
+  mc_failed=0 mc_count=0 mc_batch=0 mc_jobs= mc_blocked=0 mc_block_log=
   # A scheduler filesystem/hash error must not orphan already launched work.
   # Children own their timeout; finish/reap them without deleting their caches.
   trap 'for mc_pending in $mc_jobs; do wait "${mc_pending%:*}" 2>/dev/null || :; done' 0
@@ -70,8 +43,6 @@ run_module_compile_inventory() (
   mc_stopped=${MODULE_COMPILE_PRIOR_FAILURE:-0}
   while IFS= read -r mc_entry || [ -n "$mc_entry" ]; do
     [ -n "$mc_entry" ] || continue
-    # Observe owner cancellation before allocating another attempt or child.
-    if mc_abort_requested; then break; fi
     mc_count=$((mc_count + 1))
     mc_dir="$mc_attempt/$mc_count"
     mkdir -p "$mc_dir/home" "$mc_dir/tmp" || return 2
@@ -83,24 +54,6 @@ run_module_compile_inventory() (
       [ "$mc_blocked" = 1 ] || mc_block_log="$mc_dir/prerequisite.log"
       mc_blocked=1
       printf 'task=module_compile_%s|entry=%s|result=BLOCKED|status=prerequisite-unavailable|log=%s\n' "$mc_count" "$mc_entry" "$mc_block_log" >"$mc_dir/row"
-      mc_failed=1 mc_stopped=1
-    elif bootstrap_module_documentation_only "$mc_entry"; then
-      mc_source_sha=$(hash_stream <"$mc_entry") || return 2
-      mc_doc_result=UNSUPPORTED mc_doc_status=documentation-only-no-code
-      if ! "$mc_validate" >>"$mc_dir/prerequisite.log" 2>&1; then
-        mc_doc_result=BLOCKED mc_doc_status=authority-changed
-      else
-        mc_source_after=$(hash_stream <"$mc_entry") || return 2
-        if [ "$mc_source_sha" != "$mc_source_after" ] ||
-            ! bootstrap_module_documentation_only "$mc_entry"; then
-          mc_doc_result=BLOCKED mc_doc_status=source-changed
-        fi
-      fi
-      # No object operation was executed. Retain aggregate failure until the
-      # admission policy explicitly provides empty-input rejection coverage.
-      printf 'task=module_compile_%s|entry=%s|result=%s|status=%s|source_sha256=%s|producer_sha256=%s|artifact=-|log=%s|mode=diagnostic-relocatable-object\n' \
-        "$mc_count" "$mc_entry" "$mc_doc_result" "$mc_doc_status" \
-        "$mc_source_sha" "${snapshot_sha:-unavailable}" "$mc_dir/prerequisite.log" >"$mc_dir/row"
       mc_failed=1 mc_stopped=1
     else
       mc_key=$(printf '%s\n' "$mc_entry" | hash_stream) || return 2
@@ -137,29 +90,12 @@ run_module_compile_inventory() (
       for mc_job in $mc_jobs; do
         wait "${mc_job%:*}" || { mc_failed=1; mc_stopped=1; }
       done
-      if [ -n "${MODULE_PROGRESS_STATE:-}" ]; then
-        MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
-        for mc_job in $mc_jobs; do
-          python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
-        done
-      fi
       mc_jobs= mc_batch=0
-      # An owner stop raised while a batch ran must prevent its next entry.
-      if mc_abort_requested; then break; fi
     fi
   done <"$mc_manifest"
   for mc_job in $mc_jobs; do
     wait "${mc_job%:*}" || mc_failed=1
   done
-  if [ -n "${MODULE_PROGRESS_STATE:-}" ] && [ -n "$mc_jobs" ]; then
-    MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
-    for mc_job in $mc_jobs; do
-      python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
-    done
-  fi
-  # The last batch may be shorter than mc_workers; it has no in-loop join.
-  mc_abort_requested || :
-  if [ "$mc_count" -eq 0 ] && [ "$mc_abort_rc" -ne 0 ]; then return "$mc_abort_rc"; fi
   if [ "$mc_count" -eq 0 ]; then
     printf 'task=module_compile_inventory|result=FAIL|status=empty-inventory|log=-\n' >>"$mc_summary"
     return 1
@@ -176,6 +112,5 @@ run_module_compile_inventory() (
     fi
     mc_index=$((mc_index + 1))
   done
-  [ "$mc_abort_rc" -eq 0 ] || return "$mc_abort_rc"
   [ "$mc_failed" -eq 0 ]
 )

@@ -136,7 +136,7 @@ probe_external_formal()→ yosys + sby + solver + ghdl + yosys-ghdl-plugin
 
 ### 3.6 Quick Start
 
-```simple:skip
+```simple
 use std.nogc_sync_mut.debug.remote.exec.{QemuRv32Adapter}
 
 var adapter = QemuRv32Adapter.new()

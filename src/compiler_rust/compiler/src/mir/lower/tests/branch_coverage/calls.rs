@@ -37,36 +37,11 @@ fn string_ord_and_hash_lower_to_shared_runtime_calls() {
     assert!(has_inst(&mir, |i| matches!(
         i,
         MirInst::Call { target, args, .. }
-            if target == &CallTarget::from_name("rt_hash_text") && args.len() == 1
-    )));
-    assert!(!has_inst(&mir, |i| matches!(
-        i,
-        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_str_hash")
+            if target == &CallTarget::from_name("rt_str_hash") && args.len() == 1
     )));
     assert!(!has_inst(&mir, |i| matches!(
         i,
         MirInst::MethodCallStatic { func_name, .. } if func_name == "str.ord" || func_name == "str.hash"
-    )));
-}
-
-#[test]
-fn string_literal_hash_uses_tagged_runtime_but_user_hash_keeps_static_dispatch() {
-    let mir = compile_to_mir(
-        "struct HashBox:\n    value: i64\n\nimpl HashBox:\n    fn hash(self) -> i64:\n        return self.value\n\nfn literal_probe() -> i64:\n    return \"hello\".hash()\n\nfn user_probe(value: HashBox) -> i64:\n    return value.hash()\n",
-    )
-    .unwrap();
-    assert!(has_inst(&mir, |i| matches!(
-        i,
-        MirInst::Call { target, args, .. }
-            if target == &CallTarget::from_name("rt_hash_text") && args.len() == 1
-    )));
-    assert!(has_inst(&mir, |i| matches!(
-        i,
-        MirInst::MethodCallStatic { func_name, .. } if func_name == "HashBox.hash"
-    )));
-    assert!(!has_inst(&mir, |i| matches!(
-        i,
-        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_str_hash")
     )));
 }
 

@@ -13,7 +13,7 @@
 #   - hc_decode_reject: decoder failures poison the caller-owned reader without
 #     terminating the process. Public decode then treats the entry as a miss.
 
-use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape, flat_pool_unescape}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape}
 use compiler.frontend.parser_types_expr.{Expr}
 use compiler.blocks.value.{BlockValue}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -21,8 +21,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # also declared in io/signal_handlers, so the direct module path is required.
 use std.nogc_sync_mut.io_runtime.{exit}
 use std.common.binary_io.{f64_to_bits, f64_from_bits}
-use std.common.encoding.utf8.{text_byte_len, utf8_decode_one, utf8_encode_one, char_from_codepoint}
-use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_nil_slot, enum_wire_restore_nil}
+use std.common.encoding.utf8.{text_byte_len}
 
 # CHUNKED: `parts` is the CURRENT chunk and is bounded by HIR_CODEC_CHUNK_LINES;
 # every full chunk is joined once and moved to `chunks`. This is not a style
@@ -359,37 +358,14 @@ class HirCodecWriter:
     me put_i64(v: i64):
         if not self._can_append(22, 64, 22):
             return
-        # Do NOT test `v == nil` on this i64-typed slot. Staged-native codegen
-        # compares the raw integer with nil's immediate, which is 3, so every
-        # integer 3 (a count of three, symbol id 3, the fourth variant tag of
-        # any enum) was written as `N`. The decoder then desynchronised and
-        # rejected the entry: measured on the Windows stage-2 binary, 0 lines
-        # equal to `3` in a 261,898-line entry and `[hir-cache] hits=0` on
-        # every rerun, which also discarded all HIR shard work.
-        # The rendered text is the engine-independent discriminator: a real
-        # nil renders as `nil`, an integer never does.
-        # doc/08_tracking/bug/hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md
-        val rendered = "{v}"
-        val line = if rendered == "nil": "N\n" else: rendered + "\n"
+        val line = if v == nil: "N\n" else: "{v}\n"
         self._append_line(line)
 
     me put_bool(v: bool):
         if not self._can_append(2, 32, 2):
             return
-        # Same hazard as put_i64, and silent: staged-native `v == nil` is true
-        # for every `true`, so each true flag was written as `N` and decoded
-        # back as nil. One line either way, so nothing desynchronised.
-        val rendered = "{v}"
-        val line = if rendered == "true": "1\n" elif rendered == "false": "0\n" else: "N\n"
+        val line = if v == nil: "N\n" else: (if v: "1\n" else: "0\n")
         self._append_line(line)
-
-    me put_nil_bool_wire():
-        if self._can_append(2, 32, 2):
-            self._append_line("N\n")
-
-    me put_nil_text_wire():
-        if self._can_append(3, 32, 3):
-            self._append_line("\\N\n")
 
     # A declared `text` field can hold nil in a real lowered module (doc
     # comments, gpu targets). The escaper only ever emits `\\` or `\n`
@@ -494,92 +470,11 @@ class HirCodecWriter:
 fn hc_read_f64(r: FlatPoolReader) -> f64:
     val hi = r.next_i64()
     if not r.ok:
-        return 0.0
+        return nil
     val lo = r.next_i64()
     if not r.ok:
-        return 0.0
+        return nil
     f64_from_bits(((hi as u64) << 32) | (lo as u64))
-
-# @workaround bug=native_text_scalar_validation_failure_2026_10_18 recover=b4ac2495d01a25dbc564c6dff12621fe61c87897 reason=use-existing-pure-utf8-owners-for-scalar-validation
-fn hc_char_bytes_valid(bytes: [i64]) -> bool:
-    if bytes.len() == 0 or bytes.len() > 4: return false
-    val decoded = utf8_decode_one(bytes, 0)
-    if decoded[1] != bytes.len(): return false
-    # Invalid input decodes as U+FFFD. Byte equality distinguishes replacement
-    # from an actual U+FFFD scalar, and rejects overlong/surrogate encodings.
-    val encoded = utf8_encode_one(decoded[0])
-    if encoded.len() != bytes.len(): return false
-    var index = 0
-    while index < bytes.len():
-        if encoded[index] != bytes[index]: return false
-        index = index + 1
-    true
-
-fn hc_put_char(w: HirCodecWriter, value: char):
-    val cp = value as i64
-    if cp < 0 or cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF):
-        w.reject("invalid_char_scalar")
-        return
-    w.put_text(char_from_codepoint(cp))
-
-fn hc_read_char(r: FlatPoolReader, raw: text) -> char:
-    # A scalar char cannot carry nil. The generated enum decoder consumes the
-    # marker before this call and restores the absent slot through enum_wire.
-    if raw == "\\N":
-        r.reject_malformed("char_nil_requires_enum_slot")
-        return 0 as char
-    val value = flat_pool_unescape(raw)
-    if not hc_char_bytes_valid(value.bytes()):
-        r.reject_malformed("invalid_char_scalar")
-        return 0 as char
-    # The native text-to-char cast requires the explicit scalar intermediate.
-    (value as i64) as char
-
-# Only the generated enum schema calls these boundaries. It supplies the
-# actual variant arity/index, never an inferred runtime tuple shape.
-fn hc_enc_enum_bool<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: bool):
-    if not w._can_append(0, 128, 16): return
-    unsafe(capabilities: [ffi]):
-        match enum_wire_nil_slot(node, arity, index):
-            case Ok(is_nil):
-                if is_nil: w.put_nil_bool_wire()
-                else: w.put_bool(value)
-            case Err(detail): w.reject(detail)
-
-fn hc_enc_enum_text<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: text):
-    if not w._can_append(0, 128, 16): return
-    unsafe(capabilities: [ffi]):
-        match enum_wire_nil_slot(node, arity, index):
-            case Ok(is_nil):
-                if is_nil: w.put_nil_text_wire()
-                else: w.put_text(value)
-            case Err(detail): w.reject(detail)
-
-fn hc_enc_enum_char<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: char):
-    if not w._can_append(0, 128, 16): return
-    unsafe(capabilities: [ffi]):
-        match enum_wire_nil_slot(node, arity, index):
-            case Ok(is_nil):
-                if is_nil: w.put_nil_text_wire()
-                else: hc_put_char(w, value)
-            case Err(detail): w.reject(detail)
-
-# @workaround bug=a174_enum_scalar_codec_wire_boundary_2026_10_16 recover=5c3e501759ae833a828b14b4e23c9238c73b76a6 reason=preserve-wire-nil-without-untyped-enum-payload-joins
-fn hc_restore_enum_nil<T>(r: FlatPoolReader, prototype: T, arity: i64, slots: [i64]) -> T:
-    if not r.ok: return nil
-    # Conservative charges include the extra enum, private tuple and result
-    # wrapper. The generator separately reserves the nil-slot array before allocation.
-    if arity < 0 or arity > 576460752303422981 or slots.len() > arity:
-        r.reject_bounds("enum_wire_arity")
-        return nil
-    if not r.reserve(4096 + arity * 16) or not r.charge_work(16 + arity * 2 + slots.len()):
-        return nil
-    unsafe(capabilities: [ffi]):
-        match enum_wire_restore_nil(prototype, arity, slots):
-            case Ok(restored): return restored
-            case Err(detail):
-                r.reject_malformed(detail)
-                return nil
 
 fn hc_decode_reject(r: FlatPoolReader):
     r.reject_malformed("unknown_tag_or_discriminant")
@@ -589,17 +484,6 @@ fn hc_bad_tag(type_name: text, tag: i64):
     exit(1)
 
 # --- opaque: parser Expr (only reachable through TypeKind.Array's size) -----
-
-use compiler.common.assurance.representation_manifest_v1.{RepresentationDeclarationV1}
-
-# Explicitly unsupported carrier. Never turn source-authored authority into
-# an empty or unbound cached row while the typed metadata codec is unavailable.
-fn hc_enc_opaque_representation_declaration_v1(w: HirCodecWriter, value: RepresentationDeclarationV1):
-    w.reject("E-MC-REP-004: representation metadata transport is unsupported")
-
-fn hc_dec_opaque_representation_declaration_v1(r: FlatPoolReader) -> RepresentationDeclarationV1:
-    r.reject_malformed("E-MC-REP-004: unsupported representation metadata carrier")
-    nil
 
 fn hc_enc_opaque_expr(w: HirCodecWriter, value: Expr):
     w.reject("parser Expr inside a HIR type")
@@ -656,7 +540,5 @@ fn hc_dec_opaque_block_value(r: FlatPoolReader) -> BlockValue:
 
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver
 export HirCodecWriter, hc_bad_tag, hc_decode_reject, hc_read_f64
-export hc_enc_enum_bool, hc_enc_enum_text, hc_restore_enum_nil
 export hc_enc_opaque_expr, hc_dec_opaque_expr
 export hc_enc_opaque_block_value, hc_dec_opaque_block_value
-export hc_enc_opaque_representation_declaration_v1, hc_dec_opaque_representation_declaration_v1

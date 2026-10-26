@@ -15,7 +15,7 @@ use crate::interpreter::{
 };
 
 use crate::bounded_cache::{limit_from_env, BoundedCache, CacheStats};
-use crate::value::{Env, ModuleTable, TableView, Value};
+use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 
 // ---------------------------------------------------------------------------
@@ -208,7 +208,7 @@ pub fn probe_source_cache_len() -> usize {
 }
 
 thread_local! {
-    /// Cross-lane source+AST cache: one read and parse per physical file and OS.
+    /// Cross-lane source+AST cache: one read and one parse per PHYSICAL file.
     ///
     /// The HIR lowerer and the interpreter each walked the same import graph
     /// with a private cache that the other could not see, so every file both
@@ -217,7 +217,7 @@ thread_local! {
     /// lowerer 117 physical files, interpreter 128, intersection 117 --
     /// 1,265,979 bytes parsed a second time for nothing.
     ///
-    /// Keyed by OS plus `normalize_path_key`, the canonical key the exports cache
+    /// Keyed by `normalize_path_key`, the same canonical key the exports cache
     /// uses, so alias spellings of one file (`src/std` -> `lib`,
     /// relative vs absolute) share one entry.
     ///
@@ -231,57 +231,8 @@ thread_local! {
     /// cache -- every entry holds a whole source string AND its parsed AST --
     /// so it is the one an unbounded process grows on. An entry still borrowed
     /// by either lane is never evicted; see `shared_source_pinned`.
-    static PARSED_SOURCE_CACHE: RefCell<BoundedCache<(PathBuf, crate::pipeline::cfg_strip::CfgTarget), SharedSource>> =
+    static PARSED_SOURCE_CACHE: RefCell<BoundedCache<PathBuf, SharedSource>> =
         RefCell::new(BoundedCache::new(parsed_source_cache_max(), shared_source_pinned));
-
-    /// Source text of entries whose AST was handed to the interpreter BY
-    /// OWNERSHIP (`take_shared_ast`). Keeping the exact bytes means a later
-    /// `shared_source` for the same file re-parses what the first read saw --
-    /// never a fresh disk read -- so the result is identical to a cache hit
-    /// (the parser is deterministic), only slower. Source text is ~1/17 of
-    /// the AST it produced, which is the whole point of releasing the AST.
-    static RELEASED_SOURCE_TEXT: RefCell<HashMap<(PathBuf, crate::pipeline::cfg_strip::CfgTarget), Arc<String>>> = RefCell::new(HashMap::new());
-}
-
-/// Hand the interpreter an owned AST for `path`, releasing the cache's copy
-/// when nobody else borrows it.
-///
-/// The interpreter consumes a module's items by value, so it used to
-/// deep-clone the shared AST (`(*ast).clone()`), leaving TWO full ASTs per
-/// module alive for the rest of the run: the cache's and the interpreter's.
-/// Measured on `src/app/browser/main.spl` (513 modules, 10 MB source): the
-/// cache side alone was ~300 MB of the 1.4 GB peak.
-///
-/// The entry is released only when the cache and `ast` (the caller's handle)
-/// are the sole owners -- i.e. `shared_source_pinned` would allow evicting it
-/// once the caller drops its handle. Otherwise (a HIR lowerer still holds the
-/// Arc) this falls back to the old deep clone, so a live borrow is never
-/// disturbed. Both paths yield a tree equal to the parse of the cached bytes.
-pub fn take_shared_ast(path: &Path, ast: Arc<simple_parser::ast::Module>) -> simple_parser::ast::Module {
-    let key = (normalize_path_key(path), crate::pipeline::cfg_strip::cfg_target());
-    let released = PARSED_SOURCE_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let source = match cache.get(&key) {
-            Some(SharedSource::Parsed {
-                source,
-                ast: Ok(cached),
-            }) if Arc::ptr_eq(&cached, &ast) => {
-                // Owners here: cache entry + `cached` (from get) + `ast`.
-                if Arc::strong_count(&ast) != 3 {
-                    return false;
-                }
-                source
-            }
-            _ => return false,
-        };
-        cache.remove(&key);
-        RELEASED_SOURCE_TEXT.with(|r| r.borrow_mut().insert(key, source));
-        true
-    });
-    if released {
-        crate::perf_counters::bump(&crate::perf_counters::INTERP_MODULE_AST_TAKEN, 1);
-    }
-    Arc::try_unwrap(ast).unwrap_or_else(|shared| (*shared).clone())
 }
 
 /// Still borrowed when ANY payload `Arc` of the entry is shared outside the
@@ -335,25 +286,14 @@ impl SharedSource {
 /// Split from `shared_source` so a caller can attribute a miss to its own lane
 /// (the lowerer's `IMPORT_AST_PARSES` counts the parses that lane caused).
 pub fn shared_source_lookup(path: &Path) -> Option<SharedSource> {
-    shared_source_lookup_for_target(path, crate::pipeline::cfg_strip::cfg_target())
-}
-
-/// Look up only the AST selected for this compilation target OS.
-pub fn shared_source_lookup_for_target(path: &Path, target: crate::pipeline::cfg_strip::CfgTarget) -> Option<SharedSource> {
-    let key = (normalize_path_key(path), target);
+    let key = normalize_path_key(path);
     PARSED_SOURCE_CACHE.with(|cache| cache.borrow().get(&key))
 }
 
 /// Read + parse `path` once per process, shared by every lane. See
 /// `PARSED_SOURCE_CACHE`.
 pub fn shared_source(path: &Path) -> SharedSource {
-    shared_source_for_target(path, crate::pipeline::cfg_strip::cfg_target())
-}
-
-/// Preserve original source bytes while selecting OS branches before parsing.
-/// Callers provide the conditional-compilation target names (`cfg_target()`).
-pub fn shared_source_for_target(path: &Path, target: crate::pipeline::cfg_strip::CfgTarget) -> SharedSource {
-    let key = (normalize_path_key(path), target.clone());
+    let key = normalize_path_key(path);
     if let Some(hit) = PARSED_SOURCE_CACHE.with(|cache| cache.borrow().get(&key)) {
         crate::perf_counters::bump(&crate::perf_counters::SHARED_SRC_HITS, 1);
         return hit;
@@ -362,21 +302,6 @@ pub fn shared_source_for_target(path: &Path, target: crate::pipeline::cfg_strip:
     // today, and holding it across arbitrary work is how a RefCell panic gets
     // introduced later.
     crate::perf_counters::bump(&crate::perf_counters::SHARED_SRC_PARSES, 1);
-    // An entry whose AST was released to the interpreter is re-parsed from the
-    // SAME bytes it was first read as, so it can never observe a later edit
-    // that a still-cached entry would not have observed either.
-    if let Some(source) = RELEASED_SOURCE_TEXT.with(|r| r.borrow_mut().remove(&key)) {
-        let ast = parse_shared_source(&source, &target);
-        let entry = SharedSource::Parsed { source, ast };
-        let delta = PARSED_SOURCE_CACHE.with(|cache| cache.borrow_mut().insert(key, entry.clone()));
-        mirror_stats(
-            delta,
-            &crate::perf_counters::PARSED_SOURCE_EVICTIONS,
-            &crate::perf_counters::PARSED_SOURCE_PINNED_SKIPS,
-            &crate::perf_counters::PARSED_SOURCE_RETAINED_MAX,
-        );
-        return entry;
-    }
     let entry = match crate::read_trace::rts(file!(), line!(), path) {
         Ok(mut source) => {
             // Normalize CRLF -> LF so indentation-sensitive parsing works on
@@ -384,7 +309,10 @@ pub fn shared_source_for_target(path: &Path, target: crate::pipeline::cfg_strip:
             if source.contains('\r') {
                 source = source.replace('\r', "");
             }
-            let ast = parse_shared_source(&source, &target);
+            let ast = simple_parser::Parser::new(&source)
+                .parse()
+                .map(Arc::new)
+                .map_err(|e| Arc::from(e.to_string().as_str()));
             SharedSource::Parsed {
                 source: Arc::new(source),
                 ast,
@@ -404,22 +332,9 @@ pub fn shared_source_for_target(path: &Path, target: crate::pipeline::cfg_strip:
     entry
 }
 
-fn parse_shared_source(
-    source: &str,
-    target: &crate::pipeline::cfg_strip::CfgTarget,
-) -> Result<Arc<simple_parser::ast::Module>, Arc<str>> {
-    let selected = crate::pipeline::cfg_strip::strip_os_when_blocks(source, target)
-        .map_err(|error| Arc::<str>::from(error))?;
-    simple_parser::Parser::new(&selected)
-        .parse()
-        .map(Arc::new)
-        .map_err(|error| Arc::from(error.to_string()))
-}
-
 /// Drop the cross-lane source+AST cache.
 pub fn clear_parsed_source_cache() {
     PARSED_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
-    RELEASED_SOURCE_TEXT.with(|r| r.borrow_mut().clear());
 }
 
 /// Entry count -- for tests that assert "one parse per physical file" without
@@ -448,7 +363,7 @@ pub fn report_cache_sizes(tag: &str) {
         MODULE_ENUMS_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
     let partial = PARTIAL_MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
     let (env_m, env_e) =
-        MODULE_ENV_BY_OWNER.with(|c| (c.borrow().len(), c.borrow().values().map(|e| e.retained_len()).sum::<usize>()));
+        MODULE_ENV_BY_OWNER.with(|c| (c.borrow().len(), c.borrow().values().map(|e| e.len()).sum::<usize>()));
     let (ovl_k, ovl_e) =
         FUNCTION_OVERLOADS.with(|c| (c.borrow().len(), c.borrow().values().map(|v| v.len()).sum::<usize>()));
     let parsed = parsed_source_cache_len();
@@ -505,9 +420,6 @@ thread_local! {
     /// constant-false.
     static PATH_KEY_CACHE: RefCell<BoundedCache<PathBuf, PathBuf>> =
         RefCell::new(BoundedCache::new(path_key_cache_max(), |_| false));
-    /// `module_owner_key` memo: the last (module path, owner key) pair.
-    /// RETENTION: one entry; cleared together with `PATH_KEY_CACHE`.
-    static LAST_MODULE_OWNER_KEY: RefCell<Option<(PathBuf, Arc<str>)>> = const { RefCell::new(None) };
     /// `filter_functions_from_value` memo: source dict ptr -> (source Arc, filtered Arc).
     ///
     /// RETENTION: bounded (`FILTERED_DICT_CACHE_MAX_DEFAULT`,
@@ -566,9 +478,7 @@ pub fn clear_module_cache() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
-    LAST_MODULE_OWNER_KEY.with(|last| *last.borrow_mut() = None);
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
-    sweep_module_dict_tables();
     clear_probe_source_cache();
     clear_parsed_source_cache();
     crate::pipeline::module_loader::clear_module_source_text_cache();
@@ -636,7 +546,6 @@ pub fn clear_module_cache_selective() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     // Drop memoised filtered dicts whose source no one else holds any more.
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().retain(|_, (src, _)| Arc::strong_count(src) > 1));
-    sweep_module_dict_tables();
     // Source-derived probe/AST memos must not survive a selective boundary:
     // test and IDE callers may edit, delete, or recreate files between runs.
     clear_probe_source_cache();
@@ -703,28 +612,6 @@ pub(crate) fn total_modules_loaded() -> usize {
 /// Reset total modules loaded counter
 pub fn reset_total_modules() {
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
-}
-
-/// Owner key of a module: `normalize_path_key(path)` as text.
-///
-/// A module's evaluation asks for its own owner once per imported name and
-/// once per global, always with the same path. Each ask re-hashed the PathBuf
-/// into `PATH_KEY_CACHE` and allocated a fresh `Arc<str>` -- about 13% of
-/// module-loading CPU in a `sample` of `simple test <spec>`. The one-entry
-/// memo hits only on a byte-identical path and returns exactly the value
-/// computed from `normalize_path_key`, so callers see the same key.
-pub fn module_owner_key(path: &Path) -> Arc<str> {
-    if let Some(owner) = LAST_MODULE_OWNER_KEY.with(|last| {
-        last.borrow()
-            .as_ref()
-            .filter(|(cached, _)| cached.as_os_str() == path.as_os_str())
-            .map(|(_, owner)| owner.clone())
-    }) {
-        return owner;
-    }
-    let owner: Arc<str> = Arc::from(normalize_path_key(path).to_string_lossy().as_ref());
-    LAST_MODULE_OWNER_KEY.with(|last| *last.borrow_mut() = Some((path.to_path_buf(), owner.clone())));
-    owner
 }
 
 /// Normalize a path to a consistent key for caching/tracking.
@@ -856,159 +743,6 @@ pub fn get_cached_module_exports(path: &Path) -> Option<Value> {
         }
         result
     })
-}
-
-// ---------------------------------------------------------------------------
-// Layered module export dicts.
-//
-// A module's `Value::Dict` holds only the entries the module itself put in
-// its export table; whatever it imported whole lives in the `ModuleTable`
-// registered here under the dict's address. Every name lookup THROUGH a
-// module value goes via `module_dict_get` / `module_dict_for_each_visible`,
-// which see exactly the flat table the module used to carry.
-// doc/08_tracking/bug/interpreter_use_unpack_reexports_transitive_closure_2026-10-20.md
-//
-// The registry holds a clone of the dict `Arc` beside the view, so an address
-// can never be recycled while its entry is live (the `FILTERED_DICT_CACHE`
-// rule). Process-wide, not thread-local: a module value can cross threads.
-// ---------------------------------------------------------------------------
-
-type ModuleDictRegistry = HashMap<usize, (Arc<HashMap<String, Value>>, TableView)>;
-
-fn module_dict_tables() -> &'static parking_lot::RwLock<ModuleDictRegistry> {
-    static TABLES: OnceLock<parking_lot::RwLock<ModuleDictRegistry>> = OnceLock::new();
-    TABLES.get_or_init(|| parking_lot::RwLock::new(HashMap::new()))
-}
-
-/// Lock-free negative filter in front of the registry: one bit per hashed
-/// dict address, set on registration and never cleared. Every dict field
-/// miss, method call and write asks "is this a module dict?"; for a plain
-/// dict this answers no with one relaxed load instead of a lock. A set bit
-/// only means "check the registry" (false positives are resolved there).
-const REGISTRY_FILTER_WORDS: usize = 1024;
-static REGISTRY_FILTER: [std::sync::atomic::AtomicU64; REGISTRY_FILTER_WORDS] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; REGISTRY_FILTER_WORDS];
-
-fn registry_filter_bit(addr: usize) -> (usize, u64) {
-    // Allocation addresses are 16-byte aligned; mix before indexing.
-    let h = (addr >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
-    let bit = h % (REGISTRY_FILTER_WORDS * 64);
-    (bit / 64, 1u64 << (bit % 64))
-}
-
-fn maybe_registered(addr: usize) -> bool {
-    let (word, mask) = registry_filter_bit(addr);
-    REGISTRY_FILTER[word].load(std::sync::atomic::Ordering::Acquire) & mask != 0
-}
-
-fn register_module_dict(dict: &Arc<HashMap<String, Value>>, view: TableView) {
-    let (word, mask) = registry_filter_bit(Arc::as_ptr(dict) as usize);
-    REGISTRY_FILTER[word].fetch_or(mask, std::sync::atomic::Ordering::Release);
-    module_dict_tables()
-        .write()
-        .insert(Arc::as_ptr(dict) as usize, (Arc::clone(dict), view));
-}
-
-/// Drop registry entries no `Value` can reach any more: the dict is held only
-/// by the registry and by its own table (`own` / `filtered_own`).
-fn sweep_module_dict_tables() {
-    module_dict_tables()
-        .write()
-        .retain(|_, (dict, _)| Arc::strong_count(dict) > 2);
-}
-
-/// The registered view of `dict`, if it is a finished module's export dict
-/// (or the filtered copy of one).
-pub fn module_dict_view(dict: &Arc<HashMap<String, Value>>) -> Option<TableView> {
-    if !maybe_registered(Arc::as_ptr(dict) as usize) {
-        return None;
-    }
-    module_dict_tables()
-        .read()
-        .get(&(Arc::as_ptr(dict) as usize))
-        .and_then(|(held, view)| Arc::ptr_eq(held, dict).then(|| view.clone()))
-}
-
-/// The registered view of `dict` when it resolves anything beyond `dict`
-/// itself; `None` for plain dicts and modules that imported nothing whole.
-pub fn layered_view(dict: &Arc<HashMap<String, Value>>) -> Option<TableView> {
-    module_dict_view(dict).filter(|view| !view.table.layers().is_empty())
-}
-
-/// `dict`'s view for layering into an importer: the registered table, or a
-/// leaf table that is exactly `dict` (partial / cycle / empty dicts).
-pub fn module_table_for(dict: &Arc<HashMap<String, Value>>) -> TableView {
-    match module_dict_view(dict) {
-        Some(view) if !view.filtered => view,
-        _ => TableView::raw(Arc::new(ModuleTable::leaf(Arc::clone(dict)))),
-    }
-}
-
-/// `dict[key]` as the module's flat export table would have answered it.
-pub fn module_dict_get(dict: &Arc<HashMap<String, Value>>, key: &str) -> Option<Value> {
-    if let Some(value) = dict.get(key) {
-        return Some(value.clone());
-    }
-    layered_view(dict).and_then(|view| view.get(key).cloned())
-}
-
-pub fn module_dict_contains(dict: &Arc<HashMap<String, Value>>, key: &str) -> bool {
-    dict.contains_key(key) || layered_view(dict).is_some_and(|view| view.contains_key(key))
-}
-
-/// `Arc::make_mut` for a dict that may be a layered module value: a write
-/// first materializes the flat surface, so the written copy still carries
-/// every name the module value resolved.
-pub fn module_dict_make_mut(dict: &mut Arc<HashMap<String, Value>>) -> &mut HashMap<String, Value> {
-    if let Some(flat) = module_dict_flat(dict) {
-        *dict = flat;
-    }
-    Arc::make_mut(dict)
-}
-
-/// Every visible (name, value) of `dict`, each name once.
-pub fn module_dict_for_each_visible(dict: &Arc<HashMap<String, Value>>, mut f: impl FnMut(&String, &Value)) {
-    match layered_view(dict) {
-        Some(view) => view.for_each_visible(|name, value| f(name, value)),
-        None => {
-            for (name, value) in dict.iter() {
-                f(name, value);
-            }
-        }
-    }
-}
-
-/// The flat map a layered module dict stands for (a fresh copy), or `None`
-/// when `dict` is already flat. For collection operations applied to a
-/// module value (`len`, `keys`, iteration, ...).
-pub fn module_dict_flat(dict: &Arc<HashMap<String, Value>>) -> Option<Arc<HashMap<String, Value>>> {
-    let view = layered_view(dict)?;
-    let mut flat = HashMap::new();
-    view.for_each_visible(|name, value| {
-        flat.insert(name.clone(), value.clone());
-    });
-    Some(Arc::new(flat))
-}
-
-/// Number of visible names of `dict`.
-pub fn module_dict_len(dict: &Arc<HashMap<String, Value>>) -> usize {
-    match layered_view(dict) {
-        Some(view) => {
-            let mut n = 0;
-            view.for_each_visible(|_, _| n += 1);
-            n
-        }
-        None => dict.len(),
-    }
-}
-
-/// Register a finished module's export table and cache its dict.
-pub fn cache_module_export_table(path: &Path, table: Arc<ModuleTable>) {
-    // Registered even without layers: importers then share this one table
-    // (one id, one set of index entries) instead of minting a leaf per import.
-    let dict = Arc::clone(table.own());
-    register_module_dict(&dict, TableView::raw(table));
-    cache_module_exports(path, Value::Dict(dict));
 }
 
 /// Cache module exports for a path
@@ -1259,22 +993,6 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
             }
         }
         Value::Dict(dict) => {
-            // A layered module export dict: its filtered view is the table's
-            // filtered view, so the filtered dict keeps resolving the layers.
-            if let Some(view) = layered_view(dict) {
-                if view.filtered {
-                    return Value::Dict(Arc::clone(dict));
-                }
-                let filtered = Arc::clone(view.table.filtered_own(filter_functions_from_value));
-                register_module_dict(
-                    &filtered,
-                    TableView {
-                        table: view.table,
-                        filtered: true,
-                    },
-                );
-                return Value::Dict(filtered);
-            }
             // Recursively process dict values (imported modules) — preserve functions inside.
             //
             // Memoised per SOURCE dict: an imported module's export dict is the
@@ -1335,23 +1053,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
-    }
-
-    /// The one-entry owner memo must return exactly `normalize_path_key` as
-    /// text for every path, including when two modules alternate and when a
-    /// distinct spelling of the same file is asked for.
-    #[test]
-    fn module_owner_key_matches_normalize_path_key_across_alternating_paths() {
-        let dir = scratch_dir("owner-key");
-        let a = write_module(&dir, 1);
-        let b = write_module(&dir, 2);
-        let a_dotted = dir.join(".").join("m1.spl");
-        let missing = dir.join("absent.spl");
-        for path in [&a, &a, &b, &a, &a_dotted, &b, &missing, &missing, &a] {
-            let expected = normalize_path_key(path).to_string_lossy().into_owned();
-            assert_eq!(&*super::module_owner_key(path), expected.as_str(), "{}", path.display());
-        }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn write_module(dir: &std::path::Path, i: usize) -> std::path::PathBuf {

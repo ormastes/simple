@@ -8,7 +8,7 @@ Covers the `std.gpu.engine3d` module: backend selection, geometry, materials, li
 
 Import `Engine3D` from `std.gpu.engine3d.engine`:
 
-```simple:skip
+```simple
 use std.gpu.engine3d.engine.{Engine3D}
 use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D}
 use std.gpu.engine3d.texture3d.{TEX_FMT_RGBA8_UNORM}
@@ -57,7 +57,7 @@ Available backends: `cpu`, `software`, `cuda`, `vulkan`, `rocm`, `metal`, `openg
 
 The fundamental primitive is `submit_triangle`. All higher-level geometry is built from it.
 
-```simple:skip
+```simple
 use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams}
 
 val mat = Material3DParams(albedo: 0xFFFFFFFF, roughness: 0.5, metallic: 0.0, texture_id: -1, shader_type: 0)
@@ -73,7 +73,7 @@ engine.submit_triangle(v0, v1, v2, mat, identity)
 
 ### Built-in Shapes
 
-```simple:skip
+```simple
 # model is a column-major [f32; 16] transform matrix
 
 engine.draw_cube(model, mat)
@@ -91,7 +91,7 @@ engine.draw_wireframe(vertices, indices, model, 0xFF00FF00)
 
 ### Indexed Mesh
 
-```simple:skip
+```simple
 engine.submit_indexed_mesh(vertices, indices, mat, model)
 ```
 
@@ -99,7 +99,7 @@ engine.submit_indexed_mesh(vertices, indices, mat, model)
 
 ### Instanced Mesh
 
-```simple:skip
+```simple
 # transforms: [[f32]] — one [f32;16] matrix per instance
 engine.submit_mesh_instanced(vertices, indices, transforms, count, mat)
 ```
@@ -120,7 +120,7 @@ engine.submit_mesh_instanced(vertices, indices, transforms, count, mat)
 | `texture_id` | `i32` | Bound texture id; -1 for none |
 | `shader_type` | `i32` | 0 = unlit, 1 = Phong, 2 = PBR |
 
-```simple:skip
+```simple
 # Unlit
 val mat_unlit = Material3DParams(albedo: 0xFFCC8844, roughness: 1.0, metallic: 0.0, texture_id: -1, shader_type: 0)
 
@@ -133,7 +133,7 @@ val mat_pbr = Material3DParams(albedo: 0xFFE0E0E0, roughness: 0.2, metallic: 0.9
 
 ### Lights
 
-```simple:skip
+```simple
 use std.gpu.engine3d.types3d.{LightParams3D}
 
 val lights = [
@@ -152,7 +152,7 @@ engine.set_ambient(0xFF202040, 0.15)
 
 Matrices are column-major `[f32; 16]`.
 
-```simple:skip
+```simple
 use std.gpu.engine3d.types3d.{mat4_perspective, mat4_look_at}
 
 # Projection matrix: 60° FOV, 800/600 aspect, near=0.1, far=1000.0
@@ -173,7 +173,7 @@ engine.set_viewport(0, 0, 800, 600)
 
 ### Loading Textures
 
-```simple:skip
+```simple
 use std.gpu.engine3d.resource_pool.{TextureHandle3D}
 
 # 2D texture from pixel buffer
@@ -197,7 +197,7 @@ engine.unload_texture(tex)
 
 ### Extended Texture Operations
 
-```simple:skip
+```simple
 use std.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D, TextureView3D}
 use std.gpu.engine3d.texture3d.{TEX_DIM_2D, TEX_FMT_RGBA8_UNORM, TEX_USAGE_TEXTURE_BINDING, TEX_USAGE_COPY_DST}
 
@@ -221,7 +221,7 @@ engine.destroy_sampler(sampler_id)
 
 `ResourcePool3D` tracks all GPU resources and provides frame-age garbage collection.
 
-```simple:skip
+```simple
 use std.gpu.engine3d.resource_pool.{ResourcePool3D, TextureHandle3D, BufferHandle3D, ShaderHandle3D, PipelineHandle3D}
 
 # GC resources unused for more than 3 frames
@@ -263,7 +263,7 @@ backend responsibilities.
 
 ## Shaders and Pipelines
 
-```text
+```simple
 use std.gpu.engine3d.resource_pool.{ShaderHandle3D, PipelineHandle3D}
 
 # Load a shader pair
@@ -288,7 +288,7 @@ engine.unload_shader(sh)
 
 Shadow mapping requires a dedicated shadow pass before the main render pass.
 
-```text
+```simple
 # Shadow pass
 val light_vp = mat4_multiply(light_proj, light_view)  # column-major [f32;16]
 engine.begin_shadow_pass(light_vp, 1024)              # 1024x1024 shadow map
@@ -313,7 +313,7 @@ engine.present()
 
 Post effects are applied after geometry submission, before `present`:
 
-```text
+```simple
 # Fog — color, exponential density, near/far linear distances
 engine.apply_fog(0xFF8899AA, 0.02, 10.0, 200.0)
 
@@ -341,7 +341,7 @@ Effects are applied in call order. Typical order: fog → ssao → bloom → ton
 
 ### Single Pass
 
-```text
+```simple
 engine.begin_render_pass(color_target_id, depth_target_id)
 # ... geometry submission ...
 engine.end_render_pass()
@@ -351,7 +351,7 @@ Pass targets are texture IDs created via `load_depth_texture` / `create_texture_
 
 ### Multi-Pass with Compositor3D
 
-```text
+```simple
 use std.gpu.engine3d.compositor3d.{RenderPass3D, Compositor3D}
 
 var comp = Compositor3D.create(800, 600)
@@ -382,7 +382,7 @@ val final_frame = comp.composite()
 
 GPU compute kernels run alongside the 3D pipeline.
 
-```text
+```simple
 # Create a kernel from compute shader source (WGSL or GLSL)
 val kernel_id = engine.create_compute_kernel(compute_src)
 

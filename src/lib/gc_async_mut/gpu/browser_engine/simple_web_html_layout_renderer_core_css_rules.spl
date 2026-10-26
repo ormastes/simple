@@ -2,7 +2,6 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_c
 use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_weight}
 use std.gc_async_mut.io.mod_stub.{env_get}
-use std.gc_async_mut.io.time_ops.{time_now_micros}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 fn _css_root_prefix_is_preamble(prefix: text) -> bool:
@@ -445,7 +444,7 @@ fn _css_resolve_vars(
     # mis-marshalling of `text.starts_with` at depth: `sw_raw=false` with
     # `sw_portable=true` on a name that plainly begins with `--` is that
     # defect and nothing else.
-    if unresolved_var_count > 0 and not nested and _web_style_trace_enabled():
+    if unresolved_var_count > 0 and not nested:
         print "[web-style-producer] css-var-unresolved count={unresolved_var_count} first={first_unresolved_name} idx={first_unresolved_prop_idx} props={state.prop_count} sw_raw={first_unresolved_sw_raw} sw_portable={first_unresolved_sw_portable} css_len={css_len}"
     CssVarResolution.Resolved(
         value: text_list_prefix(chunks, chunk_count).join("")
@@ -808,11 +807,11 @@ fn _extract_css_vw_with_rule_limit(
     var _ppc_scan: i64 = 0
     var _ppc_rules: i64 = 0
     var _ppc_append: i64 = 0
-    val _ppc_t0 = if _ppc_on: time_now_micros() else: 0
+    val _ppc_t0 = if _ppc_on: rt_time_now_micros() else: 0
     val html = _html_without_inert_template_sources(source_html)
     if _ppc_on:
-        _ppc_tmpl = time_now_micros() - _ppc_t0
-    val _ppc_t1 = if _ppc_on: time_now_micros() else: 0
+        _ppc_tmpl = rt_time_now_micros() - _ppc_t0
+    val _ppc_t1 = if _ppc_on: rt_time_now_micros() else: 0
     # First pass: collect CSS custom properties from all :root blocks
     var html_tag = find_from(html, "<html", 0)
     var html_tag_guard = 0
@@ -857,7 +856,7 @@ fn _extract_css_vw_with_rule_limit(
         # block. Silent when the block yields properties.
         # PROVEN SILENT 2026-08-09 in the WM lane -- the collector is healthy in
         # the guest; do not re-suspect it without new evidence.
-        if collected_props.len() == 0 and _web_style_trace_enabled():
+        if collected_props.len() == 0:
             print "[web-style-producer] css-props-stage1 block={pre_guard} pre_css_len={pre_css.len()} collected_len=0"
         if collected_props.len() > 0 and custom_prop_count < custom_prop_parts.len():
             custom_prop_parts[custom_prop_count] = collected_props
@@ -872,10 +871,10 @@ fn _extract_css_vw_with_rule_limit(
     # the accumulate/join lost the data rather than the collector.
     # PROVEN SILENT 2026-08-09 in the WM lane -- the join delivers 1365 chars,
     # the host's exact value. The defect is downstream, in the re-parse.
-    if custom_props.len() == 0 and _web_style_trace_enabled():
+    if custom_props.len() == 0:
         print "[web-style-producer] css-props-stage2 parts={custom_prop_count} custom_props_len=0"
     if _ppc_on:
-        _ppc_props = time_now_micros() - _ppc_t1
+        _ppc_props = rt_time_now_micros() - _ppc_t1
     var group_parts: [[[text]]] = []
     var group_specificities: [[i32]] = []
     var decls: [text] = []
@@ -895,7 +894,7 @@ fn _extract_css_vw_with_rule_limit(
         if close < 0:
             break
         val css_raw = html.substring(open + 1, close)
-        val _ppc_tv = if _ppc_on: time_now_micros() else: 0
+        val _ppc_tv = if _ppc_on: rt_time_now_micros() else: 0
         val css_var_state = CssVarResolutionState.new(custom_props)
         val css_resolution = _css_resolve_vars(
             css_raw, css_var_state, 0, 0, false
@@ -915,21 +914,21 @@ fn _extract_css_vw_with_rule_limit(
             CssVarResolution.Resolved(_):
                 pass
             _:
-                if _web_style_trace_enabled(): print "[web-style-producer] css-var-pass-bailed block={guard} props_len={custom_props.len()} css_len={css_raw.len()}"
+                print "[web-style-producer] css-var-pass-bailed block={guard} props_len={custom_props.len()} css_len={css_raw.len()}"
         # Rule-boundary scan: split the sheet ONCE on "{"/"}" natively rather
         # than walking it a character at a time in interpreted Simple (which
         # cost seconds-to-minutes on a realistic theme sheet). See
         # `_css_scan_rules_simple`. Selector-group splitting, @media condition
         # evaluation, and CSS-variable substitution stay in Simple below.
         if _ppc_on:
-            _ppc_var = _ppc_var + (time_now_micros() - _ppc_tv)
+            _ppc_var = _ppc_var + (rt_time_now_micros() - _ppc_tv)
         val remaining_rules = rule_limit - group_parts.len()
-        val _ppc_ts = if _ppc_on: time_now_micros() else: 0
+        val _ppc_ts = if _ppc_on: rt_time_now_micros() else: 0
         val bounds: CssRuleScan = _css_scan_rules_simple(
             css, CSS_SCAN_CANDIDATE_CAP
         )
         if _ppc_on:
-            _ppc_scan = _ppc_scan + (time_now_micros() - _ppc_ts)
+            _ppc_scan = _ppc_scan + (rt_time_now_micros() - _ppc_ts)
         val b_sel_text: [text] = bounds.selectors
         val b_decl_text: [text] = bounds.declarations
         val candidate_count = b_sel_text.len()
@@ -950,7 +949,7 @@ fn _extract_css_vw_with_rule_limit(
         var block_important_decls: [text] = [""; block_cap]
         var out_i = 0
         var bi = 0
-        val _ppc_tr = if _ppc_on: time_now_micros() else: 0
+        val _ppc_tr = if _ppc_on: rt_time_now_micros() else: 0
         while bi < candidate_count and out_i < remaining_rules:  # cpu-lane-loop-ok: walks the candidate rules _css_scan_rules_simple produced for ONE <style> block; bound is that block's rule count, capped by remaining_rules; once per style invalidation
             var include = true
             val wrapper_start = bounds.wrapper_starts[bi]
@@ -1008,8 +1007,8 @@ fn _extract_css_vw_with_rule_limit(
         # cross-function-return hazard as above — append each element
         # directly instead of returning a [[[text]]] prefix slice.
         if _ppc_on:
-            _ppc_rules = _ppc_rules + (time_now_micros() - _ppc_tr)
-        val _ppc_ta = if _ppc_on: time_now_micros() else: 0
+            _ppc_rules = _ppc_rules + (rt_time_now_micros() - _ppc_tr)
+        val _ppc_ta = if _ppc_on: rt_time_now_micros() else: 0
         var gi = 0
         while gi < out_i:
             group_parts = group_parts + [block_group_parts[gi]]
@@ -1020,7 +1019,7 @@ fn _extract_css_vw_with_rule_limit(
             block_important_decls, out_i
         )
         if _ppc_on:
-            _ppc_append = _ppc_append + (time_now_micros() - _ppc_ta)
+            _ppc_append = _ppc_append + (rt_time_now_micros() - _ppc_ta)
         pos = close + 1
     if _ppc_on:
         print "[web-phase] css_sub ppc_tmpl_us={_ppc_tmpl} ppc_props_us={_ppc_props}" +

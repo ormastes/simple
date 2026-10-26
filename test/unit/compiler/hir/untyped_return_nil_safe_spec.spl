@@ -1,0 +1,32 @@
+"""Regression for PID1 native-build D1: return-signature scanning is nil-safe."""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirTypeKind}
+
+describe "HIR untyped return inference":
+    it "treats an absent AST expression as no inferred return":
+        var lowering = HirLowering.with_filename("nil_return_scan.spl")
+        val scan = lowering.scan_ast_expr_for_returns(nil, [])
+        expect(scan.found_value_return).to_equal(false)
+        expect(scan.ambiguous).to_equal(false)
+
+    it "keeps scalar inference after the nil-safe guard":
+        val source = "fn void_helper():\n    print(\"ok\")\n\nfn inferred():\n    return 7\n"
+        val module = parse_full_frontend(source, "untyped_return_scan.spl", "untyped_return_scan.spl", Logger(level: 0))
+        var lowering = HirLowering.with_filename("untyped_return_scan.spl")
+        val hir = lowering.lower_module(module)
+        match hir.symbols.lookup("inferred"):
+            Some(symbol):
+                val fn_ = hir.functions[symbol]
+                match fn_.return_type.kind:
+                    HirTypeKind.Int(bits, signed):
+                        expect(bits).to_equal(64u8)
+                        expect(signed).to_equal(true)
+                    _:
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)

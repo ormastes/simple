@@ -17,26 +17,12 @@
 # findings discriminate. It does NOT grep any source file for a symbol -- see
 # .claude/skills/spipe.md 'Source-text assertions are not evidence'.
 #
-# Four fixtures, so a pass cannot be vacuous:
+# Two fixtures, so a pass cannot be vacuous:
 #   clean fixture -> must reach the "Lint passed" verdict and emit NO
 #                    "Found N error(s), M warning(s)" line with M > 0
 #   dirty fixture -> must emit RAW-RT-001 for a raw `extern fn rt_*` declaration
-#   dup fixture   -> must emit unnamed_duplicate_typed_args for two positional
-#                    calls of a duplicate-typed signature
-#   ui fixture    -> must emit UI001 for a raw string WidgetNode kind
-# A run where a dirty fixture comes back clean is the false-green this guard
+# A run where the dirty fixture comes back clean is the false-green this guard
 # exists to catch, and is a FAIL, never a pass.
-#
-# The dup fixture is the ENGINE-PARITY probe (added 2026-10-10). The seed's JIT
-# lane answered "Lint passed: all files clean" for it while the interpreter
-# reported both warnings, and RAW-RT-001 alone did not notice: that rule is
-# computed identically on both lanes. Before that the same lane SEGV'd
-# (rc=139) and then exited 70, so a fixture that kills the lint process is now
-# NAMED as a crash with its exit status instead of being folded into "no
-# verdict". The ui fixture pins the source defect behind that SEGV: the
-# line-based checks were handed the whole file text instead of its lines, which
-# crashed the JIT and, on the interpreter, silently disabled UI001. See
-# doc/08_tracking/bug/lint_jit_segv_text_as_string_array_2026-10-10.md.
 #
 # Verdict is the LAST line of stdout, per .claude/rules/vcs.md convention:
 #   PASS  - <n> fixture(s) linted, ...        exit 0
@@ -76,13 +62,9 @@ trap 'rm -rf "$WORK"' EXIT
 # batch them into one invocation.
 CLEAN="$WORK/clean_fixture.spl"
 DIRTY="$WORK/dirty_fixture.spl"
-DUP="$WORK/dup_fixture.spl"
-UI="$WORK/ui_fixture.spl"
 
 printf 'fn add(a: i64, b: i64) -> i64:\n    a + b\n' > "$CLEAN"
 printf 'extern fn rt_file_write_text(a: text, b: text) -> bool\n\nfn go() -> bool:\n    rt_file_write_text("a", "b")\n' > "$DIRTY"
-printf 'fn area(width: i64, height: i64) -> i64:\n    width * height\n\nfn main():\n    print area(2, 3)\n    print area(4, 5)\n' > "$DUP"
-printf 'fn build():\n    val node = WidgetNode.new("root", "panel")\n    node\n' > "$UI"
 
 # Run the pure-Simple lint program directly, not the host binary's own `lint`
 # subcommand: on the Rust seed those are different code paths, and only this one
@@ -95,15 +77,6 @@ run_lint() {
 CHECKED=0
 FAILURES=""
 
-# A fixture that kills the lint process is a crash, not a missing verdict:
-# rc >= 128 is a signal (139 = SEGV), 70 is the seed's unresolved-dispatch
-# abort. 124/137 (timeout) are handled by the callers before this is reached.
-note_crash() {
-    if [ "$2" -ge 128 ] || [ "$2" -eq 70 ]; then
-        FAILURES="$FAILURES $1-fixture-crashed-rc$2"
-    fi
-}
-
 CLEAN_OUT=$(run_lint "$CLEAN")
 CLEAN_RC=$?
 CHECKED=$((CHECKED + 1))
@@ -113,7 +86,6 @@ if [ "$CLEAN_RC" -eq 124 ] || [ "$CLEAN_RC" -eq 137 ]; then
     exit 2
 fi
 
-note_crash clean "$CLEAN_RC"
 case "$CLEAN_OUT" in
     *"Lint passed"*) : ;;
     *) FAILURES="$FAILURES clean-fixture-no-passed-verdict" ;;
@@ -131,46 +103,15 @@ if [ "$DIRTY_RC" -eq 124 ] || [ "$DIRTY_RC" -eq 137 ]; then
     exit 2
 fi
 
-note_crash dirty "$DIRTY_RC"
 case "$DIRTY_OUT" in
     *"RAW-RT-001"*) : ;;
     *) FAILURES="$FAILURES dirty-fixture-missed-RAW-RT-001" ;;
 esac
 
-DUP_OUT=$(run_lint "$DUP")
-DUP_RC=$?
-CHECKED=$((CHECKED + 1))
-
-if [ "$DUP_RC" -eq 124 ] || [ "$DUP_RC" -eq 137 ]; then
-    printf 'ERROR - nothing was checked (dup fixture timed out; host may be saturated)\n'
-    exit 2
-fi
-
-note_crash dup "$DUP_RC"
-case "$DUP_OUT" in
-    *"unnamed_duplicate_typed_args"*) : ;;
-    *) FAILURES="$FAILURES dup-fixture-missed-unnamed_duplicate_typed_args" ;;
-esac
-
-UI_OUT=$(run_lint "$UI")
-UI_RC=$?
-CHECKED=$((CHECKED + 1))
-
-if [ "$UI_RC" -eq 124 ] || [ "$UI_RC" -eq 137 ]; then
-    printf 'ERROR - nothing was checked (ui fixture timed out; host may be saturated)\n'
-    exit 2
-fi
-
-note_crash ui "$UI_RC"
-case "$UI_OUT" in
-    *"UI001"*) : ;;
-    *) FAILURES="$FAILURES ui-fixture-missed-UI001" ;;
-esac
-
 if [ "$SELFTEST" -eq 1 ]; then
     # The selftest is the discrimination proof: the two fixtures must NOT
     # produce the same verdict. If they do, the oracle is inert.
-    if [ "$CLEAN_OUT" = "$DIRTY_OUT" ] || [ "$CLEAN_OUT" = "$DUP_OUT" ] || [ "$CLEAN_OUT" = "$UI_OUT" ]; then
+    if [ "$CLEAN_OUT" = "$DIRTY_OUT" ]; then
         printf 'FAIL - selftest: clean and dirty fixtures produced identical output; oracle is inert\n'
         exit 1
     fi

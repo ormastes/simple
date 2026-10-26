@@ -13,8 +13,8 @@ bin/simple test test/integration/rendering/
 Run only the backend matrix or perf smoke:
 
 ```
-bin/simple test test/02_integration/rendering/backend_matrix_spec.spl
-bin/simple test test/02_integration/rendering/perf_smoke_spec.spl
+bin/simple test test/integration/rendering/backend_matrix_spec.spl
+bin/simple test test/integration/rendering/perf_smoke_spec.spl
 ```
 
 ## Test Files Added by Agent H
@@ -68,7 +68,7 @@ env var set. Example GitHub Actions matrix entry:
 - name: vulkan-gpu
   env:
     FORCE_VULKAN: "1"
-  run: bin/simple test test/02_integration/rendering/backend_matrix_spec.spl
+  run: bin/simple test test/integration/rendering/backend_matrix_spec.spl
 ```
 
 ## Perf Smoke Fields

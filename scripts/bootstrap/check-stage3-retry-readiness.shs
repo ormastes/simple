@@ -24,11 +24,7 @@ done
 [ -d "$root_arg" ] && [ ! -L "$root_arg" ] || fail source-root-not-canonical
 root=$(CDPATH= cd -- "$root_arg" && pwd -P) || fail source-root-not-canonical
 [ "$root" = "$root_arg" ] || fail source-root-not-canonical
-git_root=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || \
-  fail source-root-not-git-worktree
-# Git for Windows uses drive paths; compare both roots in the shell's form.
-git_root=$(CDPATH= cd -- "$git_root" && pwd -P) || fail source-root-not-git-worktree
-[ "$git_root" = "$root" ] || \
+[ "$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)" = "$root" ] || \
   fail source-root-not-git-worktree
 [ -z "$(git -C "$root" status --porcelain=v1 2>/dev/null)" ] || \
   fail source-worktree-dirty
@@ -37,7 +33,6 @@ simple_bootstrap_storage_init "$root" || fail centralized-storage-unavailable
 
 batching="$root/src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
 diagnostics="$root/src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
-validation_diagnostics="$root/src/compiler/80.driver/driver_hir_pipeline_support.spl"
 orchestration="$root/src/compiler/80.driver/driver_orchestration.spl"
 native_build="$root/src/app/cli/native_build_main.spl"
 pipeline="$root/src/compiler/80.driver/pipeline_fn.spl"
@@ -48,22 +43,22 @@ snapshot="$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 manifest_verify="$root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
 composition="$root/src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl"
 
-for required in "$batching" "$diagnostics" "$validation_diagnostics" "$orchestration" "$native_build" \
+for required in "$batching" "$diagnostics" "$orchestration" "$native_build" \
   "$pipeline" "$focused" "$bootstrap_main" "$bootstrap" "$snapshot" \
   "$manifest_verify" "$composition"; do
   [ -f "$required" ] && [ ! -L "$required" ] || fail required-readiness-source-missing
 done
 
-[ "$(grep -c 'fn module_surface_promote_roots(roots: \[ModuleSurfaceRoot\]) -> bool:' "$batching" 2>/dev/null || true)" -eq 1 ] || \
+[ "$(grep -c 'fn module_surface_promote_roots(roots: \[Any\]) -> bool:' "$batching" 2>/dev/null || true)" -eq 1 ] || \
   fail batching-root-authority-missing
 [ "$(grep -c 'module_surface_promote_roots(roots)' "$batching" 2>/dev/null || true)" -ge 2 ] || \
   fail batching-call-sites-missing
 
 grep -Fq '[hir-fatal]' "$diagnostics" || fail source-diagnostic-emission-missing
-grep -Fq '[post-hir-validation-fatal]' "$validation_diagnostics" || fail validation-diagnostic-emission-missing
-grep -Fq 'per-module root causes were emitted above as [hir-fatal]' "$orchestration" || \
+grep -Fq '[post-hir-validation-fatal]' "$diagnostics" || fail validation-diagnostic-emission-missing
+grep -Fq 'source diagnostics were emitted as [hir-fatal]' "$orchestration" || \
   fail diagnostic-transport-disclosure-missing
-grep -Fq 'native_build_range_contains(output, "[hir-fatal", line_start, line_end)' "$native_build" || \
+grep -Fq 'line.contains("[hir-fatal")' "$native_build" || \
   fail diagnostic-preservation-filter-missing
 
 grep -Fq ') -> text:' "$pipeline" || fail pipeline-return-contract-missing
@@ -88,8 +83,7 @@ printf '%s\n' "$stage3_block" | grep -Fq -- '--source src/compiler --source src/
 ! printf '%s\n' "$stage3_block" | grep -Fq 'SIMPLE_NATIVE_BUILD_RUST=1' || \
   fail stage3-command-seed-fallback-present
 
-grep -Fq 'src/package_ownership src/plugins src/compositions' "$snapshot" && \
-grep -Fq '"$bootstrap_stage3_root" src examples/10_tooling' "$snapshot" || \
+grep -Fq 'src/lib src/compositions examples/10_tooling' "$snapshot" || \
   fail source-fingerprint-omits-compositions
 grep -Fq 'SIMPLE_BOOTSTRAP_STAGE3' "$manifest_verify" || \
   fail stage3-manifest-verifier-command-stale

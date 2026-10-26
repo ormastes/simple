@@ -21,7 +21,7 @@ are correctly parsed and applied to functions.
 
 ## Syntax
 
-```simple:skip
+```simple
 @pure
 fn add(x: i64, y: i64) -> i64:
     x + y

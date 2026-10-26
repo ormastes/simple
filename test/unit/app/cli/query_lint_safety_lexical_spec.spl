@@ -1,0 +1,104 @@
+use app.cli.query_lint_checks.{_check_safety_text}
+use app.cli.query_rich_common.{_DIAG_COLLECT_MODE, _DIAG_COLLECTED}
+use std.spec.step
+
+fn _safety_diagnostics(lines: [text]) -> [text]:
+    _DIAG_COLLECT_MODE = true
+    _DIAG_COLLECTED = []
+    val count = _check_safety_text(lines, "safety_fixture.spl", "json")
+    val result = _DIAG_COLLECTED
+    _DIAG_COLLECTED = []
+    _DIAG_COLLECT_MODE = false
+    expect(count).to_equal(result.len())
+    result
+
+describe "query safety lint lexical projection":
+    it "reports a real pointer operation at its exact token span":
+        step("Pin SAFE003 severity and source coordinates")
+        val diagnostics = _safety_diagnostics(["fn probe():", "    val x = ptr_read(handle)"])
+        expect(diagnostics).to_equal([
+            "{\"severity\":1,\"code\":\"SAFE003\",\"message\":\"raw pointer operation outside unsafe block\",\"line\":2,\"col\":13,\"end_line\":2,\"end_col\":22,\"tags\":[],\"source\":\"simple-lint\"}"])
+
+    it "ignores pointer spellings in comments and ordinary strings":
+        step("Exclude lexical payload from severity-one diagnostics")
+        val diagnostics = _safety_diagnostics([
+            "fn probe():",
+            "    # ptr_read(handle)",
+            "    val note = \"ptr_write(handle)\""])
+        expect(diagnostics.len()).to_equal(0)
+
+    it "ignores unsafe and pointer text inside a multiline docstring":
+        step("Track triple-quoted state without corrupting unsafe scope")
+        val diagnostics = _safety_diagnostics([
+            "fn probe():", "    \"\"\"", "unsafe:", "ptr_read(handle)",
+            "    \"\"\"", "    ptr_read(handle)"])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_contain("\"line\":6,\"col\":5")
+
+    it "resumes after a same-line triple string at the exact pointer":
+        step("Recognize real code following a closed docstring")
+        val diagnostics = _safety_diagnostics([
+            "fn probe():", "    \"\"\"Fake ptr_read(x)\"\"\"; ptr_write(x)"])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_contain("\"col\":29,\"end_line\":2,\"end_col\":39")
+
+    it "does not let string or comment unsafe text suppress a real error":
+        step("Drive unsafe state only from executable code")
+        val diagnostics = _safety_diagnostics([
+            "fn probe():", "    val note = \"unsafe:\"", "    # unsafe:",
+            "    ptr_read(handle)"])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_contain("\"line\":4,\"col\":5")
+
+    it "suppresses pointer operations in a real unsafe block":
+        step("Preserve the legitimate unsafe scope contract")
+        val diagnostics = _safety_diagnostics([
+            "fn probe():", "    unsafe:", "        ptr_read(handle)",
+            "    val done = true"])
+        expect(diagnostics.len()).to_equal(0)
+
+    it "preserves the outer scope after a nested unsafe block":
+        step("Track nested unsafe ownership with an indentation stack")
+        val diagnostics = _safety_diagnostics([
+            "fn probe():", "    unsafe:", "        unsafe:",
+            "            ptr_read(a)", "        ptr_read(b)",
+            "    ptr_read(c)"])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_contain("\"line\":6,\"col\":5")
+
+    it "does not treat unsafe-prefixed identifiers as scope markers":
+        step("Require an actual unsafe block header")
+        val diagnostics = _safety_diagnostics([
+            "fn probe():", "    unsafe:", "        ptr_read(a)",
+            "    unsafe_value = 0", "    ptr_read(b)"])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_contain("\"line\":5,\"col\":5")
+
+    it "emits one SAFE003 at the first real pointer operation":
+        step("Preserve one diagnostic per line with first-token span")
+        val diagnostics = _safety_diagnostics([
+            "fn probe():", "    val x = ptr_write(a) + ptr_read(b)"])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_contain("\"col\":13,\"end_line\":2,\"end_col\":23")
+
+    it "recognizes every bounded raw-pointer operation":
+        step("Pin the complete SAFE003 pattern table and token widths")
+        val operations = [
+            "ptr_read(", "ptr_write(", "ptr_cast(", "ptr_offset(",
+            "mem_copy(", "mem_set("]
+        for operation in operations:
+            val diagnostics = _safety_diagnostics([
+                "fn probe():", "    {operation}handle)"])
+            expect(diagnostics.len()).to_equal(1)
+            expect(diagnostics[0]).to_contain("\"col\":5")
+            expect(diagnostics[0]).to_contain(
+                "\"end_col\":{5 + operation.len()}")
+
+    it "applies the same lexical boundary to inline assembly":
+        step("Exclude fake asm and report the real token")
+        val diagnostics = _safety_diagnostics([
+            "fn probe():", "    # asm(\"nop\")", "    val note = \"asm nop\"",
+            "    \"\"\"", "asm(\"fake\")", "    \"\"\"", "    asm(\"nop\")"])
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_equal(
+            "{\"severity\":1,\"code\":\"SAFE001\",\"message\":\"inline assembly outside unsafe block\",\"line\":7,\"col\":5,\"end_line\":7,\"end_col\":9,\"tags\":[],\"source\":\"simple-lint\"}")

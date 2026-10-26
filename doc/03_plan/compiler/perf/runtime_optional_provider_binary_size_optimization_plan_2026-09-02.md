@@ -1,68 +1,5 @@
 # Runtime Optional Provider and Binary-Size Optimization Plan
 
-## 2026-10-11 OS and filesystem variation refinement
-
-The user selected separate sibling `variants/os/` and `variants/filesystem/`
-groups. This refines P2/P3/P4 in this plan; it does not create another resolver
-or implementation plan. See the [current design](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-selected-os-and-filesystem-separation).
-
-The corresponding plan folders are separate: [variation/os](variation/os/README.md)
-and [variation/filesystem](variation/filesystem/README.md). They index this plan's
-work by independent axis and do not duplicate its status or acceptance owners.
-
-| Work | Required exit evidence | Status |
-|---|---|---|
-| P2: separate OS and filesystem slots | Existing resolver recognizes independent selections, preserves `platform` compatibility, rejects ambiguous/conflicting aliases, and invalidates only affected selection/cache entries. | Planned |
-| P3: neutral filesystem operations | Common SOSIX contracts and production routing for statfs and path/handle truncate; existing positioned I/O retained; permission, generation and error checks verified. | Missing routes; open |
-| P4: independent provider composition | Same filesystem through two admitted OS providers; two filesystem providers under one OS; multiple simultaneous mounts; open handles retain provider identity. | Native combinations unqualified |
-| P4: shared operation acceptance | SOSIX tests parameterized by OS and filesystem, including unavailable capabilities and backend failure propagation; driver-private tests reported separately. | Open |
-
-Windows, Linux, BSD/FreeBSD and SimpleOS are OS candidates; FAT32, NVFS and DBFS
-are filesystem candidates. This is a qualification matrix, not a claim that its
-Cartesian product works. Keep native-format translation within the OS provider
-and filesystem-format algorithms within the shared filesystem owner. Do not
-copy either tree per pair. SDN remains the default configuration/evidence format;
-JSON is an explicit interoperability option.
-
-## 2026-10-11 selected variation migration
-
-The user requested incorporation of the [SIMD/GPU/SOSIX variation design](../../../05_design/compiler/simd_gpu_sosix_variation_final_2026-10-10.md). This table adds its work to this existing Item 5 plan; it creates no competing implementation plan. All rows remain **planned/unqualified** until their own production evidence passes. Current owner corrections are in the [shared-interface design](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration).
-
-| Proposal package | Existing Item 5 phases | Work and exit evidence |
-|---|---|---|
-| P0: evidence/owners | 0 | Census actual selectors, probes, host effects, public callers and current artifacts; retain source/target/producer identities and support stage. |
-| P1: environment contracts | 1, 6 | Adapt existing snapshots/codegen profiles, exact feature IDs and target registry; negotiate schema changes; prove old-reader rejection and validator/codec parity. |
-| P2: sparse source/provider slots | 1, 3 | Extend existing resolver/catalog; reject unrelated shadowing; normalize legacy tier roots; verify selected-source cache invalidation. |
-| P3: SOSIX lifecycle | 2, 6 | Connect common operation, result/wake, retained-buffer and retirement owners; prove sync/async and GC-family parity without copied algorithm bodies. |
-| P4: OS provider wiring | 2, 6 | Per OS, record source -> compile -> link/load -> bind -> execute; preserve portable fallback honestly and retire bypasses only after parity. |
-| P5: SIMD planning | 2, 3, 6 | Inject target profile into shared vectorizer; exact ISA/mask/tail/numerical receipts; qualify each fixed/scalable transformation and worker domain. |
-| P6: GPU facets | 2, 3, 6 | Keep compile and runtime facets distinct; integrate existing CUDA/Metal/Vulkan emitters/providers with shared resource lifecycle; actual submit/complete/parity per claimed backend. |
-| P7: advanced optimization | 6 | Opt-in extraction/fusion/tiling/reduction only after semantic/effect legality and measured end-to-end benefit including transfers; no new invented numeric target. |
-| P8: packaging/SimpleOS | 3, 5, 6 | Sealed providers, existing binding generations, admitted transports and real trap/registration evidence; drain before unload; no ABI-crossing fallback. |
-| P9: retirement | 7 | Remove obsolete owners or bound behavior-free aliases; verify no duplicate selectors/lifecycles, current links/manuals and exact claim-to-receipt traceability. |
-
-Proposal P5 is not this plan's Phase 5 and neither is a compiler generation. P4 and P5 may proceed independently after shared contracts freeze. Unavailable DSP, OS or physical GPU rows remain open without blocking unrelated qualified repairs. Do not remove a working static provider before dynamic parity and rollback exist.
-
-Keep the immediate host sequence: finish the immutable bootstrap candidate and Hello gates; build and execute actual Simple DB/webserver fixtures; run matched AVX512 enabled/disabled cohorts; qualify current ARM/RISC-V providers/apps; measure default image/loading and cut over qualified providers. New shared contracts enter the next candidate, never a live frozen build. Release PRs may land independently qualified fixes, but documentation or a C-only test never closes full Item 5.
-
-Each package records existing owner, callers, reused/moved/retired body, retained aliases, baseline, rollback generation, evidence references and unresolved rows. Extend the existing trace database with variation-axis attributes rather than copying one feature per OS/ISA combination.
-
-## 2026-10-09 priority and release baseline
-
-First priority is the nonbreaking item-5 plan/design and shared-interface
-alignment against release `59499d74697`. Follow the
-[shared owner and compatibility handoff](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md).
-Land this documentation separately from compiler/app source changes. Historical
-size and bootstrap reports below retain their original source/host scope; they
-do not qualify the current release or draft PRs #2761/#2762. All selected
-requirements and the Phase 0..7 gates remain in force.
-
-Execution order: freeze shared owner/version contracts; qualify the matched
-compiler/runtime; exercise actual provider admission, app parity and target
-lifetimes; produce Phase-5 size/loading cohorts; then consider target promotion
-and default cutover. Metadata tests, native C kernels and QEMU PID probes are
-prerequisites with narrower scope, not substitutes for Simple application runs.
-
 ## Goal
 
 Preserve all Simple features and architectures while making optional libraries truly demand-loaded, preferring qualified pure-Simple implementations, matching Python's base interpreter loading footprint, and measuring release-small hello against C with the same required startup and link inputs.
@@ -254,12 +191,6 @@ Gate: injected exception, unwind, RTTI, personality, or foreign-boundary require
 
 ## Phase 5 — Size and Loading Gates
 
-Use the [release compatibility matrix](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#compatibility-with-phase-5-size-and-loading-gates)
-to join exact producer/consumer/runtime/provider identities. Keep image, startup,
-warm-request and application measurements separate, and retain the existing
-30/100-sample distinction. Unqualified draft source and historical receipts must
-not be relabeled as this release's evidence.
-
 - Unstripped NoGC hello below 2 MiB on all native targets.
 - Linux stripped release-small hello at most 15 KiB and at most 1.05x same-host, same-toolchain C with the same startup wrapper, required runtime archive, linker options, section GC, and strip policy.
 - Other targets use same-host C plus an admitted format allowance.
@@ -320,21 +251,6 @@ Gate: full feature matrix passes with no static optional dependency regression.
 - Mutation suite: forced eager load, undeclared dependency, coarse section retention, collector root, unwind/RTTI injection, dual effect execution, and missing attribution.
 
 ## Completion Conditions
-
-### 2026-10-02 item 5 acceptance update
-
-The retained scope is now mapped to [14 concrete runtime acceptance cases](../../sys_test/item5_provider_size_acceptance_2026-10-02.md).
-Current-source research and ownership are recorded in the
-[development ledger](../../evidence/item5_tdd_progress_2026-10-02.md).
-Source-token assertions and synthetic BS7 cohorts remain auxiliary checker
-evidence; they cannot certify optional loading, closure exclusion or NFRs.
-
-I5-04 behavioral authority mutations were authored before a minimal admission
-fix binding pinned member geometry/digests and archive bounds. Execution is
-blocked by the missing admitted self-hosted test runtime, so RED/GREEN and
-completion remain unproven. Full activation, closure, CLI cutover, packaging,
-lifetime, parity and host/resource evidence remain required. Release/1.0
-retains a different repeated-rejection contract; renew its tests separately.
 
 - No optional provider loads for no-import hello.
 - Pure-Simple provider promotion is receipt-backed and reversible.

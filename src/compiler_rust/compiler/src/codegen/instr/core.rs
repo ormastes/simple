@@ -54,34 +54,6 @@ fn vreg_is_native_equality_scalar<M: Module>(ctx: &InstrContext<'_, M>, v: VReg)
     )
 }
 
-/// Use the tag-aware ordering runtime only when the source type explicitly
-/// says an operand is `Any`. A missing VReg type is not `Any`: call results
-/// such as `ast_module_decl_count_get()` can be raw i64 values whose MIR type
-/// was not threaded into this backend. Passing raw counts like 2 or 98 to
-/// `rt_native_cmp` can make the runtime misread their low bits as a legacy
-/// inline-float tag; this mirrors LLVM's ordering_needs_dynamic_cmp rule.
-fn ordering_needs_dynamic_cmp(lhs: Option<TypeId>, rhs: Option<TypeId>) -> bool {
-    let numeric = |ty: Option<TypeId>| {
-        matches!(
-            ty,
-            Some(
-                TypeId::BOOL
-                    | TypeId::I8
-                    | TypeId::I16
-                    | TypeId::I32
-                    | TypeId::I64
-                    | TypeId::U8
-                    | TypeId::U16
-                    | TypeId::U32
-                    | TypeId::U64
-                    | TypeId::CHAR
-                    | TypeId::NIL
-            )
-        )
-    };
-    (lhs == Some(TypeId::ANY) || rhs == Some(TypeId::ANY)) && !numeric(lhs) && !numeric(rhs)
-}
-
 fn interp_call_returns_f64(func_name: &str) -> bool {
     matches!(
         func_name,
@@ -234,10 +206,6 @@ pub(crate) fn compile_binop<M: Module>(
     // sshr vs ushr and sextend vs uextend on shift operations — the RHS is a
     // non-negative shift count and always widens uextend.
     let lhs_signed = vreg_is_signed(ctx, left_vreg);
-    // Division and remainder are unsigned when EITHER operand is statically
-    // unsigned, the same rule the ordering comparisons below use: in
-    // `100 / x_u64` the literal is typed i64 but the quotient is a u64.
-    let unsigned_divide = lhs_signed == Some(false) || vreg_is_signed(ctx, right_vreg) == Some(false);
 
     // A cross-block f64 operand is carried through an i64-typed Cranelift
     // Variable (cross-block VRegs are declared i64; `def_var` bitcasts f64->i64
@@ -306,7 +274,7 @@ pub(crate) fn compile_binop<M: Module>(
         BinOp::Div => {
             if is_float {
                 builder.ins().fdiv(lhs, rhs)
-            } else if unsigned_divide {
+            } else if lhs_signed == Some(false) {
                 builder.ins().udiv(lhs, rhs)
             } else {
                 // INT64_MIN / -1 overflows the signed quotient. x86 `idiv`
@@ -334,7 +302,7 @@ pub(crate) fn compile_binop<M: Module>(
                 let prod = builder.ins().fmul(floored, rhs);
                 builder.ins().fsub(lhs, prod)
             } else {
-                if unsigned_divide {
+                if lhs_signed == Some(false) {
                     builder.ins().urem(lhs, rhs)
                 } else {
                     // Same #DE as Div above: `INT64_MIN % -1` faults on x86
@@ -459,19 +427,23 @@ pub(crate) fn compile_binop<M: Module>(
                 };
                 let cmp_i8 = builder.ins().icmp(cc, cmp, zero);
                 ensure_i64(builder, cmp_i8)
-            } else if ordering_needs_dynamic_cmp(
-                ctx.vreg_types.get(&left_vreg).copied(),
-                ctx.vreg_types.get(&right_vreg).copied(),
-            ) {
-                // Explicitly typed Any values need tag-aware ordering when
-                // neither operand is proven numeric. Missing VReg type
-                // metadata is not Any: call results can be raw i64 values
-                // whose types were not threaded to this backend. Sending
-                // those raw values through rt_native_cmp can misread low bits
-                // as a legacy inline-float tag. This dispatch rule matches the
-                // LLVM backend's ordering_needs_dynamic_cmp contract.
-                // rt_native_cmp returns a strcmp-style signed result for
-                // dynamic string/value ordering.
+            } else if !(vreg_is_native_equality_scalar(ctx, left_vreg)
+                && vreg_is_native_equality_scalar(ctx, right_vreg))
+            {
+                // P0 follow-up (2026-08-01): NEITHER operand is statically
+                // typed. Eq/NotEq already handle this case dynamically via
+                // rt_native_eq/rt_native_neq (tag-aware: content-compares
+                // tagged heap strings, icmp-compares raw integers), which is
+                // precisely why `==` on text stayed correct while `<`/`<=`/
+                // `>`/`>=` did not -- ordering had no such fallback and fell
+                // into the raw icmp arm below, comparing string handles.
+                // rt_native_cmp is the ordering counterpart of rt_native_eq
+                // and returns a strcmp-style signed result.
+                //
+                // Gated on the operands NOT being known scalars so genuine
+                // integer comparisons keep the inline icmp and take no
+                // runtime-call perf hit; only the statically-unknown case
+                // pays for the dynamic dispatch.
                 let cmp = call_runtime_2(ctx, builder, "rt_native_cmp", lhs, rhs);
                 let zero = builder.ins().iconst(types::I64, 0);
                 let cc = match op {
@@ -972,20 +944,4 @@ pub(crate) fn compile_interp_call<M: Module>(
         ctx.vreg_values.insert(*d, value);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod ordering_dispatch_tests {
-    use super::ordering_needs_dynamic_cmp;
-    use crate::hir::TypeId;
-
-    #[test]
-    fn only_explicit_any_selects_tag_aware_ordering_for_untyped_values() {
-        assert!(ordering_needs_dynamic_cmp(Some(TypeId::ANY), None));
-        assert!(ordering_needs_dynamic_cmp(Some(TypeId::ANY), Some(TypeId::ANY)));
-        assert!(!ordering_needs_dynamic_cmp(None, Some(TypeId::I64)));
-        assert!(!ordering_needs_dynamic_cmp(Some(TypeId::I64), None));
-        assert!(!ordering_needs_dynamic_cmp(None, None));
-        assert!(!ordering_needs_dynamic_cmp(Some(TypeId::ANY), Some(TypeId::I64)));
-    }
 }

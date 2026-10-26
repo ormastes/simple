@@ -123,7 +123,7 @@ simple test --list
 
 ### Basic Operations
 
-```simple:skip
+```simple
 use std.text_core.{str_len, str_concat, str_eq}
 
 str_len("hello")              # 5
@@ -133,7 +133,7 @@ str_eq("test", "test")        # true
 
 ### Slicing and Access
 
-```simple:skip
+```simple
 use std.text_core.{str_slice, str_char_at, str_safe_slice}
 
 str_slice("hello", 0, 3)       # "hel"
@@ -144,7 +144,7 @@ str_safe_slice("hi", -1, 100)  # "hi" (bounds-safe)
 
 ### Search
 
-```simple:skip
+```simple
 use std.text_core.{str_contains, str_starts_with, str_ends_with}
 use std.text_core.{str_index_of, str_last_index_of}
 
@@ -156,7 +156,7 @@ str_index_of("hello", "x")            # -1
 
 ### Trimming, Replacement, Split/Join
 
-```simple:skip
+```simple
 use std.text_core.{str_trim, str_replace_all, str_split, str_join}
 
 str_trim("  hello  ")                  # "hello"
@@ -167,7 +167,7 @@ str_join(["x", "y", "z"], "-")        # "x-y-z"
 
 ### Case Conversion and Manipulation
 
-```simple:skip
+```simple
 use std.text_core.{str_to_lower, str_to_upper, str_capitalize}
 use std.text_core.{str_reverse, str_repeat, str_pad_left}
 
@@ -319,7 +319,7 @@ PostgreSQL Driver  |  libSQL Driver
 
 ### Connecting
 
-```text
+```simple
 use db.*
 
 val config = DbConfig(
@@ -340,7 +340,7 @@ val db = Db.connect(config)?
 
 ### Queries
 
-```text
+```simple
 # Execute (INSERT, UPDATE, DELETE)
 val result = db.execute(
     "INSERT INTO users (name, email) VALUES (?, ?)",
@@ -362,7 +362,7 @@ for row in users:
 
 ### Transactions
 
-```text
+```simple
 with_transaction(db) \tx:
     tx.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", [100, 1])?
     tx.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", [100, 2])?
@@ -382,7 +382,7 @@ with_transaction(db) \tx:
 
 ### Switching Backends
 
-```text
+```simple
 # Development
 val dev_config = DbConfig(
     backend: DbBackend.LibSql,
@@ -416,7 +416,7 @@ SQP is the high-level query and persistence DSL built on the DB layer.
 
 ### Casual Mode (Default)
 
-```text
+```simple
 data User:
     name: str
     email: str unique
@@ -433,7 +433,7 @@ Auto-generated fields: `id: i64 primary`, `created_at: datetime`, `updated_at: d
 
 ### Formal Mode
 
-```text
+```simple
 @table("users")
 data User:
     @primary @auto
@@ -453,7 +453,7 @@ data User:
 
 ### Query DSL
 
-```text
+```simple
 users = User.where(active: true)
             .order(created_at: desc)
             .limit(10)
@@ -469,7 +469,7 @@ result = db.query "SELECT * FROM users WHERE id = ?", [user_id]
 
 ### Transactions
 
-```text
+```simple
 db.transaction \tx:
     val user = User.create(name: "Alice", email: "alice@test.com")
     val post = Post.create(title: "Hello", author: user)
@@ -478,7 +478,7 @@ db.transaction \tx:
 
 ### Migrations
 
-```text
+```simple
 # Auto-generated from data definitions
 migrate "create_users":
     create_table "users":
@@ -499,7 +499,7 @@ Thread-safe, atomic database operations for SDN-formatted text files with file l
 
 ### Basic Operations
 
-```text
+```simple
 use std.db_atomic.{atomic_read, atomic_write, atomic_update, DbConfig}
 
 # Read
@@ -516,7 +516,7 @@ atomic_update("data.sdn", |content| {
 
 ### AtomicTable
 
-```text
+```simple
 use std.db_atomic.{AtomicTable, DbConfig}
 
 # Create table
@@ -551,7 +551,7 @@ val existing = AtomicTable.load("todos.sdn", "todos", DbConfig.defaults())?
 
 ### Batch Operations
 
-```text
+```simple
 # Single lock acquisition for multiple rows
 table.update(|content| {
     var new_content = content
@@ -569,7 +569,7 @@ The `note.sdn` section in SMF files tracks generic instantiation metadata for la
 
 ### Tracking Instantiations
 
-```text
+```simple
 use simple/compiler/monomorphize/note_sdn.*
 
 var note = NoteSdnMetadata.new()

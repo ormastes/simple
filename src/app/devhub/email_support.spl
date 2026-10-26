@@ -1,9 +1,9 @@
 # Shared email config, rows, credentials and process boundary.
-use std.nogc_async_mut.sosix.host_facade.{sosix_file_exists, sosix_file_read, sosix_env_get_opt}
-use app.devhub.email_config_sdn.{parse_email_sdn_json}
+use app.io.mod.{file_exists, file_read}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{time_now_unix_micros}
-use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_type, json_value_field, json_value_has, json_value_keys, json_value_len, json_value_at, json_value_text_or, json_value_serialize, json_value_pretty, json_value_object_from}
+use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_object_keys, json_to_string, json_get_type, json_serialize, json_object, json_string, json_array, json_boolean, json_pretty}
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
 use app.devhub.output.{print_error, print_success, print_warning, wants_json, print_table_dynamic}
 use app.devhub.email_translate.{
@@ -64,9 +64,9 @@ fn email_config_dir() -> text:
     Reads through env_get_opt, not env_get: env_get has co-compiled
     Optional/text variants on this seed and a wrong dispatch turns the home
     path into garbage, which makes the config file unreadable."""
-    val home = sosix_env_get_opt("HOME") ?? ""
+    val home = env_get_opt("HOME") ?? ""
     if home == "":
-        val userprofile = sosix_env_get_opt("USERPROFILE") ?? ""
+        val userprofile = env_get_opt("USERPROFILE") ?? ""
         if userprofile != "":
             return "{userprofile}/.config/devhub"
     "{home}/.config/devhub"
@@ -76,41 +76,41 @@ fn email_shared_config_path() -> text:
     "{email_config_dir()}/email.sdn"
 
 fn email_config_path() -> text:
-    # Legacy JSON requires an explicit --config-file path.
-    email_shared_config_path()
+    val shared = email_shared_config_path()
+    if file_exists(shared):
+        return shared
+    "{email_config_dir()}/email.json"
 
 fn email_expand_path(path: text) -> text:
     """Expand the literal home placeholder without invoking a shell."""
     # Assemble the marker to avoid Simple's own source-string interpolation.
     val marker = "{" + "home" + "}"
     if path == marker or path.starts_with(marker + "/"):
-        var home = sosix_env_get_opt("HOME") ?? ""
+        var home = env_get_opt("HOME") ?? ""
         if home == "":
-            home = sosix_env_get_opt("USERPROFILE") ?? ""
+            home = env_get_opt("USERPROFILE") ?? ""
         if home == "":
             return ""
         return home + path[marker.len():]
     path
 
-fn _email_json_text(obj: JsonValue, key: text) -> text:
-    json_value_text_or(json_value_field(obj, key), "")
+fn _email_json_text(obj: any, key: text) -> text:
+    val value = json_object_get(obj, key)
+    if value == nil or json_get_type(value) != "string":
+        return ""
+    json_to_string(value) ?? ""
 
 fn parse_email_shared_config(content: text, path: text) -> EmailConfig:
-    val root = json_value_parse_opt(content)
-    if root == nil:
+    val root = json_parse(content)
+    if root == nil or json_get_type(root) != "object":
         return EmailConfig.default()
-    parse_email_shared_config_value(root.unwrap(), path)
-
-fn parse_email_shared_config_value(root: JsonValue, path: text) -> EmailConfig:
-    if json_value_type(root) != "object":
-        return EmailConfig.default()
-    val entries = json_value_field(root, "accounts")
-    if json_value_type(entries) != "object":
+    val entries = json_object_get(root, "accounts")
+    if entries == nil or json_get_type(entries) != "object":
         return EmailConfig.default()
     var accounts: [EmailAccount] = []
-    for name in json_value_keys(entries):
-        val entry = json_value_field(entries, name)
-        if json_value_type(entry) == "object":
+    for name in json_object_keys(entries):
+        val entry = json_object_get(entries, name)
+        if entry != nil and json_get_type(entry) == "object":
             val protocol = _email_json_text(entry, "protocol")
             val configured_provider = _email_json_text(entry, "provider")
             var provider = "outlook_imap"
@@ -119,21 +119,57 @@ fn parse_email_shared_config_value(root: JsonValue, path: text) -> EmailConfig:
             elif protocol == "graph":
                 provider = "outlook"
             elif protocol == "" or protocol == "imap":
-                if configured_provider == "outlook":
-                    provider = "outlook"
-                elif configured_provider == "gmail":
+                if configured_provider == "gmail":
                     provider = "gmail"
             else:
                 provider = "unsupported"
             accounts = accounts + [EmailAccount(
                 name: name, provider: provider, email: _email_json_text(entry, "email"),
-                password_cmd: _email_json_text(entry, "password_cmd"), config_file: path,
+                password_cmd: "", config_file: path,
                 tenant_id: _email_json_text(entry, "tenant_id"),
                 client_id: _email_json_text(entry, "client_id"),
                 client_secret_env: _email_json_text(entry, "client_secret_env"),
                 shared_mailbox: _email_json_text(entry, "shared_mailbox"),
             )]
     EmailConfig(default_account: _email_json_text(root, "default_account"), accounts: accounts)
+
+
+fn _email_cfg_leading_spaces(line: text) -> i64:
+    var i = 0
+    while i < line.len() and line[i:i + 1] == " ":
+        i = i + 1
+    i
+
+
+fn _email_cfg_strip_value(raw: text) -> text:
+    val v = raw.trim()
+    if v.starts_with("\"") and v.ends_with("\"") and v.len() >= 2:
+        return v[1:v.len() - 1]
+    v
+
+
+fn _apply_account_field(acc: EmailAccount, key: text, value: text) -> EmailAccount:
+    match key:
+        "protocol":
+            if value == "pop3":
+                return EmailAccount(name: acc.name, provider: "pop3", email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+            acc
+        "provider":
+            EmailAccount(name: acc.name, provider: if acc.provider == "pop3": "pop3" else: value, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "email":
+            EmailAccount(name: acc.name, provider: acc.provider, email: value, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "password_cmd":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: value, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "tenant_id":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: value, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "client_id":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: value, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "client_secret_env":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: value, shared_mailbox: acc.shared_mailbox)
+        "shared_mailbox":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: value)
+        _:
+            acc
 
 
 fn load_email_config() -> EmailConfig:
@@ -153,41 +189,56 @@ fn load_email_config() -> EmailConfig:
     load_email_config_from(email_config_path())
 
 fn load_email_config_from(path: text) -> EmailConfig:
-    match load_email_config_checked(path):
-        case Ok(config):
-            config
-        case Err(_):
-            EmailConfig.default()
-
-fn load_email_config_checked(path: text) -> Result<EmailConfig, text>:
-    if not sosix_file_exists(path):
-        return Err("MAIL_CONFIG_MISSING")
-    val content = sosix_file_read(path)
+    if not file_exists(path):
+        return EmailConfig.default()
+    # file_read, not file_read_text: file_read_text has co-compiled
+    # Optional/text variants on this seed and a wide-closure dispatch can land
+    # on a raw rt_* reader that yields nil for a normal existing file. The
+    # facade below returns "" on error, never nil.
+    val content = file_read(path)
     if content == "":
-        return Err("MAIL_CONFIG_EMPTY")
-    # Legacy JSON is selected explicitly by extension; SDN never falls back.
-    if path.ends_with(".json"):
-        val root = json_value_parse_opt(content)
-        if root == nil:
-            return Err("MAIL_CONFIG_SYNTAX")
-        if json_value_type(root.unwrap()) != "object":
-            return Err("MAIL_CONFIG_ROOT")
-        if json_value_type(json_value_field(root.unwrap(), "accounts")) != "object":
-            return Err("MAIL_CONFIG_ACCOUNTS")
-        return Ok(parse_email_shared_config_value(root.unwrap(), path))
-    match parse_email_sdn_json(content):
-        case Ok(root):
-            Ok(parse_email_shared_config_value(root, path))
-        case Err(code):
-            Err(code)
-
+        return EmailConfig.default()
+    if content.trim().starts_with("{"):
+        return parse_email_shared_config(content, path)
+    _parse_email_config_content(content)
 
 fn _parse_email_config_content(content: text) -> EmailConfig:
-    match parse_email_sdn_json(content):
-        case Ok(root):
-            parse_email_shared_config_value(root, "")
-        case Err(_):
-            EmailConfig.default()
+    """Loop body of load_email_config, kept in its own function so the
+    file-read indirection (and its seed-dispatch caveats) stays in one
+    place."""
+    var default_account = ""
+    var accounts: [EmailAccount] = []
+    var current = EmailAccount.empty()
+    var have_current = false
+
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            # `pass`, not `pass_dn`: in this wide module the seed mis-dispatches
+            # `pass_dn` and aborts the loop at the first blank line, so no
+            # account block is ever parsed (config-parsing spec evidence).
+            pass
+        else:
+            val indent = _email_cfg_leading_spaces(line)
+            if indent == 0 and trimmed.contains(":"):
+                val parts = trimmed.split(":", 2)
+                val key = parts[0].trim()
+                if key == "default_account":
+                    default_account = _email_cfg_strip_value(parts[1])
+            else if indent > 0 and trimmed.ends_with(":") and not trimmed.contains(" "):
+                if have_current:
+                    accounts = accounts + [current]
+                current = EmailAccount(name: trimmed[0:trimmed.len() - 1], provider: "", email: "", password_cmd: "", tenant_id: "", client_id: "", client_secret_env: "", shared_mailbox: "")
+                have_current = true
+            else if indent > 0 and have_current and trimmed.contains(":"):
+                val parts = trimmed.split(":", 2)
+                val key = parts[0].trim()
+                current = _apply_account_field(current, key, _email_cfg_strip_value(parts[1]))
+
+    if have_current:
+        accounts = accounts + [current]
+
+    EmailConfig(default_account: default_account, accounts: accounts)
 
 
 fn resolve_email_account(config: EmailConfig, requested_name: text) -> (bool, EmailAccount):
@@ -216,18 +267,18 @@ class EmailRow:
     unread: bool
 
 
-fn _email_row_json(r: EmailRow) -> JsonValue:
-    var label_vals: [JsonValue] = []
+fn _email_row_json(r: EmailRow) -> any:
+    var label_vals: [any] = []
     for l in r.labels:
-        label_vals = label_vals + [JsonValue.Str(l)]
-    json_value_object_from([
-        ("id", JsonValue.Str(r.id)),
-        ("from", JsonValue.Str(r.from_addr)),
-        ("subject", JsonValue.Str(r.subject)),
-        ("date", JsonValue.Str(r.date)),
-        ("labels", JsonValue.Array(label_vals)),
-        ("starred", JsonValue.Bool(r.starred)),
-        ("unread", JsonValue.Bool(r.unread)),
+        label_vals = label_vals + [json_string(l)]
+    json_object([
+        ("id", json_string(r.id)),
+        ("from", json_string(r.from_addr)),
+        ("subject", json_string(r.subject)),
+        ("date", json_string(r.date)),
+        ("labels", json_array(label_vals)),
+        ("starred", json_boolean(r.starred)),
+        ("unread", json_boolean(r.unread)),
     ])
 
 
@@ -240,10 +291,10 @@ fn _render_email_rows(rows: [EmailRow], as_json: bool):
     doc §4's "empty LABELS cell, not a placeholder dash" rule, not a
     fabricated value."""
     if as_json:
-        var items: [JsonValue] = []
+        var items: [any] = []
         for r in rows:
             items = items + [_email_row_json(r)]
-        print json_value_pretty(JsonValue.Array(items))
+        print json_pretty(json_array(items))
         return
     if rows.len() == 0:
         print "No messages. Try a broader search, --limit, or check --account / your provider config."
@@ -256,10 +307,13 @@ fn _render_email_rows(rows: [EmailRow], as_json: bool):
     print_table_dynamic(headers, table_rows)
 
 
-fn _mjson_str(obj: JsonValue, key: text) -> text:
-    if not json_value_has(obj, key):
+fn _mjson_str(obj: any, key: text) -> text:
+    if obj == nil:
         return ""
-    val s = json_value_serialize(json_value_field(obj, key))
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return ""
+    val s = json_serialize(v)
     if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
         return s[1:s.len() - 1]
     s
@@ -271,17 +325,16 @@ fn _parse_mailcli_json_rows(json_text: text) -> [EmailRow]:
     objects (see tools/mail-cli/lib/format.shs mail_format_parse_headers).
     It carries no flags/labels today (doc §3's documented pre-existing
     bug) — labels/starred/unread are always empty/false here, honestly."""
-    val parsed_opt = json_value_parse_opt(json_text)
-    if parsed_opt == nil:
+    val parsed = json_parse(json_text)
+    if parsed == nil:
         return []
-    val parsed = parsed_opt.unwrap()
-    if json_value_type(parsed) != "array":
+    if json_get_type(parsed) != "array":
         return []
     var rows: [EmailRow] = []
-    val n = json_value_len(parsed)
+    val n = json_array_length(parsed)
     var i = 0
     while i < n:
-        val item = json_value_at(parsed, i)
+        val item = json_array_get(parsed, i)
         rows = rows + [EmailRow(
             id: _mjson_str(item, "uid"),
             from_addr: _mjson_str(item, "from"),
@@ -320,7 +373,7 @@ fn _resolve_mail_bin() -> text:
     itf-adapter binary path (acli_path/mc_path). DEVHUB_MAIL_BIN overrides
     it — used by specs to point at a fake script instead of PATH-prepend
     trickery, and by real deployments that install mail-cli elsewhere."""
-    val override_bin = sosix_env_get_opt("DEVHUB_MAIL_BIN") ?? ""
+    val override_bin = env_get_opt("DEVHUB_MAIL_BIN") ?? ""
     if override_bin != "":
         return email_expand_path(override_bin)
     "tools/mail-cli/bin/mail"
@@ -329,7 +382,7 @@ fn _resolve_mail_bin() -> text:
 fn email_mail_process_args(argv: [text]) -> [text]:
     # An executable plus an optional script prefix works on every host without
     # relying on Unix shebang handling or Windows .cmd association.
-    val script = sosix_env_get_opt("DEVHUB_MAIL_SCRIPT") ?? ""
+    val script = env_get_opt("DEVHUB_MAIL_SCRIPT") ?? ""
     if script != "":
         return [email_expand_path(script)] + argv
     argv

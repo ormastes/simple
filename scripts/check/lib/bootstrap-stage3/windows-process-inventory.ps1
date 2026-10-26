@@ -8,7 +8,7 @@ Set-StrictMode -Version Latest
 
 if ($Worker) {
     try {
-        $processes = @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 30)
+        $processes = @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 10)
         if ($processes.Count -eq 0 -or $processes.Count -gt 16384) {
             throw 'Windows process inventory count outside bounded contract'
         }
@@ -59,10 +59,10 @@ try {
         '-File', ('"' + $PSCommandPath + '"'), '-OutputPath', ('"' + $OutputPath + '"'), '-Worker')
     $child = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru -WindowStyle Hidden
     $null = $child.Handle
-    if (-not $child.WaitForExit(40000)) {
+    if (-not $child.WaitForExit(15000)) {
         $child.Kill()
         $null = $child.WaitForExit(5000)
-        throw 'Windows process inventory query exceeded 40 seconds'
+        throw 'Windows process inventory query exceeded 15 seconds'
     }
     $child.Refresh()
     if ($null -eq $child.ExitCode -or $child.ExitCode -ne 0) {

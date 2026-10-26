@@ -4,15 +4,6 @@ Status: accepted contract; implementation is pending runtime qualification.
 These examples describe the intended interface, not a recorded CLI or SPipe
 PASS. Use a qualified self-hosted full CLI that contains the feature.
 
-The user-selected next-rebuild retirement extension is documented in
-[workaround_retirement.md](../../05_design/workaround_retirement.md). Its
-prepare/admit API is a draft awaiting native qualification and bootstrap
-wiring. It requires an applied linked root fix, actual producer/source
-admission, and original-form tests in a new isolated checkout. Neither an
-existing marker, fetched commit nor a fixed bug status alone authorizes
-retirement. Current retained entries are listed in
-[the lifecycle inventory](../../08_tracking/bug/workaround_retirement_inventory_2026-10-05.md).
-
 ## Mark the affected block
 
 Place a comment immediately before the source block that temporarily avoids a
@@ -27,29 +18,6 @@ Use the canonical ID of an existing bug record. `//` is also accepted as the
 comment prefix. The optional `recover` field is a Git recovery reference of
 7–64 hexadecimal characters. Put the optional reason last and describe the
 defect being avoided. The marker does not resolve the bug or waive a failed check.
-
-## Required workaround traceability
-
-Every temporary build or test workaround must have all three links before it
-is used: an immediately preceding `@workaround bug=<canonical-id>` source
-annotation, an authoritative bug DB record, and a Git commit containing the
-workaround change. This applies to HIR/MIR repairs, temporary test comments,
-disabled checks and build-script workarounds. Do not treat a provisional object
-or executable as proof that the underlying bug is fixed.
-
-Record the original failure and affected source locations, the recovery commit
-for intended code, the workaround commit SHA/link, producer/source identities,
-reproducing and prevention tests, and the background fix owner in the bug
-record. The workaround commit is distinct from the later underlying-fix commit.
-If the qualified DB command is unavailable, retain these fields in a dated bug
-report and mark DB reconciliation pending; do not claim the DB was updated.
-An unknown defect needs a canonical bug record before a workaround is accepted.
-
-Keep the bug open while the workaround is active. After the underlying fix is
-applied and verified with the affected producer, record its commit and narrowly
-remove the workaround in a separate linked change. A fetched fix or a changed
-DB status alone does not authorize reverting source. Reuse valid caches and
-retain original failures throughout recovery.
 
 ## Find related workarounds
 

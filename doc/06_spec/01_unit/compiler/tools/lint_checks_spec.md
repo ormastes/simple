@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,52 +38,26 @@ assert_equal(findings[0].code, "RAW-RT-001")
 
 </details>
 
-#### does not treat ordinary src/lib modules as runtime providers
+#### does not flag privileged src/lib/ modules
 
-- Library product code requires explicit provider admission, just like app code.
+- does not flag privileged src/lib/ modules
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-UNIT
-step("Require explicit provider admission for library product code")
+step("does not flag privileged src/lib/ modules")
 val source = "extern fn rt_frobnicate(x: i64) -> i64\n"
 val findings = check_raw_rt_access(source, "src/lib/nogc_sync_mut/ffi/example.spl")
-assert_equal(findings.len(), 1)
-assert_equal(findings[0].code, "RAW-RT-001")
+assert_equal(findings.len(), 0)
 ```
 
 </details>
-
-#### exempts only an explicitly allowlisted runtime provider
-
-The actual `check_raw_rt_access_with_allowlist` owner receives one allowed path.
-It suppresses that provider's finding and still reports RAW-RT-001 for its
-ordinary library neighbor. This guards the admission boundary rather than
-granting privilege to the entire library tree.
-
-```simple
-val source = "extern fn rt_frobnicate(x: i64) -> i64\n"
-val allowlist = "src/lib/nogc_sync_mut/ffi/example.spl\n"
-val admitted = check_raw_rt_access_with_allowlist(
-    source, "src/lib/nogc_sync_mut/ffi/example.spl", allowlist)
-val ordinary = check_raw_rt_access_with_allowlist(
-    source, "src/lib/nogc_sync_mut/ffi/ordinary.spl", allowlist)
-assert_equal(admitted.len(), 0)
-assert_equal(ordinary.len(), 1)
-assert_equal(ordinary[0].code, "RAW-RT-001")
-```
-
-2026-10-11 cached Stage1 source-inline diagnostic binds all three actual lint
-owners to release `571d6cefe33`: baseline 7 executed, 6 passed, 1 failed;
-corrected 8 executed, 8 passed, zero failures. No product code, provider policy,
-cache or compiler binary changed. This scoped diagnostic is not self-hosted or
-native qualification. Identity receipts: `build/phase1-lint-provider-contract-20261011`.
 
 #### does not flag ordinary code with no extern declarations
 

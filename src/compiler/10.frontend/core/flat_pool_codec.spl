@@ -23,9 +23,7 @@
 # both encoded and decoded — an omitted pool is a SILENT MISCOMPILE, not a
 # loud failure, so it must never rely on review.
 #
-# FORMAT (version 4), line-oriented and self-delimiting:
-# Version 4 combines named-type argument and function annotation pools and
-# preserves the List import flag; older snapshots must be reparsed.
+# FORMAT (version 2), line-oriented and self-delimiting:
 # Version 2 includes declaration assembly placement and rejects malformed
 # frontend-cache frames. Old FPC files remain preserved but are cache misses.
 #   every scalar occupies one line; a list emits its length, then its elements.
@@ -36,23 +34,7 @@
 
 use std.common.encoding.utf8.{text_byte_len}
 
-# The item7 development branch also used v4 for named type arguments; those
-# unadmitted snapshots are incompatible with release's v4 described below.
-# v3 (2026-10-09): the type pools gained `function_param_tags` /
-# `function_ret_tags` (interned `fn(..) -> R` annotation shapes). A v2 blob
-# restored into a v3 reader would leave TYPE_FUNCTION_BASE tags in the AST
-# with an empty registry, so the version bump invalidates every older cache.
-# v6 (2026-10-11): the type pools gained the imported generic instance
-# registry (`named_generic_instance_{args,bases,ids}`) and the parser state
-# gained `par_imported_type_names`; an older blob would leave its instance
-# tags with an empty registry. v4 is release's (explicit call type-argument
-# pools). v5 is skipped on purpose: development builds of this lane wrote the
-# registry layout under BOTH the v4 and the v5 label before this change, so
-# neither label may be trusted for it -- purge dev caches from that lineage
-# (build/**/shared_parse*, .simple/cache) rather than rely on the label.
-# v7 combines imported generic instances with adaptive named arguments/layout
-# owners and the List import parser flag. Neither branch's older layout matches.
-val FLAT_POOL_CODEC_VERSION: text = "spl-flatpool-v8-a5-refusal"
+val FLAT_POOL_CODEC_VERSION: text = "spl-flatpool-v2"
 
 # Generated HIR records currently top out well below this representation
 # reservation. Container entries and text are charged separately by next_len
@@ -62,8 +44,6 @@ val FLAT_POOL_BOUNDED_NODE_BYTES: i64 = 4096
 # --- escaping ---------------------------------------------------------------
 
 pub fn flat_pool_escape(value: text) -> text:
-    if not value.contains("\\") and not value.contains("\n"):
-        return value
     value.replace("\\", "\\\\").replace("\n", "\\n")
 
 # Decode is on the cache-hit path and also accepts untrusted canonical HIR
@@ -120,7 +100,7 @@ pub class FlatPoolReader:
     var charged_work_units: i64
     var audit_events: i64
 
-    pub static fn new(blob: text) -> FlatPoolReader:
+    fn new(blob: text) -> FlatPoolReader:
         FlatPoolReader(lines: blob.split("\n"), pos: 0, ok: true,
             bounded: false, canonical: false, failure_kind: "", failure_detail: "",
             max_allocation_bytes: 0, max_nodes: 0, max_depth: 0,
@@ -131,15 +111,8 @@ pub class FlatPoolReader:
     # Frontend cache bytes are produced by our canonical integer encoders.
     # Reject malformed frames without changing the legacy trusted cursor.
     pub static fn new_canonical(blob: text) -> FlatPoolReader:
-        # workaround: phase2_subsystem_helper_mir_failures_2026-10-05
-        # Current native producer loses the class receiver for the sibling
-        # factory call. Direct construction preserves the same cursor owner.
-        var reader: FlatPoolReader = FlatPoolReader(lines: blob.split("\n"), pos: 0, ok: true,
-            bounded: false, canonical: true, failure_kind: "", failure_detail: "",
-            max_allocation_bytes: 0, max_nodes: 0, max_depth: 0,
-            max_work_units: 0, live_reserved_bytes: 0, entered_nodes: 0,
-            current_depth: 0, maximum_depth: 0, charged_work_units: 0,
-            audit_events: 0)
+        var reader = FlatPoolReader.new(blob)
+        reader.canonical = true
         if not blob.ends_with("\n"):
             reader.reject_malformed("missing_final_newline")
         reader
@@ -271,7 +244,7 @@ pub class FlatPoolReader:
         self.pos = self.pos + 1
         line
 
-    me decode_nullable_i64(raw: text) -> i64?:
+    me decode_nullable_i64(raw: text) -> i64:
         if raw == "N":
             return nil
         if self.bounded:
@@ -287,7 +260,7 @@ pub class FlatPoolReader:
         self.reject_malformed("integer")
         nil
 
-    me decode_nullable_bool(raw: text) -> bool?:
+    me decode_nullable_bool(raw: text) -> bool:
         if raw == "N":
             return nil
         if not self.bounded:
@@ -437,118 +410,45 @@ pub fn flat_pool_parse_i64(raw: text) -> i64:
 
 # --- encoders ---------------------------------------------------------------
 
-# One runtime builder owns the output buffer even for nested pools. The old
-# parts-array encoders registered one temporary string per element and called
-# rt_string_join at every nesting level. A Stage-2 cache miss reached the
-# legal RSS cap while serializing a small module's type pools. Appending into
-# one buffer keeps encoder working memory proportional to the final blob.
-@unsafe(reason: "bounded flat-pool cache serialization through the runtime string builder", capabilities: [ffi])
-extern fn rt_string_builder_new() -> i64
-@unsafe(reason: "bounded flat-pool cache serialization through the runtime string builder", capabilities: [ffi])
-extern fn rt_string_builder_push(handle: i64, value: text) -> i64
-@unsafe(reason: "bounded flat-pool cache serialization through the runtime string builder", capabilities: [ffi])
-extern fn rt_string_builder_finish(handle: i64) -> text
-@unsafe(reason: "inspect rejected append input without dereferencing an unvalidated string", capabilities: [ffi])
-extern fn rt_string_len(value: text) -> i64
-
-fn flat_pool_builder_push(handle: i64, value: text, site: i64, item: i64):
-    val appended =
-        unsafe(capabilities: [ffi]):
-            rt_string_builder_push(handle, value)
-    if appended != 1:
-        # Inspect only on failure: no extra string validation/allocation on
-        # successful appends, and never stringify the possibly invalid value.
-        # A valid original input does NOT prove a bad handle: foreign lowering
-        # may have transformed it before the provider rejected the append.
-        val input_length =
-            unsafe(capabilities: [ffi]):
-                rt_string_len(value)
-        val site_name = match site:
-            0 => "i64.count"
-            1 => "i64.value"
-            2 => "text.count"
-            3 => "text.value"
-            4 => "text.separator"
-            5 => "text_list.count"
-            6 => "bool.count"
-            7 => "bool.value"
-            8 => "i64_list.count"
-            _ => "text_list_list.count"
-        panic("flat pool encoder string builder append failed site={site_name} item={item} input_length={input_length} result={appended}")
-
-fn flat_pool_builder_new() -> i64:
-    val handle =
-        unsafe(capabilities: [ffi]):
-            rt_string_builder_new()
-    if handle == 0:
-        panic("flat pool encoder string builder allocation failed")
-    handle
-
-fn flat_pool_builder_finish(handle: i64) -> text:
-    val result =
-        unsafe(capabilities: [ffi]):
-            rt_string_builder_finish(handle)
-    if result == nil:
-        panic("flat pool encoder string builder finish failed")
-    result
-
-fn flat_pool_enc_i64_into(handle: i64, pool: [i64]):
-    flat_pool_builder_push(handle, "{pool.len()}\n", 0, -1)
-    var item = 0
-    for v in pool:
-        flat_pool_builder_push(handle, "{v}\n", 1, item)
-        item = item + 1
-
-fn flat_pool_enc_text_into(handle: i64, pool: [text]):
-    flat_pool_builder_push(handle, "{pool.len()}\n", 2, -1)
-    var item = 0
-    for v in pool:
-        flat_pool_builder_push(handle, flat_pool_escape(v), 3, item)
-        flat_pool_builder_push(handle, "\n", 4, item)
-        item = item + 1
-
-fn flat_pool_enc_text_list_into(handle: i64, pool: [[text]]):
-    flat_pool_builder_push(handle, "{pool.len()}\n", 5, -1)
-    for inner in pool:
-        flat_pool_enc_text_into(handle, inner)
-
+# Encoders accumulate into a parts array joined once. `out = out + piece` in a
+# loop rebuilds the whole prefix per element, which is quadratic in the pool's
+# size and showed up on the cache-MISS (store) path of every module. The bytes
+# produced are unchanged -- join("") over the same pieces, in the same order.
 pub fn flat_pool_enc_i64(pool: [i64]) -> text:
-    val handle = flat_pool_builder_new()
-    flat_pool_enc_i64_into(handle, pool)
-    flat_pool_builder_finish(handle)
+    var parts: [text] = ["{pool.len()}\n"]
+    for v in pool:
+        parts = parts.push("{v}\n")
+    parts.join("")
 
 pub fn flat_pool_enc_bool(pool: [bool]) -> text:
-    val handle = flat_pool_builder_new()
-    flat_pool_builder_push(handle, "{pool.len()}\n", 6, -1)
-    var item = 0
+    var parts: [text] = ["{pool.len()}\n"]
     for v in pool:
-        flat_pool_builder_push(handle, if v: "1\n" else: "0\n", 7, item)
-        item = item + 1
-    flat_pool_builder_finish(handle)
+        parts = parts.push(if v: "1\n" else: "0\n")
+    parts.join("")
 
 pub fn flat_pool_enc_text(pool: [text]) -> text:
-    val handle = flat_pool_builder_new()
-    flat_pool_enc_text_into(handle, pool)
-    flat_pool_builder_finish(handle)
+    var parts: [text] = ["{pool.len()}\n"]
+    for v in pool:
+        parts = parts.push(flat_pool_escape(v) + "\n")
+    parts.join("")
 
 pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
-    val handle = flat_pool_builder_new()
-    flat_pool_builder_push(handle, "{pool.len()}\n", 8, -1)
+    var parts: [text] = ["{pool.len()}\n"]
     for inner in pool:
-        flat_pool_enc_i64_into(handle, inner)
-    flat_pool_builder_finish(handle)
+        parts = parts.push(flat_pool_enc_i64(inner))
+    parts.join("")
 
 pub fn flat_pool_enc_text_list(pool: [[text]]) -> text:
-    val handle = flat_pool_builder_new()
-    flat_pool_enc_text_list_into(handle, pool)
-    flat_pool_builder_finish(handle)
+    var parts: [text] = ["{pool.len()}\n"]
+    for inner in pool:
+        parts = parts.push(flat_pool_enc_text(inner))
+    parts.join("")
 
 pub fn flat_pool_enc_text_list_list(pool: [[[text]]]) -> text:
-    val handle = flat_pool_builder_new()
-    flat_pool_builder_push(handle, "{pool.len()}\n", 9, -1)
+    var parts: [text] = ["{pool.len()}\n"]
     for inner in pool:
-        flat_pool_enc_text_list_into(handle, inner)
-    flat_pool_builder_finish(handle)
+        parts = parts.push(flat_pool_enc_text_list(inner))
+    parts.join("")
 
 # --- decoders ---------------------------------------------------------------
 
@@ -556,11 +456,8 @@ pub fn flat_pool_dec_i64(r: FlatPoolReader) -> [i64]:
     val n = r.next_len()
     var out: [i64] = []
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = r.next_i64()
-        if not r.ok:
-            break
-        out = out.push(value)
+    while i < n:
+        out = out.push(r.next_i64())
         i = i + 1
     out
 
@@ -568,11 +465,8 @@ pub fn flat_pool_dec_bool(r: FlatPoolReader) -> [bool]:
     val n = r.next_len()
     var out: [bool] = []
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = r.next_i64() == 1
-        if not r.ok:
-            break
-        out = out.push(value)
+    while i < n:
+        out = out.push(r.next_i64() == 1)
         i = i + 1
     out
 
@@ -580,11 +474,8 @@ pub fn flat_pool_dec_text(r: FlatPoolReader) -> [text]:
     val n = r.next_len()
     var out: [text] = []
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = flat_pool_unescape(r.next())
-        if not r.ok:
-            break
-        out = out.push(value)
+    while i < n:
+        out = out.push(flat_pool_unescape(r.next()))
         i = i + 1
     out
 
@@ -592,11 +483,8 @@ pub fn flat_pool_dec_i64_list(r: FlatPoolReader) -> [[i64]]:
     val n = r.next_len()
     var out: [[i64]] = []
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = flat_pool_dec_i64(r)
-        if not r.ok:
-            break
-        out = out.push(value)
+    while i < n:
+        out = out.push(flat_pool_dec_i64(r))
         i = i + 1
     out
 
@@ -604,11 +492,8 @@ pub fn flat_pool_dec_text_list(r: FlatPoolReader) -> [[text]]:
     val n = r.next_len()
     var out: [[text]] = []
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = flat_pool_dec_text(r)
-        if not r.ok:
-            break
-        out = out.push(value)
+    while i < n:
+        out = out.push(flat_pool_dec_text(r))
         i = i + 1
     out
 
@@ -616,11 +501,8 @@ pub fn flat_pool_dec_text_list_list(r: FlatPoolReader) -> [[[text]]]:
     val n = r.next_len()
     var out: [[[text]]] = []
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = flat_pool_dec_text_list(r)
-        if not r.ok:
-            break
-        out = out.push(value)
+    while i < n:
+        out = out.push(flat_pool_dec_text_list(r))
         i = i + 1
     out
 
@@ -645,9 +527,6 @@ pub fn flat_pool_dec_text_list_list(r: FlatPoolReader) -> [[[text]]]:
 # too; a run with the cache disabled was clean because a real parse only
 # pushes into the owner and never replaces it.
 #
-# Mutate the parameter directly: native array value assignment (var out = dest)
-# calls rt_array_copy and creates a transient replacement owner. Returning that
-# copy would publish a dangling global after scope teardown.
 # These decoders clear `dest` and refill it, and return `dest`, so the owner
 # identity survives the restore. The caller still assigns the result back
 # (`decl_tag = flat_pool_dec_i64_into(decl_tag, r)`). That keeps the restore
@@ -665,88 +544,76 @@ pub fn flat_pool_dec_text_list_list(r: FlatPoolReader) -> [[[text]]]:
 # end and the next reset, breaks (b).
 
 pub fn flat_pool_dec_i64_into(dest: [i64], r: FlatPoolReader) -> [i64]:
-    if dest == nil:
-        return flat_pool_dec_i64(r)
     val n = r.next_len()
-    dest.clear()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = r.next_i64()
-        if not r.ok:
-            break
-        dest.push(value)
+    while i < n:
+        out.push(r.next_i64())
         i = i + 1
-    dest
+    out
 
 pub fn flat_pool_dec_bool_into(dest: [bool], r: FlatPoolReader) -> [bool]:
-    if dest == nil:
-        return flat_pool_dec_bool(r)
     val n = r.next_len()
-    dest.clear()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = r.next_i64() == 1
-        if not r.ok:
-            break
-        dest.push(value)
+    while i < n:
+        out.push(r.next_i64() == 1)
         i = i + 1
-    dest
+    out
 
 pub fn flat_pool_dec_text_into(dest: [text], r: FlatPoolReader) -> [text]:
-    if dest == nil:
-        return flat_pool_dec_text(r)
     val n = r.next_len()
-    dest.clear()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = flat_pool_unescape(r.next())
-        if not r.ok:
-            break
-        dest.push(value)
+    while i < n:
+        out.push(flat_pool_unescape(r.next()))
         i = i + 1
-    dest
+    out
 
 pub fn flat_pool_dec_i64_list_into(dest: [[i64]], r: FlatPoolReader) -> [[i64]]:
-    if dest == nil:
-        return flat_pool_dec_i64_list(r)
     val n = r.next_len()
-    dest.clear()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = flat_pool_dec_i64(r)
-        if not r.ok:
-            break
-        dest.push(value)
+    while i < n:
+        out.push(flat_pool_dec_i64(r))
         i = i + 1
-    dest
+    out
 
 pub fn flat_pool_dec_text_list_into(dest: [[text]], r: FlatPoolReader) -> [[text]]:
-    if dest == nil:
-        return flat_pool_dec_text_list(r)
     val n = r.next_len()
-    dest.clear()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = flat_pool_dec_text(r)
-        if not r.ok:
-            break
-        dest.push(value)
+    while i < n:
+        out.push(flat_pool_dec_text(r))
         i = i + 1
-    dest
+    out
 
 pub fn flat_pool_dec_text_list_list_into(dest: [[[text]]], r: FlatPoolReader) -> [[[text]]]:
-    if dest == nil:
-        return flat_pool_dec_text_list_list(r)
     val n = r.next_len()
-    dest.clear()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
     var i: i64 = 0
-    while i < n and r.ok:
-        val value = flat_pool_dec_text_list(r)
-        if not r.ok:
-            break
-        dest.push(value)
+    while i < n:
+        out.push(flat_pool_dec_text_list(r))
         i = i + 1
-    dest
+    out
 
 # --- scalar encoders/decoders ------------------------------------------------
 #

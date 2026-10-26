@@ -1,4 +1,3 @@
-use compiler.backend.backend_types.{backend_value_bool_v1, backend_value_float_v1, backend_value_function_v1, backend_value_int_v1, backend_value_object_v1, backend_value_struct_v1}
 # Interpreter Backend - Tree-walking interpreter (optimized mode only)
 #
 # Classic mode (GC, debug hooks, SFFI arithmetic) has been removed.
@@ -10,10 +9,10 @@ use compiler.hir.hir.*
 use compiler.hir.hir_types.{HirSymbol, Effect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
-use compiler.backend.env.{EvalContext, Environment}
-use compiler.backend.interpreter_calls.*
-use compiler.backend.interpreter_expr.*
-use compiler.backend.interpreter_binop.*
+use compiler.backend.backend.env.{EvalContext, Environment}
+use compiler.backend.backend.interpreter_calls.*
+use compiler.backend.backend.interpreter_expr.*
+use compiler.backend.backend.interpreter_binop.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
@@ -92,7 +91,6 @@ fn interp_hir_expr_unsigned(e: HirExpr) -> bool:
 
 struct InterpreterBackendImpl:
     """Tree-walking interpreter backend (optimized mode only)."""
-    program_args: [text] = []
 
 impl InterpreterBackendImpl:
     static fn new() -> InterpreterBackendImpl:
@@ -100,9 +98,6 @@ impl InterpreterBackendImpl:
 
     static fn optimized() -> InterpreterBackendImpl:
         InterpreterBackendImpl()
-
-    static fn with_program_args(args: [text]) -> InterpreterBackendImpl:
-        InterpreterBackendImpl(program_args: args)
 
 # NOTE: Trait implementation syntax not supported by runtime parser
 # impl Backend for InterpreterBackendImpl:
@@ -183,15 +178,13 @@ impl InterpreterBackendImpl:
         for sym_ in module.symbols.symbols.values():
             val sym: HirSymbol = sym_
             val g_fv: FunctionValue = FunctionValue(symbol: sym.id, name: sym.name)
-            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-            ctx.env.define_global(sym.name, backend_value_function_v1(g_fv))
+            ctx.env.define_global(sym.name, Value.Function(g_fv))
 
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
             val fsym = f.symbol
             val g_fv2: FunctionValue = FunctionValue(symbol: fsym, name: f.name)
-            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-            ctx.env.define_global(f.name, backend_value_function_v1(g_fv2))
+            ctx.env.define_global(f.name, Value.Function(g_fv2))
 
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
@@ -264,10 +257,8 @@ impl InterpreterBackendImpl:
             # Copies of this Value copy the int handle, so all holders share the
             # one record -> reference semantics (Task #112).
             val handle = ctx.env.store.alloc(type_name, fields)
-            # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-            return Some(backend_value_object_v1(ObjectValue(class_name: type_name, handle: handle)))
-        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-        Some(backend_value_struct_v1(type_name, fields))
+            return Some(Value.Object(ObjectValue(class_name: type_name, handle: handle)))
+        Some(Value.Struct(type_name, fields))
 
     fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
         # LOAD-BEARING: explicitly materialize stmt.kind's discriminant BEFORE the
@@ -429,21 +420,17 @@ impl InterpreterBackendImpl:
             case Value.Int(l):
                 match right:
                     case Value.Int(r):
-                        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                        Ok(backend_value_bool_v1(l > r))
+                        Ok(Value.Bool(l > r))
                     case Value.Float(r):
-                        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                        Ok(backend_value_bool_v1(interp_int_to_f64(l, left_unsigned) > r))
+                        Ok(Value.Bool(interp_int_to_f64(l, left_unsigned) > r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >", Some(span)))
             case Value.Float(l):
                 match right:
                     case Value.Float(r):
-                        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                        Ok(backend_value_bool_v1(l > r))
+                        Ok(Value.Bool(l > r))
                     case Value.Int(r):
-                        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                        Ok(backend_value_bool_v1(l > interp_int_to_f64(r, right_unsigned)))
+                        Ok(Value.Bool(l > interp_int_to_f64(r, right_unsigned)))
                     case _:
                         Err(BackendError.type_error("invalid operands for >", Some(span)))
             case _:
@@ -454,21 +441,17 @@ impl InterpreterBackendImpl:
             case Value.Int(l):
                 match right:
                     case Value.Int(r):
-                        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                        Ok(backend_value_bool_v1(l >= r))
+                        Ok(Value.Bool(l >= r))
                     case Value.Float(r):
-                        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                        Ok(backend_value_bool_v1(interp_int_to_f64(l, left_unsigned) >= r))
+                        Ok(Value.Bool(interp_int_to_f64(l, left_unsigned) >= r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >=", Some(span)))
             case Value.Float(l):
                 match right:
                     case Value.Float(r):
-                        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                        Ok(backend_value_bool_v1(l >= r))
+                        Ok(Value.Bool(l >= r))
                     case Value.Int(r):
-                        # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                        Ok(backend_value_bool_v1(l >= interp_int_to_f64(r, right_unsigned)))
+                        Ok(Value.Bool(l >= interp_int_to_f64(r, right_unsigned)))
                     case _:
                         Err(BackendError.type_error("invalid operands for >=", Some(span)))
             case _:
@@ -478,15 +461,12 @@ impl InterpreterBackendImpl:
         match op:
             case HirUnaryOp.Neg:
                 match operand:
-                    # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                    case Value.Int(i): Ok(backend_value_int_v1(-i))
-                    # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                    case Value.Float(f): Ok(backend_value_float_v1(-f))
+                    case Value.Int(i): Ok(Value.Int(-i))
+                    case Value.Float(f): Ok(Value.Float(-f))
                     case _: Err(BackendError.type_error("invalid operand for -", Some(span)))
 
             case HirUnaryOp.Not:
-                # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
-                Ok(backend_value_bool_v1(not operand.is_truthy()))
+                Ok(Value.Bool(not operand.is_truthy()))
 
             case _:
                 Err(BackendError.not_implemented("unary operator not implemented"))

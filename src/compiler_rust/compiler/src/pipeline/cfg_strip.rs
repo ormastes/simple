@@ -33,47 +33,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use simple_common::target::TargetArch;
-pub use simple_parser::cond_compile::CfgTarget;
 use simple_parser::ast::{Attribute, Node};
-
-/// The conditional-compilation target of this process -- exactly what the
-/// lexer evaluates against (`simple_parser::cond_compile::default_target`:
-/// explicit `--target` > `SIMPLE_NATIVE_BUILD_TARGET` > `SIMPLE_TARGET_OS`/
-/// `SIMPLE_TARGET_ARCH` > host). Every text-level strip caller (discovery,
-/// import loader, parsed-source cache, `simple run`) uses these names, so it
-/// can never disagree with the lexer path.
-pub fn cfg_target() -> CfgTarget {
-    CfgTarget::from_env()
-}
-
-/// Apply module-level `@when`/`@elif`/`@else`/`@end` selection for `target`
-/// before the Rust seed parses imports. Delegates to the parser's single
-/// owner (`simple_parser::cond_compile`) so this path accepts exactly what
-/// the lexer accepts. Inactive and directive lines are blanked, kept lines
-/// stay verbatim, line numbers are preserved. Unknown atoms evaluate false
-/// and are reported as warnings (as the parser does for the lexer path);
-/// unbalanced directives fail closed instead of compiling both branches.
-pub(crate) fn strip_os_when_blocks(source: &str, target: &CfgTarget) -> Result<String, String> {
-    let selection = simple_parser::cond_compile::select_branches(source, &target.os, &target.arch);
-    if !selection.balanced {
-        return Err(selection.diagnostics.join("; "));
-    }
-    for diagnostic in &selection.diagnostics {
-        let line = format!("warning: conditional compilation ({}/{}): {diagnostic}", target.os, target.arch);
-        // One file is reached by several lanes (discovery, siblings, import
-        // loader, parsed-source cache): print each distinct warning once.
-        let first_time = WARNED.with(|cell| cell.borrow_mut().insert(line.clone()));
-        if first_time {
-            eprintln!("{line}");
-        }
-    }
-    Ok(selection.source)
-}
-
-thread_local! {
-    /// Conditional-compilation warnings already printed on this thread.
-    static WARNED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-}
 
 /// Resolve a `@cfg(...)` condition name to an architecture, if it names one.
 ///
@@ -235,24 +195,6 @@ fn doc_comment_end(lines: &[&str], start: usize) -> Option<usize> {
 /// so globals must be selected while the source still carries its `@cfg`.
 /// Blank replacement preserves source line numbers for diagnostics.
 pub fn strip_inactive_cfg_arch_globals(source: &str, target_arch: TargetArch) -> String {
-    // Host-arch callers are the interpreter/JIT `run` paths, which never pass
-    // through native discovery's OS-branch preprocessing. Without this, any
-    // module carrying an `@when(os="windows"): ... @else: ... @end` block
-    // (e.g. std io/windows_redirected_process.spl, reached from io_runtime)
-    // fails to parse under `simple run`. A malformed block is left untouched so
-    // the parser still rejects it (fail closed, never both branches).
-    let os_selected;
-    let source = if target_arch == TargetArch::host() {
-        match strip_os_when_blocks(source, &cfg_target()) {
-            Ok(selected) => {
-                os_selected = selected;
-                os_selected.as_str()
-            }
-            Err(_) => source,
-        }
-    } else {
-        source
-    };
     let lines: Vec<&str> = source.split('\n').collect();
     let mut filtered = Vec::with_capacity(lines.len());
     let mut index = 0;
@@ -469,99 +411,7 @@ pub fn strip_inactive_cfg_arch_fns_for_host(module: &mut simple_parser::ast::Mod
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simple_common::target::TargetOS;
 
-    fn linux_host() -> CfgTarget {
-        CfgTarget::new("linux", TargetArch::host().name())
-    }
-
-    #[test]
-    fn host_globals_strip_selects_host_os_when_branch_for_run_paths() {
-        // `simple run` / interpreter module loading reach this function with the
-        // HOST arch and never pass through native discovery's OS preprocessing.
-        let source = "@when(os=\"windows\"):\nfn pick() -> i64:\n    11\n@else:\nfn pick() -> i64:\n    22\n@end\n";
-        let filtered = strip_inactive_cfg_arch_globals(source, TargetArch::host());
-        assert_eq!(filtered.lines().count(), source.lines().count());
-        assert!(!filtered.contains("@when") && !filtered.contains("@else") && !filtered.contains("@end"));
-        let (kept, dropped) = if TargetOS::host() == TargetOS::Windows { ("11", "22") } else { ("22", "11") };
-        assert!(filtered.contains(kept) && !filtered.contains(dropped));
-        assert!(simple_parser::Parser::new(&filtered).parse().is_ok());
-        // Unknown atoms evaluate false (same as the lexer): the branch is dropped.
-        let unknown = "@when(os=\"unknown\"):\nval A = 1\n@end\n";
-        assert_eq!(strip_inactive_cfg_arch_globals(unknown, TargetArch::host()), "\n\n\n");
-        // Unbalanced blocks are left untouched; the parser's own lexer-side
-        // mask then fails closed on them (`cond_compile` `balanced == false`
-        // is a syntax error), so neither branch is ever compiled.
-        let malformed = "@when(os=\"windows\"):\nval A = 1\n";
-        assert_eq!(strip_inactive_cfg_arch_globals(malformed, TargetArch::host()), malformed);
-        assert!(simple_parser::Parser::new(malformed).parse().is_err());
-    }
-
-    #[test]
-    fn os_when_path_identity_selects_nested_platform_owner() {
-        let source = include_str!("../../../../lib/nogc_sync_mut/io/path_identity_abi.spl");
-        // The POSIX errno owner lives in `_PathIdentityPosix/errno_abi.spl` and is
-        // imported only by the non-Windows branch.
-        let posix_errno = "use std.nogc_sync_mut.io._PathIdentityPosix.errno_abi.{path_errno_address}";
-        for (os, expected, excluded) in [
-            ("linux", posix_errno, "fn path_errno_address() -> i64: 0"),
-            ("freebsd", posix_errno, "fn path_errno_address() -> i64: 0"),
-            ("macos", posix_errno, "fn path_errno_address() -> i64: 0"),
-            ("windows", "fn path_errno_address() -> i64: 0", posix_errno),
-        ] {
-            let filtered = super::strip_os_when_blocks(source, &CfgTarget::new(os, TargetArch::host().name())).expect("platform owner branch");
-            assert_eq!(filtered.lines().count(), source.lines().count());
-            assert!(filtered.contains(expected), "{os:?}");
-            assert!(!filtered.contains(excluded), "{os:?}");
-            assert!(simple_parser::Parser::new(&filtered).parse().is_ok(), "{os:?}");
-        }
-    }
-
-    #[test]
-    fn os_when_blocks_select_one_parseable_branch_and_keep_line_numbers() {
-        let source = "val TOKEN = 7\n@when(os=\"windows\"):\nuse std.io_runtime.{thread_sleep}\nfn selected() -> i64:\n    11\n@else:\nfn selected() -> i64:\n    22\n@end\nexport TOKEN, selected\n";
-        for (os, expected, excluded) in [
-            ("windows", "    11", "    22"),
-            ("linux", "    22", "    11"),
-        ] {
-            let filtered = super::strip_os_when_blocks(source, &CfgTarget::new(os, TargetArch::host().name())).expect("supported OS block");
-            assert_eq!(filtered.lines().count(), source.lines().count());
-            assert!(filtered.contains(expected));
-            assert!(!filtered.contains(excluded));
-            assert!(simple_parser::Parser::new(&filtered).parse().is_ok());
-        }
-        // Unknown atoms evaluate false, like the lexer: the block is dropped.
-        let unknown = super::strip_os_when_blocks("@when(os=\"unknown\"):\nfn u() -> i64: 1\n@end\n", &linux_host())
-            .expect("unknown atom is false, not an error");
-        assert!(!unknown.contains("fn u"));
-        // @elif selects the first matching branch (previously rejected).
-        let elif = "@when(os=\"windows\"):\nfn e() -> i64: 1\n@elif(os=\"linux\"):\nfn e() -> i64: 2\n@else:\nfn e() -> i64: 3\n@end\n";
-        let linux = super::strip_os_when_blocks(elif, &linux_host()).expect("elif block");
-        assert!(linux.contains("fn e() -> i64: 2") && !linux.contains(": 1") && !linux.contains(": 3"));
-        assert_eq!(linux.lines().count(), elif.lines().count());
-        // Unbalanced structure still fails closed.
-        assert!(super::strip_os_when_blocks("@else:\n", &linux_host()).is_err());
-        assert!(super::strip_os_when_blocks("@end\n", &linux_host()).is_err());
-        assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n", &linux_host()).is_err());
-        assert!(super::strip_os_when_blocks("@elif(os=\"windows\"):\n", &linux_host()).is_err());
-        // A duplicate @else, an @elif after @else and an empty condition are
-        // structural errors too: never silently drop or double a branch.
-        let dup_else = "@when(os=\"windows\"):\nval A = 1\n@else:\nval A = 2\n@else:\nval A = 3\n@end\n";
-        assert!(super::strip_os_when_blocks(dup_else, &linux_host()).unwrap_err().contains("duplicate @else"));
-        let elif_after_else = "@when(os=\"windows\"):\nval A = 1\n@else:\nval A = 2\n@elif(os=\"linux\"):\nval A = 3\n@end\n";
-        assert!(super::strip_os_when_blocks(elif_after_else, &linux_host()).unwrap_err().contains("@elif after @else"));
-        assert!(super::strip_os_when_blocks("@when():\nval A = 1\n@end\n", &linux_host()).unwrap_err().contains("empty @when"));
-        assert!(simple_parser::Parser::new(dup_else).parse().is_err());
-        let nested = "@when(os=\"windows\"):\n@when(os=\"windows\"):\nval SELECTED = 11\n@else:\nval SELECTED = 22\n@end\n@else:\nval SELECTED = 33\n@end\n";
-        let windows = super::strip_os_when_blocks(nested, &CfgTarget::new("windows", TargetArch::host().name())).expect("nested Windows branch");
-        let linux = super::strip_os_when_blocks(nested, &linux_host()).expect("nested Linux fallback");
-        assert!(windows.contains("val SELECTED = 11"));
-        assert!(!windows.contains("val SELECTED = 22"));
-        assert!(linux.contains("val SELECTED = 33"));
-        assert!(!linux.contains("val SELECTED = 11"));
-        assert!(simple_parser::Parser::new(&windows).parse().is_ok());
-        assert!(simple_parser::Parser::new(&linux).parse().is_ok());
-    }
     #[test]
     fn cfg_globals_select_aarch64_and_riscv64_before_hir_lowering() {
         let source = "\

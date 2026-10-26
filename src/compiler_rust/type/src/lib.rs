@@ -312,12 +312,6 @@ pub enum Type {
     Borrow(Box<Type>),
     /// Mutable borrow: &mut T - reference that allows read-write access
     BorrowMut(Box<Type>),
-    /// No-GC unique owner: &T (memory.md) - single owner, move-only
-    Unique(Box<Type>),
-    /// No-GC shared owner: *T (memory.md) - reference counted, read-only
-    Shared(Box<Type>),
-    /// No-GC weak reference: -T (memory.md) - non-owning, upgrade() -> Option<*T>
-    Weak(Box<Type>),
     /// Constructor type: Constructor[T] - a constructor that produces T
     Constructor {
         target: Box<Type>,
@@ -375,9 +369,6 @@ impl Type {
             Type::Optional(inner) => Type::Optional(Box::new(inner.apply_subst(subst))),
             Type::Borrow(inner) => Type::Borrow(Box::new(inner.apply_subst(subst))),
             Type::BorrowMut(inner) => Type::BorrowMut(Box::new(inner.apply_subst(subst))),
-            Type::Unique(inner) => Type::Unique(Box::new(inner.apply_subst(subst))),
-            Type::Shared(inner) => Type::Shared(Box::new(inner.apply_subst(subst))),
-            Type::Weak(inner) => Type::Weak(Box::new(inner.apply_subst(subst))),
             Type::Simd { lanes, element } => Type::Simd {
                 lanes: *lanes,
                 element: Box::new(element.apply_subst(subst)),
@@ -415,9 +406,6 @@ impl Type {
             Type::Optional(inner) => Type::Optional(Box::new(inner.substitute_type_params(subst))),
             Type::Borrow(inner) => Type::Borrow(Box::new(inner.substitute_type_params(subst))),
             Type::BorrowMut(inner) => Type::BorrowMut(Box::new(inner.substitute_type_params(subst))),
-            Type::Unique(inner) => Type::Unique(Box::new(inner.substitute_type_params(subst))),
-            Type::Shared(inner) => Type::Shared(Box::new(inner.substitute_type_params(subst))),
-            Type::Weak(inner) => Type::Weak(Box::new(inner.substitute_type_params(subst))),
             Type::Constructor { target, args } => Type::Constructor {
                 target: Box::new(target.substitute_type_params(subst)),
                 args: args
@@ -446,7 +434,7 @@ impl Type {
             Type::Dict { key, value } => key.contains_var(var_id) || value.contains_var(var_id),
             Type::Optional(inner) => inner.contains_var(var_id),
             Type::Borrow(inner) => inner.contains_var(var_id),
-            Type::BorrowMut(inner) | Type::Unique(inner) | Type::Shared(inner) | Type::Weak(inner) => inner.contains_var(var_id),
+            Type::BorrowMut(inner) => inner.contains_var(var_id),
             Type::Simd { element, .. } => element.contains_var(var_id),
             _ => false,
         }
@@ -544,9 +532,6 @@ pub enum TypeError {
     ConstKeyMustBeLiteral {
         found: String,
     },
-    /// No-GC ownership-sigil violation (`&T`/`*T`/`-T`). Only produced in the
-    /// opt-in no-GC strict mode, and always fatal there.
-    Ownership(String),
 }
 
 /// Result of validating dict literal keys against a ConstKeySet
@@ -733,15 +718,6 @@ pub struct TypeChecker {
     /// FString const_keys registry: variable name -> keys extracted from FString
     /// Used to resolve DependentKeys types (e.g., `template.keys` -> ["user", "city"])
     fstring_keys: HashMap<String, Vec<String>>,
-    /// Opt-in no-GC strict mode (`@no_gc(strict)` / `SIMPLE_NOGC_STRICT=1`):
-    /// ownership-sigil conversions are checked and bare class `T` means `&T`.
-    pub nogc_strict: bool,
-    /// Class names declared in the module (bare `T` resolves to `&T` in strict mode).
-    class_names: HashSet<String>,
-    /// Declared parameter/return types per function, for strict boundary checks.
-    fn_sigs: HashMap<String, (Vec<Option<Type>>, Option<Type>)>,
-    /// Declared return type of the function currently being checked.
-    current_ret: Option<Type>,
 }
 
 // TypeChecker implementation (split for maintainability)
@@ -752,62 +728,17 @@ include!("macro_checker.rs");
 include!("mixin_checker.rs");
 include!("dispatch_checker.rs");
 include!("checker_infer.rs");
-include!("checker_ownership.rs");
 
 // Unit tests for new features
 #[cfg(test)]
 mod dyn_trait_tests;
 #[cfg(test)]
 mod transitive_mixin_tests;
-#[cfg(test)]
-mod ownership_sigil_tests;
 
 /// Check a list of AST nodes for type errors
 pub fn check(items: &[Node]) -> Result<(), TypeError> {
-    check_with_nogc_strict(items, nogc_strict_requested(items))
-}
-
-/// Check with the no-GC ownership-sigil strict mode set explicitly.
-pub fn check_with_nogc_strict(items: &[Node], nogc_strict: bool) -> Result<(), TypeError> {
     let mut checker = TypeChecker::new();
-    checker.nogc_strict = nogc_strict;
     checker.check_items(items)
-}
-
-/// Opt-in gate for no-GC ownership-sigil enforcement. Plain `@no_gc` (43
-/// existing modules) keeps legacy behaviour; only `@no_gc(strict)` on the
-/// module, or `SIMPLE_NOGC_STRICT=1` for the whole run, turns checks on.
-pub fn nogc_strict_requested(items: &[Node]) -> bool {
-    if std::env::var("SIMPLE_NOGC_STRICT").map(|v| v == "1").unwrap_or(false) {
-        return true;
-    }
-    // `@no_gc(strict)` is a file-level attribute: it is honoured on a `mod`
-    // declaration, or on whatever item the parser attached it to when it is
-    // the first line of the file (the first item). A `@no_gc(strict)` on a
-    // later function does not flip the whole module.
-    let on_mod_decl = items.iter().any(|node| match node {
-        Node::ModDecl(decl) => decl.attributes.iter().any(attribute_is_nogc_strict),
-        _ => false,
-    });
-    let first_decl = items
-        .iter()
-        .find(|node| !matches!(node, Node::UseStmt(_) | Node::ExportUseStmt(_)));
-    let first_item_attrs: &[simple_parser::ast::Attribute] = match first_decl {
-        Some(Node::Function(f)) => &f.attributes,
-        Some(Node::Class(c)) => &c.attributes,
-        Some(Node::Struct(s)) => &s.attributes,
-        _ => &[],
-    };
-    on_mod_decl || first_item_attrs.iter().any(attribute_is_nogc_strict)
-}
-
-/// `@no_gc(strict)`: the `no_gc` attribute with a positional `strict` argument.
-pub fn attribute_is_nogc_strict(attr: &simple_parser::ast::Attribute) -> bool {
-    attr.name == "no_gc"
-        && attr
-            .args
-            .as_ref()
-            .is_some_and(|args| args.iter().any(|a| matches!(a, Expr::Identifier(n) if n == "strict")))
 }
 
 //==============================================================================

@@ -43,33 +43,7 @@ compiler/interpreter/loader specs, all running on FreeBSD.
   (`full_cli` host gate: Linux|Darwin only). The Stage 4 link is done by the
   pure-Simple Stage 3 compiler, not the Rust seed linker.
 
-## riscv64 lane (separate script)
-
-- `sh scripts/check/check-freebsd-riscv64-bootstrap-qemu.shs
-  --preflight|--smoke|--phase0|--phase1`. `QEMU_ARCH=riscv64` on the main
-  wrapper refuses and points here.
-- FreeBSD 14.4 riscv64 ships no BASIC-CLOUDINIT image, and pkg.FreeBSD.org has
-  only `base_*` repos for riscv64 (no rust, no llvm23). So the guest is
-  provisioned over the serial console with expect, and the Rust seed is
-  cross-built on the host for `riscv64gc-unknown-freebsd` (nightly
-  `-Zbuild-std`) against the release `base.txz` sysroot. In-guest C uses base
-  clang/lld 19.1.7.
-- Boot: OpenSBI `fw_jump.bin` -> U-Boot smode `uboot.elf` -> FreeBSD loader.
-  `fw_jump.elf` overlaps QEMU's mrom and is rejected.
-- Verified 2026-10-21: boot + SSH, phase0 (seed `--version` in guest).
-
 ## Traps that have cost time
-
-- riscv64: the repo's `vendor/` source replacement hides std's deps from
-  `-Zbuild-std` (hashbrown 0.17). Vendor std's deps separately and merge them
-  into a side directory for the build. Redefining `crates-io` is rejected.
-- riscv64: one long console command line is mangled. Send one short command
-  per prompt.
-- riscv64: a 15 GB host running an 8-10 GB guest plus a seed build was
-  OOM-killed, which left the guest UFS needing a manual `fsck -y`. Build the
-  seed before booting the guest.
-- riscv64: behind this container's TLS proxy, guest `pkg`/`fetch` need the
-  proxy CA (`SSL_CA_CERT_FILE`). The riscv64 repo still has no ports packages.
 
 - The 2026-09-18 run was killed at exactly 5h (18000s) with no reason
   printed: the ssh cap was shorter than the raised bootstrap budget. The

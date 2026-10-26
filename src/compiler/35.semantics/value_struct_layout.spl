@@ -1,113 +1,18 @@
 # Reject direct by-value struct cycles before MIR recursively copies values.
 
 use compiler.hir.hir_types.*
-use compiler.hir.hir_definitions.{HirStruct, HirField}
-use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirStruct}
 
 # A module key whose text object was freed under the caller (the 2026-09-06
 # module-surface freeze defect) reads back as nil, and `nil + "|" + name` is
 # nil too. Concatenating that produced silent nil node keys, and the dictionary
 # miss they caused was dereferenced as a HirStruct: a bare SIGSEGV with no
 # diagnostic. This never dereferences, so the test itself cannot fault.
-extern fn rt_heap_ref_wellformed(value: text) -> bool
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 
 struct ValueStructLayoutWalk:
     node_key: text
     path: text
-    # "<node key><TAB><field>" per hop, newline separated; read only when a cycle closes.
-    chain: text
-
-# These declaration views are deliberately NOT HirModule/HirStruct/HirField.
-# They cannot be decoded as a complete body or admitted to mono registration.
-struct ValueStructLayoutFieldV1:
-    name: text
-    named_symbol_id: i64
-    span: Span
-
-struct ValueStructLayoutStructV1:
-    name: text
-    symbol_id: i64
-    skip_template: bool
-    fields: [ValueStructLayoutFieldV1]
-    span: Span
-
-struct ValueStructLayoutSymbolV1:
-    name: text
-    defining_module: text?
-
-struct ValueStructLayoutModuleV1:
-    name: text
-    path: text
-    structs: [ValueStructLayoutStructV1]
-    struct_symbols: Dict<i64, ValueStructLayoutSymbolV1>
-
-pub fn value_struct_layout_declarations_v1(module_name: text, module_path: text,
-        structs: Dict<SymbolId, HirStruct>, symbols: SymbolTable) -> ValueStructLayoutModuleV1:
-    var declarations: [ValueStructLayoutStructV1] = []
-    for dk_28 in structs.keys():
-        # ANY-transport hazard: annotated rebinds (cycle-70 validation SIGSEGV).
-        val struct_: HirStruct = structs[dk_28]
-        var fields: [ValueStructLayoutFieldV1] = []
-        for raw_field in struct_.fields:
-            val field: HirField = raw_field
-            var symbol_id: i64 = -1
-            match field.type_.kind:
-                case HirTypeKind.Named(symbol, args):
-                    if args.len() == 0: symbol_id = symbol.id
-                case _: pass
-            fields.push(ValueStructLayoutFieldV1(name: field.name,
-                named_symbol_id: symbol_id, span: field.span))
-        declarations.push(ValueStructLayoutStructV1(name: struct_.name, symbol_id: struct_.symbol.id,
-            skip_template: struct_.type_params.len() > 0 or struct_.is_generic_template,
-            fields: fields, span: struct_.span))
-    var struct_symbols: Dict<i64, ValueStructLayoutSymbolV1> = {}
-    for symbol_id in symbols.symbols.keys():
-        val symbol: HirSymbol = symbols.symbols[symbol_id]
-        if symbol.kind == SymbolKind.Struct:
-            struct_symbols[symbol_id] = ValueStructLayoutSymbolV1(name: symbol.name,
-                defining_module: symbol.defining_module)
-    ValueStructLayoutModuleV1(name: module_name, path: module_path,
-        structs: declarations, struct_symbols: struct_symbols)
-
-# Retain only the HIR needed by value-layout validation. The normal driver
-# already owns each complete HirModule in its phase map; retaining another
-# complete module value keeps functions, classes, traits, and bodies reachable
-# for a pass that reads only structs and struct symbols.
-pub fn value_struct_layout_snapshot_v1(
-    module_name: text,
-    module_path: text,
-    structs: Dict<SymbolId, HirStruct>,
-    source_symbols: SymbolTable
-) -> HirModule:
-    var layout_symbols = SymbolTable.new()
-    for symbol_id in source_symbols.symbols.keys():
-        val symbol: HirSymbol = source_symbols.symbols[symbol_id]
-        if symbol.kind == SymbolKind.Struct:
-            layout_symbols.symbols[symbol_id] = symbol
-    HirModule(
-        name: module_name,
-        path: module_path,
-        imports: [],
-        exports: [],
-        domain_blocks: [],
-        symbols: layout_symbols,
-        functions: {},
-        gpu_function_targets: {},
-        gpu_function_backend_orders: {},
-        classes: {},
-        structs: structs,
-        enums: {},
-        bitfields: {},
-        traits: {},
-        impls: [],
-        constants: {},
-        static_asserts: [],
-        aop_advices: [],
-        di_bindings: [],
-        arch_rules: [],
-        mock_decls: [],
-        types: []
-    )
 
 fn value_layout_node_key(module_name: text, struct_name: text) -> text:
     # Both values are compiler-owned scalar identities. Re-normalizing a key
@@ -115,148 +20,67 @@ fn value_layout_node_key(module_name: text, struct_name: text) -> text:
     # boundary after full-closure HIR allocation.
     module_name + "|" + struct_name
 
-fn value_layout_location(span_file: text, module_path: text, line: i64) -> text:
-    # Lowered spans usually carry an empty `file`; the module path is the
-    # dependable half. Only ever called while formatting a diagnostic.
-    var shown: text = module_path
-    if rt_heap_ref_wellformed(span_file):
-        if span_file != "":
-            shown = span_file
-    if line > 0:
-        return shown + ":" + "{line}"
-    shown
-
-struct ValueStructLayoutReport:
-    errors: [text]
-    # By-value struct-typed fields whose target struct is in no validated
-    # module (distinct fields). Zero means every such edge was walked.
-    skipped_struct_edges: i64
-
-fn value_layout_internal_error(message: text) -> ValueStructLayoutReport:
-    ValueStructLayoutReport(errors: [message], skipped_struct_edges: 0)
-
-fn value_struct_layout_is_cycle_diagnostic(message: text) -> bool:
-    message.starts_with("recursive by-value struct layout: ")
-
-fn value_struct_layout_cycle_is_fatal_for(raw: text) -> bool:
-    """`SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE` policy: only the exact value
-    `warning` downgrades a cycle; unset, empty and anything else stay fatal."""
-    raw != "warning"
-
 fn validate_value_struct_layouts(
     module_keys: [text],
     module_values: [HirModule]
 ) -> [text]:
-    val report = value_struct_layout_report(module_keys, module_values)
-    report.errors
-
-fn value_struct_layout_report(
-    module_keys: [text],
-    module_values: [HirModule]
-) -> ValueStructLayoutReport:
-    if module_keys.len() != module_values.len():
-        return value_layout_internal_error("internal error: value struct layout module keys and values are misaligned")
-    var declarations: [ValueStructLayoutModuleV1] = []
-    var index = 0
-    while index < module_values.len():
-        val module: HirModule = module_values[index]
-        declarations.push(value_struct_layout_declarations_v1(module_keys[index], module.path,
-            module.structs, module.symbols))
-        index = index + 1
-    value_struct_layout_declaration_report_v1(module_keys, declarations)
-
-pub fn value_struct_layout_declaration_report_v1(
-    module_keys: [text],
-    module_values: [ValueStructLayoutModuleV1]
-) -> ValueStructLayoutReport:
-    """Return every resolved direct by-value struct cycle, one diagnostic each.
+    """Return the first resolved direct by-value struct cycle, if any.
 
     The validator accepts a deliberately aligned, physical-module view instead
     of `Dict<text, HirModule>`. Native bootstrap can retain a dictionary key
     while dropping its aggregate HIR value; direct array indexing preserves the
     paired module identity and aggregate value across this post-HIR boundary.
     Callers must deduplicate registry aliases before constructing this view.
-
-    Each diagnostic is `recursive by-value struct layout: A.f -> B.g -> A`
-    followed by ` [struct A in module <key> at <file>:<line>, field f at
-    <file>:<line>; struct B ...]`. Cycles are reported in root order; a cycle
-    is reported once, from its first root.
     """
     if module_keys.len() != module_values.len():
-        return value_layout_internal_error("internal error: value struct layout module keys and values are misaligned")
-    var structs: Dict<text, ValueStructLayoutStructV1> = {}
+        return ["internal error: value struct layout module keys and values are misaligned"]
+    var structs: Dict<text, HirStruct> = {}
     var owner_module_indices: Dict<text, i64> = {}
     var roots: [text] = []
     # Keep the array as the authoritative traversal order, and use the
     # dictionary only as a membership index.  Traversing dictionary keys here
     # would make first-cycle selection depend on hash iteration order.
     var root_keys: Dict<text, bool> = {}
-    # Edge resolution indexes. A struct symbol's `defining_module` is whatever
-    # text its definer passed: HIR lowering passes the module SOURCE PATH
-    # (`HirLowering.module_filename`), an import surface passes the LOGICAL
-    # name, and the module keys here are logical names. Matching the owner
-    # text against the key alone resolved only the second spelling, so a
-    # struct embedding itself was accepted whenever its symbol came from its
-    # own declaration (the whole retained HIR path). Neither index normalizes
-    # a path: one is the struct's own symbol id, the other the exact
-    # `HirModule.path` text.
-    var own_struct_keys: Dict<text, text> = {}
-    var module_keys_by_path: Dict<text, text> = {}
 
     var module_index = 0
     while module_index < module_keys.len():
         val module_key: text = module_keys[module_index]
-        val module: ValueStructLayoutModuleV1 = module_values[module_index]
-        val module_path: text = module.path
-        if rt_heap_ref_wellformed(module_path):
-            if module_path != "":
-                module_keys_by_path[module_path] = module_key
+        val module: HirModule = module_values[module_index]
         # Read values in dictionary insertion order. Copying a SymbolId key
         # before an erased native dictionary lookup loses its pointer identity;
         # this pass needs the struct value, not a reconstructed key lookup.
-        val struct_values: [ValueStructLayoutStructV1] = module.structs
+        val struct_values: [HirStruct] = module.structs.values()
         var struct_index = 0
         while struct_index < struct_values.len():
-            val struct_: ValueStructLayoutStructV1 = struct_values[struct_index]
-            if struct_.skip_template:
+            val struct_: HirStruct = struct_values[struct_index]
+            if struct_.type_params.len() > 0 or struct_.is_generic_template:
                 struct_index = struct_index + 1
                 continue
             # Use the stable scalar owner key. HirModule.name is unsafe when
             # projected from an aggregate Dict value under closure pressure.
             val canonical: text = value_layout_node_key(module_key, struct_.name)
             if not rt_heap_ref_wellformed(canonical):
-                return value_layout_internal_error("internal error: value struct layout module key at index "
-                    + "{module_index}" + " does not carry a usable text value")
+                return ["internal error: value struct layout module key at index "
+                    + "{module_index}" + " does not carry a usable text value"]
             structs[canonical] = struct_
             owner_module_indices[canonical] = module_index
-            val own_symbol_id: i64 = struct_.symbol_id
-            own_struct_keys["{module_index}" + ":" + "{own_symbol_id}"] = canonical
             if not root_keys.has(canonical):
                 roots.push(canonical)
                 root_keys[canonical] = true
             struct_index = struct_index + 1
         module_index = module_index + 1
 
-    var errors: [text] = []
-    var skipped_struct_edges: i64 = 0
-    var skipped_edges: Dict<text, bool> = {}
-    # Membership-only: sorted node-key signatures of reported cycles. A mutual
-    # cycle A <-> B is one defect, not one per root.
-    var reported: Dict<text, bool> = {}
-
     # ponytail: per-root walks are simplest for today's sparse type graphs;
     # replace with a color-map DFS only if dense graphs make this measurable.
     for root in roots:
-        var pending: [ValueStructLayoutWalk] = [ValueStructLayoutWalk(node_key: root, path: "", chain: "")]
+        var pending: [ValueStructLayoutWalk] = [ValueStructLayoutWalk(node_key: root, path: "")]
         # This index is membership-only; pending and field arrays remain the
         # sole traversal-order owners so diagnostics and cycle choice stay
         # stable while repeated membership checks are expected O(1).
         var visited: Dict<text, bool> = {}
         var pending_idx = 0
-        var root_cycle_found = false
-        while pending_idx < pending.len() and not root_cycle_found:
-            # ANY-transport: composite element rebind (cycle-70 class).
-            val walk: ValueStructLayoutWalk = pending[pending_idx]
+        while pending_idx < pending.len():
+            val walk = pending[pending_idx]
             pending_idx = pending_idx + 1
             if visited.has(walk.node_key):
                 continue
@@ -267,18 +91,15 @@ pub fn value_struct_layout_declaration_report_v1(
             # Reading the miss and walking its fields is what turned that
             # broken invariant into a SIGSEGV with no message.
             if not structs.has(walk.node_key):
-                return value_layout_internal_error("internal error: value struct layout node key is absent from the struct index")
+                return ["internal error: value struct layout node key is absent from the struct index"]
             val struct_ = structs[walk.node_key]
             val owner_module_index = owner_module_indices[walk.node_key]
             if owner_module_index < 0 or owner_module_index >= module_values.len():
-                return value_layout_internal_error("internal error: value struct layout owner module index is invalid")
+                return ["internal error: value struct layout owner module index is invalid"]
             val owner_module_key = module_keys[owner_module_index]
-            val owner: ValueStructLayoutModuleV1 = module_values[owner_module_index]
+            val owner: HirModule = module_values[owner_module_index]
             for field in struct_.fields:
-                if root_cycle_found:
-                    break
-                # Scalar-only edge resolution, classified once from the real
-                # field type by value_struct_layout_declarations_v1. This path used to cross two
+                # Scalar-only edge resolution. This path used to cross two
                 # Option-of-aggregate boundaries -- a `SymbolId?` helper return
                 # and `Dict<i64, HirSymbol>.get()` -- and the Phase-2 native
                 # ABI decoded both as a nil payload that the next field read
@@ -286,96 +107,43 @@ pub fn value_struct_layout_declaration_report_v1(
                 # declaring a struct field whose type is a user-declared name
                 # (struct, class or enum alike). Membership test plus indexed
                 # read is the idiom the struct index above already uses, and
-                # the declaration carries only the actual nongeneric Named
-                # symbol identity; no HirType aggregate crosses this boundary.
-                val field_symbol_id = field.named_symbol_id
+                # the match is inlined so no HirType aggregate crosses a call
+                # boundary either.
+                var field_symbol_id: i64 = -1
+                match field.type_.kind:
+                    case HirTypeKind.Named(symbol, args):
+                        if args.len() == 0:
+                            field_symbol_id = symbol.id
+                    case _:
+                        pass
                 if field_symbol_id < 0:
                     continue
+                if not owner.symbols.symbols.has(field_symbol_id):
+                    continue
+                val resolved: HirSymbol = owner.symbols.symbols[field_symbol_id]
+                val resolved_is_struct: bool = match resolved.kind:
+                    case SymbolKind.Struct: true
+                    case _: false
+                if not resolved_is_struct:
+                    continue
 
-                var target: text = ""
-                val own_key: text = "{owner_module_index}" + ":" + "{field_symbol_id}"
-                if own_struct_keys.has(own_key):
-                    # A struct declared by the owner module itself: its symbol
-                    # id is the identity, whatever owner text the symbol holds.
-                    target = own_struct_keys[own_key]
-                else:
-                    if not owner.struct_symbols.has(field_symbol_id):
-                        continue
-                    val resolved: ValueStructLayoutSymbolV1 = owner.struct_symbols[field_symbol_id]
-
-                    var defining_module: text = owner_module_key
-                    match resolved.defining_module:
-                        case Some(symbol_module):
-                            defining_module = symbol_module
-                        case _:
-                            pass
-                    target = value_layout_node_key(defining_module, resolved.name)
-                    if not structs.has(target):
-                        if module_keys_by_path.has(defining_module):
-                            target = value_layout_node_key(module_keys_by_path[defining_module], resolved.name)
+                var defining_module: text = owner_module_key
+                match resolved.defining_module:
+                    case Some(symbol_module):
+                        defining_module = symbol_module
+                    case _:
+                        pass
+                val target = value_layout_node_key(defining_module, resolved.name)
                 if not structs.has(target):
-                    # A by-value field of struct type that resolves to no
-                    # validated struct: not provably a cycle, not provably
-                    # safe. Counted once per field, never reported as an error.
-                    val skipped_edge: text = walk.node_key + "\t" + field.name
-                    if not skipped_edges.has(skipped_edge):
-                        skipped_edges[skipped_edge] = true
-                        skipped_struct_edges = skipped_struct_edges + 1
                     continue
 
                 val edge = struct_.name + "." + field.name
                 val next_path = if walk.path == "": edge else: walk.path + " -> " + edge
-                val hop = walk.node_key + "\t" + field.name
-                val next_chain = if walk.chain == "": hop else: walk.chain + "\n" + hop
                 if target == root:
-                    root_cycle_found = true
-                    val hop_entries = next_chain.split("\n")
-                    var cycle_keys: [text] = []
-                    for hop_entry in hop_entries:
-                        val hop_parts = hop_entry.split("\t")
-                        if hop_parts.len() == 2:
-                            cycle_keys.push(hop_parts[0])
-                    cycle_keys.sort()
-                    var signature: text = ""
-                    for cycle_key in cycle_keys:
-                        signature = signature + cycle_key + "\n"
-                    if reported.has(signature):
-                        continue
-                    reported[signature] = true
-                    # Locations are assembled only here, so a healthy build
-                    # never reads a span.
-                    var where_: text = ""
-                    for hop_entry in hop_entries:
-                        val hop_parts = hop_entry.split("\t")
-                        if hop_parts.len() != 2:
-                            continue
-                        val hop_key: text = hop_parts[0]
-                        val hop_field_name: text = hop_parts[1]
-                        if not structs.has(hop_key):
-                            continue
-                        val hop_struct = structs[hop_key]
-                        val hop_module_index = owner_module_indices[hop_key]
-                        val hop_module: ValueStructLayoutModuleV1 = module_values[hop_module_index]
-                        var hop_path: text = "<unknown file>"
-                        val hop_module_path: text = hop_module.path
-                        if rt_heap_ref_wellformed(hop_module_path):
-                            if hop_module_path != "":
-                                hop_path = hop_module_path
-                        if where_ != "":
-                            where_ = where_ + "; "
-                        where_ = where_ + "struct " + hop_struct.name + " in module " + module_keys[hop_module_index] + " at " + value_layout_location(hop_struct.span.file, hop_path, hop_struct.span.line)
-                        for hop_field in hop_struct.fields:
-                            if hop_field.name == hop_field_name:
-                                where_ = where_ + ", field " + hop_field_name + " at " + value_layout_location(hop_field.span.file, hop_path, hop_field.span.line)
-                    errors.push("recursive by-value struct layout: " + next_path + " -> " + structs[root].name + " [" + where_ + "]")
-                    continue
+                    return ["recursive by-value struct layout: " + next_path + " -> " + structs[root].name]
                 if not visited.has(target):
-                    pending.push(ValueStructLayoutWalk(node_key: target, path: next_path, chain: next_chain))
-    ValueStructLayoutReport(errors: errors, skipped_struct_edges: skipped_struct_edges)
+                    pending.push(ValueStructLayoutWalk(node_key: target, path: next_path))
+    []
 
-export validate_value_struct_layouts, value_struct_layout_snapshot_v1
-export ValueStructLayoutReport, value_struct_layout_report
-export value_struct_layout_is_cycle_diagnostic, value_struct_layout_cycle_is_fatal_for
-export ValueStructLayoutFieldV1, ValueStructLayoutStructV1, ValueStructLayoutSymbolV1, ValueStructLayoutModuleV1
-export value_struct_layout_declarations_v1, value_struct_layout_declaration_report_v1
+export validate_value_struct_layouts
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

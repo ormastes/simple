@@ -85,13 +85,13 @@ Use one of these. Do not invent a fourth without a probe matrix.
 - **Drive `launch()` without binding a handle at all** (P6, N3).
 - **Return the acquisition as a function's tail expression:**
 
-```simple:skip
+```simple
 @init_phase
 fn boot(src: RefDebugSession) -> Option<DebugProfiler>:
     ref_debug_profiler(src)          # tail expression — aliases
 ```
 
-```text
+```simple
 # BROKEN — binds to a local, handle stops aliasing
 val dp = ref_debug_profiler(src)
 dp.set_breakpoint(4)                  # silently discarded
@@ -123,7 +123,7 @@ dp.set_breakpoint(4)                  # silently discarded
   return a sentinel; that is what `CapLevel` is for.
 - **Group** — the union, one trait over one value, zero new methods:
 
-```simple:skip
+```simple
 trait DebugProfiler with DebugTarget, ProfileTarget:
     pass
 ```
@@ -215,7 +215,7 @@ Under critical mode the GPU backend is pinned in the manifest — `auto` is a
 DCA002 error, because it defers the choice to a boot probe. At boot, call the
 gate:
 
-```text
+```simple
 val check = verify_gpu_manifest_pin(cfg.gpu_backend, probe_backend(), cfg.enabled)
 if not check.ok:
     print check.report

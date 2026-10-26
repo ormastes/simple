@@ -80,7 +80,7 @@ Inner layers NEVER import outer layers. Outer layers import inner interfaces (po
 
 **Domain Layer** (`src/entity/`):
 
-```simple:skip
+```simple
 struct Order:
     id: text
     lines: [OrderLine]
@@ -93,7 +93,7 @@ struct Order:
 
 **Application Layer** (`src/feature/`):
 
-```simple:skip
+```simple
 struct CreateOrderUseCase:
     order_repo: OrderRepository     # Port (interface)
     payment: PaymentGateway         # Port (interface)
@@ -105,7 +105,7 @@ struct CreateOrderUseCase:
 
 **Adapters** (`src/adapter/`):
 
-```simple:skip
+```simple
 # Inbound adapter (HTTP controller)
 class OrderController:
     use_case: CreateOrderUseCase
@@ -141,7 +141,7 @@ src/
 
 **Ports** are interfaces defined by the application layer:
 
-```simple:skip
+```simple
 trait OrderRepository:
     fn find_by_id(id: text) -> Option<Order>
     fn save(order: Order) -> Result<(), text>
@@ -149,7 +149,7 @@ trait OrderRepository:
 
 **Adapters** implement ports for specific infrastructure:
 
-```simple:skip
+```simple
 class PostgresOrderRepository impl OrderRepository:
     fn find_by_id(id: text) -> Option<Order>:
         # PostgreSQL-specific implementation

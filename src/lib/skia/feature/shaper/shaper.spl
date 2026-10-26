@@ -7,14 +7,14 @@ use std.skia.feature.shaper.feature_tags.{OpenTypeFeature, feature_tag}
 use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_font_for_script, fallback_chain_font_for_run}
 use std.skia.feature.glyph.ot_parser.{OtFont}
 use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
-use std.skia.feature.glyph.ot_parser_layout.{GsubLookup}
+use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, parse_gsub_skeleton}
 use std.skia.feature.shaper.selected_complex.{selected_arabic_presentation_codepoint, selected_glyph_advance}
 use std.skia.feature.shaper.selected_devanagari.{selected_devanagari_glyphs}
 use std.skia.feature.shaper.selected_arabic.{selected_arabic_glyphs}
 use std.skia.feature.shaper.ot_layout_shaper.{CanonicalLayoutRun, layout_tag, resolve_canonical_layout_run}
 use std.nogc_sync_mut.text_layout.font_types.{FontGlyphRun}
 use std.nogc_sync_mut.io.font_sffi.{font_face_current_generation, font_face_identity, font_face_is_live}
-use std.common.crypto.sha256.{sha256_u8_fast_hex}
+use std.common.crypto.sha256.{sha256_u8_hex}
 extern fn rt_font_glyph_index(font_handle: i64, codepoint: i64) -> i64
 # ===== Arabic joining form =====
 enum ArabicJoinForm:
@@ -304,35 +304,11 @@ fn shaper_with_features(shaper: Shaper, features: [OpenTypeFeature]) -> Shaper:
 fn shaper_with_ot_font(shaper: Shaper, font: OtFont) -> Shaper:
     Shaper(fallback: shaper.fallback, features_enabled: shaper.features_enabled, ot_font: Some(font), ot_font_handle: 0, ot_font_generation: 0, ot_faces: shaper.ot_faces)
 fn shaper_with_ot_face(shaper: Shaper, font_handle: i64, font: OtFont) -> Shaper:
-    shaper_with_ot_face_blob_hex(shaper, font_handle, font, sha256_u8_fast_hex(font.blob))
-
-# Same as `shaper_with_ot_face`, for a caller that already holds the SHA-256
-# hex of `font.blob`. Hashing an 845 KB face in pure Simple is ~45 s in the
-# interpreter, and the font renderer used to pay it on EVERY shaped run of a
-# complex script (each Arabic link on wikipedia.org). The identity check is
-# unchanged; only who computes the digest moves.
-# Memoised SHA-256 hex for `shaper_with_ot_face_blob_hex` callers. The caller
-# supplies the cache key (see font_renderer `_shaped_face_blob_sha256_hex`).
-var _shaper_face_blob_hex_cache: Dict<text, text> = {}
-var _shaper_face_blob_hex_hits: i64 = 0
-
-fn shaper_face_blob_hex_cache_hits() -> i64:
-    _shaper_face_blob_hex_hits
-
-fn shaper_face_blob_sha256_hex_cached(cache_key: text, blob: [u8]) -> text:
-    if _shaper_face_blob_hex_cache.has(cache_key):
-        _shaper_face_blob_hex_hits = _shaper_face_blob_hex_hits + 1
-        return _shaper_face_blob_hex_cache[cache_key]
-    val hex = sha256_u8_fast_hex(blob)
-    _shaper_face_blob_hex_cache[cache_key] = hex
-    hex
-
-fn shaper_with_ot_face_blob_hex(shaper: Shaper, font_handle: i64, font: OtFont, blob_sha256_hex: text) -> Shaper:
     val generation = font_face_current_generation(font_handle)
     if font_handle <= 0 or generation <= 0:
         return shaper
     val identity = font_face_identity(font_handle, generation)
-    if not identity.starts_with("sha256=" + blob_sha256_hex + ";axes="):
+    if not identity.starts_with("sha256=" + sha256_u8_hex(font.blob) + ";axes="):
         return shaper
     var faces: [ShaperOtFace] = []
     for face in shaper.ot_faces:
@@ -393,6 +369,14 @@ fn _cmap_has_mapping(ot_font: Option<OtFont>, cp: u32) -> bool:
             cmap_glyph_id(font, cp) > 0
         case None:
             false
+
+# ===== get GSUB lookups from OT font =====
+fn _get_gsub_lookups(ot_font: Option<OtFont>) -> [GsubLookup]:
+    match ot_font:
+        case Some(font):
+            parse_gsub_skeleton(font)
+        case None:
+            []
 
 # ===== Arabic glyph id with joining form encoding =====
 fn _arabic_glyph_id(raw_gid: u32, cp: u32, form_offset: u32, cmap_mapped: bool, gsub_lookups: [GsubLookup]) -> u32:
@@ -770,7 +754,7 @@ fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, s
         if s != run_script:
             val run_font = fallback_chain_font_for_run(shaper.fallback, run_script, codepoints, start: run_start, end_idx: i)
             val bound = _shaper_ot_face(shaper, run_font)
-            val run = _build_run(codepoints, start: run_start, end_idx: i, scr: run_script, language: run_language, font: run_font, ot_font: bound.0, ot_font_handle: bound.1, ot_font_generation: bound.2, gsub_lookups: [], features: shaper.features_enabled, start_x: run_x, start_y: start_y)
+            val run = _build_run(codepoints, start: run_start, end_idx: i, scr: run_script, language: run_language, font: run_font, ot_font: bound.0, ot_font_handle: bound.1, ot_font_generation: bound.2, gsub_lookups: _get_gsub_lookups(bound.0), features: shaper.features_enabled, start_x: run_x, start_y: start_y)
             runs.push(run)
             run_x = run_x + _run_advance(run)
             run_start = i
@@ -778,7 +762,7 @@ fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, s
         i = i + 1
     val last_font = fallback_chain_font_for_run(shaper.fallback, run_script, codepoints, start: run_start, end_idx: n)
     val last_bound = _shaper_ot_face(shaper, last_font)
-    val last_run = _build_run(codepoints, start: run_start, end_idx: n, scr: run_script, language: run_language, font: last_font, ot_font: last_bound.0, ot_font_handle: last_bound.1, ot_font_generation: last_bound.2, gsub_lookups: [], features: shaper.features_enabled, start_x: run_x, start_y: start_y)
+    val last_run = _build_run(codepoints, start: run_start, end_idx: n, scr: run_script, language: run_language, font: last_font, ot_font: last_bound.0, ot_font_handle: last_bound.1, ot_font_generation: last_bound.2, gsub_lookups: _get_gsub_lookups(last_bound.0), features: shaper.features_enabled, start_x: run_x, start_y: start_y)
     runs.push(last_run)
     runs
 

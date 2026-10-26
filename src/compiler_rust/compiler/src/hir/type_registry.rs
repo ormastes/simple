@@ -56,11 +56,6 @@ pub struct TypeRegistry {
     types: std::collections::BTreeMap<TypeId, HirType>,
     allocator: TypeIdAllocator,
     name_to_id: HashMap<String, TypeId>,
-    /// Owner-scope overlay for same-named flattened structs/classes: bare
-    /// name -> owner-exact registered name, as seen from the function being
-    /// lowered. Empty outside HIR lowering of a flattened unit with a
-    /// collision. See `hir/lower/module_lowering/flatten_struct_owner.rs`.
-    scope_aliases: HashMap<String, String>,
 }
 
 impl TypeRegistry {
@@ -69,7 +64,6 @@ impl TypeRegistry {
             types: std::collections::BTreeMap::new(),
             allocator: TypeIdAllocator::new(),
             name_to_id: HashMap::new(),
-            scope_aliases: HashMap::new(),
         };
 
         // Register built-in types
@@ -242,20 +236,7 @@ impl TypeRegistry {
     }
 
     pub fn lookup(&self, name: &str) -> Option<TypeId> {
-        self.name_to_id.get(self.scoped_name(name)).copied()
-    }
-
-    /// The registered name `name` denotes in the current owner scope.
-    pub fn scoped_name<'a>(&'a self, name: &'a str) -> &'a str {
-        if self.scope_aliases.is_empty() {
-            return name;
-        }
-        self.scope_aliases.get(name).map(String::as_str).unwrap_or(name)
-    }
-
-    /// Install an owner-scope overlay, returning the previous one.
-    pub(crate) fn replace_scope_aliases(&mut self, scope: HashMap<String, String>) -> HashMap<String, String> {
-        std::mem::replace(&mut self.scope_aliases, scope)
+        self.name_to_id.get(name).copied()
     }
 
     /// Register a type alias - maps a name to an existing type ID

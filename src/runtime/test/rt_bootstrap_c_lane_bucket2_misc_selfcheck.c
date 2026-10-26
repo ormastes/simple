@@ -195,13 +195,9 @@ static void check_random(void) {
 }
 
 static void check_typed_bytes(void) {
-    /* Data pointers are 8-aligned; bit 0 is the slot-layout tag. */
-    _Alignas(8) uint8_t buf[4] = {10, 20, 30, 40};
+    uint8_t buf[4] = {10, 20, 30, 40};
     CHECK(rt_typed_bytes_u8_data_at((int64_t)(intptr_t)buf, 0) == 10, "byte[0] == 10");
     CHECK(rt_typed_bytes_u8_data_at((int64_t)(intptr_t)buf, 3) == 40, "byte[3] == 40");
-    int64_t slots[2] = {10 << 3, 20 << 3}; /* tagged ints */
-    CHECK(rt_typed_bytes_u8_data_at((int64_t)(intptr_t)slots | 1, 0) == 10, "slot[0] == 10");
-    CHECK(rt_typed_bytes_u8_data_at((int64_t)(intptr_t)slots | 1, 1) == 20, "slot[1] == 20");
 }
 
 static void check_mem_attr(void) {

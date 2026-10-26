@@ -8,15 +8,11 @@
  * Test:  cc -o /tmp/runtime_test bootstrap/runtime_test.c bootstrap/runtime.c -std=c11 && /tmp/runtime_test
  */
 
-/* FreeBSD's default environment already exposes POSIX 2008 + XSI; defining
- * these there zeroes __BSD_VISIBLE and hides u_int/sysctl/kinfo_proc. */
-#if !defined(__FreeBSD__)
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
-#endif
 #endif
 /* On Darwin, _POSIX_C_SOURCE/_XOPEN_SOURCE alone lock the SDK headers into
  * strict-POSIX mode at the FIRST system include (runtime.h -> <stdint.h>),
@@ -35,9 +31,6 @@
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
 #include "runtime.h"
-#if defined(__APPLE__)
-#include <sys/stdio.h>
-#endif
 
 int64_t rt_simple_abi_version(void) {
     return (int64_t)SIMPLE_ABI_VERSION;
@@ -47,22 +40,6 @@ int64_t rt_simple_abi_version_deferred(void) {
     return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
 }
 #include "runtime_startup_args.h"
-/* SPL_RUNTIME_NATIVE_TWIN marks the 40 hosted definitions in this file and in
- * platform/unix_common.h (included only from here) that runtime_native.c -- or
- * runtime_process.c, for rt_process_wait -- also defines strongly. The ordinary
- * hosted composition compiles both, and the ELF lanes accept that through
- * --allow-multiple-definition. Apple ld has no such option, so a Darwin link
- * that takes both objects (the host-gpu native-all tools: mcp, lsp_mcp,
- * test_runner) failed with "ld: 2088 duplicate symbols" (2026-10-20). On Mach-O
- * these copies are weak and the runtime_native.c/runtime_process.c owner wins,
- * which is the composition the seed's core-C runtime and Stage 4 already use
- * (neither compiles runtime.c). Off Apple the macro is empty, so Linux, FreeBSD
- * and Windows objects are byte-identical to before. */
-#if defined(__APPLE__)
-#  define SPL_RUNTIME_NATIVE_TWIN __attribute__((weak))
-#else
-#  define SPL_RUNTIME_NATIVE_TWIN
-#endif
 #include "platform/platform.h"
 #include "runtime_memtrack.h"
 #if defined(_WIN32)
@@ -75,7 +52,6 @@ int64_t rt_simple_abi_version_deferred(void) {
 #endif
 
 #include <stdio.h>
-#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -84,17 +60,6 @@ int64_t rt_simple_abi_version_deferred(void) {
 #include <fcntl.h>
 #if defined(__linux__)
 #include <sys/syscall.h>
-#endif
-#if defined(__APPLE__) || defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/resource.h>
-#include <sys/sysctl.h>
-#endif
-#if defined(__APPLE__)
-#include <libproc.h>
-#elif defined(__FreeBSD__)
-#include <sys/user.h>
 #endif
 #include <signal.h>
 #include <stdatomic.h>
@@ -109,10 +74,6 @@ int64_t rt_simple_abi_version_deferred(void) {
 #include <io.h>
 #include <time.h>
 #include <sys/types.h>
-#ifndef PSAPI_VERSION
-#define PSAPI_VERSION 2
-#endif
-#include <psapi.h>
 /* MSVC/clang-cl compatibility shims. Windows-only: every definition below is
  * inside this `#else` branch of `#ifndef _WIN32`, so the POSIX build is
  * byte-identical. Without them this TU has never compiled on Windows at all
@@ -144,7 +105,6 @@ typedef long long ssize_t;
 #ifndef _WIN32
 #include <dirent.h>
 #endif
-#include "platform/runtime_group_self_charge.h"
 
 /* ================================================================
  * Runtime Configuration
@@ -229,7 +189,7 @@ static void rt_file_exists_probe_record(uint_fast64_t lease, int exists) {
     }
 }
 
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_exists_probe_begin(void) {
+int64_t rt_file_exists_probe_begin(void) {
     uint_fast64_t idle = 0;
     if (!atomic_compare_exchange_strong_explicit(
             &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
@@ -253,7 +213,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_exists_probe_begin(void) {
     return (int64_t)generation;
 }
 
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_exists_probe_end(int64_t token) {
+int64_t rt_file_exists_probe_end(int64_t token) {
     if (token <= 0 || (uint_fast64_t)token > RT_FILE_EXISTS_PROBE_GENERATION_MAX ||
         atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
             (uint_fast64_t)token) return -2;
@@ -1246,7 +1206,7 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
-SPL_RUNTIME_NATIVE_TWIN int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
     char path_buf[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
     const char* path = path_buf;
@@ -1278,7 +1238,7 @@ SPL_RUNTIME_NATIVE_TWIN int rt_file_is_regular_no_follow(const uint8_t* path_ptr
  * Symlinks are followed (stat, not lstat): the caller wants to know whether
  * the path ultimately resolves to a character device, not whether the leaf
  * entry itself is one. */
-SPL_RUNTIME_NATIVE_TWIN int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
+int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
 #if defined(_WIN32)
     (void)path_ptr; (void)path_len;
     return 0;
@@ -1675,15 +1635,11 @@ int64_t rt_enum_payload(int64_t value) {
     return enum_value ? enum_value->payload : 0;
 }
 
-/* Keep every legacy enum operation weak: mixed bundles use the registered
- * tagged enum owner in runtime_native.c for construction AND checking. */
-SPL_WEAK
 int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value && enum_value->discriminant == (int32_t)expected;
 }
 
-SPL_WEAK
 int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     if (!enum_value || enum_value->discriminant != (int32_t)expected_discriminant) return 0;
@@ -1691,29 +1647,25 @@ int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t ex
     return expected_enum_id == 0 || enum_value->enum_id == 0 || enum_value->enum_id == (int32_t)expected_enum_id;
 }
 
-/* Standalone core-C requires the native BDD state and actual assertions.
- * The legacy hosted compatibility callbacks intentionally do nothing. */
-#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
-SPL_RUNTIME_NATIVE_TWIN void rt_bdd_describe_start_rv(int64_t name_rv) {
+void rt_bdd_describe_start_rv(int64_t name_rv) {
     (void)name_rv;
 }
 
-SPL_RUNTIME_NATIVE_TWIN void rt_bdd_describe_end(void) {
+void rt_bdd_describe_end(void) {
 }
 
-SPL_RUNTIME_NATIVE_TWIN void rt_bdd_it_start_rv(int64_t name_rv) {
+void rt_bdd_it_start_rv(int64_t name_rv) {
     (void)name_rv;
 }
 
-SPL_RUNTIME_NATIVE_TWIN void rt_bdd_it_end(int64_t passed) {
+void rt_bdd_it_end(int64_t passed) {
     (void)passed;
 }
 
-SPL_RUNTIME_NATIVE_TWIN void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
+void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
     (void)actual;
     (void)expected;
 }
-#endif
 
 /* ================================================================
  * Panic
@@ -1866,7 +1818,7 @@ void spl_prefetch_wait(void) {}
  * as a value with no string tag -- observed as `len=0`, indistinguishable from
  * an empty file or a missing one. The runtime's own handle validator prints
  * "probable compiler/FFI ABI mismatch" on it. */
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
+int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     /* RT_NIL: TAG_SPECIAL(0b011) with payload 0 == 3; matches
      * RuntimeValue::NIL in src/compiler_rust/runtime/src/value/core.rs:152,
@@ -1940,13 +1892,13 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_text(const uint8_t* path_ptr, uint6
  * to be re-argued. */
 static _Thread_local int64_t rt_rnf_last_failure = 77;
 
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_last_failure(void) {
+int64_t rt_file_read_regular_no_follow_last_failure(void) {
     return rt_rnf_last_failure;
 }
 
 #define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
 
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
+int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
@@ -1986,8 +1938,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
     free(bytes);
     return RT_RNF_FAIL(2);
 #else
-    /* Reach same-fd admission even for a FIFO with no writer. */
-    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
@@ -2012,7 +1963,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
 }
 /* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
  * NUL-terminated and the compiler passes it as a pair. */
-SPL_RUNTIME_NATIVE_TWIN int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     uint_fast64_t lease = rt_file_exists_probe_lease_admit();
     char path[RT_TEXT_PATH_MAX];
     int exists = 0;
@@ -2022,28 +1973,10 @@ SPL_RUNTIME_NATIVE_TWIN int         rt_file_exists(const uint8_t* path_ptr, uint
     rt_file_exists_probe_record(lease, exists);
     return exists;
 }
-SPL_RUNTIME_NATIVE_TWIN int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
+int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return rt_is_dir(path) ? 1 : 0;
-}
-/* Inspect the directory entry itself. In particular, a Windows junction or
- * directory symlink must not pass an ancestor check by resolving its target. */
-SPL_RUNTIME_NATIVE_TWIN int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) || !path[0]) return 0;
-#if defined(_WIN32)
-    wchar_t* wide_path = rt_win_long_path_widen(path);
-    if (!wide_path) return 0;
-    DWORD attributes = GetFileAttributesW(wide_path);
-    free(wide_path);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-#else
-    struct stat st;
-    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
-#endif
 }
 int         rt_file_write(const char* path, const char* content) {
     if (!path) return 0;
@@ -2066,7 +1999,7 @@ int         rt_file_append(const char* path, const char* content) {
 /* Two `text` arguments -> FOUR machine words (src_ptr, src_len, dst_ptr,
  * dst_len); runtime_sffi.rs:1868 declares &[I64, I64, I64, I64]. The old
  * two-parameter form read BOTH paths past their ends. */
-SPL_RUNTIME_NATIVE_TWIN int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
+int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len) {
     char src[RT_TEXT_PATH_MAX];
     char dst[RT_TEXT_PATH_MAX];
@@ -2095,12 +2028,12 @@ SPL_RUNTIME_NATIVE_TWIN int         rt_file_copy(const uint8_t* src_ptr, uint64_
     fclose(out);
     return 1;
 }
-SPL_RUNTIME_NATIVE_TWIN int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return spl_file_delete(path);
 }
-SPL_RUNTIME_NATIVE_TWIN int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
+int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
     return spl_file_size(path);
@@ -2230,7 +2163,7 @@ static char* rt_m3_owned_path(const char* path, int64_t path_len) {
     return owned;
 }
 
-SPL_RUNTIME_NATIVE_TWIN int rt_file_copy_create_excl_no_follow(
+int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
 #if defined(_WIN32) || !defined(O_NOFOLLOW)
@@ -2280,7 +2213,7 @@ SPL_RUNTIME_NATIVE_TWIN int rt_file_copy_create_excl_no_follow(
 #endif
 }
 
-SPL_RUNTIME_NATIVE_TWIN int rt_file_link_create_excl_no_follow(
+int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
 #if defined(_WIN32) || !defined(O_NOFOLLOW)
@@ -2337,18 +2270,7 @@ static int rt_mem_snapshot_parent_fd(char* path, const char** leaf_out) {
 
 int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
 #if defined(_WIN32)
-    char path[RT_TEXT_PATH_MAX];
-    if (!path_ptr || path_len <= 0 || (uint64_t)path_len >= sizeof(path) ||
-            memchr(path_ptr, '\0', (size_t)path_len)) return -1;
-    memcpy(path, path_ptr, (size_t)path_len); path[path_len] = '\0';
-    wchar_t* wide = rt_win_long_path_widen(path);
-    if (!wide) return -1;
-    int valid_parent = rt_win_profile_path_parents_are_real(wide);
-    HANDLE file = valid_parent ? CreateFileW(wide, GENERIC_WRITE, 0, NULL,
-        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL) :
-        INVALID_HANDLE_VALUE;
-    free(wide);
-    return file == INVALID_HANDLE_VALUE ? -1 : (int64_t)(intptr_t)file;
+    (void)path_ptr; (void)path_len; return -1;
 #else
     char path[RT_TEXT_PATH_MAX];
     if (!path_ptr || path_len <= 0 || (uint64_t)path_len >= sizeof(path) ||
@@ -2375,17 +2297,7 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
 
 int rt_mem_snapshot_append_flush(int64_t fd64, const char* record, int64_t record_len) {
 #if defined(_WIN32)
-    if (fd64 == -1 || !record || record_len <= 0 || record_len > 65536 ||
-            record[record_len - 1] != '\n') return 0;
-    HANDLE file = (HANDLE)(intptr_t)fd64;
-    int64_t off = 0;
-    while (off < record_len) {
-        DWORD written = 0;
-        if (!WriteFile(file, record + off, (DWORD)(record_len - off), &written, NULL) ||
-                written == 0) return 0;
-        off += (int64_t)written;
-    }
-    return FlushFileBuffers(file) != 0;
+    (void)fd64; (void)record; (void)record_len; return 0;
 #else
     if (fd64 < 0 || fd64 > INT_MAX || !record || record_len <= 0 || record[record_len - 1] != '\n') return 0;
     int fd = (int)fd64; int64_t off = 0;
@@ -2429,18 +2341,10 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
         rt_mem_snapshot_token(event_token, sizeof(event_token), event, event_len) < 0 ||
         rt_mem_snapshot_token(phase_token, sizeof(phase_token), phase, phase_len) < 0 ||
         rt_mem_snapshot_token(path_token, sizeof(path_token), source_path, source_path_len) < 0) return 0;
-    int64_t group_current = -1, group_peak = -1;
-    int group_measured = rt_group_self_charge_snapshot(&group_current, &group_peak);
-    const char* group_kind = "unavailable";
-#if defined(_WIN32)
-    if (group_measured) group_kind = "job-commit";
-#elif defined(__linux__)
-    if (group_measured) group_kind = "cgroup-memory";
-#endif
     const char* path_kind = source_path_len > 0 ? "recorded" : "none";
     const char* emitted_path = source_path_len > 0 ? path_token : "-";
     int n = snprintf(line, sizeof(line),
-        "schema=simple.compiler.mem_snapshot.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld group_charge_metric=%s group_charge_current_bytes=%lld group_charge_peak_bytes=%lld\n",
+        "schema=simple.compiler.mem_snapshot.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld\n",
         run_token, (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(),
         event_token, phase_token, (long long)source_index, path_kind, emitted_path,
         (long long)retained_modules, (long long)validation_keys,
@@ -2448,8 +2352,7 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
         (long long)hir_symbols, (long long)hir_functions, (long long)hir_constants,
         (long long)hir_enums, (long long)hir_structs, (long long)hir_classes,
         (long long)rt_heap_live_bytes(), (long long)rt_heap_peak_bytes(),
-        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib(),
-        group_kind, (long long)group_current, (long long)group_peak);
+        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib());
     return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
 }
 
@@ -2471,7 +2374,7 @@ int rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_
 
 int rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
-    return fd != -1 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
+    (void)fd; return 0;
 #else
     return fd >= 0 && fd <= INT_MAX && close((int)fd) == 0;
 #endif
@@ -2479,48 +2382,7 @@ int rt_mem_snapshot_close(int64_t fd) {
 
 static int64_t rt_process_status_kib(const char* key) {
 #if defined(_WIN32)
-    /* Self-process working set is a resident observation, not the group
-     * JobObject's aggregate committed charge. Keep those metrics separate. */
-#if defined(_WIN64)
-    _Static_assert(sizeof(PROCESS_MEMORY_COUNTERS_EX) == 80,
-        "Win64 PROCESS_MEMORY_COUNTERS_EX layout changed");
-    _Static_assert(offsetof(PROCESS_MEMORY_COUNTERS_EX, WorkingSetSize) == 16 &&
-        offsetof(PROCESS_MEMORY_COUNTERS_EX, PeakWorkingSetSize) == 8,
-        "Win64 process working-set offsets changed");
-#endif
-    PROCESS_MEMORY_COUNTERS_EX counters = {0};
-    counters.cb = (DWORD)sizeof(counters);
-    if (!K32GetProcessMemoryInfo(GetCurrentProcess(),
-            (PROCESS_MEMORY_COUNTERS*)&counters, counters.cb)) return -1;
-    if (strcmp(key, "VmRSS:") == 0) return (int64_t)(counters.WorkingSetSize / 1024);
-    if (strcmp(key, "VmHWM:") == 0) return (int64_t)(counters.PeakWorkingSetSize / 1024);
-    return -1;
-#elif defined(__APPLE__) || defined(__FreeBSD__)
-    /* No /proc/self/status: resident from the kernel, peak from getrusage. */
-    if (strcmp(key, "VmHWM:") == 0) {
-        struct rusage ru;
-        if (getrusage(RUSAGE_SELF, &ru) != 0) return -1;
-#if defined(__APPLE__)
-        int64_t peak = (int64_t)ru.ru_maxrss / 1024; /* bytes on Darwin */
-#else
-        int64_t peak = (int64_t)ru.ru_maxrss;        /* KiB on FreeBSD */
-#endif
-        /* ru_maxrss is tick-sampled on FreeBSD and can trail the live RSS. */
-        int64_t rss = rt_process_status_kib("VmRSS:");
-        return peak > rss ? peak : rss;
-    }
-    if (strcmp(key, "VmRSS:") != 0) return -1;
-#if defined(__APPLE__)
-    struct proc_taskinfo ti;
-    if (proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &ti, (int)sizeof(ti)) != (int)sizeof(ti)) return -1;
-    return (int64_t)(ti.pti_resident_size / 1024);
-#else
-    struct kinfo_proc kp;
-    size_t len = sizeof(kp);
-    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid() };
-    if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len != sizeof(kp)) return -1;
-    return (int64_t)kp.ki_rssize * (int64_t)sysconf(_SC_PAGESIZE) / 1024;
-#endif
+    (void)key; return -1;
 #else
     FILE* f = fopen("/proc/self/status", "r");
     if (!f) return -1;
@@ -2658,9 +2520,7 @@ int64_t rt_readdir_count(int64_t h) { (void)h; return 0; }
 int64_t rt_readdir_entry(int64_t h, int64_t i) { (void)h; (void)i; return rt_string_new(NULL, 0); }
 void rt_readdir_free(int64_t h) { (void)h; }
 int64_t rt_mkdir(int64_t p, int64_t m) { (void)p; (void)m; return -(int64_t)EINVAL; }
-#if !defined(SIMPLE_CORE_C_STANDALONE)
 int64_t rt_remove(const char* p) { (void)p; return -1; }
-#endif
 #endif
 
 /* Tagged-text ABI (see runtime.h): decode the command, delegate to
@@ -2701,7 +2561,7 @@ int64_t rt_shell_output(int64_t cmd_value) {
  * link), but conflicting weak-external defaults are a separate, unforceable
  * rule.
  *
- * Making THIS file the strong owner on hosted Windows fixes it while leaving exactly
+ * Making THIS file the strong owner on Windows fixes it while leaving exactly
  * one weak external (runtime_native.c's), which resolves against a strong
  * definition normally. The reverse -- compiling runtime_native.c's copies out
  * under SIMPLE_CORE_C_STANDALONE -- was tried first and is WRONG: it leaves
@@ -2711,8 +2571,6 @@ int64_t rt_shell_output(int64_t cmd_value) {
  * failed with `simple_runtime.lib(runtime_native.obj) : error LNK2019:
  * unresolved external symbol rt_cli_get_args`.
  *
- * Standalone core-C instead needs runtime_native.c's registered tagged argv;
- * its three definitions below are excluded from that composition.
  * CROSS-PLATFORM: off Windows this macro expands to exactly the
  * `__attribute__((weak))` that was here before, so Linux, macOS and FreeBSD
  * are byte-identical. The mingw lane is COFF too and benefits identically. */
@@ -2722,10 +2580,6 @@ int64_t rt_shell_output(int64_t cmd_value) {
 #  define SPL_CLI_ARGS_WEAK __attribute__((weak))
 #endif
 
-/* Standalone core-C uses tagged, registered arrays and scalar words, whereas
- * these hosted helpers return legacy SplArray/SplValue layouts. Keep the
- * native core provider as the sole Windows standalone owner. */
-#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
 SPL_CLI_ARGS_WEAK SplArray* rt_cli_get_args(void) {
     SplArray* arr = spl_array_new();
     for (int i = 0; i < g_argc; i++) {
@@ -2745,7 +2599,6 @@ SPL_CLI_ARGS_WEAK SplValue rt_cli_arg_at(int64_t index) {
     const char* arg = spl_get_arg(index);
     return spl_str(arg ? arg : "");
 }
-#endif
 
 /* rt_ FFI wrappers for prefetch */
 void rt_prefetch_start(const char* path) { spl_prefetch_start(path); }
@@ -2832,7 +2685,7 @@ int64_t rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
  * pulled into THIS translation unit by the #include of platform/platform.h at
  * the top of this file, which is why the extern ABI gate -- which parses only
  * src/runtime/*.c -- never saw these two definitions at all. */
-SPL_RUNTIME_NATIVE_TWIN bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
+bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
     return rt_dir_create_cpath(path, recursive);
@@ -2856,7 +2709,7 @@ bool rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len) {
  * wrote through. SIGSEGV in all three C link orders, for an existing directory
  * and for a missing one alike. The worker is now rt_dir_list_cpath and this is
  * the entry point the compiler actually calls. */
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
+int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
     int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return result;
@@ -3018,14 +2871,6 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
     if (errno == EEXIST) return 0;
     if (errno != ENOSYS && errno != EINVAL) return -1;
 #endif
-#if defined(__APPLE__)
-    /* Preserve no-replace semantics for both files and directories. */
-    if (renamex_np(staged, destination, RENAME_EXCL) == 0) return 1;
-    if (errno == EEXIST) return 0;
-    if (errno != ENOTSUP && errno != EOPNOTSUPP && errno != EINVAL) return -1;
-#endif
-    struct stat source_stat;
-    if (lstat(staged, &source_stat) != 0 || !S_ISREG(source_stat.st_mode)) return -1;
     if (link(staged, destination) != 0) return errno == EEXIST ? 0 : -1;
     /* Publication is complete once link succeeds. Cleanup failure leaves the
      * staged alias behind but must not misreport or roll back visible output. */
@@ -4177,9 +4022,6 @@ const char* rt_hex_to_wire(const char* hex_str) {
     return (const char*)result;
 }
 
-#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
-/* Standalone core-C instead selects runtime_native.c's tagged text/array ABI.
- * Keep these legacy hosted byte-buffer helpers out of that composition. */
 /* ---- Byte array handle for [u8] FFI ----
  * The [u8] type in Simple FFI maps to an opaque int64_t handle.
  * Internally: pointer to { uint8_t* data; int64_t len; int64_t cap; } */
@@ -4190,7 +4032,7 @@ typedef struct {
 } rt_byte_buf;
 
 /* rt_text_to_bytes: create byte array handle from text string */
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(const char* text) {
+int64_t rt_text_to_bytes(const char* text) {
     if (!text) text = "";
     size_t len = strlen(text);
     rt_byte_buf* bb = (rt_byte_buf*)SPL_MALLOC(sizeof(rt_byte_buf), "bytes");
@@ -4217,7 +4059,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(const char* text) {
  * which has no RuntimeFuncSpec (the compiler never calls it) and no C-internal
  * caller of rt_bytes_to_text exists, so nothing was relying on the old
  * interpretation. */
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
+int64_t rt_bytes_to_text(int64_t bytes_value) {
     int64_t len = rt_array_len_safe(bytes_value);
     if (bytes_value == 0 || len <= 0) return rt_string_new(NULL, 0);
     const uint8_t* data =
@@ -4225,4 +4067,3 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     if (!data) return rt_string_new(NULL, 0);
     return rt_string_new(data, (uint64_t)len);
 }
-#endif

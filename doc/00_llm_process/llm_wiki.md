@@ -1,73 +1,11 @@
 # LLM Repository Wiki
 
-## Simple linker: external mold/LLD and internal Simple engine
-
-The self-hosted Simple compiler can use external mold or LLVM LLD; that does
-not make the linker itself pure Simple. The mold-like MDSOC++ Simple linker
-is a separate internal engine, selected through supported internal routes.
-Keep the admitted external/platform route until internal correctness,
-compiler/application execution, resource and host evidence justify a reviewed
-target-specific cutover. ELF success does not certify Windows PE or macOS
-Mach-O. Record the actual engine; external fallback is not internal proof.
-
-Read [linker selection and cutover](../07_guide/compiler/linker_selection.md)
-before choosing defaults or claiming completion. Managed native admission
-currently requires its admitted external hosted linker. The overall
-`mold_is_pure_simple_linker_complete()` receipt gate does not automatically
-change defaults or replace real execution evidence.
-
 ## Bootstrap failure collection
 
-For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
-owned-process finality, use [native staging and terminal evidence](../07_guide/tooling/bootstrap_native_staging.md).
-A compile last-line/exit/object-size observation is not an SSpec verdict. Preserve
-actual test counts, stopped bug records, campaign Phase 3 priority and the full
-CLI command-owner gate; authored fixtures remain unexecuted until observed.
-
-For cache-preserving failed-file retries, independent MIR/object collection,
-tagged workarounds and complete-object manual linking, use
-[cached object continuation](../07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
-Successful compile observation reads only the final log line, result code and
-object size. Host access in product code uses SoSix aliases/facades; see the
-[POSIX/host interface index](../07_guide/app/llm/simpleos_posix_host_interface_index.md).
-These are workflow requirements, not evidence that a build or platform passed.
-
-Full bootstrap has parallel branches after each usable compiler: Phase 1 whole
-tests precede Phase 2 construction; Phase 2 sanity opens its six subsystem
-test binaries, Phase 3 build and early Phase 4 from Phase 2. Phase 3 sanity
-opens whole tools/library tests and Phase 4 from Phase 3. Run whole tests on
-both Phase 4 cohorts and preserve their distinct producer identities. See the
-[execution graph](../07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph).
-This specifies the required workflow, not a claim of completed script wiring
-or passing builds. After three unresolved repair cycles, update the bug
-database and use a scoped linked workaround where valid; continue independent
-cached work and revisit the original bug on the later rebuild.
-
-Current RC1 scope: one fully successful host is sufficient, with Windows as
-the qualifying host. Complete Windows bootstrap, required tests and local
-deployment before remote synchronization and release publication. Linux,
-macOS and BSD remain explicitly unverified until RC2. See the
-[RC1 completion scope](../07_guide/tooling/bootstrap_failure_collection.md#windows-rc1-completion-scope).
-
-Bootstrap failure collection means finishing all independently runnable modules,
-builds and tests after errors, then assigning independent root causes to parallel
-repair agents. The exact compiler must compile Hello World and execute its output
-successfully before the next provisional phase; full verification may continue
-alongside it. User-authorized time/memory/policy exceptions use separate monitored
-DIAGNOSTIC attempts, retain failed receipts, and never manufacture admission or
-test PASS. Restore normal gates before promotion. Follow the
+Bootstrap failure collection means completing independently runnable builds and tests after errors. Usable compiler bytes plus minimum sanity permit the next diagnostic phase before formal admission. Crashes block dependent chains; all failed and blocked rows remain visible and prevent a successful aggregate. Follow the
 [shared collection policy](../07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
 cache preservation, and bug evidence. This is agent workflow guidance; it does
 not change runner behavior.
-
-Maintained project routes: [build collection](../07_guide/tooling/bootstrap_failure_collection.md),
-[parallel handoff](../07_guide/app/llm/bootstrap_parallel_handoff.md), and
-[LLVM debugging](../07_guide/app/llm/llm_bootstrap_llvm_debugging.md).
-Agent entrypoints: [debug](../../.agents/skills/debug/SKILL.md),
-[long-build](../../.agents/skills/long-build/SKILL.md), and
-[bootstrap](../../.agents/skills/bootstrap/SKILL.md). Reusable SPipe procedures
-belong to the resolved common package's `skills/` and `wiki/` indexes; machine
-build status and private receipts remain in the project/runtime owner.
 
 ## SPipe home routing
 
@@ -81,28 +19,7 @@ See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownershi
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
-## Configured variants and aggregate repairs
-
-Read [configured variants and aggregate validation](../07_guide/compiler/configured_variants_and_aggregate_validation.md)
-before changing library-owner selection or array/tuple behavior. Stable
-interfaces retain configured implementation selection and importer-family
-semantics; fallback order is not authority to overwrite them. Rust/Pure-Simple
-parity remains active work. A newer source repair does not upgrade an older
-producer's evidence. Require actual engine/provider/cache bindings and test
-values/counts. The authored robust-array/tuple plan remains unidentified;
-existing research options are not its approved scope.
-
 ## Bug-linked workarounds
-
-Required for every temporary build/test workaround: a source `@workaround`
-tag with canonical bug ID, an authoritative bug DB record, and the actual
-workaround commit SHA/link. Record intended-code recovery reference, original
-failure, producer/source, reproducing/prevention tests and background fix owner.
-Create the bug record first when unknown. If the qualified DB tool is unavailable,
-record a dated bug report and explicitly leave DB reconciliation pending. Keep
-the bug open until an applied underlying fix is verified; link its commit and
-the narrow workaround-removal commit. Fetching a fix alone is insufficient.
-
 
 The accepted workflow is
 [bug-linked workarounds](../07_guide/tooling/bug_linked_workarounds.md);
@@ -122,8 +39,8 @@ references, then narrowly restore intended blocks and run the smallest valid
 build. A recovery hash never authorizes checkout/reset. Preserve cache producer,
 entry, dependency, ABI, and option identities; defer the one final clean gate
 to the required boundary. For Windows/Linux bootstrap repairs, run dependent
-Phase 3/4 diagnostics once the exact compiler passes the Hello compile/run
-gate, concurrently with qualification using isolated outputs/caches. Retain exact producer evidence;
+Phase 3/4 diagnostics once the required compiler binary exists, concurrently
+with admission using isolated outputs/caches. Retain exact producer evidence;
 admission and lineage still gate qualification and promotion. Do not turn this
 process note into a test, docgen, bootstrap, or release PASS.
 
@@ -667,14 +584,6 @@ wrong repository subsystem. Link detailed guides instead of duplicating them.
 - **Scope:** native FreeBSD x86_64 bootstrap inside QEMU (`check-freebsd-bootstrap-qemu.shs --full`)
   through Stage 3 PASS, then Stage 4 full CLI and FreeBSD spec runs.
 - **Timeouts:** ssh cap >= bootstrap budget (#1121); Stage 2 per-file cap 1800s under TCG (#1122).
-
-## Linux riscv64 QEMU bootstrap lane
-
-- **Expert note:** `doc/00_llm_process/feature_expert/linux_riscv64_qemu_bootstrap/skill.md`.
-- **Scope:** native riscv64 Linux guest (Ubuntu cloud image, OpenSBI -> U-Boot, 20 vCPU TCG)
-  via `check-linux-riscv64-bootstrap-qemu.shs`; trust-root Stage 2 with `--backend=cranelift`.
-- **Triple:** cargo needs `riscv64gc-unknown-linux-gnu` (`PLATFORM_RUST_TRIPLE`), Simple keeps `riscv64-unknown-linux-gnu`.
-
 ## Robust lifecycle persistence
 
 - **Canonical owner:** `std.lifecycle_persistence`, implemented under
@@ -1215,41 +1124,3 @@ is `tools/claude-plugin/repo-and-pull-req/skills/gh_pull_req_review/SKILL.md`.
   `0ea0:2211` exposes storage/HID only and must be rejected.
 - If OpenOCD reports the FTDI device absent, stop. Do not substitute CN22 CPLD
   service JTAG, guess CPU TAP wiring, or loop software resets.
-
-## Existing Simple native test binaries
-
-For compiled test executables like GoogleTest, use Simple's existing native
-runner, not a newly introduced foreign framework. Start with the
-[native test binary workflow](../07_guide/infra/testing/native_test_binary_workflow.md):
-explicit LLVM/Cranelift AOT commands, retained executables, source-list versus
-binary-owned counts, and the six-product compiler/interpreter/loader matrix.
-Research and repair existing aggregate/list entrypoints before replacing them.
-
-## Protected release drive machinery (rc1, 2026-10-11)
-
-Driving `v1.0.0-rc.1` through the protected convergence/candidate pipeline has
-these hard contracts (full detail: the `release` skill and
-`doc/07_guide/infra/software_release.md`):
-
-- Failed attempts increment a suffix, never rename the version: manifest
-  branches `work/release/1.0.0-rc.1_<N>`, candidates
-  `candidate/v1.0.0-rc.1/aNNN`.
-- The release line ref must satisfy every layer at once: `pr-admission.yml`
-  regex, `convergence-checkpoint.shs` regex, the review broker's
-  base→ruleset case, `candidate.yml` semver→ref derivation, and the
-  `spipe-vcs-v3-release-lines` ruleset conditions. A non-standard line like
-  `release_phase3` needs all five updated on both main and the line.
-- Manifest validator: prunes classifications merged to main, then demands
-  exact equality with `git rev-list origin/main..<release-ref>`. On tip
-  drift, rebind a fresh manifest; never merge-sync a manifest PR.
-- Convergence receipt jq accumulation must stream (`slurpfile`); `--argjson`
-  dies at ~624 rows (MAX_ARG_STRLEN).
-- Candidate refs: `gh api repos/.../git/refs` only; `git push` is blocked.
-- Broker on a fast-moving line fails with "protected base advanced";
-  resync the PR branch and redrive — several cycles are normal.
-- Runner image drift breaks llvm archive fingerprints; verify
-  `llvm-config --libfiles` archives exist (candidate.yml installs
-  `libpolly-18-dev` when `libPolly.a` is missing).
-- FreeBSD QEMU bootstrap: hours-scale timeouts, 4 GiB host headroom per run
-  for a 10–14 GB overlay, guest logs under
-  `.simple/storage/build/bootstrap/logs/`, QEMU_MEM takes a `G` suffix.

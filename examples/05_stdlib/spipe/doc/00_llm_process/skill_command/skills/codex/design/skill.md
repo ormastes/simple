@@ -74,7 +74,7 @@ to_be_less_than(val)      # Numeric comparison
 
 ### SPipe Test Template
 
-```simple:skip
+```simple
 use std.spec.SPipe
 
 describe "<Feature>":

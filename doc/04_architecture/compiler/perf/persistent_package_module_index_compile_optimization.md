@@ -1,72 +1,6 @@
 <!-- codex-design -->
 # Persistent Package/Module Index Compile Architecture
 
-## 2026-10-03 release-line reconciliation
-
-The current item 6 execution umbrella is
-`doc/03_plan/compiler/perf/item6_compile_optimization_2026-10-03.md`.
-Research inspected release commit `7d16ab11d2227cbe5f29dc998b76a1eff326abbb`.
-Cold HIR and full-index publication owners exist at that revision; remaining
-claims require executed qualification, not an assumption of missing code.
-The broad system spec's shell checker is absent, so none of its expected output
-strings can establish acceptance. The additive local/domain research and
-concrete acceptance matrix linked by the umbrella preserve these distinctions.
-
-### One authority for publication and collection
-
-`CURRENT`, generation files, and reader pins form one retention transaction.
-The index persistence owner must serialize GC retention decisions with the same
-`CURRENT.lock` used by publication. GC acquires the lock before reading the
-current generation, discovering candidates, applying retained digests, or deleting any
-generation. Contention ends the bounded collection attempt without deletion;
-it does not authorize an unlocked best-effort scan. The lock is released on
-every acquired-lock exit. Readers continue to consume immutable generations.
-
-This closes the interleaving where GC reads generation A, publication promotes
-B, and GC deletes B using its stale view of A. Tests must hold the real lock,
-inspect persisted bytes and the current pointer, and then prove ordinary
-unretained collection after releasing it. The test does not certify every
-pin/crash ordering; those remain separate acceptance rows.
-
-Reader acquisition remains OPEN: `package_module_index_read_current_v1` reads
-pointer then payload without a shared lock. Publication/GC can retire the
-chosen generation between those reads. The writer-lock repair cannot certify
-this boundary. A follow-up call-site audit found that current consumers receive
-owned decoded generation values; none retains an index-file path or lazy reader.
-For those consumers, capture pointer and complete immutable payload under the
-same lock, release it, and only then hash/decode the owned bytes. The returned
-value pins the logical generation for the request without requiring the `.index`
-file to survive. Test contention and preservation of an already acquired value
-after publication/collection. A future lazy file consumer must supply a real
-lease before use; caller-supplied `retained_digests` is not such a registry.
-Archive/CAS leases remain a separate lifetime obligation.
-
-### Semantic classification must reach the driver
-
-The existing precise invalidation owner consumes `PackageModuleChangeV1`, but
-`package_index_route_current_v1` currently receives a batch-wide boolean from
-the driver. Correct mixed-batch routing requires a per-module classification
-produced from admitted old/new semantic metadata, including public exports,
-initializers, providers and body-sensitive consumers. The driver must pass that
-classification to the actual route. Adding an unused precise overload or
-allowing the test to declare an edit private cannot prove adoption.
-
-Content identity remains separate from exported semantic identity. Unknown or
-unadmitted metadata cannot suppress reverse invalidation. The legacy coarse
-route stays conservative until the classification path is implemented and
-qualified. A public change in one independent branch must not convert a
-proven private-only edit in another branch into a public change.
-
-### Startup and performance evidence
-
-Index/GC repair must not introduce new compiler subprocesses or recursive
-source discovery. MCP/LSP continue to use the shared catalog owner; no duplicate
-workspace index is introduced. Qualify startup, local lookup p95, representative
-warm request latency and peak RSS using the existing NFR-CSM and compiler
-performance budgets, with source/runtime/target and fixture digests. Missing
-admitted Windows tooling is an evidence blocker, never a reason to run a seed
-and call its measurements production results.
-
 ## Context
 
 Simple currently has entry-closure resolution, SIF/SMF metadata, action keys,
@@ -235,33 +169,6 @@ is measured against admitted architecture-specific baselines; missing baseline
 authority fails qualification.
 
 ## SCV freeze owner and write boundary
-
-The cold ownership capture also owns the optional stable project-root digest.
-Its inputs are SCV-validated `ownership_v1.project_identity` and policy bytes.
-Manifest digests remain per-package witnesses so manifest edits can invalidate
-their exact consumers. The full-index publisher consumes this
-digest instead of the changing source tree ID while retaining separate revision,
-commit, tree and inventory witnesses. Policies without the identity remain on
-the conservative legacy tree-root path. This permits semantic transition
-comparison across source edits without relaxing snapshot admission.
-
-Generated facets require a producer declaration selected independently of the
-compiled artifact. The current compiled-output bridge has no such input and
-therefore rejects nonempty generated facets before any index publication;
-artifact-supplied declarations and receipts remain consistency evidence only.
-
-Generated support also requires preserving `generated_source_digest` beyond
-TLDR construction. The schema-4 implementation candidate persists it in full
-and entry-scoped graphs and binds it into module action identity. Semantic
-transition comparison uses it for owner/reverse-consumer invalidation. Legacy
-graphs remain readable, but unknown generated witnesses force conservative
-invalidation; grouped worker routes require migration before archive reuse. The
-bootstrap request explicitly selects V4, and full-inventory consumers still
-reject entry-scoped graphs. These changes await runtime qualification. Real
-producer execution, independently selected declaration authority, and this
-projection are separate required steps; none substitutes for another. See
-`doc/01_research/domain/compiler/perf/generated_package_authority.md` for the
-evidence and acceptance sequence.
 
 The compile source-view owner runs before the catalog owner. It creates or
 inherits one immutable snapshot, validates its canonical inventory, and passes

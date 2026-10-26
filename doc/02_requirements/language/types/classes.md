@@ -14,7 +14,7 @@ and static polymorphism with interface bindings.
 
 ## Syntax
 
-```simple:skip
+```simple
 class Calculator:
     static fn add(a, b):
         return a + b

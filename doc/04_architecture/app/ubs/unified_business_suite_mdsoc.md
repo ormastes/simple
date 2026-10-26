@@ -294,7 +294,7 @@ Simple's **virtual capsules + manifests + architecture-aware repo structure** ar
 - A **manifest** declares what a capsule *introduces*, *requires*, and *exports* — the contract that lets the IDE and compiler reason about composition without expanding everything (the same contract-first principle as Simple's parser-friendly macros).
 - **Architecture rules** (`forbid`/`allow` pointcuts) enforce dimension boundaries at compile time so, e.g., a presentation capsule can never reach into the ledger directly.
 
-```simple:skip
+```simple
 # manifest: the tax dimension contributes a VAT slice to Invoice
 capsule tax.invoice_vat:
     requires entity Invoice has (subtotal: Money, jurisdiction: JurisdictionId)
@@ -338,7 +338,7 @@ The compiler **enforces family boundaries**, so an analytics module can't accide
 
 Audit, permission checks, tax application, and approval gating are textbook cross-cutting concerns. Implement them as **predicate-based AOP advice with compile-time weaving** (Simple's default), so there's zero overhead where no aspect applies and no per-module duplication:
 
-```simple:skip
+```simple
 # audit every state-changing service call, suite-wide, once
 on pc{ execution(* services.*.commit(..)) } use audit_write after_success priority 20
 
@@ -360,7 +360,7 @@ This is the literal realization of MDSOC's claim that AOP/MDSOC lets you "specif
 
 This is where Simple buys you correctness incumbents fake with conventions:
 
-```simple:skip
+```simple
 # money is a unit type, not a float; currencies are nominal and non-mixable
 unit currency(base: Decimal):
     USD = 1.0, EUR = 1.0, KRW = 1.0      # held per-book; cross-rate via explicit FX
@@ -395,7 +395,7 @@ For a system of record, "the ledger provably balances" is a differentiator no Sa
 
 ### 2.10 End-to-end sketch: one event, every dimension, one commit
 
-```simple:skip
+```simple
 # A single shipment event composes across dimensions in one transaction.
 actor OrderFulfillment:
     fn on_ship(order: OrderId, lines: [ShipLine]) -> Result[Unit, FulfillError]:

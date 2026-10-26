@@ -34,24 +34,6 @@ things, and this gate asserts all three:
    mechanically separates a stage-4 binary from a stage-3 one at runtime, which
    is why the gate probes **both** binaries.
 
-### Stage 4c: crypto/compress dynSMF bundles (opt-in)
-
-After the full-CLI relink (Stage 4/4b), `bootstrap-from-scratch.sh` can compile
-`src/lib/common/{crypto,compress}/dynsmf_entry.spl` with the new full CLI
-(`compile --format=smf`) into `build/dynsmf/<id>.smf` and print
-`dynsmf_artifact_sha256=<id>:<sha>` lines. It is **off by default**:
-
-| `SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF` | Behaviour |
-|---|---|
-| unset / `0` | prints `Stage 4c: skipped (...)` and continues; argv, receipts and preflight config are unchanged |
-| `1` | builds both bundles; a missing entry or empty output exits 1 (fail-closed) |
-| anything else | rejected right after argument parsing, exit 64 |
-
-It is an environment variable rather than a flag because the strategy
-supervisor (`bootstrap-strategy.shs`) rebuilds the Stage 4 continuation argv
-and would drop an unknown flag; the environment reaches that child unchanged.
-Test: `scripts/bootstrap/tests/stage4c-dynsmf-optin-test.shs`.
-
 ## Gap this closes: the existing sspec gate never runs the binary
 
 `check-post-bootstrap-stage4-sspec.shs` is a good paper gate — it re-runs

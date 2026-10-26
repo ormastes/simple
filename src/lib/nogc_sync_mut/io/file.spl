@@ -1,9 +1,3 @@
-use std.nogc_sync_mut.sffi.fs.{io_file_open, io_file_write, io_file_write_all}
-use std.nogc_sync_mut.io.file_bytes.{file_read_borrowed_bytes}
-use std.nogc_sync_mut.io.text_session.{TextSessionCodec}
-use std.nogc_sync_mut.io.file_text_session.{FileTextSession, file_default_text_codec, file_session_read_fd, file_session_encode, file_session_read_line_fd}
-use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message}
-
 """
 # Sync File I/O
 
@@ -66,6 +60,7 @@ expect copied == "copy me"
 
 use std.io.traits.{Read, Write, Seek, Close}
 use std.io.types.{IoError, IoErrorKind, SeekFrom, FileMode, FileMetadata}
+use std.common.string_core.{char_from_code}
 
 # ============================================================================
 # FileHandle - Trait-Based File Handle
@@ -89,7 +84,7 @@ class FileHandle with Read, Write, Seek, Close:
 
     # --- Factory ---
 
-    pub static fn open(path: text, mode: FileMode) -> Result<FileHandle, IoError>:
+    static fn open(path: text, mode: FileMode) -> Result<FileHandle, IoError>:
         """Open file with specified mode.
 
         Args:
@@ -104,12 +99,14 @@ class FileHandle with Read, Write, Seek, Close:
             case FileMode.WriteOnly: 1
             case FileMode.ReadWrite: 2
             case FileMode.Append: 3
-        val fd = io_file_open(path, mode_int)
+        var fd: i64 = -1
+        unsafe(capabilities: [ffi]):
+            fd = rt_io_file_open(path, mode_int)
         if fd < 0:
             return Err(IoError(kind: IoErrorKind.NotFound, message: "failed to open: {path}", source: nil))
         Ok(FileHandle(fd: fd, mode: mode, open: true))
 
-    pub static fn read_file(path: text) -> Result<FileHandle, IoError>:
+    static fn read_file(path: text) -> Result<FileHandle, IoError>:
         """Open file for reading.
 
         Args:
@@ -120,7 +117,7 @@ class FileHandle with Read, Write, Seek, Close:
         """
         FileHandle.open(path, FileMode.ReadOnly)
 
-    pub static fn create(path: text) -> Result<FileHandle, IoError>:
+    static fn create(path: text) -> Result<FileHandle, IoError>:
         """Create file for writing (truncates if exists).
 
         Args:
@@ -131,7 +128,7 @@ class FileHandle with Read, Write, Seek, Close:
         """
         FileHandle.open(path, FileMode.WriteOnly)
 
-    pub static fn append(path: text) -> Result<FileHandle, IoError>:
+    static fn append(path: text) -> Result<FileHandle, IoError>:
         """Open file for appending.
 
         Args:
@@ -144,7 +141,7 @@ class FileHandle with Read, Write, Seek, Close:
 
     # --- Read trait ---
 
-    pub fn read(size: i64) -> Result<[u8], IoError>:
+    fn read(size: i64) -> Result<[u8], IoError>:
         """Read up to size bytes.
 
         Args:
@@ -155,9 +152,16 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        file_read_borrowed_bytes(self.fd, size)
+        if size < 0:
+            return Err(IoError(kind: IoErrorKind.Other, message: "read size must be non-negative", source: nil))
+        var data: [u8] = []
+        unsafe(capabilities: [ffi]):
+            data = rt_io_file_read(self.fd, size)
+        if data.len() < 0:
+            return Err(IoError(kind: IoErrorKind.Other, message: "read failed", source: nil))
+        Ok(data)
 
-    pub fn read_exact(size: i64) -> Result<[u8], IoError>:
+    fn read_exact(size: i64) -> Result<[u8], IoError>:
         """Read exactly size bytes (blocks until filled or EOF).
 
         Args:
@@ -170,14 +174,14 @@ class FileHandle with Read, Write, Seek, Close:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
         if size < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "read_exact size must be non-negative", source: nil))
-        # One read, as before: short data advances the descriptor and reports
-        # UnexpectedEof; a provider failure remains its own I/O error.
-        val data = self.read(size)?
+        var data: [u8] = []
+        unsafe(capabilities: [ffi]):
+            data = rt_io_file_read(self.fd, size)
         if data.len() != size:
             return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "read_exact: got {data.len()} of {size} bytes", source: nil))
         Ok(data)
 
-    pub fn read_all() -> Result<[u8], IoError>:
+    fn read_all() -> Result<[u8], IoError>:
         """Read all remaining bytes.
 
         Returns:
@@ -185,40 +189,39 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        var data: [u8]? = nil
+        var data: [u8] = []
         unsafe(capabilities: [ffi]):
             data = rt_io_file_read_all(self.fd)
-        if data == nil:
-            return Err(IoError(kind: IoErrorKind.Other, message: "read_all failed", source: nil))
-        Ok(data ?? [])
+        Ok(data)
 
-    pub me read_text() -> Result<text, IoError>:
+    fn read_text() -> Result<text, IoError>:
+        """Read all remaining content as text.
+
+        Returns:
+            Result with text content
+        """
+        val bytes = self.read_all()?
+        val s = _bytes_to_text(bytes)
+        Ok(s)
+
+    fn read_line() -> Result<text, IoError>:
+        """Read a single line (up to newline).
+
+        Returns:
+            Result with line including newline
+        """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val codec = match file_default_text_codec():
-            case Ok(value): value
-            case Err(error): return Err(file_text_io_error(error))
-        match file_session_read_fd(self.fd, codec):
-            case Ok(value): Ok(value)
-            case Err(error):
-                # A bounded read may have consumed a prefix and its overflow
-                # probe. Keep this owning facade terminal, just like the
-                # dedicated text session; raw borrowed reads stay borrowed.
-                self.close()
-                Err(file_text_io_error(error))
-
-    pub me read_line() -> Result<text, IoError>:
-        if not self.open:
-            return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        match file_session_read_line_fd(self.fd):
-            case Ok(value): Ok(value)
-            case Err(error):
-                self.close()
-                Err(file_text_io_error(error))
+        var line: text? = nil
+        unsafe(capabilities: [ffi]):
+            line = rt_io_file_read_line(self.fd)
+        if line == nil:
+            return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "end of file", source: nil))
+        Ok(line)
 
     # --- Write trait ---
 
-    pub fn write(data: [u8]) -> Result<i64, IoError>:
+    fn write(data: [u8]) -> Result<i64, IoError>:
         """Write bytes, returning number written.
 
         Args:
@@ -229,12 +232,14 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val written = io_file_write(self.fd, data)
+        var written: i64 = -1
+        unsafe(capabilities: [ffi]):
+            written = rt_io_file_write(self.fd, data)
         if written < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "write failed", source: nil))
         Ok(written)
 
-    pub fn write_all(data: [u8]) -> Result<(), IoError>:
+    fn write_all(data: [u8]) -> Result<(), IoError>:
         """Write all bytes (blocks until done).
 
         Args:
@@ -245,25 +250,24 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val ok = io_file_write_all(self.fd, data)
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_io_file_write_all(self.fd, data)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "write_all failed", source: nil))
         Ok(())
 
-    pub me write_text(s: text) -> Result<(), IoError>:
-        if not self.open:
-            return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val codec = match file_default_text_codec():
-            case Ok(value): value
-            case Err(error): return Err(file_text_io_error(error))
-        val bytes = match file_session_encode(s, codec, 0):
-            case Ok(value): value
-            case Err(error): return Err(file_text_io_error(error))
-        match self.write_all(bytes):
-            case Ok(_): Ok(())
-            case Err(error):
-                self.close()
-                Err(error)
+    fn write_text(s: text) -> Result<(), IoError>:
+        """Write text string.
+
+        Args:
+            s: Text to write
+
+        Returns:
+            Result or error
+        """
+        val bytes = _sync_io_file_text_to_bytes(s)
+        self.write_all(bytes)
 
     fn flush() -> Result<(), IoError>:
         """Flush write buffer to disk.
@@ -323,7 +327,7 @@ class FileHandle with Read, Write, Seek, Close:
 
     # --- Close trait ---
 
-    pub me close() -> Result<(), IoError>:
+    me close() -> Result<(), IoError>:
         """Close file handle and release fd.
 
         Returns:
@@ -331,17 +335,15 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Ok(())
-        val descriptor = self.fd
-        self.open = false
-        self.fd = -1
         var ok = false
         unsafe(capabilities: [ffi]):
-            ok = rt_io_file_close(descriptor)
+            ok = rt_io_file_close(self.fd)
+        self.open = false
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "close failed", source: nil))
         Ok(())
 
-    pub fn is_open() -> bool:
+    fn is_open() -> bool:
         """Check if file handle is still open."""
         self.open
 
@@ -433,7 +435,7 @@ class File:
         File.write("output.txt", content)?
     """
 
-    pub static fn read(path: text) -> Result<text, IoError>:
+    static fn read(path: text) -> Result<text, IoError>:
         """Read entire file as text.
 
         Args:
@@ -442,25 +444,12 @@ class File:
         Returns:
             Result with text content
         """
-        val codec = match file_default_text_codec():
-            case Ok(value): value
-            case Err(error): return Err(file_text_io_error(error))
-        var session = match FileTextSession.open(path, FileMode.ReadOnly, codec):
-            case Ok(value): value
-            case Err(error): return Err(file_text_io_error(error))
-        val result = session.read()
-        val closed = session.close()
-        match result:
-            case Err(error): Err(file_text_io_error(error))
-            case Ok(value):
-                match closed:
-                    case Err(error): Err(file_text_io_error(error))
-                    case Ok(_): Ok(value)
+        val fh = FileHandle.read_file(path)?
+        val content = fh.read_text()?
+        fh.close()?
+        Ok(content)
 
-    pub static fn open_text(path: text, mode: FileMode, codec: TextSessionCodec) -> Result<FileTextSession, TextIoError>:
-        FileTextSession.open(path, mode, codec)
-
-    pub static fn read_bytes(path: text) -> Result<[u8], IoError>:
+    static fn read_bytes(path: text) -> Result<[u8], IoError>:
         """Read entire file as bytes.
 
         Args:
@@ -469,17 +458,12 @@ class File:
         Returns:
             Result with byte array
         """
-        var fh = FileHandle.read_file(path)?
-        val result = fh.read_all()
-        val closed = fh.close()
-        match result:
-            case Err(error): Err(error)
-            case Ok(data):
-                match closed:
-                    case Err(error): Err(error)
-                    case Ok(_): Ok(data)
+        val fh = FileHandle.read_file(path)?
+        val data = fh.read_all()?
+        fh.close()?
+        Ok(data)
 
-    pub static fn write(path: text, content: text) -> Result<(), IoError>:
+    static fn write(path: text, content: text) -> Result<(), IoError>:
         """Write text to file (creates/truncates).
 
         Args:
@@ -489,9 +473,12 @@ class File:
         Returns:
             Result or error
         """
-        file_write_default_session(path, content, FileMode.WriteOnly)
+        val fh = FileHandle.create(path)?
+        fh.write_text(content)?
+        fh.close()?
+        Ok(())
 
-    pub static fn write_bytes(path: text, data: [u8]) -> Result<(), IoError>:
+    static fn write_bytes(path: text, data: [u8]) -> Result<(), IoError>:
         """Write bytes to file (creates/truncates).
 
         Args:
@@ -501,14 +488,12 @@ class File:
         Returns:
             Result or error
         """
-        var fh = FileHandle.create(path)?
-        val written = fh.write_all(data)
-        val closed = fh.close()
-        match written:
-            case Err(error): Err(error)
-            case Ok(_): closed
+        val fh = FileHandle.create(path)?
+        fh.write_all(data)?
+        fh.close()?
+        Ok(())
 
-    pub static fn append(path: text, content: text) -> Result<(), IoError>:
+    static fn append(path: text, content: text) -> Result<(), IoError>:
         """Append text to file.
 
         Args:
@@ -518,7 +503,10 @@ class File:
         Returns:
             Result or error
         """
-        file_write_default_session(path, content, FileMode.Append)
+        val fh = FileHandle.append(path)?
+        fh.write_text(content)?
+        fh.close()?
+        Ok(())
 
     static fn copy(src: text, dst: text) -> Result<(), IoError>:
         """Copy file from src to dst.
@@ -533,7 +521,7 @@ class File:
         val data = File.read_bytes(src)?
         File.write_bytes(dst, data)
 
-    pub static fn exists(path: text) -> bool:
+    static fn exists(path: text) -> bool:
         """Check if file exists.
 
         Args:
@@ -567,7 +555,17 @@ class File:
 
 # File handle operations
 @unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
-extern fn rt_io_file_read_all(fd: i64) -> [u8]?
+extern fn rt_io_file_open(path: text, mode: i64) -> i64
+@unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
+extern fn rt_io_file_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
+extern fn rt_io_file_read_all(fd: i64) -> [u8]
+@unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
+extern fn rt_io_file_read_line(fd: i64) -> text?
+@unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
+extern fn rt_io_file_write(fd: i64, data: [u8]) -> i64
+@unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
+extern fn rt_io_file_write_all(fd: i64, data: [u8]) -> bool
 @unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
 extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
 @unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
@@ -589,21 +587,33 @@ extern fn rt_io_file_exists(path: text) -> bool
 @unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
 extern fn rt_io_file_delete(path: text) -> bool
 
-fn file_write_default_session(path: text, content: text, mode: FileMode) -> Result<(), IoError>:
-    val codec = match file_default_text_codec():
-        case Ok(value): value
-        case Err(error): return Err(file_text_io_error(error))
-    match FileTextSession.write_file(path, content, mode, codec):
-        case Ok(_): Ok(())
-        case Err(error): Err(file_text_io_error(error))
+# Pure text conversion
+fn _sync_io_file_text_to_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.byte_at(i))
+        i = i + 1
+    out
 
-fn file_text_io_error(error: TextIoError) -> IoError:
-    match error:
-        case TextIoError.Transport(transport): transport
-        case _: IoError(kind: IoErrorKind.InvalidData, message: io_text_error_message(error), source: nil)
+fn _bytes_to_text(bytes: [u8]) -> text:
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        val b = bytes[i] as i64
+        if b == 10:
+            result = result + "\n"
+        elif b == 13:
+            result = result + "\r"
+        elif b == 9:
+            result = result + "\t"
+        else:
+            result = result + char_from_code(b)
+        i = i + 1
+    result
 
 # ============================================================================
 # Exports
 # ============================================================================
 
-export FileHandle, File, FileTextSession, file_read_borrowed_bytes
+export FileHandle, File

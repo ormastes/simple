@@ -254,32 +254,8 @@ int64_t rt_term_write(int64_t text_value) {
     if (len <= 0) return 0;
     const uint8_t* data = rt_string_data(text_value);
     if (!data) return 0;
-#ifdef _WIN32
-    if ((uint64_t)len > (uint64_t)SIZE_MAX) return 0;
-    /* Keep redirected stdout byte-exact without changing global CRT mode.
-     * This locks only the existing C FILE owner, not Rust std::io buffers. */
-    int64_t written = 0;
-    _lock_file(stdout);
-    int fd = _fileno(stdout);
-    if (fd >= 0 && _fflush_nolock(stdout) == 0) {
-        intptr_t raw_handle = _get_osfhandle(fd); /* borrowed: never close */
-        if (raw_handle != -1 && raw_handle != -2) {
-            while (written < len) {
-                uint64_t remaining = (uint64_t)(len - written);
-                DWORD chunk = remaining > UINT32_MAX ? UINT32_MAX : (DWORD)remaining;
-                DWORD count = 0;
-                BOOL ok = WriteFile((HANDLE)raw_handle, data + written, chunk, &count, NULL);
-                if (!ok || count == 0 || count > chunk) break;
-                written += (int64_t)count;
-            }
-        }
-    }
-    _unlock_file(stdout);
-    return written;
-#else
     size_t written = fwrite(data, 1, (size_t)len, stdout);
     return (int64_t)written;
-#endif
 }
 
 /* Flush the terminal (stdout); 0 on success, -1 on error. */

@@ -9,7 +9,7 @@ use app.test_daemon.session_types.{
     SESSION_KIND_QEMU_VM, SESSION_KIND_CONTAINER, SESSION_KIND_SERVICE,
     SESSION_KIND_OPENOCD, SESSION_KIND_TRACE32, SESSION_KIND_SIMULATOR,
     REUSE_FRESH_PER_TEST,
-    session_key_matches, session_lease_pending, session_lease_from_descriptor,
+    session_key_to_id, session_key_matches, session_lease_new,
     session_descriptor_new, session_kind_name, meta_to_session_key
 }
 use app.test_daemon.session_adapter.{SessionAdapter, AdapterRegistry, adapter_registry_new}
@@ -55,55 +55,51 @@ impl SessionBroker:
     me acquire(meta: TestSessionMeta) -> SessionLease:
         """
         Acquires a session for the given test metadata.
-        1. Refuse acquisition when the kind is disabled
-        2. Unless fresh_per_test, look for an idle lease with matching key
+        1. If fresh_per_test → always create new
+        2. Look for existing idle lease with matching key
         3. If found → mark active, return
         4. If under limit → start new via adapter
         5. If at limit → evict oldest idle, then start new
         """
         val key = meta_to_session_key(meta)
-        val kind_name = session_kind_name(key.kind)
-        val max = self.max_sessions[kind_name] ?? 4
-        if max <= 0:
-            return session_lease_pending(key)
+
+        # Fresh-per-test always gets a new session
+        if meta.reuse_mode == REUSE_FRESH_PER_TEST:
+            return self.start_new_session(meta, key)
 
         # Look for existing idle session with matching key
-        if meta.reuse_mode != REUSE_FRESH_PER_TEST:
-            var i = 0
-            while i < self.leases.len():
-                val lease = self.leases[i]
-                if (session_key_matches(lease.key, key) and
-                        lease.status == LEASE_IDLE):
-                    # Reuse this session
-                    val now = rt_time_now_unix_micros()
-                    self.leases[i] = SessionLease(
-                        session_id: lease.session_id,
-                        key: lease.key,
-                        pid: lease.pid,
-                        qmp_socket: lease.qmp_socket,
-                        status: LEASE_ACTIVE,
-                        snapshot_name: lease.snapshot_name,
-                        created_at: lease.created_at,
-                        last_used_at: now,
-                        test_count: lease.test_count + 1
-                    )
-                    return self.leases[i]
-                i = i + 1
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            if (session_key_matches(lease.key, key) and
+                    lease.status == LEASE_IDLE):
+                # Reuse this session
+                val now = rt_time_now_unix_micros()
+                self.leases[i] = SessionLease(
+                    session_id: lease.session_id,
+                    key: lease.key,
+                    pid: lease.pid,
+                    qmp_socket: lease.qmp_socket,
+                    status: LEASE_ACTIVE,
+                    snapshot_name: lease.snapshot_name,
+                    created_at: lease.created_at,
+                    last_used_at: now,
+                    test_count: lease.test_count + 1
+                )
+                return self.leases[i]
+            i = i + 1
 
         # No matching idle session — check concurrency limit
+        val kind_name = session_kind_name(key.kind)
+        val max = self.max_sessions[kind_name] ?? 4
         val current = self.count_by_kind(key.kind)
-
-        # A reduced limit may leave existing leases above capacity. Do not
-        # evict one and then admit another while the pool is still over limit.
-        if current > max:
-            return session_lease_pending(key)
 
         if current >= max:
             # Try to evict oldest idle of same kind
             val evicted = self.evict_oldest_idle(key.kind)
             if not evicted:
                 # No idle session to evict — return a pending lease
-                return session_lease_pending(key)
+                return session_lease_new(key)
 
         self.start_new_session(meta, key)
 
@@ -308,12 +304,10 @@ impl SessionBroker:
     # --- Private helpers ---
 
     me start_new_session(meta: TestSessionMeta, key: SessionKey) -> SessionLease:
-        val desc = session_descriptor_new(key)
         val adapter = self.registry.find_by_kind(key.kind)
         if adapter.?:
+            val desc = session_descriptor_new(key)
             val lease = adapter.start(desc)
-            if lease.session_id == "":
-                return lease
             val counted = SessionLease(
                 session_id: lease.session_id,
                 key: lease.key,
@@ -328,7 +322,7 @@ impl SessionBroker:
             self.leases.push(counted)
             return counted
         # No adapter — return a default lease
-        val lease = session_lease_from_descriptor(desc)
+        val lease = session_lease_new(key)
         val counted = SessionLease(
             session_id: lease.session_id,
             key: lease.key,

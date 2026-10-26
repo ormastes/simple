@@ -118,33 +118,8 @@ fn labeled_tuple_numeric_access_dispatches_to_tuple_get() {
 }
 
 #[test]
-fn i64_word_lane_off_emits_no_word_lane_symbols() {
-    // Freestanding/WASM runtimes do not define rt_typed_words_i64_*.
-    let mut parser = simple_parser::Parser::new("fn test():\n    var arr = [10, 20]\n    arr[0] = 5\n    val x = arr[1]\n");
-    let ast = parser.parse().expect("parse failed");
-    let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
-    let off = crate::mir::lower_to_mir_with_word_lane(&hir_module, false).unwrap();
-    let on = crate::mir::lower_to_mir_with_word_lane(&hir_module, true).unwrap();
-    let word_lane = |i: &MirInst| {
-        matches!(i, MirInst::Call { target, .. }
-            if target == &CallTarget::from_name("rt_typed_words_i64_at") || target == &CallTarget::from_name("rt_typed_words_i64_set"))
-    };
-    assert!(has_inst(&on, word_lane), "default lowering uses the lane");
-    assert!(!has_inst(&off, word_lane), "word lane disabled must not reference it");
-}
-
-#[test]
 fn array_index_dispatch() {
-    // `[i64]` reads go through the layout-aware signed accessor; any other
-    // element type keeps rt_array_get.
     let mir = compile_to_mir("fn test():\n    val arr = [10, 20]\n    val x = arr[0]\n").unwrap();
-    assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_words_i64_at"))
-    }));
-    assert!(!has_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_index_get"))
-    }));
-    let mir = compile_to_mir("fn test():\n    val arr: [f64] = [10.0, 20.0]\n    val x = arr[0]\n").unwrap();
     assert!(has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_get"))
     }));
@@ -302,81 +277,8 @@ fn u64_capacity_array_call_lowers_to_packed_constructor() {
 
 #[test]
 fn index_int_unboxing() {
-    // `[i64]` reads need no unbox (the signed lane returns the raw word); a
-    // narrower integer element still decodes the tagged slot.
-    let mir = compile_to_mir("fn test() -> i32:\n    val arr: [i32] = [10, 20, 42]\n    return arr[2]\n").unwrap();
+    let mir = compile_to_mir("fn test() -> i64:\n    val arr = [10, 20, 42]\n    return arr[2]\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::UnboxInt { .. })));
-}
-
-/// `fn f(v: any) -> bool: v` must decode the tagged value: a boxed FALSE is a
-/// non-zero word and read as true under the JIT when returned raw
-/// (llm_caret claude_cli `_json_bool` printed `ERROR: <reply>`).
-#[test]
-fn any_to_bool_return_and_local_unboxing() {
-    let is_truthy_call =
-        |i: &MirInst| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_truthy"));
-    let ret = compile_to_mir("fn test(v: any) -> bool:\n    v\n").unwrap();
-    assert!(has_inst(&ret, is_truthy_call));
-    let local = compile_to_mir("fn test(v: any) -> bool:\n    val b: bool = v\n    b\n").unwrap();
-    assert!(has_inst(&local, is_truthy_call));
-    // The exact `_json_bool` shape: tagged else-branch into a bool if-merge slot.
-    let merged = compile_to_mir("fn test(v: any?) -> bool:\n    if v == nil: false else: v\n").unwrap();
-    assert!(has_inst(&merged, is_truthy_call));
-}
-
-/// Branch / `and` / `or` / `not` / `while` on an `ANY` value must decode it:
-/// a tagged FALSE or NIL is a non-zero word, so `if pair.second:` on a
-/// generic `Pair<_, bool>` was always taken under the JIT (h1_client's
-/// `read.second or closed.is_err()` failed every https fetch).
-#[test]
-fn any_condition_decodes_truthiness() {
-    let is_truthy_call =
-        |i: &MirInst| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_truthy"));
-    for src in [
-        "fn test(v: any) -> i64:\n    if v:\n        return 1\n    0\n",
-        "fn test(v: any) -> i64:\n    var n = 0\n    while v and n < 3:\n        n = n + 1\n    n\n",
-        "fn test(v: any) -> i64:\n    if false or v:\n        return 1\n    0\n",
-        "fn test(v: any) -> i64:\n    if not v:\n        return 1\n    0\n",
-        "fn test(v: any) -> i64:\n    if v: 1 else: 0\n",
-    ] {
-        let mir = compile_to_mir(src).unwrap();
-        assert!(has_inst(&mir, is_truthy_call), "missing rt_value_truthy for:\n{src}");
-    }
-    // A typed bool condition stays a raw word test.
-    let typed = compile_to_mir("fn test(v: bool) -> i64:\n    if v and not v:\n        return 1\n    0\n").unwrap();
-    assert!(!has_inst(&typed, is_truthy_call));
-}
-
-/// Pushing an `ANY` element into a `[u8]` must decode it before the typed
-/// byte push (JIT inflate: `out.push(block_out[k])` stored the tag word's byte).
-#[test]
-fn any_push_into_u8_array_is_decoded() {
-    let mir = compile_to_mir(
-        "fn test(xs: [Any]) -> [u8]:\n    var out: [u8] = []\n    out.push(xs[0])\n    out\n",
-    )
-    .unwrap();
-    assert!(has_inst(&mir, |i| matches!(i, MirInst::UnboxInt { .. })));
-    assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_bytes_u8_push"))
-    }));
-}
-
-/// `text * int` and `int * text` are repetition, not a native multiply on the
-/// string pointer (JIT `"x" * 4000` had len -1).
-#[test]
-fn text_times_int_lowers_to_string_repeat() {
-    let is_repeat =
-        |i: &MirInst| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_string_repeat"));
-    for src in [
-        "fn test(n: i64) -> text:\n    \"x\" * n\n",
-        "fn test(n: i64) -> text:\n    n * \"ab\"\n",
-        "fn test(n: i32) -> text:\n    \"-\" * n\n",
-    ] {
-        let mir = compile_to_mir(src).unwrap();
-        assert!(has_inst(&mir, is_repeat), "missing rt_string_repeat for:\n{src}");
-    }
-    let num = compile_to_mir("fn test(a: i64, b: i64) -> i64:\n    a * b\n").unwrap();
-    assert!(!has_inst(&num, is_repeat));
 }
 
 #[test]

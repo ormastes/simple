@@ -3,16 +3,10 @@
 //! This module provides utilities for extracting location information from
 //! AST nodes and converting it to coverage data format.
 
-use simple_parser::ast::{BinOp, ClassDef, Expr, FunctionDef, Node};
+use simple_parser::ast::{Node, Expr};
 use simple_parser::token::Span;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-
-use super::{evaluate_expr, Enums, ImplMethods};
-use crate::error::CompileError;
-use crate::value::{Env, Value};
 
 /// Extract source location from a Node's span
 ///
@@ -117,20 +111,16 @@ fn span_to_location(span: &Span) -> (String, usize, usize) {
 /// at `"<entry>"`.
 pub fn current_coverage_file() -> String {
     let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
-    coverage_file_for_owner(owner.as_deref())
-}
-
-/// Coverage file for a module owner key. Shared by the runtime probes (via
-/// `current_coverage_file`) and the static site enumeration
-/// (`coverage_sites.rs`) so both produce byte-identical file strings — a
-/// differing string would put a phantom zero-count row beside the visited one.
-pub(crate) fn coverage_file_for_owner(owner: Option<&str>) -> String {
-    match owner {
-        Some(o) if o != "<entry>" => o.to_string(),
-        _ => crate::interpreter::get_current_file()
-            .map(|p| crate::interpreter::normalize_path_key(&p).to_string_lossy().to_string())
-            .unwrap_or_else(|| "<entry>".to_string()),
+    let needs_entry_fallback = match &owner {
+        None => true,
+        Some(o) => o.as_ref() == "<entry>",
+    };
+    if !needs_entry_fallback {
+        return owner.unwrap().to_string();
     }
+    crate::interpreter::get_current_file()
+        .map(|p| crate::interpreter::normalize_path_key(&p).to_string_lossy().to_string())
+        .unwrap_or_else(|| "<entry>".to_string())
 }
 
 /// Generate a deterministic decision ID from location info
@@ -143,6 +133,15 @@ pub fn generate_decision_id(file: &str, line: usize, column: usize) -> u32 {
     line.hash(&mut hasher);
     column.hash(&mut hasher);
     (hasher.finish() as u32) ^ 0xDEADBEEF // XOR with magic to avoid 0
+}
+
+/// Generate a deterministic decision ID from a Span
+pub fn decision_id_from_span(span: &Span) -> u32 {
+    let mut hasher = DefaultHasher::new();
+    span.line.hash(&mut hasher);
+    span.column.hash(&mut hasher);
+    span.start.hash(&mut hasher);
+    (hasher.finish() as u32) ^ 0xDEADBEEF
 }
 
 /// Check if coverage is enabled without allocating
@@ -174,232 +173,81 @@ pub fn record_node_coverage(node: &Node) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Decision / condition sites
-//
-// A decision site is identified by (file, anchor line, anchor column, sub):
-//   * `if` / `while`            -> its own statement span, SUB_STMT
-//   * `elif` #i                 -> the parent `if` span, sub_elif(i)
-//   * match-arm guard           -> the arm span, SUB_GUARD
-//   * if-expression             -> the enclosing function's span (FN_ANCHOR),
-//                                  sub = hash of the condition
-//   * standalone `and`/`or`     -> the enclosing function's span,
-//                                  sub = hash of the whole expression
-// `Expr` carries no span, which is why the last two anchor on the function.
-// A condition is an atomic operand of an `and`/`or` tree, numbered in
-// pre-order; `not` is transparent (a leaf `not x` has the same covered
-// status as `x`). The static enumeration in `coverage_sites.rs` produces the
-// same keys, so a site that never runs is still in the denominator.
-// ---------------------------------------------------------------------------
-
-pub(crate) const SUB_STMT: u64 = 0;
-pub(crate) const SUB_GUARD: u64 = 0x4755_4152_4400_0000;
-pub(crate) const TAG_IF_EXPR: &str = "if-expr";
-pub(crate) const TAG_AND_OR: &str = "and-or";
-
 #[inline]
-pub(crate) fn sub_elif(idx: usize) -> u64 {
-    1 + idx as u64
-}
-
-thread_local! {
-    /// Span (line, column) of the function body currently executing; the
-    /// anchor of expression-level decision sites. Maintained by
-    /// `execute_function_body` only while coverage is enabled.
-    static FN_ANCHOR: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
-}
-
-/// Set the expression-site anchor, returning the previous one for restore.
-pub(crate) fn swap_fn_anchor(anchor: (u32, u32)) -> (u32, u32) {
-    FN_ANCHOR.with(|cell| cell.replace(anchor))
-}
-
-fn fn_anchor() -> (u32, u32) {
-    FN_ANCHOR.with(|cell| cell.get())
-}
-
-pub(crate) fn site_decision_id(file: &str, line: u32, column: u32, sub: u64) -> u32 {
-    if sub == SUB_STMT {
-        return generate_decision_id(file, line as usize, column as usize);
-    }
-    let mut hasher = DefaultHasher::new();
-    file.hash(&mut hasher);
-    line.hash(&mut hasher);
-    column.hash(&mut hasher);
-    sub.hash(&mut hasher);
-    (hasher.finish() as u32) ^ 0xDEADBEEF
-}
-
-/// Discriminator for an expression-level site (top bit set so it can never
-/// equal SUB_STMT, an elif index, or SUB_GUARD).
-pub(crate) fn expr_site_sub(tag: &str, expr: &Expr) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    tag.hash(&mut hasher);
-    format!("{:?}", expr).hash(&mut hasher);
-    hasher.finish() | (1u64 << 63)
-}
-
-#[inline]
-pub(crate) fn is_and_or(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Binary {
-            op: BinOp::And | BinOp::Or,
-            ..
-        }
-    )
-}
-
-/// Atomic operands of an `and`/`or` tree (1 for anything else).
-pub(crate) fn count_tree_leaves(expr: &Expr) -> u32 {
-    match expr {
-        Expr::Binary {
-            op: BinOp::And | BinOp::Or,
-            left,
-            right,
-        } => count_tree_leaves(left) + count_tree_leaves(right),
-        _ => 1,
-    }
-}
-
-/// Number of condition sites a decision with this condition owns.
-pub(crate) fn decision_condition_count(cond: &Expr) -> u32 {
-    if is_and_or(cond) {
-        count_tree_leaves(cond)
-    } else {
-        0
-    }
-}
-
-/// Record a decision outcome at a site. No-op (one load) with coverage off.
-pub(crate) fn record_decision_site(line: usize, column: usize, sub: u64, result: bool) {
+/// Decision probe for the CURRENT function's file. Checks `is_coverage_enabled()`
+/// BEFORE resolving the file: `current_coverage_file()` borrows the
+/// `CURRENT_EXEC_MODULE` thread-local and allocates a `String` for the path,
+/// and every `if`/`elif`/`while`/`match` decision used to pay that on the
+/// default (coverage-off) path before `record_decision_coverage_sffi` could
+/// early-return. Same probe, same id, same file when coverage IS on.
+/// doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md (7th session).
+pub fn record_decision_coverage_here(line: usize, column: usize, decision_result: bool) {
     if !is_coverage_enabled() {
         return;
     }
-    let file = current_coverage_file();
-    let (line, column) = (line as u32, column as u32);
-    let id = site_decision_id(&file, line, column, sub);
-    simple_runtime::coverage::coverage_record_decision(id, result, &file, line, column);
+    record_decision_coverage_sffi(&current_coverage_file(), line, column, decision_result);
 }
 
-/// Evaluate a decision's condition. With coverage off, or when the condition
-/// is not an `and`/`or` tree, this is exactly `evaluate_expr`. Otherwise the
-/// tree is evaluated here with the same short-circuit semantics as
-/// `eval_op_expr`'s `BinOp::And`/`BinOp::Or` (left/right presence via
-/// `is_condition_present`, result `Value::Bool`), recording each evaluated
-/// leaf as a condition of this decision. The caller still records the
-/// decision outcome.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn eval_decision_cond(
-    cond: &Expr,
+/// Record decision coverage for a statement via SFFI
+///
+/// Typically called from if/while/match statements with the outcome
+/// This uses the runtime SFFI to record decision coverage when running compiled code
+#[inline(always)]
+pub fn record_decision_coverage_sffi(file: &str, line: usize, column: usize, decision_result: bool) {
+    if !is_coverage_enabled() {
+        return;
+    }
+
+    let decision_id = generate_decision_id(file, line, column);
+    let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
+
+    unsafe {
+        simple_runtime::rt_coverage_decision_probe(
+            decision_id,
+            decision_result,
+            file_cstr.as_ptr(),
+            line as u32,
+            column as u32,
+        );
+    }
+}
+
+/// Record condition coverage for && and || operators
+///
+/// For compound boolean expressions, we track each individual operand.
+/// Uses a modified decision ID to distinguish from decision-level coverage.
+///
+/// Example: `if (x > 0) && (y < 10):`
+/// - Records overall decision: the if condition (decision coverage)
+/// - Records left condition: x > 0 (condition coverage)
+/// - Records right condition: y < 10 (condition coverage)
+pub fn record_condition_coverage(
+    file: &str,
     line: usize,
     column: usize,
-    sub: u64,
-    env: &mut Env,
-    functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, Arc<ClassDef>>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<Value, CompileError> {
-    if !is_coverage_enabled() || !is_and_or(cond) {
-        return evaluate_expr(cond, env, functions, classes, enums, impl_methods);
+    condition_index: u32, // 0 for left operand, 1 for right operand
+    condition_result: bool,
+) {
+    if !is_coverage_enabled() {
+        return;
     }
-    let file = current_coverage_file();
-    let (line, column) = (line as u32, column as u32);
-    let id = site_decision_id(&file, line, column, sub);
-    let mut probe = CondProbe {
-        decision_id: id,
-        file: &file,
-        line,
-        column,
-        next_leaf: 0,
-    };
-    let result = probe.eval(cond, env, functions, classes, enums, impl_methods)?;
-    Ok(Value::Bool(result))
-}
 
-/// Coverage-on evaluation of a standalone `and`/`or` expression (one not in
-/// a decision's condition position): it is its own decision, anchored on the
-/// enclosing function. Called from `eval_op_expr` only when coverage is on.
-pub(crate) fn eval_and_or_decision(
-    expr: &Expr,
-    env: &mut Env,
-    functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, Arc<ClassDef>>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<Value, CompileError> {
-    let (line, column) = fn_anchor();
-    let sub = expr_site_sub(TAG_AND_OR, expr);
-    let value = eval_decision_cond(
-        expr,
-        line as usize,
-        column as usize,
-        sub,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?;
-    record_decision_site(line as usize, column as usize, sub, value.truthy());
-    Ok(value)
-}
+    // Generate a unique ID by combining decision ID with condition index
+    let base_id = generate_decision_id(file, line, column);
+    let condition_id = base_id.wrapping_mul(31).wrapping_add(condition_index);
 
-/// Site (line, column, sub) of an if-expression with this condition.
-pub(crate) fn if_expr_site(condition: &Expr) -> (usize, usize, u64) {
-    let (line, column) = fn_anchor();
-    (line as usize, column as usize, expr_site_sub(TAG_IF_EXPR, condition))
-}
+    let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
 
-struct CondProbe<'a> {
-    decision_id: u32,
-    file: &'a str,
-    line: u32,
-    column: u32,
-    next_leaf: u32,
-}
-
-impl CondProbe<'_> {
-    fn eval(
-        &mut self,
-        expr: &Expr,
-        env: &mut Env,
-        functions: &mut HashMap<String, Arc<FunctionDef>>,
-        classes: &mut HashMap<String, Arc<ClassDef>>,
-        enums: &Enums,
-        impl_methods: &ImplMethods,
-    ) -> Result<bool, CompileError> {
-        match expr {
-            Expr::Binary {
-                op: op @ (BinOp::And | BinOp::Or),
-                left,
-                right,
-            } => {
-                let l = self.eval(left, env, functions, classes, enums, impl_methods)?;
-                let short_circuit = if matches!(op, BinOp::And) { !l } else { l };
-                if short_circuit {
-                    // Right operand not evaluated: its leaves keep their numbers.
-                    self.next_leaf += count_tree_leaves(right);
-                    return Ok(l);
-                }
-                self.eval(right, env, functions, classes, enums, impl_methods)
-            }
-            _ => {
-                let value = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
-                let result = super::interpreter_control::is_condition_present(expr, &value);
-                simple_runtime::coverage::coverage_record_condition(
-                    self.decision_id,
-                    self.next_leaf,
-                    result,
-                    self.file,
-                    self.line,
-                    self.column,
-                );
-                self.next_leaf += 1;
-                Ok(result)
-            }
-        }
+    unsafe {
+        // Use decision probe with modified ID to track condition coverage
+        // In the future, we could use rt_coverage_condition_probe when available
+        simple_runtime::rt_coverage_decision_probe(
+            condition_id,
+            condition_result,
+            file_cstr.as_ptr(),
+            line as u32,
+            column.wrapping_add(condition_index as usize) as u32,
+        );
     }
 }
 

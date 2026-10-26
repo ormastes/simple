@@ -5,7 +5,6 @@
 use compiler.blocks.builtin_blocks_math.{MathBlockDef, LossBlockDef, NogradBlockDef}
 use compiler.blocks.builtin_blocks_shell.{ShellBlockDef, MarkdownBlockDef}
 use compiler.blocks.builtin_blocks_data.{SqlBlockDef, RegexBlockDef, JsonBlockDef}
-use compiler.blocks.definition.{BlockDefinition}
 
 # ============================================================================
 # Block Registry
@@ -18,7 +17,7 @@ struct BlockRegistry:
     Use `BlockRegistry.default()` to get a registry with built-in blocks.
 
     Example:
-    ```text
+    ```simple
     val registry = BlockRegistry.default()
 
     # Check if a keyword is a block
@@ -27,7 +26,7 @@ struct BlockRegistry:
             val mode = blk_lexer_mode(blk)
     ```
     """
-    blocks: Dict<text, BlockDefinition>
+    blocks: Dict<text, Any>
 
 
 # ============================================================================
@@ -52,20 +51,20 @@ impl BlockRegistry:
 
         # Register built-in blocks (imported at module level)
         # Math/ML blocks
-        reg.register(MathBlockDef.new())
-        reg.register(LossBlockDef.new())
-        reg.register(NogradBlockDef.new())
+        reg_register(reg, MathBlockDef.new())
+        reg_register(reg, LossBlockDef.new())
+        reg_register(reg, NogradBlockDef.new())
 
         # DSL blocks
-        reg.register(ShellBlockDef.new())
-        reg.register(SqlBlockDef.new())
-        reg.register(RegexBlockDef.new())
-        reg.register(JsonBlockDef.new())
-        reg.register(MarkdownBlockDef.new())
+        reg_register(reg, ShellBlockDef.new())
+        reg_register(reg, SqlBlockDef.new())
+        reg_register(reg, RegexBlockDef.new())
+        reg_register(reg, JsonBlockDef.new())
+        reg_register(reg, MarkdownBlockDef.new())
 
         reg
 
-    me register(self, block_def: BlockDefinition):
+    me register(self, block_def: Any):
         val kind = block_def.kind()
         self.blocks[kind] = block_def
 
@@ -75,7 +74,7 @@ impl BlockRegistry:
             # natively (rt_dict_remove); assigning it back destroys the map on the
             # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
             # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
-            var _kept_self_blocks: Dict<text, BlockDefinition> = {}
+            var _kept_self_blocks: Dict<text, Any> = {}
             for _k in self.blocks.keys():
                 if _k != kind:
                     _kept_self_blocks[_k] = self.blocks[_k]
@@ -89,7 +88,7 @@ impl BlockRegistry:
                 return true
         false
 
-    fn lookup(self, kind: text) -> BlockDefinition?:
+    fn lookup(self, kind: text) -> Any?:
         if self.is_block_keyword(kind):
             return self.blocks[kind]
         nil
@@ -135,13 +134,13 @@ fn block_registry() -> BlockRegistry:
             _global_registry = Some(default_registry)
             default_registry
 
-fn reg_register(reg: BlockRegistry, block_def: BlockDefinition):
+fn reg_register(reg: BlockRegistry, block_def: Any):
     reg.register(block_def)
 
 fn reg_unregister(reg: BlockRegistry, kind: text) -> bool:
     reg.unregister(kind)
 
-fn register_block(block_def: BlockDefinition) -> bool:
+fn register_block(block_def: Any) -> bool:
     """Register a block in the global registry.
 
     Returns true if the block was registered, false if the keyword is
@@ -172,7 +171,7 @@ fn unregister_block(kind: text) -> bool:
     # natively (rt_dict_remove); assigning it back destroys the map on the
     # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
     # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
-    var _kept_reg_blocks: Dict<text, BlockDefinition> = {}
+    var _kept_reg_blocks: Dict<text, Any> = {}
     for _k in reg.blocks.keys():
         if _k != kind:
             _kept_reg_blocks[_k] = reg.blocks[_k]
@@ -184,7 +183,7 @@ fn is_block(kind: text) -> bool:
     """Check if a keyword is a registered block."""
     block_registry().is_block_keyword(kind)
 
-fn get_block(kind: text) -> BlockDefinition?:
+fn get_block(kind: text):
     """Get a block definition from the global registry.
 
     Args:
@@ -194,7 +193,7 @@ fn get_block(kind: text) -> BlockDefinition?:
         BlockDefinition if found, nil otherwise
 
     Example:
-    ```text
+    ```simple
     if val blk = get_block("sql"):
         val mode = blk_lexer_mode(blk)
     ```
@@ -226,7 +225,7 @@ fn is_block_registered(kind: text) -> bool:
     """
     is_block(kind)
 
-fn with_block<T>(block_def: BlockDefinition, body: fn() -> T) -> T:
+fn with_block(block_def: Any, body: fn() -> Any) -> Any:
     """Execute body with a temporarily registered block.
 
     The block is automatically unregistered after body completes.
@@ -239,7 +238,7 @@ fn with_block<T>(block_def: BlockDefinition, body: fn() -> T) -> T:
         Result of body()
 
     Example:
-    ```text
+    ```simple
     # Register block for test scope only
     val result = with_block(my_test_block, \:
         val value = myblock{ test content }
@@ -270,7 +269,7 @@ struct RegistryBuilder:
     """Builder for creating a custom BlockRegistry.
 
     Example:
-    ```text
+    ```simple
     val registry = RegistryBuilder.new().with_builtin()
         .register(MyBlockDef()).without("nograd")
         .build()
@@ -302,7 +301,7 @@ fn registrybuilder_with_builtin(self: RegistryBuilder) -> RegistryBuilder:
         next
 
 
-fn registrybuilder_register(self: RegistryBuilder, block_def: BlockDefinition) -> RegistryBuilder:
+fn registrybuilder_register(self: RegistryBuilder, block_def: Any) -> RegistryBuilder:
         """Register a block definition."""
         var next = self
         reg_register(next.registry, block_def)
@@ -316,43 +315,6 @@ fn registrybuilder_without(self: RegistryBuilder, kind: text) -> RegistryBuilder
         next
 
 
-fn register_builtin_blocks(registry: BlockRegistry) -> BlockRegistry:
-    """Register all built-in block definitions. Owned here (not in
-    builtin_blocks_helpers) so the helpers module stays a leaf: importing
-    registry from helpers completed an import cycle
-    (registry -> builtin_blocks_shell -> helpers -> registry) that the seed
-    loader rejects."""
-    registry
-
-var _blocks_initialized: bool = false
-
-fn init_blocks():
-    """Initialize the block system with all builtin blocks.
-
-    This should be called once at compiler startup. It registers
-    all builtin blocks (m, loss, nograd, sh, sql, re, json, md)
-    with the global BlockRegistry.
-
-    Safe to call multiple times - only initializes once.
-    """
-    if _blocks_initialized:
-        return
-
-    register_builtin_blocks(block_registry())
-    _blocks_initialized = true
-
-fn reset_blocks():
-    """Reset the block system to initial state.
-
-    Clears all registered blocks and re-initializes with builtins.
-    Useful for testing.
-    """
-    # Value snapshots held by previous callers remain unchanged.
-    _global_registry = Some(BlockRegistry.default())
-    _blocks_initialized = true
-
 # ============================================================================
 # Exports
 # ============================================================================
-
-export init_blocks, reset_blocks

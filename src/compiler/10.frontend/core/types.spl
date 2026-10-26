@@ -101,18 +101,6 @@ var span_pool_line: [i64] = []
 var span_pool_col: [i64] = []
 
 fn flat_span_new(start: i64, end_pos: i64, line: i64, col: i64) -> i64:
-    # Pool index 0 is reserved as the "no span" sentinel (line 0 / col 0).
-    # AST nodes are allocated with span id 0 when the parser carries no
-    # location for them; without the reservation that id resolved to the
-    # first REAL span registered for the file, so every unlocated node was
-    # reported at an unrelated module-level declaration (an `extern fn` or a
-    # `val` const) instead of as a missing span. Lazy so it also covers the
-    # first file parsed before any reset_all_pools().
-    if span_pool_start.len() == 0:
-        span_pool_start.push(0)
-        span_pool_end.push(0)
-        span_pool_line.push(0)
-        span_pool_col.push(0)
     val idx = span_pool_start.len()
     span_pool_start.push(start)
     span_pool_end.push(end_pos)
@@ -133,10 +121,7 @@ fn span_col(span_id: i64) -> i64:
     span_pool_col[span_id]
 
 fn span_is_valid(span_id: i64) -> bool:
-    # Index 0 is the reserved "no span" sentinel (see flat_span_new), so it
-    # is never a valid location: accepting it made parser_postfix_span_from
-    # build line-0 spans for receivers whose base carried no location.
-    span_id > 0 and span_id < span_pool_start.len()
+    span_id >= 0 and span_id < span_pool_start.len()
 
 fn span_dummy() -> i64:
     flat_span_new(0, 0, 0, 0)
@@ -357,15 +342,7 @@ val TYPE_POINTER_LIMIT: i64 = 9000
 val TYPE_ATOMIC_BASE: i64 = 9000
 val TYPE_ATOMIC_LIMIT: i64 = 9500
 val TYPE_WEAK_BASE: i64 = 9500
-val TYPE_WEAK_LIMIT: i64 = 9750
-# `fn(T, ...) -> R` annotations. The parser used to consume the shape and
-# answer the bare TYPE_FN tag, so HIR saw `Named("fn")` -> `Any` for every
-# callable parameter: a generic visitor's `f: fn(Node, C) -> C` could then
-# never bind `C` at a nested call and monomorphization refused the whole
-# body (E-MONO-032 x81 on hir_visitor.spl, phase 3, 2026-10-09). The range
-# is carved out of the weak-reference block (250 entries each).
-val TYPE_FUNCTION_BASE: i64 = 9750
-val TYPE_FUNCTION_LIMIT: i64 = 10000
+val TYPE_WEAK_LIMIT: i64 = 10000
 val TYPE_NAMED_BASE: i64 = 10000
 
 # Helper predicates for encoded type tags
@@ -453,12 +430,6 @@ fn is_weak_tag(tag: i64) -> bool:
 fn weak_tag_to_id(tag: i64) -> i64:
     tag - TYPE_WEAK_BASE
 
-fn is_function_tag(tag: i64) -> bool:
-    tag >= TYPE_FUNCTION_BASE and tag < TYPE_FUNCTION_LIMIT
-
-fn function_tag_to_id(tag: i64) -> i64:
-    tag - TYPE_FUNCTION_BASE
-
 # Stage-3 imported-module-`val` misread (blocker #7, cd81ef3d85df): a caller in
 # ANOTHER module that writes `tag == TYPE_ANY` reads TYPE_ANY as an IMPORTED
 # module-level `val`, and under the stage-3/4 self-hosted build that read comes
@@ -507,7 +478,7 @@ fn fixed_type_tag_name(tag: i64) -> text:
         return "dict"
     if tag == TYPE_STRUCT:
         return "struct"
-    if tag == TYPE_FN or is_function_tag(tag):
+    if tag == TYPE_FN:
         return "fn"
     if tag == TYPE_ANY:
         return "any"
@@ -605,7 +576,7 @@ fn type_tag_name(tag: i64) -> text:
         return "dict"
     if tag == TYPE_STRUCT:
         return "struct"
-    if tag == TYPE_FN or is_function_tag(tag):
+    if tag == TYPE_FN:
         return "fn"
     if tag == TYPE_ANY:
         return "any"
@@ -659,8 +630,6 @@ fn type_tag_name(tag: i64) -> text:
     if is_result_tag(tag):
         val rid = result_tag_to_id(tag)
         return "Result<" + type_tag_name(result_type_get_ok(rid)) + "," + type_tag_name(result_type_get_err(rid)) + ">"
-    if is_function_tag(tag):
-        return "fn"
     "unknown"
 
 fn type_tag_to_c(tag: i64) -> text:
@@ -700,7 +669,7 @@ fn type_tag_to_c(tag: i64) -> text:
         return "SplDict*"
     if tag == TYPE_STRUCT:
         return "void*"
-    if tag == TYPE_FN or is_function_tag(tag):
+    if tag == TYPE_FN:
         return "void*"
     if tag == TYPE_ANY:
         return "SplValue"
@@ -755,8 +724,6 @@ fn type_tag_to_c(tag: i64) -> text:
 # Maps struct/enum names to their field information.
 
 var named_type_names: [text] = []
-var named_type_arguments: [[i64]] = []
-var named_type_layout_owners: [i64] = []
 var named_type_field_names: [[text]] = []
 var named_type_field_types: [[i64]] = []
 
@@ -775,39 +742,13 @@ fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i
         return existing
     val idx = named_type_names.len()
     named_type_names.push(name)
-    named_type_arguments.push([])
-    named_type_layout_owners.push(idx)
     named_type_field_names.push(field_names)
     named_type_field_types.push(field_types)
     idx
 
 fn named_type_update(type_id: i64, field_names: [text], field_types: [i64]):
-    # Canonical owner indirection keeps layout updates and reads O(1).
-    val owner = named_type_layout_owners[type_id]
-    named_type_field_names[owner] = field_names
-    named_type_field_types[owner] = field_types
-
-fn named_type_apply(name: text, arguments: [i64]) -> i64:
-    val owner = named_type_register(name, [], [])
-    for i in 0..named_type_names.len():
-        if named_type_names[i] == name and named_type_arguments[i].len() == arguments.len():
-            var equal = true
-            for j in 0..arguments.len():
-                if named_type_arguments[i][j] != arguments[j]: equal = false
-            if equal: return TYPE_NAMED_BASE + i
-    val index = named_type_names.len()
-    named_type_names.push(name)
-    named_type_arguments.push(arguments)
-    named_type_layout_owners.push(owner)
-    named_type_field_names.push([])
-    named_type_field_types.push([])
-    TYPE_NAMED_BASE + index
-
-fn named_type_arguments_for_tag(tag: i64) -> [i64]:
-    val index = tag - TYPE_NAMED_BASE
-    if index >= 0 and index < named_type_arguments.len():
-        return named_type_arguments[index]
-    []
+    named_type_field_names[type_id] = field_names
+    named_type_field_types[type_id] = field_types
 
 fn named_type_find(name: text) -> i64:
     var i = 0
@@ -821,10 +762,10 @@ fn named_type_name(type_id: i64) -> text:
     named_type_names[type_id]
 
 fn named_type_fields(type_id: i64) -> [text]:
-    named_type_field_names[named_type_layout_owners[type_id]]
+    named_type_field_names[type_id]
 
 fn named_type_field_type_tags(type_id: i64) -> [i64]:
-    named_type_field_types[named_type_layout_owners[type_id]]
+    named_type_field_types[type_id]
 
 fn primitive_bit_width_from_name(type_name: text) -> i64:
     if type_name == "bool":
@@ -1339,61 +1280,6 @@ fn array_generic_type_get_elem(arr_id: i64) -> i64:
         return array_generic_elem_tags[arr_id]
     TYPE_ANY
 
-# ===== Imported Generic Instance Registry =====
-# `b: Box<i64>` where `Box` is IMPORTED is absent from this file's named-type
-# registry, so the generic branch collapsed it to TYPE_ANY: the value carried
-# no class identity and no type arguments, MIR could not resolve `b.get()`,
-# and 40.mono had nothing to specialize. Each distinct instance gets its own
-# named-type entry (keyed by base name + argument tags, so it never aliases
-# the base's own entry) and the base name and argument tags are recorded here
-# for the AST bridge, which rebuilds `Named(base, args)`.
-
-var named_generic_instance_ids: [i64] = []
-var named_generic_instance_bases: [text] = []
-var named_generic_instance_args: [[i64]] = []
-
-fn named_generic_instance_key(base: text, args: [i64]) -> text:
-    var key = base + "<"
-    var ai = 0
-    while ai < args.len():
-        if ai > 0:
-            key = key + ","
-        key = key + "{args[ai]}"
-        ai = ai + 1
-    key = key + ">"
-    key
-
-fn named_generic_instance_register(base: text, args: [i64]) -> i64:
-    val key = named_generic_instance_key(base, args)
-    val gid = named_type_register(key, [], [])
-    var existing = 0
-    while existing < named_generic_instance_ids.len():
-        if named_generic_instance_ids[existing] == gid:
-            return TYPE_NAMED_BASE + gid
-        existing = existing + 1
-    named_generic_instance_ids.push(gid)
-    named_generic_instance_bases.push(base)
-    named_generic_instance_args.push(args)
-    TYPE_NAMED_BASE + gid
-
-fn named_generic_instance_index(tag: i64) -> i64:
-    """Registry index of an imported generic instance tag, else -1."""
-    if tag < TYPE_NAMED_BASE:
-        return -1
-    val gid = tag - TYPE_NAMED_BASE
-    var i = 0
-    while i < named_generic_instance_ids.len():
-        if named_generic_instance_ids[i] == gid:
-            return i
-        i = i + 1
-    -1
-
-fn named_generic_instance_base(index: i64) -> text:
-    named_generic_instance_bases[index]
-
-fn named_generic_instance_arg_tags(index: i64) -> [i64]:
-    named_generic_instance_args[index]
-
 # ===== Isolated Capability Type Registry =====
 # Tracks `iso T` inner types (LANE ISO2, doc/08_tracking/bug/
 # iso_mut_capability_prefix_not_parsed_2026-07-29.md) -- see
@@ -1473,16 +1359,8 @@ fn reference_type_is_mutable(reference_id: i64) -> bool:
 var pointer_inner_tags: [i64] = []
 var pointer_mutable_flags: [i64] = []
 
-# Pointer registry flag: which `*` spelling was written.
-val POINTER_FLAG_SHARED: i64 = 0      # `*T`       shared (Rc) owner
-val POINTER_FLAG_RAW_MUT: i64 = 1     # `*mut T`   raw, mutable
-val POINTER_FLAG_RAW_CONST: i64 = 2   # `*const T` raw, immutable
-
 fn pointer_type_register(inner_tag: i64, mutable: bool) -> i64:
-    val flag: i64 = if mutable: POINTER_FLAG_RAW_MUT else: POINTER_FLAG_SHARED
-    pointer_type_register_flag(inner_tag, flag)
-
-fn pointer_type_register_flag(inner_tag: i64, mutable_flag: i64) -> i64:
+    val mutable_flag: i64 = if mutable: 1 else: 0
     var existing = 0
     while existing < pointer_inner_tags.len():
         if pointer_inner_tags[existing] == inner_tag and pointer_mutable_flags[existing] == mutable_flag:
@@ -1502,12 +1380,7 @@ fn pointer_type_get_inner(pointer_id: i64) -> i64:
 
 fn pointer_type_is_mutable(pointer_id: i64) -> bool:
     if pointer_id >= 0 and pointer_id < pointer_mutable_flags.len():
-        return pointer_mutable_flags[pointer_id] == POINTER_FLAG_RAW_MUT
-    false
-
-fn pointer_type_is_shared(pointer_id: i64) -> bool:
-    if pointer_id >= 0 and pointer_id < pointer_mutable_flags.len():
-        return pointer_mutable_flags[pointer_id] == POINTER_FLAG_SHARED
+        return pointer_mutable_flags[pointer_id] != 0
     false
 
 # ===== Atomic RC Type Registry =====
@@ -1556,93 +1429,6 @@ fn weak_type_get_inner(weak_id: i64) -> i64:
         return weak_inner_tags[weak_id]
     TYPE_ANY
 
-
-var function_param_tags: [[i64]] = []
-var function_ret_tags: [i64] = []
-
-fn function_type_register(param_tags: [i64], ret_tag: i64) -> i64:
-    """Intern one `fn(params...) -> ret` shape; -1 when the block is full."""
-    var existing = 0
-    while existing < function_ret_tags.len():
-        if function_ret_tags[existing] == ret_tag and function_param_tags_equal(function_param_tags[existing], param_tags):
-            return TYPE_FUNCTION_BASE + existing
-        existing = existing + 1
-    val idx = function_ret_tags.len()
-    if idx >= TYPE_FUNCTION_LIMIT - TYPE_FUNCTION_BASE:
-        return -1
-    function_param_tags.push(param_tags)
-    function_ret_tags.push(ret_tag)
-    TYPE_FUNCTION_BASE + idx
-
-fn function_param_tags_equal(a: [i64], b: [i64]) -> bool:
-    if a.len() != b.len():
-        return false
-    var i = 0
-    while i < a.len():
-        if a[i] != b[i]:
-            return false
-        i = i + 1
-    true
-
-fn function_type_known(function_id: i64) -> bool:
-    """A function tag whose registry entry is missing (a parse cache written
-    before the pool was serialized, or a torn restore) must never be read
-    as an empty `fn() -> Any`: callers check this and fail closed."""
-    function_id >= 0 and function_id < function_ret_tags.len() and function_id < function_param_tags.len()
-
-fn function_type_get_params(function_id: i64) -> [i64]:
-    if function_type_known(function_id):
-        return function_param_tags[function_id]
-    panic("function type id " + int_to_str(function_id) + " has no registry entry (" + int_to_str(function_ret_tags.len()) + " registered); the flat type pools are torn or stale")
-
-fn function_type_get_ret(function_id: i64) -> i64:
-    if function_type_known(function_id):
-        return function_ret_tags[function_id]
-    panic("function type id " + int_to_str(function_id) + " has no registry entry (" + int_to_str(function_ret_tags.len()) + " registered); the flat type pools are torn or stale")
-
-extern fn rt_transient_heap_promote<T>(value: T) -> bool
-extern fn rt_array_free<T>(array: [T])
-
-# A one-element temporary array is the root, so an owner that is not itself a
-# promotable heap root is skipped as an element instead of failing promotion.
-fn _type_pool_promote_root_text(root: [[text]]) -> bool:
-    val promoted = rt_transient_heap_promote(root)
-    rt_array_free(root)
-    promoted
-
-fn _type_pool_promote_root_i64(root: [[i64]]) -> bool:
-    val promoted = rt_transient_heap_promote(root)
-    rt_array_free(root)
-    promoted
-
-fn _type_pool_promote_root_arr_i64(root: [[[i64]]]) -> bool:
-    val promoted = rt_transient_heap_promote(root)
-    rt_array_free(root)
-    promoted
-
-# @workaround bug=phase3_global_pool_generic_inference_workaround_2026_10_10 reason=explicit declared pool T until global mono inference is repaired.
-pub fn type_pools_promote_hir_owners() -> bool:
-    # The parser resets these module globals inside a per-file transient
-    # scope, but HIR still reads them after that scope ends. Promote only the
-    # semantic registries HIR queries: custom primitives, Dict specializations,
-    # and the nested type-tag names reached from primitive backing types.
-    var promoted = true
-    promoted = _type_pool_promote_root_text([custom_primitive_names]) and promoted
-    promoted = _type_pool_promote_root_i64([custom_primitive_underlying_type_tags]) and promoted
-    promoted = _type_pool_promote_root_i64([custom_primitive_symbol_ids]) and promoted
-    promoted = _type_pool_promote_root_i64([dict_type_keys]) and promoted
-    promoted = _type_pool_promote_root_i64([dict_type_values]) and promoted
-    promoted = _type_pool_promote_root_text([named_type_names]) and promoted
-    promoted = _type_pool_promote_root_i64([named_generic_instance_ids]) and promoted
-    promoted = _type_pool_promote_root_text([named_generic_instance_bases]) and promoted
-    promoted = _type_pool_promote_root_arr_i64([named_generic_instance_args]) and promoted
-    promoted = _type_pool_promote_root_arr_i64([named_type_arguments]) and promoted
-    promoted = _type_pool_promote_root_i64([named_type_layout_owners]) and promoted
-    promoted = _type_pool_promote_root_arr_i64([union_type_members]) and promoted
-    promoted = _type_pool_promote_root_i64([result_type_ok]) and promoted
-    promoted = _type_pool_promote_root_i64([result_type_err]) and promoted
-    promoted
-
 # ===== Pool Reset =====
 # Call before parsing a new file to reset all pools.
 
@@ -1666,15 +1452,8 @@ fn reset_all_pools():
     scope_starts = []
     current_scope_depth = 0
     named_type_names = []
-    named_type_arguments = []
-    named_type_layout_owners = []
     named_type_field_names = []
     named_type_field_types = []
-    # All three newunit pools are per-file scratch. Leaving their old owners
-    # here reads reclaimed text on the next file's flat-pool cache dump.
-    newunit_names = []
-    newunit_suffixes = []
-    newunit_underlying_type_tags = []
     custom_primitive_names = []
     custom_primitive_underlying_type_tags = []
     custom_primitive_symbol_ids = []
@@ -1698,9 +1477,6 @@ fn reset_all_pools():
     array_generic_elem_tags = []
     option_generic_inner_tags = []
     isolated_inner_tags = []
-    named_generic_instance_ids = []
-    named_generic_instance_bases = []
-    named_generic_instance_args = []
     exclusive_inner_tags = []
     reference_inner_tags = []
     reference_mutable_flags = []
@@ -1708,8 +1484,6 @@ fn reset_all_pools():
     pointer_mutable_flags = []
     atomic_inner_tags = []
     weak_inner_tags = []
-    function_param_tags = []
-    function_ret_tags = []
 
 export TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT
 export TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32
@@ -1726,8 +1500,6 @@ export TYPE_RESULT_BASE, is_result_tag, result_tag_to_id
 export result_type_register, result_type_get_ok, result_type_get_err
 export TYPE_ARRAY_GENERIC_BASE, is_array_generic_tag, array_generic_tag_to_id
 export array_generic_type_register, array_generic_type_get_elem
-export named_generic_instance_register, named_generic_instance_index
-export named_generic_instance_base, named_generic_instance_arg_tags
 export TYPE_OPTION_GENERIC_BASE, is_option_generic_tag, option_generic_tag_to_id
 export option_generic_type_register, option_generic_type_get_inner
 export TYPE_ISOLATED_BASE, is_isolated_tag, isolated_tag_to_id
@@ -1738,13 +1510,10 @@ export TYPE_REFERENCE_BASE, is_reference_tag, reference_tag_to_id
 export reference_type_register, reference_type_get_inner, reference_type_is_mutable
 export TYPE_POINTER_BASE, is_pointer_tag, pointer_tag_to_id
 export pointer_type_register, pointer_type_get_inner, pointer_type_is_mutable
-export pointer_type_register_flag, pointer_type_is_shared, POINTER_FLAG_SHARED, POINTER_FLAG_RAW_MUT, POINTER_FLAG_RAW_CONST
 export TYPE_ATOMIC_BASE, is_atomic_tag, atomic_tag_to_id
 export atomic_type_register, atomic_type_get_inner
 export TYPE_WEAK_BASE, is_weak_tag, weak_tag_to_id
 export weak_type_register, weak_type_get_inner
-export TYPE_FUNCTION_BASE, TYPE_FUNCTION_LIMIT, is_function_tag, function_tag_to_id
-export function_type_register, function_type_known, function_type_get_params, function_type_get_ret
 # Needed by the structural occurs_check in type_inference.spl (2026-08-17).
 export TYPE_TUPLE_BASE, is_tuple_type_tag, tuple_type_tag_to_id
 export tuple_type_register, tuple_type_get_elems
@@ -1755,7 +1524,7 @@ export scope_push, scope_pop, scope_depth
 
 # --- flat-AST pool codec: flat_type ------------------------------
 #
-# Dump/restore for this file's 52 pools, in a FIXED SORTED ORDER that
+# Dump/restore for this file's 49 pools, in a FIXED SORTED ORDER that
 # dump and restore share. Order is the whole contract: the blob carries no
 # pool names, so a reordering on one side silently pairs each pool with its
 # neighbour's data. Sorting by name keeps the two sides in step.
@@ -1784,21 +1553,14 @@ pub fn flat_type_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_text_list(fn_sig_param_names))
     parts = parts.push(flat_pool_enc_i64_list(fn_sig_param_types))
     parts = parts.push(flat_pool_enc_i64(fn_sig_ret_types))
-    parts = parts.push(flat_pool_enc_i64_list(function_param_tags))
-    parts = parts.push(flat_pool_enc_i64(function_ret_tags))
     parts = parts.push(flat_pool_enc_text(generic_param_contexts))
     parts = parts.push(flat_pool_enc_i64(generic_param_ids))
     parts = parts.push(flat_pool_enc_text(generic_param_names))
     parts = parts.push(flat_pool_enc_i64_list(intersection_type_members))
     parts = parts.push(flat_pool_enc_i64(isolated_inner_tags))
-    parts = parts.push(flat_pool_enc_i64_list(named_generic_instance_args))
-    parts = parts.push(flat_pool_enc_text(named_generic_instance_bases))
-    parts = parts.push(flat_pool_enc_i64(named_generic_instance_ids))
     parts = parts.push(flat_pool_enc_text_list(named_type_field_names))
     parts = parts.push(flat_pool_enc_i64_list(named_type_field_types))
     parts = parts.push(flat_pool_enc_text(named_type_names))
-    parts = parts.push(flat_pool_enc_i64_list(named_type_arguments))
-    parts = parts.push(flat_pool_enc_i64(named_type_layout_owners))
     parts = parts.push(flat_pool_enc_text(newunit_names))
     parts = parts.push(flat_pool_enc_text(newunit_suffixes))
     parts = parts.push(flat_pool_enc_i64(newunit_underlying_type_tags))
@@ -1830,102 +1592,6 @@ pub fn flat_type_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_scalar_i64(current_scope_depth))
     parts.join("")
 
-fn named_type_argument_graph_valid(
-    root: i64, owner_tag: i64, imported_index_by_type: [i64]
-) -> bool:
-    # Applications may reference earlier named entries through any wrapper
-    # registry. Checking only the immediate tag misses Option<Self> cycles.
-    # This iterative validation bounds both work and scratch storage at 4096
-    # edges per argument and type depth 128, including wrapper-only cycles.
-    var pending: [i64] = [root]
-    var depths: [i64] = [1]
-    var position = 0
-    while position < pending.len():
-        val tag = pending[position]
-        val depth = depths[position]
-        position = position + 1
-        if tag < 0 or depth > 128: return false
-        var children: [i64] = []
-        if tag >= TYPE_NAMED_BASE:
-            if tag >= owner_tag: return false
-            val type_index = tag - TYPE_NAMED_BASE
-            if type_index >= imported_index_by_type.len(): return false
-            if imported_index_by_type[type_index] >= 0:
-                val instance_index = imported_index_by_type[type_index]
-                children = named_generic_instance_args[instance_index]
-            else:
-                if type_index >= named_type_arguments.len(): return false
-                children = named_type_arguments[type_index]
-        elif is_function_tag(tag):
-            val function_id = function_tag_to_id(tag)
-            if not function_type_known(function_id): return false
-            # Build a fresh child list rather than appending to the registry's
-            # parameter array returned by function_type_get_params.
-            for parameter_tag in function_type_get_params(function_id):
-                children.push(parameter_tag)
-            children.push(function_type_get_ret(function_id))
-        elif is_option_generic_tag(tag):
-            val index = option_generic_tag_to_id(tag)
-            if index >= option_generic_inner_tags.len(): return false
-            children = [option_generic_inner_tags[index]]
-        elif is_array_generic_tag(tag):
-            val index = array_generic_tag_to_id(tag)
-            if index >= array_generic_elem_tags.len(): return false
-            children = [array_generic_elem_tags[index]]
-        elif is_dict_tag(tag):
-            val index = dict_tag_to_id(tag)
-            if index >= dict_type_keys.len() or index >= dict_type_values.len(): return false
-            children = [dict_type_keys[index], dict_type_values[index]]
-        elif is_result_tag(tag):
-            val index = result_tag_to_id(tag)
-            if index >= result_type_ok.len() or index >= result_type_err.len(): return false
-            children = [result_type_ok[index], result_type_err[index]]
-        elif is_tuple_type_tag(tag):
-            val index = tuple_type_tag_to_id(tag)
-            if index >= tuple_type_elem_tags.len(): return false
-            children = tuple_type_elem_tags[index]
-        elif is_union_tag(tag):
-            val index = union_tag_to_id(tag)
-            if index >= union_type_members.len(): return false
-            children = union_type_members[index]
-        elif is_intersection_tag(tag):
-            val index = intersection_tag_to_id(tag)
-            if index >= intersection_type_members.len(): return false
-            children = intersection_type_members[index]
-        elif is_refinement_tag(tag):
-            val index = refinement_tag_to_id(tag)
-            if index >= refinement_base_types.len(): return false
-            children = [refinement_base_types[index]]
-        elif is_isolated_tag(tag):
-            val index = isolated_tag_to_id(tag)
-            if index >= isolated_inner_tags.len(): return false
-            children = [isolated_inner_tags[index]]
-        elif is_exclusive_tag(tag):
-            val index = exclusive_tag_to_id(tag)
-            if index >= exclusive_inner_tags.len(): return false
-            children = [exclusive_inner_tags[index]]
-        elif is_reference_tag(tag):
-            val index = reference_tag_to_id(tag)
-            if index >= reference_inner_tags.len(): return false
-            children = [reference_inner_tags[index]]
-        elif is_pointer_tag(tag):
-            val index = pointer_tag_to_id(tag)
-            if index >= pointer_inner_tags.len(): return false
-            children = [pointer_inner_tags[index]]
-        elif is_atomic_tag(tag):
-            val index = atomic_tag_to_id(tag)
-            if index >= atomic_inner_tags.len(): return false
-            children = [atomic_inner_tags[index]]
-        elif is_weak_tag(tag):
-            val index = weak_tag_to_id(tag)
-            if index >= weak_inner_tags.len(): return false
-            children = [weak_inner_tags[index]]
-        if pending.len() + children.len() > 4096: return false
-        for child in children:
-            pending.push(child)
-            depths.push(depth + 1)
-    true
-
 # Returns false when the blob ran short or was malformed; the caller must
 # treat that as a cache MISS and reparse, never as an empty parse.
 pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
@@ -1942,21 +1608,14 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     fn_sig_param_names = flat_pool_dec_text_list(r)
     fn_sig_param_types = flat_pool_dec_i64_list(r)
     fn_sig_ret_types = flat_pool_dec_i64(r)
-    function_param_tags = flat_pool_dec_i64_list(r)
-    function_ret_tags = flat_pool_dec_i64(r)
     generic_param_contexts = flat_pool_dec_text(r)
     generic_param_ids = flat_pool_dec_i64(r)
     generic_param_names = flat_pool_dec_text(r)
     intersection_type_members = flat_pool_dec_i64_list(r)
     isolated_inner_tags = flat_pool_dec_i64(r)
-    named_generic_instance_args = flat_pool_dec_i64_list(r)
-    named_generic_instance_bases = flat_pool_dec_text(r)
-    named_generic_instance_ids = flat_pool_dec_i64(r)
     named_type_field_names = flat_pool_dec_text_list(r)
     named_type_field_types = flat_pool_dec_i64_list(r)
     named_type_names = flat_pool_dec_text(r)
-    named_type_arguments = flat_pool_dec_i64_list(r)
-    named_type_layout_owners = flat_pool_dec_i64(r)
     newunit_names = flat_pool_dec_text(r)
     newunit_suffixes = flat_pool_dec_text(r)
     newunit_underlying_type_tags = flat_pool_dec_i64(r)
@@ -1986,49 +1645,6 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     union_type_members = flat_pool_dec_i64_list(r)
     weak_inner_tags = flat_pool_dec_i64(r)
     current_scope_depth = r.next_i64()
-    # The interned fn-type pools are parallel arrays; a length mismatch is a
-    # torn blob and must be refused, not half-restored.
-    if function_param_tags.len() != function_ret_tags.len():
-        return false
-    if not r.ok or named_type_arguments.len() != named_type_names.len() or
-            named_type_layout_owners.len() != named_type_names.len():
-        return false
-    if named_generic_instance_ids.len() != named_generic_instance_bases.len() or
-            named_generic_instance_ids.len() != named_generic_instance_args.len():
-        return false
-    var imported_index_by_type: [i64] = []
-    for _ in 0..named_type_names.len():
-        imported_index_by_type.push(-1)
-    var seen_instance_keys: Dict<text, bool> = {}
-    for i in 0..named_generic_instance_ids.len():
-        val type_index = named_generic_instance_ids[i]
-        if type_index < 0 or type_index >= named_type_names.len(): return false
-        if imported_index_by_type[type_index] >= 0: return false
-        val base = named_generic_instance_bases[i]
-        if base == "": return false
-        val key = named_generic_instance_key(base, named_generic_instance_args[i])
-        if named_type_names[type_index] != key: return false
-        if named_type_layout_owners[type_index] != type_index: return false
-        if seen_instance_keys.has(key): return false
-        seen_instance_keys[key] = true
-        imported_index_by_type[type_index] = i
-    # Parsed type applications reference previously allocated owners/arguments.
-    # Reject corrupt forward/self references before recursive AST conversion.
-    for i in 0..named_type_arguments.len():
-        val owner = named_type_layout_owners[i]
-        if owner < 0 or owner > i or named_type_layout_owners[owner] != owner or
-                named_type_names[owner] != named_type_names[i]:
-            return false
-        for argument in named_type_arguments[i]:
-            if not named_type_argument_graph_valid(
-                    argument, TYPE_NAMED_BASE + i, imported_index_by_type):
-                return false
-    for i in 0..named_generic_instance_ids.len():
-        val owner_tag = TYPE_NAMED_BASE + named_generic_instance_ids[i]
-        for argument in named_generic_instance_args[i]:
-            if not named_type_argument_graph_valid(argument, owner_tag, imported_index_by_type):
-                return false
-    true
+    r.ok
 
 export flat_type_pools_dump, flat_type_pools_restore
-export named_type_apply, named_type_arguments_for_tag

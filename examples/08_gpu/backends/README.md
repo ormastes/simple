@@ -46,13 +46,13 @@ needs no device, so it is doctested here:
 >>> use std.nogc_sync_mut.notebook.gpu_config.{parse_gpu_config}
 >>> val cfg = parse_gpu_config("project:\n  name: x\ngpu:\n  backend: vulkan\n  submode: jit\n")
 >>> cfg.backend
-vulkan
+"vulkan"
 >>> cfg.submode
-jit
+"jit"
 >>> cfg.arch
-auto
+"auto"
 >>> parse_gpu_config("project:\n  name: x\n").backend
-auto
+"auto"
 ```
 
 ## Measured 2026-08-25 (host: 2x NVIDIA, Vulkan 1.4, Linux, seed binary)

@@ -42,22 +42,6 @@ Covers supported platforms, cross-compilation, platform abstraction library, and
 
 **Requirements:** FreeBSD 13+, 64-bit kernel and userspace.
 
-### Linux riscv64 (QEMU lane)
-
-No released binary yet. Bootstrap runs natively inside a riscv64 Linux guest:
-
-```bash
-sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --smoke       # PASS: arch=riscv64 nproc=20
-sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --provision   # rustup nightly in guest
-sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --sync origin/release/1.0
-sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stage2      # cranelift; no LLVM 23 on riscv64
-```
-
-Host packages: `qemu-system-riscv opensbi u-boot-qemu qemu-utils cloud-image-utils`.
-Knobs: `QEMU_CPUS` (20), `QEMU_MEM` (32G), `QEMU_DISK` (160G), `QEMU_PORT` (2223),
-`RISCV_LINUX_VM_DIR`, `STAGE2_BACKEND`. Expert note:
-`doc/00_llm_process/feature_expert/linux_riscv64_qemu_bootstrap/skill.md`.
-
 Hosted Simple compiler binaries currently require 64-bit kernel/userspace. SimpleOS guest targets are separate from hosted compiler binaries and include 32-bit OS build lanes.
 
 ### SimpleOS Guest Targets
@@ -151,7 +135,7 @@ The Platform Abstraction Library provides a unified send/receive pattern for han
 
 ### Quick Start
 
-```simple:skip
+```simple
 use std.platform.{host_config, network_config, send_u32, recv_u32}
 
 val host = host_config()           # Auto-detect local machine
@@ -169,7 +153,7 @@ val local_val = recv_u32(host, net, wire_data)  # Convert from network order
 
 ### Endianness Conversion
 
-```simple:skip
+```simple
 val le_host = host_config()
 val be_target = make_config(TargetArch.MCS51, TargetOS.BareMetal)
 val swapped = send_u32(le_host, be_target, 0x12345678)  # byte-swapped
@@ -178,7 +162,7 @@ val original = recv_u32(le_host, be_target, swapped)     # restored
 
 ### Newline Translation
 
-```simple:skip
+```simple
 val unix = make_config(TargetArch.X86_64, TargetOS.Linux)
 val win = make_config(TargetArch.X86_64, TargetOS.Windows)
 val crlf_text = send_text(unix, win, "line1\nline2\n")  # LF -> CRLF
@@ -187,7 +171,7 @@ val lf_text = recv_text(unix, win, crlf_text)            # CRLF -> LF
 
 ### Wire Format (Binary Protocols)
 
-```simple:skip
+```simple
 # Serialize
 var writer = wire_writer_network()
 writer.write_u32(42)
@@ -202,7 +186,7 @@ val text = reader.read_text()
 
 ### Cross-Platform File I/O
 
-```simple:skip
+```simple
 # Write with host platform newlines
 text_file_write_local("output.txt", "line1\nline2\n")
 

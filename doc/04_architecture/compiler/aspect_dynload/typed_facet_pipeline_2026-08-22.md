@@ -52,7 +52,7 @@ moves into `00.common`; passive ABI records do.
 Append these defaulted fields, in this order, to `ParserModule`, after every
 existing field so Rust-seed positional construction remains valid:
 
-```text
+```simple
 facet_interfaces: [ParserFacetInterface] = []
 facet_impls: [ParserFacetImpl] = []
 facet_bindings: [ParserFacetBinding] = []
@@ -61,7 +61,7 @@ facet_requirements: [ParserFacetRequirement] = []
 
 The declaration names and fields are normative:
 
-```text
+```simple
 struct ParserFacetInterface:
     aspect_id: text
     aspect_version: i64
@@ -128,7 +128,7 @@ method lookup has established that the callee is the intrinsic facet surface.
 
 Append matching defaulted `HirModule` fields:
 
-```text
+```simple
 facet_interfaces: [HirFacetInterfaceDecl] = []
 facet_impls: [HirFacetImplDecl] = []
 facet_bindings: [HirFacetBindingDecl] = []
@@ -137,7 +137,7 @@ facet_requirements: [HirFacetRequirementDecl] = []
 
 Canonical resolved types:
 
-```text
+```simple
 struct HirFacetMethod:
     symbol: SymbolId
     name: text
@@ -212,7 +212,7 @@ enum HirFacetAcquireMode:
 
 Add exactly one expression variant:
 
-```text
+```simple
 FacetAcquire(receiver: HirExpr,
              interface_type: HirType,
              interface_id: FacetInterfaceId,
@@ -290,7 +290,7 @@ time and against each newly admitted type descriptor before publication.
 
 The signatures are fixed:
 
-```text
+```simple
 obj.try_facet<T>() -> Option<FacetRef<T>>
 obj.facet<T>() -> Result<Option<FacetRef<T>>, FacetLoadError>
 obj.require_facet<T>() -> Result<FacetRef<T>, FacetLoadError>
@@ -304,7 +304,7 @@ clean absent result to `FacetLoadError.RequiredFacetMissing`.
 
 `FacetRef<T>` is opaque to user construction and contains semantically:
 
-```text
+```simple
 struct FacetRef<T>:
     base: AnyRef
     base_pin: BaseObjectPinV1

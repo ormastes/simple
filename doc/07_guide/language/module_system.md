@@ -25,7 +25,7 @@ Rules:
 
 ### Importing Specific Names (Recommended)
 
-```text
+```simple
 use std.spec.{describe, it, expect}
 use app.io.{file_read, file_write, shell}
 use std.math.{sin, cos, sqrt}
@@ -33,7 +33,7 @@ use std.math.{sin, cos, sqrt}
 
 ### Parentheses Syntax (Alternative)
 
-```text
+```simple
 use app.io.mod (env_get, env_set)     # Explicit import from mod.spl
 ```
 
@@ -41,7 +41,7 @@ Both curly braces and parentheses work identically. Curly braces are preferred f
 
 ### Glob Imports
 
-```text
+```simple
 use crate.net.http.*                  # Imports all non-macro public items
 ```
 
@@ -57,7 +57,7 @@ Glob imports include macros only if they are listed in `auto import` in the modu
   enum identity.
 - **Bare imports don't expose functions**: `use app.io` loads the module but does not make its functions callable.
 
-```text
+```simple
 # Correct
 use app.io.{shell}
 shell("echo hi")
@@ -86,7 +86,7 @@ No functions, types, variables, or other code belongs here.
 
 ### Directory Header
 
-```text
+```simple
 #[no_gc, strong]
 #[profile("server")]
 #[deny(primitive_api)]
@@ -97,7 +97,7 @@ The identifier after `mod` must match the directory name. Attributes flow into a
 
 ### Child Module Declarations
 
-```text
+```simple
 pub mod router                        # Public: part of directory's API
 mod internal                          # Private: internal only
 #[no_gc]
@@ -110,14 +110,14 @@ Resolution: `mod router` resolves to either `router.spl` or `router/__init__.spl
 
 Imports applied to every file in the directory:
 
-```text
+```simple
 common use crate.core.base.*
 common use crate.net.Url
 ```
 
 These are inherited by child directories unless overridden. A specific file can opt out:
 
-```text
+```simple
 #[no_common_imports]
 mod somefile
 ```
@@ -126,7 +126,7 @@ mod somefile
 
 Defines the directory's public API:
 
-```text
+```simple
 export use router.Router
 export use router.{Client, Request}
 export use router.*                   # Glob: non-macro items only
@@ -136,7 +136,7 @@ export use router.*                   # Glob: non-macro items only
 
 Macros are never included in glob imports unless explicitly listed:
 
-```text
+```simple
 auto import router.route
 auto import router.route_get
 ```
@@ -184,7 +184,7 @@ src/
 ```
 
 **src/sys/__init__.spl**
-```text
+```simple
 #[strong]
 mod sys
 
@@ -192,7 +192,7 @@ pub mod http
 ```
 
 **src/sys/http/__init__.spl**
-```text
+```simple
 #[profile("server")]
 mod http
 
@@ -207,7 +207,7 @@ auto import router.route_get
 ```
 
 **src/sys/http/router.spl**
-```text
+```simple
 pub struct Router:
     # ...
 
@@ -219,7 +219,7 @@ pub macro route_get(path: Str, handler):
 ```
 
 **User code**
-```text
+```simple
 use crate.sys.http.*                  # Imports Router, route, route_get
 use crate.sys.http.route_debug        # Must be explicit (not in auto import)
 ```
@@ -268,7 +268,7 @@ Profiles are applied within `__init__.spl` via `#[profile("server")]`.
 
 Import is likely inside a function block or is a bare module import:
 
-```text
+```simple
 # Wrong: import inside block
 it "test":
     use app.io.{shell}                # Will not work
@@ -284,7 +284,7 @@ it "test":
 
 You used a bare import without listing specific names:
 
-```text
+```simple
 # Wrong
 use app.io
 
@@ -299,7 +299,7 @@ The seed compiler enforces strict exports. Three rules that commonly bite:
 1. **`pub val` alone does not export.** Module-level constants need an
    explicit `export` statement listing each name:
 
-   ```simple:skip
+   ```simple
    pub val ZSTD_MAGIC = 0xFD2FB528    # NOT visible to importers by itself
    export ZSTD_MAGIC                  # required
    ```
@@ -307,7 +307,7 @@ The seed compiler enforces strict exports. Three rules that commonly bite:
 2. **Plain `use X.*` in a shim re-exports nothing.** A hub/shim module
    must use `export use`:
 
-   ```text
+   ```simple
    # Wrong (importers of this shim get E0410)
    use nogc_sync_mut.sffi.cli*
    # Fix

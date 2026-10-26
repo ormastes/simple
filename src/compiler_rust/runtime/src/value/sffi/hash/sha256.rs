@@ -5,7 +5,7 @@
 
 use crate::value::core::RuntimeValue;
 
-use sha2::{Digest, Sha256, Sha384, Sha512};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -16,14 +16,6 @@ lazy_static::lazy_static! {
 static SHA256_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 fn runtime_byte_array_to_vec(data: RuntimeValue) -> Option<Vec<u8>> {
-    // PERF (2026-10-04): one validated borrow instead of a registry-checked
-    // `rt_array_get` per byte. That per-byte round trip made `sha256_text`
-    // cost ~1/3 of the ~360 s Stage 2 cold SCV inventory (x86_64 Linux); see
-    // doc/08_tracking/bug/stage2_x86_64_hir_shard_worker_segv_startup_2026-10-04.md.
-    // Same accept/reject contract; undecided shapes keep the loop below.
-    if let Some(decided) = crate::value::collections::checked_byte_array_bytes(data) {
-        return decided;
-    }
     let len = crate::value::collections::rt_array_len(data);
     if len < 0 {
         return None;
@@ -67,46 +59,18 @@ pub extern "C" fn rt_sha256_new() -> i64 {
     handle
 }
 
-/// Bytes of a `text` or `[u8]` (byte-packed or slot) runtime value, bounded by
-/// `len`. This is the payload contract the interpreter's `rt_sha256_write` /
-/// `rt_sha1_write` already implement (`interpreter_extern/sha256.rs`). `None`
-/// when the payload is neither, or `len` is negative or exceeds it.
-pub(crate) fn runtime_hash_payload(data: RuntimeValue, len: i64) -> Option<Vec<u8>> {
-    let limit = usize::try_from(len).ok()?;
-    let ptr = crate::value::collections::rt_string_data(data);
-    let mut bytes = if ptr.is_null() {
-        runtime_byte_array_to_vec(data)?
-    } else {
-        let text_len = usize::try_from(crate::value::collections::rt_string_len(data)).ok()?;
-        unsafe { std::slice::from_raw_parts(ptr, text_len) }.to_vec()
-    };
-    if limit > bytes.len() {
-        return None;
-    }
-    bytes.truncate(limit);
-    Some(bytes)
-}
-
-/// `rt_sha256_write(hasher, data: text | [u8], len)`.
-///
-/// Compiled code passes `data` as a tagged `RuntimeValue`. This used to be
-/// declared `(*const u8, u64)`, so the JIT handed the TAGGED word in as a raw
-/// byte pointer and the digest hashed whatever memory it pointed at
-/// (`"abc"` -> `faee9357...` instead of `ba7816bf...`, an out-of-bounds read).
-/// An unusable payload drops the handle so `finish` fails closed (NIL) rather
-/// than returning a digest of the wrong bytes.
 #[no_mangle]
-pub extern "C" fn rt_sha256_write(handle: i64, data: RuntimeValue, len: i64) {
+pub unsafe extern "C" fn rt_sha256_write(handle: i64, data_ptr: *const u8, data_len: u64) {
+    if data_ptr.is_null() {
+        return;
+    }
+    let Ok(data_len) = usize::try_from(data_len) else {
+        return;
+    };
     let mut map = SHA256_MAP.lock().unwrap();
-    match runtime_hash_payload(data, len) {
-        Some(bytes) => {
-            if let Some(hasher) = map.get_mut(&handle) {
-                hasher.update(&bytes);
-            }
-        }
-        None => {
-            map.remove(&handle);
-        }
+    if let Some(hasher) = map.get_mut(&handle) {
+        let data = std::slice::from_raw_parts(data_ptr, data_len);
+        hasher.update(data);
     }
 }
 
@@ -157,26 +121,6 @@ pub extern "C" fn rt_tls13_sha256(data: RuntimeValue) -> RuntimeValue {
     };
     let digest = Sha256::digest(&bytes);
     vec_to_runtime_byte_array(digest.as_slice())
-}
-
-/// One-shot SHA-512 (FIPS 180-4), `extern fn rt_sha512_digest(data: [u8]) -> [u8]`.
-/// Rust twin of `rt_sha512_digest` in `src/runtime/runtime_native.c`.
-#[no_mangle]
-pub extern "C" fn rt_sha512_digest(data: RuntimeValue) -> RuntimeValue {
-    let Some(bytes) = runtime_byte_array_to_vec(data) else {
-        return RuntimeValue::NIL;
-    };
-    vec_to_runtime_byte_array(Sha512::digest(&bytes).as_slice())
-}
-
-/// One-shot SHA-384 (FIPS 180-4), `extern fn rt_sha384_digest(data: [u8]) -> [u8]`.
-/// Rust twin of `rt_sha384_digest` in `src/runtime/runtime_native.c`.
-#[no_mangle]
-pub extern "C" fn rt_sha384_digest(data: RuntimeValue) -> RuntimeValue {
-    let Some(bytes) = runtime_byte_array_to_vec(data) else {
-        return RuntimeValue::NIL;
-    };
-    vec_to_runtime_byte_array(Sha384::digest(&bytes).as_slice())
 }
 
 /// Contract: `int rt_sha256_file_raw_v1(const char *path, uint8_t out[32])`
@@ -234,51 +178,6 @@ pub unsafe extern "C" fn rt_sha256_file_raw_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_text(bytes: &[u8]) -> RuntimeValue {
-        unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
-    }
-
-    fn finish_hex(handle: i64) -> String {
-        let result = rt_sha256_finish(handle);
-        assert!(!result.is_nil());
-        let ptr = crate::value::collections::rt_string_data(result);
-        let len = crate::value::collections::rt_string_len(result);
-        unsafe { std::str::from_utf8(std::slice::from_raw_parts(ptr, len as usize)).unwrap().to_string() }
-    }
-
-    /// Compiled code passes a tagged text / [u8] value (JIT "abc" used to hash
-    /// the pointed-at memory: faee9357... instead of ba7816bf...).
-    #[test]
-    fn test_sha256_write_takes_runtime_payload() {
-        const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        let h = rt_sha256_new();
-        rt_sha256_write(h, test_text(b"abc"), 3);
-        assert_eq!(finish_hex(h), ABC);
-
-        let packed = crate::value::collections::rt_byte_array_new(1);
-        for b in [97, 98, 99, 100] {
-            assert!(crate::value::collections::rt_typed_bytes_u8_push(packed, b));
-        }
-        let h = rt_sha256_new();
-        rt_sha256_write(h, packed, 3);
-        assert_eq!(finish_hex(h), ABC);
-
-        let slots = crate::value::collections::rt_array_new(3);
-        for b in [97, 98, 99] {
-            crate::value::collections::rt_array_push(slots, RuntimeValue::from_int(b));
-        }
-        let h = rt_sha256_new();
-        rt_sha256_write(h, slots, 3);
-        assert_eq!(finish_hex(h), ABC);
-
-        // len past the payload, a negative len, or a non-payload value: no digest.
-        for (data, len) in [(test_text(b"abc"), 4), (test_text(b"abc"), -1), (RuntimeValue::from_int(7), 1)] {
-            let h = rt_sha256_new();
-            rt_sha256_write(h, data, len);
-            assert!(rt_sha256_finish(h).is_nil());
-        }
-    }
     use crate::value::collections::rt_string_data;
 
     #[test]
@@ -286,7 +185,9 @@ mod tests {
         let handle = rt_sha256_new();
         assert!(handle > 0);
 
-            rt_sha256_write(handle, test_text(b"hello"), (5) as i64);
+        unsafe {
+            rt_sha256_write(handle, b"hello".as_ptr(), 5);
+        }
 
         let result = rt_sha256_finish(handle);
         let hash_str = unsafe {
@@ -304,7 +205,9 @@ mod tests {
     #[test]
     fn test_sha256_finish_bytes_is_typed_array() {
         let handle = rt_sha256_new();
-            rt_sha256_write(handle, test_text(b"hello"), (5) as i64);
+        unsafe {
+            rt_sha256_write(handle, b"hello".as_ptr(), 5);
+        }
         let result = rt_sha256_finish_bytes(handle);
         let bytes = crate::value::byte_array_bytes(result).unwrap();
         assert_eq!(
@@ -346,84 +249,6 @@ mod tests {
             got.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
-    }
-
-    fn sha2_512_family_hex(f: extern "C" fn(RuntimeValue) -> RuntimeValue, input: &[u8]) -> String {
-        let arr = vec_to_runtime_byte_array(input);
-        let result = f(arr);
-        assert!(!result.is_nil(), "digest returned nil");
-        runtime_byte_array_to_vec(result)
-            .expect("digest is a byte array")
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
-    }
-
-    #[test]
-    fn test_rt_sha512_sha384_digest_fips_180_4_vectors() {
-        let m896 = b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
-        assert_eq!(
-            sha2_512_family_hex(rt_sha512_digest, b""),
-            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
-        );
-        assert_eq!(
-            sha2_512_family_hex(rt_sha512_digest, b"abc"),
-            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
-        );
-        assert_eq!(
-            sha2_512_family_hex(rt_sha512_digest, m896),
-            "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"
-        );
-        assert_eq!(
-            sha2_512_family_hex(rt_sha384_digest, b"abc"),
-            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
-        );
-        assert_eq!(
-            sha2_512_family_hex(rt_sha384_digest, m896),
-            "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039"
-        );
-    }
-
-    // Reference: the per-element loop the bulk read replaced.
-    fn per_element_bytes(data: RuntimeValue) -> Option<Vec<u8>> {
-        let len = crate::value::collections::rt_array_len(data);
-        if len < 0 {
-            return None;
-        }
-        let mut out = Vec::new();
-        for i in 0..len {
-            let value = crate::value::collections::rt_array_get(data, i);
-            if !value.is_int() || !(0..=255).contains(&value.as_int()) {
-                return None;
-            }
-            out.push(value.as_int() as u8);
-        }
-        Some(out)
-    }
-
-    #[test]
-    fn test_bulk_byte_read_matches_per_element_contract() {
-        use crate::value::collections::{rt_array_new, rt_array_push, rt_string_bytes, rt_string_new};
-        let text = "pub fn x(): 1 -- \u{e9}";
-        let string = unsafe { rt_string_new(text.as_ptr(), text.len() as u64) };
-        // Boxed-element (tagged) array, the shape `rt_text_to_bytes` returns.
-        let tagged = rt_string_bytes(string);
-        assert!(crate::value::collections::checked_byte_array_bytes(tagged).is_some());
-        assert_eq!(runtime_byte_array_to_vec(tagged), Some(text.as_bytes().to_vec()));
-        assert_eq!(runtime_byte_array_to_vec(tagged), per_element_bytes(tagged));
-        // Rejections stay rejections: out of range, negative, non-int.
-        for bad in [RuntimeValue::from_int(256), RuntimeValue::from_int(-1), string] {
-            let array = rt_array_new(2);
-            assert!(rt_array_push(array, RuntimeValue::from_int(7)));
-            assert!(rt_array_push(array, bad));
-            assert_eq!(per_element_bytes(array), None);
-            assert_eq!(runtime_byte_array_to_vec(array), None);
-        }
-        // Empty and non-array inputs keep their previous answers.
-        let empty = rt_array_new(0);
-        assert_eq!(runtime_byte_array_to_vec(empty), Some(Vec::new()));
-        assert_eq!(runtime_byte_array_to_vec(string), per_element_bytes(string));
-        assert_eq!(runtime_byte_array_to_vec(RuntimeValue::NIL), per_element_bytes(RuntimeValue::NIL));
     }
 
     fn digest_hex(out: &[u8; 32]) -> String {

@@ -28,77 +28,6 @@ use crate::interpreter_unit::{
 };
 use simple_runtime::debug;
 
-/// Apply a binding's declared type to its value so later operations see the
-/// static type rather than the evaluated literal's default `i64`.
-///
-/// - `u8`/`u16`/`u32`/`u64`: a plain `Value::Int` becomes `Value::UInt` at the
-///   declared width (masked), so comparisons, division, remainder, and right
-///   shifts on it are unsigned. A `u64` value >= 2^63 otherwise stays a
-///   negative `Int` and compares SIGNED.
-/// - `[u8]`: an empty boxed array, or one whose elements are all integers in
-///   0..=255, becomes packed `Value::ByteArray` storage, so the binding has
-///   the contiguous bytes `rt_array_data_ptr` needs. Element reads yield `u8`,
-///   which is the declared element type.
-///
-/// Every interpreter binding site with a declared type uses this: local and
-/// module-level `val`/`var`, `const`, `static`, and declared function returns
-/// (scalars only there; see `function_exec.rs`).
-/// Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
-pub(crate) fn coerce_to_declared_type(value: Value, ty: Option<&Type>) -> Value {
-    match ty {
-        Some(Type::Simple(_)) => coerce_to_declared_unsigned(value, ty),
-        Some(Type::Array { element, size: None }) if matches!(element.as_ref(), Type::Simple(name) if name == "u8") => {
-            pack_u8_array(value)
-        }
-        _ => value,
-    }
-}
-
-/// Scalar half of [`coerce_to_declared_type`]: only the unsigned widths.
-pub(crate) fn coerce_to_declared_unsigned(value: Value, ty: Option<&Type>) -> Value {
-    let Some(Type::Simple(type_name)) = ty else {
-        return value;
-    };
-    let width: u8 = match type_name.as_str() {
-        "u8" => 8,
-        "u16" => 16,
-        "u32" => 32,
-        "u64" => 64,
-        _ => return value,
-    };
-    match value {
-        Value::Int(i) => {
-            let masked: u64 = match width {
-                8 => (i as u8) as u64,
-                16 => (i as u16) as u64,
-                32 => (i as u32) as u64,
-                _ => i as u64,
-            };
-            Value::UInt { value: masked, width }
-        }
-        // Already-typed UInt (literal-suffix path) and non-integers (e.g.
-        // object newtypes around u32) pass through.
-        other => other,
-    }
-}
-
-fn pack_u8_array(value: Value) -> Value {
-    let Value::Array(data) = &value else {
-        return value;
-    };
-    let mut bytes = Vec::with_capacity(data.len());
-    for element in data.iter() {
-        match element {
-            // Same domain as the packed-array repack after a mutation
-            // (`repack_byte_result`): any integer that fits a byte.
-            Value::UInt { value: byte, .. } if *byte <= 0xFF => bytes.push(*byte as u8),
-            Value::Int(byte) if (0..=0xFF).contains(byte) => bytes.push(*byte as u8),
-            _ => return value,
-        }
-    }
-    Value::ByteArray(Arc::new(bytes))
-}
-
 /// Check if the watchdog timeout has been exceeded (single atomic load, negligible overhead).
 macro_rules! check_timeout {
     () => {
@@ -208,14 +137,32 @@ pub(crate) fn exec_node(
                     // Coerce to Value::UInt when the annotation is an unsigned integer type
                     // so subsequent arithmetic on the bound variable applies modulo-2^width
                     // wrap. See doc/08_tracking/bug/interpreter_u32_wrap_subtraction_2026-05-01.md.
-                    Some(ty @ Type::Simple(type_name))
-                        if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") =>
-                    {
-                        coerce_to_declared_unsigned(value, Some(ty))
+                    Some(Type::Simple(type_name)) if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") => {
+                        let width: u8 = match type_name.as_str() {
+                            "u8" => 8,
+                            "u16" => 16,
+                            "u32" => 32,
+                            "u64" => 64,
+                            _ => unreachable!(),
+                        };
+                        match value {
+                            // Already-typed UInt: keep as-is (literal-suffix path).
+                            Value::UInt { .. } => value,
+                            // Plain Int: wrap into UInt at the annotated width.
+                            Value::Int(i) => {
+                                let masked: u64 = match width {
+                                    8 => (i as u8) as u64,
+                                    16 => (i as u16) as u64,
+                                    32 => (i as u32) as u64,
+                                    64 => i as u64,
+                                    _ => i as u64,
+                                };
+                                Value::UInt { value: masked, width }
+                            }
+                            // Other types pass through (e.g. Object newtypes around u32).
+                            other => other,
+                        }
                     }
-                    // `[u8]` bindings get packed byte storage (see
-                    // `coerce_to_declared_type`).
-                    Some(ty @ Type::Array { size: None, .. }) => coerce_to_declared_type(value, Some(ty)),
                     Some(Type::Simple(type_name)) if is_unit_type(type_name) => {
                         if let Err(e) = validate_unit_type(&value, type_name) {
                             let var_name = get_var_name(&let_stmt.pattern);
@@ -262,7 +209,7 @@ pub(crate) fn exec_node(
                                         arc_data.len()
                                     )));
                                 }
-                                let data = Arc::unwrap_or_clone(arc_data).into_vec();
+                                let data = Arc::unwrap_or_clone(arc_data);
                                 Value::FixedSizeArray { size, data }
                             }
                             _ => {
@@ -317,7 +264,6 @@ pub(crate) fn exec_node(
                         ctx,
                     )
                 })?;
-            let value = coerce_to_declared_type(value, const_stmt.ty.as_ref());
             env.insert(const_stmt.name.clone(), value);
             crate::interpreter::const_trace("node_exec:const-insert", &const_stmt.name);
             CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
@@ -325,7 +271,6 @@ pub(crate) fn exec_node(
         }
         Node::Static(static_stmt) => {
             let value = evaluate_expr(&static_stmt.value, env, functions, classes, enums, impl_methods)?;
-            let value = coerce_to_declared_type(value, static_stmt.ty.as_ref());
             env.insert(static_stmt.name.clone(), value);
             if !static_stmt.mutability.is_mutable() {
                 crate::interpreter::const_trace("node_exec:static-insert", &static_stmt.name);
@@ -715,13 +660,13 @@ pub(crate) fn exec_node(
                         for item_target in items {
                             match item_target {
                                 ImportTarget::Single(name) => {
-                                    if let Some(v) = crate::interpreter::module_dict_get(exports, name) {
-                                        bindings.push((name.clone(), v));
+                                    if let Some(v) = exports.get(name) {
+                                        bindings.push((name.clone(), v.clone()));
                                     }
                                 }
                                 ImportTarget::Aliased { name, alias } => {
-                                    if let Some(v) = crate::interpreter::module_dict_get(exports, name) {
-                                        bindings.push((alias.clone(), v));
+                                    if let Some(v) = exports.get(name) {
+                                        bindings.push((alias.clone(), v.clone()));
                                     }
                                 }
                                 // Nested groups are unsupported at module scope
@@ -732,17 +677,17 @@ pub(crate) fn exec_node(
                         }
                     }
                     ImportTarget::Glob => {
-                        crate::interpreter::module_dict_for_each_visible(exports, |name, value| {
+                        for (name, value) in exports.iter() {
                             // Never glob-import `main`: it would be picked up by
                             // the entry-point fallback and run instead of the
                             // script's own main. Same guard as module scope. A
                             // NAMED import of `main` is an explicit opt-in and
                             // is deliberately not filtered.
                             if matches!(value, Value::Function { .. }) && name == "main" {
-                                return;
+                                continue;
                             }
                             bindings.push((name.clone(), value.clone()));
-                        });
+                        }
                     }
                     ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
                 }
@@ -785,13 +730,20 @@ fn try_assign_module_global_index(
             Value::Array(arc) => {
                 let idx = index_val.as_int()? as usize;
                 let arr = Arc::make_mut(arc);
-                arr.assign_index(idx, value);
+                if idx < arr.len() {
+                    arr[idx] = value;
+                } else {
+                    while arr.len() < idx {
+                        arr.push(Value::Nil);
+                    }
+                    arr.push(value);
+                }
                 Ok(None)
             }
             Value::Dict(dict) => {
                 let key = index_val.to_key_string();
                 let stored = Value::wrap_dict_entry(index_val, value);
-                crate::interpreter::module_dict_make_mut(dict).insert(key, stored);
+                Arc::make_mut(dict).insert(key, stored);
                 Ok(None)
             }
             Value::Tuple(tuple) => {
@@ -1010,13 +962,10 @@ pub(crate) fn exec_assignment(
             // Check if this is a module-level global variable (for function access)
             let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
             if is_global && !env.contains_key(name) {
-                // Update module-level global. Write the per-module owner store
-                // too, not only the flat map: `g = g.me_method()` reaches here
-                // after the receiver path removed `g` from the frame and synced
-                // the OLD receiver into the owner store, and a function frame
-                // republishes the owner store on exit -- a flat-only write was
-                // silently reverted (interpreter only; JIT was correct).
-                super::interpreter_helpers::sync_flat_global(name, &value);
+                // Update module-level global
+                MODULE_GLOBALS.with(|cell| {
+                    cell.borrow_mut().insert(name.clone(), value);
+                });
             } else {
                 env.insert(name.clone(), value);
 
@@ -1477,7 +1426,14 @@ pub(crate) fn exec_assignment(
                         Value::Array(arc) => {
                             if let Some(arr) = Arc::get_mut(arc) {
                                 let idx = index_val.as_int()? as usize;
-                                arr.assign_index(idx, value);
+                                if idx < arr.len() {
+                                    arr[idx] = value;
+                                } else {
+                                    while arr.len() < idx {
+                                        arr.push(Value::Nil);
+                                    }
+                                    arr.push(value);
+                                }
                                 return Ok(Control::Next);
                             }
                         }
@@ -1503,7 +1459,15 @@ pub(crate) fn exec_assignment(
                     Value::Array(mut arc) => {
                         let arr = Arc::make_mut(&mut arc);
                         let idx = index_val.as_int()? as usize;
-                        arr.assign_index(idx, value);
+                        if idx < arr.len() {
+                            arr[idx] = value;
+                        } else {
+                            // Extend array if index is at the end
+                            while arr.len() < idx {
+                                arr.push(Value::Nil);
+                            }
+                            arr.push(value);
+                        }
                         Value::Array(arc)
                     }
                     // `rt_bytes_alloc` / `rt_byte_array_new` hand back a packed
@@ -1526,7 +1490,7 @@ pub(crate) fn exec_assignment(
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
                         let stored = Value::wrap_dict_entry(&index_val, value);
-                        crate::interpreter::module_dict_make_mut(&mut dict).insert(key, stored);
+                        Arc::make_mut(&mut dict).insert(key, stored);
                         Value::Dict(dict)
                     }
                     Value::Tuple(mut tup) => {
@@ -1647,7 +1611,6 @@ pub(crate) fn exec_assignment(
                     Some(Value::Object { fields, .. }) => match fields.get(field_name) {
                         Some(Value::Array(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                         Some(Value::Dict(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
-                        Some(Value::ByteArray(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                         _ => false,
                     },
                     _ => false,
@@ -1660,26 +1623,13 @@ pub(crate) fn exec_assignment(
                                     Value::Array(arc) => {
                                         if let Some(arr) = Arc::get_mut(arc) {
                                             let idx = index_val.as_int()? as usize;
-                                            arr.assign_index(idx, value);
-                                            return Ok(Control::Next);
-                                        }
-                                    }
-                                    // Packed `[u8]` (`rt_bytes_alloc`): same write as the
-                                    // `Value::Object` slow path below (`as_int() as u8`,
-                                    // zero-fill on growth), minus its per-write clone of
-                                    // the whole buffer -- O(n) per byte, which turned a
-                                    // 33 MB fill loop into a hang.
-                                    Value::ByteArray(arc) => {
-                                        if let Some(bytes) = Arc::get_mut(arc) {
-                                            let idx = index_val.as_int()? as usize;
-                                            let byte = value.as_int()? as u8;
-                                            if idx < bytes.len() {
-                                                bytes[idx] = byte;
+                                            if idx < arr.len() {
+                                                arr[idx] = value;
                                             } else {
-                                                while bytes.len() < idx {
-                                                    bytes.push(0);
+                                                while arr.len() < idx {
+                                                    arr.push(Value::Nil);
                                                 }
-                                                bytes.push(byte);
+                                                arr.push(value);
                                             }
                                             return Ok(Control::Next);
                                         }
@@ -1717,7 +1667,14 @@ pub(crate) fn exec_assignment(
                                             CompileError::semantic("array index must be an integer".to_string())
                                         })?;
                                         let arr = Arc::make_mut(arc);
-                                        arr.assign_index(idx, value.clone());
+                                        if idx < arr.len() {
+                                            arr[idx] = value.clone();
+                                        } else {
+                                            while arr.len() < idx {
+                                                arr.push(Value::Nil);
+                                            }
+                                            arr.push(value.clone());
+                                        }
                                         Ok(())
                                     }
                                     // A buffer handed back by a runtime allocator
@@ -1775,7 +1732,7 @@ pub(crate) fn exec_assignment(
                                     }
                                     Value::Dict(dict) => {
                                         let stored = Value::wrap_dict_entry(&index_val, value.clone());
-                                        crate::interpreter::module_dict_make_mut(dict).insert(pre_key.clone(), stored);
+                                        Arc::make_mut(dict).insert(pre_key.clone(), stored);
                                         Ok(())
                                     }
                                     Value::Tuple(tup) => {
@@ -1838,7 +1795,14 @@ pub(crate) fn exec_assignment(
                                     Value::Array(mut arc) => {
                                         let arr = Arc::make_mut(&mut arc);
                                         let idx = index_val.as_int()? as usize;
-                                        arr.assign_index(idx, value);
+                                        if idx < arr.len() {
+                                            arr[idx] = value;
+                                        } else {
+                                            while arr.len() < idx {
+                                                arr.push(Value::Nil);
+                                            }
+                                            arr.push(value);
+                                        }
                                         Value::Array(arc)
                                     }
                                     // Same runtime-allocator buffer case as the
@@ -1883,7 +1847,7 @@ pub(crate) fn exec_assignment(
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
                                         let stored = Value::wrap_dict_entry(&index_val, value);
-                                        crate::interpreter::module_dict_make_mut(&mut dict).insert(key, stored);
+                                        Arc::make_mut(&mut dict).insert(key, stored);
                                         Value::Dict(dict)
                                     }
                                     Value::Tuple(mut tup) => {
@@ -1991,7 +1955,14 @@ pub(crate) fn exec_assignment(
                             Value::Array(arc) => {
                                 let arr = Arc::make_mut(arc);
                                 let idx = index_val.as_int()? as usize;
-                                arr.assign_index(idx, value);
+                                if idx < arr.len() {
+                                    arr[idx] = value;
+                                } else {
+                                    while arr.len() < idx {
+                                        arr.push(Value::Nil);
+                                    }
+                                    arr.push(value);
+                                }
                             }
                             // Same runtime-allocator buffer case as the
                             // ClassInstance path above (`rt_byte_array_new` /
@@ -2033,7 +2004,7 @@ pub(crate) fn exec_assignment(
                             Value::Dict(dict) => {
                                 let key = index_val.to_key_string();
                                 let stored = Value::wrap_dict_entry(&index_val, value);
-                                crate::interpreter::module_dict_make_mut(dict).insert(key, stored);
+                                Arc::make_mut(dict).insert(key, stored);
                             }
                             other => {
                                 let ctx = ErrorContext::new()
@@ -2149,7 +2120,7 @@ pub(crate) fn exec_assignment(
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let values: Vec<Value> = match value {
             Value::Tuple(v) => v,
-            Value::Array(arc) => Arc::unwrap_or_clone(arc).into_vec(),
+            Value::Array(arc) => Arc::unwrap_or_clone(arc),
             _ => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -2428,16 +2399,6 @@ pub(crate) fn exec_augmented_assignment(
             rhs_value
         };
 
-        // A non-local name that lives in MODULE_GLOBALS (every top-level `var`)
-        // is read back from there (expr/literals.rs), so sync it like the plain
-        // `=` path does; an env-only write made top-level `i += 1` a no-op.
-        if !env.is_local(name) {
-            MODULE_GLOBALS.with(|cell| {
-                if cell.borrow().contains_key(name) {
-                    cell.borrow_mut().insert(name.clone(), new_value.clone());
-                }
-            });
-        }
         env.insert(name.clone(), new_value);
         Ok(Control::Next)
     }
@@ -3253,13 +3214,13 @@ mod indexed_augmented_assignment_tests {
         let mut env = Env::new();
         env.insert(
             "xs".to_string(),
-            Value::array(vec![
+            Value::Array(Arc::new(vec![
                 Value::Int(10),
                 Value::Int(20),
                 Value::Int(30),
                 Value::Int(40),
                 Value::Int(50),
-            ]),
+            ])),
         );
 
         run_indexed_aug("xs", Expr::Integer(0), AssignOp::AddAssign, 5, &mut env);
@@ -3280,7 +3241,7 @@ mod indexed_augmented_assignment_tests {
         let mut env = Env::new();
         env.insert(
             "xs".to_string(),
-            Value::array(vec![Value::Int(1), Value::Int(2)]),
+            Value::Array(Arc::new(vec![Value::Int(1), Value::Int(2)])),
         );
         // A non-literal subscript: the desugaring must bind it to a temp,
         // then restore the environment so no `__aug_*_temp__` name leaks.

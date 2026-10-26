@@ -13,12 +13,8 @@
 ## Purpose
 
 `spec/compiler_schema/transitions/hir_expr_to_mir.sdn` records what
-`MirLowering.lower_expr_impl` ACTUALLY does today with each of the 57
-variants in its declared table universe, not what it should do.
-
-The generated registry currently has 60 variants. FloatLexeme, TryCatch, and
-TypeTest are absent from this table's universe and remain a separate coverage
-gap; this spec's internal totality checks do not establish registry parity.
+`MirLowering.lower_expr_impl` ACTUALLY does today with each of the 56
+`HirExprKind` variants, not what it should do.
 
 Eleven of them (`As`, `CharLit`, `Comprehension`, `Error`, `Lambda`,
 `OptionalChain`, `StaticCall`, `StructLit`, `Throw`, `TupleIndex`, `With`) had
@@ -26,15 +22,16 @@ NO arm before lane C6: they fell through to the terminal `case _:`, whose
 message interpolates the enum value itself and therefore renders a heap enum as
 an opaque `<enum@0x..>` handle. The construct was unsupported AND unnameable.
 
-Each gained an explicit arm with a named diagnostic. Comprehension and StructLit
-have since gained real lowering, leaving nine unsupported variants. The table
-counts only actual lowering as handled; explicit rejection remains attributed
-but unhandled.
+Each now has an explicit arm raising its own `E-MIR-EXPR-<Variant>` diagnostic
+with the real source span, and is declared here as `unsupported` — covered,
+attributed, and NOT counted as handled. That honesty is the point: marking them
+`implemented` would be green and worthless, and omitting them would make them
+Missing and fail the build.
 
 ## Scope
 
-Totality of the table against its own declared universe, the registry's
-availability, and the handled/unhandled split. The counts are
+Totality of the table against its own producer universe, the universe's size
+against the generated registry, and the handled/unhandled split. The counts are
 deliberately literal so that adding a variant to `HirExprKind` without adding a
 row turns this spec red rather than drifting silently.
 
@@ -90,32 +87,34 @@ describe "hir_expr_to_mir transition table":
         expect(table.name).to_equal("hir_expr_to_mir")
         expect(table.producer).to_equal("HirExprKind")
 
-    it "declares all 57 HirExprKind variants — Missing is empty":
+    it "declares all 56 HirExprKind variants — Missing is empty":
         # @req REQ-SSPEC-UNIT
-        step("declares all 57 HirExprKind variants — Missing is empty")
-        step("Validate the declared table universe; registry parity remains a separate gap")
+        step("declares all 56 HirExprKind variants — Missing is empty")
+        step("The universe comes from the GENERATED registry, not from the dispatch")
         expect(file_exists(REGISTRY_PATH)).to_equal(true)
         val report = validate_transition_table(parse_transition_table(load_table_text()))
-        expect(report.universe_size).to_equal(57)
-        expect(report.declared).to_equal(57)
+        expect(report.universe_size).to_equal(56)
+        expect(report.declared).to_equal(56)
         step("The build invariant: Missing = ProducerUniverse - declared = {}")
         expect(report.missing.len()).to_equal(0)
         expect(report.unknown.len()).to_equal(0)
         expect(report.duplicated.len()).to_equal(0)
         expect(coverage_report_is_clean(report)).to_equal(true)
 
-    it "names the exact nine variants lower_expr_impl still cannot lower":
+    it "names the exact eleven variants lower_expr_impl still cannot lower":
         # @req REQ-SSPEC-UNIT
-        step("names the exact nine variants lower_expr_impl still cannot lower")
+        step("names the exact eleven variants lower_expr_impl still cannot lower")
         step("Before lane C6 these had no arm at all and reported as an opaque <enum@0x..> handle")
         val unsupported = unsupported_variants()
-        expect(unsupported.len()).to_equal(9)
+        expect(unsupported.len()).to_equal(11)
         expect(unsupported.contains("As")).to_equal(true)
         expect(unsupported.contains("CharLit")).to_equal(true)
+        expect(unsupported.contains("Comprehension")).to_equal(true)
         expect(unsupported.contains("Error")).to_equal(true)
         expect(unsupported.contains("Lambda")).to_equal(true)
         expect(unsupported.contains("OptionalChain")).to_equal(true)
         expect(unsupported.contains("StaticCall")).to_equal(true)
+        expect(unsupported.contains("StructLit")).to_equal(true)
         expect(unsupported.contains("Throw")).to_equal(true)
         expect(unsupported.contains("TupleIndex")).to_equal(true)
         expect(unsupported.contains("With")).to_equal(true)
@@ -132,8 +131,6 @@ describe "hir_expr_to_mir transition table":
         expect(unsupported.contains("Call")).to_equal(false)
         expect(unsupported.contains("Block")).to_equal(false)
         expect(unsupported.contains("MatchCase")).to_equal(false)
-        expect(unsupported.contains("Comprehension")).to_equal(false)
-        expect(unsupported.contains("StructLit")).to_equal(false)
 
     it "gives every unsupported row a reason and an issue code, so the hole is auditable":
         # @req REQ-SSPEC-UNIT
@@ -145,12 +142,12 @@ describe "hir_expr_to_mir transition table":
             if coverage_state_tag(row.state) == "unsupported":
                 if row.reason != "":
                     attributed = attributed + 1
-        expect(attributed).to_equal(9)
+        expect(attributed).to_equal(11)
 
-    it "counts 48 handled variants — declared is not the same as handled":
+    it "counts 45 handled variants — declared is not the same as handled":
         # @req REQ-SSPEC-UNIT
-        step("counts 48 handled variants — declared is not the same as handled")
-        step("48 implemented arms; the other nine are declared but explicitly not handled")
-        expect(coverage_report_handled(parse_transition_table(load_table_text()))).to_equal(48)
-        expect(count_with_tag("implemented")).to_equal(48)
-        expect(count_with_tag("unsupported")).to_equal(9)
+        step("counts 45 handled variants — declared is not the same as handled")
+        step("45 implemented arms; the other 11 are declared but explicitly not handled")
+        expect(coverage_report_handled(parse_transition_table(load_table_text()))).to_equal(45)
+        expect(count_with_tag("implemented")).to_equal(45)
+        expect(count_with_tag("unsupported")).to_equal(11)

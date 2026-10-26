@@ -20,44 +20,21 @@ var g_weak_alive: [bool] = []
 var g_weak_generations: [i64] = []
 var g_weak_strong_counts: [i64] = []
 var g_weak_next_id: i64 = 0
-# Never reset this serial: target/lease slots may be reused after weak_reset.
-var g_weak_next_generation: i64 = 0
-var g_weak_lease_targets: [i64] = []
-var g_weak_lease_target_generations: [i64] = []
-var g_weak_lease_generations: [i64] = []
-var g_weak_lease_values: [i64] = []
-var g_weak_lease_active: [bool] = []
 
 struct WeakRef:
     target_id: i64
     generation: i64
-
-# An explicit synchronous owning acquisition. Copies share one acquisition:
-# releasing either copy invalidates both and decrements strong count once.
-struct WeakLease:
-    token_id: i64
-    generation: i64
-
-fn weak_fresh_generation() -> i64:
-    if g_weak_next_generation == 9223372036854775807:
-        return -1
-    val generation = g_weak_next_generation
-    g_weak_next_generation = g_weak_next_generation + 1
-    generation
 
 # =========================================================================
 # Registration
 # =========================================================================
 
 fn weak_register(value: i64) -> i64:
-    val generation = weak_fresh_generation()
-    if generation < 0:
-        return -1
     val id = g_weak_next_id
     g_weak_next_id = g_weak_next_id + 1
     g_weak_values.push(value)
     g_weak_alive.push(true)
-    g_weak_generations.push(generation)
+    g_weak_generations.push(0)
     g_weak_strong_counts.push(1)
     id
 
@@ -67,12 +44,6 @@ fn weak_reset():
     g_weak_generations = []
     g_weak_strong_counts = []
     g_weak_next_id = 0
-    # Reset is explicit administrative teardown, revoking outstanding leases.
-    g_weak_lease_targets = []
-    g_weak_lease_target_generations = []
-    g_weak_lease_generations = []
-    g_weak_lease_values = []
-    g_weak_lease_active = []
 
 # =========================================================================
 # Weak reference creation
@@ -89,8 +60,6 @@ fn weak_create(target_id: i64) -> WeakRef:
 # Upgrade (dereference)
 # =========================================================================
 
-# Compatibility lookup only: this does not acquire an owner and -1 is the
-# legacy expiration sentinel. Use weak_upgrade_owned for retained lifetime.
 fn weak_upgrade(ref: WeakRef) -> i64:
     if ref.target_id < 0:
         return -1
@@ -115,12 +84,11 @@ fn weak_is_alive(ref: WeakRef) -> bool:
 # Invalidation
 # =========================================================================
 
-# Explicitly revoke weak lookups. Already acquired scalar leases retain their
-# stored payload until release; weak_reset is the operation that revokes all.
 fn weak_invalidate(target_id: i64):
     if target_id >= 0:
         if target_id < g_weak_alive.len():
             g_weak_alive[target_id] = false
+            g_weak_generations[target_id] = g_weak_generations[target_id] + 1
 
 # =========================================================================
 # Strong count management
@@ -129,16 +97,14 @@ fn weak_invalidate(target_id: i64):
 fn weak_add_strong(target_id: i64):
     if target_id >= 0:
         if target_id < g_weak_strong_counts.len():
-            if g_weak_alive[target_id] and g_weak_strong_counts[target_id] < 9223372036854775807:
-                g_weak_strong_counts[target_id] = g_weak_strong_counts[target_id] + 1
+            g_weak_strong_counts[target_id] = g_weak_strong_counts[target_id] + 1
 
 fn weak_remove_strong(target_id: i64):
     if target_id >= 0:
         if target_id < g_weak_strong_counts.len():
-            if g_weak_strong_counts[target_id] > 0:
-                g_weak_strong_counts[target_id] = g_weak_strong_counts[target_id] - 1
-                if g_weak_strong_counts[target_id] == 0:
-                    weak_invalidate(target_id)
+            g_weak_strong_counts[target_id] = g_weak_strong_counts[target_id] - 1
+            if g_weak_strong_counts[target_id] <= 0:
+                weak_invalidate(target_id)
 
 fn weak_strong_count(target_id: i64) -> i64:
     if target_id < 0:
@@ -147,49 +113,3 @@ fn weak_strong_count(target_id: i64) -> i64:
         return 0
     g_weak_strong_counts[target_id]
 
-
-# =========================================================================
-# Owned synchronous upgrade
-# =========================================================================
-# Unlike legacy weak_upgrade (a non-owning scalar lookup), this acquires one
-# strong reference. There is no cross-thread/atomic or language-sigil claim.
-fn weak_upgrade_owned(ref: WeakRef) -> WeakLease?:
-    if not weak_is_alive(ref):
-        return nil
-    if g_weak_strong_counts[ref.target_id] <= 0:
-        return nil
-    if g_weak_strong_counts[ref.target_id] == 9223372036854775807:
-        return nil
-    val generation = weak_fresh_generation()
-    if generation < 0:
-        return nil
-    val token_id = g_weak_lease_active.len()
-    g_weak_lease_targets.push(ref.target_id)
-    g_weak_lease_target_generations.push(ref.generation)
-    g_weak_lease_generations.push(generation)
-    g_weak_lease_values.push(g_weak_values[ref.target_id])
-    g_weak_lease_active.push(true)
-    g_weak_strong_counts[ref.target_id] = g_weak_strong_counts[ref.target_id] + 1
-    Some(WeakLease(token_id: token_id, generation: generation))
-
-fn weak_lease_is_active(lease: WeakLease) -> bool:
-    if lease.token_id < 0 or lease.token_id >= g_weak_lease_active.len():
-        return false
-    if g_weak_lease_generations[lease.token_id] != lease.generation:
-        return false
-    g_weak_lease_active[lease.token_id]
-
-fn weak_lease_value(lease: WeakLease) -> i64?:
-    if not weak_lease_is_active(lease):
-        return nil
-    Some(g_weak_lease_values[lease.token_id])
-
-fn weak_lease_release(lease: WeakLease) -> bool:
-    if not weak_lease_is_active(lease):
-        return false
-    g_weak_lease_active[lease.token_id] = false
-    val target_id = g_weak_lease_targets[lease.token_id]
-    if target_id >= 0 and target_id < g_weak_generations.len():
-        if g_weak_generations[target_id] == g_weak_lease_target_generations[lease.token_id]:
-            weak_remove_strong(target_id)
-    true

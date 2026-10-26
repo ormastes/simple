@@ -46,23 +46,7 @@ fn str_char_at(s: text, idx: i64) -> text:
     # Keep the legacy negative-index behavior of this free helper.
     if idx < 0:
         return ""
-    # Do not redispatch text.char_at here: native extension resolution maps
-    # that method back to this helper, creating unbounded self-recursion.
-    # Walk UTF-8 byte boundaries, then slice exactly one complete scalar.
-    val length = rt_string_len(s)
-    var offset = 0
-    var ordinal = 0
-    while offset < length:
-        val lead = s.byte_at(offset)
-        val width = if lead < 0x80: 1 elif lead < 0xE0: 2 elif lead < 0xF0: 3 else: 4
-        val next = offset + width
-        if next > length:
-            return ""
-        if ordinal == idx:
-            return s[offset:next]
-        offset = next
-        ordinal = ordinal + 1
-    ""
+    s.char_at(idx)
 
 # Search
 #
@@ -95,18 +79,18 @@ fn str_ends_with(s: text, suffix: text) -> bool:
     s[slen - flen:slen] == suffix
 
 fn str_index_of(s: text, sub: text) -> i64:
-    if sub.len() == 0:
+    val slen = s.len()
+    val sublen = sub.len()
+    if sublen == 0:
         return 0
-    if sub.len() > s.len():
+    if sublen > slen:
         return -1
-    # One native byte search (rt_text_find), the same idiom str_split uses
-    # below. The previous `s[i:i + sublen] == sub` loop allocated one
-    # substring per input byte. On the native lanes `text.contains` with a
-    # typed `text` receiver resolves to str_contains -> here, and the SCV
-    # cold inventory runs 23 such scans per source file, so this one loop
-    # cost ~25 us per source byte: 45k files / 295 MB took ~12 min of the
-    # Stage 2 cold init on Windows (2026-10-09).
-    s.index_of(sub, 0)
+    var i = 0
+    while i <= slen - sublen:
+        if s[i:i + sublen] == sub:
+            return i
+        i = i + 1
+    -1
 
 fn str_last_index_of(s: text, sub: text) -> i64:
     val slen = s.len()
@@ -165,22 +149,17 @@ fn trim_field(field: text, should_trim: bool) -> text:
 fn str_replace_all(s: text, old: text, new_s: text) -> text:
     if old == "":
         return s
+    val slen = s.len()
     val olen = old.len()
-    # Jump between leftmost non-overlapping matches with the native byte
-    # search (rt_text_find), the same idiom str_split uses below: one call
-    # and one slice per match instead of one 1-byte substring pushed per
-    # input byte. Same result as the previous left-to-right scan.
-    var hit = s.index_of(old, 0)
-    if hit < 0:
-        return s
     var result: [text] = []
-    var start = 0
-    while hit >= 0:
-        result.push(str_slice(s, start, hit))
-        result.push(new_s)
-        start = hit + olen
-        hit = s.index_of(old, start)
-    result.push(str_slice(s, start, s.len()))
+    var i = 0
+    while i < slen:
+        if i + olen <= slen and str_slice(s, i, i + olen) == old:
+            result.push(new_s)
+            i = i + olen
+        else:
+            result.push(s[i:i + 1])
+            i = i + 1
     result.join("")
 
 fn str_replace(s: text, old: text, new_s: text) -> text:
@@ -200,16 +179,16 @@ fn str_split(s: text, sep: text) -> [text]:
             result.push(s[k])
             k = k + 1
         return result
-    # Jump between separators with the native byte search (rt_text_find):
-    # one call per piece. A per-byte slice+compare allocated once per input
-    # byte and timed out the Stage 2 cold-init inventory (~292 MiB of .spl).
     var start = 0
-    var hit = s.index_of(sep, 0)
-    while hit >= 0:
-        result.push(str_slice(s, start, hit))
-        start = hit + plen
-        hit = s.index_of(sep, start)
-    result.push(str_slice(s, start, rt_string_len(s)))
+    var i = 0
+    while i <= slen - plen:
+        if str_slice(s, i, i + plen) == sep:
+            result.push(str_slice(s, start, i))
+            i = i + plen
+            start = i
+        else:
+            i = i + 1
+    result.push(str_slice(s, start, slen))
     result
 
 fn str_join(parts: [text], sep: text) -> text:

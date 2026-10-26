@@ -70,7 +70,7 @@ bin/simple build --driver-mode=dynamic examples/09_embedded/simple_os/drivers/nu
 
 MMIO goes through `std.io.volatile_ops`:
 
-```text
+```spl
 use std.io.volatile_ops.{volatile_read_u32, volatile_write_u32, memory_barrier}
 
 var CTRL_REG_ENABLE: i32 = 0x1 << 0
@@ -89,7 +89,7 @@ Bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`) work in the language.
 
 Interrupt handlers declare the `@interrupt` attribute:
 
-```text
+```spl
 @interrupt fn irq_handler(vec: u8):
     # minimal ISR: ack, schedule bottom half, return
     ...
@@ -100,7 +100,7 @@ Interrupt handlers declare the `@interrupt` attribute:
 Legal, but the `@driver` manifest must still be in the `.spl` shim, and
 the shim must implement `Driver`:
 
-```text
+```spl
 @driver(class = DriverClass.Block, vendor = 0x1B36, device = [0x000E], version = "1.0")
 module legacy_nvme_shim:
 
@@ -129,7 +129,7 @@ without a matching `impl Driver`.
 Unit-test a driver by constructing its struct directly and calling trait
 methods — no loader needed:
 
-```text
+```spl
 # test/drivers/null_block_test.spl
 use std.driver.core.{Driver}
 use std.driver.types.{DriverContext, DeviceId, DriverClass, ProbeResult}

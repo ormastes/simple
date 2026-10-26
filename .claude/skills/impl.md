@@ -10,13 +10,6 @@
 
 ## Prerequisites Check
 
-Native linker policy: `doc/07_guide/compiler/linker_selection.md`.
-Use external mold/LLD or the admitted platform route while the separate,
-mold-like internal Simple engine is being stabilized. Internal default cutover
-needs real target-specific correctness, compiler/application and performance
-evidence plus review. Record the actual engine/fallback; external linking is
-not internal proof. Managed native admission requires its external hosted linker.
-
 Before starting, check what exists — missing artifacts are created in phases 1-5:
 
 | Artifact | Path | Phase |

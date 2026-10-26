@@ -97,11 +97,8 @@ pub extern "C" fn rt_vulkan_select_device(id: i64) -> i64 {
 
     match VulkanDevice::new(selected) {
         Ok(dev) => {
-            if let Err(error) = state.install_selected_device(dev.clone()) {
-                state.set_error(error);
-                return 0;
-            }
             state.semaphore_pool = Some(SemaphorePool::new(dev.clone()));
+            state.device = Some(dev);
             1
         }
         Err(e) => {
@@ -123,8 +120,8 @@ pub extern "C" fn rt_vulkan_select_device(_id: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_get_device() -> i64 {
     let state = STATE.lock();
-    if state.device.is_some() && !state.device_generation_quarantined {
-        state.selected_device_token
+    if state.device.is_some() {
+        1
     } else {
         0
     }
@@ -134,64 +131,6 @@ pub extern "C" fn rt_vulkan_get_device() -> i64 {
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_get_device() -> i64 {
     0
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// UUIDs for the selected logical device's physical-device owner. This must
-/// never be derived from the enumerated-device cache: enumeration may precede
-/// a later selection or device generation. An empty C string means the owner
-/// is absent, software/unknown, or does not report physical UUIDs.
-#[no_mangle]
-#[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_selected_device_identity_v1(expected_token: i64) -> *const c_char {
-    let mut state = STATE.lock();
-    if (expected_token <= 0
-        || expected_token != state.selected_device_token
-        || state.device_generation_quarantined)
-    {
-        return empty_cstr();
-    }
-    let Some(device) = state.device.as_ref() else {
-        return empty_cstr();
-    };
-    let physical = device.physical_device();
-    if !matches!(
-        physical.properties.device_type,
-        vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::INTEGRATED_GPU
-    ) {
-        return empty_cstr();
-    }
-    let Some(instance) = state.instance.as_ref() else {
-        return empty_cstr();
-    };
-    let mut ids = vk::PhysicalDeviceIDProperties::default();
-    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut ids);
-    unsafe {
-        instance
-            .instance()
-            .get_physical_device_properties2(physical.handle, &mut properties);
-    }
-    if ids.device_uuid.iter().all(|byte| *byte == 0)
-        || ids.driver_uuid.iter().all(|byte| *byte == 0)
-    {
-        return empty_cstr();
-    }
-    let mut identity = String::from("v1:");
-    for byte in ids.device_uuid {
-        identity.push_str(&format!("{byte:02x}"));
-    }
-    identity.push(':');
-    for byte in ids.driver_uuid {
-        identity.push_str(&format!("{byte:02x}"));
-    }
-    state.cached_cstr(identity)
-}
-
-#[no_mangle]
-#[cfg(not(feature = "vulkan"))]
-pub extern "C" fn rt_vulkan_selected_device_identity_v1(_expected_token: i64) -> *const c_char {
-    empty_cstr()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

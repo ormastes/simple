@@ -274,7 +274,6 @@ impl _Lowerer:
     fn expr_is_float(e: HirExpr) -> bool:
         match e.kind:
             case HirExprKind.FloatLit(_, _): true
-            case HirExprKind.FloatLexeme(_, _): true
             case HirExprKind.Binary(_, left, right):
                 self.expr_is_float(left) or self.expr_is_float(right)
             case _:
@@ -320,9 +319,6 @@ impl _Lowerer:
             case HirExprKind.FloatLit(value, _):
                 self.emit_op(OP_PUSHF)
                 self.emit_imm32(f32_to_bits(value as f32) as i64)
-            case HirExprKind.FloatLexeme(value, _):
-                self.emit_op(OP_PUSHF)
-                self.emit_imm32(f32_to_bits(value.to_float() as f32) as i64)
             case HirExprKind.Var(symbol):
                 self.load_local(symbol)
             case HirExprKind.NamedVar(symbol, _):
@@ -546,17 +542,14 @@ impl _Lowerer:
                     case HirExprKind.NamedVar(symbol, _): Some(symbol)
                     case _: nil
                 if val sym = target_sym:
-                    if val compound_op = op:
-                        if self.expr_is_float(target) or self.expr_is_float(value):
-                            self.fail("compound assignment (+=/-=/etc) on a float local is in the design §4.4 subset but is not yet implemented by this D4 lowering pass (assign_opcode only maps to integer opcodes)")
-                        else:
-                            val maybe_opcode = self.assign_opcode(compound_op)
-                            if val opcode = maybe_opcode:
-                                self.compound_assign(sym, opcode, value)
-                            else:
-                                self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
+                    if self.expr_is_float(target) or self.expr_is_float(value):
+                        self.fail("compound assignment (+=/-=/etc) on a float local is in the design §4.4 subset but is not yet implemented by this D4 lowering pass (assign_opcode only maps to integer opcodes)")
                     else:
-                        self.store_local_expr(sym, value)
+                        val maybe_opcode = self.assign_opcode(op)
+                        if val opcode = maybe_opcode:
+                            self.compound_assign(sym, opcode, value)
+                        else:
+                            self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
                 else:
                     self.fail("assignment target must be a local variable in the SVM-G v1 lowering subset")
             case _:
@@ -607,15 +600,12 @@ impl _Lowerer:
     me lower_for(var_: SymbolId, iter: HirExpr, body: HirBlock):
         match iter.kind:
             case HirExprKind.Range(start, end, inclusive, step):
-                if start == nil or end == nil:
-                    self.fail("SVM-G for-loops require both range bounds")
-                    return
-                self.store_local_expr(var_, start!)
+                self.store_local_expr(var_, start)
                 if not self.ok():
                     return
                 val loop_head = self.code.len()
                 self.load_local(var_)
-                self.lower_expr(end!)
+                self.lower_expr(end)
                 if not self.ok():
                     return
                 self.emit_op(if inclusive: OP_LE else: OP_LT)
@@ -623,7 +613,7 @@ impl _Lowerer:
                 self.lower_block_stmts(body)
                 if not self.ok():
                     return
-                val step_expr = step ?? HirExpr(kind: HirExprKind.IntLit(1, None), has_type_: false, type_: _dummy_type(), span: Span.empty())
+                val step_expr = step ?? HirExpr(kind: HirExprKind.IntLit(1, nil), has_type_: false, type_: _dummy_type(), span: Span.empty())
                 self.compound_assign(var_, OP_ADD, step_expr)
                 if not self.ok():
                     return

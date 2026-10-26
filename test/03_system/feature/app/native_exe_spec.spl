@@ -1,5 +1,3 @@
-# @cover src/compiler/70.backend/build_native_types.spl 80%
-# @cover src/compiler/70.backend/backend/entry_point.spl 80%
 """
 ## Purpose and audience
 Purpose: pins BuildConfig defaults, LLVM/SMF backend selection, generated
@@ -81,7 +79,7 @@ linking, and that generated binaries execute with expected behavior.
 # - Entry point supports both hosted (main) and bare-metal (_start) modes
 
 use compiler.backend.build_native_types.{BuildConfig}
-use compiler.backend.entry_point.{generate_entry_point_ir, generate_start_ir}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir, generate_start_ir}
 use std.io_runtime.{file_read}
 
 # ============================================================================
@@ -128,13 +126,14 @@ describe "BuildConfig":
             step("Verify the real constructor set optimization to level 0 (Debug)")
             expect(cfg.optimization).to_equal(0)  # oracle: 0 — BuildConfig.default()'s own optimization field
 
-        it "delegates default CRT libraries to the target linker":
+        it "defaults to libc as library dependency":
             # @req REQ-NATIVE-EXE-005
             step("Ask BuildConfig.default() to build a config")
             val cfg = BuildConfig.default("src/main.spl", "my_program")
             # @capture: evidence_manifest("native_exe_config_libc_default") -> native_exe_spec.evidence.sdn
-            step("Verify no platform-specific library is injected into requested dependencies")
-            expect(cfg.libraries).to_equal([])
+            step("Verify the real constructor's default library list is just libc")
+            expect(cfg.libraries[0]).to_equal("c")
+            expect(cfg.libraries.len()).to_equal(1)  # oracle: 1 — BuildConfig.default()'s own libraries field
 
     context "LLVM backend configuration":
         it "accepts llvm as backend value":
@@ -177,13 +176,16 @@ describe "BuildConfig":
             expect(cfg.target_cpu.?).to_equal(true)
             expect(cfg.target_cpu.unwrap()).to_equal("x86-64-v3")
 
-        it "delegates CLI standard libraries to the target linker":
+        it "includes standard libraries":
             # @req REQ-NATIVE-EXE-009
             step("Ask BuildConfig.for_simple_cli() to build a config")
             val cfg = BuildConfig.for_simple_cli()
             # @capture: evidence_manifest("native_exe_009") -> native_exe_spec.evidence.sdn
-            step("Verify the CLI constructor does not inject Unix libraries on every target")
-            expect(cfg.libraries).to_equal([])
+            step("Verify the real constructor's library list")
+            expect(cfg.libraries[0]).to_equal("c")
+            expect(cfg.libraries.len()).to_equal(3)  # oracle: 3 — BuildConfig.for_simple_cli()'s own libraries field
+            expect(cfg.libraries[1]).to_equal("m")
+            expect(cfg.libraries[2]).to_equal("pthread")
 
         it "uses optimization level 2":
             # @req REQ-NATIVE-EXE-010

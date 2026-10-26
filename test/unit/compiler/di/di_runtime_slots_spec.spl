@@ -1,0 +1,70 @@
+use std.spec
+use compiler.common.di_runtime_slots.{
+    di_runtime_build_slot_index,
+    di_runtime_collection_slot,
+    di_runtime_final_slot,
+    di_runtime_index_diagnostics,
+    di_runtime_plugin_binding,
+    di_runtime_resolve_indexed,
+    di_runtime_slot,
+    di_runtime_validate_binding
+}
+
+describe "DI runtime slot plugin bindings":
+    it "resolves a declared scalar runtime slot to a plugin-backed implementation":
+        val slots = [di_runtime_slot("payment", "PaymentProvider")]
+        val bindings = [
+            di_runtime_plugin_binding("payment", "PaymentProvider", "stripe", "plugins/stripe.so", "StripePaymentProvider", 10)
+        ]
+        val index = di_runtime_build_slot_index(slots, bindings)
+        val result = di_runtime_resolve_indexed(index, "payment")
+
+        expect(result.ok).to_equal(true)
+        expect(result.implementation).to_equal("StripePaymentProvider")
+        expect(result.startup_scan_count).to_equal(1)
+        expect(result.hot_resolve_count).to_equal(1)
+        expect(di_runtime_index_diagnostics(index).len()).to_equal(0)
+
+    it "rejects undeclared slots, final slots, type mismatches, and unsafe paths":
+        val slots = [
+            di_runtime_slot("payment", "PaymentProvider"),
+            di_runtime_final_slot("core_logger", "Logger")
+        ]
+
+        expect(di_runtime_validate_binding(slots, di_runtime_plugin_binding("missing", "PaymentProvider", "x", "plugins/x.so", "Impl", 1)).kind).to_equal("UndeclaredRuntimeSlot")
+        expect(di_runtime_validate_binding(slots, di_runtime_plugin_binding("core_logger", "Logger", "x", "plugins/x.so", "Impl", 1)).kind).to_equal("FinalRuntimeSlot")
+        expect(di_runtime_validate_binding(slots, di_runtime_plugin_binding("payment", "OtherType", "x", "plugins/x.so", "Impl", 1)).kind).to_equal("RuntimeSlotTypeMismatch")
+        expect(di_runtime_validate_binding(slots, di_runtime_plugin_binding("payment", "PaymentProvider", "x", "/tmp/x.so", "Impl", 1)).kind).to_equal("UnsafeRuntimeSlotPath")
+        expect(di_runtime_validate_binding(slots, di_runtime_plugin_binding("payment", "PaymentProvider", "x", "../x.so", "Impl", 1)).kind).to_equal("UnsafeRuntimeSlotPath")
+
+    it "orders collection runtime slots deterministically":
+        val slots = [di_runtime_collection_slot("tools", "ToolPlugin")]
+        val bindings = [
+            di_runtime_plugin_binding("tools", "ToolPlugin", "zeta", "plugins/zeta.so", "ZetaTool", 20),
+            di_runtime_plugin_binding("tools", "ToolPlugin", "alpha", "plugins/alpha.so", "AlphaTool", 10),
+            di_runtime_plugin_binding("tools", "ToolPlugin", "beta", "plugins/beta.so", "BetaTool", 10)
+        ]
+        val index = di_runtime_build_slot_index(slots, bindings)
+        val result = di_runtime_resolve_indexed(index, "tools")
+
+        expect(result.ok).to_equal(true)
+        expect(result.implementations.len()).to_equal(3)
+        expect(result.implementations[0]).to_equal("AlphaTool")
+        expect(result.implementations[1]).to_equal("BetaTool")
+        expect(result.implementations[2]).to_equal("ZetaTool")
+        expect(result.startup_scan_count).to_equal(3)
+
+    it "reports typed diagnostics for missing and duplicate implementations":
+        val slots = [di_runtime_slot("payment", "PaymentProvider")]
+        val missing_index = di_runtime_build_slot_index(slots, [])
+        val missing = di_runtime_resolve_indexed(missing_index, "payment")
+        expect(missing.ok).to_equal(false)
+        expect(missing.diagnostic.kind).to_equal("MissingRuntimeSlotImplementation")
+
+        val duplicate_index = di_runtime_build_slot_index(slots, [
+            di_runtime_plugin_binding("payment", "PaymentProvider", "a", "plugins/a.so", "AProvider", 1),
+            di_runtime_plugin_binding("payment", "PaymentProvider", "b", "plugins/b.so", "BProvider", 2)
+        ])
+        val duplicate = di_runtime_resolve_indexed(duplicate_index, "payment")
+        expect(duplicate.ok).to_equal(false)
+        expect(duplicate.diagnostic.kind).to_equal("DuplicateRuntimeSlotImplementation")

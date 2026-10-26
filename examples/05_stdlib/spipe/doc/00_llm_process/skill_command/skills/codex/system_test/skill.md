@@ -54,7 +54,7 @@ Generate test specs using **built-in matchers only**.
 
 ### SPipe Template
 
-```simple:skip
+```simple
 use std.spec.SPipe
 
 describe "<Feature Name>":

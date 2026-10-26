@@ -34,7 +34,7 @@ val ZSTD_MAX_BLOCK_SIZE = 131072  # 128 KiB
 # Frame header result
 # ---------------------------------------------------------------------------
 
-struct ZstdLegacyFrameHeader:
+struct ZstdFrameHeader:
     window_size: i64          # decompressed window size
     dict_id: i64              # 0 = no dictionary
     content_size: i64         # -1 = unknown
@@ -61,7 +61,7 @@ fn zstd_parse_magic(r: ZstdBitReader) -> Result<ZstdMagicResult, CompressionErro
     Err(CompressionError.InvalidHeader("zstd bad magic"))
 
 # Parse Frame_Header_Descriptor + window + dict_id + FCS.
-fn zstd_parse_frame_header(r: ZstdBitReader) -> Result<ZstdLegacyFrameHeader, CompressionError>:
+fn zstd_parse_frame_header(r: ZstdBitReader) -> Result<ZstdFrameHeader, CompressionError>:
     # FHD byte
     val r1 = zstd_br_read(r, 8)?
     val fhd = r1.value
@@ -119,10 +119,12 @@ fn zstd_parse_frame_header(r: ZstdBitReader) -> Result<ZstdLegacyFrameHeader, Co
             cur = rc.reader
         else:
             if fcs_flag == 2:
-                # 4 bytes (RFC 8878 3.1.1.1.4)
-                val rc = zstd_br_read_u32(cur)?
-                content_size = rc.value
-                cur = rc.reader
+                # 3-byte: not directly readable as 24-bit with helpers, do manually
+                val rb0 = zstd_br_read(cur, 8)?
+                val rb1 = zstd_br_read(rb0.reader, 8)?
+                val rb2 = zstd_br_read(rb1.reader, 8)?
+                content_size = rb0.value | (rb1.value << 8) | (rb2.value << 16)
+                cur = rb2.reader
             else:
                 # fcs_flag == 3: 8 bytes
                 val r0 = zstd_br_read_u32(cur)?
@@ -136,7 +138,7 @@ fn zstd_parse_frame_header(r: ZstdBitReader) -> Result<ZstdLegacyFrameHeader, Co
     if single_seg == 1 and content_size >= 0:
         window_size = content_size
 
-    Ok(ZstdLegacyFrameHeader(
+    Ok(ZstdFrameHeader(
         window_size:  window_size,
         dict_id:      dict_id,
         content_size: content_size,

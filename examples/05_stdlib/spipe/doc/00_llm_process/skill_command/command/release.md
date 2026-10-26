@@ -1,4 +1,4 @@
-<!-- llm-process-gen: managed source=claude_release_command source_sha256=03ba9c81f08e225ad6b61ba40bcc36afeee07c9a3ba7f8eff5b7e935aac7e3b0 content_sha256=4037f2a0b6441dd35e75abc3dc0c8fc2d1bd104d5e3209463bf6a9be8bbc0c6e -->
+<!-- llm-process-gen: managed source=claude_release_command source_sha256=8101a3f942cf7248127ec5931807a5fd55425fb7bfb11ea1aedfaa70a7a6551b content_sha256=83dbb5431a27bdfdd2396cc66d1d370420dd4da2b9b677170a4c9ff8de21814b -->
 # Release Skill
 
 Release contract: isolated-session; reviewed-beta-backport; immutable-candidate; promote-without-rebuild; protected-ref-guard; non-destructive-release-identity.
@@ -118,7 +118,3 @@ on any *undeclared* version consumer it discovers.
 - Ordinary code and text are eligible by default absent an operator deny or constrain record with code, text, file, directory_files, and directory_recursive scopes.
 - Push, retarget, base, diff, ruleset, policy, or expiry invalidation requires a fresh exact-head review and a new self-review admission dispatch.
 - Rejection remediation follows the exact reason without broadening protected integration, candidate, release, signing, or publication authority.
-
-## Self-review admission
-
-GitHub forbids PR authors from submitting an `APPROVED` review on their own PR. Protected integration uses the required `SPipe Self Review Admission` status instead; it is not provider or independent approval. Explicit `self_attested` high-capability/high-effort PASS with zero P0/P1 binds protected target/ruleset, head, base, merge-base, and diff for ten minutes. Ordinary code/text is default allow absent operator deny/constrain through `code`, `text`, exact `file`, immediate `directory_files`, and recursive `directory_recursive` scopes. On rejection/invalidation, follow the reason: drift/expiry needs fresh exact-head review+dispatch; deny needs external policy-owner action or an eligible independent route; uncovered scope needs a smaller diff/new constraint; unsafe or secret material must be removed and credentials rotated. Never attempt author `APPROVED`, reuse a stale check, or weaken candidate/release/publication authority. Generic Actions App trust risk is user-accepted, not independent security. Release-environment approval and candidate admission remain separate.

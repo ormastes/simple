@@ -552,7 +552,7 @@ This allows seamless migration - new loaders can read both old and new formats.
 **No Changes Required** - v1.1 compilers automatically detect generics and generate appropriate format.
 
 **Before** (v1.0 - generics fully monomorphized):
-```text
+```simple
 # collections.spl
 struct List<T>:
     data: [T]
@@ -566,7 +566,7 @@ $ simple compile collections.spl -o collections.smf
 ```
 
 **After** (v1.1 - templates stored):
-```text
+```simple
 # collections.spl (same source!)
 struct List<T>:
     data: [T]
@@ -742,7 +742,7 @@ TemplateMeta:
 ```
 
 **Application** (`app.spl`):
-```text
+```simple
 import collections.List
 
 fn main():

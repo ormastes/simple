@@ -505,7 +505,7 @@ No duplicated parser logic in interpreter, loader, or compiler.
 - CI includes cross-path parse parity tests.
 
 ### Minimal flow contract (reference)
-```simple:skip
+```text
 source -> shared lexer -> shared treesitter(CST) -> shared parser(AST/HIR)
       -> (compiler lower/codegen) OR (interpreter eval) OR (loader/link path)
 ```
@@ -748,7 +748,7 @@ will result by coverage verifier.
 Test runner to check file coverage which deployment coverage testcase monitoring to gen coverage on different directories.
 before to go 2. step, make link files to overall coverage directory and make each depoyment coverage tests directoy and make link on there.
 It can specify coverage listen target by file(however it not specify filename self but module path), and threashold by file or class.
-```text
+```simple
 # @deplyment_coverage
 describe "Parser deplyomeent coverage":
   it "should cover LLVMBackend":

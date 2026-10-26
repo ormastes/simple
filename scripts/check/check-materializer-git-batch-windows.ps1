@@ -1,5 +1,4 @@
 $ErrorActionPreference = 'Stop'
-& (Join-Path $PSScriptRoot 'check-materializer-receipt-path-windows.ps1')
 $producer = Join-Path $PSScriptRoot '../setup/materialize-symlinks-windows.shs'
 $source = [IO.File]::ReadAllText((Resolve-Path $producer))
 $match = [regex]::Match($source, "(?s)<<'POWERSHELL'\r?\n(.*?)\r?\nPOWERSHELL")
@@ -32,6 +31,7 @@ try {
     $start.RedirectStandardError = $true
     $start.EnvironmentVariables['MATERIALIZER_ROOT'] = $fixture
     $start.EnvironmentVariables['MATERIALIZER_TREE'] = $tree
+    $start.EnvironmentVariables['MATERIALIZER_LIST'] = Join-Path $fixture 'list'
     $start.EnvironmentVariables['MATERIALIZER_POLICY'] = $policy
     $start.EnvironmentVariables['MATERIALIZER_POLICY_SHA256'] = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
     $start.EnvironmentVariables['MATERIALIZER_BLOB'] = $output

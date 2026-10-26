@@ -2,10 +2,12 @@
 #
 # format_number() implements a practical subset of Excel's Format Cells >
 # Number format-code language: fixed decimals, thousands grouping, percent,
-# a generic currency/literal-prefix form, scientific notation, and date
-# serials. It is the richer sibling of `cell_format._cf_excel_format` (which
-# stays as-is to protect its existing green regression spec); this module is
-# the new home for number-format work and the one to extend going forward.
+# a generic currency/literal-prefix form, scientific notation, date
+# serials, ";"-separated multi-section codes, thousands-scaling commas, a
+# simple quoted-literal suffix, and "?" as a "#"-alike digit placeholder.
+# It is the richer sibling of `cell_format._cf_excel_format` (which stays
+# as-is to protect its existing green regression spec); this module is the
+# new home for number-format work and the one to extend going forward.
 #
 # Subset shipped (docstring ceiling -- everything else falls back to
 # general display rather than erroring):
@@ -14,19 +16,71 @@
 #   "0%" / "0.0%" / "0.00%"    value * 100 with a trailing "%"
 #   "$#,##0.00"                any LITERAL run before the first "0"/"#" is
 #                               kept as a prefix (currency symbol, "USD ", ...)
+#   "#,##0.00)"-style suffix   any LITERAL run after the last "0"/"#"/"?" is
+#                               kept as a suffix -- this is how a
+#                               parenthesized negative section
+#                               ("(#,##0.00)") and a quoted-literal unit
+#                               suffix ("0.00 \"kg\"") both render.
+#   "0.0,,"                    each TRAILING comma right after the last
+#                               digit placeholder (nothing but commas
+#                               between the digits and the end of the
+#                               section) divides the value by 1000 --
+#                               Excel's thousands/millions scaling. A comma
+#                               INSIDE the digit run ("#,##0") is still
+#                               plain thousands grouping, not scaling.
 #   "0.00E+00"                 scientific notation, N-digit mantissa,
 #                               2-digit signed exponent
-#   "yyyy-mm-dd" / "mm/dd/yyyy" / "dd.mm.yyyy"
-#                               value read as an Excel date serial
+#   "yyyy-mm-dd" / "mm/dd/yyyy" / "dd.mm.yyyy" / "dd/mm/yyyy" / "d/m/yyyy" /
+#   "dd-mmm-yyyy" / "mmmm dd, yyyy"
+#                               value read as an Excel date serial; date
+#                               tokens (yyyy/yy, mmmm/mmm/mm/m, dd/d) are
+#                               read in the order they appear in the code,
+#                               so dd/mm and mm/dd are properly distinct
+#                               (any other character is a literal
+#                               separator, passed through as-is)
 #   "@"                        text passthrough (meaningful at the
 #                               cell_display_formatted layer; on a bare f64
 #                               it degrades to general)
 #   ""                         general -- trim to integer form when the
 #                               value has no fraction
-# Negative numbers get a plain "-" prefix. A ";"-separated multi-section
-# code (positive;negative;zero;text) is OUT of scope: only the first
-# section is used. Unknown/unsupported codes fall back to general rather
-# than erroring the display path.
+#   "[Red]", "[Blue]", ...     any "[...]" bracketed tag is stripped and
+#                               ignored -- colors are never rendered in
+#                               text output, and no other bracket-tag
+#                               (locale, condition) is interpreted either
+#   "\"literal\""              a quoted literal is unwrapped (the quote
+#                               characters are dropped, the content kept in
+#                               place) before the rest of the section is
+#                               parsed -- this is how a quoted currency
+#                               prefix, a quoted unit suffix, and a
+#                               quoted-only section (e.g. a zero section of
+#                               just "\"-\"") all work
+#   "?"                        treated like "#" for locating the digit run
+#                               and its right edge (so it participates in
+#                               prefix/suffix detection without breaking
+#                               parsing) -- ceiling: it does NOT get real
+#                               Excel space-padding, and alone (with no "0"
+#                               or "#" present) it does not anchor a
+#                               section as numeric at all (kept so the
+#                               landed "falls back to general for an
+#                               unrecognized code" case ("???") stays
+#                               unchanged)
+#
+# ";"-separated multi-section codes (Excel semantics):
+#   1 section  -- applies to every value; a negative value gets a plain
+#                 "-" prefix ahead of the formatted magnitude (unchanged
+#                 single-section behavior).
+#   2 sections -- section 1 for positive AND zero values; section 2 for
+#                 negative values, applied to the ABSOLUTE value with NO
+#                 automatic "-" -- a sign only appears if the section
+#                 itself has one (a literal "-" prefix, or a parenthesized
+#                 pattern like "(#,##0.00)").
+#   3 sections -- section 1 positive, section 2 negative (as above,
+#                 absolute value), section 3 zero.
+#   4 sections -- as above plus a 4th TEXT section, applied only to text
+#                 cell values via `format_text_with_code` (see below); a
+#                 bare `format_number` call (always numeric) never reaches
+#                 it. Splitting on ";" is quote-aware -- a ";" inside a
+#                 quoted literal is never treated as a section boundary.
 #
 # Date serials reuse `civil_from_serial` from `std.math.financial` (the
 # financial library's own Hinnant's-algorithm civil<->serial conversion) --
@@ -44,60 +98,47 @@ use app.office.sheets.cell_format.{SheetFormats, formats_get}
 
 fn format_number(value: f64, code: text) -> text:
     """Format `value` per an Excel-style number-format `code` (see module
-    docstring for the supported subset). Only the first ";"-separated
-    section of `code` is honored. Unknown codes fall back to general
-    display -- this function never errors."""
-    val semi = code.index_of(";")
-    val sec0 = if semi >= 0: code.substring(0, semi) else: code
-    if sec0 == "" or sec0.lower() == "general":
-        return _nf_general(value)
-    if sec0 == "@":
-        return _nf_general(value)
-    val lower = sec0.lower()
-    if lower.contains("y") and (lower.contains("m") or lower.contains("d")):
-        return _nf_format_date(value, lower)
-    val neg = value < 0.0
-    val av = if neg: 0.0 - value else: value
-    if lower.contains("e+") or lower.contains("e-"):
-        val body = _nf_format_scientific(av, _nf_count_decimals(lower))
-        if neg:
-            return "-{body}"
-        return body
-    if sec0.ends_with("%"):
-        val decs = _nf_count_decimals(sec0)
-        val body = "{_nf_fixed_grouped(av * 100.0, decs, false)}%"
-        if neg:
-            return "-{body}"
-        return body
-    val zero_idx = sec0.index_of("0")
-    val hash_idx = sec0.index_of("#")
-    var digit_idx = -1
-    if zero_idx < 0:
-        digit_idx = hash_idx
-    elif hash_idx < 0:
-        digit_idx = zero_idx
-    elif zero_idx < hash_idx:
-        digit_idx = zero_idx
-    else:
-        digit_idx = hash_idx
-    if digit_idx < 0:
-        return _nf_general(value)
-    val prefix = sec0.substring(0, digit_idx)
-    val core = sec0.substring(digit_idx, sec0.len())
-    val grouped = core.contains(",")
-    val decs = _nf_count_decimals(core)
-    val body = "{prefix}{_nf_fixed_grouped(av, decs, grouped)}"
-    if neg:
-        return "-{body}"
-    body
+    docstring for the supported subset). `code` may have 1-4
+    ";"-separated sections (positive[;negative[;zero[;text]]]); the text
+    (4th) section never applies here since `value` is always numeric --
+    use `format_text_with_code` for text cells. This function never
+    errors -- unknown/unsupported section codes fall back to general
+    display."""
+    val sections = _nf_split_sections(code)
+    val n = sections.len()
+    if n == 1:
+        return _nf_render_section(value, sections[0], true)
+    if n == 2:
+        if value < 0.0:
+            return _nf_render_section(0.0 - value, sections[1], false)
+        return _nf_render_section(value, sections[0], false)
+    if value == 0.0:
+        return _nf_render_section(value, sections[2], false)
+    if value < 0.0:
+        return _nf_render_section(0.0 - value, sections[1], false)
+    _nf_render_section(value, sections[0], false)
+
+fn format_text_with_code(text_value: text, code: text) -> text:
+    """Applies the 4th ";"-separated (text) section of `code` to a text
+    cell value: every "@" placeholder in that section is replaced with
+    `text_value`. A `code` with fewer than 4 sections has no text section
+    -- `text_value` passes through unchanged (matching Excel, which then
+    falls back to plain text display)."""
+    val sections = _nf_split_sections(code)
+    if sections.len() < 4:
+        return text_value
+    val no_color = _nf_strip_color_tags(sections[3])
+    val stripped = _nf_strip_quotes(no_color)
+    _nf_apply_text_section(text_value, stripped)
 
 fn cell_display_formatted(sheet: Sheet, formats: SheetFormats, ref: text) -> text:
     """Number-format-aware display text for one cell: applies `format_number`
     when the cell resolves to a number (a plain numeric cell, or a formula
     cell whose cached display is a plain numeric result) AND a format code
-    is set, otherwise falls back to `cell_display_text` (unchanged, general
-    display). Opt-in at the call site -- `cell_display_text` itself is
-    untouched."""
+    is set; applies `format_text_with_code` when the cell is text AND the
+    code has a 4th (text) section; otherwise falls back to
+    `cell_display_text` (unchanged, general display). Opt-in at the call
+    site -- `cell_display_text` itself is untouched."""
     val cell = sheet.get_cell(ref)
     val spec = formats_get(formats, ref)
     if spec.num_fmt != "":
@@ -107,6 +148,11 @@ fn cell_display_formatted(sheet: Sheet, formats: SheetFormats, ref: text) -> tex
             CellValue.FormulaVal(expr, cached_display):
                 if _nf_looks_numeric(cached_display):
                     return format_number(office_parse_signed_decimal_f64(cached_display), spec.num_fmt)
+                return cell_display_text(cell)
+            CellValue.TextVal(value):
+                val sections = _nf_split_sections(spec.num_fmt)
+                if sections.len() >= 4:
+                    return format_text_with_code(value, spec.num_fmt)
                 return cell_display_text(cell)
             _:
                 pass
@@ -146,6 +192,192 @@ fn _nf_looks_numeric(s: text) -> bool:
 # documented same-name flat-symbol-table collision across modules -- see
 # cell_format.spl's `_cf_` helpers for the precedent).
 # =========================================================================
+
+fn _nf_split_sections(code: text) -> [text]:
+    """Split `code` on ";" outside quoted "..." literals -- a ";" inside a
+    quoted section (e.g. a literal containing a semicolon) is NOT a
+    section boundary. Always returns at least one element (an empty
+    `code` yields one empty section, matching the pre-multi-section
+    general/empty-code fallback)."""
+    var sections: [text] = []
+    var current = ""
+    var in_quote = false
+    var i = 0
+    val n = code.len()
+    while i < n:
+        val c = code.substring(i, i + 1)
+        if c == "\"":
+            in_quote = not in_quote
+            current = "{current}{c}"
+        elif c == ";" and (not in_quote):
+            sections.push(current)
+            current = ""
+        else:
+            current = "{current}{c}"
+        i = i + 1
+    sections.push(current)
+    sections
+
+fn _nf_strip_color_tags(s: text) -> text:
+    """Remove any "[...]" bracketed tag (a color like "[Red]", or any other
+    locale/condition tag) entirely -- tags are stripped and ignored, never
+    interpreted (no color rendering, no "[>100]"-style conditional
+    sections)."""
+    var out = ""
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.substring(i, i + 1)
+        if c == "[":
+            var j = i + 1
+            while j < n and s.substring(j, j + 1) != "]":
+                j = j + 1
+            if j < n:
+                i = j + 1
+            else:
+                out = "{out}{c}"
+                i = i + 1
+        else:
+            out = "{out}{c}"
+            i = i + 1
+    out
+
+fn _nf_strip_quotes(s: text) -> text:
+    """Remove '"' characters, keeping their contents in place -- turns a
+    quoted literal like "0.00 \"kg\"" into "0.00 kg" so the generic
+    prefix/suffix scan below picks the literal up as a plain suffix (or
+    prefix). Ceiling: backslash escapes inside a quoted literal are out of
+    scope."""
+    var out = ""
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.substring(i, i + 1)
+        if c != "\"":
+            out = "{out}{c}"
+        i = i + 1
+    out
+
+fn _nf_apply_text_section(text_value: text, section: text) -> text:
+    """Replace each "@" placeholder in `section` with `text_value`; a
+    section with no "@" is a literal-only text template."""
+    var out = ""
+    var i = 0
+    val n = section.len()
+    while i < n:
+        val c = section.substring(i, i + 1)
+        if c == "@":
+            out = "{out}{text_value}"
+        else:
+            out = "{out}{c}"
+        i = i + 1
+    out
+
+fn _nf_first_digit_idx(s: text) -> i32:
+    """Index of the first "0" or "#" in `s` (whichever comes first), or -1
+    if neither is present. Deliberately excludes "?" -- a section made of
+    ONLY "?" placeholders (e.g. the historical "???" unrecognized-code
+    probe) must still fall back to general display, not be treated as a
+    real numeric pattern."""
+    val zero_idx = s.index_of("0")
+    val hash_idx = s.index_of("#")
+    if zero_idx < 0:
+        return hash_idx
+    if hash_idx < 0:
+        return zero_idx
+    if zero_idx < hash_idx:
+        return zero_idx
+    hash_idx
+
+fn _nf_last_digit_idx(core: text) -> i32:
+    """Index of the LAST "0", "#", or "?" in `core` (used to find where
+    the digit run ends and any literal/scaling suffix begins). Unlike
+    `_nf_first_digit_idx`, "?" counts here -- by the time this runs, a
+    real "0"/"#" anchor has already been found, so "?" safely extends the
+    digit run for suffix-boundary purposes."""
+    var last = -1
+    var i = 0
+    val n = core.len()
+    while i < n:
+        val c = core.substring(i, i + 1)
+        if c == "0" or c == "#" or c == "?":
+            last = i
+        i = i + 1
+    last
+
+fn _nf_all_commas(s: text) -> bool:
+    """True if every character of a non-empty `s` is ",". Used to tell a
+    thousands-SCALING suffix (only commas, e.g. the ",," in "0.0,,") apart
+    from a literal suffix like ")" or " kg"."""
+    var i = 0
+    val n = s.len()
+    while i < n:
+        if s.substring(i, i + 1) != ",":
+            return false
+        i = i + 1
+    true
+
+fn _nf_render_section(value: f64, section_in: text, allow_auto_sign: bool) -> text:
+    """Render one ";"-separated section against `value`. `allow_auto_sign`
+    is true only for a single-section code (`value` may be negative and
+    gets an automatic "-" prefix); for a multi-section code the caller
+    always passes the correct sign-appropriate value (already made
+    absolute for a negative section) and `allow_auto_sign=false`, since
+    Excel only shows a sign there if the section spells one out itself
+    (a literal "-", or parentheses)."""
+    val no_color = _nf_strip_color_tags(section_in)
+    val section = _nf_strip_quotes(no_color)
+    val had_quotes = no_color != section
+    val lower = section.lower()
+    if section == "" or lower == "general":
+        return _nf_general(value)
+    if section == "@":
+        return _nf_general(value)
+    if lower.contains("y") and (lower.contains("m") or lower.contains("d")):
+        return _nf_format_date(value, lower)
+    var neg = false
+    var av = value
+    if value < 0.0:
+        av = 0.0 - value
+        if allow_auto_sign:
+            neg = true
+    if lower.contains("e+") or lower.contains("e-"):
+        val body = _nf_format_scientific(av, _nf_count_decimals(section))
+        if neg:
+            return "-{body}"
+        return body
+    if section.ends_with("%"):
+        val decs = _nf_count_decimals(section)
+        val body = "{_nf_fixed_grouped(av * 100.0, decs, false)}%"
+        if neg:
+            return "-{body}"
+        return body
+    val digit_idx = _nf_first_digit_idx(section)
+    if digit_idx < 0:
+        if had_quotes:
+            return section
+        return _nf_general(value)
+    val prefix = section.substring(0, digit_idx)
+    val core = section.substring(digit_idx, section.len())
+    val last_idx = _nf_last_digit_idx(core)
+    val raw_suffix = core.substring(last_idx + 1, core.len())
+    var scale_count = 0
+    var literal_suffix = raw_suffix
+    if raw_suffix.len() > 0 and _nf_all_commas(raw_suffix):
+        scale_count = raw_suffix.len()
+        literal_suffix = ""
+    val digit_portion = core.substring(0, last_idx + 1)
+    val grouped = digit_portion.contains(",")
+    val decs = _nf_count_decimals(digit_portion)
+    var scaled_av = av
+    var k = 0
+    while k < scale_count:
+        scaled_av = scaled_av / 1000.0
+        k = k + 1
+    val body = "{prefix}{_nf_fixed_grouped(scaled_av, decs, grouped)}{literal_suffix}"
+    if neg:
+        return "-{body}"
+    body
 
 fn _nf_general(value: f64) -> text:
     """General/unformatted display: integer form when there's no fraction,
@@ -236,18 +468,111 @@ fn _nf_format_scientific(v: f64, decimals: i32) -> text:
     val exp_sign = if exp < 0: "-" else: "+"
     "{mant_txt}E{exp_sign}{_nf_pad2(exp_abs)}"
 
-fn _nf_format_date(value: f64, lower_fmt: text) -> text:
-    """yyyy-mm-dd (default) / mm/dd/yyyy (code contains "/") / dd.mm.yyyy
-    (code contains "."). Ceiling: only these three separator/order
-    combinations are recognized -- e.g. dd/mm/yyyy is not distinguished
-    from mm/dd/yyyy. `value` is read as an Excel date serial via the
-    financial library's own conversion (no duplicated date arithmetic)."""
+fn _nf_match_at(s: text, i: i32, tok: text) -> bool:
+    """True if `tok` occurs starting at index `i` in `s` (bounds-checked)."""
+    val tlen = tok.len()
+    if i + tlen > s.len():
+        return false
+    s.substring(i, i + tlen) == tok
+
+fn _nf_month_abbr(m: i64) -> text:
+    """3-letter English month abbreviation ("mmm" date token). Ceiling:
+    English only -- no locale support."""
+    if m == 1:
+        return "Jan"
+    if m == 2:
+        return "Feb"
+    if m == 3:
+        return "Mar"
+    if m == 4:
+        return "Apr"
+    if m == 5:
+        return "May"
+    if m == 6:
+        return "Jun"
+    if m == 7:
+        return "Jul"
+    if m == 8:
+        return "Aug"
+    if m == 9:
+        return "Sep"
+    if m == 10:
+        return "Oct"
+    if m == 11:
+        return "Nov"
+    "Dec"
+
+fn _nf_month_full(m: i64) -> text:
+    """Full English month name ("mmmm" date token). Ceiling: English only
+    -- no locale support."""
+    if m == 1:
+        return "January"
+    if m == 2:
+        return "February"
+    if m == 3:
+        return "March"
+    if m == 4:
+        return "April"
+    if m == 5:
+        return "May"
+    if m == 6:
+        return "June"
+    if m == 7:
+        return "July"
+    if m == 8:
+        return "August"
+    if m == 9:
+        return "September"
+    if m == 10:
+        return "October"
+    if m == 11:
+        return "November"
+    "December"
+
+fn _nf_format_date(value: f64, fmt: text) -> text:
+    """Excel-style date-code tokenizer: reads `fmt` left to right,
+    recognizing "yyyy"/"yy", "mmmm"/"mmm"/"mm"/"m", "dd"/"d" (longest
+    token first) in the ORDER they appear, emitting the corresponding
+    piece of the date from `value` (an Excel date serial, converted via
+    the financial library's own conversion -- no duplicated date
+    arithmetic). Any other character (a separator like "/", "-", ".", or
+    a space) passes through literally. Reading tokens in appearance order
+    is what makes "dd/mm/yyyy" and "mm/dd/yyyy" render distinctly, unlike
+    a fixed template. Ceiling: no locale month names (English only, see
+    `_nf_month_abbr`/`_nf_month_full`), no time-of-day tokens."""
     val ymd = civil_from_serial(value)
     val y = ymd[0]
-    val m = _nf_pad2(ymd[1])
-    val d = _nf_pad2(ymd[2])
-    if lower_fmt.contains("/"):
-        return "{m}/{d}/{y}"
-    if lower_fmt.contains("."):
-        return "{d}.{m}.{y}"
-    "{y}-{m}-{d}"
+    val m = ymd[1]
+    val d = ymd[2]
+    var out = ""
+    var i = 0
+    val n = fmt.len()
+    while i < n:
+        if _nf_match_at(fmt, i, "yyyy"):
+            out = "{out}{y}"
+            i = i + 4
+        elif _nf_match_at(fmt, i, "yy"):
+            out = "{out}{_nf_pad2(y % 100)}"
+            i = i + 2
+        elif _nf_match_at(fmt, i, "mmmm"):
+            out = "{out}{_nf_month_full(m)}"
+            i = i + 4
+        elif _nf_match_at(fmt, i, "mmm"):
+            out = "{out}{_nf_month_abbr(m)}"
+            i = i + 3
+        elif _nf_match_at(fmt, i, "mm"):
+            out = "{out}{_nf_pad2(m)}"
+            i = i + 2
+        elif _nf_match_at(fmt, i, "dd"):
+            out = "{out}{_nf_pad2(d)}"
+            i = i + 2
+        elif fmt.substring(i, i + 1) == "m":
+            out = "{out}{m}"
+            i = i + 1
+        elif fmt.substring(i, i + 1) == "d":
+            out = "{out}{d}"
+            i = i + 1
+        else:
+            out = "{out}{fmt.substring(i, i + 1)}"
+            i = i + 1
+    out

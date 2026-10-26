@@ -1,11 +1,7 @@
-use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 # Part of src/compiler/50.mir/mir_lowering.spl: function/const/type/block/range/inline-asm lowering, field resolution
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.asm_and_targets.*
-use compiler.mir._MirLowering.native_trait_registration.*
-use compiler.mir._MirLowering.native_trait_dispatch.*
-use compiler.mir._MirLowering.native_trait_conversion.*
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity, mir_provider_function_name}
 use std.nogc_sync_mut.sffi.system.{env_get}
 # MIR Lowering - HIR to MIR Transformation
@@ -26,10 +22,7 @@ use std.nogc_sync_mut.sffi.system.{env_get}
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
-use compiler.mir.array_move.mir_array_move.{array_move_sites_for, array_move_sites_empty, am_block_has_place_let}
 use compiler.hir.hir_types.*
-use compiler.hir.ownership_types.{hir_type_is_short_candidate}
-use compiler.mir.mir_types.{MirLocal}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use compiler.common.diagnostics.span.{Span}
@@ -47,10 +40,13 @@ use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata, n
 use compiler.mir.mir_types.{MirConstant}
 
 @unsafe(reason: "raw tagged HIR type discriminant ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant<T>(value: T) -> i64
+extern fn rt_enum_discriminant(value: Any) -> i64
+# Formation probe: true only for a well-formed heap object. Distinguishes a
+# ZEROED slot (raw 0) from the nil sentinel (raw 3), which `== nil` cannot.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 
 @always_inline
-fn _sffi_hir_type_discriminant<T>(value: T) -> i64:
+fn _sffi_hir_type_discriminant(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
@@ -158,7 +154,6 @@ impl MirLowering:
         match expr.kind:
             case IntLit(_, _): Some(MirType.i64())
             case FloatLit(_, _): Some(MirType.f64())
-            case FloatLexeme(_, _): Some(MirType.f64())
             case BoolLit(_): Some(MirType(kind: MirTypeKind.Bool))
             case StringLit(_, _): Some(MirType(kind: MirTypeKind.Opaque("str")))
             # `lower_const_expr` only folds integer binary expressions.
@@ -167,7 +162,6 @@ impl MirLowering:
                 # Defensive compatibility for future folded scalar forms.
                 match value:
                     case Int(_): Some(MirType.i64())
-                    case FloatLexeme(_): Some(MirType.f64())
                     case Float(_): Some(MirType.f64())
                     case Bool(_): Some(MirType(kind: MirTypeKind.Bool))
                     case Str(_): Some(MirType(kind: MirTypeKind.Opaque("str")))
@@ -199,25 +193,14 @@ impl MirLowering:
         self.local_hir_type_resource_states = []
         self.bitfield_value_syms = {}
         self.struct_value_syms = {}
-        self.optional_record_owners = {}
-        self.result_err_record_owners = {}
-        # Keyed by LocalId like struct_value_syms, and LocalIds restart per
-        # function: a `W(v: "s")` built in one function must not type the
-        # fields of whatever local reuses its id in the next one.
-        self.generic_instance_field_types = {}
-        self.generic_instance_field_struct_names = {}
         self.runtime_array_locals = {}
         self.runtime_dict_locals = {}
         self.runtime_elem_value_type = {}
-        self.inferred_array_elem_state = {}
         self.array_element_struct_syms = {}
         self.runtime_value_local_ids = []
         self.tagged_text_locals = {}
-        self.exists_collection_locals = {}
         self.option_value_locals = {}
         self.nil_locals = {}
-        self.extern_result_locals = {}
-        self.static_scalar_locals = {}
         self.resource_owned_locals = []
         self.consumed_resource_locals = {}
 
@@ -230,15 +213,6 @@ impl MirLowering:
 
     me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""
-        # Lambda bindings contain HIR expression bodies, not module metadata.
-        # A nested lowering must restore its caller's bindings; a completed
-        # top-level function must leave no body graph in the retained owner.
-        # Lifted lambdas use a fresh MirLowering, while inlined lambdas stay
-        # inside this function and therefore keep these bindings until exit.
-        val caller_lambda_bindings: Dict<i64, HirExpr> = self.lambda_bindings
-        val caller_lambda_snapshots: Dict<i64, Dict<i64, LocalId>> = self.lambda_capture_snapshot
-        self.lambda_bindings = {}
-        self.lambda_capture_snapshot = {}
         self.unsafe_depth = 0
         self.mir_tag_probe_active_function = fn_.name + ""
         self.type_transport_owner = fn_.name + ""
@@ -257,14 +231,6 @@ impl MirLowering:
         # bootstrap_stage2_empty_mir_bodies_2026-07-05). Real HIR->MIR lowering
         # now runs for all bootstrap functions.
         self.reset_function_local_tracking()
-        # Inlined lambdas re-enter this method on the same instance: keep the
-        # caller's array-move approvals and restore them on exit.
-        val caller_array_move_lets: Dict<i64, bool> = self.array_move_let_symbols
-        val array_move_sites = if am_block_has_place_let(fn_.body):
-            array_move_sites_for(fn_.body, self.symbols, self.array_move_ctor_tables(fn_.body))
-        else:
-            array_move_sites_empty()
-        self.array_move_let_symbols = array_move_sites.let_symbols
         if bootstrap_trace:
             print "[mir-lower] real-lower:start {fn_.name}"
 
@@ -419,10 +385,8 @@ impl MirLowering:
         # `+ ""` is the fresh-copy idiom proven by the alias oracle; plain
         # interpolation "{s}" does NOT copy (measured verdict=0).
         var function_owner = self.current_module_id
-        # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-        val optional_function_symbol: HirSymbol? = self.symbols.get_symbol_raw(fn_.symbol.id)
-        if val present_function_symbol = optional_function_symbol:
-            val function_symbol: HirSymbol = present_function_symbol
+        val function_symbol = self.symbols.get_symbol_raw(fn_.symbol.id)
+        if function_symbol != nil:
             val declared_owner = function_symbol.defining_module ?? ""
             if declared_owner != "":
                 function_owner = declared_owner
@@ -431,12 +395,7 @@ impl MirLowering:
         # positional lane) fell back to `<module>.main`, so the object never
         # defined `__simple_main` and the entry shim failed to link (LNK2019).
         val fallback_name = mir_provider_function_name(function_owner, self.symbols, fn_, self.lowering_entry_module)
-        # A definition's explicit C export is authoritative over imported or
-        # relocated callable sidecars. HIR retains this declaration contract;
-        # routing its definition through a stored module-qualified symbol
-        # leaves an extern caller's unmangled C ABI unresolved.
-        val mir_fn_name = (if fn_.has_export_attr: fallback_name
-            else: self.provider_callable_symbol_name(fn_.symbol, fallback_name)) + ""
+        val mir_fn_name = self.provider_callable_symbol_name(fn_.symbol, fallback_name) + ""
         var bldr = self.builder
         bldr.begin_function(fn_.symbol, mir_fn_name, signature, fn_.span)
         if trace_enabled:
@@ -482,20 +441,6 @@ impl MirLowering:
             # local so backends render actual port names, not arg0/arg1/arg2.
             var name_bldr = self.builder
             name_bldr.set_local_name(local, param.name)
-            # A strict bare parameter is a view at this function's original
-            # boundary, not an owning local. Keep the declaration's mutability
-            # and boundary identity attached to the actual MIR argument slot.
-            if self.nogc_strict and hir_type_is_short_candidate(param.type_):
-                var provenance_index = 0
-                while provenance_index < name_bldr.locals.len():
-                    val slot: MirLocal = name_bldr.locals[provenance_index]
-                    if slot.id.id == local.id:
-                        name_bldr.locals[provenance_index] = MirLocal(
-                            id: slot.id, name: slot.name, type_: slot.type_,
-                            kind: slot.kind, is_ghost: slot.is_ghost,
-                            short_borrow: true, short_mutable: param.is_mutable,
-                            short_boundary: fn_.symbol.id)
-                    provenance_index = provenance_index + 1
             self.builder = name_bldr
             # Preserve every parameter's declared HIR type on its MIR local.
             # Receiver expressions on the flat/full-entry path can carry a
@@ -542,19 +487,11 @@ impl MirLowering:
             # convert_nodes.spl's Param.is_mutable -> declaration_lowering.spl's
             # lower_param -> HirParam.is_mutable), mirroring how `me`'s
             # by-reference signal reaches this same lowering step. A PLAIN
-            # (non-`mut`) struct param keeps the Bug #167 copy in legacy
-            # mode. Strict bare parameters are short borrows, including
-            # readonly structs and trait values, and retain the incoming
-            # place without an allocation or provenance-erasing rebind.
+            # (non-`mut`) struct param must keep the Bug #167 copy -- only
+            # `me`/`self` receivers and explicitly `mut`-marked params alias
+            # the caller's memory.
             val is_me_receiver = fn_.is_mutable and pli == 0 and (param.name == "self" or param.name == "me")
             val is_mut_param = param.is_mutable
-            val is_short_param = self.nogc_strict and hir_type_is_short_candidate(param.type_)
-            if self.native_trait_value_type(param.type_):
-                if not is_me_receiver and not is_mut_param and not is_short_param:
-                    val copied_trait = self.copy_native_trait_value(local, param.type_)
-                    self.bind_local(param_symbol_id, copied_trait)
-                pli = pli + 1
-                continue
             match param.type_.kind:
                 case Array(element_type, _):
                     # Preserve the same runtime-array and element-struct
@@ -569,10 +506,8 @@ impl MirLowering:
                         self.mark_runtime_value_local(local.id)
                         match element_type.kind:
                             case Named(element_symbol, _):
-                                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-                                val optional_element: HirSymbol? = self.symbols.get_symbol_raw(element_symbol.id)
-                                if val present_element = optional_element:
-                                    val element: HirSymbol = present_element
+                                val element = self.symbols.get_symbol_raw(element_symbol.id)
+                                if element.?:
                                     self.array_element_struct_syms[local.id] = element.name
                             case _:
                                 ()
@@ -605,11 +540,9 @@ impl MirLowering:
                     # struct params, which still hit the Named arm untouched.
                     match inner.kind:
                         case Named(type_symbol, _):
-                            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-                            val optional_parameter_type: HirSymbol? = self.symbols.get_symbol_raw(type_symbol.id)
+                            val parameter_type = self.symbols.get_symbol_raw(type_symbol.id)
                             var parameter_type_name = ""
-                            if val present_parameter_type = optional_parameter_type:
-                                val parameter_type: HirSymbol = present_parameter_type
+                            if parameter_type != nil:
                                 parameter_type_name = parameter_type.name
                                 match parameter_type.kind:
                                     case Class: parameter_type_name = mir_class_identity(parameter_type)
@@ -619,30 +552,11 @@ impl MirLowering:
                                 self.struct_value_syms[local.id] = parameter_type_name
                         case _:
                             ()
-                case HirTypeKind.Ref(inner, _):
-                    # Borrowed nominal parameters retain their owner's field
-                    # layout without a value copy: writes must reach the same
-                    # object the caller borrowed. Otherwise a field such as
-                    # scope.capabilities falls back to I64 and loses its array
-                    # element type before iteration/pop dispatch.
-                    match inner.kind:
-                        case Named(type_symbol, _):
-                            val optional_reference_owner: HirSymbol? = self.symbols.get_symbol_raw(type_symbol.id)
-                            if val reference_owner = optional_reference_owner:
-                                var reference_owner_name = reference_owner.name
-                                match reference_owner.kind:
-                                    case Class: reference_owner_name = mir_class_identity(reference_owner)
-                                    case _: ()
-                                if self.struct_field_order.has(reference_owner_name):
-                                    self.struct_value_syms[local.id] = reference_owner_name
-                        case _: ()
                 case Named(type_symbol, _):
-                    # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-                    val optional_parameter_type: HirSymbol? = self.symbols.get_symbol_raw(type_symbol.id)
+                    val parameter_type = self.symbols.get_symbol_raw(type_symbol.id)
                     var parameter_type_name = ""
                     var is_class_param = false
-                    if val present_parameter_type = optional_parameter_type:
-                        val parameter_type: HirSymbol = present_parameter_type
+                    if parameter_type != nil:
                         parameter_type_name = parameter_type.name
                         match parameter_type.kind:
                             case Class:
@@ -667,9 +581,8 @@ impl MirLowering:
                     # caller's instance. Only a genuine `struct` param keeps
                     # the defensive per-call copy when it's neither a `me`
                     # receiver nor an explicit `mut` param.
-                    if is_named_struct and (is_me_receiver or is_mut_param or is_class_param or is_short_param):
-                        # Bind the receiver/mut-param/class-param/strict short
-                        # parameter directly to
+                    if is_named_struct and (is_me_receiver or is_mut_param or is_class_param):
+                        # Bind the receiver/mut-param/class-param directly to
                         # the raw incoming arg local (already mapped via
                         # self.local_map above) -- NO defensive copy, NO
                         # local_map rebind -- so a `me.field = v` /
@@ -716,8 +629,7 @@ impl MirLowering:
                         # param no longer reaches this copy arm at all. This
                         # copy now applies only to a genuine `struct` param
                         # that is neither a `me` receiver nor `mut`-marked,
-                        # in legacy mode. Strict short parameters have already
-                        # taken the direct binding branch above.
+                        # which is exactly Bug #167's original, correct scope.
                         val copy_local = self.copy_struct_value_recursive(local, parameter_type_name, type_symbol, [parameter_type_name])
                         self.bind_local(param_symbol_id, copy_local)
                 case _:
@@ -730,11 +642,6 @@ impl MirLowering:
         self.current_has_vhdl_metadata = fn_.has_vhdl_metadata
         val previous_gpu_kernel_target = self.current_gpu_kernel_target
         self.current_gpu_kernel_target = gpu_kernel_target
-
-        # Only the program entry configures its recorder. Library functions
-        # named main remain ordinary callees; static-off emits no setup.
-        if self.lowering_entry_module and fn_.name == "main" and not fn_.is_method:
-            self.emit_mcdc_runtime_configuration()
 
         # Lower body
         if trace_enabled:
@@ -762,24 +669,7 @@ impl MirLowering:
         # current_has_vhdl_metadata above, so nested lowering cannot leak it.
         val previous_fn_returns_bool = self.current_fn_returns_bool
         self.current_fn_returns_bool = fn_returns_bool
-        # ... and for a scalar-optional function whose TAIL is a conditional:
-        # each arm must box its own value (see lower_expr_for_slot), which the
-        # threaded expected type does. Any other tail of a `-> T?` function
-        # keeps the plain path and is boxed once, after the block.
-        var fn_tail_conditional_into_scalar_optional = false
-        match fn_.return_type.kind:
-            case HirTypeKind.Optional(tail_optional_inner):
-                if hir_type_is_plain_scalar(tail_optional_inner) and fn_.body.has and fn_.body.value != nil:
-                    match fn_.body.value.kind:
-                        case HirExprKind.If(_, _, tail_if_else):
-                            fn_tail_conditional_into_scalar_optional = tail_if_else != nil
-                        case HirExprKind.IfChain(_, tail_chain_else):
-                            fn_tail_conditional_into_scalar_optional = tail_chain_else != nil
-                        case HirExprKind.MatchCase(_, _):
-                            fn_tail_conditional_into_scalar_optional = true
-                        case _: ()
-            case _: ()
-        val result = if fn_returns_bool or fn_tail_conditional_into_scalar_optional:
+        val result = if fn_returns_bool:
             self.lower_block_expected(fn_.body, fn_.return_type)
         else:
             self.lower_block(fn_.body)
@@ -806,35 +696,12 @@ impl MirLowering:
                 # Stage4 can enter that arm without copying its LocalId payload.
                 val tail_local = result ?? LocalId(id: 0)
                 var returned_tail_local = tail_local
-                if fn_.body.has:
-                    returned_tail_local = self.coerce_native_trait_object(tail_local, fn_.body.value, fn_.return_type)
                 match fn_.return_type.kind:
                     case HirTypeKind.Any:
                         # `-> Any` is a tagged ABI boundary. A raw scalar tail
                         # must be boxed before the caller records the result as
                         # a RuntimeValue local.
                         returned_tail_local = self.box_runtime_value(tail_local)
-                    case HirTypeKind.Optional(_):
-                        # `-> T?` implicit tail: the same canonical-handle
-                        # promotion the explicit `return` path applies
-                        # (lower_return_expr). Without it a `-> i64?` body
-                        # ending in a raw scalar, a nil literal or an untyped
-                        # value returned the raw word, so the caller's
-                        # presence test read payload bits against the nil
-                        # sentinel (3 -> None, nil -> ... whatever the word
-                        # was). Already-boxed tails pass through unchanged.
-                        returned_tail_local = self.ensure_option_handle(tail_local, fn_.return_type)
-                    case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
-                        # Scalar tail that is a scalar Optional local (`v`
-                        # after `if v == nil: return ..`): return the payload,
-                        # exactly as `return v` does. Bool included: a tail
-                        # already coerced to a presence predicate (`opt.?`)
-                        # is a fresh Bool temp, not an Optional local, and is
-                        # returned unchanged by the helper.
-                        returned_tail_local = self.option_scalar_payload_of(returned_tail_local)
-                        if val tail_hir = self.find_local_hir_type(returned_tail_local.id):
-                            if tail_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(returned_tail_local.id):
-                                returned_tail_local = self.decode_runtime_value(returned_tail_local, return_type)
                     case _:
                         ()
                 # WP-E: the function's own tail value moves the resource out
@@ -860,9 +727,14 @@ impl MirLowering:
                 # which the checker's terminator arm alone already covers
                 # via record_use).
                 var tail_operand = mir_operand_copy(returned_tail_local)
-                if fn_.body.has:
-                    tail_operand = self.ownership_return_operand(returned_tail_local, fn_.body.value)
-                bldr2 = self.builder
+                if self.local_hir_type_isolation_state(returned_tail_local.id) == 1:
+                    var b_rmove = self.builder
+                    val rmove_ty = self.local_mir_type_of(returned_tail_local) ?? MirType.i64()
+                    val rmove_local = b_rmove.new_temp(rmove_ty)
+                    b_rmove.emit_move(rmove_local, returned_tail_local)
+                    self.builder = b_rmove
+                    bldr2 = self.builder
+                    tail_operand = mir_operand_copy(rmove_local)
                 val tail_box: MirOperand? = Some(tail_operand)
                 bldr2.terminate_return(tail_box)
             else:
@@ -927,16 +799,13 @@ impl MirLowering:
 
         self.unsafe_depth = 0
         self.mir_tag_probe_active_function = ""
-        self.lambda_bindings = caller_lambda_bindings
-        self.lambda_capture_snapshot = caller_lambda_snapshots
-        self.array_move_let_symbols = caller_array_move_lets
         fn_result
 
     me lower_vulkan_kernel_param_type(param: HirParam) -> MirType:
         """Lower source array parameters to Vulkan's storage-buffer ABI."""
         val kind = param.type_.kind
         val kind_disc = _sffi_hir_type_discriminant(kind)
-        val array_disc = _sffi_hir_type_discriminant(HirTypeKind.Array(param.type_, None))
+        val array_disc = _sffi_hir_type_discriminant(HirTypeKind.Array(param.type_, nil))
         val slice_disc = _sffi_hir_type_discriminant(HirTypeKind.Slice(param.type_))
         val int_disc = _sffi_hir_type_discriminant(HirTypeKind.Int(32, false))
         if kind_disc == array_disc or kind_disc == slice_disc:
@@ -970,7 +839,7 @@ impl MirLowering:
         """Lower source array parameters to CUDA's global-pointer ABI."""
         val kind = param.type_.kind
         val kind_disc = _sffi_hir_type_discriminant(kind)
-        val array_disc = _sffi_hir_type_discriminant(HirTypeKind.Array(param.type_, None))
+        val array_disc = _sffi_hir_type_discriminant(HirTypeKind.Array(param.type_, nil))
         val slice_disc = _sffi_hir_type_discriminant(HirTypeKind.Slice(param.type_))
         if kind_disc == array_disc or kind_disc == slice_disc:
             var element = param.type_
@@ -1042,16 +911,7 @@ impl MirLowering:
         val sym_id_always = const_.symbol.id
         if sym_id_always >= 0:
             self.global_symbol_ids[sym_id_always] = true
-            # A Unit-typed global has no storage (lower_static), so a read
-            # falls back to this expression; recording the initializer would
-            # RE-RUN it (`val r = unit_fn()` then `r` calling unit_fn again).
-            # Its value is the unit constant: the initializer runs once, in
-            # the module initializer, for its side effects.
-            if hir_const_is_unit_typed(const_):
-                self.global_const_exprs[sym_id_always] = HirExpr(kind: HirExprKind.UnitLit,
-                    has_type_: true, type_: const_.type_, span: const_.value.span)
-            else:
-                self.global_const_exprs[sym_id_always] = const_.value
+            self.global_const_exprs[sym_id_always] = const_.value
         if val const_value = value:
             # Binary/bitwise module constants can legitimately retain an
             # unresolved HIR inference variable. `const_value` is already
@@ -1079,10 +939,6 @@ impl MirLowering:
             module.constants = constants
             bldr.module = module
             self.builder = bldr
-            # Address materialization and ordinary folded reads share this
-            # resolved-symbol cache. Keep it in sync with the module constant.
-            if sym_id_always >= 0:
-                self.global_constants_by_id[sym_id_always] = mir_const
             # mutglobal2 lane (module-level `var`/`val` mutation end-to-end,
             # see scratchpad/mutglobal_plan.md + scratchpad/mutglobal2
             # report): `global_symbol_ids`/`global_const_exprs` (registered
@@ -1115,17 +971,17 @@ impl MirLowering:
             val caller_disc = self.mir_tag_probe_pending_caller_disc
             self.mir_tag_probe_pending_site = "recursive-or-other"
             self.mir_tag_probe_pending_caller_disc = -2
-            if callee_disc < 0:
-                eprint("[mir-tag-probe] fn={self.mir_tag_probe_active_function} site={probe_site} caller_disc={caller_disc} callee_disc={callee_disc} invalid_kind_carrier=true\n")
-        if callee_disc < 0:
+            if type_.kind == 0:
+                eprint("[mir-tag-probe] fn={self.mir_tag_probe_active_function} site={probe_site} caller_disc={caller_disc} callee_disc={callee_disc} kindzero=true\n")
+        if type_.kind == 0:
             if self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT:
                 self.type_transport_receipts = self.type_transport_receipts + 1
-                eprint("[mir-type-invariant] receipt={self.type_transport_receipts}/{MIR_TYPE_TRANSPORT_RECEIPT_LIMIT} owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} invalid_kind_carrier=true\n")
-                val relation = if self.type_transport_caller_disc >= 0:
+                eprint("[mir-type-invariant] receipt={self.type_transport_receipts}/{MIR_TYPE_TRANSPORT_RECEIPT_LIMIT} owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} kindzero=true\n")
+                val relation = if self.type_transport_caller_disc > 0:
                     "changed-at-call-boundary"
                 else:
-                    "already-invalid-at-caller"
-                self.error_fatal("E-MIR-TYPE-Transport: invalid HirType kind carrier observed at MIR boundary owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} relation={relation}", nil)
+                    "already-zero-at-caller"
+                self.error_fatal("E-MIR-TYPE-Transport: raw-zero HirType kind observed at MIR boundary owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} relation={relation}", nil)
             return MirType.i64()
         # [mir-lower-type-probe] -- DIAGNOSTIC, default OFF, gated by
         # SIMPLE_MIRB_TRACE via mir_trace_enabled().
@@ -1159,7 +1015,7 @@ impl MirLowering:
             if mir_lower_type_probe_seq == 50000:
                 eprint("[mir-lower-type-probe] truncated seq=50000\n")
             else:
-                # invalid_kind_carrier discriminates absent/corrupt enum carriers without
+                # kindzero / kindnil discriminate the two candidate mechanisms without
                 # adding a runtime accessor. There is NO scalar tag accessor in the C
                 # runtime (no rt_value_tag / rt_raw_bits), so `type_ & 7` is not
                 # expressible from Simple, and reaching into the object to synthesise one
@@ -1167,14 +1023,14 @@ impl MirLowering:
                 # relies on: copy_local_hir_type_metadata (mir_lowering_types.spl:595)
                 # tests `source_type == nil or source_type == 0` to reject a
                 # "staged-native raw zero". Same test here:
-                #   disc=-1 with invalid_kind_carrier=true -> the arm-binding guard FAILED and the
+                #   disc=-1 with kindzero=true  -> the arm-binding guard FAILED and the
                 #     copy came from the freshly rt_alloc'd ZEROED block; the migration is
                 #     the cause and the fix is the tagging / the guard's assumption.
-                #   disc>=0 with invalid_kind_carrier=false -> the guard PASSED and the copy is wrong
+                #   disc=-1 with kindzero=false -> the guard PASSED and the copy is wrong
                 #     for some other reason; the zeroed-block story is refuted.
                 # Both operands are compared by value; neither reads a field of the
                 # suspect object beyond `kind`, which round 1 proved safe to touch.
-                eprint("[mir-lower-type-probe] seq={mir_lower_type_probe_seq} fn={probe_fn} disc={callee_disc} invalid_kind_carrier={callee_disc < 0}\n")
+                eprint("[mir-lower-type-probe] seq={mir_lower_type_probe_seq} fn={probe_fn} disc={_sffi_hir_type_discriminant(type_.kind)} kindzero={type_.kind == 0} kindnil={type_.kind == nil}\n")
         val dict_type_disc = _sffi_hir_type_discriminant(HirTypeKind.Dict(type_, type_))
         if _sffi_hir_type_discriminant(type_.kind) == dict_type_disc:
             match type_.kind:
@@ -1282,16 +1138,6 @@ impl MirLowering:
                 MirType(kind: MirTypeKind.Ref(self.lower_type(inner), mutable))
             case HirTypeKind.Ptr(inner, mutable):
                 MirType.ptr(self.lower_type(inner), mutable)
-            # No-GC ownership sigils (strict modules only, memory.md). Stage 1
-            # keeps each one's legacy MIR representation: `&T` was Ref(T,false),
-            # `*T` was Ptr(T,false). `-T` is an opaque handle word until the
-            # Stage 3 runtime (rt_weak_*) defines its layout.
-            case HirTypeKind.Unique(inner):
-                MirType(kind: MirTypeKind.Ref(self.lower_type(inner), false))
-            case HirTypeKind.Shared(inner):
-                MirType.ptr(self.lower_type(inner), false)
-            case HirTypeKind.Weak(_):
-                MirType.i64()
             case HirTypeKind.Optional(inner):
                 # Optional is enum { nil, Some(T) }
                 MirType(kind: MirTypeKind.Tuple([
@@ -1308,12 +1154,6 @@ impl MirLowering:
                     mir_members = mir_members.push(self.lower_type(m))
                 MirType(kind: MirTypeKind.Union(mir_members))
             case HirTypeKind.Named(symbol, _):
-                # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-                val optional_named_symbol: HirSymbol? = self.symbols.get_symbol_raw(symbol.id)
-                if val present_named_symbol = optional_named_symbol:
-                    val named_symbol: HirSymbol = present_named_symbol
-                    if named_symbol.kind == SymbolKind.Trait:
-                        return native_trait_object_type()
                 self.record_external_layout_reference(symbol)
                 val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
                 if underlying == TYPE_BOOL:
@@ -1325,26 +1165,7 @@ impl MirLowering:
                 MirType(kind: MirTypeKind.Struct(
                     self.canonical_mir_type_symbol(symbol)))
             case HirTypeKind.Infer(id, generation):
-                # Name the inference variable, the enclosing function and the
-                # module. `{type_.kind}` rendered as an opaque `<enum@0x...>`
-                # and an Infer type's own span is almost always empty, so the
-                # six phase-3 `[infer-arm]` failures could not be attributed to
-                # any source site. Pass the span only when it carries a real
-                # location so the driver's canonical missing-span marker, not
-                # a bogus `:0:0`, is shown otherwise.
-                # The function actually being lowered, set on entry to
-                # lower_function_with_gpu_metadata (and for lifted lambdas).
-                # current_function_names is the module's whole function-name
-                # table, so its last entry names an unrelated function.
-                val infer_fn = if self.mir_tag_probe_active_function != "":
-                    self.mir_tag_probe_active_function
-                else:
-                    "<module-level>"
-                val infer_span: Span? = if type_.span.file != "" or type_.span.line > 0:
-                    Some(type_.span)
-                else:
-                    nil
-                self.error_fatal("unsupported MIR type kind [infer-arm]: unresolved inference variable Infer(id={id}, generation={generation}) reached lower_type in fn {infer_fn} (module {self.current_module_id})", infer_span)
+                self.error_fatal("unsupported MIR type kind [infer-arm]: {type_.kind}", Some(type_.span))
                 MirType(kind: MirTypeKind.I64)
             case HirTypeKind.Never:
                 MirType(kind: MirTypeKind.Never)
@@ -1354,45 +1175,6 @@ impl MirLowering:
                 # recovered "unresolved type"). Registering such a type must
                 # not abort the whole bootstrap compile — degrade to the
                 # tagged any/i64 slot the runtime already uses for `any`.
-                #
-                # 1a (MIR half, CURRENT_BUG_PREVENTION.md): the erasure is no
-                # longer silent. It is recorded as a lowering ADVISORY naming
-                # owner + span (`self.advisory` -> `self.mir_advisories`, NOT
-                # `self.errors`: bootstrap_type_registration, backend/compiler,
-                # jit_interpreter and simpleos focused_pipeline all abort on
-                # `errors.len() > 0`, and array/dict literal lowering compares
-                # `errors.len()` around element lowering). It is a real error
-                # only under SIMPLE_MIR_VERIFY_LEVELS="E-MIR-TYPE-Error=error".
-                val type_error_level = self.mir_advisory_level("E-MIR-TYPE-Error")
-                if type_error_level == "off":
-                    return MirType.i64()
-                val error_fn = if self.mir_tag_probe_active_function != "":
-                    self.mir_tag_probe_active_function
-                else:
-                    "<module-level>"
-                val error_span: Span? = if type_.span.file != "" or type_.span.line > 0:
-                    Some(type_.span)
-                else:
-                    nil
-                if type_error_level == "error":
-                    # Promoted: every occurrence is a real error. No rate
-                    # limit and no summary line -- a "suppressed" note must
-                    # never itself become an error.
-                    self.advisory("E-MIR-TYPE-Error", "unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
-                    return MirType.i64()
-                # Rate limit (advisory level only): at most 3 reports per
-                # module + function, then one summary line, so an unresolved
-                # import does not produce hundreds of identical diagnostics
-                # (measured 240/file). Keyed by module AND function, and the
-                # table is cleared at each module boundary (`lower_module`),
-                # so a same-named function in a later module is reported.
-                val report_key = "{self.current_module_id}::{error_fn}"
-                val prior_reports = self.mir_type_error_reports[report_key] ?? 0
-                self.mir_type_error_reports[report_key] = prior_reports + 1
-                if prior_reports < 3:
-                    self.advisory("E-MIR-TYPE-Error", "unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
-                elif prior_reports == 3:
-                    self.advisory("E-MIR-TYPE-Error", "further unresolved HIR types in fn {error_fn} (module {self.current_module_id}) suppressed after 3 reports", error_span)
                 MirType.i64()
             case HirTypeKind.Isolated(inner):
                 # `iso T` ERASES to T's MIR representation. Isolation is an
@@ -1416,7 +1198,10 @@ impl MirLowering:
                 # Normalized to MirTypeKind.Tuple([Ptr(U8), Ptr(U8)]) — a trait
                 # object is a fat pointer (data pointer, vtable pointer); MIR
                 # has no distinct dyn-trait type.
-                native_trait_object_type()
+                MirType(kind: MirTypeKind.Tuple([
+                    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+                    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false))
+                ]))
             case HirTypeKind.Any:
                 # Profile-dependent (hardening plan §8 / §9.5: "Any introduced
                 # as generic erasure count = 0"). Erasing `Any` to a tagged
@@ -1464,18 +1249,139 @@ impl MirLowering:
             case _:
                 # Seed requires a trailing arm; every HirTypeKind variant is
                 # handled explicitly above, so this is unreachable by construction.
-                self.unreachable_hir_type_kind(type_.kind, type_.span)
+                self.unreachable_hir_type_kind(type_)
 
-    me unreachable_hir_type_kind(kind: HirTypeKind, span: Span) -> MirType:
+    me unreachable_hir_type_kind(type_: HirType) -> MirType:
         """Raise for a HirTypeKind that has no explicit lower_type arm.
 
         Unreachable by construction: lower_type covers all 26 declared
         HirTypeKind variants. Exists only because the seed compiler demands a
         trailing match arm.
         """
-        # Project at the owning lower_type frame. Transporting HirType again
-        # can corrupt the diagnostic itself on the staged native ABI.
-        self.error_fatal("E-MIR-TYPE-Unknown: unreachable HirTypeKind disc={_sffi_hir_type_discriminant(kind)}: {kind} at {span.file}:{span.line}:{span.col}", Some(span))
+        # DIAGNOSTIC-ONLY (2026-08-30). The message used to be ambiguous in the
+        # exact case that matters: `disc=-1` is what
+        # `_sffi_hir_type_discriminant` returns for a NON-ENUM, which a nil
+        # `type_.kind` also produces -- so "unreachable HirTypeKind disc=-1: 0"
+        # cannot distinguish "lower_type was handed a NIL HirType" from
+        # "lower_type met a real kind it has no arm for". Those two have
+        # opposite fixes (nil-guard the CALLER vs add a lower_type arm), and
+        # guessing between them costs a full bootstrap per attempt. Split them,
+        # and name the function being lowered so the caller is locatable.
+        # NOT the function being lowered. `current_function_names` is never
+        # pushed/popped -- every write is a whole-array assignment of a MODULE's
+        # (module_lowering.spl:1150) or the PROGRAM's (bootstrap_globals.spl:386)
+        # complete name list, so `[len-1]` is a fixed tail name that is identical
+        # for every fatal raised while that list is installed. Reported as a
+        # scope hint only; a session that reads it as the offending function
+        # searches the wrong file (this cost two bootstrap runs on 2026-09-02).
+        val fn_ctx = if self.mir_tag_probe_active_function != "":
+            "active-function:" + self.mir_tag_probe_active_function
+        elif self.current_function_names.len() > 0:
+            "scope-tail:" + self.current_function_names[self.current_function_names.len() - 1]
+        else:
+            "<no-function-context>"
+        if type_ == nil:
+            self.error_fatal("E-MIR-TYPE-NilType: lower_type received a NIL HirType (not an unknown kind) while lowering '{fn_ctx}' -- the CALLER needs a nil guard", nil)
+            return MirType.i64()
+        # `== nil` above is NOT sufficient, and that gap is the whole reason this
+        # diagnostic has stayed ambiguous. The nil sentinel in this runtime is raw
+        # 3, so a ZEROED heap slot -- raw 0 -- passes the nil test and lands here
+        # rendering as "disc=-1: 0", indistinguishable from a genuine unhandled
+        # variant. Those two have opposite fixes (repair the producer of a dead
+        # object vs add a lower_type arm), which is exactly the guess this comment
+        # block says costs a full bootstrap per attempt. rt_heap_ref_wellformed is
+        # the formation probe for precisely this raw-0-vs-sentinel class; it reads
+        # only the header, never a field of the suspect object, which is what made
+        # round 2's five extra field reads unsafe.
+        # MEASURED 2026-08-31, and it refutes the obvious reading: the object is
+        # NOT malformed. rt_heap_ref_wellformed(type_) returns TRUE in 10/10
+        # failing runs, so a header-only formation probe cannot separate these
+        # cases. What is zero is the KIND FIELD -- `kindzero=true kindnil=false`
+        # on every raise. Report on that instead, which is the distinction that
+        # actually has two opposite fixes (repair the producer that left kind
+        # unwritten vs add a lower_type arm for a real variant).
+        if type_.kind == 0:
+            # RAISE-SITE PROBE (2026-09-03, OFF unless SIMPLE_MIR_TAG_PROBE=1).
+            #
+            # WHY HERE. Every crossing-side probe sees only its own crossing;
+            # the raise site sees EVERY producer. The param-crossing probe at
+            # :287 reported ZERO lines across a run that raised this fatal, so
+            # the producer is not on that path and a further crossing probe
+            # would be another 65-minute guess. This one cannot miss.
+            #
+            # WHY THE SCOPE-TAIL LABEL IS NOT ENOUGH. `fn_ctx` above is a fixed
+            # tail of a whole-array-assigned `current_function_names` (see the
+            # comment at the top of this method): identical for every fatal in a
+            # module, so it localises nothing. `type_.span` is the real source
+            # location and is the field this probe exists to recover.
+            #
+            # SAFETY, and why this does not repeat the round-2 failure
+            # documented at the bottom of this method. Round 2 dereferenced
+            # `.span`'s subfields UNGUARDED and UNGATED on the default path, and
+            # the worker died silently. Three changes make this different:
+            #   1. It is behind `_mir_tag_probe_enabled()` -- default-off, so a
+            #      normal run is byte-for-byte unchanged and cannot regress.
+            #   2. `zk_span` is guarded by BOTH `== nil` AND `== 0` before any
+            #      subfield read. The nil sentinel here is raw 3, so a ZEROED
+            #      slot passes `== nil`; the `or ... == 0` half is the in-repo
+            #      idiom from `copy_local_hir_type_metadata`
+            #      (mir_lowering_types.spl:595) for exactly this raw-0 class.
+            #      Round 2 had no such guard.
+            #   3. The emit is STAGED into two lines. Line A reads nothing off
+            #      `type_` beyond `kind` (round 1 proved that safe) and is
+            #      written BEFORE any span deref, so even if line B were to kill
+            #      the worker, line A survives and still names the module.
+            #
+            # THE GUARD RESULT IS ITSELF EVIDENCE. `spanzero=true` means the
+            # whole HirType came from a zeroed block (the producer allocated and
+            # never wrote it); `spanzero=false` plus a real file:line:col in line
+            # B is the producing construct's source address, which is the one
+            # thing no previous run has printed.
+            #
+            # Additive only: both `error_fatal` calls in this method are
+            # untouched, and nothing outside this `if` is decorated.
+            if _mir_tag_probe_enabled() and mir_zerokind_raise_probe_seq < 16:
+                mir_zerokind_raise_probe_seq = mir_zerokind_raise_probe_seq + 1
+                val zk_span = type_.span
+                val zk_span_nil = zk_span == nil
+                val zk_span_zero = zk_span == 0
+                eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} module={self.current_module_id} disc={_sffi_hir_type_discriminant(type_.kind)} kindzero={type_.kind == 0} kindnil={type_.kind == nil} spannil={zk_span_nil} spanzero={zk_span_zero} scope_hint={fn_ctx}\n")
+                # The `else` branch here USED to deref zk_span.file/.line/.col.
+                # It was removed 2026-09-03 after a live run proved it repeats
+                # the exact mistake the "Round 2 REVERTED" comment below already
+                # documents: this object is corrupt (disc=-1, kind not an enum),
+                # so NO further field of it is a safe read -- including span's,
+                # even though span passes both `== nil` and `== 0`.
+                #
+                # Measured: with the deref in place the probe emitted line A
+                # twice and line B ZERO times (0 occurrences of `at=` in an
+                # 8,924,312-byte log AND in the 492,027-byte full stderr), while
+                # the run continued and exited normally. The print was silently
+                # swallowed mid-eprint.
+                #
+                # That silent swallow IS the finding, so it is reported rather
+                # than retried: a span that is neither nil nor zero yet cannot be
+                # dereferenced is a dangling read, which means the whole HirType
+                # is a corrupt aggregate -- NOT a producer that merely forgot to
+                # write `kind`.
+                if zk_span_nil or zk_span_zero:
+                    eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} span=zeroed-or-nil -- producer never wrote span either\n")
+                else:
+                    eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} span=non-nil-non-zero-but-UNDEREFERENCEABLE -- corrupt aggregate, not an unset field (see comment; do not re-add the deref)\n")
+            self.error_fatal("E-MIR-TYPE-ZeroKind: lower_type received a well-formed HirType whose `kind` field is raw 0 (never written) while lowering '{fn_ctx}' -- fix the PRODUCER that left kind unset, not lower_type", nil)
+            return MirType.i64()
+        # Round 2 REVERTED (2026-08-30). This block briefly read five MORE
+        # fields off `type_.span` -- including `.file`, a `text` -- to localise
+        # the construct. That was labelled "diagnostic-only, no behaviour
+        # change", and that label was WRONG: round 1 had already PROVEN this
+        # object is corrupt (`kind` is not an enum, disc=-1), so dereferencing
+        # further fields of the same object is not a safe read. With it in
+        # place the entry-module lowering stopped producing any output at all
+        # and the worker exited 1 silently, losing the 20 informative lines
+        # round 1 gave us. Only report fields round 1 already proved safe to
+        # touch: the rendered `kind`, its discriminant, and the span passed BY
+        # REFERENCE to error_fatal (never field-read here).
+        self.error_fatal("E-MIR-TYPE-Unknown: unreachable HirTypeKind disc={_sffi_hir_type_discriminant(type_.kind)}: {type_.kind} while lowering '{fn_ctx}'", Some(type_.span))
         MirType.i64()
 
     me lower_block(block: HirBlock) -> LocalId?:
@@ -1524,11 +1430,6 @@ impl MirLowering:
                     "<none>"
                 eprint("[mir-lower-stmt-probe] stmt={blk_i} fn={stmt_probe_fn} kind_disc={_sffi_hir_type_discriminant(stmt.kind)}\n")
             self.lower_stmt(stmt)
-            # A return/break/continue owns the completed block. Lowering its
-            # unreachable suffix (including the tail) would finalize it again
-            # and replace both the live instructions and its terminator.
-            if self.builder.current_block_has_explicit_terminator():
-                return nil
             if trace_enabled:
                 print "[mir-lower] block:stmt-done {blk_i}"
             if bootstrap_trace:
@@ -1757,12 +1658,6 @@ impl MirLowering:
         Uses lowered value provenance before the base expression's type.
         Falls back to 0 if type cannot be determined.
         """
-        if self.result_err_record_owners.contains(base_local.id):
-            val owner = self.checked_result_err_record_owner(base_local.id, base.span)
-            if owner == "": return 0
-            if not self.struct_value_syms.contains(base_local.id) or self.struct_value_syms[base_local.id] != owner:
-                self.error_fatal("Result Err field has conflicting value provenance", Some(base.span))
-                return 0
         # Numeric SymbolIds are local to each module and can collide in an
         # entry-closure build. A lowered local's name-keyed provenance is
         # therefore authoritative when available.
@@ -1775,10 +1670,6 @@ impl MirLowering:
                     if value_fields[value_idx] == field_name:
                         return value_idx
                     value_idx = value_idx + 1
-
-        if self.result_err_record_owners.contains(base_local.id):
-            self.error_fatal("Result Err record field has no exact provider layout: {field_name}", Some(base.span))
-            return 0
 
         # Try to get the type symbol from the base expression's type
         val type_sym = self.expr_type_symbol(base)
@@ -1795,13 +1686,8 @@ impl MirLowering:
             # '<defining_module>::<Name>' key (registered alongside the bare
             # name by register_composite_field_metadata) is unambiguous, so a
             # qualified hit is authoritative over either fallback tier.
-            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-            val optional_q_type_symbol: HirSymbol? = self.symbols.get_symbol_raw(found_type_sym.id)
-            if val present_q_type_symbol = optional_q_type_symbol:
-                val q_type_symbol: HirSymbol = present_q_type_symbol
-                # Demand-on-read: a provider layout must be this consumer's
-                # before any tier below reads a row for it.
-                self.provider_layout_demand_v1(q_type_symbol.name)
+            val q_type_symbol = self.symbols.get_symbol_raw(found_type_sym.id)
+            if q_type_symbol != nil:
                 val qualified_key = self.composite_layout_key(q_type_symbol)
                 if qualified_key != q_type_symbol.name and self.struct_field_order.has(qualified_key):
                     val qualified_fields = self.struct_field_order[qualified_key]
@@ -1811,8 +1697,7 @@ impl MirLowering:
                             return q_idx
                         q_idx = q_idx + 1
             val sym_id = self.symbol_id_value(found_type_sym)
-            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-            val optional_fm_type_symbol: HirSymbol? = self.symbols.get_symbol_raw(found_type_sym.id)
+            val fm_type_symbol = self.symbols.get_symbol_raw(found_type_sym.id)
             if self.field_map.has(sym_id):
                 val fields = self.field_map[sym_id]
                 # FAIL CLOSED on a cross-module SymbolId collision. field_map is
@@ -1832,18 +1717,16 @@ impl MirLowering:
                 # one. When they agree, or no name-keyed entry exists, behaviour
                 # is unchanged.
                 var fm_trusted = true
-                if val present_fm_type_symbol = optional_fm_type_symbol:
-                    val fm_type_symbol: HirSymbol = present_fm_type_symbol
-                    if self.struct_field_order.has(fm_type_symbol.name):
-                        val fm_named = self.struct_field_order[fm_type_symbol.name]
-                        if fm_named.len() != fields.len():
-                            fm_trusted = false
-                        else:
-                            var fm_i = 0
-                            while fm_i < fm_named.len():
-                                if fm_named[fm_i] != fields[fm_i]:
-                                    fm_trusted = false
-                                fm_i = fm_i + 1
+                if fm_type_symbol != nil and self.struct_field_order.has(fm_type_symbol.name):
+                    val fm_named = self.struct_field_order[fm_type_symbol.name]
+                    if fm_named.len() != fields.len():
+                        fm_trusted = false
+                    else:
+                        var fm_i = 0
+                        while fm_i < fm_named.len():
+                            if fm_named[fm_i] != fields[fm_i]:
+                                fm_trusted = false
+                            fm_i = fm_i + 1
                 if fm_trusted:
                     val n = fields.len()
                     var idx = 0
@@ -1852,25 +1735,16 @@ impl MirLowering:
                             return idx
                         idx = idx + 1
                 elif (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
-                    if val present_trace_symbol = optional_fm_type_symbol:
-                        print "[field-idx-collision] type={present_trace_symbol.name} field={field_name} sym_id={sym_id} field_map_len={fields.len()}"
-            if val present_type_symbol = optional_fm_type_symbol:
-                val type_symbol: HirSymbol = present_type_symbol
-                if self.struct_field_order.has(type_symbol.name):
-                    val named_fields = self.struct_field_order[type_symbol.name]
-                    var named_idx = 0
-                    while named_idx < named_fields.len():
-                        if named_fields[named_idx] == field_name:
-                            return named_idx
-                        named_idx = named_idx + 1
+                    print "[field-idx-collision] type={fm_type_symbol.name} field={field_name} sym_id={sym_id} field_map_len={fields.len()}"
+            val type_symbol = fm_type_symbol
+            if type_symbol != nil and self.struct_field_order.has(type_symbol.name):
+                val named_fields = self.struct_field_order[type_symbol.name]
+                var named_idx = 0
+                while named_idx < named_fields.len():
+                    if named_fields[named_idx] == field_name:
+                        return named_idx
+                    named_idx = named_idx + 1
 
-        # Backstop: under layout demand a provider declaration with this leaf
-        # must have been registered by now (demand-on-read above); silently
-        # reading field 0 of an unregistered layout would be a wrong offset.
-        if val fallback_type_sym = type_sym:
-            if val fallback_symbol = self.symbols.get_symbol_raw(fallback_type_sym.id):
-                if self.provider_layout_missed_v1(fallback_symbol.name):
-                    self.error_fatal("provider layout for '{fallback_symbol.name}' was never registered in this consumer (field '{field_name}')", Some(base.span))
         if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
             print "[field-idx-fallback0] field={field_name} base_local={base_local.id} in_svs={self.struct_value_syms.contains(base_local.id)}"
         0  # Default fallback when type is unknown
@@ -1891,10 +1765,8 @@ impl MirLowering:
             return Some(self.struct_value_syms[base_local.id])
         val type_sym = self.expr_type_symbol(base)
         if val found_type_sym = type_sym:
-            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
-            val optional_type_symbol: HirSymbol? = self.symbols.get_symbol_raw(found_type_sym.id)
-            if val present_type_symbol = optional_type_symbol:
-                val type_symbol: HirSymbol = present_type_symbol
+            val type_symbol = self.symbols.get_symbol_raw(found_type_sym.id)
+            if type_symbol != nil:
                 return type_symbol.name
         nil
 

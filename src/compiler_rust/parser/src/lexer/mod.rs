@@ -29,38 +29,11 @@ pub struct Lexer<'a> {
     /// Forced indentation only applies at or below the bracket depth when it was enabled.
     /// This ensures that inner parenthesized expressions still suppress indentation normally.
     force_indent_bracket_depths: Vec<usize>,
-    /// Lines (0-based) blanked by `@when`/`@elif`/`@else`/`@end` conditional
-    /// compilation (see `crate::cond_compile`). Kept lines lex verbatim
-    /// (branch bodies are flat). `None` when no directive occurs.
-    line_mask: Option<std::sync::Arc<crate::cond_compile::LineMask>>,
-    /// Diagnostics from conditional-compilation evaluation (unsupported atoms etc.).
-    pub cond_diagnostics: Vec<String>,
-    /// `false` when the directives are unbalanced (stray `@elif`/`@else`/
-    /// `@end`, unclosed `@when`): the parser fails closed on this.
-    pub cond_balanced: bool,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
-        let (os, arch) = crate::cond_compile::default_target();
-        Self::new_for_target(source, os, arch)
-    }
-
-    /// Like `new`, but evaluates `@when(...)` conditions against an explicit target.
-    pub fn new_for_target(source: &'a str, os: &str, arch: &str) -> Self {
-        let (line_mask, cond_diagnostics, cond_balanced) =
-            match crate::cond_compile::inactive_line_mask(source, os, arch) {
-                Some(mut mask) => {
-                    let diags = std::mem::take(&mut mask.diagnostics);
-                    let balanced = mask.balanced;
-                    (Some(std::sync::Arc::new(mask)), diags, balanced)
-                }
-                None => (None, Vec::new(), true),
-            };
         Self {
-            line_mask,
-            cond_diagnostics,
-            cond_balanced,
             source,
             chars: source.char_indices().peekable(),
             current_pos: 0,
@@ -86,9 +59,6 @@ impl<'a> Lexer<'a> {
             column: 1,
             indent_stack: vec![0],
             pending_tokens: Vec::new(),
-            line_mask: None,
-            cond_diagnostics: Vec::new(),
-            cond_balanced: true,
             at_line_start: false, // Don't treat leading whitespace as indentation
             bracket_depth: 0,
             force_indentation_depth: 0,
@@ -157,7 +127,6 @@ impl<'a> Lexer<'a> {
         // Handle indentation at line start (but not inside brackets, unless forced)
         if self.at_line_start {
             self.at_line_start = false;
-            self.skip_masked_lines();
             // Skip indentation handling when inside brackets/parens/braces, unless force_indentation is active
             if self.bracket_depth == 0 || self.is_forced_indentation_active() {
                 if let Some(indent_token) = self.handle_indentation() {
@@ -175,7 +144,6 @@ impl<'a> Lexer<'a> {
                             self.advance();
                             self.line += 1;
                             self.column = 1;
-                            self.skip_masked_lines();
                         }
                         _ => break,
                     }
@@ -578,25 +546,6 @@ impl<'a> Lexer<'a> {
         let lexeme = self.source[start_pos..end_pos].to_string();
 
         Token::new(kind, Span::new(start_pos, end_pos, start_line, start_column), lexeme)
-    }
-
-    /// At the start of a line, consume every line masked out by conditional
-    /// compilation (directive lines and inactive branches) as if it were empty.
-    pub(super) fn skip_masked_lines(&mut self) {
-        let Some(mask) = self.line_mask.clone() else { return };
-        while self.column == 1 && mask.skip.get(self.line - 1).copied().unwrap_or(false) {
-            loop {
-                match self.advance() {
-                    Some((_, '\n')) => {
-                        self.line += 1;
-                        self.column = 1;
-                        break;
-                    }
-                    Some(_) => {}
-                    None => return,
-                }
-            }
-        }
     }
 
     fn advance(&mut self) -> Option<(usize, char)> {

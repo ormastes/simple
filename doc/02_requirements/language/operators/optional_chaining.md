@@ -12,7 +12,7 @@ None values through the chain without requiring manual null checks at each step.
 
 ## Syntax
 
-```simple:skip
+```simple
 obj?.field               # Safe field access - returns Option
 obj?.method()            # Safe method call - returns Option
 obj?.field?.nested?.deep # Safe chaining - short-circuits on None

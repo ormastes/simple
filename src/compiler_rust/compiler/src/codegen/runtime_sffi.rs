@@ -84,7 +84,6 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_current_dir")
         || name.starts_with("rt_set_current_dir")
         || name.starts_with("rt_process_")
-        || name.starts_with("rt_linux_group_")
         || name.starts_with("rt_exec")
         || name.starts_with("rt_write_file")
         || name.starts_with("rt_getpid")
@@ -446,8 +445,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_transient_array_scope_begin", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_pause", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_heap_promote", &[I64], &[I8]),
-    RuntimeFuncSpec::new("rt_transient_heap_promote_share_begin", &[], &[I8]),
-    RuntimeFuncSpec::new("rt_transient_heap_promote_share_end", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_end", &[], &[I8]),
     // Diagnostic heap counters. Compiled code needs these to observe whether a
     // transient scope actually reclaimed: `alloc - free` climbing across a
@@ -642,8 +639,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_to_lower", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_int_lenient", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_to_int_dynamic", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_any_to_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_index_of", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_find", &[I64, I64], &[I64]),
     // Receiver-polymorphic index_of (array or text). See rt_index_of.
@@ -774,7 +769,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_enum_new", &[I32, I32, I64], &[I64]),
     RuntimeFuncSpec::new("rt_enum_check_discriminant", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_enum_check_variant", &[I64, I64, I64], &[I8]),
-    RuntimeFuncSpec::new("rt_try_is_absent", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_enum_id", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_enum_discriminant", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_enum_payload", &[I64], &[I64]),
@@ -873,21 +867,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_data_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_ptr_write_bytes_raw", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_data_ptr_text", &[I64], &[I64]),
-    // [u8] validation + checked-copy providers (runtime_native.c:9132 and the
-    // Rust runtime collections.rs). Without these compiler-owned contracts the
-    // generic dynamic-SFFI dispatcher fails closed with "no compiler-owned ABI
-    // contract" before it can resolve the symbol from the runtime library.
-    // The seed interpreter additionally registers Value-aware twins
-    // (interpreter_extern/memory.rs) so packed/boxed arrays never cross the
-    // raw-i64 marshalling boundary.
-    RuntimeFuncSpec::new("rt_array_bytes_validate", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_array_bytes_copy_checked", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_header_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_set_len_known", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_set_len_known_text", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_typed_bytes_u8_unchecked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_typed_bytes_u8_data_at", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_array_is_byte_packed", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_typed_bytes_u64_le_unchecked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u8_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u32_le_at", &[I64, I64], &[I64]),
@@ -914,9 +898,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_typed_words_u64_push_known_data_at", &[I64, I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_typed_words_u64_store_known_data_at", &[I64, I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_typed_words_u64_set", &[I64, I64, I64], &[I8]),
-    RuntimeFuncSpec::new("rt_typed_words_i64_at", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_typed_words_i64_set", &[I64, I64, I64], &[I8]),
-    RuntimeFuncSpec::new("rt_typed_words_i64_push", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_memory_barrier", &[], &[]),
     RuntimeFuncSpec::new("rt_load_barrier", &[], &[]),
     RuntimeFuncSpec::new("rt_store_barrier", &[], &[]),
@@ -1648,12 +1629,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_execute", &[I64, I64, I64], &[I32]),
     RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_run_bounded", &[I64, I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_process_run_bounded_bytes", &[I64, I64, I64, I64, I64], &[I64]),
     // Owned-process receipt ABI, backed by src/runtime/runtime_process_owned.c.
     // Lost together with that C file in the tree-wipe restore ae55a746719; without
     // this spec resolve_runtime_func drops whole modules to the interpreter.
     RuntimeFuncSpec::new("rt_process_run_owned_bounded_value", &[I64, I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_process_run_owned_observed_bounded_value", &[I64, I64, I64, I64, I64], &[I64]),
     // Owned-process V3 opaque adapter.  `text` command expands to (ptr, len),
     // so the Simple six-argument start declaration has a seven-word native
     // call signature.  All projections return runtime-owned i64/byte arrays;
@@ -1700,7 +1679,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_kill", &[I64], &[I64]),
     // rt_process_spawn_async(cmd_ptr, cmd_len, args) -> pid (i64)
     RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_process_spawn_async_value", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_guarded", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_inherit", &[], &[I64]),
     // rt_process_run_with_limits(cmd_ptr, cmd_len, args, timeout_ms, memory_bytes,
@@ -2168,20 +2146,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_exists_probe_end", &[I64], &[I64]), // token -> packed total/failed or error
     RuntimeFuncSpec::new("rt_file_is_regular_no_follow", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_dir_exists", &[I64, I64], &[I8]),  // path_ptr, path_len -> bool
-    RuntimeFuncSpec::new("rt_dir_is_real_no_follow", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
-    // Linux SOSIX owner C ABI. Register MACHINE signatures as well as semantic
-    // text indices: otherwise signature adaptation truncates expanded ptr/len
-    // pairs back to the Simple extern's argument count.
-    RuntimeFuncSpec::new("rt_linux_group_available_capacity_v1", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_linux_group_parent_acquire_v1", &[I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_linux_group_parent_release_v1", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_linux_group_launch_broker_v1", &[I64, I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_linux_group_start_v1",
-        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
-        &[I64]),
-    RuntimeFuncSpec::new("rt_linux_group_poll_v1", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_linux_group_cancel_v1", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_linux_group_collect_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_stat", &[I64, I64], &[I64]),  // path_ptr, path_len -> i64 (mtime seconds)
     // =========================================================================
     // File I/O Operations
@@ -2241,14 +2205,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]),             // old, new -> bool
     RuntimeFuncSpec::new("rt_secure_temp_dir", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_publish_noreplace", &[I64, I64, I64, I64], &[I64]),
-    // Cycle-170 split crossing: rt_secure_temp_dir's two-argument text-ABI
-    // marshalling draws erased on candidate-seednew, so Simple crosses the
-    // staging parent and prefix as two single-argument calls (thread-local
-    // slot in the C runtime). Each setter takes ONE boxed text RuntimeValue
-    // (no text_arg_indices row), so every seed vintage emits the same ABI.
-    RuntimeFuncSpec::new("rt_secure_temp_dir_set_parent", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_secure_temp_dir_set_prefix", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_secure_temp_dir_make", &[], &[I64]),
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
     RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),           // path -> RuntimeValue (array)
@@ -2388,34 +2344,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("spl_collection_capture_note_lookup", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_note_materialization", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_note_hash_probe", &[I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("spl_collection_capture_note_filter", &[I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("spl_collection_capture_note_loop", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_finish", &[], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_abort", &[], &[I64]),
-    // GPU registry raw ABI. path returns a borrowed C pointer represented as
-    // an address-sized I64 in this runtime ABI, never a managed Text value.
-    RuntimeFuncSpec::new("rt_gpu_provider_loaded", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_abi_version", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_backend_bits", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_capability_bits", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_identity", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_generation", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_artifact_digest_word", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_path", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_unload", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_session_open", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_session_close", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_resource_alloc", &[I64, I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_resource_release", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_submit_raw", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_wait_raw", &[I64, I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_readback_raw", &[I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_completion_release", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_quarantine_drain", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_session_authority_word", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_resource_authority_word", &[I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_completion_authority_word", &[I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_gpu_provider_device_image_authority_word", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlopen", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_backend_plugin_run_v1", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlopen_checked", &[I64, I64], &[I64]),
@@ -2487,8 +2417,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_write_span", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse_mut", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_sha384_digest", &[I64], &[I64]), // [u8] -> 48-byte [u8]
-    RuntimeFuncSpec::new("rt_sha512_digest", &[I64], &[I64]), // [u8] -> 64-byte [u8]
     RuntimeFuncSpec::new("rt_sort", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_capitalize", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_center", &[I64, I64, I64], &[I64]),
@@ -2521,31 +2449,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_unbox_int", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_xxh3_128_text", &[I64], &[I64]), // text -> 32-hex XXH3-128
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn linux_owner_machine_signatures_preserve_all_ptr_len_pairs() {
-        for (name, machine_arity) in [
-            ("rt_linux_group_available_capacity_v1", 2),
-            ("rt_linux_group_parent_acquire_v1", 4),
-            ("rt_linux_group_parent_release_v1", 1),
-            ("rt_linux_group_launch_broker_v1", 5),
-            ("rt_linux_group_start_v1", 18),
-            ("rt_linux_group_poll_v1", 1),
-            ("rt_linux_group_cancel_v1", 1),
-            ("rt_linux_group_collect_v1", 1),
-        ] {
-            let spec = spec_for(name).expect("Linux C owner requires an explicit runtime signature");
-            assert_eq!(spec.params, vec![I64; machine_arity], "{name}");
-            assert_eq!(spec.returns, [I64], "{name}");
-            assert_eq!(spec.tier(), RuntimeFuncTier::Sys, "{name}");
-        }
-    }
 
     #[test]
     fn collection_set_abi_is_registered_for_native_codegen() {

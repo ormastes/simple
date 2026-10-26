@@ -86,7 +86,7 @@ pub struct SmfHeader {
 - Version changed to 1.1
 
 **Key Difference from v1.0:**
-```simple:skip
+```simple
 # v1.0: Write header first
 buf = write_header()
 buf = buf.concat(write_sections())
