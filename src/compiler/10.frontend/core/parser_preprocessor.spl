@@ -10,27 +10,20 @@ use compiler.frontend.frontend_target_cfg_receipt_v1.{
 
 # ===== Preprocessor State =====
 
-var _pp_tokens: [text] = []
-var _pp_pos: i64 = 0
-var _pp_target_mode: bool = false
-var _pp_target_os: text = ""
-var _pp_target_arch: text = ""
-var _pp_target_error: text = ""
-var _pp_target_decisions: [FrontendCfgDecisionV1] = []
 
 # One condition evaluator for both modes. Target mode (receipted native
 # builds) evaluates against the explicit target and records an error for
 # anything it does not recognize; ambient mode evaluates against the build
 # target / host from cfg_platform and treats unknown atoms as false.
 fn _pp_current_os() -> text:
-    if _pp_target_mode: _pp_target_os else: cfg_detect_os()
+    if pp_state._pp_target_mode: pp_state._pp_target_os else: cfg_detect_os()
 
 fn _pp_current_arch() -> text:
-    if _pp_target_mode: _pp_target_arch else: cfg_detect_arch()
+    if pp_state._pp_target_mode: pp_state._pp_target_arch else: cfg_detect_arch()
 
 fn _pp_unsupported(message: text) -> bool:
-    if _pp_target_mode:
-        _pp_target_error = message
+    if pp_state._pp_target_mode:
+        pp_state._pp_target_error = message
     false
 
 # Canonical atom set shared with the Rust seed (`parser/src/cond_compile.rs`;
@@ -85,7 +78,7 @@ fn _pp_eval_atom(token: text) -> bool:
     val lowered = t.to_lower()
     if lowered == "true" or lowered == "compiled" or lowered == "debug": return true
     if lowered == "false" or lowered == "interpreter" or lowered == "release": return false
-    if not _pp_target_mode and t == "": return false
+    if not pp_state._pp_target_mode and t == "": return false
     if _pp_os_name(t) != "": return _pp_os_match(t)
     if _pp_arch_name(t) != "": return _pp_arch_match(t)
     val parts = if t.contains("=="): t.split("==") else: t.split("=")
@@ -175,14 +168,14 @@ fn _pp_tokenize_condition(condition: text) -> [text]:
     tokens
 
 fn _pp_peek() -> text:
-    if _pp_pos >= _pp_tokens.len():
+    if pp_state._pp_pos >= pp_state._pp_tokens.len():
         return ""
-    _pp_tokens[_pp_pos]
+    pp_state._pp_tokens[pp_state._pp_pos]
 
 fn _pp_take() -> text:
     val token = _pp_peek()
     if token != "":
-        _pp_pos = _pp_pos + 1
+        pp_state._pp_pos = pp_state._pp_pos + 1
     token
 
 fn _pp_parse_or() -> bool:
@@ -250,15 +243,15 @@ fn _pp_parse_primary() -> bool:
     _pp_eval_atom(atom)
 
 fn _pp_eval_condition(condition: text) -> bool:
-    _pp_tokens = _pp_tokenize_condition(condition)
-    _pp_pos = 0
-    if _pp_tokens.len() == 0:
-        if _pp_target_mode:
-            _pp_target_error = "empty target cfg condition"
+    pp_state._pp_tokens = _pp_tokenize_condition(condition)
+    pp_state._pp_pos = 0
+    if pp_state._pp_tokens.len() == 0:
+        if pp_state._pp_target_mode:
+            pp_state._pp_target_error = "empty target cfg condition"
         return false
     val result = _pp_parse_or()
-    if _pp_target_mode and _pp_pos != _pp_tokens.len():
-        _pp_target_error = "malformed target cfg condition: {condition}"
+    if pp_state._pp_target_mode and pp_state._pp_pos != pp_state._pp_tokens.len():
+        pp_state._pp_target_error = "malformed target cfg condition: {condition}"
     result
 
 fn _pp_extract_paren_condition(line: text) -> text:
@@ -377,8 +370,8 @@ fn _pp_target_decl_end(lines: [text], start: i64) -> i64:
 fn _pp_target_record(line: i64, directive_kind: text, condition: text,
     parent_active: bool, condition_result: bool, effective_active: bool,
     excluded_kind: text, excluded_start: i64, excluded_end: i64):
-    if not _pp_target_mode: return
-    _pp_target_decisions.push(FrontendCfgDecisionV1(
+    if not pp_state._pp_target_mode: return
+    pp_state._pp_target_decisions.push(FrontendCfgDecisionV1(
         line: line, directive_kind: directive_kind, condition: condition,
         parent_active: parent_active, condition_result: condition_result,
         effective_active: effective_active,
@@ -409,8 +402,8 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         val is_when = trimmed.starts_with("@when(")
         if is_when:
             val cond = _pp_extract_paren_condition(trimmed)
-            if _pp_target_mode and cond == "":
-                _pp_target_error = "empty @when condition at line {source_line}"
+            if pp_state._pp_target_mode and cond == "":
+                pp_state._pp_target_error = "empty @when condition at line {source_line}"
             val parent = active
             val cond_ok = _pp_eval_condition(cond)
             val current = parent and cond_ok
@@ -440,25 +433,25 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 var taken = stack_branch_taken[idx]
                 var current = false
                 val cond = _pp_extract_paren_condition(trimmed)
-                if _pp_target_mode and cond == "":
-                    _pp_target_error = "empty @elif condition at line {source_line}"
-                if _pp_target_mode and stack_else_seen[idx]:
-                    _pp_target_error = "@elif after @else at line {source_line}"
+                if pp_state._pp_target_mode and cond == "":
+                    pp_state._pp_target_error = "empty @elif condition at line {source_line}"
+                if pp_state._pp_target_mode and stack_else_seen[idx]:
+                    pp_state._pp_target_error = "@elif after @else at line {source_line}"
                 var condition_result = false
                 if parent and not taken:
                     condition_result = _pp_eval_condition(cond)
                     current = condition_result
                     if current:
                         taken = true
-                elif _pp_target_mode:
+                elif pp_state._pp_target_mode:
                     condition_result = _pp_eval_condition(cond)
                 stack_branch_taken[idx] = taken
                 stack_branch_active[idx] = current
                 active = current
                 _pp_target_record(source_line, "elif", cond, parent,
                     condition_result, current, "", 0, 0)
-            elif _pp_target_mode:
-                _pp_target_error = "@elif without @when at line {source_line}"
+            elif pp_state._pp_target_mode:
+                pp_state._pp_target_error = "@elif without @when at line {source_line}"
             out_lines.push("")
             continue
 
@@ -466,8 +459,8 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         if is_else:
             if depth > 0:
                 val idx = depth - 1
-                if _pp_target_mode and stack_else_seen[idx]:
-                    _pp_target_error = "duplicate @else at line {source_line}"
+                if pp_state._pp_target_mode and stack_else_seen[idx]:
+                    pp_state._pp_target_error = "duplicate @else at line {source_line}"
                 stack_else_seen[idx] = true
                 val parent = stack_parent_active[idx]
                 val taken = stack_branch_taken[idx]
@@ -477,8 +470,8 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 active = current
                 _pp_target_record(source_line, "else", "", parent,
                     not taken, current, "", 0, 0)
-            elif _pp_target_mode:
-                _pp_target_error = "@else without @when at line {source_line}"
+            elif pp_state._pp_target_mode:
+                pp_state._pp_target_error = "@else without @when at line {source_line}"
             out_lines.push("")
             continue
 
@@ -486,8 +479,8 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         if is_end:
             if depth > 0:
                 depth = depth - 1
-            elif _pp_target_mode:
-                _pp_target_error = "@end without @when at line {source_line}"
+            elif pp_state._pp_target_mode:
+                pp_state._pp_target_error = "@end without @when at line {source_line}"
             if depth <= 0:
                 active = true
             else:
@@ -503,7 +496,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             out_lines.push(line)
         else:
             # Keep line count stable for diagnostics.
-            if _pp_target_mode and trimmed.starts_with("@cfg("):
+            if pp_state._pp_target_mode and trimmed.starts_with("@cfg("):
                 val inactive_cond = _pp_extract_cfg_condition(trimmed)
                 val inactive_result = _pp_eval_condition(inactive_cond)
                 _pp_target_record(source_line, "cfg", inactive_cond, false,
@@ -515,8 +508,8 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                     _pp_target_decl_end(lines, source_line - 1))
             out_lines.push("")
 
-    if _pp_target_mode and depth != 0:
-        _pp_target_error = "unclosed @when block"
+    if pp_state._pp_target_mode and depth != 0:
+        pp_state._pp_target_error = "unclosed @when block"
 
     # Second pass: @cfg(condition) per-declaration conditionals
     var final_lines: [text] = []
@@ -629,7 +622,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             # In target mode adjacent decorators jointly gate one declaration.
             # The ambient path retains its existing single-decorator behavior.
             var declaration_index = i + 1
-            if _pp_target_mode:
+            if pp_state._pp_target_mode:
                 while declaration_index < out_lines.len() and
                         out_lines[declaration_index].trim().starts_with("@cfg("):
                     declaration_index = declaration_index + 1
@@ -726,19 +719,19 @@ pub fn _pp_preprocess_conditionals_target_receipted_v1(
 ) -> Result<FrontendTargetPreprocessV1, text>:
     if target_os == "" or target_arch == "":
         return Err("explicit target cfg OS and architecture are required")
-    _pp_target_mode = true
-    _pp_target_os = target_os
-    _pp_target_arch = target_arch
-    _pp_target_error = ""
-    _pp_target_decisions = []
+    pp_state._pp_target_mode = true
+    pp_state._pp_target_os = target_os
+    pp_state._pp_target_arch = target_arch
+    pp_state._pp_target_error = ""
+    pp_state._pp_target_decisions = []
     val preprocessed = _pp_preprocess_conditionals(source)
-    val error = _pp_target_error
-    val decisions = _pp_target_decisions
-    _pp_target_mode = false
-    _pp_target_os = ""
-    _pp_target_arch = ""
-    _pp_target_error = ""
-    _pp_target_decisions = []
+    val error = pp_state._pp_target_error
+    val decisions = pp_state._pp_target_decisions
+    pp_state._pp_target_mode = false
+    pp_state._pp_target_os = ""
+    pp_state._pp_target_arch = ""
+    pp_state._pp_target_error = ""
+    pp_state._pp_target_decisions = []
     if error != "": return Err(error)
     Ok(FrontendTargetPreprocessV1(source: preprocessed, decisions: decisions))
 
@@ -765,32 +758,17 @@ pub struct PreprocessorState:
     _pp_target_error: text
     _pp_target_decisions: [FrontendCfgDecisionV1]
 
+fn preprocessor_state_fresh() -> PreprocessorState:
+    PreprocessorState(_pp_tokens: [], _pp_pos: 0, _pp_target_mode: false, _pp_target_os: "", _pp_target_arch: "", _pp_target_error: "", _pp_target_decisions: [])
+
+var pp_state: PreprocessorState = preprocessor_state_fresh()
+
 pub fn preprocessor_state_take() -> PreprocessorState:
-    val s = PreprocessorState(
-        _pp_tokens: _pp_tokens,
-        _pp_pos: _pp_pos,
-        _pp_target_mode: _pp_target_mode,
-        _pp_target_os: _pp_target_os,
-        _pp_target_arch: _pp_target_arch,
-        _pp_target_error: _pp_target_error,
-        _pp_target_decisions: _pp_target_decisions
-    )
-    _pp_tokens = []
-    _pp_pos = 0
-    _pp_target_mode = false
-    _pp_target_os = ""
-    _pp_target_arch = ""
-    _pp_target_error = ""
-    _pp_target_decisions = []
+    val s = pp_state
+    pp_state = preprocessor_state_fresh()
     s
 
 pub fn preprocessor_state_install(s: PreprocessorState):
-    _pp_tokens = s._pp_tokens
-    _pp_pos = s._pp_pos
-    _pp_target_mode = s._pp_target_mode
-    _pp_target_os = s._pp_target_os
-    _pp_target_arch = s._pp_target_arch
-    _pp_target_error = s._pp_target_error
-    _pp_target_decisions = s._pp_target_decisions
+    pp_state = s
 
 export PreprocessorState, preprocessor_state_take, preprocessor_state_install
