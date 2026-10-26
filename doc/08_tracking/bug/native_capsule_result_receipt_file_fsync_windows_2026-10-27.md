@@ -11,3 +11,6 @@
   /tmp path on Windows (likely the seed runtime opens read-only for FlushFileBuffers, or /tmp is not mapped).
   The runtime lives in src/compiler_rust (off-limits here). Next step: check rt_file_fsync's Windows open flags
   (needs GENERIC_WRITE) and /tmp mapping in host_path_native.
+
+## Correction (review of PR #4957)
+Cause B (the file opened read-only) is ruled out: `win_fsync_path` (runtime file_ops.rs:870-897) already opens with FILE_GENERIC_READ|FILE_GENERIC_WRITE. The remaining candidate is how `host_path_native` maps `/tmp` to the drive root.

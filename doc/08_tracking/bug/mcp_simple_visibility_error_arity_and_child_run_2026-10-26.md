@@ -21,3 +21,6 @@
   `mcp_run_argv(_bin, ["run", "src/app/cli/query_visibility.spl", ...], 30000, 262144)` (no shell, no quoting).
 - Result: mcp_visibility_requester_spec 2/6 -> 6/6; lsp_visibility_requester_spec 5/5 (unchanged).
 - Note: `mcp_run_argv` merges stderr into output (the old command dropped it via `2>/dev/null`).
+
+## Correction (review of PR #4957)
+The landed fix calls `process_run_bounded` directly with literal argv and keeps stdout only, matching the old `2>/dev/null`. It does not use `mcp_run_argv`, which merges stderr into the output.
