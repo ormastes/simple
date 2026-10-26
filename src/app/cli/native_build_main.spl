@@ -1782,6 +1782,16 @@ pub fn native_build_missing_output_is_failure_v1(code: i64, output_path: text,
 pub fn native_build_workarounds_refresh_needed_v1(worker: text, shard_child: bool) -> bool:
     worker != "1" and not shard_child
 
+pub fn native_build_memory_gate_applies_v1(worker: text, shard_child: bool, group_result: text,
+        mir_shard_link: text, args: [text]) -> bool:
+    if worker == "1" or shard_child or group_result != "" or mir_shard_link != "":
+        return false
+    for arg in args:
+        if arg.starts_with("--file-worker") or arg.starts_with("--parse-shard") or
+                arg.starts_with("--hir-shard") or arg.starts_with("--mir-shard"):
+            return false
+    true
+
 pub fn run_native_build_worker(raw_args: [text]) -> i64:
     val request = match native_build_authority_request_v1(raw_args,
             (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") == "1"):
@@ -1811,6 +1821,14 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
                     stderr_write("workarounds: incomplete coverage; run simple check-dbs --fullscan bugs\n")
             case Err(reason):
                 stderr_write("workarounds: refresh failed: " + reason + "\n")
+    # Memory admission at build start, coordinator only: workers, shard
+    # children, grouped and file workers are admitted by their parent's pool.
+    if native_build_memory_gate_applies_v1(env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "", shard_child,
+            env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? "", env_get("SIMPLE_MIR_SHARD_LINK") ?? "", args):
+        val memory_refusal = build_memory_start_refusal_v1(shard_mem_available_kb(), build_memory_reserve_kib())
+        if memory_refusal != "":
+            eprint memory_refusal
+            return 3
     val compiled_bootstrap_route =
         (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
     val simple_bin = if compiled_bootstrap_route:
@@ -2379,27 +2397,8 @@ pub fn run_native_build_entry_v1(raw_args: [text]) -> i64:
         eprint "Error: No entry point specified for native-build backend"
         eprint "Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]..."
         return 1
-    # Memory admission at build start (top-level builds only: shard and
-    # grouped children are admitted by their parent's worker pool).
-    if native_build_is_top_level_v1(args, group_manifest):
-        val refusal = build_memory_start_refusal_v1(shard_mem_available_kb(), build_memory_reserve_kib())
-        if refusal != "":
-            eprint refusal
-            return 3
-
     run_native_build_worker(args)
 
-fn native_build_is_top_level_v1(args: [text], group_manifest: text) -> bool:
-    if group_manifest != "":
-        return false
-    for name in ["SIMPLE_PARSE_SHARD_QUEUE", "SIMPLE_HIR_SHARD_QUEUE", "SIMPLE_MIR_SHARD_QUEUE"]:
-        val queue = env_get(name) ?? ""
-        if queue != "" and queue != "0":
-            return false
-    for arg in args:
-        if arg.starts_with("--parse-shard") or arg.starts_with("--hir-shard") or arg.starts_with("--mir-shard"):
-            return false
-    true
 
 fn main() -> i64:
     run_native_build_entry_v1(native_build_entry_args())
