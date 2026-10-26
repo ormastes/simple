@@ -5,7 +5,8 @@
 # Usage: sh scripts/release/publish-win-stage-rc.shs <stage-exe> <stage2|stage3> <commit> [--dry-run]
 #
 # The asset is the stage compiler itself (bootstrap CLI: compile/native-build
-# only), never the Rust seed. Tag = rc-1.0.0-rc.<highest existing + 1>.
+# only), never the Rust seed. SIMPLE_RC_EXTRA_ASSETS (space-separated paths)
+# attaches extra files, e.g. the runtime DLL bundle + its .sha256. Tag = rc-1.0.0-rc.<highest existing + 1>.
 set -u
 exe=${1:?stage exe path}; stage=${2:?stage2|stage3}; commit=${3:?source commit}; mode=${4:-}
 case "$stage" in stage2|stage3) ;; *) echo "FAIL — stage must be stage2 or stage3"; exit 2 ;; esac
@@ -27,8 +28,10 @@ lrc=$?
 if [ "$lrc" -eq 0 ] && [ -f "$work/hello.exe" ]; then
   out=$("$work/hello.exe" 2>&1); orc=$?
   gate="$gate; link+run: rc=$orc output='$out'"
+  case "$orc:$out" in 0:*"hello world"*) ;; *) echo "FAIL — hello.exe run: $gate"; exit 1 ;; esac
 else
-  gate="$gate; link (native-build exe) rc=$lrc (not required)"
+  tail -20 "$work/link.log"
+  echo "FAIL — hello link: rc=$lrc"; exit 1
 fi
 echo "gate: $gate"
 
@@ -45,12 +48,13 @@ Windows x86_64 $stage bootstrap compiler (bootstrap CLI: compile/native-build on
 - built path: $exe
 - sha256: $hash
 - gate: $gate
+- runtime dependency: libLLVM-23.dll (MSYS2 clang64 build, e.g. C:/msys64/clang64/bin) must be on PATH; the llvm-mingw libLLVM-23.dll fails with 0xC0000139. Linking an exe additionally needs LIB = MSVC 14.44 lib/x64 + Windows Kits 10.0.26100.0 ucrt/x64 and um/x64, plus SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_SCV_FREEZE_FALLBACK=1, run from a release/1.0.0 checkout (runtime C is compiled from the checkout at link time).
 EOF
 echo "tag=$tag asset=$(basename "$asset") sha256=$hash"
 [ "$mode" = "--dry-run" ] && { echo "PASS — dry run, not published"; exit 0; }
 gh release create "$tag" --prerelease --target "$commit" \
   --title "$tag (win $stage)" --notes-file "$work/notes.md" \
-  "$asset" "$asset.sha256"
+  "$asset" "$asset.sha256" ${SIMPLE_RC_EXTRA_ASSETS:-}
 crc=$?
 [ "$crc" -eq 0 ] || { echo "FAIL — gh release create rc=$crc"; exit 1; }
 echo "PASS — published $tag"
