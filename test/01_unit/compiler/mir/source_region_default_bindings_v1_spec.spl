@@ -1,0 +1,182 @@
+# Authored UNRUN. Encoded observations only; no invocation/replay admission.
+use std.spec.{describe, it, expect, fail}
+use compiler.common.config.{Logger}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, HirImportItem, SymbolId}
+use compiler.hir.hir_definitions.{HirExpr}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_expr, hc_enc_symbol_id, hc_enc_hir_import_item}
+use compiler.mir.hir_expression_artifact_v1.{mir_hir_expression_encode_v1, mir_hir_expression_header_v1}
+use compiler.mir.source_region_default_bindings_v1.{source_region_capture_default_bindings_v1}
+use compiler.mir.source_region_default_binding_types_v1.{MirSourceDefaultCapturedExpressionV1}
+
+fn default_binding_test_account_v1(work: i64 = 1048576) -> MirLoopResourceAccountV1:
+    var limits = MirLoopResourceLimitsV1()
+    limits.max_work = work
+    match MirLoopResourceAccountV1.create(limits):
+        case Ok(account): account
+        case Err(_): fail("actual resource account factory refused")
+
+fn default_binding_test_source_v1(program: text) -> HirModule:
+    val parsed = parse_full_frontend(program, "default_binding.spl", "default_binding", Logger(level: 0))
+    var lowering = HirLowering.with_filename("default_binding.spl")
+    val source = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    source
+
+fn default_binding_test_symbol_v1(source: HirModule, name: text) -> SymbolId:
+    match source.symbols.lookup(name):
+        case Some(symbol): symbol
+        case _: fail("actual frontend declaration absent")
+
+fn default_binding_test_field_v1(source: HirModule) -> HirExpr:
+    val holder = source.classes[default_binding_test_symbol_v1(source, "Holder")]
+    expect(holder.fields[0].has_default).to_equal(true)
+    holder.fields[0].default
+
+fn default_binding_test_capture_v1(source: HirModule) -> MirSourceDefaultCapturedExpressionV1:
+    match source_region_capture_default_bindings_v1(default_binding_test_field_v1(source), source.symbols,
+            default_binding_test_symbol_v1(source, "original"), 3, source.name, default_binding_test_account_v1()):
+        case Ok(captured): captured
+        case Err(error): fail(error)
+
+fn default_binding_test_nested_source_v1() -> HirModule:
+    default_binding_test_source_v1("fn helper(value: i64) -> i64:\n    value\n" +
+        "class Holder:\n    value: i64 = helper(helper(7))\n" +
+        "fn original() -> Holder:\n    Holder()\n")
+
+fn default_binding_test_writer_v1(account: MirLoopResourceAccountV1) -> HirCodecWriter:
+    match HirCodecWriter.create_accounted_v1(8388608, 134217728, 1000000, account):
+        case Ok(writer): writer
+        case Err(error): fail(error)
+
+describe("accounted default symbol observations"):
+    it("retains real nested default occurrences but snapshots a repeated target record once"):
+        val source = default_binding_test_nested_source_v1()
+        val helper = default_binding_test_symbol_v1(source, "helper")
+        val captured = default_binding_test_capture_v1(source)
+        expect(captured.bindings.original).to_equal(default_binding_test_symbol_v1(source, "original").id)
+        expect(captured.bindings.ordinal).to_equal(3)
+        expect(captured.bindings.target_key).to_equal(source.name)
+        var uses = 0
+        var ordinal = 0
+        for reference in captured.bindings.expression_references:
+            expect(reference.ordinal).to_equal(ordinal)
+            ordinal = ordinal + 1
+            if reference.present and reference.value == helper.id:
+                expect(reference.role).to_contain("HirExprKind.")
+                uses = uses + 1
+        expect(uses).to_equal(2)
+        var records = 0
+        for record in captured.bindings.symbols:
+            if record.symbol == helper.id: records = records + 1
+        expect(records).to_equal(1)
+        expect(captured.blob).to_equal(mir_hir_expression_encode_v1(default_binding_test_field_v1(source)).unwrap())
+
+    it("visits a real target symbol type cycle once per identity"):
+        val source = default_binding_test_source_v1("class CycleA:\n    value: i64\n" +
+            "class CycleB:\n    value: i64\n" +
+            "class Holder:\n    value: CycleA = CycleA(7)\n" +
+            "fn original() -> Holder:\n    Holder()\n")
+        val a = default_binding_test_symbol_v1(source, "CycleA")
+        val b = default_binding_test_symbol_v1(source, "CycleB")
+        # Exercise the data collector on actual allocated target records;
+        # this type-graph fixture is not a callable/admitted declaration proof.
+        var left = source.symbols.symbols[a.id]
+        var right = source.symbols.symbols[b.id]
+        left.type_ = Some(HirType(kind: HirTypeKind.Named(b, [])))
+        right.type_ = Some(HirType(kind: HirTypeKind.Named(a, [])))
+        source.symbols.symbols[a.id] = left
+        source.symbols.symbols[b.id] = right
+        val captured = default_binding_test_capture_v1(source)
+        var a_count = 0
+        var b_count = 0
+        for record in captured.bindings.symbols:
+            if record.symbol == a.id: a_count = a_count + 1
+            if record.symbol == b.id: b_count = b_count + 1
+        expect(a_count).to_equal(1)
+        expect(b_count).to_equal(1)
+
+    it("retains encoded records instead of mutable target symbol aliases"):
+        val source = default_binding_test_nested_source_v1()
+        val captured = default_binding_test_capture_v1(source)
+        val helper = default_binding_test_symbol_v1(source, "helper")
+        var before = ""
+        for record in captured.bindings.symbols:
+            if record.symbol == helper.id: before = record.bytes
+        expect(before.len()).to_be_greater_than(0)
+        var target = source.symbols.symbols[helper.id]
+        target.name = "changed_helper"
+        source.symbols.symbols[helper.id] = target
+        val changed = default_binding_test_capture_v1(source)
+        for record in captured.bindings.symbols:
+            if record.symbol == helper.id: expect(record.bytes).to_equal(before)
+        var after = ""
+        for record in changed.bindings.symbols:
+            if record.symbol == helper.id: after = record.bytes
+        expect(after == before).to_equal(false)
+
+    it("rejects an actual table key mismatch without returning a partial observation"):
+        val source = default_binding_test_nested_source_v1()
+        val helper = default_binding_test_symbol_v1(source, "helper")
+        val original = default_binding_test_symbol_v1(source, "original")
+        source.symbols.symbols[helper.id] = source.symbols.symbols[original.id]
+        val result = source_region_capture_default_bindings_v1(default_binding_test_field_v1(source),
+            source.symbols, original, 0, source.name, default_binding_test_account_v1())
+        expect(result).to_equal(Err("SOURCE-DEFAULT-BINDING: target symbol key differs"))
+
+    it("refuses one-short inventory growth and stops subsequent generated visits"):
+        val source = default_binding_test_nested_source_v1()
+        val helper = default_binding_test_symbol_v1(source, "helper")
+        val account = default_binding_test_account_v1()
+        var writer = default_binding_test_writer_v1(account)
+        expect(writer.begin_symbol_inventory_v1()).to_equal(true)
+        val remaining = account.limits().max_work - account.snapshot().work_used
+        # role binding has7bytes: work16+94 then allocation206*2 =522.
+        expect(account.reserve(work: remaining - 521)).to_equal(Ok(()))
+        val before = account.snapshot()
+        val allocated = writer.charged_allocation_bytes
+        expect(writer.record_symbol_reference_v1(helper.id, true, "binding")).to_equal(false)
+        expect(writer.symbol_inventory_v1.occurrences.len()).to_equal(0)
+        expect(writer.charged_allocation_bytes).to_equal(allocated)
+        expect(account.snapshot().work_used).to_equal(before.work_used + 110)
+        val refused = account.snapshot()
+        val visited = writer.accounted_visits_v1
+        hc_enc_symbol_id(writer, helper, "binding")
+        expect(writer.accounted_visits_v1).to_equal(visited)
+        expect(account.snapshot().work_used).to_equal(refused.work_used)
+
+    it("accepts the exact inventory boundary and preserves sentinel and absent roles"):
+        val account = default_binding_test_account_v1()
+        var boundary = default_binding_test_writer_v1(account)
+        expect(boundary.begin_symbol_inventory_v1()).to_equal(true)
+        val remaining = account.limits().max_work - account.snapshot().work_used
+        expect(account.reserve(work: remaining - 522)).to_equal(Ok(()))
+        expect(boundary.record_symbol_reference_v1(-1, true, "binding")).to_equal(true)
+        expect(boundary.symbol_inventory_v1.occurrences[0].value).to_equal(-1)
+        var writer = default_binding_test_writer_v1(default_binding_test_account_v1())
+        expect(writer.begin_symbol_inventory_v1()).to_equal(true)
+        # A real pre-link import item legitimately has no resolved SymbolId.
+        hc_enc_hir_import_item(writer, HirImportItem(name: "pending", alias: nil, resolved: nil))
+        hc_enc_symbol_id(writer, SymbolId(id: -1), "unresolved")
+        expect(writer.ok).to_equal(true)
+        expect(writer.symbol_inventory_v1.occurrences.len()).to_equal(2)
+        val absent = writer.symbol_inventory_v1.occurrences[0]
+        expect(absent.role).to_equal("HirImportItem.resolved")
+        expect(absent.present).to_equal(false)
+        val sentinel = writer.symbol_inventory_v1.occurrences[1]
+        expect(sentinel.present).to_equal(true)
+        expect(sentinel.value).to_equal(-1)
+
+    it("leaves disabled inventory absent and preserves the ordinary expression bytes"):
+        val source = default_binding_test_nested_source_v1()
+        val expression = default_binding_test_field_v1(source)
+        var writer = default_binding_test_writer_v1(default_binding_test_account_v1())
+        hc_enc_hir_expr(writer, expression)
+        val bytes = writer.finish_with_header(mir_hir_expression_header_v1())
+        expect(writer.ok).to_equal(true)
+        expect(writer.symbol_inventory_v1).to_equal(nil)
+        expect(bytes).to_equal(mir_hir_expression_encode_v1(expression).unwrap())
