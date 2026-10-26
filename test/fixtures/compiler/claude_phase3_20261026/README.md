@@ -32,7 +32,10 @@ completion is claimed by this preservation change.
 - `wt-rel3-new`'s uncommitted preflight edit lowered `MIN_FREE_GB` from 20 to
   8. Preserve that local operational choice by setting `MIN_FREE_GB=8` explicitly
   for a deliberate diagnostic invocation; the shared default remains 20.
-  The exact local patch is retained alongside this README for provenance.
+  The historical patch against that worktree's `d72188e68ec` base is retained
+  alongside this README for provenance. Current release source also honors
+  `SIMPLE_BOOTSTRAP_MIN_FREE_GB`; the archived patch is not a current-release
+  patch proposal.
 - Missing submodules and flattened Windows symlinks are checkout state, not
   unpublished product changes. The audit preserved them in their source trees.
 
