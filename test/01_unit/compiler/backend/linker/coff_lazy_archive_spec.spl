@@ -1,0 +1,142 @@
+# Lazy, index-driven COFF archive search.
+#
+# lld-link materializes only the archive members its linker-member symbol
+# index names for a still-undefined symbol. The internal engine used to parse
+# every member of every library on every closure call (several GB for the
+# MSVC/SDK libraries of a hosted hello world, never freed under @no_gc).
+# An indexed archive must therefore ignore members nothing asks for; the
+# spec proves it with a member that cannot even be parsed.
+
+use std.spec.*
+use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64}
+
+fn _cl_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _cl_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result.push(((value >> 24) & 0xff) as u8)
+
+fn _cl_name(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _cl_object(symbol_name: text, section_number: i64) -> [u8]:
+    # Header 20 + section 40 + one-byte RET + symbol 18 + string table.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 61)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc3)
+    # Names longer than eight bytes live in the string table at offset 4.
+    val long_name = symbol_name.len() > 8
+    if long_name:
+        bytes = _cl_u32(bytes, 0)
+        bytes = _cl_u32(bytes, 4)
+    else:
+        bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, section_number)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    if not long_name: return _cl_u32(bytes, 4)
+    bytes = _cl_u32(bytes, 4 + symbol_name.len() + 1)
+    var ni: i64 = 0
+    while ni < symbol_name.len():
+        bytes = bytes.push(symbol_name.byte_at(ni) as u8)
+        ni = ni + 1
+    bytes.push(0)
+
+fn _cl_ascii(bytes: [u8], value: text, width: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < width:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0x20) as u8)
+        i = i + 1
+    result
+
+fn _lz_append(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i: i64 = 0
+    while i < src.len():
+        out = out.push(src[i])
+        i = i + 1
+    out
+
+fn _lz_member(name: text, data: [u8]) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _cl_ascii(bytes, name, 16)
+    bytes = _cl_ascii(bytes, "0", 12)
+    bytes = _cl_ascii(bytes, "0", 6)
+    bytes = _cl_ascii(bytes, "0", 6)
+    bytes = _cl_ascii(bytes, "100644", 8)
+    bytes = _cl_ascii(bytes, data.len().to_text(), 10)
+    bytes = bytes.push(0x60).push(0x0a)
+    bytes = _lz_append(bytes, data)
+    if data.len() % 2 != 0: bytes = bytes.push(0x0a)
+    bytes
+
+fn _lz_be32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push(((value >> 24) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result.push((value & 0xff) as u8)
+
+fn _lz_indexed_archive(symbol: text, good: [u8], bad: [u8]) -> [u8]:
+    # "/" index (one symbol -> the good member), then the good and bad members.
+    var index: [u8] = []
+    index = _lz_be32(index, 1)
+    val index_len = 4 + 4 + symbol.len() + 1
+    val padded_index = if index_len % 2 != 0: index_len + 1 else: index_len
+    index = _lz_be32(index, 8 + 60 + padded_index)
+    var i: i64 = 0
+    while i < symbol.len():
+        index = index.push(symbol.byte_at(i) as u8)
+        i = i + 1
+    index = index.push(0)
+    var bytes = _cl_ascii([], "!<arch>\n", 8)
+    bytes = _lz_append(bytes, _lz_member("/", index))
+    bytes = _lz_append(bytes, _lz_member("good.obj/", good))
+    _lz_append(bytes, _lz_member("bad.obj/", bad))
+
+fn _lz_bad_object() -> [u8]:
+    # AMD64 header claiming one section, truncated before its section table.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    var i: i64 = 0
+    while i < 16:
+        bytes = bytes.push(0)
+        i = i + 1
+    bytes
+
+describe "COFF lazy archive search":
+    it "never parses an indexed member that no undefined symbol names":
+        val linked = coff_link_amd64(CoffLinkRequest(
+            objects: [_cl_object("helper", 1)],
+            archives: [_lz_indexed_archive("_start", _cl_object("_start", 1), _lz_bad_object())],
+            entry: "_start"))
+        if linked.is_err(): print("link error: {linked.unwrap_err()}")
+        expect(linked.is_ok()).to_equal(true)
