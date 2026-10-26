@@ -240,3 +240,20 @@ confirmed base3fafd89481d remained current. No guard is disabled. New evidence:
 RUNNING, not PASS. If it fails, stop the compiler repair lane at six cycles;
 continuation requires the explicit budget extension. A successful link still
 requires real Hello compile and output execution before dependent producer use.
+
+## Final compiler-cycle terminal evidence (2026-10-26)
+
+The low-memory sixth cycle is FAILED, exit88, enforced RSS cap20971520 KiB,
+observed peak20978344 KiB. Its receipt reports quiescent=1, and the recorded
+parent/child process tree is absent. All1515 HIR entries completed (1289 lowered,
+226 cached), followed by HIR-complete; object compilation/link completion is
+unproven. The planned compiler executable does not exist. Evidence remains in
+the producer worktree's `build/tooling-producer/compile5-low-memory/`, including
+the retained temporary compiler log and terminal RSS receipt.
+
+The supported low-memory option did not keep this full build within20 GiB;
+do not infer success or manufacture a post-HIR checkpoint. Compiler repair has
+now exhausted six accounted cycles. Together with exhausted tooling lanes,
+this blocks the full requested verification and PR landing. A bounded extension
+of up to three cycles per exhausted lane has been requested explicitly. No
+additional repair/build cycle starts merely because that question is pending.
