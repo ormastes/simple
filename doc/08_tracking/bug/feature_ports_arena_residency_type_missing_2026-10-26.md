@@ -12,3 +12,16 @@
 - Verdict: spec is ahead of the implementation (feature not landed), not a stale spec. Import itself resolves (handles.spl is in the module).
 - Repro: `bin/simple.exe test test/01_unit/compiler/mdsoc/feature_ports_spec.spl --no-session-daemon`
 - Fix: land ArenaResidency<T>(object, entity_count, byte_len) in handles.spl and the residency fields on the ports, or retire the specs.
+
+## Resolution (2026-10-27) - NOT FIXED; history found, left filed
+- History: ArenaResidency<T>(object: ObjectRef<T>, entity_count: u64, byte_len: u64) DID exist, in handles.spl plus
+  `*_residency: ArenaResidency<AnyObject>` fields on the mdsoc ports (parser_input/output, linker_input/output), at
+  e274cd33719 (2026-09 "merge all share-history worktree branches"). It was dropped by fcbec1c3b62
+  "fix(merge): restore src/compiler and src/lib to origin for phase 1 bootstrap" (an ancestor of HEAD), which reverted
+  handles.spl, semantic.spl (AnyObject), backend/planner and the ports. So the specs are not ahead of a never-landed
+  design; the feature landed and was deliberately reverted for bootstrap. Related gpu symbols (hash128, GpuCasStore,
+  DescriptorTable, placement_object_state) went the same way (see gpu_lib_removed_apis_specs_red_2026-09-16.md).
+- Not restored: it is a multi-file revert (handles, semantic AnyObject, 4+ ports, EntityRef relocation to
+  common.structural.identity.entity_id) well over the minimal size, and it undoes a bootstrap-motivated revert.
+  Owner decision needed: re-land from e274cd33719 (`git show e274cd33719:<path>`) once the phase-1 bootstrap reason is
+  cleared, or retire the 5 specs.
