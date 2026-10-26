@@ -37,7 +37,10 @@ use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, 
 use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
-use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid, env_get_opt}
+use std.nogc_async_mut.async.future.{Future}
+use std.nogc_async_mut.fiber.io_reactor.{fiber_io_new, fiber_io_close, fiber_io_submit_open_write, fiber_io_submit_write, fiber_io_submit_close, fiber_io_ready, fiber_io_result, fiber_io_pump}
+use std.common.task_runner.fiber_scheduler.{fiber_sched_new}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.common.config.{Logger}
 use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_guarded_v1}
@@ -495,6 +498,60 @@ pub fn module_artifact_publish_atomic_v1(path: text, content: text) -> bool:
         val _r = file_delete(temp)
         return false
     true
+
+# Reactor write of `content` to `temp` (create+truncate). True only when the
+# whole payload was written and the fd closed; the caller owns temp cleanup.
+fn _publish_reactor_write_v1(temp: text, content: text) -> bool:
+    var r = fiber_io_new(8)
+    if r.error != "":
+        return false
+    val s = fiber_sched_new([0], 100)
+    var sub = fiber_io_submit_open_write(r, temp)
+    r = sub.reactor
+    var pump = fiber_io_pump(r, s, 5000)
+    r = pump.reactor
+    if sub.op <= 0 or not fiber_io_ready(r, sub.op):
+        fiber_io_close(r)
+        return false
+    val fd = fiber_io_result(r, sub.op)
+    if fd < 0:
+        fiber_io_close(r)
+        return false
+    var ok = true
+    if content.len() > 0:
+        sub = fiber_io_submit_write(r, fd, content, 0)
+        r = sub.reactor
+        pump = fiber_io_pump(r, s, 5000)
+        r = pump.reactor
+        ok = sub.op > 0 and fiber_io_ready(r, sub.op) and fiber_io_result(r, sub.op) == content.len()
+    sub = fiber_io_submit_close(r, fd)
+    r = sub.reactor
+    pump = fiber_io_pump(r, s, 5000)
+    r = pump.reactor
+    val closed = sub.op > 0 and fiber_io_ready(r, sub.op) and fiber_io_result(r, sub.op) == 0
+    fiber_io_close(r)
+    ok and closed
+
+# Async variant. Unset SIMPLE_ASYNC_WRITES: exactly the sync publish. With
+# SIMPLE_ASYNC_WRITES=1: same admission and temp name, temp written through the
+# fiber IO reactor, rename stays synchronous; a failed write removes the temp
+# and never touches the destination.
+pub fn module_artifact_publish_atomic_async_v1(path: text, content: text) -> Future<bool>:
+    if (env_get_opt("SIMPLE_ASYNC_WRITES") ?? "") != "1":
+        return Future.from_value(module_artifact_publish_atomic_v1(path, content))
+    val slash = path.rfind("/")
+    if slash > 0 and not dir_create_all(path.substring(0, slash)):
+        return Future.from_value(false)
+    if not disk_publish_admitted(if slash > 0: path.substring(0, slash) else: ".", content.len()):
+        return Future.from_value(false)
+    val temp = "{path}.{getpid()}.{xxh3_128_text(content)}.tmp"
+    if not _publish_reactor_write_v1(temp, content):
+        val _w = file_delete(temp)
+        return Future.from_value(false)
+    if not file_rename(temp, path):
+        val _r = file_delete(temp)
+        return Future.from_value(false)
+    Future.from_value(true)
 
 # The shared entry. Returns "" on success (fresh or regenerated), else an
 # error text. A fresh companion skips the parse entirely.

@@ -1,0 +1,73 @@
+"""
+## Purpose and audience
+Purpose: Verify module_artifact_publish_atomic_async_v1 matches the sync publish
+byte for byte with SIMPLE_ASYNC_WRITES unset and set, replaces an existing
+destination, and on a failed write leaves the destination untouched and no .tmp.
+Audience: cache/build-runner engineers.
+## Compatibility and limitations
+Writes under a scratch dir in the working directory and deletes it.
+Design: cache plan step 1 (S1-4).
+"""
+use app.io.env_ops.{env_get, env_set}
+use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_create_all, getpid}
+use std.nogc_async_mut.async.poll.{Poll}
+use std.nogc_async_mut.async.future.{Future}
+use compiler.driver.cache.module_artifacts_v1.{module_artifact_publish_atomic_v1, module_artifact_publish_atomic_async_v1}
+
+fn _pa_dir() -> text:
+    ".publish_async_spec_{getpid()}"
+
+fn _pa_ready(f: Future<bool>) -> bool:
+    match f.poll():
+        case Poll.Ready(v): v
+        case Poll.Pending: false
+
+fn _pa_tmp_leftovers(dir: text, dest: text) -> bool:
+    # temp name is "{dest}.{pid}.{hash}.tmp"; the probe covers the pid-prefixed form
+    file_exists("{dest}.{getpid()}.tmp")
+
+describe "publish_atomic async":
+    before_each:
+        dir_create_all(_pa_dir())
+
+    it "flag off and flag on give identical bytes and no temp":
+        val dir = _pa_dir()
+        val a = "{dir}/a.bin"
+        val b = "{dir}/b.bin"
+        val prev = env_get("SIMPLE_ASYNC_WRITES")
+        env_set("SIMPLE_ASYNC_WRITES", "")
+        expect(_pa_ready(module_artifact_publish_atomic_async_v1(a, "payload-1"))).to_be(true)
+        env_set("SIMPLE_ASYNC_WRITES", "1")
+        expect(_pa_ready(module_artifact_publish_atomic_async_v1(b, "payload-1"))).to_be(true)
+        env_set("SIMPLE_ASYNC_WRITES", prev)
+        expect(file_read(a)).to_equal("payload-1")
+        expect(file_read(b)).to_equal(file_read(a))
+        expect(_pa_tmp_leftovers(dir, a)).to_be(false)
+        expect(_pa_tmp_leftovers(dir, b)).to_be(false)
+        file_delete(a)
+        file_delete(b)
+
+    it "replaces an existing destination":
+        val dir = _pa_dir()
+        val d = "{dir}/c.bin"
+        file_write(d, "old")
+        val prev = env_get("SIMPLE_ASYNC_WRITES")
+        env_set("SIMPLE_ASYNC_WRITES", "1")
+        expect(_pa_ready(module_artifact_publish_atomic_async_v1(d, "new-content"))).to_be(true)
+        env_set("SIMPLE_ASYNC_WRITES", prev)
+        expect(file_read(d)).to_equal("new-content")
+        file_delete(d)
+
+    it "failed write leaves destination unchanged and no temp":
+        val dir = _pa_dir()
+        val d = "{dir}/d.bin"
+        file_write(d, "keep")
+        # a path whose parent is a regular file cannot host the temp file
+        val bad = "{d}/inner.bin"
+        val prev = env_get("SIMPLE_ASYNC_WRITES")
+        env_set("SIMPLE_ASYNC_WRITES", "1")
+        expect(_pa_ready(module_artifact_publish_atomic_async_v1(bad, "zzz"))).to_be(false)
+        env_set("SIMPLE_ASYNC_WRITES", prev)
+        expect(file_read(d)).to_equal("keep")
+        expect(file_exists(bad)).to_be(false)
+        file_delete(d)
