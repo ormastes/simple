@@ -1,0 +1,45 @@
+# File-facing compatibility facades intentionally retain their configured IO
+# closure. These cases are separate from pure source-owner qualification.
+use std.spec
+use app.cmm_lsp.cmm_parser.{parse_cmm_source as parse_cmm_public_source}
+use app.cmm_lsp.cmm_parser_runtime.{parse_cmm_source as parse_cmm_runtime_source}
+use app.cmm_lsp.cmm_parser_source.{parse_cmm_source, parse_cmm_source_with_policy}
+use app.cmm_lsp.cmm_ast.{CmmStmt}
+
+describe "CMM-PARSE stable source facades":
+    it "delegates strict source parsing without losing nonempty AST nodes":
+        step("Compare the existing public facade with the canonical source owner")
+        val source = "SYStem.CPU CortexA53\nPRINT \"hello\"\n"
+        val actual = parse_cmm_public_source(source)
+        val owner = parse_cmm_source(source)
+        expect(actual.errors).to_equal(owner.errors)
+        expect(actual.warnings).to_equal(owner.warnings)
+        expect(actual.statements.len()).to_equal(2)
+        expect(owner.statements.len()).to_equal(2)
+        match actual.statements[0]:
+            case CmmStmt.Command(name, _, _): expect(name).to_equal("SYStem.CPU")
+            case _: fail("public facade lost the source command")
+
+    it "delegates runtime recovery to the explicit tolerant source policy":
+        step("Keep the partial dialog and warning in the runtime compatibility API")
+        val source = "DIALOG (\nTEXT \"kept\"\n"
+        val actual = parse_cmm_runtime_source(source)
+        val owner = parse_cmm_source_with_policy(source, true)
+        expect(actual.errors).to_equal(owner.errors)
+        expect(actual.errors.len()).to_equal(0)
+        expect(actual.warnings).to_equal(owner.warnings)
+        expect(actual.warnings.len()).to_equal(1)
+        expect(actual.statements.len()).to_equal(1)
+        match actual.statements[0]:
+            case CmmStmt.DialogBlock(_, items, _): expect(items.len()).to_equal(1)
+            case _: fail("runtime facade lost the partial dialog")
+
+    it "does not enable runtime recovery in the strict compatibility API":
+        step("Keep a strict parse error distinct from the runtime warning")
+        val source = "(\nPRINT \"kept\"\n"
+        val strict = parse_cmm_public_source(source)
+        val runtime = parse_cmm_runtime_source(source)
+        expect(strict.errors.len()).to_be_greater_than(0)
+        expect(strict.warnings.len()).to_equal(0)
+        expect(runtime.errors.len()).to_equal(0)
+        expect(runtime.warnings.len()).to_equal(1)

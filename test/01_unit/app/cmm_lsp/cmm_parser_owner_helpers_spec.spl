@@ -1,0 +1,50 @@
+use std.spec
+use app.cmm_lsp.cmm_tokens.{CmmTokenKind, CmmToken}
+use app.cmm_lsp.cmm_parser_core.{CmmParser}
+use app.cmm_lsp.cmm_parser_expr
+
+fn owner_token(kind: CmmTokenKind) -> CmmToken:
+    CmmToken(kind: kind, line: 1, column: 1, text: "")
+
+describe "CMM parser-owned helpers":
+    it "uses one classic-operator owner with expression extensions loaded":
+        step("Check each classic operator against the real core parser")
+        var parser = CmmParser(tokens: [owner_token(CmmTokenKind.ClassicAnd(":A:")), owner_token(CmmTokenKind.ClassicOr(":O:")), owner_token(CmmTokenKind.ClassicXor(":X:")), owner_token(CmmTokenKind.ClassicNot("N:")), owner_token(CmmTokenKind.Eof)], current: 0, errors: [], recover_unclosed: false, warnings: [])
+        expect(parser.check_classic_and()).to_equal(true)
+        expect(parser.check_classic_or()).to_equal(false)
+        parser.advance()
+        expect(parser.check_classic_or()).to_equal(true)
+        parser.advance()
+        expect(parser.check_classic_xor()).to_equal(true)
+        parser.advance()
+        expect(parser.check_classic_not()).to_equal(true)
+        parser.advance()
+        expect(parser.check_classic_not()).to_equal(false)
+
+    it "consumes a compound dialog modifier on the parser receiver":
+        step("Leave the parser after ampersand-plus and before the next item")
+        var parser = CmmParser(tokens: [owner_token(CmmTokenKind.Ampersand), owner_token(CmmTokenKind.Plus), owner_token(CmmTokenKind.Identifier("BUTTON")), owner_token(CmmTokenKind.Eof)], current: 0, errors: [], recover_unclosed: false, warnings: [])
+        expect(parser.parse_dialog_modifier()).to_equal("&+")
+        expect(parser.cursor_position()).to_equal(2)
+        expect(parser.check_kind("Identifier")).to_equal(true)
+
+    it "does not consume an item when a dialog modifier is absent":
+        step("Keep the cursor on the first non-modifier token")
+        var parser = CmmParser(tokens: [owner_token(CmmTokenKind.Identifier("BUTTON")), owner_token(CmmTokenKind.Eof)], current: 0, errors: [], recover_unclosed: false, warnings: [])
+        expect(parser.parse_dialog_modifier()).to_equal("")
+        expect(parser.cursor_position()).to_equal(0)
+
+    it "consumes subtractive and replacement dialog modifiers":
+        step("Keep both remaining compound suffixes on the same mutable owner")
+        var subtractive = CmmParser(tokens: [owner_token(CmmTokenKind.Ampersand), owner_token(CmmTokenKind.Minus), owner_token(CmmTokenKind.Eof)], current: 0, errors: [], recover_unclosed: false, warnings: [])
+        expect(subtractive.parse_dialog_modifier()).to_equal("&-")
+        expect(subtractive.cursor_position()).to_equal(2)
+        var replacement = CmmParser(tokens: [owner_token(CmmTokenKind.Ampersand), owner_token(CmmTokenKind.Assign), owner_token(CmmTokenKind.Eof)], current: 0, errors: [], recover_unclosed: false, warnings: [])
+        expect(replacement.parse_dialog_modifier()).to_equal("&=")
+        expect(replacement.cursor_position()).to_equal(2)
+
+    it "preserves a lone ampersand before a dialog item":
+        step("Consume only the ampersand when there is no compound suffix")
+        var parser = CmmParser(tokens: [owner_token(CmmTokenKind.Ampersand), owner_token(CmmTokenKind.Identifier("BUTTON")), owner_token(CmmTokenKind.Eof)], current: 0, errors: [], recover_unclosed: false, warnings: [])
+        expect(parser.parse_dialog_modifier()).to_equal("&")
+        expect(parser.cursor_position()).to_equal(1)

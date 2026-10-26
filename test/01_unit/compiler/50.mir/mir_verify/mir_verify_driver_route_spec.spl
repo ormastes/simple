@@ -93,7 +93,38 @@ fn with_env(levels: text, phase: text) -> (bool, i64, i64, text):
     val _d = env_set("SIMPLE_ASSURANCE_WARNING_PHASE", saved_phase)
     result
 
+fn missing_type_with_env(levels: text, phase: text) -> (bool, i64, i64, text):
+    val saved_levels = env_get("SIMPLE_MIR_VERIFY_LEVELS")
+    val saved_phase = env_get("SIMPLE_ASSURANCE_WARNING_PHASE")
+    val _a = env_set("SIMPLE_MIR_VERIFY_LEVELS", levels)
+    val _b = env_set("SIMPLE_ASSURANCE_WARNING_PHASE", phase)
+    var module = text_to_u8_module(1)
+    var candidate = module.functions[SymbolId(id: 1)]
+    candidate.signature.return_type = unsafe:
+        MirType.result(MirType.i64(), nil)
+    module.functions[candidate.symbol] = candidate
+    var driver = CompilerDriver.create(driver_core_compile_options_default())
+    driver.ctx.mir_modules[module.name] = module
+    val ok = driver.verify_lowered_mir_v1()
+    val errors = driver.ctx.error_count()
+    val warnings = driver.ctx.warnings.len()
+    val first = if errors > 0: driver.ctx.error_message_at(0) else: ""
+    val _c = env_set("SIMPLE_MIR_VERIFY_LEVELS", saved_levels)
+    val _d = env_set("SIMPLE_ASSURANCE_WARNING_PHASE", saved_phase)
+    (ok, errors, warnings, first)
+
 describe "MIR verify driver route (verify_lowered_mir_v1)":
+    it "rejects a missing carrier even when rules are off and warning phase is enabled":
+        step("Drive the actual pre-backend gate with an absent Result error declaration")
+        val overrides = ["*=off", "*=off,MIRV-001n=warning", "*=off,MIRV-001n=off"]
+        for level_spec in overrides:
+            val (ok, errors, warnings, first) = missing_type_with_env(level_spec, "1")
+            expect(ok).to_equal(false)
+            expect(errors).to_be_greater_than(0)
+            expect(warnings).to_equal(0)
+            expect(first).to_contain("MIRV-001n")
+            expect(first).to_contain("missing MIR type declaration")
+
     it "warn-first default: the finding is a driver warning and the step passes":
         val (ok, errors, warnings, _first) = with_env("", "")
         expect(ok).to_equal(true)
@@ -140,7 +171,7 @@ describe "MIR verify driver route (verify_lowered_mir_v1)":
         expect(first.contains("invalid SIMPLE_MIR_VERIFY_LEVELS")).to_equal(true)
         expect(first.contains("eror")).to_equal(true)
 
-    it "`*=off` skips the walk itself: the receipt says state=skipped with zero modules":
+    it "`*=off` keeps the structural walk while suppressing configurable findings":
         val sink = "build/test_tmp/mir_verify_driver_route_skip_receipt.txt"
         val _mk = dir_create_all("build/test_tmp")
         if file_exists(sink):
@@ -151,9 +182,10 @@ describe "MIR verify driver route (verify_lowered_mir_v1)":
         val _restore = env_set("SIMPLE_PASS_RECEIPT", saved_sink)
         expect(ok and errors == 0 and warnings == 0).to_equal(true)
         val lines = file_read(sink)
-        expect(lines.contains("pass_executed name=mir_verify state=skipped")).to_equal(true)
-        expect(lines.contains("modules=0")).to_equal(true)
-        expect(mir_verify_levels_from_spec("*=off").verifier_off).to_equal(true)
+        expect(lines.contains("pass_executed name=mir_verify state=executed")).to_equal(true)
+        expect(lines.contains("modules=1")).to_equal(true)
+        expect(mir_verify_levels_from_spec("*=off").verifier_off).to_equal(false)
+        expect(mir_verify_levels_from_spec("*=off,MIRV-001n=off").level_of("MIRV-001n")).to_equal("error")
         expect(mir_verify_levels_from_spec("*=off,MIRV-002=warning").verifier_off).to_equal(false)
 
     it "warning output is capped per rule per build: first N lines plus one count line; errors are never capped":

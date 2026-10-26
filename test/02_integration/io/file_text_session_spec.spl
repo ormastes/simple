@@ -31,6 +31,30 @@ fn file_session_codec_error(result: Result<text, TextIoError>, kind: CodecErrorK
                 case _: fail("codec failure lost its typed error")
 
 describe "File text sessions on actual descriptors":
+    it "retains every byte when an ordinary line grows beyond its initial capacity":
+        # @req: REQ-FILE-SESSION-001
+        # @req: REQ-FILE-SESSION-005
+        step("Grow the line buffer past 256 bytes while preserving NUL and a non-BMP scalar")
+        val path = file_session_scratch()
+        var prefix = ""
+        for _index in range(0, 300):
+            prefix = prefix + "A"
+        val first_line = prefix + bytes_to_text([0u8, 240u8, 159u8, 152u8, 128u8, 10u8])
+        expect(File.write(path, first_line + "B\n").is_ok()).to_equal(true)
+        var reader = FileHandle.read_file(path).unwrap()
+        val actual = text_to_bytes(reader.read_line().unwrap())
+        expect(actual).to_equal(text_to_bytes(first_line))
+        expect(actual.len()).to_equal(306)
+        expect(actual[299]).to_equal(65u8)
+        expect(actual[300]).to_equal(0u8)
+        expect(actual[301]).to_equal(240u8)
+        expect(actual[304]).to_equal(128u8)
+        expect(actual[305]).to_equal(10u8)
+        step("Read the next line from the same descriptor without losing its cursor")
+        expect(reader.read_line().unwrap()).to_equal("B\n")
+        expect(reader.close().is_ok()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+
     it "keeps ordinary File and runtime reads in internal UTF-8 without caller conversions":
         # @req: REQ-FILE-SESSION-001
         step("Write ordinary internal text with an embedded NUL and non-BMP scalar")

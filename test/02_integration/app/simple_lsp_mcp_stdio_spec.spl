@@ -10,6 +10,12 @@ fn write_framed_request(body: text) -> text:
 fn lsp_mcp_jsonl(body: text) -> text:
     body + "\n"
 
+fn lsp_mcp_ping_body(id_raw: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"method\":\"ping\"" + "}"
+
+fn lsp_mcp_ping_result(id_raw: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"result\":" + "{" + "}" + "}"
+
 fn lsp_init_body(id: text) -> text:
     "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
 
@@ -97,6 +103,22 @@ fn send_lsp_mcp(messages: text) -> text:
     output
 
 describe "Simple LSP MCP stdio":
+    it "rejects invalid JSONL roots after blank lines and still replies to the next request":
+        step("Validate non-object roots instead of swallowing them as headers or spinning on a blank line")
+        val invalid_reply = "{" + "\"jsonrpc\":\"2.0\",\"id\":null,\"error\":" + "{" + "\"code\":-32600,\"message\":\"Invalid Request\"" + "}" + "}"
+        val invalid_roots = ["[]", "null", "true", "7", "\"text\""]
+        for root in invalid_roots:
+            val input = "\r\n" + lsp_mcp_jsonl(root) + lsp_mcp_jsonl(lsp_mcp_ping_body("43"))
+            expect(send_lsp_mcp(input)).to_equal(lsp_mcp_jsonl(invalid_reply) + lsp_mcp_jsonl(lsp_mcp_ping_result("43")))
+
+    it "changes response framing with each consecutive request transport":
+        step("Read JSONL, framed, then JSONL pings directly from the selected native binary")
+        val input = lsp_mcp_jsonl(lsp_mcp_ping_body("61")) + write_framed_request(lsp_mcp_ping_body("62")) + lsp_mcp_jsonl(lsp_mcp_ping_body("63"))
+        val middle = lsp_mcp_ping_result("62")
+        val framed_middle = "Content-Length: " + middle.len().to_string() + "\r\n\r\n" + middle
+        val expected = lsp_mcp_jsonl(lsp_mcp_ping_result("61")) + framed_middle + lsp_mcp_jsonl(lsp_mcp_ping_result("63"))
+        expect(send_lsp_mcp(input)).to_equal(expected)
+
     it "mirrors Claude-style JSONL requests with JSONL responses":
         step("Send consecutive requests directly to the selected native server")
         val input = lsp_mcp_jsonl(lsp_init_body("1")) + lsp_mcp_jsonl(lsp_tools_body("2"))

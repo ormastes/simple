@@ -3,6 +3,28 @@ use app.md_lsp.md_lsp_handler.{md_lsp_handle_request_raw, md_lsp_initialize, md_
 use app.md_lsp.md_lsp_workspace.{MdWorkspace}
 
 describe "Markdown LSP request correlation":
+    it "does not interpret fenced examples as hover targets or quick fixes":
+        step("Query heading, link and empty-link syntax inside a fenced example")
+        var workspace = MdWorkspace.new()
+        workspace.open_document("file:///code.md", "# Visible\n```md\n# Hidden\n[link](#visible)\n[]()\n```", 1)
+        val document = "{" + "\"textDocument\":" + "{" + "\"uri\":\"file:///code.md\"" + "}"
+        val heading = document + ",\"position\":" + "{" + "\"line\":2,\"character\":2" + "}" + "}"
+        val link = document + ",\"position\":" + "{" + "\"line\":3,\"character\":9" + "}" + "}"
+        val action = document + ",\"range\":" + "{" + "\"start\":" + "{" + "\"line\":4,\"character\":0" + "}" + ",\"end\":" + "{" + "\"line\":4,\"character\":4" + "}" + "}" + "}"
+        expect(md_lsp_handle_request_raw("textDocument/hover", heading, "2", workspace)).to_equal("{" + "\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null" + "}")
+        expect(md_lsp_handle_request_raw("textDocument/definition", link, "3", workspace)).to_equal("{" + "\"jsonrpc\":\"2.0\",\"id\":3,\"result\":null" + "}")
+        expect(md_lsp_handle_request_raw("textDocument/codeAction", action, "4", workspace)).to_equal("{" + "\"jsonrpc\":\"2.0\",\"id\":4,\"result\":[]" + "}")
+
+    it "keeps an unclosed fenced tail out of Markdown hover and fixes":
+        step("Check the final code line without requiring a closing delimiter")
+        var workspace = MdWorkspace.new()
+        workspace.open_document("file:///open-fence.md", "# Visible\n```md\n# Hidden\n[]()", 1)
+        val document = "{" + "\"textDocument\":" + "{" + "\"uri\":\"file:///open-fence.md\"" + "}"
+        val heading = document + ",\"position\":" + "{" + "\"line\":2,\"character\":2" + "}" + "}"
+        val action = document + ",\"position\":" + "{" + "\"line\":3,\"character\":0" + "}" + "}"
+        expect(md_lsp_handle_request_raw("textDocument/hover", heading, "2", workspace)).to_equal("{" + "\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null" + "}")
+        expect(md_lsp_handle_request_raw("textDocument/codeAction", action, "3", workspace)).to_equal("{" + "\"jsonrpc\":\"2.0\",\"id\":3,\"result\":[]" + "}")
+
     it "maps UTF-16 columns to whole UTF-8 code points":
         step("Count BMP and supplementary characters without splitting a surrogate pair")
         val value = "한글🙂"

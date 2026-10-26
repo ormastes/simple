@@ -7,7 +7,7 @@
 # and extern fn declarations.
 
 use app.io.minimal_runtime_ops.{env_get, file_exists, process_run}
-use app.protocol.framing.{frame_strip_line_end, frame_parse_decimal}
+use app.protocol.framing.{frame_strip_line_end, frame_parse_decimal, frame_line_is_jsonl_payload}
 
 extern fn stdin_read_char() -> text
 use std.nogc_sync_mut.sffi.diag.{stdout_flush as sosix_stdout_flush}
@@ -398,36 +398,23 @@ fn _parse_decimal_raw(s: text) -> i64:
     frame_parse_decimal(s)
 
 fn read_stdin_message() -> text:
-    val first_line = _read_line()
-    if first_line.len() == 0:
-        return ""
-    # A framed client may send Content-Type before Content-Length. Only a JSON
-    # object line selects JSONL; otherwise consume the complete header block.
-    val first_content = first_line.trim_start()
-    val use_content_length = not first_content.starts_with("{")
-    if not use_content_length:
-        _TRANSPORT_MODE = "jsonl"
-        return _strip_line_end(first_line)
-
     var content_length = 0
-    var line = first_line
     while true:
-        if line.len() == 0:
-            if content_length > 0:
-                break
+        val raw_line = _read_line()
+        if raw_line.len() == 0:
             return ""
-        if line.starts_with("\r\n") or line.starts_with("\r") or line.starts_with("\n"):
+        val line = _strip_line_end(raw_line)
+        if line.trim().len() == 0:
             if content_length > 0:
                 break
             continue
-        line = _strip_line_end(line)
+        if frame_line_is_jsonl_payload(line):
+            _TRANSPORT_MODE = "jsonl"
+            return line
         if line.starts_with("Content-Length:"):
-            var len_str = line.replace("Content-Length:", "")
-            len_str = len_str.trim()
+            val len_str = line.replace("Content-Length:", "").trim()
             content_length = _parse_decimal_raw(len_str)
-        line = _read_line()
-    if content_length <= 0:
-        return ""
+    _TRANSPORT_MODE = "framed"
     _read_chars(content_length)
 
 fn write_stdout_message(body: text):

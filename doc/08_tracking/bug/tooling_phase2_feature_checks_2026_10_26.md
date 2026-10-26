@@ -254,3 +254,70 @@ links and executes3 actual assertions. This is stronger boundary evidence,
 not a root-cause proof or general SSpec PASS. Six shared compiler/runner
 diagnostic attempts are now accounted. Stop this repair/build loop pending an
 explicit extension; preserve the failed and passing inputs without green reruns.
+
+## Astra-guided completion pass
+
+User explicitly requested Astra guidance/review and renewed feature completion
+with Phase2, followed by GitHub landing. Four disjoint owners resumed under a
+bounded three-cycle extension, with root scheduling compiler/cache access and
+Astra reviewing actual diffs. Original failures and passing evidence remain.
+
+Shared cycle1 traced the original fixture: native139 after module MIR complete.
+Cycle2 authenticated alternate pure-Simple Phase2 SHA17d1a40abc390c08c05cec3ba13db41eb12ee5709126c6636fe974f753f7e5ac
+and matching runtime; fresh Hello compile/run passed, original Result fixture
+still crashed139. Cycle3 captured a native nullread under LLDB. The debugger
+itself exited0, which is NOT compiler success; no executable was emitted.
+Initial debugger launch failed before compiler execution on missing python310
+DLL; using the already-installed matching Python resolved that setup failure.
+All receipts/logs are retained under build/tooling-phase2/astra-alt/.
+
+Static PE mapping identifies fault RVA0x6fae60 in alternate17d as
+mir_verify_type_unresolved_reason, dereferencing absent MirType before kind
+matching. This replaces the earlier speculative diagnostic-iteration theory.
+An actual verifier-owner repair with mandatory error admission is in review;
+current source edits cannot repair either immutable old compiler executable.
+No new compiler qualification or canonical SSpec PASS is claimed.
+
+Markdown extension cycle1 compiled/linked the reviewed parsed-code guards and
+passed exact native fenced hover=null, definition=null, action=[], outside
+heading hover positive, complete correlated frames and exit0. Evidence:
+astra-markdown/code-guards/ and sibling stdout/stderr captures. Seven authored
+stdio SSpecs remain unrun; they use the existing native process/spec framework.
+
+CMM owner consolidated duplicate parser methods under explicit strict/tolerant
+recovery policy after Astra reviewed the differing bodies. Native production
+probe is running (session37004, astra-cmm/probe-run). Historical system suites
+with local fake parsers are being replaced with production-owner assertions;
+their previous pass claims are not accepted as feature evidence.
+
+The reviewed MCP/LSP shared transport classifier compiled/linked and executed
+17 production-owner cases /18 actual assertions (astra-mcp/transport-run).
+This independently proves admission of JSON root/malformed lines and retention
+of valid standard/vendor framing headers and blank separators. Full server
+dispatch, byte/error regression suites and canonical SSpecs remain unverified.
+CMM probe1 passed HIR and reports no ambiguous methods, but stops at14 MIR
+payload/type diagnostics; no executable/parser behavioral checks ran.
+
+## Final reviewed T32/CMM packet and bounded results
+
+Astra reviewed the actual method consolidation, explicit strict/tolerant
+recovery policy and typed Err-preserving expression extraction at9constructor
+sites. Source-parser logic now has a single pure owner; public source/file
+facades delegate to it and retain file-reading behavior. Two historical fake
+system suites were replaced by82statement and80expression production-parser
+scenarios. Their expected results remain UNRUN, including the original compact
+double-negation case, whose concrete grammar issue is recorded separately.
+
+Combined T32/CMM extension cycle2 built/linked the production state-owner probe
+but execution failed an assertion (exit1). Its11 authored assertions must not
+be reported passed; exact failed assertion remains unlocalized. Cycle3's pure
+production-parser probe compiled8HIR/MIR modules and then crashed139 before
+object emission, peak234060KiB. This probe has no file-I/O dependency; removing
+the unrelated closure did not qualify the immutable compiler or parser behavior.
+Evidence: astra-cmm/state-run/ and pure-source-run/. All3extension cycles are
+accounted. Retain native failures and the reviewed source without false PASS.
+
+The next mandatory prerequisite is a rebuilt qualified compiler containing the
+reviewed actual-owner repairs, followed by Hello and the original Result
+regression, canonical SSpecs and real feature checks. Neither a source review
+nor debugger exit0 supplies those results. GitHub landing remains blocked.
