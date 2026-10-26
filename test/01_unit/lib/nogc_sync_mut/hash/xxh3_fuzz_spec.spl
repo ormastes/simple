@@ -1,0 +1,66 @@
+"""
+# XXH3 pure-vs-runtime fuzz
+@req XXH3-FUZZ-001 pure xxh3_128 equals the runtime xxh3_128_text digest over seeded random inputs of length 0..4096
+@req XXH3-FUZZ-002 the fuzz run performs a non-zero number of real comparisons (runtime answer present)
+"""
+
+use std.spec.step
+use std.spec.*
+use std.common.hash.xxh3.{xxh3_128, Xxh3Hash128}
+use std.common.text_bytes.{bytes_to_text}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text_runtime_only}
+
+val _CASES: i64 = 500
+val _MAX_LEN: i64 = 4096
+
+# Deterministic 64-bit LCG (Knuth MMIX); wraps naturally in u64.
+fn _next(state: u64) -> u64:
+    state * 6364136223846793005u64 + 1442695040888963407u64
+
+fn _hex64(v: u64) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var i = 15
+    while i >= 0:
+        val nib = ((v >> (i * 4)) & 15) as i64
+        out = out + digits[nib:nib + 1]
+        i = i - 1
+    out
+
+fn _hex128(h: Xxh3Hash128) -> text:
+    _hex64(h.high) + _hex64(h.low)
+
+describe "xxh3 pure vs runtime fuzz":
+    it "agrees on 500 seeded random ASCII inputs of length 0..4096":
+        step("seed PRNG and reset counters")
+        var st: u64 = 0x5EEDC0DE12345678u64
+        var compared = 0
+        var skipped = 0
+        var mismatches = 0
+        var case_no = 0
+        step("generate inputs and compare")
+        while case_no < _CASES:
+            st = _next(st)
+            var n = ((st >> 33u64) % ((_MAX_LEN + 1) as u64)) as i64
+            if case_no == 0:
+                n = 0
+            if case_no == 1:
+                n = _MAX_LEN
+            var d: [u8] = []
+            var i = 0
+            while i < n:
+                st = _next(st)
+                d.push(((((st >> 33u64) % 127u64) + 1u64)) as u8)
+                i = i + 1
+            val rt = xxh3_128_text_runtime_only(bytes_to_text(d))
+            if rt.len() != 32:
+                skipped = skipped + 1
+            else:
+                compared = compared + 1
+                if _hex128(xxh3_128(d)) != rt:
+                    mismatches = mismatches + 1
+            case_no = case_no + 1
+        print "xxh3-fuzz cases={_CASES} compared={compared} skipped={skipped} mismatches={mismatches}"
+        step("assert clean and non-vacuous")
+        expect(mismatches).to_equal(0)
+        expect(compared > 0).to_equal(true)
