@@ -5,7 +5,7 @@
 **Evidence:** `C:/dev/hircfg-probe/logs3/*.log`, `C:/dev/hircfg-probe/logs/`
 **Compiler:** `bin/simple native-build` on release/1.0.0
 **Severity:** P1 (blocks all native-build on the release branch)
-**Owner:** unassigned (pure_sql lane author of c2a397e2b9b)
+**Owner:** unassigned (authors of c2a397e2b9b, 0d71ab206d4, 52e892180bd, 7b6dc118a4d8)
 
 ## Rule
 
@@ -36,17 +36,41 @@ Every native-build log in `C:/dev/hircfg-probe/logs3/` and `C:/dev/hircfg-probe/
 
 ### Root cause
 
-Annotations using `@workaround doc/<path>` instead of `@workaround bug=<id>`:
+Two distinct failures in workaround annotation handling:
+
+#### Cause 1: Malformed `@workaround doc/...` instead of `@workaround bug=<id>`
+
+Twelve annotations use the wrong form `@workaround doc/<path>` instead of the required `@workaround bug=<id>` format. The registry parser (src/lib/scv/compile_source_inventory.spl and src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl) fails with:
 
 ```
-src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:73:# @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 2):
-src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:3032:            # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 1):
-src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:3057:                # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 1):
-src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:3138:            # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 1):
-src/compiler/70.backend/linker/elf/archive_file.spl:75:            # @workaround doc/08_tracking/bug/indcall_try_then_member_2026-10-25.md:
+mandatory bug=<canonical-id> must be first
 ```
 
-Introduced in commit c2a397e2b9b ("fix(pure_sql): work around three native MIR failures...").
+Sites and introducing commits:
+
+**Commit c2a397e2b9b** ("fix(pure_sql): work around three native MIR failures"):
+- src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:73
+- src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:3032
+- src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:3057
+- src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:3138
+- src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:3387
+- src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/row_value_helpers.spl:702
+- src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/row_value_helpers.spl:733
+- src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/row_value_helpers.spl:778
+- src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/row_value_helpers.spl:1520
+
+**Commit 0d71ab206d4** ("fix(build): parenthesize try before member in elf archive_file (@workaround indcall)"):
+- src/compiler/70.backend/linker/elf/archive_file.spl:75
+
+**Commit 52e892180bd** ("fix(io): @workaround element-wise identity compare in retained_file"):
+- src/lib/nogc_sync_mut/io/retained_file.spl:151
+- src/lib/nogc_sync_mut/io/retained_file.spl:288
+
+#### Cause 2: Annotation separated from function by comment lines
+
+In src/lib/scv/compile_source_inventory.spl:420, the annotation is well-formed (`@workaround bug=native_raw_integer_optional_presence_2026_10_26`) but fails because four OPEN: comment lines sit between it and the function declaration it annotates. The registry (src/app/bug/workaround_index.spl:119-122) requires the annotation to immediately precede the affected block with no intervening comments.
+
+Introduced in commit 7b6dc118a4d8 (2026-10-26).
 
 ## Side effect: stale lock file
 
@@ -67,6 +91,12 @@ Native-build is completely blocked on release/1.0.0, preventing:
 
 ## Expected fix
 
-1. Rewrite each malformed `@workaround doc/...` annotation as `@workaround bug=<id> ...` per the registry contract.
+**For Cause 1** (malformed @workaround doc/... annotations):
+1. Rewrite each of the 11 sites using `@workaround doc/...` as `@workaround bug=<id> ...` per the registry contract, mapping each to the documented bug ID in the referenced doc.
 2. Verify the mapped bug ID exists in `bug_db.sdn`.
-3. Make the lock file stale-safe: read the lock, check its timestamp, and retry after a timeout rather than blocking indefinitely.
+
+**For Cause 2** (annotation separated from function):
+1. Move the `@workaround bug=native_raw_integer_optional_presence_2026_10_26` annotation in src/lib/scv/compile_source_inventory.spl directly above the `fn compile_source_inventory_decimal_v1` declaration, removing the intervening OPEN comment lines to a preceding location or documentation section.
+
+**General hardening**:
+1. Make the lock file stale-safe: read the lock, check its timestamp, and retry after a timeout rather than blocking indefinitely.
