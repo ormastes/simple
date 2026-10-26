@@ -133,3 +133,21 @@ See [the evidence and remaining acceptance ledger](../../evidence/cache_perfile_
 for terminal outcomes, current PR states, compiler identities, artifact hashes,
 and the next reduced reproduction. The complete Phase 3 feature matrix and
 historical acceptance scenarios remain required; none is dropped by this update.
+
+## User-directed landing order — 2026-10-26
+
+After Phase 3 qualification, land the source-to-object per-file pipeline and
+cache changes to the remote `release/1.0.0` branch through reviewed PRs, then
+make that pipeline the default. Required ordering: repair and qualify Phase 3;
+perform the coherent per-file self-rebuild, strict link/sanity and overlap
+receipt; land the remaining pipeline/cache changes; flip the production
+default and verify the documented opt-out. Local default-only experiment
+commits are not remote admission evidence. The full cache/Phase 3 acceptance
+ledger remains required; this sequencing instruction does not mark it complete.
+
+
+Execution preferences: workaround first and underlying fix afterward; reuse
+existing admitted Phase 2 where possible. Main build budget is 80 jobs on the
+80-logical-core/128-GiB host, with actual worker/RSS evidence and memory
+admission. Smaller-model sidecars operate under root guidance and final review;
+see [parallel task ownership](../../agent_tasks/cache_perfile_phase3_20261026.md).

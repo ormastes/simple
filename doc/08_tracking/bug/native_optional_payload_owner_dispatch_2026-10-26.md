@@ -82,3 +82,14 @@ SSpec/manual gate remain pending; this bug is still OPEN.
 - A separate pattern fixture is prepared for an 80-job build; its runtime
   outcome is not yet claimed. The existing SSpec additions are unrun because
   a qualified general full-CLI runner is unavailable.
+
+Workaround commit: `9bebc55105d` on `work/phase3-optional-payload-20261026`
+(the source annotations carry the stable bug ID and recovery base above).
+The commit is local pending remaining qualification and root review.
+
+
+Pattern qualification completed: requested jobs=80; actual production-owner
+124-module fixture native build rc=0 and runtime rc=0, with output
+`optional pattern substitution: 5 cases, 2 passes each`. Both touched payload
+helpers now have focused native runtime evidence. General SSpec/manual/core
+CLI gates remain TEST_BLOCKED; overall Phase 3 and root-fix status stay OPEN.
