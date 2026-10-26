@@ -1,0 +1,44 @@
+# Native provider regression. Requires python on PATH and the repaired C runtime.
+# A seed/interpreter run does not qualify the native provider or tuple ABI.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+describe "bounded process facade preserves NUL byte lengths":
+    it "preserves Git rename records, spaces, and the final NUL":
+        val result = process_run_bounded("python", ["-c",
+            "import sys; sys.stdout.buffer.write(b'R  new name.spl\\0old name.spl\\0?? next.spl\\0')"], 3000, 128)
+        expect(result.2).to_equal(0)
+        expect(result.0).to_equal("R  new name.spl\0old name.spl\0?? next.spl\0")
+        expect(result.1).to_equal("")
+
+    it "preserves leading, internal, and trailing NULs on both streams at the limit":
+        val result = process_run_bounded("python", ["-c",
+            "import sys; sys.stdout.buffer.write(bytes([0,97,0,98,99,0,100,0])); sys.stderr.buffer.write(bytes([101,0,114,0]))"], 3000, 8)
+        expect(result.2).to_equal(0)
+        expect(result.0).to_equal("\0a\0bc\0d\0")
+        expect(result.1).to_equal("e\0r\0")
+
+    it "retains the NUL-bearing head and tail around the truncation marker":
+        val result = process_run_bounded("python", ["-c",
+            "import sys; sys.stdout.buffer.write(bytes([0,97,0,98,99,0,100,0,101,102,103,104,105,106,107,108,0,120,0,121]))"], 3000, 8)
+        expect(result.2).to_equal(0)
+        expect(result.0).to_equal("\0a\0b\n[output truncated: 12 bytes omitted]\n\0x\0y")
+
+    it "preserves stderr NULs before appending the native timeout marker":
+        val result = process_run_bounded("python", ["-c",
+            "import sys,time; sys.stderr.buffer.write(bytes([101,0,114,0])); sys.stderr.flush(); time.sleep(5)"], 500, 64)
+        expect(result.2).to_equal(-1)
+        expect(result.1).to_start_with("e\0r\0")
+        expect(result.1).to_end_with("[TIMEOUT: Process killed after 500ms]")
+
+    it "resets stream lengths between NUL, empty, and ordinary text captures":
+        val binary = process_run_bounded("python", ["-c", "import sys; sys.stdout.buffer.write(bytes([0,97,0]))"], 3000, 16)
+        val empty = process_run_bounded("python", ["-c", "pass"], 3000, 16)
+        val ordinary = process_run_bounded("python", ["-c", "import sys; sys.stdout.write('hello'); sys.stderr.write('warning'); sys.exit(7)"], 3000, 16)
+        expect(binary.0).to_equal("\0a\0")
+        expect(empty.0).to_equal("")
+        expect(empty.1).to_equal("")
+        expect(empty.2).to_equal(0)
+        expect(ordinary.0).to_equal("hello")
+        expect(ordinary.1).to_equal("warning")
+        expect(ordinary.2).to_equal(7)

@@ -1,0 +1,135 @@
+# BUG-EMPTY-DEPENDENCY-PARSE-RECEIPT-20261012: real parser and production policy.
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.parser.{par_had_error_get}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_types.{MirConstant, MirConstValue, MirType}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.driver.driver_empty_dependency_receipt_v1.*
+use compiler.driver.driver_aot_native_output.{driver_native_module_is_export_facade, driver_native_frozen_source_lookup}
+
+fn source_fixture() -> text:
+    file_read("src/lib/nogc_async_mut/env/utilities.spl")
+
+fn empty_mir() -> MirModule:
+    MirModule(name: "fixture", functions: {}, statics: {}, constants: {}, types: {})
+
+fn generation_fixture() -> text:
+    sha256_text("empty-dependency-source-snapshot-v1")
+
+describe "parse completed empty dependency admission":
+    it "admits the authentic comments-only dependency after successful parse":
+        val source = source_fixture()
+        val parsed = parse_and_build_module(source, "fixture.spl")
+        expect(par_had_error_get()).to_equal(false)
+        val digest = sha256_text(source)
+        val receipt = driver_empty_dependency_parse_receipt_v1(parsed, source, digest, generation_fixture(), not par_had_error_get())
+        expect(receipt).to_equal(generation_fixture() + ":" + digest)
+        expect(driver_empty_dependency_admitted_v1(empty_mir(), parsed, receipt, digest, generation_fixture(), false, false)).to_equal(true)
+
+    it "accepts CRLF and ASCII whitespace without accepting executable text":
+        val source = " \t# comment\r\n\t \r\n# tail\r\n"
+        val parsed = parse_and_build_module(source, "whitespace.spl")
+        val receipt = driver_empty_dependency_parse_receipt_v1(parsed, source, sha256_text(source), generation_fixture(), not par_had_error_get())
+        expect(receipt.len()).to_equal(129)
+        expect(driver_empty_dependency_comments_only_v1("# comment\nfn body():\n    1\n")).to_equal(false)
+        expect(driver_empty_dependency_comments_only_v1("\"# not a comment\"\n")).to_equal(false)
+
+    it "rejects an authored function whose MIR body was lost":
+        val source = "fn body() -> i64:\n    42\n"
+        val parsed = parse_and_build_module(source, "body.spl")
+        expect(parsed.functions.len()).to_equal(1)
+        val receipt = driver_empty_dependency_parse_receipt_v1(parsed, source, sha256_text(source), generation_fixture(), not par_had_error_get())
+        expect(receipt).to_equal("")
+        expect(driver_empty_dependency_admitted_v1(empty_mir(), parsed, receipt, sha256_text(source), generation_fixture(), false, false)).to_equal(false)
+
+    it "rejects a parser error rather than certifying its partial AST":
+        val source = "fn broken(:\n"
+        val parsed = parse_and_build_module(source, "broken.spl")
+        expect(par_had_error_get()).to_equal(true)
+        expect(driver_empty_dependency_parse_receipt_v1(parsed, source, sha256_text(source), generation_fixture(), not par_had_error_get())).to_equal("")
+
+    it "rejects absent and unparsed metadata even for authentic comments":
+        val source = source_fixture()
+        val parsed = parse_and_build_module(source, "fixture.spl")
+        val digest = sha256_text(source)
+        expect(driver_empty_dependency_parse_receipt_v1(nil, source, digest, generation_fixture(), true)).to_equal("")
+        expect(driver_empty_dependency_parse_receipt_v1(parsed, source, digest, generation_fixture(), false)).to_equal("")
+        expect(driver_empty_dependency_admitted_v1(empty_mir(), parsed, "", digest, generation_fixture(), false, false)).to_equal(false)
+
+    it "rejects changed generation and changed source digest":
+        val source = source_fixture()
+        val parsed = parse_and_build_module(source, "fixture.spl")
+        val digest = sha256_text(source)
+        val receipt = driver_empty_dependency_parse_receipt_v1(parsed, source, digest, generation_fixture(), not par_had_error_get())
+        expect(driver_empty_dependency_admitted_v1(empty_mir(), parsed, receipt, digest, sha256_text("next snapshot"), false, false)).to_equal(false)
+        val changed_same_length = source.replace("Environment", "environment")
+        expect(changed_same_length.len()).to_equal(source.len())
+        expect(driver_empty_dependency_admitted_v1(empty_mir(), parsed, receipt, sha256_text(changed_same_length), generation_fixture(), false, false)).to_equal(false)
+        expect(driver_empty_dependency_parse_receipt_v1(parsed, source, sha256_text("different source"), generation_fixture(), true)).to_equal("")
+
+    it "never skips the primary entry or a poisoned module":
+        val source = source_fixture()
+        val parsed = parse_and_build_module(source, "fixture.spl")
+        val digest = sha256_text(source)
+        val receipt = driver_empty_dependency_parse_receipt_v1(parsed, source, digest, generation_fixture(), not par_had_error_get())
+        expect(driver_empty_dependency_admitted_v1(empty_mir(), parsed, receipt, digest, generation_fixture(), true, false)).to_equal(false)
+        expect(driver_empty_dependency_admitted_v1(empty_mir(), parsed, receipt, digest, generation_fixture(), false, true)).to_equal(false)
+
+    it "retains real MIR constant data for code generation":
+        val source = source_fixture()
+        val parsed = parse_and_build_module(source, "fixture.spl")
+        val digest = sha256_text(source)
+        val receipt = driver_empty_dependency_parse_receipt_v1(parsed, source, digest, generation_fixture(), not par_had_error_get())
+        val constant = MirConstant(symbol: SymbolId(id: 1), name: "answer", type_: MirType.i64(), value: MirConstValue.Int(42))
+        var constants: Dict<SymbolId, MirConstant> = {}
+        constants[constant.symbol] = constant
+        val mir = MirModule(name: "fixture", functions: {}, statics: {}, constants: constants, types: {})
+        expect(driver_empty_dependency_admitted_v1(mir, parsed, receipt, digest, generation_fixture(), false, false)).to_equal(false)
+
+    it "preserves the existing re-export facade route":
+        val source = "export use owner.backend.\{body\}\n"
+        val parsed = parse_and_build_module(source, "facade.spl")
+        expect(par_had_error_get()).to_equal(false)
+        expect(parsed.imports.len()).to_equal(1)
+        expect(driver_empty_dependency_parse_receipt_v1(parsed, source, sha256_text(source), generation_fixture(), true)).to_equal("")
+        expect(driver_native_module_is_export_facade(empty_mir(), parsed)).to_equal(true)
+
+    it "admits a zero-byte file only with successful parse and frozen identity":
+        val source = file_read("test/fixtures/compiler/empty_dependency/zero.spl")
+        expect(source.len()).to_equal(0)
+        val parsed = parse_and_build_module(source, "empty.spl")
+        val parse_ok = not par_had_error_get()
+        expect(parse_ok).to_equal(true)
+        val digest = sha256_text(source)
+        val receipt = driver_empty_dependency_parse_receipt_v1(parsed, source, digest, generation_fixture(), parse_ok)
+        expect(driver_empty_dependency_admitted_v1(empty_mir(), parsed, receipt, digest, generation_fixture(), false, false)).to_equal(true)
+        expect(driver_empty_dependency_parse_receipt_v1(parsed, source, "", generation_fixture(), parse_ok)).to_equal("")
+        expect(driver_empty_dependency_parse_receipt_v1(parsed, source, digest, "", parse_ok)).to_equal("")
+
+    it "forgets prior success before a failed retry without dropping other owners":
+        val source = source_fixture()
+        val parsed = parse_and_build_module(source, "fixture.spl")
+        val parse_ok = not par_had_error_get()
+        val digest = sha256_text(source)
+        val receipt = driver_empty_dependency_parse_receipt_v1(parsed, source, digest, generation_fixture(), parse_ok)
+        var receipts: {text: text} = {"fixture.spl": receipt, "other.spl": receipt}
+        receipts = driver_empty_dependency_forget_source_v1(receipts, "fixture.spl")
+        expect(receipts.has("fixture.spl")).to_equal(false)
+        expect(receipts["other.spl"]).to_equal(receipt)
+        val failed = driver_empty_dependency_parse_receipt_v1(parsed, source, digest, generation_fixture(), false)
+        expect(failed).to_equal("")
+        expect(driver_empty_dependency_admitted_v1(empty_mir(), parsed, receipts["fixture.spl"] ?? "", digest, generation_fixture(), false, false)).to_equal(false)
+
+    it "rejects duplicate module names and physical aliases in the frozen owner":
+        val digest = sha256_text(source_fixture())
+        val (path, identity) = driver_native_frozen_source_lookup(["fixture.spl"], [digest], ["fixture"], "fixture")
+        expect(path).to_equal("fixture.spl")
+        expect(identity).to_equal(digest)
+        val (duplicate, _) = driver_native_frozen_source_lookup(["fixture.spl", "other.spl"], [digest, digest], ["fixture", "fixture"], "fixture")
+        expect(duplicate).to_equal("")
+        val (alias, _) = driver_native_frozen_source_lookup(["fixture.spl", "fixture.spl"], [digest, digest], ["fixture", "alias"], "fixture")
+        expect(alias).to_equal("")

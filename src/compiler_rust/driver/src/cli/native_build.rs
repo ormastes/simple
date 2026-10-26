@@ -413,6 +413,12 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 entry_closure_explicit = true;
                 i += 1;
             }
+            "--emit-object" => {
+                // The seed has no relocatable-output mode. Never treat this
+                // option as a source path and silently link an executable.
+                eprintln!("error: E-SEED-NATIVE-BUILD-EMIT-OBJECT-UNSUPPORTED: --emit-object is unsupported by the Rust seed; use an object-capable pure-Simple compiler");
+                return 1;
+            }
             "--emit-archive" => {
                 emit_archive = true;
                 i += 1;
@@ -752,6 +758,26 @@ pub fn handle_native_build(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{is_allowed_runtime_bundle, normalize_backend, seed_build_mode_notice, SEED_DEFAULT_BUILD_MODE};
+
+    #[test]
+    fn unsupported_object_output_rejects_before_project_discovery() {
+        // Baseline silently accepts the unknown option and reaches help (exit 0).
+        // The candidate rejects first; neither branch can start compilation.
+        let args = vec!["native-build".to_string(), "--emit-object".to_string(), "--help".to_string()];
+        assert_eq!(super::handle_native_build(&args), 1);
+    }
+
+    #[test]
+    fn unsupported_object_output_does_not_create_a_named_artifact() {
+        let root = tempfile::tempdir().expect("temporary fixture");
+        let output = root.path().join("should-not-be-an-executable.o");
+        let args = vec![
+            "native-build".to_string(), "--emit-object".to_string(), "--output".to_string(),
+            output.to_string_lossy().into_owned(), "--help".to_string(),
+        ];
+        assert_eq!(super::handle_native_build(&args), 1);
+        assert!(!output.exists());
+    }
 
     #[test]
     fn seed_default_build_mode_is_not_dynload() {

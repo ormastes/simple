@@ -1,0 +1,58 @@
+# Six new criteria; authored before candidate source. Runtime UNRUN.
+use std.spec.*
+use std.spec.step
+use compiler.loader.loader.compiler_sffi.*
+
+describe "SFFI recursive element storage is finite and preserves wire identity":
+    it "retains a primitive with zero element storage":
+        step("Build a scalar through the production constructor and round-trip it")
+        val scalar = make_int_type(64, true)
+        expect(scalar.elem.len()).to_equal(0)
+        expect(sffi_type_elem_storage_check(scalar).is_ok()).to_equal(true)
+        expect(serialize_type_json(json_to_type_info_text(serialize_type_json(scalar)))).to_equal(serialize_type_json(scalar))
+
+    it "retains every level of a nested array element":
+        step("Parse two real nested element objects and preserve their cache key")
+        val value = json_to_type_info_text('{"kind":"array","name":"Rows","elem":{"kind":"array","name":"Row","elem":{"kind":"int","name":"i32","bits":32,"signed":true}}}')
+        expect(value.elem.len()).to_equal(1)
+        expect(value.elem[0].elem.len()).to_equal(1)
+        expect(value.elem[0].elem[0].name).to_equal("i32")
+        val wire = serialize_type_json(value)
+        expect(wire).to_equal('{"kind":"array","name":"Rows","elem":{"kind":"array","name":"Row","elem":{"kind":"int","name":"i32","bits":32,"signed":true}}}')
+        val lb = text.from_char_code(123)
+        val rb = text.from_char_code(125)
+        val golden = "t" + lb + "5#array4#Rowsb0s0l0a0:e1t" + lb + "5#array3#Rowb0s0l0a0:e1t" + lb + "3#int3#i32b12#32s11l0a0:e0" + rb + rb + rb
+        expect(type_to_cache_key(value)).to_equal(golden)
+        val restored = json_to_type_info_text(wire)
+        expect(type_to_cache_key(restored)).to_equal(golden)
+
+    it "preserves tuple function and optional descriptor nesting":
+        step("Round-trip args independently of the single element slot")
+        val value = json_to_type_info_text('{"kind":"function","name":"Fn","args":[{"kind":"tuple","name":"Pair","args":[{"kind":"int","name":"i64"},{"kind":"string","name":"string"}]}],"elem":{"kind":"optional","name":"Maybe","elem":{"kind":"bool","name":"bool"}}}')
+        val restored = json_to_type_info_text(serialize_type_json(value))
+        expect(restored.args[0].args.len()).to_equal(2)
+        expect(restored.elem[0].elem[0].kind).to_equal("bool")
+        expect(type_to_cache_key(restored)).to_equal(type_to_cache_key(value))
+
+    it "keeps different nested element cache identities distinct":
+        step("Element identity is not replaced by presence alone")
+        val a = json_to_type_info_text('{"kind":"array","name":"Items","elem":{"kind":"int","name":"i32"}}')
+        val b = json_to_type_info_text('{"kind":"array","name":"Items","elem":{"kind":"int","name":"i64"}}')
+        expect(type_to_cache_key(a) == type_to_cache_key(b)).to_equal(false)
+
+    it "refuses declared present elements with missing or multiple storage":
+        step("A failed singleton retention or malformed public value cannot become absence")
+        var value = make_int_type(64, true)
+        value.has_elem = true
+        expect(serialize_type_json_checked(value).unwrap_err()).to_equal("SffiTypeElementCardinality")
+        expect(type_to_cache_key_checked(value).unwrap_err()).to_equal("SffiTypeElementCardinality")
+        value.elem = [make_bool_type(), make_string_type()]
+        expect(serialize_type_json_checked(value).unwrap_err()).to_equal("SffiTypeElementCardinality")
+        expect(type_to_cache_key_checked(value).unwrap_err()).to_equal("SffiTypeElementCardinality")
+
+    it "refuses hidden element storage when presence is false":
+        step("Contradictory presence cannot serialize or key as an absent element")
+        var value = make_int_type(64, true)
+        value.elem = [make_bool_type()]
+        expect(serialize_type_json_checked(value).unwrap_err()).to_equal("SffiTypeElementCardinality")
+        expect(type_to_cache_key_checked(value).unwrap_err()).to_equal("SffiTypeElementCardinality")

@@ -3333,6 +3333,43 @@ impl Lowerer {
         }
     }
 
+    /// An authored callable binding takes precedence over the unbound BDD DSL.
+    /// Keep flattened owners separate: an unrelated module's `it`/`expect`
+    /// must not capture a call in the current module.
+    fn bdd_name_has_binding(&self, name: &str, ctx: &FunctionContext) -> bool {
+        if ctx.lookup(name).is_some() {
+            return true;
+        }
+        let owner = self.current_function_owner.as_deref();
+        // The native-project map belongs to this physical module. A tagged
+        // flattened function instead uses its own import-owner map below.
+        if owner.is_none()
+            && self
+                .qualified_import_functions
+                .as_ref()
+                .is_some_and(|bindings| bindings.contains_key(name))
+        {
+            return true;
+        }
+        let definitions = self.flatten_fn_owners.get(name);
+        if definitions.is_some_and(|owners| owners.iter().any(|declared| declared.as_deref() == owner)) {
+            return true;
+        }
+        if self
+            .flatten_owner_import_bindings
+            .get(owner.unwrap_or("<entry>"))
+            .is_some_and(|bindings| bindings.contains_key(name))
+        {
+            return true;
+        }
+        if owner.is_some() || definitions.is_some_and(|owners| owners.iter().any(Option::is_some)) {
+            return false;
+        }
+        self.own_declared_function_names.contains(name)
+            || self.extern_fn_names.contains(name)
+            || self.imported_function_names.contains(name)
+    }
+
     /// Lower `expect(<subject>).<matcher>(<expected>)` into the same
     /// `rt_bdd_expect_*` builtins the operator form uses, by rewriting the
     /// matcher into its equivalent comparison expression.
@@ -3362,6 +3399,9 @@ impl Lowerer {
         let Some((subject, negated)) = Self::peel_expect_matcher_receiver(receiver) else {
             return Ok(None);
         };
+        if self.bdd_name_has_binding("expect", ctx) {
+            return Ok(None);
+        }
         if args.len() > 1 || args.first().is_some_and(|a| a.name.is_some()) {
             return Ok(None);
         }
@@ -3495,6 +3535,12 @@ impl Lowerer {
             }
             _ => return Ok(None),
         };
+
+        if matches!(name, "describe" | "context" | "it" | "test" | "example" | "specify" | "expect" | "before_each" | "after_each")
+            && self.bdd_name_has_binding(name, ctx)
+        {
+            return Ok(None);
+        }
 
         match name {
             "describe" | "context" => {
@@ -3749,6 +3795,50 @@ mod host_gpu_lane_statement_tests {
         let names: Vec<&str> = func.body.iter().filter_map(builtin_name).collect();
 
         assert_eq!(names, vec!["rt_host_gpu_lane_event", "rt_host_gpu_lane_event"]);
+    }
+}
+
+#[cfg(test)]
+mod native_bdd_scope_tests {
+    use super::*;
+
+    fn lower_with_native_owner(consumer_owner: Option<&str>) -> HirModule {
+        let source = "fn it(name: text, body: fn()):\n    body()\nfn probe():\n    it \"case\":\n        expect(false)\n    0\n";
+        let mut ast = simple_parser::Parser::new(source).parse().unwrap();
+        for item in &mut ast.items {
+            if let Node::Function(function) = item {
+                if function.name == "it" {
+                    crate::interpreter::tag_function_module_owner(function, "foreign-owner");
+                } else if let Some(owner) = consumer_owner {
+                    crate::interpreter::tag_function_module_owner(function, owner);
+                }
+            }
+        }
+        let mut lowerer = Lowerer::new();
+        lowerer.set_lenient_types(true);
+        lowerer.set_qualified_import_functions(std::sync::Arc::new(
+            [("it".to_string(), "selected_owner__it".to_string())].into_iter().collect(),
+        ));
+        lowerer.lower_module(&ast).unwrap()
+    }
+
+    #[test]
+    fn native_bdd_scope_current_native_import_precedes_foreign_definition() {
+        let module = lower_with_native_owner(None);
+        let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+        assert!(function.body.iter().any(|stmt| matches!(stmt,
+            HirStmt::Expr(HirExpr { kind: HirExprKind::Call { args, .. }, .. }) if args.len() == 2
+        )), "current module's explicit import must remain an ordinary call: {:?}", function.body);
+        assert!(!format!("{:?}", function.body).contains("rt_bdd_it_start_rv"));
+    }
+
+    #[test]
+    fn native_bdd_scope_foreign_function_cannot_inherit_entry_import() {
+        let module = lower_with_native_owner(Some("consumer-owner"));
+        let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+        let debug = format!("{:?}", function.body);
+        assert!(debug.contains("rt_bdd_it_start_rv"), "entry import leaked across owner boundary: {debug}");
+        assert!(debug.contains("rt_bdd_expect_truthy_rv"), "real unbound assertion body must remain: {debug}");
     }
 }
 

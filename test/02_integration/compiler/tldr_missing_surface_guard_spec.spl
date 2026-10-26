@@ -1,0 +1,84 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use compiler.hir.archive.tldr_function_header_v1.{TldrFunctionHeaderAuthorityV1,
+    AdmittedTldrFunctionImportV1, tldr_function_header_prefix_v1,
+    tldr_function_header_admit_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_import_resolution.*
+use compiler.hir.hir_lowering._Items.module_tldr_registration.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+fn fallback_fixture(name: text) -> text:
+    file_read("test/fixtures/compiler/tldr_ordinary_source_fallback/{name}.spl")
+
+fn fallback_header() -> AdmittedTldrFunctionImportV1:
+    val digest = sha256_text("fallback-fixture")
+    var authority = TldrFunctionHeaderAuthorityV1("dependency",
+        sha256_text(fallback_fixture("dependency")), digest, digest, digest, "")
+    val payload = tldr_function_header_prefix_v1(authority).unwrap() +
+        "function|add|dependency.add|left:i64,right:i64|i64\n"
+    authority.payload_digest = sha256_text(payload)
+    val signatures = tldr_function_header_admit_v1(payload, authority).unwrap()
+    AdmittedTldrFunctionImportV1(payload, authority, Some(signatures))
+
+fn reject_missing_fallback_surface(name: text):
+    step("Parse the real consumer fixture and admit its function-only header")
+    val consumer = parse_full_frontend(fallback_fixture(name),
+        "{name}.spl", name, Logger(level: 0))
+    expect(consumer.imports.len()).to_equal(1)
+    var lowering = HirLowering.new()
+    lowering.tldr_imports = [fallback_header()]
+    step("Resolve actual imports without a dependency surface and require an explicit error")
+    lowering.resolve_import_symbols(consumer)
+    expect(lowering.errors.len()).to_equal(1)
+    expect(lowering.errors[0].message).to_start_with("tldr-source-fallback-unavailable:dependency:")
+    expect(lowering.symbols.lookup_or_invalid("add").is_valid()).to_equal(false)
+
+describe "TLDR ordinary imports cannot silently lose required source surfaces":
+    it "REQ-TLDR-FALLBACK-001 rejects mixed record and function imports without source":
+        reject_missing_fallback_surface("mixed")
+
+    it "REQ-TLDR-FALLBACK-002 rejects namespace imports without source":
+        reject_missing_fallback_surface("namespace")
+
+    it "REQ-TLDR-FALLBACK-003 rejects a generic function requiring its body":
+        reject_missing_fallback_surface("generic")
+
+    it "REQ-TLDR-FALLBACK-004 retains the real ordinary surface path when source is present":
+        step("Parse both real source fixtures and build their canonical module surfaces")
+        val provider_text = fallback_fixture("dependency")
+        val consumer_text = fallback_fixture("mixed")
+        val provider = parse_full_frontend(provider_text, "dependency.spl", "dependency", Logger(level: 0))
+        val consumer = parse_full_frontend(consumer_text, "mixed.spl", "mixed", Logger(level: 0))
+        var modules: Dict<text, ParserModule> = {}
+        modules["dependency"] = provider
+        modules["mixed"] = consumer
+        val surfaces = module_surfaces_from_test_modules(modules,
+            [SourceFile(path: "dependency.spl", content: provider_text, module_name: "dependency"),
+             SourceFile(path: "mixed.spl", content: consumer_text, module_name: "mixed")]).unwrap()
+        var lowering = HirLowering.new()
+        lowering.module_surfaces = surfaces
+        lowering.tldr_imports = [fallback_header()]
+        step("Resolve the mixed import through the retained surface without partial header bindings")
+        lowering.resolve_import_symbols(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("Record").is_valid()).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("add").is_valid()).to_equal(true)
+
+    it "REQ-TLDR-FALLBACK-005 preserves function-only header admission without source":
+        step("Parse and resolve a supported function-only import without a dependency surface")
+        val consumer = parse_full_frontend(fallback_fixture("function_only"),
+            "function_only.spl", "function_only", Logger(level: 0))
+        var lowering = HirLowering.new()
+        lowering.tldr_imports = [fallback_header()]
+        lowering.resolve_import_symbols(consumer)
+        val symbol = lowering.symbols.lookup_or_invalid("add")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(symbol.is_valid()).to_equal(true)
+        expect(lowering.symbols.admitted_function_abis.has(symbol.id)).to_equal(true)

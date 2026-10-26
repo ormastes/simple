@@ -7,6 +7,18 @@ bootstrap_cache_hash_file() {
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
   else return 1; fi
 }
+bootstrap_cache_windows_acl_verify() {
+  bc_acl_path=$1
+  bc_acl_repo=${repo_root:-${repo:-}}
+  [ -n "$bc_acl_repo" ] || return 1
+  bc_acl_helper="$bc_acl_repo/scripts/bootstrap/phase2-capsule-permissions.ps1"
+  [ -f "$bc_acl_helper" ] && command -v powershell.exe >/dev/null 2>&1 &&
+    command -v cygpath >/dev/null 2>&1 || return 1
+  bc_acl_windows_path=$(cygpath -w "$bc_acl_path") || return 1
+  powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+    -File "$(cygpath -w "$bc_acl_helper")" -Action verify \
+    -Path "$bc_acl_windows_path"
+}
 # Historical directories stay beside their original path: Linux needs write
 # permission on a directory to change its '..' entry during cross-parent rename.
 # Bind their names into the attempt instead of thawing sealed runtime authority.
@@ -56,7 +68,19 @@ bootstrap_cache_archive_directory() (
   # Reject partial mutable authority before any mapping or expensive rebuild,
   # not only when the terminal attempt receipt is finally frozen.
   bc_unsealed=$(find "$bc_prior" \( -type l -o -perm -200 -o -perm -020 -o -perm -002 \) -print) || return 1
-  [ -z "$bc_unsealed" ] || bootstrap_cache_error 'prior directory is not sealed nonsymlink evidence' || return 1
+  if [ -n "$bc_unsealed" ]; then
+    case $(uname -s) in
+      MINGW*|MSYS*|CYGWIN*)
+        # MSYS chmod cannot remove directory write bits on NTFS. Accept that
+        # representation only when the Windows ACL independently denies
+        # writes throughout the complete tree; the verifier also rejects
+        # reparse points, so the cache archive still contains sealed evidence.
+        bootstrap_cache_windows_acl_verify "$bc_prior" ||
+          bootstrap_cache_error 'prior directory is not sealed nonsymlink evidence' || return 1
+        ;;
+      *) bootstrap_cache_error 'prior directory is not sealed nonsymlink evidence' || return 1 ;;
+    esac
+  fi
   bootstrap_cache_attempt_directory_list "$bc_archive" >/dev/null || return 1
   bc_map="$bc_archive/attempt-directories.tsv"
   bc_pending="$bc_map.pending.$$"
@@ -108,7 +132,12 @@ bootstrap_cache_freeze_attempt() (
     # These are frozen historical directories, not mutable cache. Never thaw
     # or silently seal an untrusted mapped tree during receipt generation.
     find "$bc_retained" \( -perm -200 -o -perm -020 -o -perm -002 \) -print > "$bc_list.writable" || return 1
-    [ ! -s "$bc_list.writable" ] || return 1
+    if [ -s "$bc_list.writable" ]; then
+      case $(uname -s) in
+        MINGW*|MSYS*|CYGWIN*) bootstrap_cache_windows_acl_verify "$bc_retained" || return 1 ;;
+        *) return 1 ;;
+      esac
+    fi
     find "$bc_retained" -type f >> "$bc_list" || return 1
   done < "$bc_list.directories"
   LC_ALL=C sort "$bc_list" > "$bc_list.sorted" || return 1

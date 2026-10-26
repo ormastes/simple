@@ -2,10 +2,10 @@
 
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded}
-use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
 use app.io.cli_ops.{cli_current_exe_path}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs, resolve_timeout_secs, timeout_value_is_well_formed}
-use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests}
+use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests, daemon_claim_wait_expired, daemon_platform_bypass}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
@@ -55,6 +55,10 @@ val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 # client can tell whether the daemon lane would silently substitute a different
 # compiler for the one the caller invoked.
 val LIGHT_BINARY: text = ".build/test_daemon_light/daemon.binary"
+# run_one_via_daemon result: the request was withdrawn unclaimed (busy worker);
+# the caller runs the spec directly. Distinct from every real exit code and
+# from LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT.
+val LIGHT_DAEMON_WITHDRAWN_RESULT: i64 = -750076
 
 struct ClientRun:
     # First requested path. Retained for error reporting only; execution
@@ -324,6 +328,9 @@ fn ensure_daemon() -> bool:
         return true
     report_stale_lock()
     file_delete(LIGHT_LOCK)
+    # The binary record belongs to the dead lock holder; clear it so the wait
+    # below can only be satisfied by the daemon spawned here.
+    file_delete(LIGHT_BINARY)
     val binary = simple_binary()
     val (_daemon_out, _daemon_err, daemon_code) = process_run(
         "/bin/sh",
@@ -332,9 +339,13 @@ fn ensure_daemon() -> bool:
     if daemon_code != 0:
         file_write("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
         return false
+    # The daemon claims LIGHT_LOCK first and publishes LIGHT_BINARY right
+    # after. Returning on the lock alone raced that publish: the caller then
+    # read no binary record, reported "identity unavailable or mismatched" and
+    # bypassed the daemon it had just started. Wait for both.
     var waits = 0
     while waits < 40:
-        if file_exists(LIGHT_LOCK):
+        if file_exists(LIGHT_LOCK) and file_exists(LIGHT_BINARY):
             return true
         thread_sleep(50)
         waits = waits + 1
@@ -568,11 +579,28 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
         print "ERROR: test daemon request write failed: {req_path}"
         return 1
     val deadline = expiry_micros + (LIGHT_REQUEST_RESPONSE_GRACE_MS * 1000)
+    val submitted_micros = time_now_unix_micros()
+    var claimed = false
     while time_now_unix_micros() < deadline:
         if file_exists(resp_path):
             val content = read_file_text(resp_path)
             file_delete(resp_path)
             return print_response(path, content)
+        if not claimed:
+            # The worker claims by renaming our `.req` away. Unclaimed after
+            # the claim window means it is busy with another spec; every
+            # further millisecond in the queue is taken from this spec's own
+            # budget. Withdraw (rename our own `.req`) and run directly with
+            # the full budget. Rename is atomic, so exactly one of the
+            # worker's claim and our withdrawal wins.
+            if not file_exists(req_path):
+                claimed = true
+            elif daemon_claim_wait_expired((time_now_unix_micros() - submitted_micros) / 1000):
+                val withdrawn_path = "{req_path}.withdrawn"
+                if file_rename(req_path, withdrawn_path):
+                    file_delete(withdrawn_path)
+                    return LIGHT_DAEMON_WITHDRAWN_RESULT
+                claimed = true
         thread_sleep(100)
     # No response inside the budget + grace. Emit a verdict so the spec reads
     # BROKEN, not UNRUN, and name the lock + the one-line remedy: the most
@@ -784,8 +812,10 @@ fn main() -> i64:
     # daemon predating this record has unavailable identity and must not serve
     # qualification work.
     val invoker = candidate_binary
-    val daemon_binary = daemon_recorded_binary()
-    val daemon_was_alive = daemon_lock_alive()
+    val daemon_host = host_os()
+    val daemon_host_bypass = daemon_platform_bypass(daemon_host)
+    val daemon_binary = if daemon_host_bypass: "" else: daemon_recorded_binary()
+    val daemon_was_alive = not daemon_host_bypass and daemon_lock_alive()
     val invoker_bypass = daemon_was_alive and daemon_binary != invoker
     val environment_bypass = daemon_was_alive and not test_daemon_environment_can_reuse_v1(
         caller_environment, lock_environment_digest())
@@ -808,9 +838,9 @@ fn main() -> i64:
     # OWN request -- and, worse, on leftover `.resp`/lock names. That is what
     # `count_pending_requests` exists for; it was pinned by a unit spec but had
     # zero production call sites. This is that wiring.
-    val backlog_pending = if file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
+    val backlog_pending = if not daemon_host_bypass and file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
     val backlog_bypass = daemon_backlog_bypass(backlog_pending)
-    var daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
+    var daemon_ok = if daemon_host_bypass or cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
     if daemon_ok:
         val active_daemon_binary = daemon_recorded_binary()
         if active_daemon_binary == "" or active_daemon_binary != candidate_binary:
@@ -822,7 +852,9 @@ fn main() -> i64:
             daemon_ok = false
     var binary = ""
     if not daemon_ok:
-        if cov_bypass:
+        if daemon_host_bypass:
+            print "test-daemon: light daemon requires Linux /proc; running directly on {daemon_host}"
+        elif cov_bypass:
             print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
         elif require_gpu_bypass:
             print "require-gpu: SIMPLE_REQUIRE_GPU set; bypassing test daemon so the requirement reaches the spec"
@@ -873,6 +905,9 @@ fn main() -> i64:
                 daemon_ok = false
                 binary = candidate_binary
                 code = run_one_direct(binary, p, run.timeout_secs)
+            elif code == LIGHT_DAEMON_WITHDRAWN_RESULT:
+                print "daemon-busy: the single test-daemon worker did not claim the request; running directly"
+                code = run_one_direct(candidate_binary, p, run.timeout_secs)
         else:
             code = run_one_direct(binary, p, run.timeout_secs)
         executed = executed + 1

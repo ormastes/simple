@@ -729,7 +729,13 @@ pub fn rt_file_write_text(args: &[Value]) -> Result<Value, CompileError> {
 /// Synchronize file contents and metadata with durable storage.
 pub fn rt_file_fsync(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    match OpenOptions::new().read(true).open(&path) {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    // Windows FlushFileBuffers requires GENERIC_WRITE. Keep OPEN_EXISTING:
+    // syncing must neither create a missing file nor truncate its contents.
+    #[cfg(windows)]
+    options.write(true);
+    match options.open(&path) {
         Ok(file) => Ok(Value::Bool(file.sync_all().is_ok())),
         Err(_) => Ok(Value::Bool(false)),
     }
@@ -2560,10 +2566,19 @@ mod tests {
 
         let ok = rt_file_fsync(&[Value::text(path)]).expect("fsync");
         assert_eq!(ok, Value::Bool(true));
+        assert_eq!(std::fs::read(dir.path().join("sync.txt")).unwrap(), b"durable");
+
+        let cached = rt_file_fsync_cached(&[Value::text(
+            dir.path().join("sync.txt").to_string_lossy().to_string(),
+        )])
+        .expect("cached fsync");
+        assert_eq!(cached, Value::Bool(true));
+        assert_eq!(std::fs::read(dir.path().join("sync.txt")).unwrap(), b"durable");
 
         let missing = dir.path().join("missing.txt").to_string_lossy().to_string();
         let fail = rt_file_fsync(&[Value::text(missing)]).expect("missing fsync");
         assert_eq!(fail, Value::Bool(false));
+        assert!(!dir.path().join("missing.txt").exists());
     }
 
     #[test]

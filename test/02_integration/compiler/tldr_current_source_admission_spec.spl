@@ -1,0 +1,82 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.tldr_function_archive_v1.{tldr_function_archive_admit_v1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use compiler.hir.archive.interface_action_archive.{InterfaceActionArchiveV1, InterfaceArchiveSymbolV1}
+use compiler.hir.archive.tldr_function_header_v1.{AdmittedTldrFunctionImportV1, tldr_function_header_admit_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Items.module_tldr_registration.*
+use compiler.frontend.parser_types.{ParserImport, ImportItem}
+use compiler.common.diagnostics.span.{Span}
+
+fn current_tldr_archive(record: text = "dependency.add;left:i64,right:i64;i64") -> InterfaceActionArchiveV1:
+    val digest = sha256_text("fixture")
+    val variant = ConfigVariantKeyV1("x86_64-pc-windows-msvc", "llvm", [], "debug", "simple-v1", [], [])
+    InterfaceActionArchiveV1("package", variant, digest, [], digest, digest,
+        [InterfaceArchiveSymbolV1("dependency#add", "function-header-v1", record, digest)], [])
+
+fn current_tldr_receipt(variant: text) -> PackageArchiveReceiptV1:
+    val digest = sha256_text("fixture")
+    PackageArchiveReceiptV1("package", digest, digest, digest, "fixture-producer", digest, variant, [], [], digest)
+
+fn current_tldr_entry(source: text) -> PackageModuleIndexEntryV1:
+    val digest = sha256_text("fixture")
+    PackageModuleIndexEntryV1("package", "dependency", "dependency.spl", source,
+        digest, digest, digest, digest, digest, digest, digest, "dependency", [], [])
+
+fn current_tldr_admit() -> AdmittedTldrFunctionImportV1:
+    val digest = sha256_text("fixture")
+    tldr_function_archive_admit_v1(current_tldr_archive(), current_tldr_receipt(digest), current_tldr_entry(digest)).unwrap()
+
+fn current_tldr_import(local_name: text) -> ParserImport:
+    ParserImport("dependency", [ImportItem("add", true, local_name)], false, Span.empty())
+
+describe "current-source TLDR import admission and fallback":
+    it "REQ-CURRENT-001 uses a supported header without strict mode":
+        var lowering = HirLowering.new()
+        lowering.tldr_imports = [current_tldr_admit()]
+        expect(lowering.tldr_entry_only).to_equal(false)
+        expect(lowering.resolve_tldr_import_v1("main", current_tldr_import("sum"))).to_equal(true)
+        val symbol = lowering.symbols.lookup_or_invalid("sum")
+        expect(symbol.is_valid()).to_equal(true)
+        expect(lowering.symbols.admitted_function_abis.has(symbol.id)).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "REQ-CURRENT-002 keeps an absent header on the ordinary surface path":
+        var lowering = HirLowering.new()
+        expect(lowering.resolve_tldr_import_v1("main", current_tldr_import("sum"))).to_equal(false)
+        expect(lowering.symbols.lookup_or_invalid("sum").is_valid()).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "REQ-CURRENT-003 refuses partial registration for mixed declarations":
+        var lowering = HirLowering.new()
+        lowering.tldr_imports = [current_tldr_admit()]
+        val mixed = ParserImport("dependency", [ImportItem("add", true, "sum"), ImportItem("Record", false, "")], false, Span.empty())
+        expect(lowering.resolve_tldr_import_v1("main", mixed)).to_equal(false)
+        expect(lowering.symbols.lookup_or_invalid("sum").is_valid()).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "REQ-CURRENT-004 namespace imports require ordinary surfaces":
+        var lowering = HirLowering.new()
+        lowering.tldr_imports = [current_tldr_admit()]
+        val namespace = ParserImport("dependency", [], false, Span.empty())
+        expect(lowering.resolve_tldr_import_v1("main", namespace)).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "REQ-CURRENT-005 strict mode reports the missing body prerequisite":
+        var lowering = HirLowering.new()
+        lowering.tldr_entry_only = true
+        expect(lowering.resolve_tldr_import_v1("main", current_tldr_import("sum"))).to_equal(true)
+        expect(lowering.errors.len()).to_equal(1)
+
+    it "REQ-CURRENT-006 raw stale authority is rejected instead of source fallback":
+        val old = current_tldr_admit()
+        var changed = old.authority
+        changed.source_digest = sha256_text("changed source")
+        var lowering = HirLowering.new()
+        lowering.tldr_imports = [AdmittedTldrFunctionImportV1(old.payload, changed)]
+        expect(lowering.resolve_tldr_import_v1("main", current_tldr_import("sum"))).to_equal(true)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.symbols.lookup_or_invalid("sum").is_valid()).to_equal(false)

@@ -20,6 +20,13 @@
 # independent and moves unchanged.
 
 use app.io.mod (file_exists, file_read, file_write, file_append)
+use std.common.source_change.buffer_observation_v1.{SourceBufferObservationV1}
+use std.common.source_change.contracts_v1.{SourceEditV1, EditOriginV1}
+use std.common.source_change.edit_transition_v1.{source_change_validate_edit_bytes_v1}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.core.{scv_worktree_path_safe}
+
 
 struct ScvEditorEvent:
     kind: text
@@ -187,3 +194,44 @@ fn scv_editor_ipc_flush(ipc: EditorIpc) -> (EditorIpc, [ScvEditorEvent]):
     next.buffers = []
     next.expected_saves = []
     (next, out)
+
+# Consume an observed buffer, not an externally asserted complete snapshot.
+# The application retains both owners and supplies its actual expected SCV base.
+# IPC application does not acknowledge IDE durability or attach a revision.
+fn scv_editor_accept_source_observation_v1(ipc: EditorIpc,
+        observation: SourceBufferObservationV1,
+        expected_before_digest: text?) -> Result<(EditorIpc, [ScvEditorEvent]), text>:
+    if observation.generation <= 0 or observation.version <= 0 or
+            not scv_worktree_path_safe(observation.source_identity):
+        return Err("scv-source-observation-identity-invalid")
+    val index = _scv_ipc_buffer_index(ipc, observation.source_identity)
+    if (index < 0 and expected_before_digest != nil) or (index >= 0 and expected_before_digest == nil):
+        return Err("scv-source-observation-base-mismatch")
+    val before_text = if index >= 0: ipc.buffers[index].bytes else: ""
+    if before_text.len() < 0 or before_text.len() > 1048576 or
+            observation.source_text.len() < 0 or observation.source_text.len() > 1048576:
+        return Err("scv-source-observation-byte-bound")
+    val before = text_to_utf8_bytes(before_text)
+    val after = text_to_utf8_bytes(observation.source_text)
+    if before.len() != before_text.len() or after.len() != observation.source_text.len():
+        return Err("scv-source-observation-conversion-failed")
+    val before_digest = sha256_u8_hex(before)
+    if before_digest.len() != 64: return Err("scv-source-observation-digest-provider-failed")
+    if expected_before_digest != nil and expected_before_digest! != before_digest:
+        return Err("scv-source-observation-base-mismatch")
+    val observed_edit = SourceEditV1(path: observation.source_identity,
+        old_snapshot: before_digest, old_start_byte: 0, old_end_byte: before.len() as u64,
+        new_bytes_digest: observation.source_digest, new_byte_len: after.len() as u64,
+        origin: EditOriginV1.Ide,
+        transaction_id: "ide-{observation.generation}-{observation.version}")
+    val checked = source_change_validate_edit_bytes_v1(before_digest, before,
+        observed_edit, after, after)?
+    if not checked: return Err("scv-source-observation-transition-invalid")
+    val kind = if index < 0: "buffer_open" else: "edit"
+    val (updated, events) = _scv_ipc_apply(ipc, kind, observation.source_identity, "", observation.source_text)
+    val stored_index = _scv_ipc_buffer_index(updated, observation.source_identity)
+    if stored_index < 0 or updated.buffers[stored_index].bytes != observation.source_text or events.len() != 1:
+        return Err("scv-source-observation-store-failed")
+    Ok((updated, events))
+
+export scv_editor_accept_source_observation_v1

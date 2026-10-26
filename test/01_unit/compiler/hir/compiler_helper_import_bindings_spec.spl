@@ -1,0 +1,118 @@
+# @req REQ-COMPILER-HELPER-IMPORT-BINDINGS-1
+# Actual parser/HIR/registry consumers, not source-text import assertions.
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module, flat_bootstrap_function_count, flat_bootstrap_function_decl_at}
+use compiler.frontend.core.parser.{parser_init, parse_module_silent_checked}
+use compiler.frontend.core.parser_stmts.{parse_trailing_colon_block_arg}
+use compiler.frontend.core.ast_expr.{expr_call, expr_ident, expr_get_args, expr_get_int}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceBuilder, ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_registry.{module_surfaces_by_name_from_parts}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+describe "compiler consumers bind split helper owners":
+    it "marks a real parsed trailing colon block as a scoped lambda":
+        step("the statement parser must call the canonical AST marker")
+        parser_init(":\n    7\n")
+        val call = expr_call(expr_ident("consume", 0), [], 0)
+        val parsed = parse_trailing_colon_block_arg(call)
+        val arguments = expr_get_args(parsed)
+        expect(arguments.len()).to_equal(1)
+        expect(expr_get_int(arguments[0])).to_equal(1)
+
+    it "lowers a typed function and preserves both source parameters":
+        step("exercise real declaration lowering with its sibling helper bindings")
+        val source = "fn bind_sum(left: i64, right: i64) -> i64:\n    left + right\n"
+        val parsed = parse_full_frontend(source, "binding.spl", "binding", Logger(level: 0))
+        var lowering = HirLowering.with_filename("binding.spl")
+        val hir = lowering.lower_module(parsed)
+        var parameter_count = -1
+        for function_ in hir.functions.values():
+            if function_.name == "bind_sum":
+                parameter_count = function_.params.len()
+        expect(lowering.errors.len()).to_equal(0)
+        expect(parameter_count).to_equal(2)
+
+    it "binds a parsed bootstrap function through its real declaration consumer":
+        step("flat function lowering invokes bootstrap_hir_symbol_for_name for main")
+        val parse_failed = parse_module_silent_checked("fn main() -> i64:\n    return 7\n", "bootstrap_binding.spl")
+        expect(parse_failed).to_equal(false)
+        expect(flat_bootstrap_function_count()).to_equal(1)
+        val declaration = flat_bootstrap_function_decl_at(0)
+        var lowering = HirLowering.with_filename("bootstrap_binding.spl")
+        val function_ = lowering.lower_bootstrap_flat_function(declaration)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(function_.name).to_equal("main")
+        expect(function_.symbol.id).to_equal(6)
+        expect(function_.params.len()).to_equal(0)
+
+    it "freezes an aligned empty registry through the real builder consumer":
+        step("finish_into validates alignment before publishing the registry")
+        var builder = ModuleSurfaceBuilder.new()
+        var registry = ModuleSurfacesByName.empty()
+        expect(builder.finish_into(registry)).to_equal("")
+        expect(registry.frozen).to_equal(true)
+        expect(registry.surfaces.len()).to_equal(0)
+
+    it "rejects misaligned registry name rows before publication":
+        step("missing helper import must never be replaced by bypassing validation")
+        val result = module_surfaces_by_name_from_parts([], {}, ["missing"], [])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("different lengths")
+
+    it "resolves an explicitly exported value through a real wildcard facade":
+        step("origin-route lookup retains the concrete provider identity")
+        val body = "pub fn value() -> i64:\n    7\n"
+        val facade_body = "use binding.provider.*\nexport value\n"
+        val provider = parse_and_build_module(body, "binding/provider.spl")
+        val facade = parse_and_build_module(facade_body, "binding/facade.spl")
+        val result = module_surfaces_from_test_modules(
+            {"binding.provider": provider, "binding.facade": facade},
+            [SourceFile(path: "binding/provider.spl", content: body, module_name: "binding.provider"),
+             SourceFile(path: "binding/facade.spl", content: facade_body, module_name: "binding.facade")])
+        expect(result.is_ok()).to_equal(true)
+        val registry = result.unwrap()
+        val owner = registry.surfaces[registry.index_by_name["binding.facade"]]
+        var value_position = -1
+        var i = 0
+        while i < owner.export_origin_index.names.len():
+            if owner.export_origin_index.names[i] == "value":
+                value_position = i
+            i = i + 1
+        expect(value_position).to_be_greater_than(-1)
+        if value_position >= 0:
+            expect(owner.export_origin_index.owner_modules[value_position]).to_equal("binding.provider")
+            expect(owner.export_origin_index.source_names[value_position]).to_equal("value")
+
+    it "preserves platform attribute warning fields through real struct lowering":
+        step("lower_struct must invoke the canonical platform attribute projection")
+        val source = "@platform\nstruct PlatformBound:\n    lane: i64\n"
+        val parsed = parse_full_frontend(source, "platform_binding.spl", "platform_binding", Logger(level: 0))
+        var lowering = HirLowering.with_filename("platform_binding.spl")
+        val hir = lowering.lower_module(parsed)
+        var found = false
+        var platform_present = false
+        var platform_error = true
+        var platform_warning = false
+        var message = ""
+        var diagnostic_line = 0
+        for struct_ in hir.structs.values():
+            if struct_.name == "PlatformBound":
+                found = true
+                platform_present = struct_.has_platform_attr
+                platform_error = struct_.platform_has_error
+                platform_warning = struct_.platform_has_warning
+                message = struct_.platform_diagnostic_message
+                diagnostic_line = struct_.platform_diagnostic_line
+        expect(lowering.errors.len()).to_equal(0)
+        expect(found).to_equal(true)
+        expect(platform_present).to_equal(true)
+        expect(platform_error).to_equal(false)
+        expect(platform_warning).to_equal(true)
+        expect(message).to_contain("explicitly")
+        expect(diagnostic_line).to_equal(1)
+

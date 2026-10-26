@@ -1253,6 +1253,16 @@ bootstrap_windows_cc_env=""
 bootstrap_windows_include_env=""
 bootstrap_windows_lib_env=""
 bootstrap_windows_libpath_env=""
+# The pure-Simple stages pick their process-spawn implementation from the OS
+# env var (io/process_ops.spl _is_windows_platform reads env_get("OS")); a
+# curated env that omits it sends every bare-name child spawn (git above all)
+# down the POSIX path, which fails with -1 on Windows -- observed as
+# SCV-E-ADMISSION git-event-source-unavailable and "workaround Git failed (-1)"
+# in the stage-2 sanity. Always carry OS for the native build lanes.
+bootstrap_windows_os_env=""
+if [ "${os}" = "windows" ]; then
+  bootstrap_windows_os_env="OS=${OS:-Windows_NT}"
+fi
 if [ "${os}" = "windows" ]; then
   exe_suffix=".exe"
   case "${SIMPLE_LINKER_FLAVOR:-${PLATFORM_ABI}}" in
@@ -1408,9 +1418,15 @@ for bootstrap_path_entry in ${PATH}; do
     IFS=:
     continue
   }
-  bootstrap_path_entry=$(
-    CDPATH= cd -- "${bootstrap_path_entry}" && pwd -P
-  ) || exit 1
+  if ! bootstrap_path_entry=$(
+    { CDPATH= cd -- "${bootstrap_path_entry}" && pwd -P; } 2>/dev/null
+  ); then
+    # Windows app execution aliases can expose package directories through
+    # PATH even when the current token cannot traverse them. They cannot be
+    # stable tool authorities, so omit them; required tools are checked below.
+    IFS=:
+    continue
+  fi
   case ":${bootstrap_canonical_path}:" in
     *":${bootstrap_path_entry}:"*) ;;
     *)
@@ -1868,6 +1884,10 @@ bootstrap_stage_sanity() (
   sanity_system_root=${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
   sanity_system_drive=${SystemDrive:-${SYSTEMDRIVE:-}}
   sanity_program_data=${ProgramData:-${PROGRAMDATA:-}}
+  sanity_os=${OS:-}
+  # OS decides the child's process-spawn implementation (see
+  # bootstrap_windows_os_env above); the sanity HOME/TMP scrub otherwise
+  # strands the pure-Simple candidate on the POSIX spawn path.
   sanity_win_temp=${TEMP:-${TMP:-}}
   sanity_cc=${CC:-}
   sanity_cxx=${CXX:-}
@@ -1878,6 +1898,12 @@ bootstrap_stage_sanity() (
   # 180s) can raise it; without this the scrub always restored the 180s
   # default and the probe timed out with raw_status=124.
   sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-}
+  # SIMPLE_SCV_INVENTORY_COLD_INIT: the first build in a fresh checkout has no
+  # compile-event journal; the compiler's own SCV admission then fails closed
+  # with "compile-event-journal-missing ... rerun with
+  # SIMPLE_SCV_INVENTORY_COLD_INIT=1". That operator escape hatch must survive
+  # the scrub below or the documented rerun can never take effect.
+  sanity_scv_cold_init=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}
   # The outer guard owns these values. Scrubbing them makes the bounded-log
   # collector create a new session, escaping the still-active outer monitor.
   # Validate before any candidate execution, and preserve presence (including
@@ -1912,6 +1938,10 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_build_timeout}" ]; then
     COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
     export COMPILER_BUILD_TIMEOUT_SECONDS
+  fi
+  if [ -n "${sanity_scv_cold_init}" ]; then
+    SIMPLE_SCV_INVENTORY_COLD_INIT=${sanity_scv_cold_init}
+    export SIMPLE_SCV_INVENTORY_COLD_INIT
   fi
   if [ -n "${sanity_windows_abi}" ]; then
     SIMPLE_WINDOWS_ABI=${sanity_windows_abi}
@@ -1955,6 +1985,10 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_program_data}" ]; then
     ProgramData=${sanity_program_data}
     export ProgramData
+  fi
+  if [ -n "${sanity_os}" ]; then
+    OS=${sanity_os}
+    export OS
   fi
   if [ -n "${sanity_win_temp}" ]; then
     TEMP=${sanity_win_temp}
@@ -3574,6 +3608,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
       ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
       ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+      ${bootstrap_windows_os_env:+"${bootstrap_windows_os_env}"} \
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
@@ -3656,6 +3691,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
       ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
       ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+      ${bootstrap_windows_os_env:+"${bootstrap_windows_os_env}"} \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       ${stage3_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
@@ -3723,6 +3759,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
       ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
       ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+      ${bootstrap_windows_os_env:+"${bootstrap_windows_os_env}"} \
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}"
@@ -4656,6 +4693,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
     ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
     ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+    ${bootstrap_windows_os_env:+"${bootstrap_windows_os_env}"} \
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
     ${stage3_diagnostic_env} -- \
     "${stage2_admitted_absolute}" native-build \
@@ -4682,6 +4720,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "error: Stage 3 mutated the read-only Phase 2 cache" >&2
       exit 1
     }
+    # Two-comparator fail-closed confirmation for the Phase 2 mutation snapshot
+    # gate: the pinned comparator above classifies infrastructure failure, and
+    # this canonical cmp -s independently anchors the byte-equality verdict so
+    # the snapshot comparison cannot be re-bound to a weaker equality helper.
+    if ! cmp -s "${phase2_cache_before_stage3}" "${phase2_cache_after_stage3}"; then
+      echo "error: Stage 3 mutated the read-only Phase 2 cache" >&2
+      exit 1
+    fi
     if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
       phase2_manifest_sha_after_stage3=$(bootstrap_stage3_hash_file \
         "${stage2_compatibility_manifest_absolute}") || exit 1

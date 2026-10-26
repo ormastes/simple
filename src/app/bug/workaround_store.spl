@@ -12,6 +12,10 @@ use std.convert.{try_parse_int}
 
 fn workaround_source_candidate(path: text) -> bool:
     if not workaround_path_valid(path): return false
+    # SCV materializations are derived copies, not authored workaround owners.
+    # Match only the repository-relative reserved namespace: a legitimate
+    # checkout/source may itself live below an absolute build directory.
+    if path.starts_with("build/scv/snapshots/"): return false
     if path.starts_with("src/compiler_rust/vendor/") or path.starts_with("src/runtime/vendor/"):
         return false
     if path == "src/runtime/miniaudio.h" or path == "src/runtime/stb_image.h" or path == "src/runtime/stb_truetype.h":
@@ -27,6 +31,7 @@ fn workaround_status_paths(output: text) -> Result<[text], text>:
         return Err("truncated workaround Git status output")
     val records = output.split("\0")
     var paths: [text] = []
+    var seen: Dict<text, bool> = {}
     var i = 0
     while i < records.len():
         val record = records[i]
@@ -38,12 +43,16 @@ fn workaround_status_paths(output: text) -> Result<[text], text>:
         val status = record.substring(0, 2)
         val path = record.substring(3)
         if not workaround_path_valid(path): return Err("unsafe workaround Git path: {path}")
-        if workaround_source_candidate(path) and not paths.contains(path): paths.push(path)
+        if workaround_source_candidate(path) and not seen.contains_key(path):
+            paths.push(path)
+            seen[path] = true
         if status.contains("R") or status.contains("C"):
             i = i + 1
             if i >= records.len() or not workaround_path_valid(records[i]):
                 return Err("missing workaround Git rename source")
-            if workaround_source_candidate(records[i]) and not paths.contains(records[i]): paths.push(records[i])
+            if workaround_source_candidate(records[i]) and not seen.contains_key(records[i]):
+                paths.push(records[i])
+                seen[records[i]] = true
         i = i + 1
     Ok(paths)
 
@@ -110,7 +119,14 @@ fn workaround_bug_snapshot(root: text) -> Result<BugDatabase, text>:
     if not found: return Err("canonical bug database has no bug table")
     Ok(BugDatabase(db: db))
 
-fn workaround_refresh_locked(root: text, revision: text, fullscan: bool, discovered: [text]) -> Result<WorkaroundIndex, text>:
+# Process-local owned values, never a reusable freshness receipt. Preparation
+# and changed-payload publication remain inside the writer transaction.
+struct WorkaroundPreparedRefresh:
+    checked: WorkaroundIndex
+    encoded: text
+    unchanged: bool
+
+fn workaround_prepare_locked(root: text, revision: text, fullscan: bool, discovered: [text]) -> Result<WorkaroundPreparedRefresh, text>:
     val index_path = root + "/.simple/workarounds.sdn"
     var previous = empty_workaround_index(revision)
     var previous_encoded = ""
@@ -161,12 +177,20 @@ fn workaround_refresh_locked(root: text, revision: text, fullscan: bool, discove
     if encoded.len() > 16777216: return Err("workaround index exceeded bound")
     # Validate the exact publication payload before touching the old index.
     val checked = decode_workaround_index(encoded)?
+    Ok(WorkaroundPreparedRefresh(checked, encoded, encoded == previous_encoded))
+
+fn workaround_check_current_head(root: text, revision: text) -> Result<bool, text>:
     val final_head = workaround_git(root, ["rev-parse", "--verify", "HEAD"])?
     if final_head.trim() != revision:
         return Err("Git HEAD changed during workaround refresh; retry on a stable checkout")
-    if encoded == previous_encoded: return Ok(checked)
-    if not workaround_host_publish(index_path, encoded): return Err("atomic workaround publication failed")
-    Ok(checked)
+    Ok(true)
+
+fn workaround_commit_locked(root: text, revision: text,
+        prepared: WorkaroundPreparedRefresh) -> Result<WorkaroundIndex, text>:
+    workaround_check_current_head(root, revision)?
+    if not workaround_host_publish(root + "/.simple/workarounds.sdn", prepared.encoded):
+        return Err("atomic workaround publication failed")
+    Ok(prepared.checked)
 
 fn refresh_workarounds_at(root: text, fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
     val head = workaround_git(root, ["rev-parse", "--verify", "HEAD"])?
@@ -181,7 +205,21 @@ fn refresh_workarounds_at(root: text, fullscan: bool, known_paths: [text]) -> Re
     val lock = workaround_host_lock(root + "/.simple/workarounds.sdn.lock", 5)
     if lock < 0: return Err("workaround writer lock unavailable")
     # Capture every Result before releasing; no ? may escape the lock owner.
-    val result = workaround_refresh_locked(root, revision, fullscan, discovered)
+    val preparation = workaround_prepare_locked(root, revision, fullscan, discovered)
+    if preparation.is_err():
+        val unlocked = workaround_host_unlock(lock)
+        if not unlocked: return Err("workaround writer lock release failed")
+        return Err(preparation.unwrap_err())
+    val prepared: WorkaroundPreparedRefresh = preparation.unwrap()
+    if prepared.unchanged:
+        # This owned value was validated under the lock. A subsequent writer
+        # may replace the index; the API does not promise latest-on-return.
+        # No publication follows this unlock, but fresh HEAD is still checked.
+        val unlocked = workaround_host_unlock(lock)
+        if not unlocked: return Err("workaround writer lock release failed")
+        workaround_check_current_head(root, revision)?
+        return Ok(prepared.checked)
+    val result = workaround_commit_locked(root, revision, prepared)
     val unlocked = workaround_host_unlock(lock)
     if not unlocked: return Err("workaround writer lock release failed")
     result

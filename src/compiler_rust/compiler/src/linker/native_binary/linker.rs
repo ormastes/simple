@@ -105,7 +105,13 @@ impl NativeBinaryBuilder {
         match self.options.target.os {
             TargetOS::Linux | TargetOS::FreeBSD => vec!["c".to_string()],
             TargetOS::MacOS => vec!["System".to_string()],
-            TargetOS::Windows => vec!["c".to_string(), "msvcrt".to_string(), "kernel32".to_string()],
+            TargetOS::Windows => {
+                let mut libraries = vec!["msvcrt".to_string(), "kernel32".to_string()];
+                if self.options.target.linker_flavor() == LinkerFlavor::Gnu {
+                    libraries.insert(0, "c".to_string());
+                }
+                libraries
+            }
             _ => vec!["c".to_string()],
         }
     }

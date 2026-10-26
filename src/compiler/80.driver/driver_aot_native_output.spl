@@ -1,3 +1,4 @@
+use compiler.driver.driver_empty_dependency_receipt_v1.{driver_empty_dependency_admitted_v1, driver_empty_dependency_parser_empty_v1}
 # Driver — AOT Output Methods
 #
 # Extracted from driver.spl. Contains CompilerDriver methods for:
@@ -52,6 +53,7 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
 use compiler.common.config.{Logger}
+use compiler.common.cache.reverse_reference_facts.{reverse_reference_owner_snapshot_v1}
 use compiler.common.cache.reverse_reference_key.{
     ReverseReferenceKeyV1, reverse_reference_key_decode_v1,
     reverse_reference_key_encode_v1
@@ -61,7 +63,7 @@ use compiler.driver.cache.reverse_reference_receipt.{
     reverse_reference_exact_projection_v1
 }
 use compiler.driver.cache.phase_compatibility_admission.{
-    driver_admit_phase2_compatibility_manifest_v1
+    driver_admit_phase2_compatibility_manifest_v1, driver_frontend_compatibility_item_v2
 }
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
@@ -396,7 +398,7 @@ fn driver_log_info(log: Logger, message: text):
     if log.level >= 4:
         print "[INFO] {message}"
 
-fn driver_emit_phase2_compatibility_manifest_v1(
+pub fn driver_emit_phase2_compatibility_manifest_v1(
     build_cache: BuildCache, phase2_cache_root: text, phase3_cache_root: text,
     manifest_path: text, producer_identity: text, provider_identity: text,
     target_identity: text
@@ -449,42 +451,36 @@ fn driver_emit_phase2_compatibility_manifest_v1(
             artifact_digest, producer_identity, provider_identity,
             target_identity, source))
     val frontend_dir = frontend_parse_cache_dir()
-    for name in dir_list(frontend_dir) ?? []:
-        if not name.ends_with(".fpc"):
+    val frontend_snapshot = reverse_reference_owner_snapshot_v1()
+    # Only THIS compile's authenticated frontend facts are candidates. Do not
+    # directory-scan stale entries or bind parser keys to live file fingerprints.
+    for fact in frontend_snapshot.facts:
+        if fact.projection_kind != "frontend-parser-input-v2":
             continue
-        val artifact_path = _sffi_path_join(frontend_dir, name)
+        val fields = fact.frontend_evidence_frame_v2.split("|")
+        if fields.len() != 8:
+            return "m2-frontend-binding-missing:" + fact.subject_identity
+        val identity = fields[0] + "|" + fields[1] + "|" + fields[2] + "|" +
+            fields[3] + "|" + fields[4] + "|" + fields[5]
+        val artifact_path = _sffi_path_join(frontend_dir, fields[5] + ".fpc")
         val artifact_admission = phase_compatibility_existing_artifact_io_v1(
             canonical_phase2.canonical_root, artifact_path)
         if not artifact_admission.valid:
-            return "frontend-" + artifact_admission.reason + ":" + name
+            return "frontend-" + artifact_admission.reason + ":" + fact.subject_identity
         val artifact = phase_compatibility_read_artifact_io_v1(
             canonical_phase2.canonical_root, artifact_path)
         if not artifact.valid:
-            return "frontend-" + artifact.reason + ":" + name
-        val artifact_digest = sha256_text(artifact.content)
-        if artifact_digest.len() != 64:
-            return "unreadable-frontend-artifact:" + name
-        val subject = name.substring(0, name.len() - 4)
-        var source_identity = ""
-        for source in build_cache.entries.keys():
-            if build_cache.entries[source].fingerprint.content_hash == subject:
-                if source_identity != "":
-                    return "m2-frontend-source-ambiguous:" + subject
-                source_identity = source
-        if source_identity == "":
-            return "m2-frontend-source-missing:" + subject
+            return "frontend-" + artifact.reason + ":" + fact.subject_identity
         val projection = reverse_reference_exact_projection_v1(
-            m2_read, source_identity, source_identity,
-            "direct-import-export")
-        if projection == nil or projection!.key_frame !=
-                reverse_reference_key_encode_v1(projection!.key):
-            return "m2-frontend-key-missing-or-ambiguous:" + source_identity
-        items = items.push(phase_compatibility_item_frame_v1(
-            "frontend", projection!.key_frame,
-            artifact_admission.canonical_path, artifact_digest,
-            "producer-neutral",
-            FRONTEND_CACHE_ENTRY_VERSION + ":" + FLAT_POOL_CODEC_VERSION,
-            "target-neutral", source_identity))
+            m2_read, fact.subject_identity, fact.consumer_identity,
+            "frontend-parser-input-v2")
+        if projection == nil or projection!.key.projection_digest != fact.evidence_digest:
+            return "m2-frontend-key-missing-or-ambiguous:" + fact.subject_identity
+        val item = driver_frontend_compatibility_item_v2(projection!.key,
+            identity, artifact_admission.canonical_path, artifact.content)
+        if item == nil:
+            return "m2-frontend-artifact-binding-mismatch:" + fact.subject_identity
+        items = items.push(item!)
     val manifest = PhaseCompatibilityManifestV1(
         1, canonical_phase2.canonical_root, canonical_phase3.canonical_root,
         build_cache.cache_path, m2_receipt_digest,
@@ -1345,6 +1341,29 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Pars
         parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
         parsed.arch_rules.len() == 0 and parsed.mock_decls.len() == 0)
 
+fn driver_native_empty_dependency_for_context_v1(
+    ctx: CompileContext, name: text, mir: MirModule,
+    parsed: ParserModule?, entry_module_name: text
+) -> bool:
+    if name == entry_module_name:
+        return false
+    if ctx.poisoned_module_count_value > 0 and ctx.is_module_poisoned(name):
+        return false
+    if mir.functions.len() > 0 or mir.statics.len() > 0 or
+            mir.constants.len() > 0 or mir.types.len() > 0:
+        return false
+    if not driver_empty_dependency_parser_empty_v1(parsed):
+        return false
+    # Only declaration-empty candidates need this lookup. The existing owner
+    # rejects duplicate module names and physical aliases, without disk reads.
+    val (source_path, source_digest) = driver_native_frozen_source_lookup(
+        ctx.source_paths_owner, ctx.source_identities_owner,
+        ctx.source_module_names_owner, name)
+    if source_path == "": return false
+    val receipt = ctx.native_empty_dependency_parse_receipts_v1[source_path] ?? ""
+    driver_empty_dependency_admitted_v1(mir, parsed, receipt, source_digest,
+        ctx.source_inventory_generation_owner_v2, false, false)
+
 fn driver_native_build_filter_scoped_outputs(cached_outputs: [text], cache_scope_root: text) -> ([text], bool):
     var scoped_outputs: [text] = []
     var all_in_scope = true
@@ -1780,6 +1799,8 @@ impl CompilerDriver:
         val low_memory = driver_mir_eviction_enabled(ctx.options.low_memory, ctx.options.output_format)
         val module_names = ctx.mir_modules.keys()
         val total_modules = module_names.len()
+        if ctx.tldr_entry_only and total_modules != 1:
+            return CompileResult.CodegenError("TLDR entry-only mode forbids imported module code generation")
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."
             _sffi_stdout_flush()
@@ -1813,11 +1834,15 @@ impl CompilerDriver:
         var progress_cache_scanned = 0
         log_build_progress("native_cache", "modules", 0, total_modules,
             "pending", 5, 6, 0, 0, "running")
+        val object_dispatch_entry = bootstrap_entry_module_name(ctx)
         for name in module_names:
             progress_cache_scanned = progress_cache_scanned + 1
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
-            if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):
+            if ctx.modules.has(name) and (
+                    driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]) or
+                    driver_native_empty_dependency_for_context_v1(ctx, name,
+                        ctx.mir_modules[name], ctx.modules[name], object_dispatch_entry)):
                 val objectless_reason = driver_cold_hir_record_objectless_v1(
                     ctx, name)
                 if objectless_reason != "":
@@ -1877,7 +1902,7 @@ impl CompilerDriver:
                     if witness_shadow_mismatch_lines.len() < NATIVE_MODULE_CACHE_SHADOW_MISMATCH_LIMIT:
                         witness_shadow_mismatch_lines.push(
                             "module={driver_native_shadow_bounded_module(name)} reason={witness_reason}")
-                val cached_outputs = if (source_snapshot_matches and
+                val cached_outputs = if (not ctx.tldr_entry_only and source_snapshot_matches and
                     witness_reason == "match"):
                     build_cache.get_cached_outputs(cache_source)
                 else:
@@ -2539,8 +2564,8 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         return _aot_compile_failure(name, "storage-snapshot-module-mismatch")
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
-    if mir_module.functions.keys().len() == 0:
-        return _aot_compile_failure(name, "MIR module has no functions")
+    if mir_module.functions.len() == 0 and mir_module.statics.len() == 0:
+        return _aot_compile_failure(name, "MIR module has no functions or static data")
     val empty_native_obj = env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
         val c_path = "{output_base}.{name}.bootstrap_empty.c"

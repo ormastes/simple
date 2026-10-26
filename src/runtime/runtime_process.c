@@ -151,26 +151,30 @@ bool rt_process_kill(int64_t pid) {
 }
 #endif
 
-static SplArray* process_timeout_result(const char* stdout_text, const char* stderr_text, int64_t code, int timed_out, int64_t timeout_ms) {
+static SplArray* process_timeout_result(const char* stdout_text, size_t stdout_len,
+        const char* stderr_text, size_t stderr_len, int64_t code, int timed_out, int64_t timeout_ms) {
     const char* out = stdout_text ? stdout_text : "";
     const char* err = stderr_text ? stderr_text : "";
+    if (!stdout_text) stdout_len = 0;
+    if (!stderr_text) stderr_len = 0;
     char* timeout_error = NULL;
     if (timed_out) {
         char marker[96];
         snprintf(marker, sizeof(marker), "[TIMEOUT: Process killed after %lldms]", (long long)timeout_ms);
-        size_t err_len = strlen(err);
         size_t marker_len = strlen(marker);
-        timeout_error = (char*)malloc(err_len + marker_len + 2);
+        if (stderr_len <= SIZE_MAX - marker_len - 2)
+            timeout_error = (char*)malloc(stderr_len + marker_len + 2);
         if (timeout_error) {
-            memcpy(timeout_error, err, err_len);
-            if (err_len > 0) timeout_error[err_len++] = '\n';
-            memcpy(timeout_error + err_len, marker, marker_len + 1);
+            memcpy(timeout_error, err, stderr_len);
+            if (stderr_len > 0) timeout_error[stderr_len++] = '\n';
+            memcpy(timeout_error + stderr_len, marker, marker_len + 1);
+            stderr_len += marker_len;
             err = timeout_error;
         }
     }
     SplArray* result = rt_array_new(3);
-    rt_array_push(result, rt_string_new((const uint8_t*)out, (uint64_t)strlen(out)));
-    rt_array_push(result, rt_string_new((const uint8_t*)err, (uint64_t)strlen(err)));
+    rt_array_push(result, rt_string_new((const uint8_t*)out, (uint64_t)stdout_len));
+    rt_array_push(result, rt_string_new((const uint8_t*)err, (uint64_t)stderr_len));
     rt_array_push(result, rt_value_int(code));
     free(timeout_error);
     return result;
@@ -377,16 +381,16 @@ static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplA
     int64_t code = -1;
 
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1 || memchr(cmd, '\0', (size_t)cmd_len)) {
-        return process_timeout_result("", "missing command", -1, 0, timeout_ms);
+        return process_timeout_result("", 0, "missing command", sizeof("missing command") - 1, -1, 0, timeout_ms);
     }
     if (max_output_bytes < -1 ||
         (max_output_bytes >= 0 && (uint64_t)max_output_bytes > SIZE_MAX - WIN_CAPTURE_MARKER_MAX - 1U)) {
-        return process_timeout_result("", "", -1, 0, timeout_ms);
+        return process_timeout_result("", 0, "", 0, -1, 0, timeout_ms);
     }
     stdout_capture.limit = max_output_bytes < 0 ? SIZE_MAX : (size_t)max_output_bytes;
     stderr_capture.limit = stdout_capture.limit;
     cmd_c = (char*)malloc((size_t)cmd_len + 1);
-    if (!cmd_c) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+    if (!cmd_c) return process_timeout_result("", 0, "process spawn failed", sizeof("process spawn failed") - 1, -1, 0, timeout_ms);
     memcpy(cmd_c, cmd, (size_t)cmd_len);
     cmd_c[cmd_len] = '\0';
 
@@ -554,7 +558,9 @@ finish:
     win_capture_finish(&stderr_capture);
 
     const char* result_error = failure ? failure : stderr_capture.data;
-    SplArray* result = process_timeout_result(stdout_capture.data, result_error,
+    size_t result_error_len = failure ? strlen(failure) : stderr_capture.len;
+    SplArray* result = process_timeout_result(stdout_capture.data, stdout_capture.len,
+                                              result_error, result_error_len,
                                               failure ? -1 : code, timed_out, timeout_ms);
     win_close_handle(&stdout_read);
     win_close_handle(&stderr_read);
@@ -1931,11 +1937,11 @@ int64_t rt_browser_renderer_spawn_sandboxed(
 static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
                                            int64_t timeout_ms, int64_t max_output_bytes) {
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1) {
-        return process_timeout_result("", "missing command", -1, 0, timeout_ms);
+        return process_timeout_result("", 0, "missing command", sizeof("missing command") - 1, -1, 0, timeout_ms);
     }
 
     char* cmd_c = (char*)malloc((size_t)cmd_len + 1);
-    if (!cmd_c) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+    if (!cmd_c) return process_timeout_result("", 0, "process spawn failed", sizeof("process spawn failed") - 1, -1, 0, timeout_ms);
     memcpy(cmd_c, cmd, (size_t)cmd_len);
     cmd_c[cmd_len] = '\0';
 
@@ -1943,7 +1949,7 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
     char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
     if (!argv) {
         free(cmd_c);
-        return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+        return process_timeout_result("", 0, "process spawn failed", sizeof("process spawn failed") - 1, -1, 0, timeout_ms);
     }
     argv[0] = cmd_c;
     for (int64_t i = 0; i < argc; i++) {
@@ -1967,7 +1973,7 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
 
     free(argv);
     free(cmd_c);
-    if (child_pid < 0) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+    if (child_pid < 0) return process_timeout_result("", 0, "process spawn failed", sizeof("process spawn failed") - 1, -1, 0, timeout_ms);
 
     int64_t code = max_output_bytes < 0
         ? rt_fork_parent_wait(child_pid, timeout_ms > 0 ? timeout_ms : 0)
@@ -1978,7 +1984,8 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
     const char* out = rt_fork_parent_stdout();
     const char* err = rt_fork_parent_stderr();
     if (code == 127 && err && strstr(err, "rt_process_run_timeout execvp") != NULL) code = -1;
-    return process_timeout_result(out, err, code, timed_out, timeout_ms);
+    return process_timeout_result(out, (size_t)rt_fork_parent_stdout_len(),
+                                  err, (size_t)rt_fork_parent_stderr_len(), code, timed_out, timeout_ms);
 }
 
 /* (cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (array), per
@@ -1999,7 +2006,7 @@ int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes) {
     if (max_output_bytes < 0 || (uint64_t)max_output_bytes > SIZE_MAX - 97U) {
-        return process_timeout_result("", "", -1, 0, timeout_ms);
+        return process_timeout_result("", 0, "", 0, -1, 0, timeout_ms);
     }
     return posix_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
 }

@@ -1,0 +1,64 @@
+# @req REQ-COMPILER-HELPER-IMPORT-BINDINGS-2
+# UNRUN: exercises real consumers of the three added imports.
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+use compiler.mir.mir_instructions.{MirInst, MirInstKind}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{_ssa_written_local_id}
+
+describe "compiler consumers bind remaining split helper owners":
+    it "preserves platform warnings through actual class lowering":
+        step("class lowering projects attributes through its imported helper")
+        val source = "@platform\nclass PlatformClass:\n    lane: i64\n"
+        val parsed = parse_full_frontend(source, "platform_class.spl", "platform_class", Logger(level: 0))
+        var lowering = HirLowering.with_filename("platform_class.spl")
+        val hir = lowering.lower_module(parsed)
+        var found = false
+        var has_platform = false
+        var warning = false
+        var error = true
+        for class_ in hir.classes.values():
+            if class_.name == "PlatformClass":
+                found = true
+                has_platform = class_.has_platform_attr
+                warning = class_.platform_has_warning
+                error = class_.platform_has_error
+        expect(lowering.errors.len()).to_equal(0)
+        expect(found).to_equal(true)
+        expect(has_platform).to_equal(true)
+        expect(warning).to_equal(true)
+        expect(error).to_equal(false)
+
+    it "validates the frozen registry before resolving a concrete reexport":
+        step("the import registration consumer calls frozen alignment on a new generation")
+        val body = "pub fn value() -> i64:\n    7\n"
+        val facade_body = "use binding.provider.*\nexport value\n"
+        val result = module_surfaces_from_test_modules(
+            {"binding.provider": parse_and_build_module(body, "binding/provider.spl"),
+             "binding.facade": parse_and_build_module(facade_body, "binding/facade.spl")},
+            [SourceFile(path: "binding/provider.spl", content: body, module_name: "binding.provider"),
+             SourceFile(path: "binding/facade.spl", content: facade_body, module_name: "binding.facade")])
+        expect(result.is_ok()).to_equal(true)
+        val registry = result.unwrap()
+        var lowering = hirlowering_for_module("consumer", registry)
+        val facade_index = registry.index_by_name["binding.facade"]
+        val resolved = lowering.find_reexport_source(facade_index, "value")
+        expect(lowering.reexport_registry_valid).to_equal(true)
+        expect(resolved.found).to_equal(true)
+        expect(resolved.module_index).to_equal(registry.index_by_name["binding.provider"])
+        val missing = lowering.find_reexport_source(facade_index, "absent")
+        expect(missing.found).to_equal(false)
+
+    it "extracts the actual destination local id through the SSA consumer":
+        step("constant instructions retain their nonzero and zero LocalId values")
+        val nonzero = MirInst(kind: MirInstKind.Const(LocalId(37), MirConstValue.Int(9), MirType.i64()), span: nil)
+        val zero = MirInst(kind: MirInstKind.Const(LocalId(0), MirConstValue.Int(9), MirType.i64()), span: nil)
+        expect(_ssa_written_local_id(nonzero)).to_equal(37)
+        expect(_ssa_written_local_id(zero)).to_equal(0)

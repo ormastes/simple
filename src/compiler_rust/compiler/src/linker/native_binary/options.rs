@@ -34,11 +34,7 @@ pub(super) fn compile_c_args(cc: &str, output: &Path, input: &Path) -> Vec<Strin
 }
 
 pub(super) fn is_msvc_compiler(cc: &str) -> bool {
-    let base = std::path::Path::new(cc)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(cc);
-    base.eq_ignore_ascii_case("cl") || base.eq_ignore_ascii_case("cl.exe")
+    simple_common::platform::cc_detect::is_msvc_driver(cc)
 }
 
 pub(super) fn detect_nm_command(target: &Target) -> (String, Vec<String>) {

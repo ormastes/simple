@@ -1,0 +1,142 @@
+# @req REQ-CACHE-TIER-BACKFILL-ATOMIC-ADMISSION
+# Real CAS failure paths; portable fixture adapter execution is pending an
+# admitted self-hosted helper. Earlier fixed-root source diagnostics are bound
+# in build/native_probe/tier-backfill-20261012/REVIEW_SEAL.json.
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_write_exact, dir_create_all}
+use std.env.platform.{get_temp_dir, detect_os}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.nogc_sync_mut.io_runtime.{dir_remove_all}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+use std.common.cache_path_policy_v1.{cache_root_is_absolute_v1}
+use std.crypto.sha256.{sha256_text}
+use compiler.driver.cache.cas_store.{ResultManifest, cas_open, cas_put, cas_get, cas_has, result_manifest_put}
+use compiler.driver.cache.action_index.action_index.{CacheNamespace, IndexPutResult, action_index_put, action_index_read_raw}
+use compiler.driver.cache.tier_router.tier_router.{TierRouter, TierLookupResult, tier_router_lookup, result_manifest_digest}
+
+struct BackfillFixtureScope:
+    root: text
+    parent_prefix: text
+    leaf_prefix: text
+
+fn backfill_fixture_is_owned(scope: BackfillFixtureScope) -> bool:
+    if scope.parent_prefix == "" or scope.leaf_prefix == "": return false
+    if not scope.root.starts_with(scope.parent_prefix): return false
+    val leaf = scope.root.substring(scope.parent_prefix.len())
+    leaf.len() > scope.leaf_prefix.len() and leaf.starts_with(scope.leaf_prefix) and
+        not leaf.contains("/") and not leaf.contains("\\") and
+        leaf != "." and leaf != ".."
+
+fn backfill_fixture_scope(tag: text) -> BackfillFixtureScope:
+    val configured = get_temp_dir()
+    if configured.len() <= 0: panic("backfill fixture temporary parent is unavailable")
+    # Capture filesystem authority once. A relative configured temp parent is
+    # resolved here; lookup and cleanup never consult a later CWD or env value.
+    val parent = host_path_canonical(path_absolute(configured))
+    val os = detect_os()
+    if not cache_root_is_absolute_v1(os, parent):
+        panic("backfill fixture temporary parent is not absolute")
+    val prefix = "simple-tier-backfill-" + tag
+    val created = match secure_temp_dir(parent, prefix):
+        case Ok(path): path
+        case Err(reason): panic(reason)
+    val root = host_path_canonical(created)
+    val parent_prefix = if parent.ends_with("/"): parent else: parent + "/"
+    val scope = BackfillFixtureScope(root, parent_prefix, prefix + "-")
+    if not cache_root_is_absolute_v1(os, root) or not backfill_fixture_is_owned(scope):
+        panic("secure temporary provider returned an unexpected child path")
+    scope
+
+fn backfill_fixture_cleanup(scope: BackfillFixtureScope):
+    # Every path written by these tests is below this exclusive private child.
+    # Never remove the configured parent or a path recomputed from global state.
+    if not backfill_fixture_is_owned(scope):
+        panic("refusing cleanup outside the captured backfill fixture")
+    expect(dir_remove_all(scope.root)).to_equal(true)
+
+fn kind(result: TierLookupResult) -> text:
+    match result:
+        case TierLookupResult.Miss: "miss"
+        case TierLookupResult.HitL1(_): "l1"
+        case TierLookupResult.HitL2Backfilled(_): "backfilled"
+
+fn seeded(root: text, tag: text) -> (TierRouter, text, text):
+    val l1 = root + "/l1"
+    val l2 = root + "/l2"
+    expect(cas_open(l2)).to_equal(true)
+    val blob = cas_put(l2, "actual-artifact-" + tag)
+    expect(blob.len()).to_equal(64)
+    val action = sha256_text("action-" + tag)
+    val manifest = ResultManifest(action_digest: action, result_kind: "interpreter_module",
+        artifact_digests: [blob], output_fingerprint: "fp", dependency_manifest: "deps", producer_schema: 2)
+    expect(result_manifest_put(l2, action, manifest)).to_equal(true)
+    expect(action_index_put(l2, CacheNamespace.WorkspaceLocal, action, result_manifest_digest(manifest))).to_equal(IndexPutResult.Ok)
+    (TierRouter(root, l1, l2, {}), action, blob)
+
+fn misses_without_memo(tr: TierRouter, action: text):
+    expect(kind(tier_router_lookup(tr, CacheNamespace.WorkspaceLocal, action))).to_equal("miss")
+    expect(tr.memo.len()).to_equal(0)
+    expect(kind(tier_router_lookup(tr, CacheNamespace.WorkspaceLocal, action))).to_equal("miss")
+    expect(tr.memo.len()).to_equal(0)
+
+describe "Portable exclusive backfill fixture":
+    it "creates distinct absolute private children for equal prefixes":
+        step("creates distinct absolute private children for equal prefixes")
+        val first = backfill_fixture_scope("same-prefix")
+        defer:
+            backfill_fixture_cleanup(first)
+        val second = backfill_fixture_scope("same-prefix")
+        defer:
+            backfill_fixture_cleanup(second)
+        expect(first.root == second.root).to_equal(false)
+        expect(first.parent_prefix).to_equal(second.parent_prefix)
+        expect(backfill_fixture_is_owned(first)).to_equal(true)
+        expect(backfill_fixture_is_owned(second)).to_equal(true)
+        expect(backfill_fixture_is_owned(BackfillFixtureScope(first.parent_prefix,
+            first.parent_prefix, first.leaf_prefix))).to_equal(false)
+        expect(backfill_fixture_is_owned(BackfillFixtureScope(first.root,
+            "", first.leaf_prefix))).to_equal(false)
+        expect(file_create_exclusive(first.root + "/first-owner", "first")).to_equal(true)
+        expect(file_create_exclusive(second.root + "/second-owner", "second")).to_equal(true)
+
+describe "Real CAS failed backfill admission":
+    it "does not publish a hit when L1 cannot receive an artifact":
+        step("does not publish a hit when L1 cannot receive an artifact")
+        val scope = backfill_fixture_scope("blocked-blob")
+        defer:
+            backfill_fixture_cleanup(scope)
+        val (tr, action, blob) = seeded(scope.root, "blocked-blob")
+        expect(file_write_exact(tr.l1_root, "ordinary-file-not-a-CAS-directory")).to_equal(true)
+        misses_without_memo(tr, action)
+        expect(cas_has(tr.l1_root, blob)).to_equal(false)
+    it "does not publish a hit when the copied blob cannot get its manifest":
+        step("does not publish a hit when the copied blob cannot get its manifest")
+        val scope = backfill_fixture_scope("blocked-manifest")
+        defer:
+            backfill_fixture_cleanup(scope)
+        val (tr, action, blob) = seeded(scope.root, "blocked-manifest")
+        dir_create_all(tr.l1_root)
+        expect(file_write_exact(tr.l1_root + "/actions", "ordinary-file-not-a-manifest-directory")).to_equal(true)
+        misses_without_memo(tr, action)
+        expect(cas_has(tr.l1_root, blob)).to_equal(true)
+    it "does not memoize or overwrite a conflicting L1 index mapping":
+        step("does not memoize or overwrite a conflicting L1 index mapping")
+        val scope = backfill_fixture_scope("index-conflict")
+        defer:
+            backfill_fixture_cleanup(scope)
+        val (tr, action, blob) = seeded(scope.root, "index-conflict")
+        val other = sha256_text("other-manifest")
+        expect(action_index_put(tr.l1_root, CacheNamespace.WorkspaceLocal, action, other)).to_equal(IndexPutResult.Ok)
+        misses_without_memo(tr, action)
+        expect(action_index_read_raw(tr.l1_root, CacheNamespace.WorkspaceLocal, action).unwrap()).to_equal(other)
+    it "still backfills valid bytes and gives the subsequent L1 hit":
+        step("still backfills valid bytes and gives the subsequent L1 hit")
+        val scope = backfill_fixture_scope("success")
+        defer:
+            backfill_fixture_cleanup(scope)
+        val (tr, action, blob) = seeded(scope.root, "success")
+        expect(kind(tier_router_lookup(tr, CacheNamespace.WorkspaceLocal, action))).to_equal("backfilled")
+        expect(cas_get(tr.l1_root, blob).unwrap()).to_equal("actual-artifact-success")
+        expect(kind(tier_router_lookup(tr, CacheNamespace.WorkspaceLocal, action))).to_equal("l1")

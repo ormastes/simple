@@ -104,3 +104,175 @@ impl AsyncSemaphore:
         """Return a permit. Clamps at max_permits."""
         if self.permits < self.max_permits:
             self.permits = self.permits + 1
+
+# ============================================================
+# Hosted ownership adapter for the existing cooperative gate
+# ============================================================
+
+use std.async.cancellation.{CancellationToken, cancellation_token_new}
+use std.async_host.scheduler.{HostTaskContext}
+use std.thread_sffi.{thread_current_id}
+
+struct AsyncMutexLease:
+    """Revocable scalar lease; no protected pointer or reference escapes."""
+    mutex_lifetime: i64
+    task_lifetime: i64
+    epoch: i64
+
+class HostedAsyncMutex:
+    """Single-carrier adapter; HostScheduler owns suspension and cleanup.
+
+    Use AsyncMutex.hosted(capacity), poll_acquire(task_context), and release
+    the returned lease. Scheduler completion/cancellation releases a held
+    lease or unlinks a waiter before reclaiming its task generation. close()
+    releases the mutex lifetime and wakes queued tasks to observe refusal.
+    No automatic destructor, OS-thread transport, or unwind interception.
+    """
+    gate: AsyncMutex
+    lifetime: CancellationToken
+    owner_thread: i64
+    owner: Option<HostTaskContext>
+    epoch: i64
+    waiters: [HostTaskContext]
+    capacity: i64
+    closed: bool
+
+    fn on_owner_thread() -> bool:
+        self.owner_thread > 0 and self.owner_thread == thread_current_id()
+
+    fn is_live() -> bool:
+        self.on_owner_thread() and not self.closed and self.lifetime.is_valid()
+
+    fn current_lease(task: HostTaskContext) -> AsyncMutexLease:
+        AsyncMutexLease(mutex_lifetime: self.lifetime.token_id,
+            task_lifetime: task.lifetime.token_id, epoch: self.epoch)
+
+    me poll_acquire(task: HostTaskContext) -> Poll<Result<AsyncMutexLease, text>>:
+        """One nonblocking poll; contention parks through the real scheduler."""
+        if not self.is_live() or not task.is_current():
+            return Poll.Ready(Err("mutex or task lifetime is closed/foreign"))
+        val task_lifetime = task.lifetime.token_id
+        val cleanup = \:
+            self.cancel_task_lifetime(task_lifetime)
+            ()
+        if not task.register_cleanup(self.lifetime.token_id, cleanup):
+            return Poll.Ready(Err("task resource capacity exceeded"))
+        match self.owner:
+            case Some(owner):
+                if owner.lifetime.token_id == task_lifetime:
+                    return Poll.Ready(Ok(self.current_lease(task)))
+                if not owner.is_live():
+                    self.cancel_task_lifetime(owner.lifetime.token_id)
+                    # Recovery can hand the grant to this very queued task.
+                    # Re-read ownership before considering another admission.
+                    match self.owner:
+                        case Some(recovered):
+                            if recovered.lifetime.token_id == task_lifetime:
+                                return Poll.Ready(Ok(self.current_lease(task)))
+                        case nil: pass
+            case nil: pass
+        for waiter in self.waiters:
+            if waiter.lifetime.token_id == task_lifetime:
+                return Poll.Pending
+        if not self.gate.locked and self.waiters.is_empty():
+            if self.epoch >= 9223372036854775807:
+                task.unregister_cleanup(self.lifetime.token_id)
+                return Poll.Ready(Err("mutex lease epoch exhausted"))
+            self.gate.try_acquire()
+            self.epoch = self.epoch + 1
+            self.owner = Some(task)
+            return Poll.Ready(Ok(self.current_lease(task)))
+        if self.waiters.len() >= self.capacity:
+            task.unregister_cleanup(self.lifetime.token_id)
+            return Poll.Ready(Err("mutex waiter capacity exceeded"))
+        self.waiters = self.waiters.push(task)
+        Poll.Pending
+
+    me handoff():
+        # Commit ownership before signaling; a newly arriving task cannot barge
+        # past a granted waiter. Each scan is bounded by the configured queue.
+        while not self.waiters.is_empty():
+            val next = self.waiters[0]
+            self.waiters = self.waiters[1:]
+            if next.is_live():
+                if self.epoch >= 9223372036854775807:
+                    self.close()
+                    next.wake()
+                    return
+                self.gate.try_acquire()
+                self.epoch = self.epoch + 1
+                self.owner = Some(next)
+                if next.wake():
+                    return
+                self.owner = nil
+                self.gate.release()
+
+    me release(lease: AsyncMutexLease) -> bool:
+        """Release this exact live grant once, from its currently polled task."""
+        if not self.is_live() or lease.mutex_lifetime != self.lifetime.token_id or lease.epoch != self.epoch:
+            return false
+        match self.owner:
+            case Some(owner):
+                if owner.lifetime.token_id != lease.task_lifetime or not owner.is_current():
+                    return false
+                owner.unregister_cleanup(self.lifetime.token_id)
+            case nil: return false
+        self.owner = nil
+        self.gate.release()
+        self.handoff()
+        true
+
+    me cancel_task_lifetime(task_lifetime: i64) -> bool:
+        """Owner-side scheduler cleanup, including a grant not yet dispatched."""
+        if not self.is_live():
+            return false
+        var removed = false
+        var keep: [HostTaskContext] = []
+        for waiter in self.waiters:
+            if waiter.lifetime.token_id == task_lifetime:
+                removed = true
+            else:
+                keep = keep.push(waiter)
+        self.waiters = keep
+        match self.owner:
+            case Some(owner):
+                if owner.lifetime.token_id == task_lifetime:
+                    self.owner = nil
+                    self.gate.release()
+                    self.handoff()
+                    removed = true
+            case nil: pass
+        removed
+
+    fn pending_count() -> i64:
+        if not self.on_owner_thread():
+            return 0
+        self.waiters.len()
+
+    me close() -> bool:
+        """Terminal, idempotent revocation; future polls return a typed refusal."""
+        if not self.on_owner_thread() or self.closed:
+            return false
+        self.closed = true
+        val waiters = self.waiters
+        self.waiters = []
+        match self.owner:
+            case Some(owner): owner.wake()
+            case nil: pass
+        self.owner = nil
+        self.gate.release()
+        for waiter in waiters:
+            waiter.wake()
+        self.lifetime.release()
+        true
+
+impl AsyncMutex:
+    static fn hosted(capacity: i64) -> HostedAsyncMutex:
+        """Create a finite hosted owner; invalid capacity yields a closed owner."""
+        var lifetime = cancellation_token_new()
+        val valid = capacity > 0 and capacity <= 4096 and lifetime.is_valid()
+        if not valid:
+            lifetime.release()
+        HostedAsyncMutex(gate: AsyncMutex(locked: false), lifetime: lifetime,
+            owner_thread: thread_current_id(), owner: nil, epoch: 0,
+            waiters: [], capacity: capacity, closed: not valid)

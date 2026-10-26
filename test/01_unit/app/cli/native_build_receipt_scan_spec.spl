@@ -1,0 +1,55 @@
+use std.spec.{describe, it, expect}
+use app.cli.native_build_receipt_scan.{native_build_log_has_exact_line_v1}
+
+fn legacy_native_build_exact_line(output: text, expected: text) -> bool:
+    output.replace("\r\n", "\n").split("\n").contains(expected)
+
+describe "native-build publication receipt scan":
+    it "matches first, middle and final lines with LF or CRLF":
+        for output in ["receipt", "receipt\nother", "before\nreceipt\nafter", "before\r\nreceipt\r\nafter", "before\nreceipt"]:
+            expect(native_build_log_has_exact_line_v1(output, "receipt")).to_equal(true)
+
+    it "rejects prefix and suffix text on a receipt line":
+        for output in ["xreceipt", "receiptx", "prefix receipt suffix", "receip", "RECEIPT"]:
+            expect(native_build_log_has_exact_line_v1(output, "receipt")).to_equal(false)
+
+    it "retains a bare CR rather than treating it as a newline":
+        expect(native_build_log_has_exact_line_v1("receipt\r", "receipt")).to_equal(false)
+        expect(native_build_log_has_exact_line_v1("receipt\r", "receipt\r")).to_equal(true)
+        expect(native_build_log_has_exact_line_v1("before\rreceipt", "receipt")).to_equal(false)
+
+    it "removes exactly the CR that is paired with LF":
+        expect(native_build_log_has_exact_line_v1("receipt\r\n", "receipt\r")).to_equal(false)
+        expect(native_build_log_has_exact_line_v1("receipt\r\r\n", "receipt\r")).to_equal(true)
+        expect(native_build_log_has_exact_line_v1("receipt\r\r\n", "receipt")).to_equal(false)
+
+    it "matches Unicode paths byte exactly":
+        expect(native_build_log_has_exact_line_v1("before\nArtifact: 빌드/출력.o\r\n", "Artifact: 빌드/출력.o")).to_equal(true)
+        expect(native_build_log_has_exact_line_v1("Artifact: 빌드/출력.o", "Artifact: 빌드/다른.o")).to_equal(false)
+
+    it "does not accept a multiline expected receipt":
+        expect(native_build_log_has_exact_line_v1("receipt\nforged", "receipt\nforged")).to_equal(false)
+
+    it "preserves the split behavior for empty lines and final separators":
+        expect(native_build_log_has_exact_line_v1("", "")).to_equal(true)
+        expect(native_build_log_has_exact_line_v1("other\n", "")).to_equal(true)
+        expect(native_build_log_has_exact_line_v1("\r\n", "")).to_equal(true)
+        expect(native_build_log_has_exact_line_v1("\r", "")).to_equal(false)
+        expect(native_build_log_has_exact_line_v1("", "receipt")).to_equal(false)
+
+    it "matches the legacy oracle across boundary combinations":
+        val atoms = ["", "r", "rr", "\r", "\n", "\r\n", "\r\r\n", "한"]
+        val expected_lines = ["", "r", "rr", "r\r", "한", "r\nr"]
+        for left in atoms:
+            for right in atoms:
+                val output = left + right
+                for expected in expected_lines:
+                    expect(native_build_log_has_exact_line_v1(output, expected)).to_equal(
+                        legacy_native_build_exact_line(output, expected))
+
+    it "continues past repeated misleading receipts to the exact final line":
+        var output = ""
+        for index in 0..128:
+            output = output + "receiptX\nXreceipt\r\n"
+        expect(native_build_log_has_exact_line_v1(output, "receipt")).to_equal(false)
+        expect(native_build_log_has_exact_line_v1(output + "receipt", "receipt")).to_equal(true)

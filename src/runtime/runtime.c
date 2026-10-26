@@ -4060,10 +4060,16 @@ int64_t rt_text_to_bytes(const char* text) {
  * caller of rt_bytes_to_text exists, so nothing was relying on the old
  * interpretation. */
 int64_t rt_bytes_to_text(int64_t bytes_value) {
-    int64_t len = rt_array_len_safe(bytes_value);
-    if (bytes_value == 0 || len <= 0) return rt_string_new(NULL, 0);
-    const uint8_t* data =
-        (const uint8_t*)(uintptr_t)rt_array_data_ptr((SplArray*)(uintptr_t)bytes_value);
+    int64_t len = rt_array_bytes_validate(bytes_value);
+    if (len <= 0) return rt_string_new(NULL, 0);
+    uint8_t* data = (uint8_t*)malloc((size_t)len);
     if (!data) return rt_string_new(NULL, 0);
-    return rt_string_new(data, (uint64_t)len);
+    int64_t copied = rt_array_bytes_copy_checked(bytes_value, data, len);
+    if (copied < 0) {
+        free(data);
+        return rt_string_new(NULL, 0);
+    }
+    int64_t result = rt_string_new(data, (uint64_t)copied);
+    free(data);
+    return result;
 }

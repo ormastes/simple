@@ -1,0 +1,170 @@
+# @req REQ-HIR-UNIT-RETURN-INFERENCE-1
+# Authored regression coverage; executable status UNRUN.
+# Real compiler consumers; helpers are local to this spec.
+use std.spec.{describe, it, expect, step}
+
+# Actual compiler methods and parsed functions; no inference implementation here.
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, Stmt, StmtKind, Block, BinOp, UnaryOp}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Items.module_callable_types.*
+use compiler.hir.hir_lowering._Items.lowering_helpers.{hir_type_kind_from_simple_name, hir_type_simple_name, hir_simple_type_name_is_known}
+
+fn unit_check(ok: bool, label: text) -> bool:
+    if not ok: print "UNIT_INFERENCE_ASSERTION_FAIL {label}"
+    ok
+
+fn unit_literal_case() -> bool:
+    var lowering = HirLowering.with_filename("unit_literal.spl")
+    val unit_value = Expr(kind: ExprKind.TupleLit([]), span: Span.empty())
+    val name = lowering.infer_simple_type_name_ast(unit_value, [])
+    if not unit_check(name != nil, "empty tuple is known"): return false
+    if not unit_check(name! == "unit", "canonical unit name"): return false
+    match hir_type_kind_from_simple_name(name!):
+        case HirTypeKind.Unit: ()
+        case _: return unit_check(false, "unit kind mapping")
+    val roundtrip = hir_type_simple_name(HirType(kind: HirTypeKind.Unit, span: Span.empty()))
+    if not unit_check(roundtrip != nil and roundtrip! == "unit", "Unit name roundtrip"): return false
+    unit_check(not hir_simple_type_name_is_known("unit"), "unit is not an arithmetic scalar")
+
+fn unit_return_scanners_case() -> bool:
+    val span = Span.empty()
+    val value = Expr(kind: ExprKind.TupleLit([]), span: span)
+    val explicit = Stmt(kind: StmtKind.Return(Some(value)), span: span)
+    val bare = Stmt(kind: StmtKind.Return(nil), span: span)
+    var lowering = HirLowering.with_filename("unit_scan.spl")
+    val empty = lowering.scan_ast_block_for_returns(Block(stmts: [bare], span: span), [])
+    if not unit_check(not empty.found_value_return and not empty.ambiguous and empty.resolved_name == nil, "bare return unchanged"): return false
+    val statement = lowering.scan_ast_block_for_returns(Block(stmts: [bare, explicit], span: span), [])
+    if not unit_check(statement.found_value_return and not statement.ambiguous and statement.resolved_name != nil, "statement return unit resolves"): return false
+    if not unit_check(statement.resolved_name! == "unit", "statement unit name"): return false
+    val expression = Expr(kind: ExprKind.Return(Some(value)), span: span)
+    val expression_scan = lowering.scan_ast_block_for_returns(Block(stmts: [Stmt(kind: StmtKind.Expr(expression), span: span)], span: span), [])
+    unit_check(expression_scan.found_value_return and not expression_scan.ambiguous and expression_scan.resolved_name != nil and expression_scan.resolved_name! == "unit", "expression return unit resolves")
+
+fn unit_negative_shapes_case() -> bool:
+    val span = Span.empty()
+    val unit_value = Expr(kind: ExprKind.TupleLit([]), span: span)
+    val integer = Expr(kind: ExprKind.IntLit(7), span: span)
+    val tuple_value = Expr(kind: ExprKind.TupleLit([integer, integer]), span: span)
+    var lowering = HirLowering.with_filename("unit_negative.spl")
+    if not unit_check(lowering.infer_simple_type_name_ast(tuple_value, []) == nil, "nonempty tuple stays unknown"): return false
+    val arithmetic = Expr(kind: ExprKind.Binary(BinOp.Add, unit_value, unit_value), span: span)
+    if not unit_check(lowering.infer_simple_type_name_ast(arithmetic, []) == nil, "unit plus unit stays unknown"): return false
+    val unit_return = Stmt(kind: StmtKind.Return(Some(unit_value)), span: span)
+    val int_return = Stmt(kind: StmtKind.Return(Some(integer)), span: span)
+    for statements in [[unit_return, int_return], [int_return, unit_return]]:
+        val scan = lowering.scan_ast_block_for_returns(Block(stmts: statements, span: span), [])
+        if not unit_check(scan.found_value_return and scan.ambiguous, "mixed unit/i64 stays ambiguous in both orders"): return false
+    true
+
+fn unit_unary_negatives_case() -> bool:
+    val span = Span.empty()
+    var lowering = HirLowering.with_filename("unit_unary.spl")
+    val unit_value = Expr(kind: ExprKind.TupleLit([]), span: span)
+    val negated = Expr(kind: ExprKind.Unary(UnaryOp.Neg, unit_value), span: span)
+    if not unit_check(lowering.infer_simple_type_name_ast(negated, []) == nil, "negated empty tuple stays unknown"): return false
+    val source = "fn literal_negative():\n    return -()\n\nfn typed_negative(value: unit):\n    return -value\n"
+    val parsed = parse_full_frontend(source, "unit_unary.spl", "unit_unary", Logger(level: 0))
+    var checked = 0
+    for function_ in parsed.functions.values():
+        if function_.name != "literal_negative" and function_.name != "typed_negative": continue
+        val scan = lowering.scan_ast_block_for_returns(function_.body, function_.params)
+        if not unit_check(scan.found_value_return and scan.ambiguous and scan.resolved_name == nil, "parsed unit negation stays unknown"): return false
+        checked = checked + 1
+    unit_check(checked == 2, "both parsed unary controls checked")
+
+fn unit_scalar_preservation_case() -> bool:
+    val span = Span.empty()
+    var lowering = HirLowering.with_filename("unit_scalars.spl")
+    val literals = [Expr(kind: ExprKind.IntLit(7), span: span), Expr(kind: ExprKind.FloatLit(1.5), span: span), Expr(kind: ExprKind.BoolLit(true), span: span), Expr(kind: ExprKind.StringLit("ok", nil), span: span)]
+    val names = ["i64", "f64", "bool", "text"]
+    var index = 0
+    while index < literals.len():
+        val inferred = lowering.infer_simple_type_name_ast(literals[index], [])
+        if not unit_check(inferred != nil and inferred! == names[index], "scalar literal name preserved"): return false
+        if index < 2:
+            val negated = Expr(kind: ExprKind.Unary(UnaryOp.Neg, literals[index]), span: span)
+            val negative_name = lowering.infer_simple_type_name_ast(negated, [])
+            if not unit_check(negative_name != nil and negative_name! == names[index], "numeric unary inference preserved"): return false
+        index = index + 1
+    for type_name in ["i64", "i32", "u64", "u32", "f64", "f32", "bool", "text"]:
+        val source = "fn scalar(value: {type_name}):\n    return value\n"
+        val parsed = parse_full_frontend(source, "unit_scalars.spl", "unit_scalars", Logger(level: 0))
+        var checked = 0
+        for function_ in parsed.functions.values():
+            if function_.name != "scalar": continue
+            val scan = lowering.scan_ast_block_for_returns(function_.body, function_.params)
+            if not unit_check(scan.found_value_return and not scan.ambiguous and scan.resolved_name != nil and scan.resolved_name! == type_name, "typed scalar inference preserved"): return false
+            val declared = lowering.declared_callable_type(function_, nil)
+            if not unit_check(declared != nil, "scalar callable exists"): return false
+            match declared!.kind:
+                case HirTypeKind.Function(_, result, _):
+                    val result_name = hir_type_simple_name(result)
+                    if not unit_check(result_name != nil and result_name! == type_name, "scalar callable result preserved"): return false
+                case _: return unit_check(false, "scalar callable kind")
+            checked = checked + 1
+        if not unit_check(checked == 1, "parsed scalar function checked"): return false
+    unit_check(lowering.errors.len() == 0, "scalar inference has no diagnostics")
+
+fn unit_parsed_signature_case() -> bool:
+    val source = "fn emit_pending_finally_shape(flag: bool):\n    if flag:\n        return ()\n    ()\n\nfn bare_shape(flag: bool):\n    if flag:\n        return\n    ()\n\nfn typed_unit(value: unit):\n    return value\n"
+    val parsed = parse_full_frontend(source, "unit_parsed.spl", "unit_parsed", Logger(level: 0))
+    var lowering = HirLowering.with_filename("unit_parsed.spl")
+    var checked = 0
+    for function_ in parsed.functions.values():
+        if function_.name != "emit_pending_finally_shape" and function_.name != "bare_shape" and function_.name != "typed_unit": continue
+        if not unit_check(not function_.has_return_type, "parsed function is genuinely unannotated"): return false
+        val inferred = lowering.infer_untyped_return_type(function_)
+        match inferred.kind:
+            case HirTypeKind.Unit: ()
+            case _: return unit_check(false, "parsed function returns Unit")
+        val declared = lowering.declared_callable_type(function_, nil)
+        if not unit_check(declared != nil, "callable signature exists"): return false
+        match declared!.kind:
+            case HirTypeKind.Function(parameters, result, _):
+                if not unit_check(parameters.len() == 1, "declared parameter retained"): return false
+                match result.kind:
+                    case HirTypeKind.Unit: ()
+                    case _: return unit_check(false, "declared signature retains Unit")
+            case _: return unit_check(false, "declared signature is callable")
+        checked = checked + 1
+    unit_check(checked == 3 and lowering.errors.len() == 0, "all real parsed signatures lower without diagnostics")
+
+fn unit_parsed_negatives_case() -> bool:
+    val source = "fn mixed(flag: bool):\n    if flag:\n        return ()\n    return 7\n\nfn tuple_value():\n    return (1, 2)\n\nfn typed_unit_arithmetic(value: unit):\n    return value + value\n\nfn unknown_call():\n    return missing_function()\n"
+    val parsed = parse_full_frontend(source, "unit_parsed_negative.spl", "unit_parsed_negative", Logger(level: 0))
+    var lowering = HirLowering.with_filename("unit_parsed_negative.spl")
+    var checked = 0
+    for function_ in parsed.functions.values():
+        if function_.name != "mixed" and function_.name != "tuple_value" and function_.name != "typed_unit_arithmetic" and function_.name != "unknown_call": continue
+        val scan = lowering.scan_ast_block_for_returns(function_.body, function_.params)
+        if not unit_check(scan.found_value_return and scan.ambiguous, "parsed negative stays ambiguous"): return false
+        checked = checked + 1
+    unit_check(checked == 4, "all parsed negative functions checked")
+
+describe "unit return inference preserves scalar and ambiguity boundaries":
+    it "keeps literal and typed Unit unary negation unknown":
+        step("exercise actual inference and parsed return scanners for unary negatives")
+        expect(unit_unary_negatives_case()).to_equal(true)
+    it "preserves scalar literal and typed callable inference":
+        step("check actual scalar inference names and parsed callable result types")
+        expect(unit_scalar_preservation_case()).to_equal(true)
+    it "recognizes the empty tuple with an explicit Unit kind mapping":
+        step("exercise actual AST inference without arithmetic admission")
+        expect(unit_literal_case()).to_equal(true)
+    it "preserves bare returns and resolves both return AST representations":
+        step("scan actual statement and expression return nodes")
+        expect(unit_return_scanners_case()).to_equal(true)
+    it "keeps nonempty tuples and unit arithmetic unknown and mixed returns ambiguous":
+        step("negative controls use actual inference and merge paths")
+        expect(unit_negative_shapes_case()).to_equal(true)
+    it "infers Unit for an actual parsed finally-cleanup-shaped function":
+        step("check both inference and declared callable signature")
+        expect(unit_parsed_signature_case()).to_equal(true)
+    it "retains ambiguity for parsed mixed returns, tuples, unit arithmetic and unknown calls":
+        step("parse source and scan it without substituting a model")
+        expect(unit_parsed_negatives_case()).to_equal(true)

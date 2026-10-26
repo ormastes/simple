@@ -1,0 +1,102 @@
+# @req REQ-ARTIFACT-CLAIM-ATOMICITY-001
+# Actual-owner regression; UNRUN pending an admitted runtime/provider closure.
+use std.spec.*
+use std.spec.step
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionPoolV1, BuildActionResultV1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1, coordinator_new_v1}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.action_graph.artifact_service_bridge.{DemandArtifactRouteV1, demand_artifact_route_v1, demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1}
+use compiler.driver.backend.native_promotion_queue.{NativePromotionQueueV1}
+use compiler.driver.perf.demand_compile_counters.{demand_compile_counters_empty_v1}
+use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use lib.compiler_artifact_service.service.{ArtifactRequestStateV1}
+
+fn atomic_claim_fixture() -> DemandArtifactRouteV1:
+    val first = BuildActionV1("first", "compile-first", ["first.spl"], [], ["first.o"], BuildActionPoolV1.parse, 1, "snapshot", 64, "")
+    val second = BuildActionV1("second", "compile-second", ["second.spl"], ["first"], ["second.o"], BuildActionPoolV1.parse, 1, "snapshot", 64, "")
+    val graph = PersistedBuildGraphV1("graph", "", "snapshot", [first, second])
+    val coordinator = coordinator_new_v1(graph, [BuildPoolBudgetV1(BuildActionPoolV1.parse, 1, 1024)])
+    val execution = DemandCompileExecutionV1(true, "ok", Some(coordinator), nil, NativePromotionQueueV1([]), "first", demand_compile_counters_empty_v1(), nil, nil, 0, "", 0, 0)
+    val profile = artifact_service_profile_v1("claim-test", "compatible", ["parse"], 0, true)
+    demand_artifact_route_v1(execution, profile, false, "owner", 1)
+
+describe("artifact claims commit both authorities atomically"):
+    it("keeps a sibling queued while the requested action is leased"):
+        val transfer = demand_artifact_claim_owned_v1(atomic_claim_fixture(), "first", "first-lease", 1024)
+        expect(transfer.claim.valid).to_equal(true)
+        expect(transfer.route.service.entries[1].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(transfer.route.service.entries[1].lease).to_be_nil()
+
+    it("does not reserve coordinator ownership when the service rejects memory"):
+        val transfer = demand_artifact_claim_owned_v1(atomic_claim_fixture(), "first", "no-memory", 32)
+        expect(transfer.claim.valid).to_equal(false)
+        expect(transfer.claim.reason).to_equal("artifact-service-not-ready")
+        expect(transfer.route.execution.coordinator!.runtime[0].owner_token).to_equal("")
+        expect(transfer.route.execution.coordinator!.runtime[0].memory_reserved_bytes).to_equal(0)
+        expect(transfer.route.service.entries[0].lease).to_be_nil()
+        expect(transfer.route.service.entries[1].state).to_equal(ArtifactRequestStateV1.queued)
+
+    it("does not retain a service lease when dependencies reject the claim"):
+        step("claim the dependent action before its predecessor completes")
+        val transfer = demand_artifact_claim_owned_v1(atomic_claim_fixture(), "second", "early", 1024)
+        expect(transfer.claim.valid).to_equal(false)
+        expect(transfer.claim.reason).to_equal("not-ready")
+        step("both queued requests retain no leases")
+        expect(transfer.route.service.entries[0].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(transfer.route.service.entries[1].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(transfer.route.service.entries[0].lease).to_be_nil()
+        expect(transfer.route.service.entries[1].lease).to_be_nil()
+
+    it("can claim the dependent action after the rejected attempt and predecessor commit"):
+        val denied = demand_artifact_claim_owned_v1(atomic_claim_fixture(), "second", "early", 1024)
+        expect(denied.claim.valid).to_equal(false)
+        step("run and commit the predecessor through the actual bridge")
+        val first = demand_artifact_claim_owned_v1(denied.route, "first", "first-lease", 1024)
+        expect(first.claim.valid).to_equal(true)
+        val committed = demand_artifact_commit_owned_v1(first.route, BuildActionResultV1("first", "snapshot", true, false, "first-object", "", [], 64))
+        expect(committed.accepted).to_equal(true)
+        step("retry only the previously rejected dependent action")
+        val second = demand_artifact_claim_owned_v1(committed.route, "second", "second-lease", 1024)
+        expect(second.claim.valid).to_equal(true)
+        expect(second.claim.owner_token).to_equal("second-lease")
+
+    it("keeps an existing owner's lease when a duplicate claim is rejected"):
+        val first = demand_artifact_claim_owned_v1(atomic_claim_fixture(), "first", "first-lease", 1024)
+        expect(first.claim.valid).to_equal(true)
+        step("reject the duplicate without cancelling the admitted owner")
+        val duplicate = demand_artifact_claim_owned_v1(first.route, "first", "intruder", 1024)
+        expect(duplicate.claim.valid).to_equal(false)
+        expect(duplicate.claim.reason).to_equal("single-flight")
+        expect(duplicate.route.service.entries[0].state).to_equal(ArtifactRequestStateV1.leased)
+        expect(duplicate.route.service.entries[0].lease!.lease_id).to_equal("first-lease")
+        expect(duplicate.route.execution.coordinator!.runtime[0].owner_token).to_equal("first-lease")
+
+    it("does not retain a service lease when coordinator memory budget rejects work"):
+        var route = atomic_claim_fixture()
+        var execution = route.execution
+        var coordinator = execution.coordinator!
+        coordinator.budgets = [BuildPoolBudgetV1(BuildActionPoolV1.parse, 1, 32)]
+        execution.coordinator = Some(coordinator)
+        route.execution = execution
+        step("service memory admits the action but coordinator reservation does not")
+        val transfer = demand_artifact_claim_owned_v1(route, "first", "over-budget", 1024)
+        expect(transfer.claim.valid).to_equal(false)
+        expect(transfer.claim.reason).to_equal("not-ready")
+        expect(transfer.route.service.entries[0].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(transfer.route.service.entries[0].lease).to_be_nil()
+        expect(transfer.route.execution.coordinator!.runtime[0].owner_token).to_equal("")
+
+    it("does not lease work when the coordinator is cancelled"):
+        var route = atomic_claim_fixture()
+        var execution = route.execution
+        var coordinator = execution.coordinator!
+        coordinator.cancelled = true
+        execution.coordinator = Some(coordinator)
+        route.execution = execution
+        step("reject a claim without changing service queue ownership")
+        val transfer = demand_artifact_claim_owned_v1(route, "first", "cancelled-lease", 1024)
+        expect(transfer.claim.valid).to_equal(false)
+        expect(transfer.claim.reason).to_equal("cancelled")
+        expect(transfer.route.service.entries[0].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(transfer.route.service.entries[0].lease).to_be_nil()

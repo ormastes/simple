@@ -213,6 +213,15 @@ pub fn find_homebrew_llvm_lib() -> Option<String> {
     None
 }
 
+/// Compiler-driver argument dialect, independent of the generated target ABI.
+/// Plain clang may target MSVC but still accepts GNU driver options; clang-cl
+/// and cl use /c and /Fo. Inspect names only, with no tool probe or shell.
+pub fn is_msvc_driver(cc: &str) -> bool {
+    let base = cc.rsplit(['/', '\\']).next().unwrap_or(cc);
+    ["cl", "cl.exe", "clang-cl", "clang-cl.exe"].iter()
+        .any(|name| base.eq_ignore_ascii_case(name))
+}
+
 /// Check if a compiler name looks like MSVC cl.exe.
 pub fn is_msvc_compiler(cc: &str) -> bool {
     let base = std::path::Path::new(cc)

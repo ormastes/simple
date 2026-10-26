@@ -2,7 +2,7 @@
 # Contains address space creation/destruction, page-in mapping,
 # COW helpers, phase-2 bulk copy APIs, and the ProcessVmSpace constructor.
 
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, phys_addr_value, virt_addr_value}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_NO_EXECUTE, phys_addr_value, virt_addr_value}
 use os.kernel.types.task_types.{AddressSpace}
 use os.kernel.types.vmspace_types.{VmArea, ProcessVmSpace}
 use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read64, mmio_write64}
@@ -463,15 +463,9 @@ pub fn vmm_map_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flag
     val vaddr = virt_addr_value(virt)
     val paddr = phys_addr_value(phys)
     var safe_flags = flags
-    if flags.writable and not flags.no_execute:
-        safe_flags = VmFlags(
-            present: flags.present,
-            writable: true,
-            user: flags.user,
-            write_through: flags.write_through,
-            cache_disable: flags.cache_disable,
-            no_execute: true
-        )
+    # @workaround bug=cranelift_noparen_method_access_miscompiles_2026-07-06 recover=7ec3c3d99c209e9266449cda785dfe5f4efca7fd reason=Use explicit accessors while native property lookup degrades to slot zero
+    if flags.writable() and not flags.no_execute():
+        safe_flags = VmFlags(bits: flags.bits | VM_NO_EXECUTE)
 
     val pml4_virt = _phys_to_virt(space.phys_root)
 

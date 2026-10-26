@@ -1,5 +1,6 @@
 # Invocation-local HIR work ledger. Cache identity and validity remain owned by
 # driver_hir_cache: PASS is a lowering outcome, never permission to load bytes.
+use compiler.driver.driver_hir_diagnostic_v1.{hir_diagnostic_encode_v1, hir_diagnostic_decode_v1, hir_diagnostic_read_text_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.io.{file_lock, file_unlock}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, dir_list_optional, getpid}
@@ -151,3 +152,48 @@ pub fn hir_shard_recovery_close_inventory(queue: text, fail_fast: bool) -> i64:
             return -1
         index = index + 1
     unfinished
+
+# Publish explanatory evidence first, then the unchanged terminal, while holding
+# the same queue lock. A sidecar left by an interrupted publisher is not a status.
+pub fn hir_shard_recovery_terminal_diagnostic_v1(queue: text, owner: text, path: text, state: text, cache_stored: bool, reason: text) -> bool:
+    if state != "FAILED" and state != "BLOCKED": return false
+    if reason == "": return hir_shard_recovery_terminal(queue, owner, path, state, cache_stored)
+    val base = hir_shard_record_base(queue, path)
+    val fd = file_lock("{queue}/.lock", 30)
+    if fd < 0: return false
+    val claim = file_read("{base}.claim")
+    var written = false
+    if hir_shard_claim_valid(claim) and claim.starts_with(owner + "\n") and not file_exists("{base}.terminal"):
+        val fields = claim.split("\n")
+        if fields[1] == path:
+            val cache = if cache_stored: "CACHE_STORED" else: "UNCACHED"
+            val terminal = state + "\n" + claim + cache + "\n"
+            val diagnostic = hir_diagnostic_encode_v1(queue, terminal, reason)
+            if diagnostic != "":
+                val _diagnostic_written = hir_shard_record_publish("{base}.diagnostic-v1", diagnostic)
+            # Detail is optional: preserve the known outcome even when its
+            # sidecar could not be published. The reader reports unknown detail.
+            written = hir_shard_record_publish("{base}.terminal", terminal)
+    val _released = file_unlock(fd)
+    written
+
+# Unknown detail is an error from this evidence reader, never an override of
+# the existing failure counter, crash sealer, or terminal outcome.
+pub fn hir_shard_recovery_diagnostic_v1(queue: text, owner: text, path: text) -> Result<text, text>:
+    val base = hir_shard_record_base(queue, path)
+    val terminal_read = hir_diagnostic_read_text_v1("{base}.terminal", 65536)
+    if terminal_read.is_err(): return Err("diagnostic unknown: unreadable terminal")
+    val terminal = terminal_read.unwrap()
+    val fields = terminal.split("\n")
+    if fields.len() != 6: return Err("diagnostic unknown: malformed terminal")
+    if (fields[0] != "FAILED" and fields[0] != "BLOCKED") or fields[1] != owner or owner == "" or fields[2] != path or path == "" or fields[3] == "" or fields[5] != "":
+        return Err("diagnostic unknown: terminal owner or state mismatch")
+    if fields[4] != "CACHE_STORED" and fields[4] != "UNCACHED":
+        return Err("diagnostic unknown: terminal cache flag")
+    val claim = hir_diagnostic_read_text_v1("{base}.claim", 65536)
+    if claim.is_err(): return Err("diagnostic unknown: unreadable claim")
+    if claim.unwrap() != owner + "\n" + path + "\n" + fields[3] + "\n":
+        return Err("diagnostic unknown: claim mismatch")
+    val diagnostic = hir_diagnostic_read_text_v1("{base}.diagnostic-v1", 12288)
+    if diagnostic.is_err(): return Err("diagnostic unknown: unreadable sidecar")
+    hir_diagnostic_decode_v1(queue, terminal, diagnostic.unwrap())

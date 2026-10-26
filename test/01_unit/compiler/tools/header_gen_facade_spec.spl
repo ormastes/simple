@@ -1,0 +1,36 @@
+"""Exercise the named header-generator facade used by project builds."""
+use std.spec.{describe, it, expect, step}
+use compiler.tools.header_gen.mod_.{ValidationResult, validate_generated_header}
+use compiler.tools.header_gen.mod.{validate_generated_header as validate_direct}
+
+describe "header generator named facade":
+    it "preserves validation result construction":
+        step("Construct success and failure through the public named module")
+        val success = ValidationResult.ok()
+        expect(success.is_valid).to_be(true)
+        expect(success.errors.len()).to_equal(0)
+        val failure = ValidationResult.fail(["missing declaration"])
+        expect(failure.is_valid).to_be(false)
+        expect(failure.errors).to_equal(["missing declaration"])
+
+    it "delegates valid headers to the existing implementation":
+        step("Validate a guard and a real exported function declaration")
+        val header = "#ifndef EXAMPLE_H\n#define EXAMPLE_H\nint answer(void);\n#endif\n"
+        val result = validate_generated_header(header, ["answer"], [])
+        expect(result.is_valid).to_be(true)
+        expect(result.errors.len()).to_equal(0)
+
+    it "retains failures for missing exported declarations":
+        step("Reject a guarded header whose requested export is absent")
+        val header = "#ifndef EXAMPLE_H\n#define EXAMPLE_H\n#endif\n"
+        val result = validate_generated_header(header, ["answer"], [])
+        expect(result.is_valid).to_be(false)
+        expect(result.errors).to_contain("Missing declaration for exported function: answer")
+
+    it "matches the direct provider for valid and invalid input":
+        step("Compare facade results with the existing direct module")
+        for header in ["", "#ifndef EXAMPLE_H\n#define EXAMPLE_H\nint answer(void);\n#endif\n"]:
+            val via_facade = validate_generated_header(header, ["answer"], [])
+            val direct = validate_direct(header, ["answer"], [])
+            expect(via_facade.is_valid).to_equal(direct.is_valid)
+            expect(via_facade.errors).to_equal(direct.errors)

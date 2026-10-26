@@ -1,0 +1,13 @@
+# FlatPoolReader canonical factory owner workaround
+
+Status: OPEN. Canonical bug: `phase2_subsystem_helper_mir_failures_2026-10-05`. Qualified pure-tool bug DB reconciliation remains PENDING; this record does not close or repair the underlying receiver-resolution bug.
+
+The b580 native producer reached parser MIR but lost the class receiver for `FlatPoolReader.new(blob)` and the local receiver for `reader.reject_malformed` inside `new_canonical`. The reviewed workaround uses an explicitly typed reader and the full direct constructor. Its 17 fields match trusted `new(blob)` defaults exactly except `canonical=true`, preserving the immediately following original assignment. Malformed rejection remains active; the old method behavior remains unrepaired.
+
+The canonical `@workaround` marker recovers source baseline `abb0891dcc048958ea2030759802ad7ae0cedc76`. Isolated source/test admission commit: `fe00198965c926ce93284dd03a96687c7b888f81` in `build/native_probe/build-runner-review-20261011/parser-stmts-existing-fix-analysis/source/.git`. Equivalent upstream constructor fix: `cb4b2cb66b70f393a40b92b80e91df22f285a1c0`. Exact frozen evidence commit: `9be171f7ec5d8ee4878dce5897d2a40f73784de8` in `phase1-sixcase/source-frozen/.git` under that evidence directory.
+
+Immutable seed `6b133a15211e2ffb7c8c289a151400dc9a173e70b72e1c9f2feb6589e5dd0e0e` ran the full FlatPoolReader owner with the exact production `text_byte_len` helper and 76 frozen host framework files. The existing canonical frame spec and the new reader owner spec each executed three real cases: 6 passed, 0 failed, 0 skipped, 0 dropped. Authenticated collector closure reports exit 0, final Job active 0, 1.955536 seconds, 56,752 KiB peak sampled tree RSS. These measurements describe the scoped Phase1 run; native performance comparison and pure/native qualification remain UNRUN.
+
+Corrected request SHA256: `3a888d8b5a647c9b86c62da79b432861f8be0bd0e48fbe2c8c65f0130852dc40`. Terminal log SHA256: `b160583d22150f048255ffe7d17edb5417547113905d79ed82c3288b5dd9b101`. Evidence: `build/native_probe/build-runner-review-20261011/parser-stmts-existing-fix-analysis/phase1-sixcase/{request.json,RESULT.json,compile/receipt.env,compile/child.log}` and `LOCAL_APPLICATION.json` in the parent directory. The original preparation had conflicting relocated VmFlags pins and stopped at cycle 0 before any compiler dispatch; its original request/result remain preserved as `preflight-v1-*`.
+
+Only the canonical factory hunk and the new three-case production test were locally applied after root review and clean-owner/hash checks. No full compiler retry, root branch commit, or remote action was performed.

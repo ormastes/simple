@@ -1,0 +1,39 @@
+"""A captured editor-buffer observation, not complete snapshot admission.
+
+generation is local to the owning registry, never a globally trusted token.
+source_text is retained immutable text from the actual editor buffer; its
+exact UTF8 bytes are hashed once during capture. No file text read occurs.
+"""
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+pub struct SourceBufferObservationV1:
+    source_identity: text
+    generation: i64
+    version: i64
+    source_text: text
+    source_digest: text
+    provenance: text
+    buffer_dirty: bool
+
+pub fn source_buffer_observation_copy_v1(value: SourceBufferObservationV1) -> SourceBufferObservationV1:
+    # Reconstruct the carrier; callers never receive the stored mutable struct.
+    # Text values themselves are immutable. Native lifetime still needs testing.
+    SourceBufferObservationV1(value.source_identity, value.generation, value.version,
+        value.source_text, value.source_digest, value.provenance, value.buffer_dirty)
+
+pub fn source_buffer_observe_text_v1(identity: text, generation: i64,
+        version: i64, content: text, maximum_bytes: i64, buffer_dirty: bool) -> Result<SourceBufferObservationV1, text>:
+    if identity == "" or generation <= 0 or version <= 0:
+        return Err("source-buffer-generation-invalid")
+    if maximum_bytes < 0 or maximum_bytes > 1048576 or content.len() < 0 or content.len() > maximum_bytes:
+        return Err("source-buffer-capture-bound")
+    val raw = text_to_utf8_bytes(content)
+    if raw.len() != content.len():
+        return Err("source-buffer-conversion-failed")
+    val digest = sha256_u8_hex(raw)
+    if digest.len() != 64:
+        return Err("source-buffer-digest-provider-failed")
+    Ok(SourceBufferObservationV1(identity, generation, version, content, digest, "reconciled-buffer", buffer_dirty))
+
+export SourceBufferObservationV1, source_buffer_observe_text_v1, source_buffer_observation_copy_v1

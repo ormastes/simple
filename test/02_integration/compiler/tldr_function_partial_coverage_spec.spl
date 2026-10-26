@@ -1,0 +1,244 @@
+# Real production HIR projection owner diagnostic; no native/performance claim.
+use std.spec
+use std.spec.step
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.archive.tldr_function_header_v1.*
+use std.common.crypto.sha256.{sha256_text}
+fn mk_span() -> Span:
+    Span.empty()
+
+fn mk_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: mk_span())
+
+fn mk_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: mk_span())
+
+fn mk_block(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: mk_expr(HirExprKind.NilLit), span: mk_span())
+
+fn mk_fn(id: i64, name: text, type_params: [HirTypeParam], params: [HirParam], ret: HirType, body: HirBlock) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        type_params: type_params,
+        params: params,
+        return_type: ret,
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: ""
+    )
+
+
+fn fixture(mode: text) -> HirModule:
+    val scalar = mk_type(HirTypeKind.Int(64, true))
+    val ordinary = mk_fn(1, "bar", [], [], scalar, mk_block([]))
+    var unsupported = mk_fn(2, "foo", [], [], scalar, mk_block([]))
+    if mode == "generic": unsupported.is_generic_template = true
+    if mode == "async": unsupported.is_async = true
+    if mode == "effect": unsupported.effects = [Effect(kind: EffectKind.IO, span: mk_span())]
+    if mode == "default":
+        unsupported.params = [HirParam(symbol: SymbolId(id: 90), name: "value", type_: scalar,
+            has_default: true, default: mk_expr(HirExprKind.IntLit(1)), span: mk_span(), is_mutable: false)]
+    if mode == "overload": unsupported.name = "bar"
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[ordinary.symbol] = ordinary
+    functions[unsupported.symbol] = unsupported
+    var module = HirModule(
+        name: "provider",
+        path: "synthetic/mono_rewrite_test.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        gpu_function_targets: {},
+        gpu_function_backend_orders: {},
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+    module
+
+fn rows(module: HirModule) -> [text]:
+    val result = tldr_function_rows_from_hir_v1(module, {"bar": "provider.bar", "foo": "provider.foo"})
+    expect(result.is_ok()).to_equal(true)
+    if result.is_err(): return []
+    result.unwrap()
+
+fn authority(payload: text) -> TldrFunctionHeaderAuthorityV1:
+    val digest = sha256_text("bound-input")
+    TldrFunctionHeaderAuthorityV1("provider", digest, digest, digest, digest, sha256_text(payload))
+
+fn payload(records: text) -> text:
+    tldr_function_header_prefix_v1(authority("")).unwrap() + records + "\n"
+
+describe "Name-atomic TLDR function projection":
+    it "retains an unrelated function for each unsupported exported category":
+        step("retains an unrelated function for each unsupported exported category")
+        for mode in ["generic", "async", "effect", "default"]:
+            val projected = rows(fixture(mode))
+            expect(projected.len()).to_equal(2)
+            expect(projected.contains("function|bar|provider.bar||i64")).to_equal(true)
+            expect(projected.contains("body-required|foo|unsupported")).to_equal(true)
+    it "omits the complete overloaded name instead of one declaration":
+        step("omits the complete overloaded name instead of one declaration")
+        val projected = rows(fixture("overload"))
+        expect(projected.len()).to_equal(1)
+        expect(projected.contains("body-required|bar|overload")).to_equal(true)
+    it "admits callable rows with explicit authenticated body demands":
+        step("admits callable rows with explicit authenticated body demands")
+        val bytes = payload("function|bar|provider.bar||i64\nbody-required|foo|unsupported")
+        val admitted = tldr_function_header_admit_v1(bytes, authority(bytes))
+        expect(admitted.is_ok()).to_equal(true)
+        if admitted.is_ok():
+            expect(admitted.unwrap().len()).to_equal(1)
+            expect(admitted.unwrap()[0].name).to_equal("bar")
+    it "rejects duplicate or forged omission records and stale source authority":
+        step("rejects duplicate or forged omission records and stale source authority")
+        for records in ["function|bar|provider.bar||i64\nbody-required|bar|unsupported", "body-required|foo|unsupported\nbody-required|foo|overload", "body-required|foo|unchecked"]:
+            val bytes = payload(records)
+            expect(tldr_function_header_admit_v1(bytes, authority(bytes)).is_err()).to_equal(true)
+        val bytes = payload("function|bar|provider.bar||i64\nbody-required|foo|unsupported")
+        var stale = authority(bytes)
+        stale.source_digest = sha256_text("changed-source")
+        expect(tldr_function_header_admit_v1(bytes, stale).is_err()).to_equal(true)
+
+use compiler.hir.abi_interface.{hir_abi_interface_encoded_v1}
+use compiler.driver.cache.tldr_function_archive_v1.*
+use compiler.hir.archive.interface_action_archive.*
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Items.module_tldr_registration.*
+use compiler.frontend.parser_types.{ParserImport, ImportItem}
+
+fn project_archive(module: HirModule) -> AdmittedTldrFunctionImportV1:
+    val abi = sha256_text(hir_abi_interface_encoded_v1(module).unwrap())
+    val encoded = tldr_function_archive_interface_v1(module, "provider", abi)
+    expect(encoded.is_ok()).to_equal(true)
+    val content = encoded.unwrap()
+    expect(tldr_function_archive_interface_valid_v1(content, "provider", abi)).to_equal(true)
+    val decoded = interface_action_archive_symbols_decode_v1(content)
+    expect(decoded.is_ok()).to_equal(true)
+    val digest = sha256_text("input")
+    val variant = ConfigVariantKeyV1("x86_64-pc-windows-msvc", "llvm", [], "debug", "simple", [], [])
+    val archive = InterfaceActionArchiveV1("package", variant, digest, [], sha256_text(content), digest, decoded.unwrap(), [])
+    val receipt = PackageArchiveReceiptV1("package", digest, digest, digest, "compiler", digest, digest, [], [], digest)
+    val entry = PackageModuleIndexEntryV1("package", "provider", "provider.spl", digest,
+        digest, digest, abi, digest, digest, digest, digest, "package", [], [])
+    val admitted = tldr_function_archive_admit_v1(archive, receipt, entry)
+    expect(admitted.is_ok()).to_equal(true)
+    admitted.unwrap()
+
+fn imported(names: [text]) -> ParserImport:
+    var items: [ImportItem] = []
+    for name in names: items.push(ImportItem(name, false, ""))
+    ParserImport("provider", items, false, mk_span())
+
+describe "TLDR negative coverage integration":
+    it "keeps overloaded names omitted regardless of insertion order":
+        step("keeps overloaded names omitted regardless of insertion order")
+        for reverse in [false, true]:
+            val original = fixture("generic")
+            var module = original
+            var overloaded = original.functions[SymbolId(id: 2)]
+            overloaded.name = "bar"
+            module.functions = {}
+            if reverse:
+                module.functions[overloaded.symbol] = overloaded
+                module.functions[SymbolId(id: 1)] = original.functions[SymbolId(id: 1)]
+            else:
+                module.functions[SymbolId(id: 1)] = original.functions[SymbolId(id: 1)]
+                module.functions[overloaded.symbol] = overloaded
+            expect(rows(module)).to_equal(["body-required|bar|overload"])
+    it "round trips real archive producer rows for mixed and all-negative modules":
+        step("round trips real archive producer rows for mixed and all-negative modules")
+        val mixed = project_archive(fixture("generic"))
+        expect(mixed.admitted_signatures.unwrap().len()).to_equal(1)
+        expect(mixed.admitted_signatures.unwrap()[0].name).to_equal("bar")
+        expect(mixed.payload.contains("body-required|foo|unsupported")).to_equal(true)
+        var all_negative = fixture("generic")
+        var second = all_negative.functions[SymbolId(id: 1)]
+        second.is_async = true
+        all_negative.functions[second.symbol] = second
+        val negative = project_archive(all_negative)
+        expect(negative.admitted_signatures.unwrap().len()).to_equal(0)
+        expect(negative.payload.contains("body-required|bar|unsupported")).to_equal(true)
+        print "TLDR_METADATA mixed_bytes={mixed.payload.len()} all_negative_bytes={negative.payload.len()}"
+    it "preflights missing omitted global and glob requests without binding mutations":
+        step("preflights missing omitted global and glob requests without binding mutations")
+        val prepared = project_archive(fixture("generic"))
+        for strict in [false, true]:
+            for requested in [["bar", "foo"], ["bar", "missing"], ["bar", "state"], []]:
+                var lowering = HirLowering.new()
+                lowering.tldr_entry_only = strict
+                lowering.tldr_imports = [prepared]
+                val before = lowering.symbols.symbols.len()
+                expect(lowering.resolve_tldr_import_v1("consumer", imported(requested))).to_equal(strict)
+                expect(lowering.symbols.symbols.len()).to_equal(before)
+                expect(lowering.symbols.admitted_function_abis.len()).to_equal(0)
+    it "registers only the requested supported header repeatedly with stable ABI":
+        step("registers only the requested supported header repeatedly with stable ABI")
+        val prepared = project_archive(fixture("default"))
+        var lowering = HirLowering.new()
+        lowering.tldr_entry_only = true
+        lowering.tldr_imports = [prepared]
+        expect(lowering.resolve_tldr_import_v1("consumer", imported(["bar"]))).to_equal(true)
+        val count = lowering.symbols.symbols.len()
+        val binding = lowering.symbols.lookup_or_invalid("bar")
+        expect(binding.is_valid()).to_equal(true)
+        expect(lowering.symbols.admitted_function_abis.len()).to_equal(1)
+        expect(lowering.resolve_tldr_import_v1("consumer", imported(["bar"]))).to_equal(true)
+        expect(lowering.symbols.symbols.len()).to_equal(count)
+        expect(lowering.symbols.lookup_or_invalid("foo").is_valid()).to_equal(false)
+    it "binds omissions to full ABI and rejects malformed archive name coverage":
+        step("binds omissions to full ABI and rejects malformed archive name coverage")
+        val module = fixture("generic")
+        var auth = authority("")
+        auth.abi_digest = sha256_text(hir_abi_interface_encoded_v1(module).unwrap())
+        val header = tldr_function_header_from_hir_v1(module, auth, {"bar": "provider.bar", "foo": "provider.foo"})
+        expect(header.is_ok()).to_equal(true)
+        auth.payload_digest = sha256_text(header.unwrap())
+        var wrong = auth
+        wrong.producer_digest = sha256_text("other-producer")
+        expect(tldr_function_header_admit_v1(header.unwrap(), wrong).is_err()).to_equal(true)
+        wrong = auth
+        wrong.abi_digest = sha256_text("other-interface")
+        expect(tldr_function_header_from_hir_v1(module, wrong, {"bar": "provider.bar"}).is_err()).to_equal(true)
+        for name in ["bad.name", "", "bad;name"]:
+            val bytes = payload("body-required|{name}|unsupported")
+            expect(tldr_function_header_admit_v1(bytes, authority(bytes)).is_err()).to_equal(true)

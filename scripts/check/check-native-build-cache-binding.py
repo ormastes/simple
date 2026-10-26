@@ -48,8 +48,8 @@ def main():
     originals = {}
 
     def read(path):
-        text = (args.repo / path).read_text()
-        originals[path] = hashlib.sha256(text.encode()).hexdigest()
+        text = (args.repo / path).read_text(encoding="utf-8")
+        originals[path] = hashlib.sha256(text.encode("utf-8")).hexdigest()
         return text
 
     runtime = read("src/lib/nogc_sync_mut/io_runtime.spl")
@@ -139,12 +139,12 @@ fn compiler_driver_run_compile(status: i64) -> i64:
     # standalone .spl file is deliberately outside that admission surface.
     (args.work / "src").mkdir(exist_ok=args.retry)
     source = args.work / "src" / "cache-owner-projection.spl"
-    source.write_text("\n\n".join(pieces))
+    source.write_text("\n\n".join(pieces), encoding="utf-8")
     # SCV cold initialization requires a genuine source revision. Keep caches
     # and evidence untracked; initialize only this new disposable fixture.
     if not (args.work / ".git").exists():
         subprocess.run(["git", "init", "-q", str(args.work)], check=True)
-    (args.work / ".gitignore").write_text("*\n!.gitignore\n!src/\n!src/cache-owner-projection.spl\n")
+    (args.work / ".gitignore").write_text("*\n!.gitignore\n!src/\n!src/cache-owner-projection.spl\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(args.work), "add", ".gitignore", str(source.relative_to(args.work))], check=True)
     staged = subprocess.run(["git", "-C", str(args.work), "diff", "--cached", "--quiet"])
     if staged.returncode == 1:
@@ -171,32 +171,32 @@ fn compiler_driver_run_compile(status: i64) -> i64:
                 "qualification": "production owner bodies with recording driver; not full compiler/bootstrap"}
     # Validate all admission and isolation prerequisites together before the
     # single native invocation. Retrying changes only this fixture's revision.
-    head = subprocess.check_output(["git", "-C", str(args.work), "rev-parse", "HEAD"], text=True).strip()
-    listed = subprocess.check_output(["git", "-C", str(args.work), "ls-files", "--", "src"], text=True).splitlines()
+    head = subprocess.check_output(["git", "-C", str(args.work), "rev-parse", "HEAD"], text=True, encoding="utf-8").strip()
+    listed = subprocess.check_output(["git", "-C", str(args.work), "ls-files", "--", "src"], text=True, encoding="utf-8").splitlines()
     assert "src/cache-owner-projection.spl" in listed and head
     assert command[command.index("--cache-dir") + 1] == env["SIMPLE_NATIVE_BUILD_CACHE_DIR"]
     assert env["SIMPLE_CACHE"] == str(args.work / "build" / "scv")
     assert args.compiler.is_file() and os.access(args.compiler, os.X_OK) and args.runtime.is_dir()
-    assert not re.search(r"(?m)^(?:export )?use ", source.read_text())
+    assert not re.search(r"(?m)^(?:export )?use ", source.read_text(encoding="utf-8"))
     evidence["preflight"] = {"git_head": head, "tracked_sources": listed,
                              "cli_environment_cache_match": True, "compiler_imports": False}
-    (args.work / "plan.json").write_text(json.dumps(evidence, indent=2))
-    with (args.work / "compile.log").open("w") as log:
+    (args.work / "plan.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+    with (args.work / "compile.log").open("w", encoding="utf-8") as log:
         compiled = subprocess.run(command, cwd=args.work, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=120)
     if compiled.returncode or not binary.is_file():
         raise SystemExit("FAIL: native fixture compilation; see " + str(args.work / "compile.log"))
-    ran = subprocess.run([str(binary)], cwd=args.work, env=env, capture_output=True, text=True, timeout=15)
-    (args.work / "run.log").write_text(ran.stdout + ran.stderr)
+    ran = subprocess.run([str(binary)], cwd=args.work, env=env, capture_output=True, text=True, encoding="utf-8", timeout=15)
+    (args.work / "run.log").write_text(ran.stdout + ran.stderr, encoding="utf-8")
     evidence["run_exit"] = ran.returncode
     routed = ran.returncode == 0 and all(
-        Path(path, leaf).is_file() and Path(path, leaf).read_text() == selected
+        Path(path, leaf).is_file() and Path(path, leaf).read_text(encoding="utf-8") == selected
         for path, selected in requested
         for leaf in ("native_provider_identity.receipt", "build_cache.sdn", "reverse-references/CURRENT"))
     inherited_untouched = not Path(paths["inherited"], "build_cache.sdn").exists()
     evidence.update(routed=routed, inherited_untouched=inherited_untouched)
     passed = (not routed and not inherited_untouched) if args.negative_control else (routed and inherited_untouched)
     evidence["status"] = "PASS" if passed else "FAIL"
-    (args.work / "result.json").write_text(json.dumps(evidence, indent=2))
+    (args.work / "result.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
     print(evidence["status"] + ": native cache owner " + ("ignored-CLI negative control" if args.negative_control else "routing/restoration/filesystem"))
     return 0 if passed else 1
 

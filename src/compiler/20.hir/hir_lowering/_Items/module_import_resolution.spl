@@ -1,3 +1,4 @@
+use compiler.hir.hir_lowering._Items.module_tldr_registration.*
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.hir.hir_lowering._Items.lowering_helpers.{imported_symbol_local_name}
@@ -368,6 +369,9 @@ impl HirLowering:
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
+            if self.resolve_tldr_import_v1(module.name, imp):
+                import_idx = import_idx + 1
+                continue
             var fallback_item_name = ""
             # ParserStruct-valued Dict.get() corrupts native hit payloads. Track the
             # winning key and read the value only with bracket indexing.
@@ -401,9 +405,9 @@ impl HirLowering:
                     rel_pkg = rel_pkg + rel_segs[rel_si]
                     rel_si = rel_si + 1
                 val rel_abs = if rel_pkg == "": rel_tail else: rel_pkg + "." + rel_tail
+                resolved_module_name = rel_abs
                 if self.surface_index_for_name(rel_abs) >= 0:
                     imported_key = rel_abs
-                    resolved_module_name = rel_abs
             if imported_key == "":
                 # Canonical-key fallbacks (see resolve_module_key): closure
                 # files register ONLY under path-derived names, keeping
@@ -477,6 +481,19 @@ impl HirLowering:
                                 imported_key = parent_key
                                 resolved_module_name = parent_key
                                 fallback_item_name = member_name
+            if imported_key == "":
+                # A declined header is not proof that its excluded source was
+                # loaded. Missing ordinary surfaces must fail before namespace
+                # imports can silently disappear or mixed bindings escape.
+                var missing_tldr_surface = false
+                for prepared in self.tldr_imports:
+                    if hir_pkg_canonical_module_name(prepared.authority.module_name) ==
+                            hir_pkg_canonical_module_name(resolved_module_name):
+                        missing_tldr_surface = true
+                if missing_tldr_surface:
+                    self.error("tldr-source-fallback-unavailable:{resolved_module_name}:ordinary-source-route-required", imp.span)
+                    import_idx = import_idx + 1
+                    continue
             if imported_key != "":
                 val imported_index = self.surface_index_for_name(imported_key)
                 if imported_index < 0:

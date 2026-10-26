@@ -1,0 +1,37 @@
+use std.spec.*
+use std.editor.document.registry.{DocumentRegistry}
+use std.scv.editor_ipc.{scv_editor_ipc_open, scv_editor_read, scv_editor_accept_source_observation_v1}
+
+describe "REQ-005 SCV consumes the shared editor observation":
+    it "should update the actual SCV editor buffer from a captured generation":
+        step("Transfer the captured IDE buffer through the existing SCV editor owner")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        val captured = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        val ipc = scv_editor_ipc_open("unused-source-observation-spool")
+        val (updated, events) = scv_editor_accept_source_observation_v1(ipc, captured, nil).unwrap()
+        expect(scv_editor_read(updated, "src/a.spl")).to_equal("a")
+        expect(events.len()).to_equal(1)
+        expect(events[0].kind).to_equal("buffer_open")
+        # IPC delivery alone is not durable publication acknowledgement.
+        expect(registry.get("src/a.spl").source_pending).to_equal(true)
+
+    it "should reject a stale expected SCV base without altering its live buffer":
+        step("Compare the expected base with the existing SCV buffer bytes")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        val captured = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        val ipc = scv_editor_ipc_open("unused-source-observation-spool")
+        val (updated, events) = scv_editor_accept_source_observation_v1(ipc, captured, nil).unwrap()
+        expect(scv_editor_accept_source_observation_v1(updated, captured, Some("stale")).unwrap_err()).to_equal("scv-source-observation-base-mismatch")
+        expect(scv_editor_read(updated, "src/a.spl")).to_equal("a")
+
+    it "should reject a tampered observation before changing SCV state":
+        step("Validate actual transferred bytes against the capture digest")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        var captured = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        captured.source_text = "b"
+        val ipc = scv_editor_ipc_open("unused-source-observation-spool")
+        expect(scv_editor_accept_source_observation_v1(ipc, captured, nil).unwrap_err()).to_equal("source-change-payload-digest-mismatch")
+        expect(ipc.buffers.len()).to_equal(0)

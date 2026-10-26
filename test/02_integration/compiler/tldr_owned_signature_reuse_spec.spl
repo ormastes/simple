@@ -1,0 +1,114 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.tldr_function_archive_v1.{tldr_function_archive_admit_v1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use compiler.hir.archive.interface_action_archive.{InterfaceActionArchiveV1, InterfaceArchiveSymbolV1}
+use compiler.hir.archive.tldr_function_header_v1.{AdmittedTldrFunctionImportV1, tldr_function_header_admit_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Items.module_tldr_registration.*
+use compiler.frontend.parser_types.{ParserImport, ImportItem}
+use compiler.common.diagnostics.span.{Span}
+
+fn owned_tldr_archive(record: text = "dependency.add;left:i64,right:i64;i64") -> InterfaceActionArchiveV1:
+    val digest = sha256_text("fixture")
+    val variant = ConfigVariantKeyV1("x86_64-pc-windows-msvc", "llvm", [], "debug", "simple-v1", [], [])
+    InterfaceActionArchiveV1("package", variant, digest, [], digest, digest,
+        [InterfaceArchiveSymbolV1("dependency#add", "function-header-v1", record, digest)], [])
+
+fn owned_tldr_receipt(variant: text) -> PackageArchiveReceiptV1:
+    val digest = sha256_text("fixture")
+    PackageArchiveReceiptV1("package", digest, digest, digest, "fixture-producer", digest, variant, [], [], digest)
+
+fn owned_tldr_entry(source: text) -> PackageModuleIndexEntryV1:
+    val digest = sha256_text("fixture")
+    PackageModuleIndexEntryV1("package", "dependency", "dependency.spl", source,
+        digest, digest, digest, digest, digest, digest, digest, "dependency", [], [])
+
+fn owned_tldr_admit() -> AdmittedTldrFunctionImportV1:
+    val digest = sha256_text("fixture")
+    tldr_function_archive_admit_v1(owned_tldr_archive(), owned_tldr_receipt(digest), owned_tldr_entry(digest)).unwrap()
+
+fn owned_tldr_import(local_name: text) -> ParserImport:
+    ParserImport("dependency", [ImportItem("add", true, local_name)], false, Span.empty())
+
+describe "compile-owned TLDR signature reuse":
+    it "REQ-OWNED-001 retains the actual archive admission result":
+        val prepared = owned_tldr_admit()
+        expect(prepared.admitted_signatures != nil).to_equal(true)
+        val retained = prepared.admitted_signatures.unwrap()
+        val direct = tldr_function_header_admit_v1(prepared.payload, prepared.authority).unwrap()
+        expect(retained.len()).to_equal(direct.len())
+        expect(retained[0].name).to_equal(direct[0].name)
+        expect(retained[0].linkage_name).to_equal(direct[0].linkage_name)
+        expect(retained[0].param_names).to_equal(direct[0].param_names)
+        expect(retained[0].param_type_names).to_equal(direct[0].param_type_names)
+        expect(retained[0].return_type_name).to_equal(direct[0].return_type_name)
+
+    it "REQ-OWNED-002 registers repeated aliases without mutating retained signatures":
+        val prepared = owned_tldr_admit()
+        var lowering = HirLowering.new()
+        lowering.tldr_imports = [prepared]
+        lowering.resolve_tldr_import_v1("main", owned_tldr_import("sum"))
+        val first = lowering.symbols.lookup_or_invalid("sum")
+        lowering.resolve_tldr_import_v1("main", owned_tldr_import("sum"))
+        lowering.resolve_tldr_import_v1("main", owned_tldr_import("other_sum"))
+        expect(lowering.errors.len()).to_equal(0)
+        expect(first.is_valid()).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("sum").id).to_equal(first.id)
+        expect(lowering.symbols.lookup_or_invalid("other_sum").is_valid()).to_equal(true)
+        expect(lowering.symbols.symbols[first.id].name).to_equal("dependency.add")
+        val retained = lowering.tldr_imports[0].admitted_signatures.unwrap()
+        expect(retained[0].param_names).to_equal(["left", "right"])
+        expect(retained[0].param_type_names).to_equal(["i64", "i64"])
+        expect(retained[0].return_type_name).to_equal("i64")
+
+    it "REQ-OWNED-003 preserves legacy two-field admission and raw tamper rejection":
+        val prepared = owned_tldr_admit()
+        val legacy = AdmittedTldrFunctionImportV1(prepared.payload, prepared.authority)
+        expect(legacy.admitted_signatures == nil).to_equal(true)
+        var lowering = HirLowering.new()
+        lowering.tldr_imports = [legacy]
+        lowering.resolve_tldr_import_v1("main", owned_tldr_import("sum"))
+        expect(lowering.errors.len()).to_equal(0)
+        var rejected = HirLowering.new()
+        rejected.tldr_imports = [AdmittedTldrFunctionImportV1(prepared.payload + "tampered", prepared.authority)]
+        rejected.resolve_tldr_import_v1("main", owned_tldr_import("sum"))
+        expect(rejected.errors.len()).to_equal(1)
+        expect(rejected.symbols.lookup_or_invalid("sum").is_valid()).to_equal(false)
+        expect(rejected.register_tldr_imported_function_v1(prepared.payload + "tampered",
+            prepared.authority, "add", "sum", Span.empty()).is_err()).to_equal(true)
+
+    it "REQ-OWNED-004 creates fresh bindings for changed source and configuration":
+        val old = owned_tldr_admit()
+        val changed_source = sha256_text("changed source")
+        val changed_variant = sha256_text("changed target aspects or capture")
+        val current = tldr_function_archive_admit_v1(owned_tldr_archive(),
+            owned_tldr_receipt(changed_variant), owned_tldr_entry(changed_source)).unwrap()
+        expect(current.authority.source_digest).to_equal(changed_source)
+        expect(current.authority.variant_digest).to_equal(changed_variant)
+        expect(current.authority.payload_digest == old.authority.payload_digest).to_equal(false)
+        expect(tldr_function_header_admit_v1(old.payload, current.authority).is_err()).to_equal(true)
+        expect(current.admitted_signatures != nil).to_equal(true)
+        expect(old.authority.source_digest).to_equal(sha256_text("fixture"))
+
+    it "REQ-OWNED-005 rejects invalid archive rows before publishing typed results":
+        val digest = sha256_text("fixture")
+        val invalid = tldr_function_archive_admit_v1(owned_tldr_archive("dependency.add;value:unsupported;i64"),
+            owned_tldr_receipt(digest), owned_tldr_entry(digest))
+        expect(invalid.is_err()).to_equal(true)
+
+    it "REQ-OWNED-006 keeps symbol registration local to each lowering owner":
+        val prepared = owned_tldr_admit()
+        var first = HirLowering.new()
+        var second = HirLowering.new()
+        first.tldr_imports = [prepared]
+        second.tldr_imports = [prepared]
+        first.resolve_tldr_import_v1("main", owned_tldr_import("first_sum"))
+        second.resolve_tldr_import_v1("other", owned_tldr_import("second_sum"))
+        expect(first.errors.len()).to_equal(0)
+        expect(second.errors.len()).to_equal(0)
+        expect(first.symbols.lookup_or_invalid("second_sum").is_valid()).to_equal(false)
+        expect(second.symbols.lookup_or_invalid("first_sum").is_valid()).to_equal(false)
+        expect(second.tldr_imports[0].admitted_signatures.unwrap()[0].param_names).to_equal(["left", "right"])

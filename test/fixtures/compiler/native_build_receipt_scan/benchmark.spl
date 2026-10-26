@@ -1,0 +1,43 @@
+use app.cli.native_build_receipt_scan.{native_build_log_has_exact_line_v1}
+
+@unsafe(reason: "native fixture samples the monotonic provider; a negative sample fails the fixture", capabilities: [ffi])
+extern fn rt_time_now_nanos() -> i64
+
+fn receipt_scan_benchmark_legacy(output: text, expected: text) -> bool:
+    output.replace("\r\n", "\n").split("\n").contains(expected)
+
+pub fn receipt_scan_benchmark_v1(use_cursor: bool) -> i64:
+    # Identical source construction in separate legacy/cursor processes. The
+    # timed region includes only receipt recognition, not fixture construction.
+    var log_text = "receipt prefix ignored suffix\r\n"
+    for size_step in 0..16:
+        log_text = log_text + log_text
+    val present_text = log_text + "receipt"
+    val algorithm = if use_cursor: "cursor" else: "legacy"
+    var start_ns: i64 = -1
+    unsafe(capabilities: [ffi]):
+        start_ns = rt_time_now_nanos()
+    if start_ns < 0:
+        return 2
+    var checksum: i64 = 0
+    for iteration in 0..8:
+        val absent = if use_cursor:
+            native_build_log_has_exact_line_v1(log_text, "receipt")
+        else:
+            receipt_scan_benchmark_legacy(log_text, "receipt")
+        val present = if use_cursor:
+            native_build_log_has_exact_line_v1(present_text, "receipt")
+        else:
+            receipt_scan_benchmark_legacy(present_text, "receipt")
+        if absent or not present:
+            print "receipt-scan benchmark semantic failure algorithm={algorithm} iteration={iteration}"
+            return 1
+        checksum = checksum + 1
+    var end_ns: i64 = -1
+    unsafe(capabilities: [ffi]):
+        end_ns = rt_time_now_nanos()
+    if end_ns < start_ns:
+        return 3
+    val elapsed_ns = end_ns - start_ns
+    print "receipt-scan profile algorithm={algorithm} bytes={log_text.len()} scans=16 elapsed_ns={elapsed_ns} checksum={checksum}"
+    0

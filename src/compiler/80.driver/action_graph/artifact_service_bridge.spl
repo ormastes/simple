@@ -79,6 +79,9 @@ fn demand_artifact_claim_v1(
     val claim_transfer = coordinator_claim_v1(coordinator, action_id, lease!.lease_id)
     coordinator = claim_transfer.coordinator
     val claim = claim_transfer.claim
+    # Publish staged authorities only after both accepted the claim.
+    if not claim.valid:
+        return claim
     execution.coordinator = Some(coordinator)
     route.execution = execution
     route.service = service
@@ -146,24 +149,24 @@ fn artifact_service_claim_action_v1(
     service: ArtifactServiceV1, action_id: text, owner_id: text,
     lease_id: text, generation: i64, available_memory_bytes: i64
 ) -> ArtifactServiceV1:
-    var isolated = service
-    var entries = isolated.entries
-    for index in 0..entries.len():
-        if entries[index].request.action_id != action_id and
-                entries[index].state == ArtifactRequestStateV1.queued:
-            entries[index] = ArtifactQueueEntryV1(
-                entries[index].request, ArtifactRequestStateV1.rejected,
-                nil, "", "claim-deferred")
-    isolated.entries = entries
-    var claimed = artifact_service_claim_v1(
-        isolated, owner_id, lease_id, generation,
-        available_memory_bytes, -1)
-    var restored = claimed.entries
-    for index in 0..restored.len():
-        if restored[index].error_code == "claim-deferred":
-            restored[index] = service.entries[index]
-    claimed.entries = restored
-    claimed
+    # Claim only the requested entry; never mutate an aliased queue while staging.
+    var selected: ArtifactQueueEntryV1? = nil
+    for entry in service.entries:
+        if entry.request.action_id == action_id:
+            selected = Some(entry)
+            break
+    if selected == nil:
+        return service
+    val claimed = artifact_service_claim_v1(
+        ArtifactServiceV1(service.profile, [selected!]), owner_id,
+        lease_id, generation, available_memory_bytes, -1)
+    var entries: [ArtifactQueueEntryV1] = []
+    for entry in service.entries:
+        if entry.request.action_id == action_id:
+            entries = entries.push(claimed.entries[0])
+        else:
+            entries = entries.push(entry)
+    ArtifactServiceV1(service.profile, entries)
 
 fn artifact_service_lease_for_action_v1(
     service: ArtifactServiceV1, action_id: text

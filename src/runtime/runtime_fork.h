@@ -81,6 +81,11 @@ const char* rt_fork_parent_stdout(void);
  */
 const char* rt_fork_parent_stderr(void);
 
+/* Retained byte lengths, including capture markers and embedded NUL bytes.
+ * Excludes the extra C terminator. Same lifetime as the corresponding pointer. */
+uint64_t rt_fork_parent_stdout_len(void);
+uint64_t rt_fork_parent_stderr_len(void);
+
 /*
  * Child: exit immediately without atexit handlers or stdio flush.
  * Uses _exit() to avoid double-flushing stdio buffers inherited from parent.

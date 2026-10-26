@@ -271,6 +271,32 @@ impl MonomorphizationPass:
                         ptys = ptys.push(pp.type_)
                     self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, func.return_type, []), span: func.span)
 
+        # Imported callables are declarations in this module's symbol table,
+        # not bodies in module.functions. Their signatures were lowered in the
+        # caller's type scope by import registration. Preserve that scope: a
+        # callee-module SymbolId or a display-name lookup can alias a different
+        # nominal type (or a shadowed callable) in this module.
+        # declared_imported_surface_callable_type leaves generic imports untyped,
+        # including unused type parameters; never invent a signature for them.
+        if module.symbols != nil:
+            for imported_id in module.symbols.symbols.keys():
+                val imported: HirSymbol = module.symbols.symbols[imported_id]
+                if imported.kind != SymbolKind.Function or imported.type_ == nil:
+                    continue
+                if not imported.defining_module.?:
+                    continue
+                val signature: HirType = imported.type_ ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                if not hir_type_is_concrete(signature):
+                    continue
+                val key = mono_sym_key(module_name, imported.id.id)
+                if self.fn_returns.has(key):
+                    continue
+                match signature.kind:
+                    case HirTypeKind.Function(_, ret, _):
+                        self.fn_returns[key] = ret
+                        self.fn_sigs[key] = signature
+                    case _: ()
+
         # Collect generic structs
         val structs = module.structs
         for sym_id in structs.keys():

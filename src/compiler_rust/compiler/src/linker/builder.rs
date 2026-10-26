@@ -252,7 +252,7 @@ impl LinkerBuilder {
         }
 
         // Execute linking
-        linker.link(&self.objects, output, &self.options)
+        linker.link_for_target(&self.objects, output, &self.options, &self.target.unwrap_or_else(Target::host))
     }
 
     /// Get the linker that would be used.

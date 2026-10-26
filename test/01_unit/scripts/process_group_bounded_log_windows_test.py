@@ -25,8 +25,12 @@ def fixture(mode, target):
     elif mode.startswith("orphan-"):
         # Simulate a tool that exits while an inherited-output telemetry child
         # stays in its Job (the native Cargo/VCTIP failure mode).
-        child = subprocess.Popen([sys.executable, __file__, "--fixture", "sleep", str(target)],
-                                 stdin=subprocess.DEVNULL)
+        if mode == "orphan-settles":
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.4)"],
+                                     stdin=subprocess.DEVNULL)
+        else:
+            child = subprocess.Popen([sys.executable, __file__, "--fixture", "sleep", str(target)],
+                                     stdin=subprocess.DEVNULL)
         target.write_text(str(child.pid), encoding="ascii")
         if mode == "orphan-overflow":
             os.write(1, b"x" * 2000000)
@@ -186,6 +190,12 @@ def main():
             else:
                 assert receipt["reason"] == "overflow"
                 assert (work / f"{name}.log").stat().st_size == 1024
+        settling_pid = work / "orphan-settles.pid"
+        settling = run("orphan-settles", "orphan-settles", settling_pid, expected=0,
+                       root_exit_policy="terminate-job")
+        assert settling["job_remnants_terminated"] == "no"
+        assert dead(int(settling_pid.read_text(encoding="ascii")))
+        assert (work / "orphan-settles.log").read_bytes() == b"root finished\n"
         live = run("policy-live-root-timeout", "sleep", expected=124, timeout=2,
                    root_exit_policy="terminate-job")
         assert live["reason"] == "timeout" and live["job_remnants_terminated"] == "no"

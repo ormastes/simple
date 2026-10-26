@@ -1,0 +1,45 @@
+use std.spec.{describe, it, expect}
+use app.slang_pack.core.{_command_args, run_main_args}
+
+# Regression witness for the native argv defect recorded in
+# doc/09_report/slang_pack_native_argv_2026_10_07.md.
+# UNRUN: source/interpreter/native execution requires an admitted runtime.
+# Normalization cases never invoke the packer or write an output.
+describe "slang pack native argument normalization":
+    it "removes the native executable before help dispatch":
+        expect(_command_args(["C:/tools/slang-pack.exe", "--help"], true)).to_equal(["--help"])
+
+    it "removes the executable for native usage dispatch":
+        expect(_command_args(["C:/tools/slang-pack.exe"], true)).to_equal([])
+
+    it "uses ownership rather than an executable name heuristic":
+        for program in ["renamed-tool", "C:\\tools with spaces\\other.exe", "tool.spl", ""]:
+            expect(_command_args([program, "--help"], true)).to_equal(["--help"])
+
+    it "handles empty process and normalized argument arrays":
+        expect(_command_args([], true)).to_equal([])
+        expect(_command_args([])).to_equal([])
+
+    it "retains the source runner prefix contract":
+        expect(_command_args(["simple", "run", "src/app/slang_pack/main.spl", "--help"])).to_equal(["--help"])
+        expect(_command_args(["simple", "run", "src/app/slang_pack/main.spl", "--help"], true)).to_equal(["--help"])
+        expect(_command_args(["simple", "src/app/slang_pack/main.spl", "--help"], true)).to_equal(["--help"])
+        expect(_command_args(["simple", "run", "--mode=interpreter", "src/app/slang_pack/main.spl", "--help"], true)).to_equal(["--help"])
+
+    it "retains already-normalized arguments":
+        expect(_command_args(["--help", "--no-progress"])).to_equal(["--help", "--no-progress"])
+
+    it "preserves literal argument boundaries and the input array":
+        val raw = ["tool.exe", "space value.safetensors", "single'quote", "a&b;$(echo injected)", "line1\nline2", ""]
+        expect(_command_args(raw, true)).to_equal(["space value.safetensors", "single'quote", "a&b;$(echo injected)", "line1\nline2", ""])
+        expect(raw.len()).to_equal(6)
+        expect(raw[0]).to_equal("tool.exe")
+        expect(raw[5]).to_equal("")
+
+    it "dispatches safe native usage before any tensor loading":
+        expect(run_main_args(["tool.exe"], true)).to_equal(2)
+        expect(run_main_args([])).to_equal(2)
+
+    it "dispatches native JSON usage and normalized JSON usage equally":
+        expect(run_main_args(["tool.exe", "--json"], true)).to_equal(0)
+        expect(run_main_args(["--json"])).to_equal(0)

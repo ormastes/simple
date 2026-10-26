@@ -17,10 +17,27 @@ fail() {
 
 file_mode() {
     if mode=$(stat -c %a "$1" 2>/dev/null); then
-        printf '%s\n' "$mode"
+        :
     else
-        stat -f %Lp "$1"
+        mode=$(stat -f %Lp "$1")
     fi
+    # MSYS/MinGW/Cygwin represent chmod 0400/0500 as 0444/0555. Those modes
+    # preserve the invariant tested here (read-only, with seed executability)
+    # while granting read/execute bits to the Windows ACL view.
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            case "$mode" in
+                444) mode=400 ;;
+                555) mode=500 ;;
+            esac
+            if [ -d "$1" ] && [ "$mode" = 755 ]; then
+                # MSYS ignores chmod on directories; 0755 still leaves the
+                # owner writable, which is the publication-staging invariant.
+                mode=700
+            fi
+            ;;
+    esac
+    printf '%s\n' "$mode"
 }
 
 make_tuple() {
@@ -231,6 +248,28 @@ cmp "$newlayout/libsimple_runtime.a" \
     fail "runtime archive bytes changed during alias projection"
 [ "$(file_mode "$test_tmp/newlayout-out/deps/libsimple_runtime.a")" = 400 ] ||
     fail "new-layout runtime archive was not frozen read-only"
+
+# The MSVC static runtime archive follows the same Cargo profile-root layout
+# even though its frozen generation name uses the .lib spelling.
+msvc_newlayout="$test_tmp/msvc-newlayout"
+mkdir -p "$msvc_newlayout/build/spl_hosted_runtime/8325cc995898e003/out"
+printf 'MZ seed\n' >"$msvc_newlayout/simple.exe"
+chmod 755 "$msvc_newlayout/simple.exe"
+printf 'native\n' >"$msvc_newlayout/simple_native_all.lib"
+printf 'backfill\n' >"$msvc_newlayout/simple_compiler_backfill.lib"
+printf 'runtime-static\n' >"$msvc_newlayout/simple_runtime.lib"
+printf 'hosted-runtime\n' \
+    >"$msvc_newlayout/build/spl_hosted_runtime/8325cc995898e003/out/libspl_hosted_runtime-8325cc995898e003.rlib"
+bootstrap_stage3_copy_seed_tuple "$msvc_newlayout" "$test_tmp/msvc-newlayout-out" \
+    simple.exe simple_native_all.lib simple_compiler_backfill.lib x86_64-pc-windows-msvc ||
+    fail "MSVC Cargo profile-root runtime layout was rejected"
+[ ! -e "$msvc_newlayout/deps" ] ||
+    fail "MSVC profile-root fixture unexpectedly grew a deps/ directory"
+[ -f "$test_tmp/msvc-newlayout-out/deps/simple_runtime.lib" ] ||
+    fail "MSVC runtime archive was not projected into deps/ from profile root"
+cmp "$msvc_newlayout/simple_runtime.lib" \
+    "$test_tmp/msvc-newlayout-out/deps/simple_runtime.lib" >/dev/null ||
+    fail "MSVC runtime archive bytes changed during alias projection"
 
 # Mixed layout: both spellings present; the newest candidate wins regardless
 # of which layout produced it, and only the winner is projected.

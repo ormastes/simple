@@ -197,6 +197,9 @@ def main():
             root_exit_active_count = "not-observed"
             root_exit_elapsed_ms = "not-observed"
             root_exit_members = "not-observed"
+            first_root_exit_active_count = "not-observed"
+            first_root_exit_elapsed_ms = "not-observed"
+            first_root_exit_members = "not-observed"
             log_hash = hashlib.sha256()
             started = time.monotonic()
             deadline = started + args.timeout_seconds
@@ -242,25 +245,37 @@ def main():
                 # drained every byte a contained process can still produce.
                 root_done = wait(process.process, 0) == 0
                 job_active = active_processes()
+                # Observe first exit without changing cleanup-policy receipts.
+                if root_done and first_root_exit_elapsed_ms == "not-observed":
+                    first_root_exit_active_count = job_active
+                    first_root_exit_elapsed_ms = int((time.monotonic() - started) * 1000)
+                    first_root_exit_members = member_diagnostics()
                 if root_done and job_active and args.root_exit_policy == "terminate-job":
                     # Synchronous Cargo can exit while an orphaned MSVC
                     # telemetry process remains in its Job with our pipe open.
-                    # Its own exit code is already final; stop only this Job's
-                    # remnants, then drain the bytes already queued below.
+                    # Its own exit code is already final. Give children the
+                    # configured shutdown grace before treating them as leaks;
+                    # stop only remnants still alive after that grace, then
+                    # drain the bytes already queued below.
                     native = wt.DWORD()
                     require(exit_code(process.process, ct.byref(native)), "read child exit before job cleanup")
                     native_status = native.value
-                    root_exit_active_count = job_active
-                    root_exit_elapsed_ms = int((time.monotonic() - started) * 1000)
-                    root_exit_members = member_diagnostics()
-                    require(terminate_job(job, 125), "terminate root-exit job remnants")
-                    job_remnants_terminated = True
-                    cleanup_deadline = min(deadline, time.monotonic() + 10)
-                    while active_processes():
-                        if time.monotonic() >= cleanup_deadline:
-                            raise RuntimeError("root-exit job cleanup deadline")
-                        time.sleep(0.01)
-                    job_active = 0
+                    grace_deadline = min(deadline, time.monotonic() + args.term_grace_seconds)
+                    while job_active and time.monotonic() < grace_deadline:
+                        time.sleep(min(0.01, max(0.001, grace_deadline - time.monotonic())))
+                        job_active = active_processes()
+                    if job_active:
+                        root_exit_active_count = job_active
+                        root_exit_elapsed_ms = int((time.monotonic() - started) * 1000)
+                        root_exit_members = member_diagnostics()
+                        require(terminate_job(job, 125), "terminate root-exit job remnants")
+                        job_remnants_terminated = True
+                        cleanup_deadline = min(deadline, time.monotonic() + 10)
+                        while active_processes():
+                            if time.monotonic() >= cleanup_deadline:
+                                raise RuntimeError("root-exit job cleanup deadline")
+                            time.sleep(0.01)
+                        job_active = 0
                 job_done = root_done and not job_active
                 available = wt.DWORD()
                 if not peek(read_handle, None, 0, None, ct.byref(available), None):
@@ -320,6 +335,9 @@ def main():
             "root_exit_active_count": root_exit_active_count,
             "root_exit_elapsed_ms": root_exit_elapsed_ms,
             "root_exit_members": root_exit_members,
+            "first_root_exit_active_count": first_root_exit_active_count,
+            "first_root_exit_elapsed_ms": first_root_exit_elapsed_ms,
+            "first_root_exit_members": first_root_exit_members,
             "log_leaf": args.log_leaf, "log_sha256": log_hash.hexdigest(),
             "helper_sha256": args.helper_sha256,
             "command_environment": args.command_environment,

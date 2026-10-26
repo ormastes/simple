@@ -55,6 +55,7 @@ static EXTERN_DISPATCH: LazyLock<HashMap<&'static str, ExternHandler>> = LazyLoc
 pub mod common;
 pub mod conversion;
 pub mod dl_compat;
+pub mod windows_file_abi;
 pub mod process;
 pub mod pty;
 pub mod time;
@@ -3462,6 +3463,11 @@ pub(crate) fn call_extern_function_with_values(
     // doc/08_tracking/bug/interpreter_extern_registration_wiring_clobbered_2026-08-17.md.)
     if capability_gap::matches(name) {
         return capability_gap::dispatch(name);
+    }
+
+    // Exact typed Win64 file ABI, before the generic dynamic fallback.
+    if let Some(result) = windows_file_abi::dispatch(name, &evaluated) {
+        return result;
     }
 
     if let Some(result) = dynamic_sffi::try_call_dynamic(name, &evaluated) {

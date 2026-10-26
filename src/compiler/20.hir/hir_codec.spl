@@ -16,7 +16,7 @@
 #   encode(decode(encode(m))) == encode(m)  byte for byte, and a build made
 #   from decoded modules is byte-identical to one made in process.
 
-use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_types.{HirModule, HirType, SymbolKind}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader,
     FLAT_POOL_CODEC_VERSION}
 use compiler.hir.hir_codec_support.{HirCodecWriter,
@@ -25,7 +25,7 @@ use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
 use std.common.encoding.utf8.{text_byte_len}
 use std.common.crypto.sha256.{sha256_text}
 
-val HIR_CODEC_VERSION: text = "spl-hircodec-v3"
+val HIR_CODEC_VERSION: text = "spl-hircodec-v5-admitted-abi"
 val HIR_CANONICAL_CODEC_VERSION: text = "spl-hircodec-canonical-v2"
 val HIR_CANONICAL_CODEC_RULES_V1: text =
     "nil-before-present;i64-signed;symbol-id-signed;text-unsigned-utf8;" +
@@ -60,9 +60,59 @@ fn hir_canonical_codec_generated_available_v1() -> bool:
 
 # "" when the module carries a payload the codec refuses (see
 # hir_codec_support.spl); `hir_module_encode_reason` names it.
+# Ordinary HIR cache metadata extension. The generated SymbolTable codec
+# already carries each symbol's Function type; store only the admitted ids.
+# No second HirType graph or module-local id from another provider is created.
+fn hir_codec_admitted_abis_encode_v1(w: HirCodecWriter, module: HirModule):
+    val ids = module.symbols.admitted_function_abis.keys().sorted()
+    w.put_i64(ids.len())
+    for id in ids:
+        if id < 0 or not module.symbols.symbols.has(id):
+            w.reject("admitted-function-abi-symbol-invalid")
+            return
+        val symbol = module.symbols.symbols[id]
+        if symbol.kind != SymbolKind.Function or symbol.type_ == nil:
+            w.reject("admitted-function-abi-symbol-invalid")
+            return
+        val admitted = module.symbols.admitted_function_abis[id]
+        if admitted.kind != symbol.type_!.kind:
+            w.reject("admitted-function-abi-type-mismatch")
+            return
+        match admitted.kind:
+            case Function(_, _, _): ()
+            case _:
+                w.reject("admitted-function-abi-type-invalid")
+                return
+        w.put_i64(id)
+
+fn hir_codec_admitted_abis_decode_v1(r: FlatPoolReader, module: HirModule) -> bool:
+    val count_text = r.next()
+    val count = count_text.to_i64() ?? -1
+    if not r.ok or count < 0 or count > module.symbols.symbols.len() or count_text != count.to_text():
+        return false
+    var admitted: Dict<i64, HirType> = {}
+    var previous: i64 = -1
+    for index in 0..count:
+        val raw = r.next()
+        val id = raw.to_i64() ?? -1
+        if not r.ok or id <= previous or raw != id.to_text(): return false
+        if not module.symbols.symbols.has(id): return false
+        val symbol = module.symbols.symbols[id]
+        if symbol.kind != SymbolKind.Function or symbol.type_ == nil: return false
+        match symbol.type_!.kind:
+            case Function(_, _, _): ()
+            case _: return false
+        admitted[id] = symbol.type_!
+        previous = id
+    # Publish only after the complete extension validates. The types belong
+    # to the decoded module itself, with the same lifetime as its symbols.
+    module.symbols.admitted_function_abis = admitted
+    true
+
 fn hir_module_encode(module: HirModule) -> text:
     var w = HirCodecWriter.create()
     hc_enc_hir_module(w, module)
+    if w.ok: hir_codec_admitted_abis_encode_v1(w, module)
     if not w.ok:
         return ""
     hir_codec_header() + "\n" + w.finish()
@@ -73,6 +123,8 @@ fn hir_module_encode(module: HirModule) -> text:
 fn hir_module_encode_canonical(
     module: HirModule,
 ) -> Result<text, HirDecodeError>:
+    if module.symbols.admitted_function_abis.len() > 0:
+        return Err(HirDecodeError.Unavailable("canonical_admitted_abi_extension_unavailable"))
     if not hir_canonical_codec_generated_available_v1():
         return Err(HirDecodeError.Unavailable(
             "canonical_codec_generator_stale"))
@@ -92,6 +144,7 @@ fn hir_module_encode_canonical(
 fn hir_module_encode_reason(module: HirModule) -> text:
     var w = HirCodecWriter.create()
     hc_enc_hir_module(w, module)
+    if w.ok: hir_codec_admitted_abis_encode_v1(w, module)
     if w.ok:
         return ""
     w.unsupported
@@ -108,7 +161,7 @@ fn hir_module_decode(blob: text) -> HirModule?:
         return nil
     var r = FlatPoolReader.new(blob.substring(nl + 1, blob.len()))
     val module = hc_dec_hir_module(r)
-    if not r.ok:
+    if not r.ok or not hir_codec_admitted_abis_decode_v1(r, module):
         return nil
     if r.pos != r.lines.len() - 1 or r.lines[r.pos] != "":
         return nil

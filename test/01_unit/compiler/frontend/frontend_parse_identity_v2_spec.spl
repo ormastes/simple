@@ -1,0 +1,51 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.core.parser.{parser_path_is_script}
+use compiler.common.cache.frontend_parse_identity_v2.*
+
+describe "exact frontend parser identity V2":
+    it "binds actual parser bytes and invalidates opposite-generation input":
+        val policy = frontend_parse_policy_digest_v2(true, "reference")
+        val a = frontend_parse_key_from_digests_v2(sha256_text("fn a(): 1\n"), policy)
+        val b = frontend_parse_key_from_digests_v2(sha256_text("fn b(): 2\n"), policy)
+        expect(a.len()).to_equal(64)
+        expect(a == b).to_equal(false)
+
+    it "uses the actual parser script warning policy and advisory identity":
+        val script = frontend_parse_policy_digest_v2(parser_path_is_script("test/fixture.spl"), "reference")
+        val application = frontend_parse_policy_digest_v2(parser_path_is_script("src/app/fixture.spl"), "reference")
+        val advisory = frontend_parse_policy_digest_v2(true, "changed-advisory")
+        expect(script == application).to_equal(false)
+        expect(script == advisory).to_equal(false)
+
+    it "shares content keys while keeping raw generation bindings distinct":
+        val parser = sha256_text("fn same(): 1\n")
+        val policy = frontend_parse_policy_digest_v2(true, "reference")
+        val key = frontend_parse_key_from_digests_v2(parser, policy)
+        val a = frontend_parse_identity_frame_v2(parser, policy, sha256_text("raw-a"), sha256_text("generation-a"))
+        val b = frontend_parse_identity_frame_v2(parser, policy, sha256_text("raw-b"), sha256_text("generation-b"))
+        expect(a == b).to_equal(false)
+        expect(frontend_parse_identity_valid_v2(a, key, true)).to_equal(true)
+        expect(frontend_parse_identity_valid_v2(b, key, true)).to_equal(true)
+
+    it "rejects missing raw authority for cross-phase publication":
+        val parser = sha256_text("fn same(): 1\n")
+        val policy = frontend_parse_policy_digest_v2(true, "reference")
+        val key = frontend_parse_key_from_digests_v2(parser, policy)
+        val local = frontend_parse_identity_frame_v2(parser, policy, "", "")
+        expect(frontend_parse_identity_valid_v2(local, key, false)).to_equal(true)
+        expect(frontend_parse_identity_valid_v2(local, key, true)).to_equal(false)
+
+    it "rejects malformed frames substituted keys and partial raw authority":
+        val parser = sha256_text("fn same(): 1\n")
+        val policy = frontend_parse_policy_digest_v2(true, "reference")
+        val key = frontend_parse_key_from_digests_v2(parser, policy)
+        val frame = frontend_parse_identity_frame_v2(parser, policy, sha256_text("raw"), sha256_text("generation"))
+        expect(frontend_parse_identity_valid_v2(frame + "|extra", key, true)).to_equal(false)
+        expect(frontend_parse_identity_valid_v2(frame, sha256_text("wrong-key"), true)).to_equal(false)
+        val partial = frontend_parse_identity_frame_v2(parser, policy, sha256_text("raw"), "")
+        expect(frontend_parse_identity_valid_v2(partial, key, false)).to_equal(false)
+
+    it "returns no key for absent digests rather than fabricating authority":
+        expect(frontend_parse_key_from_digests_v2("", "")).to_equal("")
+        expect(frontend_parse_identity_frame_v2("", "", "", "")).to_equal("")

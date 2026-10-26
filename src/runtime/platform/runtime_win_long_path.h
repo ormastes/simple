@@ -33,6 +33,7 @@
 
 #if defined(_WIN32)
 
+#include <stdio.h> /* rename: this header must compile before runtime.h. */
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>

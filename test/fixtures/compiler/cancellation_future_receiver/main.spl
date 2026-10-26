@@ -1,0 +1,44 @@
+# Real cancellation owner regression; requires native compile, link and run.
+use nogc_async_mut.async.cancellation.{CancellationToken, cancellation_token_new}
+use nogc_async_mut.async.future.{Future}
+use nogc_async_mut.async.poll.{Poll}
+
+fn main() -> i64:
+    var parent: CancellationToken = cancellation_token_new()
+    val child: CancellationToken = parent.child()
+    val grandchild: CancellationToken = child.child()
+    var unrelated: CancellationToken = cancellation_token_new()
+    val before: Future<bool> = grandchild.guard_future()
+    val before_poll: Poll<bool> = before.poll()
+    match before_poll:
+        case Poll.Pending: ()
+        case _: return 11
+
+    parent.cancel()
+    val after: Future<bool> = grandchild.guard_future()
+    val after_poll: Poll<bool> = after.poll()
+    match after_poll:
+        case Poll.Ready(value):
+            if not value: return 12
+        case _: return 13
+
+    # guard_future is a poll-once snapshot, not a subscribed future.
+    val retained_poll: Poll<bool> = before.poll()
+    match retained_poll:
+        case Poll.Pending: ()
+        case _: return 14
+    val unrelated_before: Future<bool> = unrelated.guard_future()
+    val unrelated_poll: Poll<bool> = unrelated_before.poll()
+    match unrelated_poll:
+        case Poll.Pending: ()
+        case _: return 15
+
+    unrelated.cancel()
+    val own_after: Future<bool> = unrelated.guard_future()
+    val own_poll: Poll<bool> = own_after.poll()
+    match own_poll:
+        case Poll.Ready(value):
+            if not value: return 16
+        case _: return 17
+    print "cancellation-future-receiver-pass"
+    0

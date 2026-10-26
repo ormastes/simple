@@ -21,7 +21,8 @@
 # acceptable answer to any doubt.
 #
 # KEYING
-#   sha256(source file bytes)  -- the module's own content
+#   versioned SHA256(exact parser-input digest + warning/advisory policy digest)
+#   -- computed by frontend after conditional/domain/advisory processing
 #   + the scope the DRIVER publishes in SIMPLE_FRONTEND_CACHE_SCOPE, which
 #     folds native_build_cache_scope_key (lane from SIMPLE_CACHE_SCOPE,
 #     backend, cpu, features, opt) together with the compiler SOURCE
@@ -32,6 +33,8 @@
 # No scope published => the cache is OFF. A frontend that cannot see the
 # driver's scope has no way to know what it would be sharing entries with, and
 # guessing is exactly how a stale-parser hit becomes a wrong module.
+# Frozen raw-source SHA/generation is a separate driver/M2 receipt binding;
+# it does not replace this shareable parser-input identity.
 
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 use compiler.frontend.cache_dir_evict.{cache_dir_evict_due, cache_dir_evict_to_cap, cache_dir_max_bytes}
@@ -41,13 +44,14 @@ use std.io_runtime.{
     file_move_cross_device, file_delete
 }
 use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.frontend_parse_identity_v2.{frontend_parse_identity_valid_v2}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Entry format version. Bumping this invalidates every stored entry without
 # anyone having to delete a directory: an old entry's first line no longer
 # matches and is a miss.
-val FRONTEND_CACHE_ENTRY_VERSION: text = "spl-fecache-v1"
+val FRONTEND_CACHE_ENTRY_VERSION: text = "spl-fecache-v2"
 
 var _fe_cache_scope_memo: text = "@@unset@@"
 var _fe_cache_hits: i64 = 0
@@ -87,9 +91,9 @@ pub fn frontend_parse_cache_dir() -> text:
     val lane_name = if lane == "": "default" else: lane
     "build/bootstrap/native_cache/{lane_name}/frontend"
 
-# The key is the module's own content hash; the scope rides in the entry
-# header and in the directory, not in the filename, so a scope mismatch is a
-# loud version mismatch rather than a silent miss on a differently-named file.
+# Legacy raw-file helper retained for callers outside the exact-input frontend.
+# Production frontend lookup/store uses frontend_parse_key_from_digests_v2 and
+# never calls this live disk hasher. Legacy filenames are not M3 V2 evidence.
 pub fn frontend_parse_cache_key(file_path: text) -> text:
     if not file_exists(file_path):
         return ""
@@ -130,11 +134,14 @@ pub fn frontend_parse_cache_load(key: text) -> text:
 pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
     if key == "" or blob == "" or not frontend_parse_cache_enabled():
         return false
+    frontend_parse_cache_store_record_v2(key, [frontend_parse_cache_header(), blob].join("\n"))
+
+fn frontend_parse_cache_store_record_v2(key: text, record: text) -> bool:
     val dir = frontend_parse_cache_dir()
     val made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
     val tmp = final_path + ".{getpid()}.tmp"
-    if not file_write_exact(tmp, frontend_parse_cache_header() + "\n" + blob):
+    if not file_write_exact(tmp, record):
         frontend_parse_cache_note_store_failure(dir, made)
         return false
     if file_move_cross_device(tmp, final_path):
@@ -194,3 +201,42 @@ export frontend_parse_cache_load, frontend_parse_cache_store
 export frontend_parse_cache_store_phase3_immutable_v1
 export frontend_parse_cache_note_hit, frontend_parse_cache_note_miss
 export frontend_parse_cache_hits, frontend_parse_cache_misses
+
+# The ordinary header still authenticates compiler scope and pool codec. The
+# second line binds this payload to exact parser input and policy.
+pub fn frontend_parse_cache_load_bound_v2(key: text) -> (text, text):
+    if key == "" or not frontend_parse_cache_enabled():
+        return ("", "")
+    val raw = match file_read_result(frontend_parse_cache_path(key)):
+        case Ok(content): content
+        case Err(_): return ("", "")
+    val header_end = raw.index_of("\n")
+    if header_end < 0 or raw.substring(0, header_end) != frontend_parse_cache_header():
+        return ("", "")
+    val identity_end = raw.index_of("\n", header_end + 1)
+    if identity_end < 0 or identity_end + 1 >= raw.len():
+        return ("", "")
+    val identity = raw.substring(header_end + 1, identity_end)
+    if not frontend_parse_identity_valid_v2(identity, key, false):
+        return ("", "")
+    (identity, raw.substring(identity_end + 1, raw.len()))
+
+pub fn frontend_parse_cache_store_bound_v2(key: text, identity: text, blob: text) -> bool:
+    if (key == "" or blob == "" or not frontend_parse_cache_enabled() or
+            not frontend_parse_identity_valid_v2(identity, key, false)):
+        return false
+    frontend_parse_cache_store_record_v2(
+        key, [frontend_parse_cache_header(), identity, blob].join("\n"))
+
+export frontend_parse_cache_load_bound_v2, frontend_parse_cache_store_bound_v2
+
+pub fn frontend_parse_cache_record_header_valid_v2(record: text) -> bool:
+    val nl = record.index_of("\n")
+    nl > 0 and record.substring(0, nl) == frontend_parse_cache_header()
+
+export frontend_parse_cache_record_header_valid_v2
+
+pub fn frontend_parse_cache_current_header_v2() -> text:
+    frontend_parse_cache_header()
+
+export frontend_parse_cache_current_header_v2

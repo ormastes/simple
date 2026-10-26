@@ -1,0 +1,135 @@
+use std.spec.*
+use std.common.source_change.contracts_v1.{SourceEditV1, EditOriginV1}
+use std.common.source_change.edit_transition_v1.{source_change_validate_edit_bytes_v1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+fn transition_edit(before: [u8], start: u64, finish: u64, payload: [u8]) -> SourceEditV1:
+    SourceEditV1(path: "src/example.spl", old_snapshot: sha256_u8_hex(before),
+        old_start_byte: start, old_end_byte: finish,
+        new_bytes_digest: sha256_u8_hex(payload), new_byte_len: payload.len() as u64,
+        origin: EditOriginV1.Ide, transaction_id: "transaction-1")
+
+describe "REQ-005 exact observed byte transition":
+    it "should validate a captured replacement without rereading source":
+        step("Validate the actual before, replacement and after buffers")
+        val before: [u8] = [97, 98, 99]
+        val payload: [u8] = [120, 121]
+        val edit = transition_edit(before, 1, 2, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [97, 120, 121, 99]).is_ok()).to_equal(true)
+
+    it "should permit an insertion at the exact byte boundary":
+        step("Insert into a captured empty byte buffer")
+        val before: [u8] = []
+        val payload: [u8] = [97]
+        val edit = transition_edit(before, 0, 0, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [97]).is_ok()).to_equal(true)
+
+    it "should reject a claim with a different captured base identity":
+        step("Compare the edit base with the capture owner's selected generation")
+        val before: [u8] = [97]
+        val payload: [u8] = [98]
+        val edit = transition_edit(before, 0, 1, payload)
+        expect(source_change_validate_edit_bytes_v1("other-generation", before,
+            edit, payload, [98]).unwrap_err()).to_equal("source-change-base-mismatch")
+
+describe "REQ-007 raw byte positions and payload identity":
+    it "should retain CRLF and multibyte UTF8 bytes exactly":
+        step("Replace two UTF8 bytes without normalizing the CRLF suffix")
+        val before: [u8] = [97, 195, 169, 13, 10]
+        val payload: [u8] = [195, 168]
+        val edit = transition_edit(before, 1, 3, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [97, 195, 168, 13, 10]).is_ok()).to_equal(true)
+
+    it "should validate byte-level changes without claiming parser boundary reuse":
+        step("Observe an exact byte patch inside a multibyte sequence")
+        val before: [u8] = [195, 169]
+        val payload: [u8] = [168]
+        val edit = transition_edit(before, 1, 2, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [195, 168]).is_ok()).to_equal(true)
+
+    it "should reject a payload whose digest differs from the edit record":
+        step("Compare the record with actual observed replacement bytes")
+        val before: [u8] = [97]
+        val payload: [u8] = [98]
+        val edit = transition_edit(before, 0, 1, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, [99], [99]).unwrap_err()).to_equal("source-change-payload-digest-mismatch")
+
+describe "REQ-006 malformed or incomplete observed transition":
+    it "should validate deleting the full captured source":
+        step("Check deletion as an empty resulting byte buffer")
+        val before: [u8] = [97, 98]
+        val payload: [u8] = []
+        val edit = transition_edit(before, 0, 2, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, []).is_ok()).to_equal(true)
+
+    it "should reject an end outside the source without clamping it":
+        step("Reject invalid observed coordinates before arithmetic or indexing")
+        val before: [u8] = [97]
+        val payload: [u8] = []
+        val edit = transition_edit(before, 0, 2, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, []).unwrap_err()).to_equal("source-change-range-invalid")
+
+    it "should reject an inverted range without unsigned subtraction":
+        step("Check the half-open range order before calculating its extent")
+        val before: [u8] = [97, 98]
+        val payload: [u8] = []
+        val edit = transition_edit(before, 2, 1, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, []).unwrap_err()).to_equal("source-change-range-invalid")
+
+describe "REQ-023 changed untouched bytes must not be concealed":
+    it "should accept replacing the final byte of a source":
+        step("Check a suffix-empty replacement")
+        val before: [u8] = [97, 98]
+        val payload: [u8] = [99]
+        val edit = transition_edit(before, 1, 2, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [97, 99]).is_ok()).to_equal(true)
+
+    it "should reject normalized line endings outside the changed range":
+        step("Compare untouched suffix bytes with the actual captured output")
+        val before: [u8] = [97, 13, 10]
+        val payload: [u8] = [98]
+        val edit = transition_edit(before, 0, 1, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [98, 10]).unwrap_err()).to_equal("source-change-result-length-mismatch")
+
+    it "should reject unrelated same-length edits in the retained prefix":
+        step("Reject a source transition with undeclared changes")
+        val before: [u8] = [97, 98, 99]
+        val payload: [u8] = [120]
+        val edit = transition_edit(before, 1, 2, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [90, 120, 99]).unwrap_err()).to_equal("source-change-untouched-prefix-mismatch")
+
+    it "should reject unrelated same-length edits in the retained suffix":
+        step("Compare the declared edit with unchanged trailing bytes")
+        val before: [u8] = [97, 98, 99]
+        val payload: [u8] = [120]
+        val edit = transition_edit(before, 1, 2, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [97, 120, 90]).unwrap_err()).to_equal("source-change-untouched-suffix-mismatch")
+
+    it "should reject observed output that omits the claimed replacement":
+        step("Compare observed replacement bytes, not only the record digest")
+        val before: [u8] = [97]
+        val payload: [u8] = [98]
+        val edit = transition_edit(before, 0, 1, payload)
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [99]).unwrap_err()).to_equal("source-change-replacement-mismatch")
+
+    it "should reject a declared payload length that was truncated":
+        step("Check actual replacement length before source offset arithmetic")
+        val before: [u8] = [97]
+        val payload: [u8] = [98]
+        var edit = transition_edit(before, 0, 1, payload)
+        edit.new_byte_len = 2
+        expect(source_change_validate_edit_bytes_v1(edit.old_snapshot, before,
+            edit, payload, [98]).unwrap_err()).to_equal("source-change-payload-length-mismatch")

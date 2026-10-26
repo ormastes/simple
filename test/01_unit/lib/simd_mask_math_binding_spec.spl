@@ -1,0 +1,84 @@
+# @req REQ-SIMD-NATIVE-BINDING-1
+# Actual public SIMD methods; no local replacement implementation or skips.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.simd.vector.{Vector}
+use std.simd.fixed.{FixedVec, fixedvec_from_array}
+use std.simd.mask.{Mask}
+use std.common.math.math.{math_sqrt}
+
+fn retain_comparison_mask<V: Vector>(value: Mask<V>) -> Mask<V>:
+    Mask.from_cmp(value)
+
+describe "SIMD native mask and scalar math bindings":
+    it "keeps comparison mask bits and lane count for f64 vectors":
+        step("invoke the real generic identity constructor on a concrete comparison")
+        val left: FixedVec<f64> = fixedvec_from_array([1.0, 2.0, 3.0, 4.0])
+        val right: FixedVec<f64> = fixedvec_from_array([1.0, 9.0, 3.0, 8.0])
+        val original: Mask<FixedVec<f64>> = left.cmp_eq(right)
+        val retained: Mask<FixedVec<f64>> = retain_comparison_mask(original)
+        expect(retained.bits).to_equal(5u64)
+        expect(retained.lane_count).to_equal(4)
+        expect(retained.to_bits()).to_equal(original.to_bits())
+        expect(retained.lane_active(0)).to_equal(true)
+        expect(retained.lane_active(1)).to_equal(false)
+
+    it "keeps a different integer vector mask specialization":
+        step("the typed result remains Mask<FixedVec<i32>>")
+        val left: FixedVec<i32> = fixedvec_from_array([1i32, 2i32])
+        val right: FixedVec<i32> = fixedvec_from_array([8i32, 2i32])
+        val retained: Mask<FixedVec<i32>> = retain_comparison_mask(left.cmp_eq(right))
+        expect(retained.bits).to_equal(2u64)
+        expect(retained.lane_count).to_equal(2)
+
+    it "computes f64 square roots and reciprocal square roots lane by lane":
+        step("exact binary results exercise both public methods")
+        val values: FixedVec<f64> = fixedvec_from_array([1.0, 4.0, 16.0, 64.0])
+        expect(values.sqrt().to_array()).to_equal([1.0, 2.0, 4.0, 8.0])
+        expect(values.recip_sqrt().to_array()).to_equal([1.0, 0.5, 0.25, 0.125])
+
+    it "computes f32 square roots and reciprocal square roots lane by lane":
+        step("keep the result and reciprocal arithmetic in the f32 lane type")
+        val inputs: [f32] = [1.0, 4.0, 16.0, 64.0]
+        val roots: [f32] = [1.0, 2.0, 4.0, 8.0]
+        val inverse: [f32] = [1.0, 0.5, 0.25, 0.125]
+        val values: FixedVec<f32> = fixedvec_from_array(inputs)
+        expect(values.sqrt().to_array()).to_equal(roots)
+        expect(values.recip_sqrt().to_array()).to_equal(inverse)
+
+    it "matches f64 scalar zero negative and NaN behavior":
+        step("derive exceptional values through the real scalar math facade")
+        val nan = math_sqrt(-1.0)
+        expect(nan == nan).to_equal(false)
+        val values: FixedVec<f64> = fixedvec_from_array([0.0, -1.0, nan, 2.0])
+        val roots = values.sqrt().to_array()
+        val inverse = values.recip_sqrt().to_array()
+        val zero = math_sqrt(0.0)
+        expect(roots[0]).to_equal(zero)
+        expect(inverse[0]).to_equal(1.0 / zero)
+        expect(roots[1] == roots[1]).to_equal(false)
+        expect(roots[2] == roots[2]).to_equal(false)
+        expect(inverse[1] == inverse[1]).to_equal(false)
+        expect(inverse[2] == inverse[2]).to_equal(false)
+        expect(roots[3]).to_equal(math_sqrt(2.0))
+        expect(inverse[3]).to_equal(1.0 / math_sqrt(2.0))
+
+    it "matches f32 scalar conversion including zero negative and NaN":
+        step("test rounding at a non-perfect square as well as exceptional lanes")
+        val nan: f32 = math_sqrt(-1.0) as f32
+        expect(nan == nan).to_equal(false)
+        val inputs: [f32] = [0.0, -1.0, nan, 2.0]
+        val values: FixedVec<f32> = fixedvec_from_array(inputs)
+        val roots = values.sqrt().to_array()
+        val inverse = values.recip_sqrt().to_array()
+        val zero: f32 = math_sqrt(0.0) as f32
+        val one: f32 = 1.0
+        val root_two: f32 = math_sqrt(2.0) as f32
+        expect(roots[0]).to_equal(zero)
+        expect(inverse[0]).to_equal(one / zero)
+        expect(roots[1] == roots[1]).to_equal(false)
+        expect(roots[2] == roots[2]).to_equal(false)
+        expect(inverse[1] == inverse[1]).to_equal(false)
+        expect(inverse[2] == inverse[2]).to_equal(false)
+        expect(roots[3]).to_equal(root_two)
+        expect(inverse[3]).to_equal(one / root_two)

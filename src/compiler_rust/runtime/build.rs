@@ -8,6 +8,8 @@ use std::process::Command;
 mod runtime_export_scan;
 #[path = "src/runtime_signature_scan.rs"]
 mod runtime_signature_scan;
+#[path = "src/selected_c_inputs.rs"]
+mod selected_c_inputs;
 
 fn main() {
     emit_cdylib_soname();
@@ -415,6 +417,13 @@ fn compile_c_runtime_sources() {
         c_sources.push("vendor/liburing/src/syscall.c");
     }
 
+    // Validate the complete producer-selected set before cc probes or compilation.
+    // Missing inputs must never silently create a partial or empty runtime archive.
+    let target = env::var("TARGET").unwrap_or_else(|_| target_os.clone());
+    let selected_paths = selected_c_inputs::require_selected_c_inputs(
+        &runtime_c_dir, &c_sources, &target,
+    ).unwrap_or_else(|error| panic!("{}", error));
+
     let mut build = cc::Build::new();
     build.define("SIMPLE_RUNTIME_RUST_COLLECTION_CAPTURE_PROVIDER", None);
     build.opt_level(2).warnings(false).cargo_metadata(false);
@@ -498,11 +507,8 @@ fn compile_c_runtime_sources() {
         build.flag_if_supported("/std:c11");
         build.flag_if_supported("/experimental:c11atomics");
     }
-    for source in &c_sources {
-        let src_path = runtime_c_dir.join(source);
-        if src_path.exists() {
-            build.file(src_path);
-        }
+    for src_path in selected_paths {
+        build.file(src_path);
     }
     build.define("SIMPLE_RUNTIME_RUST_SDL_PROVIDER", None);
     build.compile("runtime_sffi_c");

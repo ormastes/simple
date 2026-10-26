@@ -181,8 +181,12 @@ impl NativeLinker {
 
     /// Get the linker command name for a specific target.
     pub fn command_for_target(&self, target: &Target) -> &'static str {
+        self.command_for_flavor(target.linker_flavor())
+    }
+
+    fn command_for_flavor(&self, flavor: LinkerFlavor) -> &'static str {
         match self {
-            Self::Lld => match target.linker_flavor() {
+            Self::Lld => match flavor {
                 LinkerFlavor::Msvc => "lld-link",
                 LinkerFlavor::WasmLd => "wasm-ld",
                 LinkerFlavor::Gnu => "ld.lld",
@@ -272,18 +276,40 @@ impl NativeLinker {
     ///
     /// Returns `Ok(())` on success, or a `LinkerError` on failure.
     pub fn link(&self, objects: &[PathBuf], output: &Path, options: &LinkOptions) -> LinkerResult<()> {
-        // Verify all input files exist
+        self.link_for_target(objects, output, options, &Target::host())
+    }
+
+    /// Preserve the selected target through executable and argument selection.
+    pub fn link_for_target(&self, objects: &[PathBuf], output: &Path,
+        options: &LinkOptions, target: &Target) -> LinkerResult<()> {
         for obj in objects {
-            if !obj.exists() {
-                return Err(LinkerError::ObjectNotFound(obj.clone()));
+            if !obj.exists() { return Err(LinkerError::ObjectNotFound(obj.clone())); }
+        }
+        let mut cmd = self.build_link_command(objects, output, options, target)?;
+        if std::env::var("SIMPLE_LINKER_DEBUG").is_ok() || options.verbose {
+            eprintln!("Link command: {:?}", cmd);
+        }
+        let result = cmd.output()?;
+        if result.status.success() { Ok(()) }
+        else { self.classify_link_error(result.status.code().unwrap_or(-1),
+            &String::from_utf8_lossy(&result.stderr)) }
+    }
+
+    /// Build arguments without launching a process; regression tests exercise
+    /// the same command object used by the real linker invocation.
+    fn build_link_command(&self, objects: &[PathBuf], output: &Path,
+        options: &LinkOptions, target: &Target) -> LinkerResult<Command> {
+        let flavor = target.linker_flavor();
+        if flavor == LinkerFlavor::Msvc {
+            if !matches!(self, Self::Msvc | Self::Lld) {
+                return Err(LinkerError::InvalidConfig(format!("{} does not support the MSVC argument dialect", self.name())));
             }
+            return Ok(Self::build_msvc_command(self.command_for_flavor(flavor), objects, output, options));
         }
-
         if matches!(self, Self::Msvc) {
-            return self.link_msvc(objects, output, options);
+            return Err(LinkerError::InvalidConfig("link.exe requires the MSVC target ABI".into()));
         }
-
-        let mut cmd = Command::new(self.command());
+        let mut cmd = Command::new(self.command_for_flavor(flavor));
 
         // Add output file
         cmd.arg("-o").arg(output);
@@ -389,21 +415,7 @@ impl NativeLinker {
             cmd.arg("-e").arg(entry);
         }
 
-        // Debug: emit full command when SIMPLE_LINKER_DEBUG is set
-        if std::env::var("SIMPLE_LINKER_DEBUG").is_ok() || options.verbose {
-            eprintln!("Link command: {:?}", cmd);
-        }
-
-        // Execute linker
-        let output_result = cmd.output()?;
-
-        if output_result.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
-            let exit_code = output_result.status.code().unwrap_or(-1);
-            self.classify_link_error(exit_code, &stderr)
-        }
+        Ok(cmd)
     }
 
     /// Check if a library path contains only Simple runtime libraries
@@ -425,15 +437,16 @@ impl NativeLinker {
             .any(|prefix| path.starts_with(prefix))
     }
 
-    /// MSVC-specific link invocation using /OUT:, /LIBPATH:, etc.
-    fn link_msvc(&self, objects: &[PathBuf], output: &Path, options: &LinkOptions) -> LinkerResult<()> {
-        let mut cmd = Command::new(self.command());
+    /// One COFF argument owner for both link.exe and the lld-link frontend.
+    fn build_msvc_command(command: &str, objects: &[PathBuf], output: &Path,
+        options: &LinkOptions) -> Command {
+        let mut cmd = Command::new(command);
 
         // MSVC uses /OUT: for output
         cmd.arg(format!("/OUT:{}", output.display()));
 
         // Add MSVC-specific flags
-        self.add_common_flags(&mut cmd, options);
+        Self::Msvc.add_common_flags(&mut cmd, options);
 
         // Add object files
         for obj in objects {
@@ -442,7 +455,8 @@ impl NativeLinker {
 
         // Add libraries (MSVC uses name.lib, no -l prefix)
         for lib in &options.libraries {
-            cmd.arg(format!("{}.lib", lib));
+            if lib.to_ascii_lowercase().ends_with(".lib") { cmd.arg(lib); }
+            else { cmd.arg(format!("{}.lib", lib)); }
         }
 
         // Add library search paths (MSVC uses /LIBPATH:)
@@ -462,21 +476,7 @@ impl NativeLinker {
             cmd.arg(format!("/ENTRY:{}", entry));
         }
 
-        // Debug: emit full command when SIMPLE_LINKER_DEBUG is set
-        if std::env::var("SIMPLE_LINKER_DEBUG").is_ok() || options.verbose {
-            eprintln!("Link command: {:?}", cmd);
-        }
-
-        // Execute linker
-        let output_result = cmd.output()?;
-
-        if output_result.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
-            let exit_code = output_result.status.code().unwrap_or(-1);
-            self.classify_link_error(exit_code, &stderr)
-        }
+        cmd
     }
 
     /// Classify linker error output into specific error variants.
@@ -985,5 +985,84 @@ mod tests {
             NativeLinker::extract_multiple_definition(stderr3),
             Some("_bar".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod target_dialect_regressions {
+    use super::*;
+    use simple_common::target::TargetArch;
+    fn target(os: TargetOS, flavor: LinkerFlavor) -> Target {
+        let mut result = Target::new(TargetArch::X86_64, os);
+        result.linker_flavor_hint = Some(flavor);
+        result
+    }
+    fn arguments(command: &Command) -> Vec<String> {
+        command.get_args().map(|s| s.to_string_lossy().into_owned()).collect()
+    }
+    #[test]
+    fn windows_lld_command_uses_coff_dialect_for_every_structured_option() {
+        let options = LinkOptions { libraries: vec!["simple_runtime".into(), "Already.LIB".into()],
+            library_paths: vec![PathBuf::from("C:/SDK with spaces/lib")],
+            entry_point: Some("mainCRTStartup".into()), generate_map: true,
+            map_file: Some(PathBuf::from("C:/out with spaces/hello.map")),
+            strip: true, shared: true, pie: true, verbose: true,
+            extra_flags: vec!["/INCLUDE:actual_symbol".into()], ..Default::default() };
+        let command = NativeLinker::Lld.build_link_command(&[PathBuf::from("hello.obj")],
+            Path::new("C:/out with spaces/hello.exe"), &options,
+            &target(TargetOS::Windows,LinkerFlavor::Msvc)).unwrap();
+        assert_eq!(command.get_program(), "lld-link");
+        let args = arguments(&command);
+        for expected in ["/OUT:C:/out with spaces/hello.exe", "/MAP:C:/out with spaces/hello.map",
+            "/OPT:REF,ICF", "/DEBUG:NONE", "/DLL", "/VERBOSE", "hello.obj", "simple_runtime.lib",
+            "Already.LIB", "/LIBPATH:C:/SDK with spaces/lib", "/ENTRY:mainCRTStartup", "/INCLUDE:actual_symbol"] {
+            assert!(args.iter().any(|a|a==expected), "missing {expected}: {args:?}");
+        }
+        assert!(!args.iter().any(|a|a.starts_with('-')), "GNU argument in COFF command: {args:?}");
+        assert!(!args.contains(&"Already.LIB.lib".into()));
+    }
+    #[test]
+    fn explicit_msvc_keeps_link_exe_and_same_coff_argument_owner() {
+        let command=NativeLinker::Msvc.build_link_command(&[],Path::new("x.exe"),
+            &LinkOptions::default(),&target(TargetOS::Windows,LinkerFlavor::Msvc)).unwrap();
+        assert_eq!(command.get_program(),"link.exe");
+        assert_eq!(arguments(&command)[0],"/OUT:x.exe");
+    }
+    #[test]
+    fn linux_lld_uses_target_gnu_frontend_even_on_a_windows_host() {
+        let options=LinkOptions::new().library("simple_runtime").library_path("/target/lib")
+            .with_map("x.map").strip_symbols();
+        let command=NativeLinker::Lld.build_link_command(&[],Path::new("x"),&options,
+            &target(TargetOS::Linux,LinkerFlavor::Gnu)).unwrap();
+        assert_eq!(command.get_program(),"ld.lld");
+        let args=arguments(&command);
+        for item in ["-o","x","-Map=x.map","--strip-all","--gc-sections","-L","/target/lib","-lsimple_runtime"] {
+            assert!(args.iter().any(|a|a==item),"missing {item}: {args:?}");
+        }
+        assert!(!args.iter().any(|a|a.starts_with("/OUT:")));
+    }
+    #[test]
+    fn windows_gnu_abi_does_not_inherit_host_msvc_frontend() {
+        let command=NativeLinker::Lld.build_link_command(&[],Path::new("x.exe"),
+            &LinkOptions::default(),&target(TargetOS::Windows,LinkerFlavor::Gnu)).unwrap();
+        assert_eq!(command.get_program(),"ld.lld");
+        assert!(arguments(&command).contains(&"-o".into()));
+    }
+    #[test]
+    fn wasm_uses_wasm_frontend_instead_of_host_lld_link() {
+        let mut selected=target(TargetOS::None,LinkerFlavor::WasmLd);
+        selected.arch=TargetArch::Wasm32;
+        let command=NativeLinker::Lld.build_link_command(&[],Path::new("x.wasm"),
+            &LinkOptions::default(),&selected).unwrap();
+        assert_eq!(command.get_program(),"wasm-ld");
+    }
+    #[test]
+    fn incompatible_linker_family_is_rejected_before_any_process_launch() {
+        for linker in [NativeLinker::Mold,NativeLinker::Ld] {
+            assert!(linker.build_link_command(&[],Path::new("x.exe"),&LinkOptions::default(),
+                &target(TargetOS::Windows,LinkerFlavor::Msvc)).is_err());
+        }
+        assert!(NativeLinker::Msvc.build_link_command(&[],Path::new("x"),&LinkOptions::default(),
+            &target(TargetOS::Linux,LinkerFlavor::Gnu)).is_err());
     }
 }

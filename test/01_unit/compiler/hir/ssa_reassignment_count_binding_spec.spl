@@ -1,0 +1,32 @@
+# @req REQ-SSA-COUNT-IMPORT-1
+# UNRUN: uses the actual consumer, including valid LocalId zero.
+use std.spec.{describe, it, expect, step}
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirInst, MirInstKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_reassigned_locals_for_blocks}
+
+fn count_binding_const(id: i64, value: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Const(LocalId(id), MirConstValue.Int(value), MirType.i64()), span: nil)
+
+fn count_binding_block(id: i64, instructions: [MirInst]) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: instructions, terminator: MirTerminator.Ret(nil))
+
+describe "SSA reassignment consumer imports canonical count helper":
+    it "counts zero-id definitions across distinct blocks while excluding single writes":
+        step("the consumer must invoke local_count_increment on both first and repeated definitions")
+        val blocks = [
+            count_binding_block(0, [count_binding_const(0, 10), count_binding_const(37, 20)]),
+            count_binding_block(1, [count_binding_const(0, 30)])]
+        val reassigned = ssa_reassigned_locals_for_blocks(blocks)
+        expect(reassigned.len()).to_equal(1)
+        expect(reassigned[0]).to_equal(0)
+
+    it "reports each repeated nonzero local once and keeps single-write locals unslotted":
+        step("repeated increments preserve the consumer's multi-definition threshold")
+        val blocks = [count_binding_block(0, [
+            count_binding_const(37, 1), count_binding_const(37, 2),
+            count_binding_const(8, 3), count_binding_const(37, 4)])]
+        val reassigned = ssa_reassigned_locals_for_blocks(blocks)
+        expect(reassigned.len()).to_equal(1)
+        expect(reassigned[0]).to_equal(37)
+        expect(ssa_reassigned_locals_for_blocks([count_binding_block(2, [count_binding_const(0, 1)])]).len()).to_equal(0)

@@ -1,0 +1,93 @@
+# Run in a fresh process: compiler scope remains immutable for its lifetime.
+# Qualification target: supported POSIX host; Windows remains UNQUALIFIED.
+# Unsupported hosts fail the admission assertions, never skip to PASS.
+# Actual owner integration; UNRUN. This exercises one engine/provider with two
+# private cache roots. It does not qualify different compiler executables.
+use std.spec.*
+use std.io_runtime.{file_exists, env_get_opt, env_set, dir_create_all, file_write_exact, file_read_nullable, getpid}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.core.parser.{parser_path_is_script}
+use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_hits, frontend_parse_cache_stores}
+use compiler.common.cache.frontend_parse_identity_v2.*
+use compiler.common.cache.reverse_reference_facts.{reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1}
+use compiler.driver.driver_build.incremental.{build_cache_record_entry_at, build_cache_open}
+use compiler.driver.driver_aot_native_output.{driver_emit_phase2_compatibility_manifest_v1}
+use compiler.driver.cache.phase_compatibility_admission.{driver_import_phase2_frontend_v2}
+use compiler.common.cache.phase_compatibility_path_io.{phase_compatibility_canonical_directory_io_v1}
+
+@unsafe(reason: "canonical fixture root resolution", capabilities: [ffi])
+extern fn rt_path_absolute(path: text) -> text
+
+describe "actual exact frontend Phase2 to Phase3 reuse":
+    it "publishes actual frozen AST then imports and restores it without parsing live bytes":
+        val run_root = rt_path_absolute("build/test/frontend-exact-phase-reuse-v2-{getpid()}")
+        expect(dir_create_all(run_root + "/phase2/frontend")).to_equal(true)
+        expect(dir_create_all(run_root + "/phase3/frontend")).to_equal(true)
+        val phase2 = phase_compatibility_canonical_directory_io_v1(run_root + "/phase2")
+        val phase3 = phase_compatibility_canonical_directory_io_v1(run_root + "/phase3")
+        expect(phase2.valid).to_equal(true)
+        expect(phase3.valid).to_equal(true)
+        val source_path = phase2.canonical_root + "/source.spl"
+        val a = "fn frozen_a() -> i64:\n    17\n"
+        val b = "fn live_b() -> i64:\n    29\n"
+        val raw_digest = sha256_text(a)
+        val raw_generation = sha256_text("frozen-owner-generation|" + raw_digest)
+        expect(file_write_exact(source_path, b)).to_equal(true)
+        val previous_dir = env_get_opt("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+        val previous_scope = env_get_opt("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        val previous_enabled = env_get_opt("SIMPLE_FRONTEND_CACHE") ?? ""
+        val previous_manifest = env_get_opt("SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ") ?? ""
+        val previous_root = env_get_opt("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT") ?? ""
+        env_set("SIMPLE_FRONTEND_CACHE", "1")
+        env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "same-engine-provider-v2")
+        env_set("SIMPLE_FRONTEND_CACHE_DIR", phase2.canonical_root + "/frontend")
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val calls_before = flat_parse_module_body_calls()
+        val first = parse_full_frontend_with_advisory_policy_v1(a, source_path,
+            "fixture", Logger(level: 0), FrontendAdvisoryPreprocessPolicyV1.Reference,
+            0u64, 0u64, 0u64, "", raw_digest, raw_generation).unwrap()
+        expect(first.functions.contains("frozen_a")).to_equal(true)
+        expect(first.functions.contains("live_b")).to_equal(false)
+        expect(flat_parse_module_body_calls() - calls_before).to_equal(1)
+        val policy = frontend_parse_policy_digest_v2(parser_path_is_script(source_path), "")
+        val key = frontend_parse_key_from_digests_v2(sha256_text(a), policy)
+        val artifact_path = phase2.canonical_root + "/frontend/" + key + ".fpc"
+        expect(file_read_nullable(artifact_path) != nil).to_equal(true)
+        val cache_path = phase2.canonical_root + "/build-cache.sdn"
+        expect(build_cache_record_entry_at(cache_path, source_path, [], [artifact_path])).to_equal(true)
+        val manifest_path = phase2.canonical_root + "/frontend-manifest.sdn"
+        expect(driver_emit_phase2_compatibility_manifest_v1(build_cache_open(cache_path),
+            phase2.canonical_root, phase3.canonical_root, manifest_path,
+            "unused-native-producer", "unused-native-provider", "unused-native-target")).to_equal("ok")
+        val original = file_read_nullable(artifact_path).unwrap()
+        env_set("SIMPLE_FRONTEND_CACHE_DIR", phase3.canonical_root + "/frontend")
+        env_set("SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ", manifest_path)
+        env_set("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", phase3.canonical_root)
+        val destination = phase3.canonical_root + "/frontend/" + key + ".fpc"
+        expect(file_exists(destination)).to_equal(false)
+        expect(driver_import_phase2_frontend_v2({source_path: sha256_text(b)})).to_equal("reused=0")
+        expect(file_exists(destination)).to_equal(false)
+        expect(driver_import_phase2_frontend_v2({source_path: raw_digest})).to_equal("reused=1")
+        val warm_calls = flat_parse_module_body_calls()
+        val warm_hits = frontend_parse_cache_hits()
+        val warm_stores = frontend_parse_cache_stores()
+        val restored = parse_full_frontend_with_advisory_policy_v1(a, source_path,
+            "fixture", Logger(level: 0), FrontendAdvisoryPreprocessPolicyV1.Reference,
+            0u64, 0u64, 0u64, "", raw_digest, raw_generation).unwrap()
+        expect(restored.functions.contains("frozen_a")).to_equal(true)
+        expect(restored.functions.contains("live_b")).to_equal(false)
+        expect(flat_parse_module_body_calls() - warm_calls).to_equal(0)
+        expect(frontend_parse_cache_hits() - warm_hits).to_equal(1)
+        expect(frontend_parse_cache_stores() - warm_stores).to_equal(0)
+        expect(file_read_nullable(artifact_path).unwrap()).to_equal(original)
+        reverse_reference_owner_end_v1()
+        env_set("SIMPLE_FRONTEND_CACHE_DIR", previous_dir)
+        env_set("SIMPLE_FRONTEND_CACHE_SCOPE", previous_scope)
+        env_set("SIMPLE_FRONTEND_CACHE", previous_enabled)
+        env_set("SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ", previous_manifest)
+        env_set("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", previous_root)

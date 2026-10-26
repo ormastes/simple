@@ -518,7 +518,7 @@ bootstrap_stage3_stage2_canonical_env_names() {
             printf ' %s' 'CC CXX AR LD LLVM_CONFIG SIMPLE_LLVM_REQUIRED_VERSION'
             ;;
         *windows-gnu*)
-            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC'
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC OS'
             ;;
         *windows-msvc*)
             # INCLUDE/LIB/LIBPATH belong here for the same reason CC does:
@@ -526,7 +526,12 @@ bootstrap_stage3_stage2_canonical_env_names() {
             # anything absent is simply gone. Without them cl.exe cannot find the
             # MSVC headers and the core-c-bootstrap runtime supplement fails with
             # "fatal error C1083: cannot open include file 'stdint.h'".
-            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC INCLUDE LIB LIBPATH'
+            # OS is load-bearing too: the pure-Simple stages choose their
+            # process-spawn implementation from env OS (io/process_ops.spl
+            # _is_windows_platform), and without it every bare-name child
+            # spawn (git above all) fails -1 -- observed as SCV-E-ADMISSION
+            # git-event-source-unavailable in the stage-2 sanity.
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC INCLUDE LIB LIBPATH OS'
             ;;
     esac
     printf ' %s\n' 'SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT SIMPLE_BINARY'
@@ -3142,8 +3147,8 @@ bootstrap_stage3_copy_seed_tuple() {
     # Same layout change for the runtime archive: older cargo parked it in
     # deps/ (the slot the last invocation wins); newer cargo leaves the
     # staticlib at the profile root, where the last runtime-producing build
-    # still wins. Admit the root spelling as a source alias for the GNU
-    # spelling only; the frozen generation still stores deps/libsimple_runtime.a.
+    # still wins. Admit the root spelling as a source alias for either
+    # platform spelling; the frozen generation still stores the runtime under deps/.
     if [ "$bootstrap_stage3_tuple_runtime_name" = deps/libsimple_runtime.a ] &&
         [ ! -f "$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_runtime_name" ] &&
         [ -f "$bootstrap_stage3_tuple_source/libsimple_runtime.a" ] &&
@@ -3151,6 +3156,15 @@ bootstrap_stage3_copy_seed_tuple() {
         case "$bootstrap_stage3_tuple_aliases" in
             '') bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_runtime_name=libsimple_runtime.a" ;;
             *) bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_aliases;$bootstrap_stage3_tuple_runtime_name=libsimple_runtime.a" ;;
+        esac
+    fi
+    if [ "$bootstrap_stage3_tuple_runtime_name" = deps/simple_runtime.lib ] &&
+        [ ! -f "$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_runtime_name" ] &&
+        [ -f "$bootstrap_stage3_tuple_source/simple_runtime.lib" ] &&
+        [ ! -L "$bootstrap_stage3_tuple_source/simple_runtime.lib" ]; then
+        case "$bootstrap_stage3_tuple_aliases" in
+            '') bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_runtime_name=simple_runtime.lib" ;;
+            *) bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_aliases;$bootstrap_stage3_tuple_runtime_name=simple_runtime.lib" ;;
         esac
     fi
     BOOTSTRAP_STAGE3_TUPLE_SOURCE_ALIASES=$bootstrap_stage3_tuple_aliases
@@ -4533,6 +4547,29 @@ public static class Stage3MaterializedConsumer {
             throw;
         }
     }
+    static HashSet<string> IgnoredDirectories(string root) {
+        var ignored = new HashSet<string>(StringComparer.Ordinal);
+        // --directory collapses ignored output trees to one row. Keeping the
+        // audit at these boundaries avoids opening thousands of generated
+        // files that Git has already excluded from the source inventory.
+        foreach (string row in Nul(Git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z", "--", "."))) {
+            if (!row.EndsWith("/", StringComparison.Ordinal)) continue;
+            string relative = row.Substring(0, row.Length - 1);
+            CheckPath(relative);
+            ignored.Add(relative);
+        }
+        return ignored;
+    }
+    static bool IsIgnoredContent(string relative, HashSet<string> ignored) {
+        string probe = relative;
+        while (probe.Length != 0) {
+            if (ignored.Contains(probe)) return true;
+            int slash = probe.LastIndexOf('/');
+            if (slash < 0) break;
+            probe = probe.Substring(0, slash);
+        }
+        return false;
+    }
     static string[] Nul(byte[] b) {
         string s = Text(b); if (s.Length == 0) return new string[0];
         if (!s.EndsWith("\0")) throw new IOException("git.nul-format");
@@ -4690,8 +4727,10 @@ public static class Stage3MaterializedConsumer {
         HashSet<string> inspectedGitlinks, HashSet<string> initializedGitlinks,
         List<string> generatedAuthorities, List<SafeFileHandle> held) {
         var todo = new Stack<string>(); todo.Push(root);
+        var ignoredDirectories = IgnoredDirectories(root);
         Parents(Path.Combine(root, "leaf"), false, held);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        const string generatedAuthority = "src/compiler_rust/target/bootstrap";
         while (todo.Count != 0) {
             Tick(); string dir = todo.Pop();
             // Enumerate one ordinary directory at a time, never recurse through
@@ -4702,6 +4741,10 @@ public static class Stage3MaterializedConsumer {
                 if (relative == ".git") continue;
                 CheckPath(relative);
                 if (!cases.Add(relative)) throw new IOException("path.case-collision");
+                int parentSlash = relative.LastIndexOf('/');
+                string parentRelative = parentSlash < 0 ? "" : relative.Substring(0, parentSlash);
+                if (IsIgnoredContent(parentRelative, ignoredDirectories) &&
+                    relative != generatedAuthority && !generatedAuthority.StartsWith(relative + "/", StringComparison.Ordinal)) continue;
                 if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) {
                     string parent = relative.Substring(0, relative.Length - 5);
                     // A registered submodule gitlink carries its own nested
@@ -4726,7 +4769,7 @@ public static class Stage3MaterializedConsumer {
                 {
                     var tag = Tag(raw);
                     if (aliases.ContainsKey(relative) && aliases[relative] == "directory") continue;
-                    if ((tag.Attributes & 0x400) != 0 && relative == "src/compiler_rust/target/bootstrap") {
+                    if ((tag.Attributes & 0x400) != 0 && relative == generatedAuthority) {
                         CheckGeneratedAuthority(root, item, held);
                         generatedAuthorities.Add(item);
                         continue;
@@ -4739,7 +4782,13 @@ public static class Stage3MaterializedConsumer {
                         if (CheckGitlink(root, item, oid, gitlinks, true, held)) initializedGitlinks.Add(relative);
                         inspectedGitlinks.Add(relative);
                     }
-                    if ((tag.Attributes & 0x10) != 0) todo.Push(item);
+                    // Inspect ignored directory boundaries themselves for
+                    // aliases/reparse points, then prune their contents. The
+                    // generated bootstrap authority is the sole exception; it
+                    // is checked directly even though target/ is ignored.
+                    bool generatedAncestor = generatedAuthority.StartsWith(relative + "/", StringComparison.Ordinal);
+                    if ((tag.Attributes & 0x10) != 0 &&
+                        (!ignoredDirectories.Contains(relative) || generatedAncestor)) todo.Push(item);
                 }
             }
         }

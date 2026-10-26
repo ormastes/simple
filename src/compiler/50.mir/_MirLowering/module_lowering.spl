@@ -147,6 +147,20 @@ fn mir_static_type_is_integer(type_: MirType) -> bool:
              MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
         case _: false
 
+fn mir_exact_extern_type_v1(type_: HirType, allow_void: bool) -> bool:
+    match type_.kind:
+        case HirTypeKind.Int(bits, _): bits == 32 or bits == 64
+        case HirTypeKind.Unit: allow_void
+        case HirTypeKind.Ptr(inner, _): mir_exact_extern_pointee_v1(inner)
+        case _: false
+
+fn mir_exact_extern_pointee_v1(type_: HirType) -> bool:
+    match type_.kind:
+        case HirTypeKind.Int(bits, _): bits == 8 or bits == 16 or bits == 32 or bits == 64
+        case HirTypeKind.Unit: true
+        case HirTypeKind.Ptr(inner, _): mir_exact_extern_pointee_v1(inner)
+        case _: false
+
 impl MirLowering:
     me static_scalar_type_from_hir(type_: HirType?) -> MirType?:
         if type_ == nil:
@@ -1447,12 +1461,68 @@ impl MirLowering:
             return Err("transient MIR scope end failed for {module.name}")
         Ok(lowered)
 
+    me record_exact_extern_declaration_v1(declaration: HirFunction):
+        # HIR exposes fixed parameters only. Generic/default/method and
+        # adapted text signatures must retain their existing lowering.
+        if not declaration.is_extern or declaration.is_method or declaration.is_async or declaration.type_params.len() != 0 or declaration.is_generic_template:
+            return
+        if not mir_exact_extern_type_v1(declaration.return_type, true):
+            return
+        var parameters: [MirType] = []
+        for parameter in declaration.params:
+            if parameter.has_default or not mir_exact_extern_type_v1(parameter.type_, false):
+                return
+            parameters.push(self.lower_type(parameter.type_))
+        if declaration.symbol.id < 0:
+            return
+        if self.symbols.admitted_function_abis.has(declaration.symbol.id):
+            if val admitted = self.exact_extern_signatures.get(declaration.symbol.id):
+                var compatible = admitted.params.len() == parameters.len() and admitted.return_type.kind == self.lower_type(declaration.return_type).kind
+                if compatible:
+                    for index in 0..parameters.len():
+                        if admitted.params[index].kind != parameters[index].kind: compatible = false
+                if not compatible:
+                    self.error_fatal("explicit extern conflicts with admitted function ABI", nil)
+                    return
+        var signatures = self.exact_extern_signatures
+        signatures[declaration.symbol.id] = MirSignature(params: parameters,
+            return_type: self.lower_type(declaration.return_type), is_variadic: false,
+            params_known: true)
+        self.exact_extern_signatures = signatures
+
     me lower_module(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true) -> MirModule:
         """Lower HIR module to MIR."""
         self.unsafe_depth = 0
         self.current_module_id = mir_layout_canonical_module_name(module.name)
         self.external_layout_traces = []
         self.symbols = module.symbols
+        self.exact_extern_signatures = {}
+        # These declarations came from authenticated typed import headers, not
+        # a guessed Function symbol or an imported source body. Feed the same
+        # exact fixed-ABI owner used by ordinary explicit extern declarations.
+        for symbol_id in module.symbols.admitted_function_abis.keys():
+            val admitted_type = module.symbols.admitted_function_abis[symbol_id]
+            val declaration = module.symbols.get_symbol_raw(symbol_id)
+            if declaration == nil or declaration.kind != SymbolKind.Function or declaration.type_ == nil or declaration.type_!.kind != admitted_type.kind:
+                self.error_fatal("admitted function ABI no longer matches its symbol", nil)
+                continue
+            match admitted_type.kind:
+                case HirTypeKind.Function(parameters, result_type, effects):
+                    var valid = effects.len() == 0 and mir_exact_extern_type_v1(result_type, true)
+                    var mir_params: [MirType] = []
+                    for parameter in parameters:
+                        if not mir_exact_extern_type_v1(parameter, false): valid = false
+                        mir_params.push(self.lower_type(parameter))
+                    if not valid:
+                        self.error_fatal("unsupported admitted fixed function ABI", nil)
+                        continue
+                    self.exact_extern_signatures[symbol_id] = MirSignature(
+                        params: mir_params, return_type: self.lower_type(result_type), is_variadic: false, params_known: true)
+                case _:
+                    self.error_fatal("admitted function ABI is not a function", nil)
+        for raw_declaration in module.functions.values():
+            val declaration: HirFunction = raw_declaration
+            self.record_exact_extern_declaration_v1(declaration)
         self.lowering_entry_module = is_entry_module
         var function_names: [text] = []
         for raw_func in module.functions.values():

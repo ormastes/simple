@@ -1,0 +1,49 @@
+use std.spec.*
+use app.bug.workaround_store.{workaround_source_candidate,
+    workaround_status_paths, workaround_tracked_paths}
+
+describe "workaround discovery excludes materialized SCV source":
+    it "does not rediscover an old materialized source in an ordinary status batch":
+        val generated = "build/scv/snapshots/scv-revision-v1-old/src/lib/nogc_sync_mut/io/windows_process_owner.spl"
+        expect(workaround_status_paths("?? " + generated + "\0 M src/app/real.spl\0").unwrap()).to_equal(["src/app/real.spl"])
+        expect(workaround_tracked_paths(generated + "\0src/app/real.spl\0").unwrap()).to_equal(["src/app/real.spl"])
+
+    it "matches only the exact repository-relative reserved namespace":
+        expect(workaround_source_candidate("build/scv/snapshots/rev/src/a.spl")).to_equal(false)
+        for path in ["src/build/scv/snapshots/a.spl", "build/private/src/a.spl",
+                "build/scv/snapshots_extra/src/a.spl", "src/app/build/a.spl"]:
+            expect(workaround_source_candidate(path)).to_equal(true)
+
+    it "preserves stable first occurrence across repeated destination and rename-source records":
+        val status = " M src/z.spl\0R  src/new name.spl\0src/z.spl\0" +
+            "C  src/new name.spl\0src/old name.spl\0?? src/z.spl\0?? src/last.spl\0"
+        expect(workaround_status_paths(status).unwrap()).to_equal(
+            ["src/z.spl", "src/new name.spl", "src/old name.spl", "src/last.spl"])
+
+    it "retains the authored side of renames across the generated namespace":
+        val generated = "build/scv/snapshots/rev/src/copied.spl"
+        val status = "R  " + generated + "\0src/old.spl\0R  src/new.spl\0" + generated + "\0"
+        expect(workaround_status_paths(status).unwrap()).to_equal(["src/old.spl", "src/new.spl"])
+
+    it "rejects malformed NUL and noncanonical spellings before any exclusion can hide them":
+        for status in ["?? build/scv/snapshots/rev/a.spl", "R  src/new.spl\0",
+                "?? build/scv/snapshots/rev/a.spl\0\0 M src/real.spl\0", "??build/scv/snapshots/rev/a.spl\0",
+                "R  src/new.spl\0../outside.spl\0", "C  src/new.spl\0/build/scv/snapshots/rev/a.spl\0",
+                "?? ./build/scv/snapshots/rev/a.spl\0", "?? build//scv/snapshots/rev/a.spl\0",
+                "?? build/scv/../snapshots/rev/a.spl\0", "?? build\\scv\\snapshots\\rev\\a.spl\0",
+                "?? /build/scv/snapshots/rev/a.spl\0", "?? C:/build/scv/snapshots/rev/a.spl\0"]:
+            expect(workaround_status_paths(status).is_err()).to_equal(true)
+        expect(workaround_tracked_paths("./build/scv/snapshots/rev/a.spl\0").is_err()).to_equal(true)
+
+    it "deduplicates a larger real parser input without dropping or sorting authored names":
+        var records: [text] = []
+        var expected: [text] = []
+        var index = 0
+        while index < 2048:
+            val path = "src/app/unit_{index}.spl"
+            expected.push(path)
+            records.push(" M " + path + "\0")
+            records.push("?? build/scv/snapshots/rev/" + path + "\0")
+            records.push(" M " + path + "\0")
+            index = index + 1
+        expect(workaround_status_paths(records.join("")).unwrap()).to_equal(expected)

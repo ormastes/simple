@@ -1,0 +1,47 @@
+# Regression coverage for skipping lexical allocations on absent annotations.
+# This spec checks behavior; allocation and timing need a qualified runner.
+use std.spec.{describe, it, expect, step}
+use app.bug.workaround_index (parse_workaround_source)
+
+describe "workaround marker prefilter":
+    it "returns no links for a large ordinary source and fragmented marker text":
+        step("Scan ordinary source without any contiguous annotation prefix")
+        val source = "val sample = \"ordinary source\"\n".repeat(4096)
+        expect(parse_workaround_source("src/ordinary.spl", source).unwrap().len()).to_equal(0)
+        for fragment in ["", "# @work\n# around bug=sample\nfn x(): 1\n",
+                "# @Workaround bug=sample\nfn x(): 1\n",
+                "val example = \"@work\" + \"around\"\n",
+                "/* @work-around bug=sample */\nfn x(): 1\n"]:
+            expect(parse_workaround_source("src/fragment.spl", fragment).unwrap().len()).to_equal(0)
+
+    it "validates source paths even when annotations are absent":
+        step("Preserve path errors before the marker absence fast return")
+        for path in ["", "../escape.spl", "/absolute.spl", "src//empty.spl", "src/bad\tname.spl"]:
+            match parse_workaround_source(path, "fn ordinary(): 1\n"):
+                case Err(reason): expect(reason).to_equal("unsafe workaround path: {path}")
+                case Ok(_): assert(false)
+
+    it "keeps lexical filtering and exact locations when marker text is present":
+        step("Ignore inline prose, quoted examples, multiline strings, and block comments")
+        val source = "val example = \"@workaround bug=quoted\"\n" +
+            "# prose mentions @workaround bug=prose\n" +
+            "\"\"\"\n# @workaround bug=doc_example\nfn example(): 1\n\"\"\"\n" +
+            "/*\n// @workaround bug=block_example\n*/\n" +
+            "# @workaround bug=actual_bug recover=abcdef0 reason=preserve behavior\nfn actual(): 1\n"
+        val links = parse_workaround_source("src/markers.spl", source).unwrap()
+        expect(links.len()).to_equal(1)
+        expect(links[0].bug_id).to_equal("actual_bug")
+        expect(links[0].path).to_equal("src/markers.spl")
+        expect(links[0].line).to_equal(10)
+        expect(links[0].recover).to_equal("abcdef0")
+        expect(links[0].reason).to_equal("preserve behavior")
+
+    it "retains errors for malformed actual prefixes and detached annotations":
+        step("A prefix occurrence must still reach marker validation")
+        for source in ["# @workaroundx bug=sample\nfn x(): 1\n",
+                "# @workaround\nfn x(): 1\n",
+                "# @workaround bug=sample\n\nfn x(): 1\n",
+                "// @workaround reason=missing_id\nfn x(): 1\n"]:
+            match parse_workaround_source("src/rejected.spl", source):
+                case Err(reason): expect(reason).to_start_with("src/rejected.spl:1:")
+                case Ok(_): assert(false)

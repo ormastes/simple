@@ -1,0 +1,125 @@
+use std.spec.*
+use std.editor.document.registry.{DocumentRegistry, document_handle_content}
+use std.editor.document.transaction.{DocumentEdit, document_transaction_new}
+
+fn replace_a_with_b():
+    document_transaction_new([DocumentEdit(start: 0, end_ex: 1, new_text: "b", old_text: "a")])
+
+describe "REQ-005 IDE generation observation":
+    it "should capture an actual open document with exact content identity":
+        step("Open and capture the registry-owned buffer")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        val captured = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(captured.source_text).to_equal("a")
+        expect(captured.source_digest).to_equal("ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb")
+        expect(captured.version).to_equal(1)
+        expect(registry.get("src/a.spl").source_pending).to_equal(true)
+
+    it "should reuse the retained capture without hashing the unchanged generation twice":
+        step("Request the same owned generation from two consumers")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        val first = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        val second = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(first.generation).to_equal(second.generation)
+        expect(first.source_digest).to_equal(second.source_digest)
+        expect(registry.get("src/a.spl").source_capture_count).to_equal(1)
+
+    it "should refuse a stale acknowledgement after an actual applied edit":
+        step("Keep the edited generation pending when an old observer completes")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        val first = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(registry.apply("src/a.spl", replace_a_with_b())).to_equal(true)
+        expect(registry.source_change_ack_v1("src/a.spl", first.generation, first.source_digest)).to_equal(false)
+        expect(document_handle_content(registry.get("src/a.spl"))).to_equal("b")
+        expect(registry.get("src/a.spl").source_pending).to_equal(true)
+
+describe "REQ-006 metadata failures preserve applied editor state":
+    it "should observe the actual undo generation instead of inventing replay history":
+        step("Apply and undo through the existing transaction owner")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        registry.apply("src/a.spl", replace_a_with_b())
+        val changed = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(registry.undo("src/a.spl")).to_equal(true)
+        val undone = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(undone.source_text).to_equal("a")
+        expect(undone.version).to_equal(3)
+        expect(undone.generation).to_be_greater_than(changed.generation)
+
+    it "should leave a successful edit pending when metadata budget rejects capture":
+        step("Limit metadata capture without rolling back the document")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        expect(registry.apply("src/a.spl", replace_a_with_b())).to_equal(true)
+        expect(registry.source_change_capture_v1("src/a.spl", 0).is_err()).to_equal(true)
+        expect(document_handle_content(registry.get("src/a.spl"))).to_equal("b")
+        expect(registry.get("src/a.spl").version).to_equal(2)
+        expect(registry.get("src/a.spl").source_pending).to_equal(true)
+
+    it "should reconcile restored buffers without accepting a historical acknowledgement":
+        step("Restore existing SDN state and capture a fresh pending observation")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        val first = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(registry.source_change_ack_v1("src/a.spl", first.generation, first.source_digest)).to_equal(true)
+        var restored = DocumentRegistry.restore_state(registry.serialize_state()).unwrap()
+        expect(restored.get("src/a.spl").source_pending).to_equal(true)
+        expect(restored.get("src/a.spl").source_cached == nil).to_equal(true)
+
+describe "REQ-023 outbox acknowledgement boundaries":
+    it "should acknowledge only the currently retained captured content":
+        step("Acknowledge a capture after its consumer completes")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        val captured = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(registry.source_change_ack_v1("src/a.spl", captured.generation, "wrong")).to_equal(false)
+        expect(registry.source_change_ack_v1("src/a.spl", captured.generation, captured.source_digest)).to_equal(true)
+        expect(registry.get("src/a.spl").source_pending).to_equal(false)
+
+    it "should reject an old generation after closing and reopening the same path":
+        step("Reopen the document without reusing its old local generation token")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        val old = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        registry.close("src/a.spl")
+        registry.open("src/a.spl", "a")
+        val current = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(current.generation).to_be_greater_than(old.generation)
+        expect(registry.source_change_ack_v1("src/a.spl", old.generation, old.source_digest)).to_equal(false)
+
+    it "should capture the actual clamped result without claiming the invalid edit range":
+        step("Observe existing editor clamping as a reconciliation snapshot")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        val tx = document_transaction_new([DocumentEdit(start: 99, end_ex: 100, new_text: "b", old_text: "")])
+        expect(registry.apply("src/a.spl", tx)).to_equal(true)
+        val observed = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(observed.source_text).to_equal("ab")
+        expect(observed.provenance).to_equal("reconciled-buffer")
+
+    it "should keep a caller-mutated observation separate from the retained carrier":
+        step("Modify a returned carrier without changing the owning registry capture")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        var returned = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        returned.source_text = "wrong"
+        val retained = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(retained.source_text).to_equal("a")
+        expect(registry.get("src/a.spl").source_capture_count).to_equal(1)
+
+    it "should record a save boundary without hashing unchanged source again":
+        step("Advance metadata generation while retaining identical source bytes")
+        var registry = DocumentRegistry.new()
+        registry.open("src/a.spl", "a")
+        registry.apply("src/a.spl", replace_a_with_b())
+        val dirty = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(registry.mark_saved("src/a.spl")).to_equal(true)
+        val saved = registry.source_change_capture_v1("src/a.spl", 1024).unwrap()
+        expect(saved.generation).to_be_greater_than(dirty.generation)
+        expect(saved.source_digest).to_equal(dirty.source_digest)
+        expect(saved.buffer_dirty).to_equal(false)
+        expect(registry.get("src/a.spl").source_capture_count).to_equal(1)
+        expect(registry.source_change_ack_v1("src/a.spl", dirty.generation, dirty.source_digest)).to_equal(false)

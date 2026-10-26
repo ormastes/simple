@@ -1,3 +1,4 @@
+use compiler.driver.cache.tldr_function_archive_v1.{tldr_function_archive_admit_v1}
 # CompilerDriver phase-1 source loading.
 #
 # The main driver retains parsing, HIR, and later compilation phases.
@@ -165,6 +166,12 @@ impl CompilerDriver:
         true
 
     me load_sources_impl() -> (CompileContext, bool):
+        val tldr_entry_only = (sosix_env_get_nullable("SIMPLE_NATIVE_TLDR_ENTRY_ONLY") ?? "") == "1"
+        self.ctx.tldr_entry_only = tldr_entry_only
+        self.ctx.tldr_imports = []
+        if tldr_entry_only and ((sosix_env_get_nullable("SIMPLE_NO_STUB_FALLBACK") ?? "") != "1" or (sosix_env_get_nullable("SIMPLE_STUB_HIR") ?? "") == "1" or (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_DIRECT_STUB_IR") ?? "") == "1"):
+            self.ctx.add_error("TLDR entry-only compilation requires real lowering with SIMPLE_NO_STUB_FALLBACK=1")
+            return (self.ctx, false)
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
         var all_sources: [SourceFile] = []
@@ -217,7 +224,7 @@ impl CompilerDriver:
             native_entry_input
         val native_entry_closure_pre = (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val explicit_entry_closure = explicit_entry_input != ""
-        val entry_closure_walk = explicit_entry_closure or (
+        val entry_closure_walk = tldr_entry_only or explicit_entry_closure or (
             native_entry_input != "" and not native_entry_closure_pre)
         # The persistent package index route (package_index_route_current_v1)
         # needs a producer/root-generation/variant-digest compatibility
@@ -230,9 +237,12 @@ impl CompilerDriver:
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
-        val package_index_cold_init =
+        if tldr_entry_only and (not package_index_compat_markers_present or requested_entry_input == ""):
+            self.ctx.add_error("TLDR entry-only mode requires an admitted prepared package index and one entry")
+            return (self.ctx, false)
+        val package_index_cold_init = not tldr_entry_only and (
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
-            not package_index_compat_markers_present
+            not package_index_compat_markers_present)
         var package_index_routed = false
         if not package_index_cold_init:
             val package_resolution_started_ns = demand_compile_phase_begin_v1()
@@ -256,6 +266,14 @@ impl CompilerDriver:
                 (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PUBLIC_INTERFACE_CHANGED") ?? "") == "1")
             if not route.valid:
                 self.ctx.add_error("persistent package index admission failed: {route.reason}; run explicit cold initialization with SIMPLE_PACKAGE_INDEX_COLD_INIT=1")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            if tldr_entry_only and (route.source_paths.len() != 1 or route.dirty_modules.len() != 1):
+                self.ctx.add_error("TLDR entry-only mode requires exactly one dirty entry; cache-only and dependency-body routes are forbidden")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            if tldr_entry_only and route.source_paths[0] != requested_entry_input:
+                self.ctx.add_error("TLDR dirty source is not the requested entry")
                 driver_entry_scan_cache_release()
                 return (self.ctx, false)
             val runtime_std_authority = RuntimeStdPackageAuthorityV1(
@@ -404,6 +422,27 @@ impl CompilerDriver:
                 self.ctx.demand_compile_execution = Some(
                     demand_compile_section_reads_v1(
                         self.ctx.demand_compile_execution!, 3))
+                # Ordinary package archives may require source surfaces/bodies.
+                # Keep header-only admission opt-in until the package planner
+                # can reroute those demands before excluding their source.
+                if tldr_entry_only:
+                    for entry in admission.module_entries:
+                        val prepared = tldr_function_archive_admit_v1(
+                            decoded.unwrap(), admission.load.receipt!, entry)
+                        if prepared.is_err():
+                            _ = route_capability_scope_close_all_v1(&capability_scope)
+                            archive_transaction = route_archive_install_rollback_owned_v1(archive_transaction)
+                            self.ctx.add_error(prepared.unwrap_err())
+                            driver_entry_scan_cache_release()
+                            return (self.ctx, false)
+                        for installed in self.ctx.tldr_imports:
+                            if installed.authority.module_name == entry.module_identity:
+                                _ = route_capability_scope_close_all_v1(&capability_scope)
+                                archive_transaction = route_archive_install_rollback_owned_v1(archive_transaction)
+                                self.ctx.add_error("duplicate prepared TLDR module identity")
+                                driver_entry_scan_cache_release()
+                                return (self.ctx, false)
+                        self.ctx.tldr_imports.push(prepared.unwrap())
                 val staged = route_archive_install_stage_owned_v1(
                     archive_transaction, decoded.unwrap())
                 archive_transaction = staged.transaction
@@ -497,6 +536,9 @@ impl CompilerDriver:
         elif driver_inputs.len() == 0:
             if requested_entry_input != "":
                 driver_inputs = [requested_entry_input]
+        if tldr_entry_only and (not package_index_routed or driver_inputs.len() != 1):
+            self.ctx.add_error("TLDR entry-only mode cannot fall back to source discovery")
+            return (self.ctx, false)
         val input_len = driver_inputs.len()
         val source_trace = (sosix_env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (sosix_env_get_nullable("SIMPLE_INTERP_TRACE") ?? "") == "1"
         if source_trace:
@@ -903,6 +945,28 @@ impl CompilerDriver:
         self.ctx.source_byte_lengths_owner = owned_byte_lengths
         self.ctx.source_content_hashes_owner = owned_content_hashes
         self.ctx.source_identities_owner = owned_identities
+        # Interpreter-only / explicitly disabled cache lanes retain the existing
+        # raw SHA owner but allocate no frontend lookup maps or inventory rows.
+        val frontend_identity_capture = (sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE") ?? "") != "0" and
+            (self.ctx.options.mode != CompileMode.Interpret or
+                (sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "")
+        if frontend_identity_capture:
+            var frontend_raw_by_path: {text: text} = {}
+            var frontend_index_by_path: {text: i64} = {}
+            var frontend_inventory_rows: [text] = []
+            var frontend_identity_index = 0
+            while frontend_identity_index < owned_paths.len():
+                val frozen_path = owned_paths[frontend_identity_index]
+                val frozen_digest = owned_identities[frontend_identity_index]
+                frontend_raw_by_path[frozen_path] = frozen_digest
+                frontend_index_by_path[frozen_path] = frontend_identity_index
+                frontend_inventory_rows.push("{frozen_path.len()}:{frozen_path}" + frozen_digest)
+                frontend_identity_index = frontend_identity_index + 1
+            self.ctx.native_empty_dependency_parse_receipts_v1 = {}
+            self.ctx.source_identity_by_path_owner_v2 = frontend_raw_by_path
+            self.ctx.source_index_by_path_owner_v2 = frontend_index_by_path
+            self.ctx.source_inventory_generation_owner_v2 = sha256_text(
+                "frontend-frozen-inventory-v2|" + frontend_inventory_rows.join(""))
         self.ctx.source_module_names_owner = owned_module_names
         # Canonical phase-1 owners now retain the source bodies. Drop the
         # duplicate scan payloads before parsing/lowering grows compiler RSS.

@@ -1,0 +1,110 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.hir_tldr_cache_identity_v1.{hir_tldr_cache_closure_digest_v1}
+use compiler.hir.archive.tldr_function_header_v1.{AdmittedTldrFunctionImportV1, TldrFunctionHeaderAuthorityV1}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_module}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Items.module_tldr_registration.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+
+fn cache_header(name: text = "dependency") -> AdmittedTldrFunctionImportV1:
+    val digest = sha256_text("fixture")
+    val payload = "simple-tldr-functions/1\nmodule={name}\nsource={digest}\nproducer={digest}\nvariant={digest}\nabi={digest}\nfunction|header_add|{name}.header_add|left:i64,right:i64|i64\n"
+    AdmittedTldrFunctionImportV1(payload, TldrFunctionHeaderAuthorityV1(name,
+        digest, digest, digest, digest, sha256_text(payload)))
+
+fn cache_header_module() -> HirModule:
+    val source = "use dependency.{header_add}\nfn main() -> i64:\n    header_add(1, 2)\n"
+    val parsed = parse_full_frontend(source, "entry", "entry.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("entry.spl")
+    lowering.tldr_entry_only = true
+    lowering.tldr_imports = [cache_header()]
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(module.symbols.admitted_function_abis.len()).to_equal(1)
+    module
+
+describe "TLDR-aware HIR cache identity and ABI preservation":
+    it "REQ-TLDR-CACHE-001 retains ordinary keys and ignores header admission order":
+        val base = sha256_text("surface closure plus static projection")
+        val first = cache_header("one")
+        val second = cache_header("two")
+        expect(hir_tldr_cache_closure_digest_v1(base, [])).to_equal(base)
+        val ordered = hir_tldr_cache_closure_digest_v1(base, [first, second])
+        expect(ordered.len()).to_equal(64)
+        expect(hir_tldr_cache_closure_digest_v1(base, [second, first])).to_equal(ordered)
+        expect(hir_tldr_cache_closure_digest_v1(base, [first, second])).to_equal(ordered)
+
+    it "REQ-TLDR-CACHE-002 changes identity for every admitted authority field":
+        val base = sha256_text("surfaces")
+        val original = cache_header()
+        val expected = hir_tldr_cache_closure_digest_v1(base, [original])
+        var checked = 0
+        for field in 0..6:
+            var changed = cache_header()
+            match field:
+                case 0: changed.authority.module_name = "other"
+                case 1: changed.authority.source_digest = sha256_text("other source")
+                case 2: changed.authority.producer_digest = sha256_text("other producer")
+                case 3: changed.authority.variant_digest = sha256_text("other target aspects capture")
+                case 4: changed.authority.abi_digest = sha256_text("other ABI")
+                case _: changed.authority.payload_digest = sha256_text("other header bytes")
+            val actual = hir_tldr_cache_closure_digest_v1(base, [changed])
+            expect(actual.len()).to_equal(64)
+            expect(actual == expected).to_equal(false)
+            checked = checked + 1
+        expect(checked).to_equal(6)
+
+    it "REQ-TLDR-CACHE-003 refuses invalid authority instead of the no-header key":
+        val base = sha256_text("surfaces")
+        var invalid = cache_header()
+        invalid.authority.source_digest = ""
+        expect(hir_tldr_cache_closure_digest_v1(base, [invalid])).to_equal("")
+        val valid = cache_header()
+        expect(hir_tldr_cache_closure_digest_v1(base, [valid, valid])).to_equal("")
+        invalid = cache_header()
+        invalid.payload = ""
+        expect(hir_tldr_cache_closure_digest_v1(base, [invalid])).to_equal("")
+
+    it "REQ-TLDR-CACHE-004 retains the existing static projection and closure identity":
+        val header = cache_header()
+        val first = hir_tldr_cache_closure_digest_v1(sha256_text("static projection A"), [header])
+        val second = hir_tldr_cache_closure_digest_v1(sha256_text("static projection B"), [header])
+        expect(first == second).to_equal(false)
+        expect(hir_tldr_cache_closure_digest_v1("", [header])).to_equal("")
+
+    it "REQ-TLDR-CACHE-005 roundtrips actual admitted function ABI metadata":
+        val module = cache_header_module()
+        val encoded = hir_module_encode(module)
+        expect(encoded != "").to_equal(true)
+        val decoded = hir_module_decode(encoded)
+        expect(decoded != nil).to_equal(true)
+        val restored = decoded.unwrap()
+        expect(restored.symbols.admitted_function_abis.len()).to_equal(1)
+        for id in module.symbols.admitted_function_abis.keys():
+            expect(restored.symbols.admitted_function_abis.has(id)).to_equal(true)
+            expect(restored.symbols.admitted_function_abis[id].kind).to_equal(module.symbols.admitted_function_abis[id].kind)
+            expect(restored.symbols.symbols[id].name).to_equal("dependency.header_add")
+        expect(hir_module_encode(restored)).to_equal(encoded)
+
+    it "REQ-TLDR-CACHE-006 rejects missing duplicate and out-of-range extension ids":
+        val module = cache_header_module()
+        val id = module.symbols.admitted_function_abis.keys()[0]
+        var writer = HirCodecWriter.create()
+        hc_enc_hir_module(writer, module)
+        expect(writer.ok).to_equal(true)
+        val prefix = hir_codec_header() + "\n" + writer.finish()
+        expect(hir_module_decode(prefix) == nil).to_equal(true)
+        expect(hir_module_decode(prefix + "2\n{id}\n{id}\n") == nil).to_equal(true)
+        expect(hir_module_decode(prefix + "1\n999999999\n") == nil).to_equal(true)
+
+    it "REQ-TLDR-CACHE-007 refuses an admitted type that disagrees with its symbol":
+        val module = cache_header_module()
+        val id = module.symbols.admitted_function_abis.keys()[0]
+        val old = module.symbols.admitted_function_abis[id]
+        module.symbols.admitted_function_abis[id] = HirType(kind: HirTypeKind.Bool, span: old.span)
+        expect(hir_module_encode(module)).to_equal("")

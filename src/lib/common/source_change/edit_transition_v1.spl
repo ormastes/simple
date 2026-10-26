@@ -1,0 +1,63 @@
+"""Validate one observed splice against already captured exact byte buffers.
+
+This is a component of shared SourceChange validation, not a complete batch,
+snapshot, path-policy, parser-boundary or durable-publication admission.
+The capture owner supplies selected_before_snapshot and owns the immutable
+before/replacement/after buffers for this call. No source file is reread.
+"""
+use std.common.source_change.contracts_v1.{SourceEditV1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+val SOURCE_CHANGE_TRANSITION_MAX_BYTES_V1: i64 = 67108864
+
+pub fn source_change_validate_edit_bytes_v1(selected_before_snapshot: text,
+        before: [u8], edit: SourceEditV1, replacement: [u8], after: [u8]) -> Result<bool, text>:
+    if selected_before_snapshot == "" or edit.old_snapshot != selected_before_snapshot:
+        return Err("source-change-base-mismatch")
+    if edit.path == "" or edit.transaction_id == "":
+        return Err("source-change-identity-missing")
+    val before_len = before.len()
+    val replacement_len = replacement.len()
+    val after_len = after.len()
+    if before_len < 0 or replacement_len < 0 or after_len < 0 or
+            before_len > SOURCE_CHANGE_TRANSITION_MAX_BYTES_V1 or
+            replacement_len > SOURCE_CHANGE_TRANSITION_MAX_BYTES_V1 or
+            after_len > SOURCE_CHANGE_TRANSITION_MAX_BYTES_V1:
+        return Err("source-change-byte-bound")
+    # Check unsigned values before narrowing; no untrusted sum/subtraction.
+    if edit.old_start_byte > edit.old_end_byte or edit.old_end_byte > (before_len as u64):
+        return Err("source-change-range-invalid")
+    if edit.new_byte_len != (replacement_len as u64):
+        return Err("source-change-payload-length-mismatch")
+    val begin = edit.old_start_byte as i64
+    val finish = edit.old_end_byte as i64
+    val retained = before_len - (finish - begin)
+    if replacement_len > SOURCE_CHANGE_TRANSITION_MAX_BYTES_V1 - retained:
+        return Err("source-change-byte-bound")
+    if after_len != retained + replacement_len:
+        return Err("source-change-result-length-mismatch")
+    val payload_digest = sha256_u8_hex(replacement)
+    if payload_digest.len() != 64:
+        return Err("source-change-digest-provider-failed")
+    if payload_digest != edit.new_bytes_digest:
+        return Err("source-change-payload-digest-mismatch")
+    # Compare without constructing another combined source buffer. The caller
+    # retains its captures; provider argument-copy costs remain a runtime gate.
+    var cursor = 0
+    while cursor < begin:
+        if before[cursor] != after[cursor]:
+            return Err("source-change-untouched-prefix-mismatch")
+        cursor = cursor + 1
+    cursor = 0
+    while cursor < replacement_len:
+        if replacement[cursor] != after[begin + cursor]:
+            return Err("source-change-replacement-mismatch")
+        cursor = cursor + 1
+    cursor = finish
+    while cursor < before_len:
+        if before[cursor] != after[begin + replacement_len + cursor - finish]:
+            return Err("source-change-untouched-suffix-mismatch")
+        cursor = cursor + 1
+    Ok(true)
+
+export SOURCE_CHANGE_TRANSITION_MAX_BYTES_V1, source_change_validate_edit_bytes_v1

@@ -164,6 +164,11 @@ impl PlatformLinkConfig {
                 "bcrypt",
                 "userenv",
                 "ntdll",
+                "synchronization",
+                "oldnames",
+                "uuid",
+                "propsys",
+                "runtimeobject",
                 "advapi32",
                 "dbghelp",
                 "ole32",
@@ -316,16 +321,18 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
             "simple_runtime".into(),
         ],
         TargetOS::MacOS => vec!["System".into(), "simple_runtime".into()],
-        TargetOS::Windows => vec![
-            "c".into(),
-            "msvcrt".into(),
-            "kernel32".into(),
-            "ws2_32".into(),
-            "advapi32".into(),
-            "d3d11".into(),
-            "dxgi".into(),
-            "simple_runtime".into(),
-        ],
+        TargetOS::Windows => {
+            if target.linker_flavor() == crate::target::LinkerFlavor::Msvc {
+                let mut libraries: Vec<String> = PlatformLinkConfig::windows().libraries
+                    .iter().map(|library| (*library).to_string()).collect();
+                libraries.push("simple_runtime".into());
+                libraries
+            } else {
+                // Preserve the existing standalone GNU ABI recipe unchanged.
+                vec!["c".into(), "msvcrt".into(), "kernel32".into(), "ws2_32".into(),
+                    "advapi32".into(), "d3d11".into(), "dxgi".into(), "simple_runtime".into()]
+            }
+        }
         TargetOS::FreeBSD => vec![
             "c".into(),
             "pthread".into(),
@@ -377,5 +384,36 @@ mod tests {
         for library in ["z", "zstd", "tinfo"] {
             assert!(config.libraries.contains(&library));
         }
+    }
+}
+
+#[cfg(test)]
+mod standalone_windows_library_regressions {
+    use super::*;
+    use crate::target::{LinkerFlavor, TargetArch};
+    #[test]
+    fn standalone_msvc_uses_msvcrt_without_nonexistent_c_lib() {
+        let mut target=Target::new(TargetArch::X86_64,TargetOS::Windows);
+        target.linker_flavor_hint=Some(LinkerFlavor::Msvc);
+        let libraries=default_libraries_for_target(&target);
+        assert!(!libraries.iter().any(|s|s=="c"));
+        assert!(libraries.iter().any(|s|s=="msvcrt"));
+        assert!(libraries.iter().any(|s|s=="simple_runtime"));
+        for library in ["bcrypt","userenv","ntdll","ole32","oleaut32","propsys","runtimeobject","synchronization","oldnames","uuid","user32","gdi32","ucrt","vcruntime"] {
+            assert!(libraries.iter().any(|s|s==library),"missing actual Rust runtime support library {library}");
+        }
+        for driver in ["cl.exe","CLANG-CL.EXE","C:/LLVM with spaces/bin/clang-cl.exe",r"C:\LLVM\bin\clang-cl.exe"] {
+            assert!(crate::platform::cc_detect::is_msvc_driver(driver));
+        }
+
+    }
+    #[test]
+    fn standalone_windows_gnu_preserves_existing_c_runtime_selection() {
+        let mut target=Target::new(TargetArch::X86_64,TargetOS::Windows);
+        target.linker_flavor_hint=Some(LinkerFlavor::Gnu);
+        assert_eq!(default_libraries_for_target(&target),vec!["c","msvcrt","kernel32","ws2_32","advapi32","d3d11","dxgi","simple_runtime"]);
+        assert!(!crate::platform::cc_detect::is_msvc_driver("clang"));
+        assert!(!crate::platform::cc_detect::is_msvc_driver("not-clang-cl.exe"));
+
     }
 }

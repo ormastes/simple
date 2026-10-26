@@ -1,0 +1,125 @@
+# @req REQ-NATIVE-STATIC-GUARD-1
+# UNRUN: actual driver boundary, never a copied predicate.
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{getpid, time_now_unix_micros, host_os}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes, file_exists}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use compiler.common.config.{Logger}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_definitions.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.mir.mir_types.{MirStatic, MirConstant, MirType, MirConstValue}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_aot_native_output.{_compile_selected_module}
+use compiler.driver.cache.binary_object_cas.{binary_object_magic_kind}
+use compiler.backend.linker.coff.coff_object.{coff_parse_object, COFF_MACHINE_AMD64, COFF_STORAGE_CLASS_EXTERNAL}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+fn static_guard_module(name: text) -> MirModule:
+    MirModule(name: name, functions: {}, statics: {}, constants: {}, types: {})
+
+fn static_guard_output(name: text) -> text:
+    val root = "build/tmp/native_static_guard/{name}-{getpid()}-{time_now_unix_micros()}"
+    dir_create_all(root)
+    root + "/object"
+
+fn static_guard_compile(module: MirModule, output: text) -> Result<text, text>:
+    var ctx = CompileContext.create(driver_core_compile_options_default())
+    ctx.mir_modules[module.name] = module
+    val identity = ctx.freeze_storage_registry()
+    expect(identity == "invalid").to_equal(false)
+    val snapshot = ctx.frozen_storage_module_snapshot(module.name)
+    expect(snapshot.ok).to_equal(true)
+    _compile_selected_module("llvm", false, 0, output, module.name, module, snapshot, "generic", nil)
+
+# Bind the Windows object verdict to the actual defined symbol and its bytes.
+# A valid but unrelated COFF object must never qualify static-only emission.
+fn static_guard_coff_initializer_matches(bytes: [u8]) -> bool:
+    val parsed = coff_parse_object(bytes)
+    if parsed.is_err(): return false
+    val object_ = parsed.unwrap()
+    if object_.machine != COFF_MACHINE_AMD64: return false
+    var matched = 0
+    for symbol in object_.symbols:
+        if symbol.name != "g_static_guard_value": continue
+        if symbol.storage_class != COFF_STORAGE_CLASS_EXTERNAL: return false
+        if symbol.section_number <= 0 or symbol.section_number > object_.sections.len(): return false
+        val section = object_.sections[symbol.section_number - 1]
+        if symbol.value < 0 or section.data.len() < 8: return false
+        if symbol.value > section.data.len() - 8: return false
+        if section.data[symbol.value].to_i64() != 29: return false
+        var index = 1
+        while index < 8:
+            if section.data[symbol.value + index].to_i64() != 0: return false
+            index = index + 1
+        # This fixture has only one integer initializer, hence no data relocations.
+        if section.relocations.len() != 0: return false
+        matched = matched + 1
+    matched == 1
+
+describe "native static-only driver guard", tag: ["only-compiled"]:
+    it "emits a real initialized static through the actual driver boundary":
+        step("zero functions with real static data must reach LLVM object emission")
+        expect((env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? "") == "1").to_equal(false)
+        var module = static_guard_module("static_guard_data")
+        val symbol = SymbolId(id: 901)
+        module.statics[symbol] = MirStatic(symbol: symbol, name: "static_guard_value", type_: MirType.i64(),
+            init: Some(MirConstant(symbol: symbol, name: "static_guard_value", type_: MirType.i64(), value: MirConstValue.Int(29))),
+            is_mutable: true, alignment: 8, visibility: Visibility.Public)
+        expect(module.functions.len()).to_equal(0)
+        expect(module.statics.len()).to_equal(1)
+        val ir = MirToLlvm.create(module.name, CodegenTarget.X86_64, nil).translate_module(module)
+        expect(ir).to_contain("@g_static_guard_value = global i64 29")
+        expect(ir.contains("define ")).to_equal(false)
+        val emitted = static_guard_compile(module, static_guard_output("initialized"))
+        expect(emitted.is_ok()).to_equal(true)
+        val bytes = file_read_regular_no_follow_bounded_bytes(emitted.unwrap(), 1048576)
+        expect(bytes.is_ok()).to_equal(true)
+        expect(binary_object_magic_kind(bytes.unwrap()) == "").to_equal(false)
+        if host_os() == "windows":
+            expect(binary_object_magic_kind(bytes.unwrap())).to_equal("coff")
+        if binary_object_magic_kind(bytes.unwrap()) == "coff":
+            expect(static_guard_coff_initializer_matches(bytes.unwrap())).to_equal(true)
+
+    it "rejects a zero-function zero-static module before backend emission":
+        step("empty MIR remains a failure without fabricating an object")
+        val output = static_guard_output("empty")
+        val expected_object = output + ".static_guard_empty.o"
+        expect(file_exists(expected_object)).to_equal(false)
+        val emitted = static_guard_compile(static_guard_module("static_guard_empty"), output)
+        expect(emitted.is_err()).to_equal(true)
+        expect(emitted.unwrap_err()).to_contain("MIR module has no functions or static data")
+        expect(file_exists(expected_object)).to_equal(false)
+
+    it "rejects empty MIR when a real generic call requested a concrete body":
+        step("a missing concrete specialization cannot become a declaration-only success")
+        val source = "fn ident<T>(value: T) -> T:\n    value\n\nfn caller() -> i64:\n    ident(29)\n"
+        val parsed = parse_full_frontend(source, "guard_specialization.spl", "guard_specialization", Logger(level: 0))
+        var lowering = HirLowering.with_filename("guard_specialization.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val (modules, stats, diagnostics) = run_monomorphization_with_diagnostics({"guard_specialization": hir})
+        expect(diagnostics.len()).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+        var concrete = 0
+        for function_ in modules["guard_specialization"].functions.values():
+            if function_.name == "ident$i64":
+                concrete = concrete + 1
+        expect(concrete).to_equal(1)
+        # Deliberate negative fixture: omit all emitted bodies after proving
+        # the real mono pass created a concrete target. The guard must reject.
+        val output = static_guard_output("missing_body")
+        val expected_object = output + ".guard_specialization.o"
+        expect(file_exists(expected_object)).to_equal(false)
+        val emitted = static_guard_compile(static_guard_module("guard_specialization"), output)
+        expect(emitted.is_err()).to_equal(true)
+        expect(emitted.unwrap_err()).to_contain("MIR module has no functions or static data")
+        expect(file_exists(expected_object)).to_equal(false)

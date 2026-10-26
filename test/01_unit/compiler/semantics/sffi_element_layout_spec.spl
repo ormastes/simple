@@ -1,0 +1,119 @@
+use std.spec.*
+use std.spec.step
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirField, HirStruct, HirTypeParam}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
+
+fn mk_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "synthetic", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: mk_span())
+
+fn named_type(sym: SymbolId) -> HirType:
+    HirType(kind: HirTypeKind.Named(sym, []), span: mk_span())
+
+fn named_type_args(sym: SymbolId, args: [HirType]) -> HirType:
+    HirType(kind: HirTypeKind.Named(sym, args), span: mk_span())
+
+fn optional_type(inner: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Optional(inner), span: mk_span())
+
+fn array_type(elem: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Array(elem, nil), span: mk_span())
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_type(), span: mk_span())
+
+fn mk_field(name: text, type_: HirType) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: nil_expr(),
+        visibility: Visibility.Public,
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: mk_span()
+    )
+
+fn mk_struct(sym: SymbolId, name: text, fields: [HirField], type_params: [HirTypeParam]) -> HirStruct:
+    HirStruct(
+        symbol: sym,
+        name: name,
+        type_params: type_params,
+        fields: fields,
+        visibility: Visibility.Public,
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        has_layout_attr: false,
+        layout_attr: LayoutAttr(layout_kind: TypeLayoutKind.Simple, is_packed: false),
+        has_platform_attr: false,
+        platform_has_error: false,
+        platform_has_warning: false,
+        platform_diagnostic_message: "",
+        platform_diagnostic_line: 0,
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {}
+    )
+
+fn mk_type_param(sym: SymbolId, name: text) -> HirTypeParam:
+    HirTypeParam(symbol: sym, name: name, bounds: [], has_default: false, default: i64_type(), span: mk_span())
+
+fn mk_module(name: text, table: SymbolTable, structs: [HirStruct]) -> HirModule:
+    var structs_dict: Dict<SymbolId, HirStruct> = {}
+    for s in structs:
+        structs_dict[s.symbol] = s
+    HirModule(
+        name: name,
+        path: "synthetic/" + name + ".spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: table,
+        functions: {},
+        classes: {},
+        structs: structs_dict,
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+
+# Two new exact-shape controls; source/HIR only, UNRUN.
+describe "SFFI TypeInfo layout requires real indirection":
+    it "rejects the failed BUILD has_elem plus by-value elem shape":
+        step("Reproduce the actual TypeInfo.elem cycle through the existing validator")
+        var table = SymbolTable.new()
+        val node = table.define("TypeInfo", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val definition = mk_struct(node, "TypeInfo", [mk_field("has_elem", i64_type()), mk_field("elem", named_type(node))], [])
+        val module = mk_module("sffi_cycle", table, [definition])
+        expect(validate_value_struct_layouts(["sffi_cycle"], [module])).to_equal(["recursive by-value struct layout: TypeInfo.elem -> TypeInfo"])
+
+    it "accepts element and argument arrays without weakening the checker":
+        step("Both recursive edges go through existing array storage")
+        var table = SymbolTable.new()
+        val node = table.define("TypeInfo", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val definition = mk_struct(node, "TypeInfo", [mk_field("args", array_type(named_type(node))), mk_field("elem", array_type(named_type(node)))], [])
+        val module = mk_module("sffi_finite", table, [definition])
+        expect(validate_value_struct_layouts(["sffi_finite"], [module]).len()).to_equal(0)

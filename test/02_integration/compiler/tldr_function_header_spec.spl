@@ -1,0 +1,303 @@
+use compiler.driver.cache.tldr_function_archive_v1.{tldr_function_archive_interface_v1,
+    tldr_function_archive_interface_valid_v1}
+use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.semantics.resolve.{resolve_methods_quiet}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.hir.archive.tldr_function_header_v1.{TldrFunctionHeaderAuthorityV1,
+    AdmittedTldrFunctionImportV1, tldr_function_header_admit_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Items.module_tldr_registration.*
+use compiler.hir.hir_lowering._Items.module_import_resolution.*
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{ParserImport, ImportItem}
+use std.common.crypto.sha256.{sha256_text}
+
+fn tldr_test_digest() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn tldr_test_header(record: text) -> text:
+    val digest = tldr_test_digest()
+    "simple-tldr-functions/1\nmodule=dependency\nsource={digest}\nproducer={digest}\nvariant={digest}\nabi={digest}\n" + record + "\n"
+
+fn tldr_test_authority(payload: text) -> TldrFunctionHeaderAuthorityV1:
+    val digest = tldr_test_digest()
+    TldrFunctionHeaderAuthorityV1("dependency", digest, digest, digest,
+        digest, sha256_text(payload))
+
+fn tldr_test_ordinary_header() -> text:
+    tldr_test_header("function|header_add|dependency.header_add|left:i64,right:i64|i64")
+
+describe "prepared TLDR function boundary":
+    it "admits explicit parameter and return types without executable body data":
+        val payload = tldr_test_ordinary_header()
+        val admitted = tldr_function_header_admit_v1(payload, tldr_test_authority(payload))
+        expect(admitted.is_ok()).to_equal(true)
+        val signatures = admitted.unwrap()
+        expect(signatures.len()).to_equal(1)
+        expect(signatures[0].param_names).to_equal(["left", "right"])
+        expect(signatures[0].param_type_names).to_equal(["i64", "i64"])
+        expect(signatures[0].return_type_name).to_equal("i64")
+
+    it "registers the actual typed function under a local alias with pinned linkage":
+        val payload = tldr_test_ordinary_header()
+        var lowering = HirLowering.new()
+        val registered = lowering.register_tldr_imported_function_v1(payload,
+            tldr_test_authority(payload), "header_add", "add", Span.empty())
+        expect(registered.is_ok()).to_equal(true)
+        val symbol = lowering.symbols.symbols[registered.unwrap().id]
+        expect(symbol.name).to_equal("dependency.header_add")
+        expect(symbol.kind).to_equal(SymbolKind.Function)
+        expect(lowering.symbols.lookup_or_invalid("add").id).to_equal(symbol.id.id)
+        expect(symbol.type_ != nil).to_equal(true)
+        match symbol.type_!.kind:
+            case Function(parameters, result_type, effects):
+                expect(parameters.len()).to_equal(2)
+                expect(parameters[0].kind).to_equal(HirTypeKind.Int(64, true))
+                expect(parameters[1].kind).to_equal(HirTypeKind.Int(64, true))
+                expect(result_type.kind).to_equal(HirTypeKind.Int(64, true))
+                expect(effects.len()).to_equal(0)
+            case _:
+                assert(false, "TLDR import was not registered as an actual function type")
+
+    it "rejects stale source and incompatible producer or configuration bindings":
+        val payload = tldr_test_ordinary_header()
+        var authority = tldr_test_authority(payload)
+        authority.source_digest = sha256_text("changed source")
+        expect(tldr_function_header_admit_v1(payload, authority).is_err()).to_equal(true)
+        authority = tldr_test_authority(payload)
+        authority.producer_digest = sha256_text("changed producer")
+        expect(tldr_function_header_admit_v1(payload, authority).is_err()).to_equal(true)
+        authority = tldr_test_authority(payload)
+        authority.variant_digest = sha256_text("changed target or options")
+        expect(tldr_function_header_admit_v1(payload, authority).is_err()).to_equal(true)
+        authority = tldr_test_authority(payload)
+        authority.abi_digest = sha256_text("changed interface ABI")
+        expect(tldr_function_header_admit_v1(payload, authority).is_err()).to_equal(true)
+
+    it "reuses an exact repeated alias and rejects a conflicting signature":
+        val payload = tldr_test_ordinary_header()
+        val authority = tldr_test_authority(payload)
+        var lowering = HirLowering.new()
+        val first = lowering.register_tldr_imported_function_v1(payload,
+            authority, "header_add", "add", Span.empty())
+        val repeated = lowering.register_tldr_imported_function_v1(payload,
+            authority, "header_add", "add", Span.empty())
+        expect(first.is_ok()).to_equal(true)
+        expect(repeated.is_ok()).to_equal(true)
+        expect(repeated.unwrap().id).to_equal(first.unwrap().id)
+        val changed = payload.replace("right:i64", "right:i32")
+        expect(lowering.register_tldr_imported_function_v1(changed,
+            tldr_test_authority(changed), "header_add", "add", Span.empty()).unwrap_err()).to_equal("tldr-import-binding-conflict:add")
+
+    it "keeps equal bare names from different owners distinct":
+        val payload = tldr_test_ordinary_header()
+        val other = payload.replace("dependency", "other")
+        var other_authority = tldr_test_authority(other)
+        other_authority.module_name = "other"
+        var lowering = HirLowering.new()
+        val first = lowering.register_tldr_imported_function_v1(payload,
+            tldr_test_authority(payload), "header_add", "first", Span.empty())
+        val second = lowering.register_tldr_imported_function_v1(other,
+            other_authority, "header_add", "second", Span.empty())
+        expect(first.is_ok()).to_equal(true)
+        expect(second.is_ok()).to_equal(true)
+        expect(first.unwrap().id == second.unwrap().id).to_equal(false)
+        expect(lowering.symbols.symbols[first.unwrap().id].name).to_equal("dependency.header_add")
+        expect(lowering.symbols.symbols[second.unwrap().id].name).to_equal("other.header_add")
+
+    it "rejects tampering even when the modified declaration remains well formed":
+        val payload = tldr_test_ordinary_header()
+        val tampered = payload.replace("right:i64", "right:i32")
+        expect(tldr_function_header_admit_v1(tampered,
+            tldr_test_authority(payload)).unwrap_err()).to_equal("tldr-payload-digest-mismatch")
+
+    it "requires a body path for generic or unsupported type records":
+        val payload = tldr_test_header("function|identity|dependency.identity|value:T|T")
+        expect(tldr_function_header_admit_v1(payload,
+            tldr_test_authority(payload)).unwrap_err()).to_start_with("tldr-body-required:")
+
+    it "rejects extra body fields and duplicate imported functions":
+        val body = tldr_test_header("function|header_add|dependency.header_add|left:i64|i64|return 1")
+        expect(tldr_function_header_admit_v1(body, tldr_test_authority(body)).is_err()).to_equal(true)
+        val duplicate = tldr_test_header("function|header_add|dependency.header_add|left:i64|i64\nfunction|header_add|dependency.other|left:i64|i64")
+        expect(tldr_function_header_admit_v1(duplicate,
+            tldr_test_authority(duplicate)).unwrap_err()).to_equal("tldr-function-identity-invalid")
+
+    it "rejects empty malformed and duplicate-parameter records":
+        val empty = tldr_test_header("")
+        expect(tldr_function_header_admit_v1(empty, tldr_test_authority(empty)).is_err()).to_equal(true)
+        val malformed = tldr_test_header("function|header_add|dependency.header_add|left:i64,right|i64")
+        expect(tldr_function_header_admit_v1(malformed,
+            tldr_test_authority(malformed)).unwrap_err()).to_equal("tldr-parameter-invalid")
+        val duplicate = tldr_test_header("function|header_add|dependency.header_add|left:i64,left:i64|i64")
+        expect(tldr_function_header_admit_v1(duplicate,
+            tldr_test_authority(duplicate)).unwrap_err()).to_equal("tldr-parameter-invalid")
+
+    it "does not mutate the symbol table for a rejected header":
+        val payload = tldr_test_ordinary_header()
+        var lowering = HirLowering.new()
+        var authority = tldr_test_authority(payload)
+        authority.source_digest = sha256_text("stale")
+        expect(lowering.register_tldr_imported_function_v1(payload, authority,
+            "header_add", "add", Span.empty()).is_err()).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("add").is_valid()).to_equal(false)
+
+    it "resolves a selective prepared import without a dependency source surface":
+        val payload = tldr_test_ordinary_header()
+        var lowering = HirLowering.new()
+        lowering.tldr_entry_only = true
+        lowering.tldr_imports = [AdmittedTldrFunctionImportV1(payload, tldr_test_authority(payload))]
+        val imported = ParserImport("dependency",
+            [ImportItem("header_add", true, "add")], false, Span.empty())
+        lowering.resolve_import_list([imported], "main", false)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("add").is_valid()).to_equal(true)
+        expect(lowering.module_surfaces.surfaces.len()).to_equal(0)
+
+    it "rejects missing prepared imports instead of requesting source bodies":
+        var lowering = HirLowering.new()
+        lowering.tldr_entry_only = true
+        val imported = ParserImport("dependency",
+            [ImportItem("header_add", false, "")], false, Span.empty())
+        lowering.resolve_import_list([imported], "main", false)
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.symbols.lookup_or_invalid("header_add").is_valid()).to_equal(false)
+
+fn tldr_test_lower_external_call(record: text, expression: text) -> MirSignature:
+    val payload = tldr_test_header(record)
+    val source = "use dependency.{header_add}\nfn main() -> i64:\n    val answer = " + expression + "\n    0\n"
+    val parsed = parse_full_frontend(source, "entry", "entry.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("entry.spl")
+    lowering.tldr_entry_only = true
+    lowering.tldr_imports = [AdmittedTldrFunctionImportV1(payload, tldr_test_authority(payload))]
+    val hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(hir.functions.len()).to_equal(1)
+    val (resolved, errors) = resolve_methods_quiet(hir)
+    expect(errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(resolved.symbols)
+    val mir = mir_lowering.lower_module(resolved)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    expect(mir.functions.len()).to_equal(1)
+    var observed = 0
+    var actual = MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, arguments):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                                if name == "dependency.header_add":
+                                    observed = observed + 1
+                                    match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature):
+                                            actual = signature
+                                            expect(arguments.len()).to_equal(signature.params.len())
+                                        case _: expect(false).to_equal(true)
+                            case _: ()
+                    case _: ()
+    expect(observed).to_equal(1)
+    actual
+
+describe "TLDR parser to MIR external call ABI":
+    it "compiles one entry body with an exact two-integer external declaration":
+        val signature = tldr_test_lower_external_call(
+            "function|header_add|dependency.header_add|left:i64,right:i64|i64", "header_add(19, 23)")
+        expect(signature.params.len()).to_equal(2)
+        expect(signature.params[0].kind).to_equal(MirTypeKind.I64)
+        expect(signature.params[1].kind).to_equal(MirTypeKind.I64)
+        expect(signature.return_type.kind).to_equal(MirTypeKind.I64)
+        expect(signature.is_variadic).to_equal(false)
+        expect(signature.params_known).to_equal(true)
+
+    it "retains signed and unsigned narrow ABI widths":
+        val signature = tldr_test_lower_external_call(
+            "function|header_add|dependency.header_add|left:i32,right:u32|i32", "header_add(19, 23)")
+        expect(signature.params[0].kind).to_equal(MirTypeKind.I32)
+        expect(signature.params[1].kind).to_equal(MirTypeKind.U32)
+        expect(signature.return_type.kind).to_equal(MirTypeKind.I32)
+
+    it "retains floating and boolean ABI types":
+        val signature = tldr_test_lower_external_call(
+            "function|header_add|dependency.header_add|left:f64,right:bool|f64", "header_add(1.5, true)")
+        expect(signature.params[0].kind).to_equal(MirTypeKind.F64)
+        expect(signature.params[1].kind).to_equal(MirTypeKind.Bool)
+        expect(signature.return_type.kind).to_equal(MirTypeKind.F64)
+
+    it "preserves a zero-argument declaration":
+        val signature = tldr_test_lower_external_call(
+            "function|header_add|dependency.header_add||i64", "header_add()")
+        expect(signature.params.len()).to_equal(0)
+        expect(signature.return_type.kind).to_equal(MirTypeKind.I64)
+
+    it "rejects a call whose arity differs from the imported declaration":
+        val payload = tldr_test_ordinary_header()
+        val parsed = parse_full_frontend("use dependency.{header_add}\nfn main() -> i64:\n    header_add(1)\n", "entry", "entry.spl", Logger(level: 0))
+        var lowering = HirLowering.with_filename("entry.spl")
+        lowering.tldr_entry_only = true
+        lowering.tldr_imports = [AdmittedTldrFunctionImportV1(payload, tldr_test_authority(payload))]
+        val hir = lowering.lower_module(parsed)
+        val (resolved, errors) = resolve_methods_quiet(hir)
+        var mir_lowering = MirLowering.new(resolved.symbols)
+        val mir = mir_lowering.lower_module(resolved)
+        expect(lowering.errors.len() + errors.len() + mir_lowering.errors.len()).to_be_greater_than(0)
+
+describe "canonical producer TLDR archive extension":
+    it "emits typed function rows using the producer linkage map and retains legacy rows":
+        val source = "fn header_add(left: i64, right: i64) -> i64:\n    left + right\nexport header_add\n"
+        val parsed = parse_full_frontend(source, "dependency", "dependency.spl", Logger(level: 0))
+        var lowering = HirLowering.with_filename("dependency.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val abi = hir_abi_interface_digest_v1(hir).unwrap()
+        val content = tldr_function_archive_interface_v1(hir, "dependency", abi).unwrap()
+        expect(content).to_equal("symbol|dependency|module|{abi}|{abi}\nsymbol|dependency#header_add|function-header-v1|header_add;left:i64,right:i64;i64|{abi}")
+        expect(tldr_function_archive_interface_valid_v1(content, "dependency", abi)).to_equal(true)
+        expect(tldr_function_archive_interface_valid_v1("symbol|dependency|module|{abi}|{abi}", "dependency", abi)).to_equal(true)
+
+
+describe "admitted function ABI owner isolation":
+    it "preserves the module snapshot and clears the reused lowering table":
+        val payload = tldr_test_ordinary_header()
+        var lowering = HirLowering.new()
+        val symbol = lowering.register_tldr_imported_function_v1(payload,
+            tldr_test_authority(payload), "header_add", "header_add", Span.empty()).unwrap()
+        val snapshot = lowering.symbols.module_snapshot()
+        lowering.symbols.reset_module()
+        expect(lowering.symbols.admitted_function_abis.len()).to_equal(0)
+        expect(snapshot.admitted_function_abis.has(symbol.id)).to_equal(true)
+
+    it "rejects admitted ABI metadata attached to a non-function symbol":
+        val payload = tldr_test_ordinary_header()
+        val parsed = parse_full_frontend("use dependency.{header_add}\nfn main() -> i64:\n    0\n", "entry", "entry.spl", Logger(level: 0))
+        var lowering = HirLowering.with_filename("entry.spl")
+        lowering.tldr_entry_only = true
+        lowering.tldr_imports = [AdmittedTldrFunctionImportV1(payload, tldr_test_authority(payload))]
+        val hir = lowering.lower_module(parsed)
+        val symbol = hir.symbols.lookup_or_invalid("header_add")
+        var forged = hir.symbols.symbols[symbol.id]
+        forged.kind = SymbolKind.Variable
+        hir.symbols.symbols[symbol.id] = forged
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_be_greater_than(0)
+
+    it "rejects a conflicting explicit extern instead of overwriting admitted ABI":
+        val parsed = parse_full_frontend("fn main() -> i64:\n    0\n", "entry", "entry.spl", Logger(level: 0))
+        var lowering = HirLowering.with_filename("entry.spl")
+        var hir = lowering.lower_module(parsed)
+        for key in hir.functions.keys():
+            var function = hir.functions[key]
+            hir.symbols.admitted_function_abis[function.symbol.id] = hir.symbols.symbols[function.symbol.id].type_!
+            function.is_extern = true
+            function.return_type = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+            hir.functions[key] = function
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_be_greater_than(0)

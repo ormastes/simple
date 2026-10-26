@@ -3,6 +3,43 @@
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
+## 2026-10-10 addendum: omitted-field construction paths disagree
+
+The retained original `e10963a3b065dde1643c777512c3988526973957` body
+`test/01_unit/compiler/regression/struct_init_omitted_field_nil_fill_spec.spl`
+(SHA256 `88a7a564c3d1408cb740004756510cb7dd3a725ae52939545ce885f6e04a3b0f`)
+ran once under bootstrap diagnostic producer `c642f683b8a09abbe67dc9970d894eb166c6ab9e83f5a763e75df57e92404a4b`:
+seven cases executed, four passed, three failed. Paren construction returned
+zero for omitted `i64` fields; brace construction returned nil. The two paren
+nil expectations and brace/paren parity expectation failed. Evidence is
+`build/native_probe/phase1-e109-original-unseen40-20261010/33-struct_init_omitted_field_nil_fill_spec/`.
+Its receipt closed authentically, but the body emitted no loaded-owner trace;
+these are raw bootstrap observations, not immutable source or native qualification.
+
+The fixture documents the old all-nil interpreter behavior. Commit
+`981c88435e0ca161b643dd6b1df46774ba45519d` subsequently introduced primitive
+zero-fill for value-type struct constructors and a pure-Simple counterpart.
+Rust `src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs:14–32`
+defines `undefaulted_field_fill` (used at line 163); the pure counterpart is
+`src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:492–513`.
+The actual helper contract is pinned by
+`test/01_unit/compiler/interpreter/mirror_omitted_field_zero_fill_spec.spl`:
+integer zero, float zero, boolean false, and nil for nonprimitive fields.
+
+The brace paths remain different: Rust
+`src/compiler_rust/compiler/src/interpreter/expr/collections.rs:149–164`
+pre-fills missing fields with `Value::Nil`; pure
+`src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl:578–595`
+stores only explicitly supplied fields. Thus stale fixture documentation and
+oracles coexist with a real constructor-path mismatch. A test-only expectation
+change would hide the mismatch.
+
+Status: OPEN, contract-alignment selection required. Preserve declaration-slot
+ordering, explicit defaults, spread overrides, primitive defaults and
+nonprimitive nil behavior when selecting a repair across the real owners.
+No language behavior change, assertion rewrite, seed rebuild or rerun was
+performed for this addendum. The completed original cohort remains closed.
+
 Triage of unfixed failures from the 2026-08-16 compiler test sweep. Engine:
 `bin/simple test` (tree-walk interpreter path). One item was a stale spec and is
 FIXED in this change; everything else is filed here with root-cause notes.

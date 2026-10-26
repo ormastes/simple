@@ -20,7 +20,7 @@ use compiler.common.cache.phase_compatibility_manifest.{
 use compiler.frontend.frontend_parse_cache.{FRONTEND_CACHE_ENTRY_VERSION}
 use compiler.driver.cache.phase_compatibility_admission.{
     driver_admit_phase2_compatibility_manifest_v1,
-    driver_import_phase2_frontend_v1
+    driver_import_phase2_frontend_v2
 }
 use compiler.driver.cache.reverse_reference_receipt.{
     REVERSE_REFERENCE_FAMILIES_V1,
@@ -229,8 +229,8 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
         expect(phase_compatibility_manifest_decode_v1(
             encoded.replace("64:" + DIGEST_A, "99:" + DIGEST_A)).valid).to_equal(false)
 
-    it "should consume only the current admitted M2 frontend projection":
-        step("Publish a real immutable M2 receipt and consume its exact projection")
+    it "should reject legacy raw-filename frontend records and preserve M2 authority negatives":
+        step("Publish legacy schema1 evidence; exact-input V2 rejects it without materialization")
         val root = rt_path_absolute("build/test-artifacts/m3-phase-compatibility")
         val _clean = rt_dir_remove_all(root)
         val phase2 = root + "/phase2"
@@ -244,6 +244,9 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
         expect(dir_create_all(phase3_frontend)).to_equal(true)
         expect(file_write(source, "export fn answer() -> i64: 42\n")).to_equal(true)
         expect(file_write(cache_path, "version: 1\nentries: []\n")).to_equal(true)
+        # Frozen fixture authority is passed explicitly. Production receives it
+        # from phase-1 owners and never obtains it from a live path here.
+        val frozen_raw = {source: sha256_text("export fn answer() -> i64: 42\n")}
         val frontend_key = file_hash_sha256_or_empty(source)
         val source_record = phase2_frontend + "/" + frontend_key + ".fpc"
         expect(file_write(source_record, "old-producer-header\nflat-pool-payload")).to_equal(true)
@@ -274,14 +277,12 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
         rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", phase3_frontend)
         rt_env_set("SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ", manifest_path)
         rt_env_set("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", phase3)
-        expect(driver_import_phase2_frontend_v1()).to_equal("reused=1")
+        expect(driver_import_phase2_frontend_v2(frozen_raw)).to_equal("reused=0")
         expect(file_hash_sha256_or_empty(source_record)).to_equal(source_hash_before)
         val materialized_path = phase3_frontend + "/" + frontend_key + ".fpc"
-        val materialized = file_read(materialized_path)
-        expect(materialized).to_contain("phase3-scope\nflat-pool-payload")
-        expect(file_delete(materialized_path)).to_equal(true)
+        expect(file_hash_sha256_or_empty(materialized_path)).to_equal("")
         expect(file_write(source_record, "corrupt-after-publication")).to_equal(true)
-        expect(driver_import_phase2_frontend_v1()).to_equal("reused=0")
+        expect(driver_import_phase2_frontend_v2(frozen_raw)).to_equal("reused=0")
         expect(file_write(source_record, "old-producer-header\nflat-pool-payload")).to_equal(true)
 
         step("Reject manifest authority mutations and a superseded CURRENT receipt")
@@ -289,7 +290,7 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
         wrong_digest_manifest.m2_receipt_digest = DIGEST_A
         expect(file_write(manifest_path,
             phase_compatibility_manifest_encode_v1(wrong_digest_manifest))).to_equal(true)
-        expect(driver_import_phase2_frontend_v1()).to_equal(
+        expect(driver_import_phase2_frontend_v2(frozen_raw)).to_equal(
             "manifest-rejected:m2-receipt-digest-mismatch")
         expect(file_write(manifest_path,
             phase_compatibility_manifest_encode_v1(manifest))).to_equal(true)
@@ -297,7 +298,7 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
             source, sha256_text("new-owner"), sha256_text("new-root"), "newer")
         expect(reverse_reference_publish_generation_v1(
             cache_path, newer_receipt)).to_equal(true)
-        expect(driver_import_phase2_frontend_v1()).to_equal(
+        expect(driver_import_phase2_frontend_v2(frozen_raw)).to_equal(
             "manifest-rejected:m2-receipt-digest-mismatch")
         val pointer = cache_path + ".reverse-references/CURRENT"
         val pointer_target = phase2 + "/pointer-target"
@@ -312,7 +313,7 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
             print "SKIP: symlink creation unavailable; receipt mutation negatives remain covered"
 
         rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", phase2_frontend)
-        expect(driver_import_phase2_frontend_v1()).to_contain("manifest-rejected:")
+        expect(driver_import_phase2_frontend_v2(frozen_raw)).to_contain("manifest-rejected:")
         expect(rt_dir_remove_all(root)).to_equal(true)
 
     it "should reject filesystem aliases symlinks and prefix collisions":
