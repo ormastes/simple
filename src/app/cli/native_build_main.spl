@@ -1729,6 +1729,13 @@ pub fn native_build_relaunch_past_ice_crashes(worker_bin: text, relaunch_args: [
     native_build_relaunch_past_ice_crashes(worker_bin, relaunch_args, timeout_ms,
         retries_left - 1, next_stdout, next_stderr, next_code)
 
+pub fn native_build_missing_output_is_failure_v1(code: i64, output_path: text,
+        output_ok: bool, shard_child: bool) -> bool:
+    code == 0 and output_path != "" and not output_ok and not shard_child
+
+pub fn native_build_workarounds_refresh_needed_v1(worker: text, shard_child: bool) -> bool:
+    worker != "1" and not shard_child
+
 pub fn run_native_build_worker(raw_args: [text]) -> i64:
     val request = match native_build_authority_request_v1(raw_args,
             (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") == "1"):
@@ -1747,7 +1754,11 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # This is the parent coordinator; native_build_worker.spl and shard
     # children never publish the derived index. One changed-path batch keeps
     # recovery links current without changing compilation cache identities.
-    if (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") != "1":
+    # Re-executed shard children (SIMPLE_{PARSE,HIR,MIR}_SHARD set from their
+    # role flag) are not the coordinator either: one build, one writer lock.
+    val shard_child = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
+        (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD") ?? "") != ""
+    if native_build_workarounds_refresh_needed_v1(env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "", shard_child):
         match refresh_workarounds(false, []):
             case Ok(index):
                 if not index.complete:
@@ -2064,7 +2075,11 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     val _warm_promoted = native_build_warm_receipt_finish(
         warm_receipt, stdout, code == 0, output_ok)
     env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
-    if code == 0 and output_path != "" and not output_ok:
+    # Parse/HIR/MIR shard children exit before link by design; a missing -o
+    # there is not a failure (it marked every successful parse shard FAILED).
+    val shard_child_run = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
+        (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD") ?? "") != ""
+    if native_build_missing_output_is_failure_v1(code, output_path, output_ok, shard_child_run):
         # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
         # worker chain died in a way that still reports success (an early-exit
         # helper, a killed sibling, etc.) but left no output file, fail loudly
