@@ -399,6 +399,27 @@ pub fn rt_unambiguous_declaration_names_v1(
             names[id] = declaration.name
     names
 
+# Invocation-local lazy analysis. Used ONLY for the unadjusted ordinary graph
+# when the actual capability list is empty. HAL gets its own synthetic graph.
+class RtCriticalSharedAnalysisV1:
+    var built: bool = false
+    var positions: Dict<text, i64> = {}
+    var masks: [i64] = []
+    var graph_builds: i64 = 0
+
+    me admit(root: text, facts: [RtCriticalFact]) -> [text]:
+        if not self.built:
+            self.positions = rt_fact_index(facts)
+            self.masks = rt_critical_closure(facts)
+            self.graph_builds = self.graph_builds + 1
+            self.built = true
+        rt_critical_admit_precomputed_v1(root, self.positions, self.masks)
+
+fn rt_admit_ordinary_v1(root: text, facts: [RtCriticalFact],
+        capabilities: [RtBoundCapability], shared: RtCriticalSharedAnalysisV1) -> [text]:
+    if capabilities.len() == 0: return shared.admit(root, facts)
+    rt_admit_with_capabilities_v1(root, facts, capabilities)
+
 fn rt_admit_with_manifest(root_id: text, facts: [RtCriticalFact]) -> [text]:
     rt_admit_with_capabilities_v1(root_id, facts, rt_bound_manifest_capabilities())
 
@@ -636,6 +657,17 @@ pub fn rt_criticality_graph_facts_v1(functions: [RtCriticalFunctionFactsV1]) -> 
 pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
         functions: [RtCriticalFunctionFactsV1], capabilities: [RtBoundCapability],
         claims: [RtCriticalContractClaimV1], implicit_profile_error: bool) -> [RtCriticalDiagnostic]:
+    validate_rt_criticality_claim_facts_with_analysis_v1(module_ids, functions,
+        capabilities, claims, implicit_profile_error, RtCriticalSharedAnalysisV1())
+
+# The observer receives a work count only. Its supplied graph/cache fields are
+# never read: each actual validation constructs a fresh private analysis.
+pub fn validate_rt_criticality_claim_facts_with_analysis_v1(module_ids: [text],
+        functions: [RtCriticalFunctionFactsV1], capabilities: [RtBoundCapability],
+        claims: [RtCriticalContractClaimV1], implicit_profile_error: bool,
+        observer: RtCriticalSharedAnalysisV1) -> [RtCriticalDiagnostic]:
+    var shared = RtCriticalSharedAnalysisV1()
+    observer.graph_builds = 0
     val trace = rt_validation_trace_enabled_v1()
     val trace_started_ms = if trace: time_now_monotonic_ms() else: -1
     if trace:
@@ -656,6 +688,18 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
     # Resolve each claim once. Rank propagation then shares one scalar graph
     # closure across all roots, including explicit lower-tier callers of a
     # critical or verified dependency.
+    # Index names once; each bucket retains declaration order. Path/key/name
+    # aliases are still tested by the existing exact predicate, never joined
+    # into an ambiguous delimiter key or collapsed into a last-writer winner.
+    var candidates: Dict<text, [i64]> = {}
+    var candidate_index = 0
+    while candidate_index < functions.len():
+        val candidate: RtCriticalFunctionFactsV1 = functions[candidate_index]
+        val name = candidate.declaration.name
+        var bucket: [i64] = if candidates.contains_key(name): candidates[name] else: []
+        bucket.push(candidate_index)
+        candidates[name] = bucket
+        candidate_index = candidate_index + 1
     var claim_roots: Dict<text, text> = {}
     var declared_ranks: Dict<text, i64> = {}
     for raw_claim in claims:
@@ -666,12 +710,11 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
         val fn_name = claim.fn_name
         val profile = claim.profile
         var root_id = ""
-        for raw_fn in functions:
-            # ANY-transport: annotated rebind (cycle-71).
-            val fn_: RtCriticalFunctionFactsV1 = raw_fn
-            val declaration = fn_.declaration
-            if not rt_declaration_matches_v1(declaration, claim.path): continue
-            if declaration.name == fn_name:
+        if candidates.contains_key(fn_name):
+            for candidate in candidates[fn_name]:
+                val fn_: RtCriticalFunctionFactsV1 = functions[candidate]
+                val declaration = fn_.declaration
+                if not rt_declaration_matches_v1(declaration, claim.path): continue
                 if root_id != "": root_id = "__rt_ambiguous_root__"
                 else: root_id = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
         claim_roots[key] = root_id
@@ -737,12 +780,12 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
                 # Ordinary roots retain the exact compiler fact graph used by
                 # the reviewed digest. A HAL-only synthetic edge would change
                 # that digest and silently discard valid allocation authority.
-                for d in rt_admit_with_capabilities_v1(admission_root, facts, capabilities):
+                for d in rt_admit_ordinary_v1(admission_root, facts, capabilities, shared):
                     diagnostics.push(RtCriticalDiagnostic(
                         severity: RtCriticalDiagnosticSeverity.Error, message: d))
             admitted_roots[admission_identity] = true
         elif fact_positions.contains_key(root_id):
-            for d in rt_admit_with_capabilities_v1(root_id, facts, capabilities):
+            for d in rt_admit_ordinary_v1(root_id, facts, capabilities, shared):
                 if d.starts_with("error[RT-E-UNBOUNDED-ALLOCATION]"):
                     val level = if implicit_profile_error: "error" else: "warning"
                     val code = if implicit_profile_error:
@@ -772,6 +815,7 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
             diagnostics.push(RtCriticalDiagnostic(
                 severity: RtCriticalDiagnosticSeverity.Error, message: d))
         admitted_roots[root_id] = true
+    observer.graph_builds = shared.graph_builds
     val ordered = rt_sort_criticality_diagnostics(diagnostics)
     rt_validation_trace_v1(trace, trace_started_ms, "policy:done", ordered.len(), functions.len())
     ordered
@@ -1113,3 +1157,6 @@ export rt_module_function_declarations_v1, rt_unambiguous_declaration_names_v1
 export rt_function_facts_v1, validate_rt_criticality_facts_v1
 export validate_rt_criticality_facts_with_capabilities_v1
 export RtCriticalContractClaimV1, rt_critical_contract_claims_v1, validate_rt_criticality_claim_facts_v1, rt_criticality_graph_facts_v1
+
+export RtCriticalSharedAnalysisV1
+export validate_rt_criticality_claim_facts_with_analysis_v1
