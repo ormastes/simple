@@ -21,6 +21,7 @@ typedef struct RtArraySnapshotV1 {
 } RtArraySnapshotV1;
 /* Compiler-private bridge is supported on the actual 64-bit native ABI only.
  * These are record layout contracts, never Simple object layout assumptions. */
+#if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(RtDictSnapshotV1)==64,"snapshot observation ABI size");
 _Static_assert(offsetof(RtDictSnapshotV1,dictionary)==0,"snapshot dictionary offset");
 _Static_assert(offsetof(RtDictSnapshotV1,owner)==8,"snapshot owner offset");
@@ -37,6 +38,9 @@ _Static_assert(offsetof(RtArraySnapshotV1,data)==16,"array witness data offset")
 _Static_assert(offsetof(RtArraySnapshotV1,birth)==24,"array witness birth offset");
 _Static_assert(offsetof(RtArraySnapshotV1,owner)==32,"array witness owner offset");
 _Static_assert(offsetof(RtArraySnapshotV1,consumed)==36,"array witness consumed offset");
+/* Other native targets may build the ordinary runtime, but have no admitted
+ * private bridge layout. fill_publish refuses them explicitly. */
+#endif
 int64_t rt_array_snapshot_new_v1(int64_t length,int64_t work,int64_t fields,int64_t bytes,
     RtArraySnapshotV1* output);
 int64_t rt_array_snapshot_dispose_v1(RtArraySnapshotV1* output,int64_t work);

@@ -216,6 +216,11 @@ int64_t rt_dict_snapshot_fill_bound_v1(int64_t capacity,int64_t length) {
  * Actual successful fill is the sole proof edge; nothing fallible follows. */
 int64_t rt_dict_snapshot_fill_publish_v1(int64_t dictionary,const RtDictSnapshotV1* expected,
     RtArraySnapshotV1* output,int64_t work) {
+#if UINTPTR_MAX != UINT64_MAX
+    (void)dictionary; (void)expected; (void)output; (void)work;
+    return DS_INVALID; /* ordinary runtime remains buildable, private ABI absent */
+#else
     int64_t status=rt_dict_snapshot_fill_v1(dictionary,expected,output,work);
     return status==0 ? output->array : status;
+#endif
 }
