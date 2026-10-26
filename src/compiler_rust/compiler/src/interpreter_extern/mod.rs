@@ -1928,6 +1928,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_kill", system::rt_process_kill);
     insert_simple!("rt_process_run", system::rt_process_run);
     insert_simple!("rt_process_run_bounded", system::rt_process_run_bounded);
+    insert_simple!("rt_process_run_bounded_bytes", system::rt_process_run_bounded_bytes);
     insert_simple!("rt_process_run_inherit", system::rt_process_run_inherit);
     // Declared by src/lib/nogc_sync_mut/io/resource_scope.spl and reached by
     // every directory-mode `simple test` run via _run_scoped_child; the C

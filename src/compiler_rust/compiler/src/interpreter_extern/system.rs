@@ -874,6 +874,25 @@ fn bounded_output_limit(value: &Value) -> Option<usize> {
 }
 
 pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
+    let (stdout, stderr, exit_code) = process_run_bounded_raw(args)?;
+    Ok(Value::Tuple(vec![
+        Value::text(String::from_utf8_lossy(&stdout).into_owned()),
+        Value::text(String::from_utf8_lossy(&stderr).into_owned()),
+        Value::Int(exit_code),
+    ]))
+}
+
+/// Byte-exact twin of `rt_process_run_bounded` (std process_run_bounded_bytes).
+pub fn rt_process_run_bounded_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let (stdout, stderr, exit_code) = process_run_bounded_raw(args)?;
+    Ok(Value::Tuple(vec![
+        Value::byte_array(stdout),
+        Value::byte_array(stderr),
+        Value::Int(exit_code),
+    ]))
+}
+
+fn process_run_bounded_raw(args: &[Value]) -> Result<(Vec<u8>, Vec<u8>, i64), CompileError> {
     if args.len() < 4 {
         return Err(CompileError::runtime(
             "rt_process_run_bounded requires 4 arguments (cmd, args, timeout_ms, max_output_bytes)",
@@ -929,20 +948,10 @@ pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => {
-            return Ok(Value::Tuple(vec![
-                Value::text(String::new()),
-                Value::text(String::new()),
-                Value::Int(-1),
-            ]))
-        }
+        Err(_) => return Ok((Vec::new(), Vec::new(), -1)),
     };
     let (stdout, stderr, exit_code) = finish_child_output_bounded(child, timeout_ms, max_output_bytes);
-    Ok(Value::Tuple(vec![
-        Value::text(String::from_utf8_lossy(&stdout).into_owned()),
-        Value::text(String::from_utf8_lossy(&stderr).into_owned()),
-        Value::Int(exit_code),
-    ]))
+    Ok((stdout.to_vec(), stderr.to_vec(), exit_code))
 }
 
 /// Mirror of `RtOwnedProcessReceipt` in `src/runtime/runtime.h`.
