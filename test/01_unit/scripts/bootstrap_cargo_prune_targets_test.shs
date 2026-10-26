@@ -1,0 +1,22 @@
+#!/bin/sh
+# build/c/<config-key> cargo targets (~2.8 GB each) are bounded: the current
+# key plus the newest others up to SIMPLE_CARGO_TARGET_KEEP survive.
+set -u
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+src="$repo/scripts/bootstrap/bootstrap-authority-wiring.shs"
+body=$(sed -n '/^bootstrap_cargo_prune_targets() {$/,/^}$/p' "$src")
+[ -n "$body" ] || { echo "FAIL — bootstrap_cargo_prune_targets not defined in $src"; exit 1; }
+eval "$body"
+grep -q 'bootstrap_cargo_prune_targets "${bootstrap_cargo_repo}/build/c"' "$src" ||
+  { echo "FAIL — prune not wired into the cargo target path"; exit 1; }
+fx=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+trap 'rm -rf "$fx"' EXIT
+c="$fx/build/c"
+mkdir -p "$c/k1" "$c/k2" "$c/k3" "$c/k4"
+touch -d '4 minutes ago' "$c/k1"; touch -d '3 minutes ago' "$c/k2"
+touch -d '2 minutes ago' "$c/k3"; touch -d '1 minute ago' "$c/k4"
+SIMPLE_CARGO_TARGET_KEEP=2 bootstrap_cargo_prune_targets "$c" k1 2>/dev/null ||
+  { echo "FAIL — prune returned nonzero"; exit 1; }
+for k in k1 k4; do [ -d "$c/$k" ] || { echo "FAIL — $k wrongly evicted"; exit 1; }; done
+for k in k2 k3; do [ ! -e "$c/$k" ] || { echo "FAIL — $k not evicted"; exit 1; }; done
+echo "PASS — 4 cargo targets checked, current + newest kept, 2 evicted"
