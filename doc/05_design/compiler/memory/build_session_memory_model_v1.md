@@ -202,7 +202,8 @@ tables) under the session allocator is the next perf step.
 `BuildSession.end()` is OPT-IN (`SIMPLE_BUILD_SESSION_END=1`) until one green
 native Stage-3 run; under the interpreter `rt_rc_share` refuses, so `end()` is
 always skipped there. Globals still dangling after an `end()`:
-`resource_registry` (reset not exported) and `mir_data` `_bootstrap_fn_*`.
+none known: `resource_registry` and `mir_data` `_bootstrap_fn_*` are now reset by
+`build_session_end_reset_globals_v1` (spec `build_session_end_reset_globals_spec.spl`).
 Kill-switches: `SIMPLE_BUILD_SESSION=0` (no session), `SIMPLE_BUILD_SESSION_END=0`.
 Next s3 run should record HIR/MIR per-module time and `PeakWorkingSet64`
 with and without `SIMPLE_BUILD_SESSION_END=1` (method: HIR perf lane, #4764 body).
