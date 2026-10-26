@@ -59,7 +59,8 @@ use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
 # paid in full at module-bootstrap time: app/compile/native.spl alone retained
 # 10,910 export bindings and cost 692ms. Removed as dead imports.
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compile_result_errors, compileoptions_normalize_mir_optimization)
-use app.cli.native_build_output_plan.{native_build_is_standalone_flag_v1, native_build_output_format_v1}
+use app.cli.native_build_output_plan.{native_build_is_standalone_flag_v1,
+    native_build_output_format_v1, native_build_apply_failure_policy_v1}
 use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
 use app.build.targets.action_identity.{
     NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
@@ -1032,17 +1033,9 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
             no_mangle = true
         elif a == "--low-memory":
             low_memory = true
-        elif a == "--fail-fast":
-            # Match the parent worker policy; explicit flags override inherited env.
-            env_set("SIMPLE_COMPILE_FAIL_FAST", "1")
-        elif a == "--keep-going":
-            env_set("SIMPLE_COMPILE_FAIL_FAST", "0")
-        elif a == "--go-to-end":
-            # Emit every object that can be produced past HIR/MIR/codegen
-            # failures, write <output>.go-to-end.sdn, never link a partial
-            # binary (compiler/80.driver/driver_build/go_to_end.spl).
-            env_set("SIMPLE_COMPILE_FAIL_FAST", "0")
-            env_set("SIMPLE_NATIVE_GO_TO_END", "1")
+        elif a == "--fail-fast" or a == "--keep-going" or a == "--go-to-end":
+            # The shared policy owner applied these after option validation.
+            pass
         elif a == "--runtime-owner":
             if j + 1 < args.len():
                 j = j + 1
@@ -1238,6 +1231,7 @@ fn _cli_native_build(
         case Err(reason):
             _cli_eprint(reason)
             return 2
+    native_build_apply_failure_policy_v1(args)
     val collection_planner = collection_planner_options(args)
     # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
     var backend = ""
