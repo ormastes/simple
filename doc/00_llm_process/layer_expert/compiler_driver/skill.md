@@ -285,3 +285,12 @@ is in-process and dies with the child, so cross-process failure detail goes
 through the ledger terminals (FAILED) and the ICE receipt part rows
 (`mir_lower`). Bug:
 `doc/08_tracking/bug/mir_shard_go_to_end_failure_published_as_pass_2026-10-25.md`.
+
+## TRACE32 physical owners (2026-10-25)
+
+Windows may materialize app symlinks as ordinary target-text files. Exact import
+fallback now covers `app.mcp_t32` and `app.cmm_lsp` alongside `app.t32_cli`, after
+ordinary resolution with existing prefix boundaries. Preserve requested-name
+closure aliases instead of rewriting HIR names. Source regressions are UNRUN;
+actual T32 consumers need a rebuilt producer and real Hello compile/run sanity.
+See [matrix](../../../08_tracking/bug/tooling_phase3_matrix_2026_10_25.md).
