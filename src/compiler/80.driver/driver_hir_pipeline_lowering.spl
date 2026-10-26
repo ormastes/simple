@@ -114,6 +114,7 @@ use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir
 use compiler.driver.driver_source_receipt_index_v1.{
     driver_source_receipt_pair_key_v1, driver_source_receipt_index_v1}
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_unit_active_v1}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_register_source_alias_v1, reverse_reference_module_begin_v1
@@ -1090,6 +1091,9 @@ impl CompilerDriver:
         else:
             ""
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        # Per-file unit child (native_file_worker_v1.spl): HIR for its claims,
+        # then this same process continues into MIR + object.
+        val hir_unit_mode: bool = hir_shard_mode and native_file_worker_unit_active_v1()
         if hir_shard_active() and not hir_shard_mode:
             hir_shard_guard_block("HIR cache identity unavailable for shard")
             self.ctx.add_error("HIR cache identity unavailable for shard")
@@ -1145,7 +1149,7 @@ impl CompilerDriver:
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
-            if hir_shard_mode and shard_completed_surfaces.contains_key(surface_index):
+            if hir_shard_mode and not hir_unit_mode and shard_completed_surfaces.contains_key(surface_index):
                 hir_loop_pos = hir_loop_pos + 1
                 continue
             if lowered_by_surface.contains_key(surface_index):
@@ -1254,53 +1258,59 @@ impl CompilerDriver:
                     hir_shard_guard_block("HIR claim or cache identity unavailable")
                     self.ctx.add_error("HIR shard ledger claim failed")
                     return false
-                if claim == 0:
+                if claim == 1:
+                    # File-worker P4: record F's direct import source paths (frozen
+                    # surface import targets) before F's terminal; the coordinator's
+                    # generic-instance step reads them.
+                    if hir_shard_deps_wanted_v1():
+                        var shard_dep_paths: [text] = []
+                        for dep_surface_index in surfaces.surfaces[surface_index].import_target_indices:
+                            if dep_surface_index >= 0 and dep_surface_index < surfaces.surfaces.len():
+                                val dep_source_index = surfaces.surfaces[dep_surface_index].source_index
+                                if dep_source_index >= 0 and dep_source_index < self.ctx.sources.len():
+                                    shard_dep_paths = shard_dep_paths.push(self.ctx.sources[dep_source_index].path)
+                        if not hir_shard_publish_deps_v1(source.path, shard_dep_paths):
+                            hir_shard_guard_block("HIR shard deps record publication failed")
+                            self.ctx.add_error("HIR shard deps record publication failed")
+                            return false
+                        if not hir_shard_publish_hirkey_v1(source.path, hir_stream_key):
+                            hir_shard_guard_block("HIR shard hirkey record publication failed")
+                            self.ctx.add_error("HIR shard hirkey record publication failed")
+                            return false
+                    val shard_status = self.lower_streaming_hir_shard_transaction_v1(
+                        lowering, source, is_requested_bootstrap_entry, hir_stream_key)
+                    if shard_status < 0 or shard_status > 3:
+                        hir_shard_guard_block("HIR shard transaction failed before safe completion")
+                        return false
+                    val source_failed = shard_status == 2
+                    if not hir_shard_finish(source.path, if source_failed: "FAILED" else: "PASS", driver_hir_shard_cache_stored_v1(shard_status)):
+                        hir_shard_guard_block("HIR shard terminal receipt publication failed")
+                        self.ctx.add_error("HIR shard terminal receipt publication failed")
+                        return false
+                    if source_failed:
+                        poisoned_by_surface[surface_index] = true
+                        var poison_ctx = self.ctx
+                        poison_ctx.mark_module_poisoned(source.module_name)
+                        if poison_ctx.poison_budget_exhausted(): return false
+                    else:
+                        shard_completed_surfaces[surface_index] = true
+                        progress_hir_done = progress_hir_done + 1
+                        if shard_status == 1 or shard_status == 3: hir_shard_lowered = hir_shard_lowered + 1
+                    # Poisoned modules are this row's failures; before 2026-10-19
+                    # the count sat in the `cached` slot and `failed` was 0.
+                    log_build_progress("hir", "modules", progress_hir_done,
+                        surfaces.surfaces.len(), source.module_name, 2, 6,
+                        self.ctx.poisoned_module_count_value, hir_cache_hits(), "running")
+                    # A unit child goes on to load its own fresh HIR from the
+                    # cache below, for its in-process MIR + object.
+                    if not hir_unit_mode or source_failed:
+                        hir_loop_pos = hir_loop_pos + 1
+                        continue
+                elif not hir_unit_mode:
                     hir_loop_pos = hir_loop_pos + 1
                     continue
-                # File-worker P4: record F's direct import source paths (frozen
-                # surface import targets) before F's terminal, so the worker can
-                # admit MIR(F) once F and these imports are PASS.
-                if hir_shard_deps_wanted_v1():
-                    var shard_dep_paths: [text] = []
-                    for dep_surface_index in surfaces.surfaces[surface_index].import_target_indices:
-                        if dep_surface_index >= 0 and dep_surface_index < surfaces.surfaces.len():
-                            val dep_source_index = surfaces.surfaces[dep_surface_index].source_index
-                            if dep_source_index >= 0 and dep_source_index < self.ctx.sources.len():
-                                shard_dep_paths = shard_dep_paths.push(self.ctx.sources[dep_source_index].path)
-                    if not hir_shard_publish_deps_v1(source.path, shard_dep_paths):
-                        hir_shard_guard_block("HIR shard deps record publication failed")
-                        self.ctx.add_error("HIR shard deps record publication failed")
-                        return false
-                    if not hir_shard_publish_hirkey_v1(source.path, hir_stream_key):
-                        hir_shard_guard_block("HIR shard hirkey record publication failed")
-                        self.ctx.add_error("HIR shard hirkey record publication failed")
-                        return false
-                val shard_status = self.lower_streaming_hir_shard_transaction_v1(
-                    lowering, source, is_requested_bootstrap_entry, hir_stream_key)
-                if shard_status < 0 or shard_status > 3:
-                    hir_shard_guard_block("HIR shard transaction failed before safe completion")
-                    return false
-                val source_failed = shard_status == 2
-                if not hir_shard_finish(source.path, if source_failed: "FAILED" else: "PASS", driver_hir_shard_cache_stored_v1(shard_status)):
-                    hir_shard_guard_block("HIR shard terminal receipt publication failed")
-                    self.ctx.add_error("HIR shard terminal receipt publication failed")
-                    return false
-                if source_failed:
-                    poisoned_by_surface[surface_index] = true
-                    var poison_ctx = self.ctx
-                    poison_ctx.mark_module_poisoned(source.module_name)
-                    if poison_ctx.poison_budget_exhausted(): return false
-                else:
-                    shard_completed_surfaces[surface_index] = true
-                    progress_hir_done = progress_hir_done + 1
-                    if shard_status == 1 or shard_status == 3: hir_shard_lowered = hir_shard_lowered + 1
-                # Poisoned modules are this row's failures; before 2026-10-19
-                # the count sat in the `cached` slot and `failed` was 0.
-                log_build_progress("hir", "modules", progress_hir_done,
-                    surfaces.surfaces.len(), source.module_name, 2, 6,
-                    self.ctx.poisoned_module_count_value, hir_cache_hits(), "running")
-                hir_loop_pos = hir_loop_pos + 1
-                continue
+                # Unit child: an import it did not claim is loaded from the
+                # cache (or lowered in-process) below -- never waited on.
             # P-A: a module-scoped MIR child loads HIR only for its targets and
             # their frozen import closure (driver_worker_surface_closure_v1).
             if not worker_hir_load_allowed_v1(source.path):
@@ -1559,7 +1569,9 @@ impl CompilerDriver:
                 hir_shard_guard_block("HIR traversal receipt publication failed")
                 exit(1)
             rt_stdout_flush()
-            exit(if self.ctx.error_count_value > 0: 1 else: 0)
+            # A unit child continues into MIR + object in this process.
+            if not hir_unit_mode or self.ctx.error_count_value > 0:
+                exit(if self.ctx.error_count_value > 0: 1 else: 0)
         # Poisoned modules below the budget still fail this phase at the
         # error-count check further down; label the terminal row accordingly.
         val hir_terminal_outcome: text = if self.ctx.error_count_value > 0: "hir-diagnostic" else: "hir-complete"
@@ -1835,6 +1847,10 @@ impl CompilerDriver:
         if hir_shard_active() and not hir_shard_mode:
             hir_shard_guard_block("HIR cache identity unavailable for shard")
             self.ctx.add_error("HIR cache identity unavailable for shard")
+            return false
+        if hir_shard_mode and native_file_worker_unit_active_v1():
+            hir_shard_guard_block("file-worker unit requires streaming surfaces")
+            self.ctx.add_error("file-worker unit requires the streaming surface HIR path")
             return false
         var hir_level_count: i64 = 0
         var hir_shard_lowered: i64 = 0

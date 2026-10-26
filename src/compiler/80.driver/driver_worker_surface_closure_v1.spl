@@ -33,6 +33,7 @@
 # still build every surface and load every HIR module.
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
@@ -313,6 +314,78 @@ pub fn worker_surface_text_v1(source_path: text, source: text, tldr_root: text) 
         val _stored = _ws_table.publish(digest, text)
     text
 
+# Per-file unit child (SIMPLE_FILE_WORKER_UNIT=1, native_file_worker_v1.spl):
+# deps-first order over the frozen sources (iterative DFS post-order on the
+# same import resolution as worker_surface_closure_v1). Every unit child of
+# one invocation computes the same order from the same frozen inventory, so a
+# module is picked only after the modules it imports were picked.
+pub fn worker_unit_pick_order_v1(paths: [text], canonical_paths: [text], contents: [text]) -> [i64]:
+    var by_canonical: Dict<text, i64> = {}
+    var i = 0
+    while i < canonical_paths.len():
+        if not by_canonical.contains_key(canonical_paths[i]):
+            by_canonical[canonical_paths[i]] = i
+        i = i + 1
+    var edges: [[i64]] = []
+    i = 0
+    while i < paths.len():
+        var deps: [i64] = []
+        for id in worker_surface_import_ids_v1(contents[i]):
+            val resolved = resolve_module_path(id, paths[i])
+            if resolved != "":
+                val key = _ws_canonical_key_v1(resolved, canonical_paths, by_canonical)
+                if key >= 0 and key != i and not deps.contains(key): deps.push(key)
+        edges.push(deps)
+        i = i + 1
+    var state: [i64] = []
+    for _p in paths:
+        state.push(0)
+    var order: [i64] = []
+    var root = 0
+    while root < paths.len():
+        if state[root] == 0:
+            var stack: [i64] = [root]
+            var next: [i64] = [0]
+            state[root] = 1
+            while stack.len() > 0:
+                val top = stack.len() - 1
+                val at = stack[top]
+                if next[top] < edges[at].len():
+                    val dep = edges[at][next[top]]
+                    next[top] = next[top] + 1
+                    if state[dep] == 0:
+                        state[dep] = 1
+                        stack.push(dep)
+                        next.push(0)
+                else:
+                    state[at] = 2
+                    order.push(at)
+                    stack = stack.slice(0, top)
+                    next = next.slice(0, top)
+        root = root + 1
+    order
+
+# Takes up to `batch` sources in `order` that no unit child picked or claimed
+# yet, under the HIR ledger lock. The pick record "<sha256(path)>.pick" is
+# ignored by the ledger's readers (they read .claim/.terminal only).
+pub fn worker_unit_pick_v1(queue: text, owner: text, paths: [text], order: [i64], batch: i64) -> [text]:
+    var picked: [text] = []
+    if queue == "" or owner == "" or batch <= 0:
+        return picked
+    val fd = file_lock("{queue}/.lock", 30)
+    if fd < 0:
+        return picked
+    for at in order:
+        if picked.len() >= batch:
+            break
+        val path = paths[at]
+        val base = "{queue}/{sha256_text(path)}"
+        if not picked.contains(path) and not file_exists("{base}.pick") and not file_exists("{base}.claim"):
+            if file_write("{base}.pick", owner):
+                picked.push(path)
+    val _unlocked = file_unlock(fd)
+    picked
+
 pub fn worker_surface_counters_v1() -> text:
     "surfaces_built={_ws_surfaces_built} surfaces_loaded={_ws_surfaces_loaded} skeleton_parses={_ws_skeleton_parses}"
 
@@ -323,3 +396,4 @@ export worker_surface_text_v1, worker_surface_counters_v1
 export worker_mir_scoped_targets_v1, worker_surface_import_closure_v1
 export worker_source_may_declare_advice_v1, source_path_by_canonical_map_v1
 export worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_counters_v1
+export worker_unit_pick_order_v1, worker_unit_pick_v1

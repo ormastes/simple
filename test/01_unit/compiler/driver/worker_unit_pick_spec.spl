@@ -1,0 +1,41 @@
+# Per-file unit child (native_file_worker_v1.spl NATIVE_FILE_WORKER_UNIT_ENV_V1):
+# one process picks its batch deps-first and runs HIR + MIR + object for it.
+# Picks are exclusive across units and never re-take a claimed row.
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, file_delete, file_exists, file_write}
+use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_unit_pick_order_v1, worker_unit_pick_v1}
+
+fn fresh_queue() -> text:
+    val dir = "build/test_tmp/worker_unit_pick_{getpid()}_{time_now_unix_micros()}"
+    expect(dir_create_all(dir)).to_equal(true)
+    dir
+
+describe "per-file unit pick":
+    it "orders an imported module before its importer":
+        val paths = ["src/lib/common/numeric_round.spl", "src/lib/common/ctype.spl"]
+        val contents = ["use std.common.ctype\nfn b():\n    pass\n", "fn a():\n    pass\n"]
+        expect(worker_unit_pick_order_v1(paths, paths, contents)).to_equal([1, 0])
+
+    it "keeps every module exactly once on an import cycle":
+        val paths = ["src/lib/common/ctype.spl", "src/lib/common/numeric_round.spl"]
+        val contents = ["use std.common.numeric_round\n", "use std.common.ctype\n"]
+        val order = worker_unit_pick_order_v1(paths, paths, contents)
+        expect(order.len()).to_equal(2)
+        expect(order.contains(0) and order.contains(1)).to_equal(true)
+
+    it "gives each unit a disjoint batch and skips claimed rows":
+        val queue = fresh_queue()
+        val paths = ["a.spl", "b.spl", "c.spl"]
+        val order = [2, 0, 1]
+        expect(file_write("{queue}/{sha256_text("c.spl")}.claim", "other\nc.spl\nk\n")).to_equal(true)
+        val first = worker_unit_pick_v1(queue, "u0", paths, order, 1)
+        expect(first).to_equal(["a.spl"])
+        val second = worker_unit_pick_v1(queue, "u1", paths, order, 4)
+        expect(second).to_equal(["b.spl"])
+        expect(worker_unit_pick_v1(queue, "u2", paths, order, 4).len()).to_equal(0)
+
+    it "picks nothing without a ledger or owner":
+        expect(worker_unit_pick_v1("", "u0", ["a.spl"], [0], 1).len()).to_equal(0)
+        expect(worker_unit_pick_v1("q", "", ["a.spl"], [0], 1).len()).to_equal(0)
