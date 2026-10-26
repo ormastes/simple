@@ -1,0 +1,22 @@
+# Checked native teardown. This owner never reads or writes the API registry;
+# the single caller commits the returned snapshot once. False-close authority
+# is retained verbatim for retry, including deferred PTY cleanup.
+use os.apps.smux.service.{ServiceState}
+use std.sosix.pty.{sosix_pty_close}
+use std.sosix.process.{sosix_process_close_piped}
+
+pub fn close_owned_children(st0: ServiceState, session_id: text, window_id: text = "", pane_id: text = "") -> ServiceState:
+    var st = st0
+    var i = 0
+    while i < st.pane_count:
+        val pane = st.get_pane(i)
+        if pane.pane.session_id == session_id and (window_id == "" or pane.pane.window_id == window_id) and (pane_id == "" or pane.pane.id == pane_id):
+            var closed = true
+            if pane.pty_fd >= 0:
+                closed = sosix_pty_close(pane.pty_fd as i32)
+            elif pane.child_pid > 0:
+                closed = sosix_process_close_piped(pane.child_pid)
+            if closed:
+                st = st.replace_pane(i, pane.with_pty(-1, -1))
+        i = i + 1
+    return st

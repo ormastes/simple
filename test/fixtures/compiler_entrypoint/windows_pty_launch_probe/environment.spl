@@ -1,0 +1,142 @@
+# Native qualification helpers. Exact UTF16 entries are the oracle; do not
+# silently substitute the runtime's narrow _environ snapshot.
+use std.nogc_sync_mut.io.windows_pty_launch_abi.{GetEnvironmentStringsW, FreeEnvironmentStringsW}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapFree}
+use std.nogc_sync_mut.io.windows_process_owner.{_windows_process_wide_v1}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u16}
+use std.nogc_sync_mut.io.windows_pty_environment_owner.{windows_pty_environment_prepare_v1}
+use std.sys.pty_launch.{PtyEnvironmentChangeV1}
+use std.common.text_bytes.{bytes_to_text}
+
+@unsafe(reason: "copies a bounded native test snapshot and checks OS release", capabilities: [ffi, raw_ptr])
+pub fn native_environment() -> Result<[i64], text>:
+    val snapshot = GetEnvironmentStringsW()
+    if snapshot == 0: return Err("native test environment snapshot failed")
+    var units: [i64] = []
+    var offset = 0
+    var previous: i64 = -1
+    var ended = false
+    while offset < 1048576:
+        val unit = volatile_read_u16(snapshot + offset * 2)
+        units = units.push(unit)
+        if unit == 0 and previous == 0:
+            ended = true
+            break
+        previous = unit
+        offset = offset + 1
+    val released = FreeEnvironmentStringsW(snapshot) != 0
+    if not released or not ended: return Err("native test environment release/bound failed")
+    Ok(units)
+
+@unsafe(reason: "reuses the production UTF16 encoder with checked fixture-owned release", capabilities: [ffi, raw_ptr])
+pub fn native_text_units(value: text) -> Result<[i64], text>:
+    val heap = GetProcessHeap()
+    val address = _windows_process_wide_v1(heap, value)
+    if address == 0: return Err("test UTF16 allocation failed")
+    var units: [i64] = []
+    var offset = 0
+    while offset <= value.len():
+        val unit = volatile_read_u16(address + offset * 2)
+        if unit == 0: break
+        units = units.push(unit)
+        offset = offset + 1
+    if HeapFree(heap, 0u32, address) == 0: return Err("test UTF16 release failed")
+    Ok(units)
+
+@unsafe(reason: "checks shared strict wide admission and exact embedded-NUL UTF16 output", capabilities: [ffi, raw_ptr])
+pub fn check_native_wide_conversion() -> bool:
+    val heap = GetProcessHeap()
+    if heap == 0: return false
+    val invalid = _windows_process_wide_v1(heap, bytes_to_text([192u8, 175u8]))
+    if invalid != 0:
+        val _released = HeapFree(heap, 0u32, invalid)
+        return false
+    val valid = _windows_process_wide_v1(heap, "A=한글😀\0\0")
+    if valid == 0: return false
+    val expected = [65, 61, 54620, 44544, 55357, 56832, 0, 0, 0]
+    var matched = true
+    for index in 0..expected.len():
+        if volatile_read_u16(valid + index * 2) != expected[index]: matched = false
+    val released = HeapFree(heap, 0u32, valid) != 0
+    matched and released
+
+pub fn environment_entries(block: [i64]) -> [[i64]]:
+    var entries: [[i64]] = []
+    var current: [i64] = []
+    for unit in block:
+        if unit == 0:
+            if current.len() == 0: break
+            entries = entries.push(current)
+            current = []
+        else:
+            current = current.push(unit)
+    entries
+
+pub fn exact_entry(entries: [[i64]], expected: [i64]) -> bool:
+    for entry in entries:
+        if entry.len() != expected.len(): continue
+        var same = true
+        for index in 0..entry.len():
+            if entry[index] != expected[index]: same = false
+        if same: return true
+    false
+
+pub fn ascii_name(entry: [i64], name: text) -> bool:
+    if entry.len() <= name.len() or entry[name.len()] != 61: return false
+    for index in 0..name.len():
+        var unit = entry[index]
+        if unit >= 97 and unit <= 122: unit = unit - 32
+        if unit != name.char_code_at(index): return false
+    true
+
+# Retain the baseline's every unmodified native entry, including any hidden
+# drive keys or unpaired code units actually present in the native fixture.
+@unsafe(reason: "inspects prepared native environment and releases all fixture-owned resources", capabilities: [ffi, raw_ptr])
+pub fn check_native_merge_preserves_parent() -> bool:
+    val before_result = native_environment()
+    if before_result.is_err(): return false
+    val before = before_result.unwrap()
+    var hidden_seen = false
+    for entry in environment_entries(before):
+        if entry.len() > 0 and entry[0] == 61: hidden_seen = true
+    # The native runner must seed a drive-directory entry. Missing setup is a
+    # failure, not a skipped claim that hidden-entry preservation was tested.
+    if not hidden_seen: return false
+    val heap = GetProcessHeap()
+    val prepared = windows_pty_environment_prepare_v1(heap,
+        [PtyEnvironmentChangeV1.Set("SMUX_WPL_MERGE_CHECK", "new"), PtyEnvironmentChangeV1.Remove("pAtH")])
+    var valid = prepared.error == "" and prepared.block != 0 and prepared.snapshot == 0
+    var output: [i64] = []
+    if valid:
+        var previous: i64 = -1
+        var ended = false
+        for offset in 0..1048576:
+            val unit = volatile_read_u16(prepared.block + offset * 2)
+            output = output.push(unit)
+            if unit == 0 and previous == 0:
+                ended = true
+                break
+            previous = unit
+        valid = ended
+    val entries = environment_entries(output)
+    if valid:
+        for entry in environment_entries(before):
+            if not ascii_name(entry, "PATH") and not ascii_name(entry, "SMUX_WPL_MERGE_CHECK"):
+                if not exact_entry(entries, entry): valid = false
+        for entry in entries:
+            if ascii_name(entry, "PATH"): valid = false
+        match native_text_units("SMUX_WPL_MERGE_CHECK=new"):
+            case Err(_reason): valid = false
+            case Ok(expected):
+                if not exact_entry(entries, expected): valid = false
+    if prepared.snapshot != 0:
+        if FreeEnvironmentStringsW(prepared.snapshot) == 0: valid = false
+    for allocation in prepared.allocations:
+        if HeapFree(heap, 0u32, allocation) == 0: valid = false
+    match native_environment():
+        case Err(_reason): return false
+        case Ok(after):
+            if after.len() != before.len(): return false
+            for index in 0..before.len():
+                if before[index] != after[index]: return false
+    valid

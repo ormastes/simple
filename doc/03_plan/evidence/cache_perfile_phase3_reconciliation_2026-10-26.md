@@ -222,3 +222,90 @@ bounded native qualification cycle, not accepted as green.
 | `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\patterns-80-run.rc` | `13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354` |
 
 Landing source commit after clean rebase onto release `80a2b590c14`: `cf4eec3a9ff` (same workaround patch as tested local `9bebc55105d`). Upstream advance was the unrelated DevHub deflate change; focused native criteria were not replayed.
+
+## Shared default and local migration landed
+
+PR #4865 merged as `6a321410662e7a8d0de3f2667a0d4e06df124d9b`.
+The shared source constant `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1` is now `"1"`;
+unset `SIMPLE_FILE_WORKERS` selects the per-file pool in newly built compilers.
+Explicit `SIMPLE_FILE_WORKERS=0` and whole-program selection retain their
+opt-outs. The existing worker-lane shell test and eight blocking push gates
+passed. Added SSpec default/opt-out assertions remain unrun; independent
+source review found no P0/P1. This is not a native overlap or self-build PASS.
+Old immutable compiler binaries retain their compiled default.
+
+PR #4868 merged as `de1dedad7c2568acd775eccf2966e48105b2799b`.
+The remaining eleven local diagnostic sources are preserved under
+`test/fixtures/compiler/claude_phase3_20261026/`, with all original hashes and
+committed LF-normalized hashes verified. Original worktrees remain intact.
+The bundle records already-landed child-argv/enum work and preserves the
+historical low-disk preflight patch against its original source base. The
+shared disk floor was not lowered. Diagnostic preservation is not a runtime
+regression PASS; the bundle includes an intentional nil-argument control.
+
+## Active native work and remaining acceptance
+
+The cache-preserving main Phase 3 diagnostic uses the immutable pure-Simple
+Stage 2 producer `acfedbebd1db457efc0f8d1b0b3020dfa20711157bc090334c1b523a6a228779`
+and the existing `wt-rel3-new/build/s3-wp/cache`. HIR completed 1518/1518 with
+zero failures, monomorphization completed, and MIR/staged native compilation
+are still running. The launch descriptor and log are retained at
+`wt-bisect/build/native_probe/phase3_optional_payload_subst/stage2-acfedbebd1db/`
+(`phase3-main-local-config.txt`, `phase3-main-80.log`). This direct diagnostic
+does not establish canonical Stage 3 source-bound admission. Its explicit
+`SIMPLE_FILE_WORKERS=0` preserves the old producer's compatibility route;
+the new source default cannot hot-patch that executable.
+
+A later filesystem audit corrected the interpretation of progress: 209 objects
+written since this main invocation are under the cache's parent
+`wt-rel3-new/build/s3-wp/`, not the requested output directory. The newest was
+written at 11:20:02 KST; MIR continued after that without new object emission.
+The staged counter remained 232 and therefore must not be reported as 232
+new object files or evidence of ongoing codegen. The reason for the suppressed
+later batches is under investigation. Existing objects and their receipts
+remain preserved; counts and timestamps alone cannot admit them for linking.
+
+Boundary analysis subsequently found a real MIR failure by progress module
+256 (succeeded=255, failed=1). The displayed `lib.common.plugin.iface_id` is
+the progress cursor, not the proven failed owner. The first failure is within
+batch 30, scheduled modules 233–240; attribution still requires the recorded
+error context.
+The staged logger passes a hardcoded zero failure count, so its `failed=0`
+does not establish zero MIR failures. Batch 29 emitted objects; batch 30 and
+later stopped entering native cache/codegen while MIR continued. The exact
+producer's persistent lowering-failure gate and CLI/environment go-to-end
+propagation are being checked. Earlier progress reports that inferred zero
+failures from the staged line are superseded by this MIR evidence.
+The exact producer environment key is `SIMPLE_NATIVE_GO_TO_END=1`.
+
+The local configuration requests 80 jobs. Native codegen in this old
+in-process route reports sequential execution; requested jobs are not proof
+of 80-way utilization. The separate canonical Phase 2 refresh resolves 80
+jobs with 64 visible host CPUs, using a distinct output root
+`wt-s3self2/.simple/storage/build/bootstrap-srcobj-p2-20261026`. Its old parent
+sanity evidence records a 900-second timeout. Validation passed under that
+same policy after the default 180-second policy rejected the receipt; no
+receipt was edited. The root-owned refresh reached the native build owner,
+then exited 1 with `SCV-E-ADMISSION: compile-event-journal-missing` for the new
+checkout. The supported first-checkout cold-initialization path is the next
+repair; no Phase 2 completion is claimed. An earlier startup process exited
+before native compilation. All attempts preserve the same output/cache and
+the refusal logs; the old producer and live Phase 3 are unchanged.
+
+| Acceptance item | Current evidence and next required proof |
+| --- | --- |
+| Phase 3 compiler | Native diagnostic still running; require a complete verified object/link manifest and runnable compiler. Preserve successful cache entries and repair failed objects individually where supported. |
+| Hello World | Pending a runnable Phase 3 producer; require build and run success through that exact producer. |
+| Phase 3 builds Phase 3 | Pending; require the Phase 3-produced self-build, executable sanity checks, and honest source/producer lineage. |
+| Shared src-to-object default | Source landed in #4865; require a newly built producer, default-lane self-build, and a real `obj_done(A) < hir_start(B)` overlap receipt. |
+| Buffer caller workaround | Six authorized native cycles consumed. The final two compiled/linked but failed at runtime (trait argument AV, then Poll enum fallthrough). Not qualified, not landed; no seventh retry authorized. |
+| MIR registry performance repair | Baseline native semantics passed; no-copy candidate compiled/linked but failed scoped ambiguity lookup after cleanup. Retained journal text does not prove ownership of the actual native dictionary key. Control and ownership repair remain pending; do not land the failed candidate. |
+| Generic specialization absence | Candidate treats a missing section as unknown and persists explicit complete-empty lists. Focused native qualification remains in progress; no broad cache acceptance claim. |
+| Full generic cache integration | Parse-fiber context publication, production RR/planner callers, generic/private-body changed-source behavior, and the plan's wider negative/AOP/inline/CTFE invalidation cases still need implementation or integration evidence. Helper tests cannot close these items. |
+| SPipe/core/MCP verification | Still TEST_BLOCKED by the missing admitted general self-hosted runner. Native Stage 2 probes do not substitute for these gates. |
+
+Older pending PRs have a separate conflict/duplication review lane. A title
+match or overlapping patch is insufficient to reject a PR: every changed
+path, behavior, test, and document must already be covered before closing it
+as fully duplicated. Read current review comments and genuine failures before
+any admin merge; concurrent owner landings can invalidate an earlier inventory.

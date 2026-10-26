@@ -2351,6 +2351,7 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirStmt::InlineAsm {
+                dialect,
                 instructions,
                 volatile,
                 operands,
@@ -2419,6 +2420,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::InlineAsm {
+                        dialect: *dialect,
                         instructions: rewritten,
                         volatile: *volatile,
                         constraints,

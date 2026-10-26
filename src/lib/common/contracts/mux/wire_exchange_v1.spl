@@ -1,0 +1,117 @@
+# Bind a decoded success to the exact typed call. This is correlation/shape,
+# not endpoint authentication or proof that reported processes actually exist.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.request_validation_v1.*
+use std.common.contracts.mux.wire_types_v1.*
+use std.common.contracts.mux.wire_primitives_v1.*
+use std.common.contracts.mux.wire_validation_v1.*
+use std.common.contracts.mux.wire_values_06_v1.*
+
+fn mismatch() -> MuxWireErrorV1: mux_wire_error_v1("reply_request_mismatch")
+
+# Scoped snapshots include only the requested subtree and required ancestors.
+# Optional references outside the projected result are nil; layouts omit excluded
+# panes without reflow. No unrelated siblings/clients or hidden/exited leakage.
+pub fn mux_wire_validate_snapshot_scope_v1(snapshot: MuxSnapshotV1, scope: MuxScopeV1, visibility: MuxVisibilityV1) -> Result<(), MuxWireErrorV1>:
+    mux_wire_validate_snapshot_v1(snapshot)?
+    for pane in snapshot.panes:
+        if not visibility.include_hidden and pane.hidden: return Err(mismatch())
+        if not visibility.include_exited:
+            match pane.child:
+                case MuxChildStateV1.Exited(_, _, _): return Err(mismatch())
+                case _: ()
+    match scope:
+        case MuxScopeV1.Namespace: ()
+        case MuxScopeV1.Session(target):
+            if snapshot.sessions.len() != 1 or snapshot.sessions[0].identity != target: return Err(mismatch())
+            for window in snapshot.windows:
+                if window.session != target: return Err(mismatch())
+            for pane in snapshot.panes:
+                if pane.session != target: return Err(mismatch())
+            for client in snapshot.clients:
+                if client.context.session != Some(target): return Err(mismatch())
+        case MuxScopeV1.Window(target):
+            if snapshot.windows.len() != 1 or snapshot.windows[0].identity != target or snapshot.sessions.len() != 1: return Err(mismatch())
+            if snapshot.sessions[0].identity != snapshot.windows[0].session: return Err(mismatch())
+            for pane in snapshot.panes:
+                if pane.window != target: return Err(mismatch())
+            for client in snapshot.clients:
+                if client.context.window != Some(target): return Err(mismatch())
+    Ok(())
+
+pub fn mux_wire_call_request_id_v1(call: MuxWireCallV1) -> u64:
+    match call:
+        case MuxWireCallV1.Execute(request): request.request_id
+        case MuxWireCallV1.Disconnect(request): request.request_id
+        case MuxWireCallV1.Query(_, query, _):
+            match query:
+                case MuxQueryV1.RequestStatus(id): id
+                case _: 0
+        case _: 0
+
+pub fn mux_wire_validate_exchange_v1(call: MuxWireCallV1, result: MuxWireResultV1, backend: MuxBackendV1) -> Result<(), MuxWireErrorV1>:
+    mux_wire_validate_result_v1(result)?
+    match call:
+        case MuxWireCallV1.Connect(options, _):
+            match result:
+                case MuxWireResultV1.Connection(connection):
+                    if connection.snapshot.backend != backend or connection.snapshot.backend != options.backend or connection.snapshot.namespace != options.namespace: return Err(mismatch())
+                    if connection.snapshot.limits.discovery.max_sessions > options.limits.max_sessions or connection.snapshot.limits.discovery.max_reply_bytes > options.limits.max_reply_bytes: return Err(mismatch())
+                case _: return Err(mismatch())
+        case MuxWireCallV1.Query(handle, query, _):
+            val reply = match result:
+                case MuxWireResultV1.Query(value): value
+                case _: return Err(mismatch())
+            match query:
+                case MuxQueryV1.Snapshot(scope, visibility):
+                    match reply:
+                        case MuxQueryResultV1.Snapshot(snapshot):
+                            if not mux_wire_same_handle_v1(snapshot.handle, handle) or snapshot.backend != backend: return Err(mismatch())
+                            mux_wire_validate_snapshot_scope_v1(snapshot, scope, visibility)?
+                        case _: return Err(mismatch())
+                case MuxQueryV1.ResolveTarget(_, kind, _):
+                    match reply:
+                        case MuxQueryResultV1.ResolvedTarget(target): mux_wire_ref_v1(handle.owner_id, handle.owner_generation, target, kind)?
+                        case _: return Err(mismatch())
+                case MuxQueryV1.Capture(request):
+                    match reply:
+                        case MuxQueryResultV1.Captured(capture):
+                            if mux_validate_captured_v1(handle, request, capture).is_err(): return Err(mismatch())
+                        case _: return Err(mismatch())
+                case MuxQueryV1.CurrentContext(client):
+                    match reply:
+                        case MuxQueryResultV1.Context(context):
+                            mux_wire_context_v1(handle, context)?
+                            if context.client != Some(client): return Err(mismatch())
+                        case _: return Err(mismatch())
+                case MuxQueryV1.RequestStatus(id):
+                    match reply:
+                        case MuxQueryResultV1.RequestReceipt(receipt):
+                            if mux_validate_reconciliation_receipt_v1(handle, id, receipt).is_err(): return Err(mismatch())
+                        case _: return Err(mismatch())
+                case MuxQueryV1.Capabilities:
+                    match reply:
+                        case MuxQueryResultV1.Capabilities(capabilities): mux_wire_capabilities_v1(handle, backend, capabilities)?
+                        case _: return Err(mismatch())
+        case MuxWireCallV1.Execute(request):
+            match result:
+                case MuxWireResultV1.Mutation(mutation):
+                    if mux_validate_reconciliation_receipt_v1(request.handle, request.request_id, mutation.receipt).is_err(): return Err(mismatch())
+                    if mutation.receipt.operation != Some(mux_command_operation_v1(request.command)) or mutation.receipt.knowledge != MuxRequestKnowledgeV1.Retained: return Err(mismatch())
+                    if mutation.snapshot.backend != backend: return Err(mismatch())
+                case _: return Err(mismatch())
+        case MuxWireCallV1.PollEvents(handle, cursor, limits, _):
+            match result:
+                case MuxWireResultV1.Events(events):
+                    if events.owner_id != handle.owner_id or events.owner_generation != handle.owner_generation or events.from_cursor != cursor or events.events.len() > limits.max_events: return Err(mismatch())
+                    if mux_wire_size_mux_event_batch_v1(events)? > limits.max_bytes: return Err(mux_wire_error_v1("events_reply_budget"))
+                case _: return Err(mismatch())
+        case MuxWireCallV1.Disconnect(request):
+            match result:
+                case MuxWireResultV1.Disconnect(disconnect):
+                    if mux_validate_reconciliation_receipt_v1(request.handle, request.request_id, disconnect.receipt).is_err(): return Err(mismatch())
+                    if disconnect.receipt.knowledge != MuxRequestKnowledgeV1.Retained: return Err(mismatch())
+                case _: return Err(mismatch())
+    Ok(())

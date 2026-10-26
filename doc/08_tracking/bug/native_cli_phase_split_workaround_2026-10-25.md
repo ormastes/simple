@@ -1,0 +1,93 @@
+# Native CLI phase split for the retained producer
+
+Status: OPEN workaround for `ssa_write_count_quadratic_scan_2026_10_25`.
+Base: exact frozen source `93d2d24fc57`; this is a new writable candidate.
+
+The current native first-object attempt reached module
+`app.io._CliCompile.compile_targets`. Its 250-stack sample contained 244
+`local_count_increment` stacks (sample SHA256
+`71737c6bd5cf7dc2a1c596ca959ad582ddf8f30d1508e317d27f6fc3bba3b68f`).
+That establishes a module and compiler hotspot, not a particular project
+function. `_cli_native_build` was the module's largest source function at
+1018 lines. The retained producer's quadratic SSA write counter cannot receive
+the independent indexed-counter source repair without rebuilding that producer.
+No supported flag bypasses its counting pass.
+
+This candidate mechanically moves the second option-parse phase into a named
+helper with an explicit nonoptional record carrying its existing 33 fields plus
+success/status. Invalid-record construction occurs once in its own helper.
+The original defaults, evaluation order, diagnostics, parse-side effects and
+failure status stay at the same call position. The help body moves into a
+named helper. Six identical complete-result environment restorations call a
+scalar-parameter helper retaining the exact writes and conditions. The distinct
+partial early-failure restorations remain literal unchanged source.
+
+A source-level roundtrip reinserted the moved parser/help/restoration bodies
+and reproduced the original caller bytes exactly. That is evidence of the
+mechanical extraction, not compiled behavior. The largest caller is now
+628 lines; its lexical local-declaration count is 104 versus 112, and its
+`env_set` call sites are 41 versus 126. The parse helper is 363 lines with
+42 local declarations. These source counts are not MIR instruction counts,
+peak-RSS predictions, or a native performance result.
+
+Focused parser/conditional-restoration interpreter results are recorded below.
+No heavy compile, P2/Rust/runtime rebuild, frozen-source mutation or live-cache
+change ran for this candidate. Public entrypoint signatures and logical module
+identity stay unchanged; no lambda or generic new-record carrier is introduced.
+A nominal type/helper addition can still affect compilation encounter order.
+A mixed-source recovery must rebuild all failed owner-0 modules and join actual
+mono/name/type/signature/initializer evidence before linking with old objects.
+A one-object replacement is not qualified by this source audit.
+
+Removal requires a producer containing the reviewed indexed SSA counter to
+compile the original unsplit CLI through native object emission under the same
+source/runtime/provenance and resource guards. Source/interpreter checks alone
+cannot establish that gate.
+
+## Guarded interpreter evidence and test binding diagnostic
+
+The final reviewed test source has SHA256
+`c45c8f7420c3445905e5b33fdabbdcc97f85f4caa94cb3f03b71888cb73c3d23`.
+Retained-gen13 cycle 3 executed all five examples: **5 passed, 0 failed,
+0 skipped/dropped; raw status 0**. Its sixteen complete-restoration combinations
+used thirteen distinct previous values and checked each conditional parameter
+mapping; all sixteen after-call markers and the final test environment
+restoration marker were observed. Previously absent environment keys were
+removed through the real owner after testing. Peak process-tree RSS was
+1896240 KiB under the 3 GiB cap/120-second bound; final quiescence was 1.
+Source, seed and retained runtime authority hashes were identical before/after.
+Evidence: `build/verify/cli-native-phase-split-unit-20261025-03/` in the release
+review worktree. This is interpreter evidence, not native object/RSS evidence.
+
+Tests-only diagnostic ID `retained_seed_test_loop_binding_2026_10_25` remains
+OPEN. Cycles 1 and 2 executed all five examples, with four passing and one
+failing with `type mismatch: cannot convert array to int`. Cycle-2 constant
+stage markers localized failure to the test's `flags & 1` expression before the
+production restoration helper was called. Cycle 3 changed only the loop binding
+and its four reads to the unique name `cli_restore_case_bits`, plus an OPEN
+workaround comment, retaining the same range, bit operations, all assertions,
+and the seventeen-argument production call. The controlled outcome establishes
+a name-dependent test failure. A top-level `flags: [i64]` elsewhere in the source
+closure is a candidate, but the actual resolver choice/cause has not been
+proved. No baseline, global-collision root fix or seed repair is claimed.
+The diagnostic tag and failure evidence remain; no production check was waived.
+
+## Separate release publication composition
+
+The release-publication branch applies the two CLI commits in order onto
+`release/1.0.0` base `3b7976e8ef73029254221a349aecc3f48085b212`, with no conflicts
+or duplicate implementation. It does not change the raw frozen-93 CLI candidate
+`2df5f9f077b84b3e096c1d943452ae02d9964bec` used for minimal recovery.
+The actual release-composed `compile_targets.spl` SHA256 is
+`14886ab5128b7d20f98bac7043bcbcc82ee7bb3e092972a6d2b1a73ca4f0ad4e`.
+It differs from the raw minimal candidate's `58ceb28b...` source because the
+release base has its own surrounding source. Independently reinserting the
+moved bodies reproduces the release base's original caller bytes exactly;
+that caller shrinks from 1011 to 621 lines on this release composition.
+
+The five-case interpreter evidence above belongs only to the raw frozen-93
+candidate and exact test hash; it is not a release-composed execution result.
+The test file's hash is unchanged, but no green test was rerun for publication.
+No compiler/runtime rebuild or native memory/Stage-3 qualification is claimed.
+This release PR stays draft until native qualification; fixed P2 remains
+unchanged.

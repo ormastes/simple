@@ -1,0 +1,210 @@
+# @req REQ-SSPEC-COMPILER
+# Actual flat-AST representation: class methods live in synthesized impls.
+# Interpreter pass evidence never substitutes for actual P3/native qualification.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization, MonomorphizationPass}
+use compiler.mir.mir_lowering.{MirLowering}
+
+val OWNER_FACTORY_SOURCE = "enum Poll<T>:\n    Ready(T)\n    Pending\n\nclass Future<T>:\n    state: [u8]\n    poll_result: Poll<T>\n    static fn from_value(value: T) -> Future<T>:\n        Future(state: [], poll_result: Poll.Ready(value))\n    static fn pending() -> Future<T>:\n        Future(state: [], poll_result: Poll.Pending)\n\nfn ready(value: text?) -> Future<text?>:\n    Future<text?>.from_value(value)\n\nfn waiting() -> Future<text?>:\n    Future<text?>.pending()\n"
+
+fn lower_owner_factory_source(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "testdata/synthetic_factory.spl", "factory", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/synthetic_factory.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+describe "static factories carried by a synthesized generic impl":
+    it "retains owner binders separately from static method-local binders":
+        val hir = lower_owner_factory_source(OWNER_FACTORY_SOURCE)
+        var owner_found = false
+        for key in hir.classes.keys():
+            val owner: HirClass = hir.classes[key]
+            if owner.name != "Future": continue
+            owner_found = true
+            expect(owner.methods.len()).to_equal(0)
+            expect(owner.type_params.len()).to_equal(1)
+        expect(owner_found).to_equal(true)
+        var found = 0
+        for impl_ in hir.impls:
+            for method_name in ["from_value", "pending"]:
+                if not impl_.methods.has(method_name): continue
+                val method_id: SymbolId = impl_.methods[method_name]
+                val method: HirFunction = hir.functions[method_id]
+                expect(impl_.type_params.len()).to_equal(1)
+                expect(method.type_params.len()).to_equal(0)
+                expect(method.is_static).to_equal(true)
+                found = found + 1
+        expect(found).to_equal(2)
+
+    it "specializes nested optional factory results before MIR without erasing T":
+        val hir = lower_owner_factory_source(OWNER_FACTORY_SOURCE)
+        var modules: Dict<text, HirModule> = {}
+        modules["factory"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_be_greater_than(1)
+        val concrete: HirModule = output["factory"]
+        var rewritten = 0
+        for key in concrete.functions.keys():
+            val function: HirFunction = concrete.functions[key]
+            if function.name != "ready" and function.name != "waiting": continue
+            val tail: HirExpr = function.body.value
+            match tail.kind:
+                case HirExprKind.Call(callee, _, type_args):
+                    expect(type_args.len()).to_equal(0)
+                    expect(callee.has_type_).to_equal(true)
+                    rewritten = rewritten + 1
+                case _: fail("static owner factory remained unspecialized")
+        expect(rewritten).to_equal(2)
+        var mir = MirLowering.new(concrete.symbols)
+        val lowered = mir.lower_module(concrete)
+        expect(mir.errors.len()).to_equal(0)
+
+    it "canonicalizes distinct impl binder symbols while binding one owner argument":
+        var hir = lower_owner_factory_source(OWNER_FACTORY_SOURCE)
+        var checked = false
+        for key in hir.classes.keys():
+            var owner: HirClass = hir.classes[key]
+            if owner.name != "Future": continue
+            var owner_parameter: HirTypeParam = owner.type_params[0]
+            # Force distinct identity instead of depending on parser allocation.
+            owner_parameter.symbol = SymbolId(id: 9000001)
+            owner.type_params = [owner_parameter]
+            hir.classes[key] = owner
+            for owner_impl in hir.impls:
+                if not owner_impl.methods.has("from_value"): continue
+                val impl_parameter: HirTypeParam = owner_impl.type_params[0]
+                val alias_type = HirType(kind: HirTypeKind.Named(impl_parameter.symbol, []), span: impl_parameter.span)
+                val method_id: SymbolId = owner_impl.methods["from_value"]
+                var method: HirFunction = hir.functions[method_id]
+                var parameter: HirParam = method.params[0]
+                parameter.type_ = alias_type
+                method.params = [parameter]
+                match method.return_type.kind:
+                    case HirTypeKind.Named(result_owner, _):
+                        method.return_type = HirType(kind: HirTypeKind.Named(result_owner, [alias_type]), span: method.return_type.span)
+                    case _: fail("factory fixture lost nominal result")
+                hir.functions[method_id] = method
+            var mono = MonomorphizationPass.create()
+            mono.current_module = "factory"
+            mono.collect_generics(hir, "factory")
+            val name = mono.class_static_template_v1(owner.symbol, "from_value")
+            expect(name != "").to_equal(true)
+            val recipe = mono.template_recipes[name]
+            expect(recipe.bound_type_params.len()).to_equal(1)
+            expect(recipe.canonical_type_params.len()).to_equal(2)
+            expect(recipe.canonical_type_params[0].symbol.id).to_equal(9000001)
+            expect(recipe.canonical_type_params[1].symbol.id == 9000001).to_equal(false)
+            val signature = mono.template_signature_v1(name)
+            match signature.param_types[0].kind:
+                case HirTypeKind.TypeParam(parameter_name, _): expect(parameter_name).to_equal("T")
+                case _: fail("impl binder alias was not canonicalized")
+            match signature.return_type.kind:
+                case HirTypeKind.Named(_, arguments):
+                    match arguments[0].kind:
+                        case HirTypeKind.TypeParam(parameter_name, _): expect(parameter_name).to_equal("T")
+                        case _: fail("nested result retained impl binder symbol")
+                case _: fail("factory result lost nominal shape")
+            checked = true
+        expect(checked).to_equal(true)
+
+    it "does not register trait impl methods as inherent owner factories":
+        var hir = lower_owner_factory_source(OWNER_FACTORY_SOURCE)
+        var index = 0
+        while index < hir.impls.len():
+            var impl_: HirImpl = hir.impls[index]
+            impl_.has_trait_ = true
+            hir.impls[index] = impl_
+            index = index + 1
+        var mono = MonomorphizationPass.create()
+        mono.current_module = "factory"
+        mono.collect_generics(hir, "factory")
+        for key in hir.classes.keys():
+            val owner: HirClass = hir.classes[key]
+            if owner.name != "Future": continue
+            expect(mono.class_static_template_v1(owner.symbol, "from_value")).to_equal("")
+
+    it "keeps an unbound pending factory unresolved instead of inventing T":
+        val source = OWNER_FACTORY_SOURCE + "\nfn unbound():\n    Future.pending()\n"
+        val hir = lower_owner_factory_source(source)
+        var modules: Dict<text, HirModule> = {}
+        modules["factory"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.unresolved_generic_calls).to_be_greater_than(0)
+
+    it "rejects a nested noncanonical impl target":
+        var hir = lower_owner_factory_source(OWNER_FACTORY_SOURCE)
+        var index = 0
+        while index < hir.impls.len():
+            var impl_: HirImpl = hir.impls[index]
+            val parameter: HirTypeParam = impl_.type_params[0]
+            val nested = HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Named(parameter.symbol, []), span: parameter.span)), span: parameter.span)
+            match impl_.type_.kind:
+                case HirTypeKind.Named(owner, _): impl_.type_ = HirType(kind: HirTypeKind.Named(owner, [nested]), span: impl_.type_.span)
+                case _: fail("fixture impl lost named owner")
+            hir.impls[index] = impl_
+            index = index + 1
+        var mono = MonomorphizationPass.create()
+        mono.current_module = "factory"
+        mono.collect_generics(hir, "factory")
+        for key in hir.classes.keys():
+            val owner: HirClass = hir.classes[key]
+            if owner.name == "Future": expect(mono.class_static_template_v1(owner.symbol, "from_value")).to_equal("")
+
+    it "deduplicates the same method symbol exposed by class and impl tables":
+        var hir = lower_owner_factory_source(OWNER_FACTORY_SOURCE)
+        for key in hir.classes.keys():
+            var owner: HirClass = hir.classes[key]
+            if owner.name != "Future": continue
+            for impl_ in hir.impls:
+                if impl_.methods.has("from_value"): owner.methods["from_value"] = impl_.methods["from_value"]
+            hir.classes[key] = owner
+            var mono = MonomorphizationPass.create()
+            mono.current_module = "factory"
+            mono.collect_generics(hir, "factory")
+            expect(mono.class_static_template_v1(owner.symbol, "from_value") != "").to_equal(true)
+
+    it "rejects distinct symbols claiming the same owner method":
+        var hir = lower_owner_factory_source(OWNER_FACTORY_SOURCE)
+        for key in hir.classes.keys():
+            var owner: HirClass = hir.classes[key]
+            if owner.name != "Future": continue
+            for impl_ in hir.impls:
+                if not impl_.methods.has("from_value"): continue
+                val original_id: SymbolId = impl_.methods["from_value"]
+                var duplicate: HirFunction = hir.functions[original_id]
+                duplicate.symbol = SymbolId(id: 9000002)
+                hir.functions[duplicate.symbol] = duplicate
+                owner.methods["from_value"] = duplicate.symbol
+            hir.classes[key] = owner
+            var mono = MonomorphizationPass.create()
+            mono.current_module = "factory"
+            mono.collect_generics(hir, "factory")
+            expect(mono.class_static_template_v1(owner.symbol, "from_value")).to_equal("")
+
+    it "does not borrow a same-named owner from another module":
+        var hir = lower_owner_factory_source(OWNER_FACTORY_SOURCE)
+        for key in hir.classes.keys():
+            val owner: HirClass = hir.classes[key]
+            if owner.name != "Future": continue
+            var foreign: HirSymbol = hir.symbols.symbols[owner.symbol.id]
+            foreign.id = SymbolId(id: 9000003)
+            foreign.defining_module = Some("other_module")
+            hir.symbols.symbols[foreign.id.id] = foreign
+            var index = 0
+            while index < hir.impls.len():
+                var impl_: HirImpl = hir.impls[index]
+                impl_.type_ = HirType(kind: HirTypeKind.Named(foreign.id, []), span: impl_.type_.span)
+                hir.impls[index] = impl_
+                index = index + 1
+            var mono = MonomorphizationPass.create()
+            mono.current_module = "factory"
+            mono.collect_generics(hir, "factory")
+            expect(mono.class_static_template_v1(owner.symbol, "from_value")).to_equal("")

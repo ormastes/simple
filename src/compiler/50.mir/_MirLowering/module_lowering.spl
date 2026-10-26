@@ -711,6 +711,26 @@ impl MirLowering:
             return self.struct_identity_layout_key[identity]
         shape
 
+    me struct_value_layout_key(symbol: HirSymbol) -> text:
+        """Keep construction and value provenance on the same declaration.
+
+        Legacy bare layouts remain usable only when their name is unambiguous.
+        """
+        if symbol.kind == SymbolKind.Class:
+            return mir_class_identity(symbol)
+        if symbol.kind != SymbolKind.Struct:
+            return symbol.name
+        val qualified = self.declared_struct_layout_key(self.composite_layout_key(symbol))
+        if self.struct_field_order_conflict_warned.contains(qualified):
+            self.error_fatal("conflicting struct declaration layout '{qualified}'", Some(symbol.span))
+            return ""
+        if self.struct_field_order.has(qualified):
+            return qualified
+        if not self.struct_field_order_conflict_warned.contains(symbol.name):
+            return symbol.name
+        self.error_fatal("ambiguous struct/class value owner '{symbol.name}': no module-qualified layout matched", Some(symbol.span))
+        ""
+
     me struct_owner_method_key(owner: text, method: text) -> text:
         """`{owner}::{method}` dispatch-row key for a receiver's recorded owner.
 
@@ -2396,17 +2416,18 @@ impl MirLowering:
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 2))
             return Err("transient MIR scope pause failed for {module.name}")
         scope_decisions = scope_decisions | 2
+        # The returned module and owner builder share the same MIR graph.
+        # Share committed nodes across both promotions, including the owner's
+        # overlapping field roots. No retained graph is written in this window;
+        # the section profiler only updates its own scalar sink state.
+        val _owner_share_opened = transient_heap_promote_share_begin_v1()
         if not transient_heap_promote_v1(lowered):
+            val _module_share_closed = transient_heap_promote_share_end_v1()
             val _ended_module = mir_abort_reverse_reference_scope_v1(reverse_token)
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 3))
             return Err("MIR module ownership promotion failed for {module.name}")
         scope_decisions = scope_decisions | 4
         mir_section_profile_mark("s2_promote_mir", module.name)
-        # The owner's field roots overlap heavily (builder.*, symbols.*). One
-        # share window over the straight-line promote sequence walks the
-        # common graph once instead of once per root; it only promotes and
-        # releases temporary carriers, which is the window's contract.
-        val _owner_share_opened = transient_heap_promote_share_begin_v1()
         val owner_promoted = self.promote_transient_owner()
         val _owner_share_closed = transient_heap_promote_share_end_v1()
         if not owner_promoted:

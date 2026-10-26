@@ -1,0 +1,115 @@
+use std.spec.*
+use compiler.common.diagnostics.span.Span
+use compiler.hir.hir_types.*
+use compiler.mono.monomorphize_integration.MonomorphizationPass
+use compiler.mono.monomorphize.engine.mangle_type
+use compiler.mono.mono_archive_state_v1.{mono_archive_facts_from_collector_v1, mono_archive_state_create_v1, mono_archive_scratch_pass_v1}
+use compiler.mono.mono_archive_registration_v1.mono_archive_registration_scratch_collector_v1
+use compiler.mono.mono_archive_registration_types_v1.MonoArchiveRegistrationOwnerV1
+
+fn suffix_index_type(id: i64) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+
+fn suffix_index_lookup(pass_: MonomorphizationPass, module_name: text, id: i64) -> text:
+    pass_.named_type_name_in(module_name, SymbolId(id: id), suffix_index_type(id))
+
+# Retain the prior fallback solely as an oracle for the unusual empty-name
+# case, whose transition count intentionally follows dictionary traversal.
+fn suffix_index_legacy(pass_: MonomorphizationPass, id: i64) -> text:
+    val suffix = "#{id}"
+    var found = ""
+    var distinct = 0
+    for key in pass_.named_symbol_names.keys():
+        val kt: text = key
+        if not kt.ends_with(suffix): continue
+        val name: text = pass_.named_symbol_names[kt]
+        if name != found:
+            distinct = distinct + 1
+            found = name
+    if distinct == 1: return found
+    mangle_type(suffix_index_type(id))
+
+describe "mono named type suffix index":
+    it "keeps the exact module winner ahead of foreign ambiguity":
+        var pass_ = MonomorphizationPass.create()
+        pass_.named_symbol_names["caller#7"] = "Local"
+        pass_.named_symbol_names["foreign#7"] = "Other"
+        expect(suffix_index_lookup(pass_, "caller", 7)).to_equal("Local")
+        expect(pass_.named_symbol_index_count).to_equal(-1)
+
+    it "retains a unique declared name shared by multiple providers":
+        var pass_ = MonomorphizationPass.create()
+        pass_.named_symbol_names["left#7"] = "Packet"
+        pass_.named_symbol_names["right#7"] = "Packet"
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal("Packet")
+        expect(pass_.named_symbol_suffix_index["#7"].len()).to_equal(2)
+
+    it "retains ambiguous and absent engine mangling":
+        var pass_ = MonomorphizationPass.create()
+        pass_.named_symbol_names["left#7"] = "Packet"
+        pass_.named_symbol_names["right#7"] = "Other"
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal(mangle_type(suffix_index_type(7)))
+        expect(suffix_index_lookup(pass_, "absent", 8)).to_equal(mangle_type(suffix_index_type(8)))
+
+    it "excludes unrelated symbol ids from the fallback candidate bucket":
+        var pass_ = MonomorphizationPass.create()
+        for id in 100..356:
+            pass_.named_symbol_names["noise#{id}"] = "Noise{id}"
+        pass_.named_symbol_names["provider#7"] = "Packet"
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal("Packet")
+        expect(pass_.named_symbol_suffix_index["#7"].len()).to_equal(1)
+        expect(pass_.named_symbol_index_count).to_equal(257)
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal("Packet")
+
+    it "reads current values after same-key overwrite without a stale name cache":
+        var pass_ = MonomorphizationPass.create()
+        pass_.named_symbol_names["provider#7"] = "Before"
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal("Before")
+        pass_.named_symbol_names["provider#7"] = "After"
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal("After")
+
+    it "rebuilds after direct map growth and newly ambiguous registration":
+        var pass_ = MonomorphizationPass.create()
+        pass_.named_symbol_names["provider#7"] = "Packet"
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal("Packet")
+        pass_.named_symbol_names["new#7"] = "Other"
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal(mangle_type(suffix_index_type(7)))
+        expect(pass_.named_symbol_index_count).to_equal(2)
+
+    it "supports explicit invalidation for same-size whole-map replacement":
+        var pass_ = MonomorphizationPass.create()
+        pass_.named_symbol_names["old#7"] = "Old"
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal("Old")
+        pass_.named_symbol_names = {"new#8": "New"}
+        pass_.named_symbol_suffix_index = {}
+        pass_.named_symbol_index_count = -1
+        expect(suffix_index_lookup(pass_, "absent", 8)).to_equal("New")
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal(mangle_type(suffix_index_type(7)))
+
+    it "preserves the legacy empty-name transition rule and unusual key suffix":
+        var pass_ = MonomorphizationPass.create()
+        pass_.named_symbol_names["empty#7"] = ""
+        pass_.named_symbol_names["provider#nested#7"] = "Packet"
+        pass_.named_symbol_names["leading#07"] = "NotSeven"
+        expect(suffix_index_lookup(pass_, "absent", 7)).to_equal(suffix_index_legacy(pass_, 7))
+        expect(pass_.named_symbol_suffix_index["#7"].len()).to_equal(2)
+
+    it "indexes names restored through actual archive scratch-pass hydration":
+        var collector = MonomorphizationPass.create()
+        collector.named_symbol_names["archive#7"] = "Archived"
+        val facts = mono_archive_facts_from_collector_v1(collector, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap()
+        val state = mono_archive_state_create_v1(facts)
+        var worker = mono_archive_scratch_pass_v1(state)
+        expect(worker.named_symbol_index_count).to_equal(-1)
+        expect(suffix_index_lookup(worker, "absent", 7)).to_equal("Archived")
+
+    it "indexes bulk names copied by archive registration scratch collection":
+        var collector = MonomorphizationPass.create()
+        collector.named_symbol_names["archive#7"] = "Archived"
+        val facts = mono_archive_facts_from_collector_v1(collector, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap()
+        val owner = MonoArchiveRegistrationOwnerV1(state: mono_archive_state_create_v1(facts), archives: {}, roots: [],
+            generic_functions: 0, generic_structs: 0, generic_classes: 0, epoch: 0, sealed: false,
+            published_schedule_digest: "", sealed_schedule_digest: "")
+        var worker = mono_archive_registration_scratch_collector_v1(owner)
+        expect(worker.named_symbol_index_count).to_equal(-1)
+        expect(suffix_index_lookup(worker, "absent", 7)).to_equal("Archived")

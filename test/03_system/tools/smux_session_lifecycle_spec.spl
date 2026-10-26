@@ -1,0 +1,206 @@
+"""
+## Purpose
+Rename and kill real smux sessions without resetting unrelated owners.
+## Evidence boundary
+Pure registry cases exercise the actual removal gate with explicit records;
+they do not simulate native close success. The last case requires Windows
+ConPTY and proves cleanup only through the actual API/provider contract.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_sessions,
+    smux_list_windows, smux_list_panes, smux_list_clients, smux_attach,
+    smux_rename_session, smux_kill_session, smux_session_closing, smux_metrics,
+    smux_new_window, smux_split_pane, smux_pane_spawn, smux_pane_spawn_pty,
+    smux_send_text, smux_paste_text, smux_capture, smux_detach_from}
+use os.apps.smux.session_lifecycle.{rename_session_state, remove_session_state}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane, MuxClientAttachment, SmuxMetrics}
+use os.apps.smux.client_notifications.{smux_notifications_enqueue, smux_notifications_peek}
+use os.apps.smux.smux_remote.{smux_remote_dispatch, smux_remote_reply_ok}
+use std.nogc_sync_mut.sosix.process.{sosix_platform, sosix_sleep_ms}
+use std.nogc_sync_mut.sosix.pty.{sosix_pty_cleanup_pending}
+
+# @inline
+fn lifecycle_session(name: text) -> [text]:
+    val session = smux_create_session(name)
+    val window = smux_list_windows(session.id)[0]
+    val pane = smux_list_panes(session.id, window.id)[0]
+    return [session.id, window.id, pane.id]
+
+# @inline
+fn lifecycle_registry() -> ServiceState:
+    var st = ServiceState.empty().with_next_id(70).with_metrics(SmuxMetrics(
+        startup_count: 9, last_startup_ns: 17u64, resize_count: 11, capture_count: 13))
+    st = st.add_session(MuxSession(id: "target", name: "old", created_at: 19u64, generation: 4))
+    st = st.add_session(MuxSession.create("survivor", "keep"))
+    st = st.add_window(MuxWindow.create("w1", "target", "one").with_active(true))
+    st = st.add_window(MuxWindow.create("w2", "survivor", "two").with_layout("tiled", 91, 31))
+    st = st.add_pane(PaneRecord.create(MuxPane.create("p1", "w1", "target")))
+    st = st.add_pane(PaneRecord.create(MuxPane.create("p2", "w2", "survivor")).feed("retained output").with_focus(true))
+    st = st.add_client(MuxClientAttachment.create("c1", "target", 80, 24))
+    st = st.add_client(MuxClientAttachment.create("c2", "survivor", 91, 31))
+    return st
+
+describe "smux session lifecycle retains ownership until native close confirms":
+    it "manages explicit session targets through the production remote protocol":
+        smux_reset_for_test()
+        val target = lifecycle_session("work")
+        val survivor = lifecycle_session("monitor")
+        step("Discover stable IDs and rename one session through its ID")
+        expect(smux_remote_dispatch("list-sessions")).to_contain(target[0] + " work\n")
+        expect(smux_remote_dispatch("has-session " + target[0])).to_equal("smux: session exists " + target[0])
+        expect(smux_remote_dispatch("rename-session " + target[0] + " renamed")).to_equal("smux: renamed session " + target[0] + " to renamed")
+        expect(smux_remote_reply_ok(smux_remote_dispatch("has-session work"))).to_equal(false)
+        expect(smux_remote_dispatch("has-session renamed")).to_equal("smux: session exists " + target[0])
+        step("Remove only the empty target session and preserve the other window and pane")
+        expect(smux_remote_dispatch("kill-session " + target[0])).to_equal("smux: killed session " + target[0])
+        expect(smux_remote_reply_ok(smux_remote_dispatch("kill-session " + target[0]))).to_equal(false)
+        expect(smux_list_sessions().len()).to_equal(1)
+        expect(smux_list_sessions()[0].id).to_equal(survivor[0])
+        expect(smux_list_panes(survivor[0], survivor[1])[0].id).to_equal(survivor[2])
+        smux_reset_for_test()
+
+    it "renames a real session without changing stable identity or attachments":
+        smux_reset_for_test()
+        val target = lifecycle_session("old")
+        expect(smux_attach(target[0], "viewer", 80, 24).attached).to_equal(true)
+        val before = smux_list_sessions()[0]
+        step("Rename through the production API and inspect retained resources")
+        val renamed = smux_rename_session(target[0], "새이름")
+        expect(renamed.is_ok()).to_equal(true)
+        expect(renamed.unwrap().name).to_equal("새이름")
+        expect(renamed.unwrap().id).to_equal(before.id)
+        expect(renamed.unwrap().created_at).to_equal(before.created_at)
+        expect(renamed.unwrap().generation).to_equal(before.generation)
+        expect(smux_list_windows(target[0])[0].id).to_equal(target[1])
+        expect(smux_list_clients()[0].session_id).to_equal(target[0])
+
+    it "refuses ambiguous or unsafe names without mutating the registry":
+        smux_reset_for_test()
+        val target = lifecycle_session("old")
+        val other = lifecycle_session("occupied")
+        step("Reject empty, control, whitespace, existing-name and other-id targets")
+        for name in ["", "two words", "bad\nname", "\u{85}", "occupied", other[0]]:
+            expect(smux_rename_session(target[0], name).is_err()).to_equal(true)
+        expect(smux_rename_session("missing", "new").is_err()).to_equal(true)
+        expect(smux_list_sessions()[0].name).to_equal("old")
+        expect(smux_rename_session(target[0], "old").is_ok()).to_equal(true)
+
+    it "preserves complete surviving records and monotonic counters during pure removal":
+        val before = lifecycle_registry()
+        step("Use the actual service removal transform after all target owners are absent")
+        val result = remove_session_state(before, "target")
+        expect(result.is_ok()).to_equal(true)
+        val after = result.unwrap()
+        expect(after.session_count).to_equal(1)
+        expect(after.window_count).to_equal(1)
+        expect(after.pane_count).to_equal(1)
+        expect(after.client_count).to_equal(1)
+        expect(after.get_session(0).id).to_equal("survivor")
+        expect(after.get_window(0).layout).to_equal("tiled")
+        expect(after.get_window(0).canvas_cols).to_equal(91)
+        expect(after.get_pane(0).tail).to_equal("retained output")
+        expect(after.get_pane(0).focus).to_equal(true)
+        expect(after.get_client(0).client_id).to_equal("c2")
+        expect(after.next_id).to_equal(70)
+        expect(after.metrics.startup_count).to_equal(9)
+        expect(after.metrics.last_startup_ns).to_equal(17u64)
+        expect(after.metrics.resize_count).to_equal(11)
+        expect(after.metrics.capture_count).to_equal(13)
+
+    it "refuses removal while either target native ownership token remains":
+        val before = lifecycle_registry()
+        step("Test the real pruning invariant independently of native provider execution")
+        val pipe_owned = before.replace_pane(0, before.get_pane(0).with_child(123))
+        val pty_owned = before.replace_pane(0, before.get_pane(0).with_pty(-1, 0))
+        expect(remove_session_state(pipe_owned, "target").is_err()).to_equal(true)
+        expect(remove_session_state(pty_owned, "target").is_err()).to_equal(true)
+        expect(remove_session_state(before, "missing").is_err()).to_equal(true)
+        # An unrelated owned child must survive rather than block target removal.
+        val other_owned = before.replace_pane(1, before.get_pane(1).with_pty(456, 789))
+        val removed = remove_session_state(other_owned, "target").unwrap()
+        expect(removed.get_pane(0).child_pid).to_equal(456)
+        expect(removed.get_pane(0).pty_fd).to_equal(789)
+
+    it "preserves timestamps metrics and child records in the pure rename transform":
+        val before = lifecycle_registry()
+        step("Change only the target name in the actual bounded registry transform")
+        val after = rename_session_state(before, "target", "renamed").unwrap()
+        expect(after.get_session(0).name).to_equal("renamed")
+        expect(after.get_session(0).created_at).to_equal(19u64)
+        expect(after.get_session(0).generation).to_equal(4)
+        expect(after.get_pane(1).tail).to_equal("retained output")
+        expect(after.get_window(1).layout).to_equal("tiled")
+        expect(after.get_client(0).client_id).to_equal("c1")
+        expect(after.next_id).to_equal(70)
+        expect(after.metrics.capture_count).to_equal(13)
+
+    it "kills only one empty session and clears only its client notices":
+        smux_reset_for_test()
+        val target = lifecycle_session("target")
+        val other = lifecycle_session("survivor")
+        expect(smux_attach(target[0], "one", 80, 24).attached).to_equal(true)
+        expect(smux_attach(other[0], "two", 80, 24).attached).to_equal(true)
+        expect(smux_notifications_enqueue(target[0], "one", "drop").is_ok()).to_equal(true)
+        expect(smux_notifications_enqueue(other[0], "two", "keep").is_ok()).to_equal(true)
+        val startup = smux_metrics().startup_count
+        step("Kill the requested session without resetting other owners or IDs")
+        expect(smux_kill_session(target[0]).is_ok()).to_equal(true)
+        expect(smux_session_closing(target[0])).to_equal(false)
+        expect(smux_list_sessions().len()).to_equal(1)
+        expect(smux_list_sessions()[0].id).to_equal(other[0])
+        expect(smux_list_windows(target[0]).len()).to_equal(0)
+        expect(smux_list_panes(target[0], target[1]).len()).to_equal(0)
+        expect(smux_list_clients().len()).to_equal(1)
+        expect(smux_notifications_peek(target[0], "one").id).to_equal(0)
+        expect(smux_notifications_peek(other[0], "two").body).to_equal("keep")
+        expect(smux_metrics().startup_count).to_equal(startup)
+        expect(smux_kill_session(target[0]).is_err()).to_equal(true)
+        val next = lifecycle_session("next")
+        expect(next[0]).to_equal("id7")
+
+    it "frees bounded registry capacity without rewinding the allocator":
+        smux_reset_for_test()
+        var ids: [text] = []
+        var i = 0
+        while i < 8:
+            ids.push(smux_create_session("s" + i.to_text()).id)
+            i = i + 1
+        expect(smux_create_session("full").id).to_equal("")
+        step("Release one actual session and admit one new session at the next ID")
+        expect(smux_kill_session(ids[3]).is_ok()).to_equal(true)
+        expect(smux_create_session("replacement").id).to_equal("id25")
+        expect(smux_list_sessions().len()).to_equal(8)
+
+    it "terminates a detached real Windows PTY owner and refuses mutations while close is pending":
+        smux_reset_for_test()
+        expect(sosix_platform()).to_equal("windows")
+        val target = lifecycle_session("live")
+        val survivor = lifecycle_session("survivor")
+        expect(smux_pane_spawn_pty(target[0], target[1], target[2], "cmd.exe /Q").is_ok()).to_equal(true)
+        expect(smux_attach(target[0], "viewer", 80, 24).attached).to_equal(true)
+        expect(smux_detach_from(target[0], "viewer")).to_equal(true)
+        step("Request actual native cleanup and retry only the retained pending owner")
+        var killed = smux_kill_session(target[0])
+        var attempts = 0
+        while killed.is_err() and attempts < 200:
+            expect(smux_session_closing(target[0])).to_equal(true)
+            expect(smux_attach(target[0], "late", 80, 24).attached).to_equal(false)
+            expect(smux_new_window(target[0], "late").id).to_equal("")
+            expect(smux_split_pane(target[0], target[1], target[2], "vertical").is_err()).to_equal(true)
+            expect(smux_pane_spawn(target[0], target[1], target[2], "cmd.exe", []).is_err()).to_equal(true)
+            expect(smux_pane_spawn_pty(target[0], target[1], target[2], "cmd.exe").is_err()).to_equal(true)
+            expect(smux_send_text(target[0], target[1], target[2], "echo late\r").is_err()).to_equal(true)
+            expect(smux_paste_text(target[0], target[1], target[2], "late").is_err()).to_equal(true)
+            expect(smux_rename_session(target[0], "late").is_err()).to_equal(true)
+            expect(smux_capture(target[0], target[1], target[2], 10).is_ok()).to_equal(true)
+            sosix_sleep_ms(25)
+            killed = smux_kill_session(target[0])
+            attempts = attempts + 1
+        expect(killed.is_ok()).to_equal(true)
+        expect(smux_list_sessions().len()).to_equal(1)
+        expect(smux_list_sessions()[0].id).to_equal(survivor[0])
+        expect(sosix_pty_cleanup_pending()).to_equal(0)

@@ -1,5 +1,7 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1,
+    library_mode_effective_family_v1, library_mode_import_key_v1}
 use compiler.hir.hir_lowering._Items.lowering_helpers.{imported_symbol_local_name}
 # HIR Lowering - Item Lowering
 #
@@ -378,6 +380,9 @@ impl HirLowering:
         val importer_source_path = if importer_surface_index >= 0:
             self.module_surfaces.surfaces[importer_surface_index].canonical_path
         else: importer_name
+        val importer_owner = if importer_surface_index >= 0:
+            self.module_surfaces.surfaces[importer_surface_index].module_name
+        else: importer_name
         if lexical:
             importer_surface_index = -1
         var import_idx = 0
@@ -386,7 +391,12 @@ impl HirLowering:
             var fallback_item_name = ""
             # ParserStruct-valued Dict.get() corrupts native hit payloads. Track the
             # winning key and read the value only with bracket indexing.
-            var imported_key = if self.surface_index_for_name(imp.module) >= 0: imp.module else: ""
+            val selected_key = library_mode_import_key_v1(imp.module, self.library_mode, importer_owner)
+            var imported_key = if self.surface_index_for_name(selected_key) >= 0: selected_key else: ""
+            if self.library_mode != "" and library_mode_generic_import_v1(imp.module) and imported_key == "":
+                self.error("LIBRARY_MODE_OWNER_MISSING: configured import `{imp.module}` has no frozen scoped owner for `{importer_name}`", imp.span)
+                import_idx = import_idx + 1
+                continue
             # Symbols must register under the DEFINING module's canonical name:
             # a relative alias like ".helper" would otherwise be baked into the
             # call symbol (@.helper.helper_val) while the definition object
@@ -452,6 +462,8 @@ impl HirLowering:
                     import_idx = import_idx + 1
                     continue
                 val imported_surface = self.module_surfaces.surfaces[imported_index]
+                if self.library_mode != "" and library_mode_generic_import_v1(imp.module):
+                    resolved_module_name = imported_surface.module_name
                 # Per-import item rows: the frozen importer surface's flattened
                 # copy when the importing module has a registered surface, the
                 # live parser import decls otherwise (identical data and order;
@@ -556,6 +568,14 @@ impl HirLowering:
                         if not self.surface_declares_item_indexed(imported_surface, item_name):
                             val reexport = self.find_reexport_source(
                                 imported_surface.physical_index, item_name)
+                            if self.library_mode != "" and library_mode_generic_import_v1(imp.module) and
+                                    (not reexport.found or not self.reexport_walk_complete or
+                                     not self.reexport_walk_valid):
+                                val selected_family = library_mode_effective_family_v1(
+                                    self.library_mode, importer_owner)
+                                self.error("LIBRARY_MODE_SYMBOL_MISSING: configured '{self.library_mode}' selected '{selected_family}' for `{imp.module}`; frozen owner `{imported_surface.module_name}` does not prove export `{item_name}`", imp.span)
+                                item_idx = item_idx + 1
+                                continue
                             # A truncated or invalid walk is not proof that
                             # the frozen target lacks the requested export.
                             # Preserve the registration path in that case;

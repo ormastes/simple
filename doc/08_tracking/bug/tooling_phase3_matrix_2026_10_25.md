@@ -1,4 +1,4 @@
-﻿# Phase 3 tooling matrix continuation — 2026-10-25
+# Phase 3 tooling matrix continuation — 2026-10-25
 
 This adds independent findings to the existing Markdown repair report; it does
 not reset its exhausted six-attempt budget. Same isolated worktree and producer

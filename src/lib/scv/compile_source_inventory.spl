@@ -83,8 +83,44 @@ fn compile_source_inventory_apply_and_publish_v1(
     if digest == "":
         return CompileSourceInventoryReadV1(
             false, "inventory-publication-failed:" + publish_reason, "", nil)
-    compile_source_inventory_publication_readback_v1(
-        cache_root, digest, expected_pointer_digest)
+    compile_source_inventory_publication_readback_owned_v1(
+        cache_root, digest, expected_pointer_digest, inventory)
+
+# Only the successful local publisher supplies this owner. Its canonical
+# encoding validated every row and produced published_digest in this call;
+# fresh matching immutable bytes need no second decode. Never retain this
+# authority across requests or expose it as a general reader parameter.
+fn compile_source_inventory_publication_readback_owned_v1(
+    cache_root: text, published_digest: text, expected_pointer_digest: text,
+    inventory: CompileSourceInventoryV1
+) -> CompileSourceInventoryReadV1:
+    val root = compile_source_inventory_storage_v1(cache_root)
+    # Match the ordinary reader's captured-pointer semantics. Immutable bytes
+    # matching the locally published SHA need no additional lock or wait.
+    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    val separator = pointer_content.index_of("\n")
+    val pointer = if separator < 0: pointer_content else: pointer_content[:separator]
+    var admitted = CompileSourceInventoryReadV1(false, "inventory-generation-invalid", "", nil)
+    if compile_source_inventory_digest_valid_v1(pointer) and pointer == published_digest:
+        if compile_source_inventory_publication_bytes_match_v1(root, published_digest):
+            admitted = CompileSourceInventoryReadV1(true, "ok", published_digest, Some(inventory))
+    else:
+        # Preserve full admission and first-error diagnostics for a different
+        # or malformed captured pointer; never adopt another writer's owner.
+        admitted = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    compile_source_inventory_publication_readback_result_v1(
+        admitted, pointer_content, published_digest, expected_pointer_digest)
+
+# The raw immutable blob and SHA scratch never escape this scalar predicate.
+# A refused nested begin leaves the caller's active/paused scope untouched.
+fn compile_source_inventory_publication_bytes_match_v1(root: text, digest: text) -> bool:
+    val owns_scratch = transient_scope_begin()
+    val content = compile_source_inventory_read_text_v1(
+        "{root}/generations/{digest}.inventory") ?? ""
+    val matches = content != "" and sha256_text(content) == digest
+    if owns_scratch and not transient_scope_end():
+        return false
+    matches
 
 fn compile_source_inventory_publication_readback_v1(
     cache_root: text, published_digest: text, expected_pointer_digest: text
@@ -97,6 +133,13 @@ fn compile_source_inventory_publication_readback_v1(
     """
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     val admitted = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    compile_source_inventory_publication_readback_result_v1(
+        admitted, pointer_content, published_digest, expected_pointer_digest)
+
+fn compile_source_inventory_publication_readback_result_v1(
+    admitted: CompileSourceInventoryReadV1, pointer_content: text,
+    published_digest: text, expected_pointer_digest: text
+) -> CompileSourceInventoryReadV1:
     if not admitted.valid:
         return CompileSourceInventoryReadV1(false,
             "inventory-publication-readback-invalid:{admitted.reason}" +

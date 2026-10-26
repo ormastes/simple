@@ -1,7 +1,9 @@
 # Bootstrap options, shard knobs and cache protocol state
 
-Dated 2026-10-25, against `release/1.0.0`. Each item names the PR or file it was
-checked against. Opt-in means the default is OFF today.
+Dated 2026-10-25, against `release/1.0.0`, with the per-file worker default
+updated 2026-10-26. Each item names the PR or file it was checked against.
+Opt-in means the default is off unless an item says otherwise; the true
+per-file worker pipeline is now selected when `SIMPLE_FILE_WORKERS` is unset.
 
 ## Essential applications after Stage 4
 
@@ -134,12 +136,13 @@ leaders (#4441), and #4525, which makes per-module lowering the default.
 - Not yet proven: a full Stage 3 run of the per-file lane under
   `SIMPLE_BOOTSTRAP_STAGE3=1` with `SIMPLE_BOOTSTRAP` empty. If it fails, use
   `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` and record the failure.
-- Per-file pipeline default flip (P-F, prepared, NOT flipped): the default
+- Per-file pipeline default (P-F): the default
   for `SIMPLE_FILE_WORKERS` when unset is the
   single constant `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1` in
-  `src/compiler/80.driver/driver_build/native_file_worker_v1.spl` (today
-  `"0"`). Every read site uses `?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1`, so the
-  flip is that one line; `SIMPLE_FILE_WORKERS=0` stays the opt-out. The Stage 3
+  `src/compiler/80.driver/driver_build/native_file_worker_v1.spl` (now
+  `"1"`). Unset selects the per-file `src → obj` worker pool;
+  `SIMPLE_FILE_WORKERS=0` opts out, and
+  `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` keeps the whole-program route. The Stage 3
   scripts pass the knob through when set (exactly `0` or `1`, anything else
   is refused) and hash it into the Stage 3 args receipt; unset adds nothing,
   so existing receipts stay resume-compatible. The resume worker receives it

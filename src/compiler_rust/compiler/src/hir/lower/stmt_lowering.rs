@@ -1539,6 +1539,14 @@ impl Lowerer {
                     }
                 }
                 use simple_parser::ast::AsmConstraintKind;
+                let dialect = crate::hir::AsmDialect::from_options(
+                    asm_stmt.constraints.iter().filter_map(|constraint| {
+                        match &constraint.kind {
+                            AsmConstraintKind::Options(options) => Some(options.iter().map(String::as_str)),
+                            _ => None,
+                        }
+                    }).flatten(),
+                ).map_err(LowerError::Unsupported)?;
                 let mut operands = Vec::new();
                 let mut clobbers: Vec<String> = asm_stmt.clobbers.clone();
                 for c in &asm_stmt.constraints {
@@ -1552,7 +1560,8 @@ impl Lowerer {
                             }
                             continue;
                         }
-                        // clobber_abi / options: no codegen support yet; the
+                        // Dialect options were retained above. Other options and
+                        // clobber_abi have no codegen support yet; the
                         // block still lowers with a `memory` clobber, which is
                         // the conservative side.
                         AsmConstraintKind::ClobberAbi(_) | AsmConstraintKind::Options(_) => continue,
@@ -1577,6 +1586,7 @@ impl Lowerer {
                     }
                 }
                 Ok(vec![HirStmt::InlineAsm {
+                    dialect,
                     instructions: asm_stmt.instructions.clone(),
                     volatile: asm_stmt.volatile,
                     operands,

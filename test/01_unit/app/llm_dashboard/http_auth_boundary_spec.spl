@@ -1,0 +1,31 @@
+"""Pure loopback HTTP authority checks, not authentication or backend proof.
+NOT_RUN: requires the verified native test runner. Real HTTP/login/tmux flows
+remain separate system scenarios with actual product processes and cleanup.
+# @manual: primary
+"""
+use std.spec.{describe, it, expect, step}
+use app.llm_dashboard.http_auth_boundary.{dashboard_header, dashboard_local_origin}
+
+describe "dashboard loopback request authority":
+    it "requires the exact local authority and origin for mutations":
+        step("Accept same-origin loopback headers and reject another origin or port")
+        expect(dashboard_local_origin("Host: localhost:8765\r\nOrigin: http://localhost:8765\r\n", 8765, true)).to_equal(true)
+        expect(dashboard_local_origin("host: 127.0.0.1:8765\norigin: http://127.0.0.1:8765\n", 8765, true)).to_equal(true)
+        expect(dashboard_local_origin("Host: localhost:8765\nOrigin: http://evil.example\n", 8765, true)).to_equal(false)
+        expect(dashboard_local_origin("Host: localhost:8765\nOrigin: http://localhost:8766\n", 8765, true)).to_equal(false)
+        expect(dashboard_local_origin("Host: evil.example:8765\nOrigin: http://evil.example:8765\n", 8765, true)).to_equal(false)
+
+    it "refuses duplicate or folded authority headers even for reads":
+        step("Reject conflicting origins instead of treating a duplicate as a missing header")
+        expect(dashboard_local_origin("Host: localhost:8765\nOrigin: http://localhost:8765\nOrigin: http://evil.example\n", 8765, false)).to_equal(false)
+        expect(dashboard_local_origin("Host: localhost:8765\nHost: localhost:8765\n", 8765, false)).to_equal(false)
+        expect(dashboard_local_origin("Host: localhost:8765\n Origin: http://evil.example\n", 8765, false)).to_equal(false)
+        expect(dashboard_header("Host: localhost:8765\nHost: evil.example\n", "host")).to_be_nil()
+
+    it "separates absent optional read origins from invalid required origins":
+        step("Apply the declared read policy without granting authenticated access")
+        expect(dashboard_local_origin("Host: localhost:8765\n", 8765, false)).to_equal(true)
+        expect(dashboard_local_origin("Host: localhost:8765\n", 8765, true)).to_equal(false)
+        expect(dashboard_local_origin("Host: localhost:8765\nOrigin:\n", 8765, false)).to_equal(false)
+        expect(dashboard_local_origin("Origin: http://localhost:8765\n", 8765, false)).to_equal(false)
+        expect(dashboard_local_origin("Host: localhost:0\n", 0, false)).to_equal(false)

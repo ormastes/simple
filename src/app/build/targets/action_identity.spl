@@ -15,6 +15,8 @@ use compiler.common.cache.darwin_runtime_provider_manifest.{
     darwin_runtime_artifact_error_v1,
     darwin_runtime_provider_manifest_content_identity_v1
 }
+use compiler.backend.linker.macho_inspect.{macho_parse_header, MH_OBJECT}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 
 val NATIVE_ACTION_INPUT_SCHEMA_V1 = "simple-native-action-input-v1"
@@ -68,6 +70,34 @@ fn native_identity_value_valid_v1(value: text) -> bool:
 fn darwin_macho_slice_error_v1(path: text, architecture: text) -> text:
     val error = darwin_runtime_artifact_error_v1(path, architecture)
     if error == "": "" else: "target-identity-error: " + error
+
+# Object output is a target-specific relocatable artifact, not runtime linkage.
+# A matching CPU alone would also admit executable/archive bytes as an object.
+fn darwin_object_artifact_error_v1(path: text, architecture: text) -> text:
+    val slice_error = darwin_macho_slice_error_v1(path, architecture)
+    if slice_error != "": return slice_error
+    val header = match macho_parse_header(file_read_bytes(path)):
+        case Ok(value): value
+        case Err(reason): return "target-identity-error: object-header-invalid: " + reason
+    if header.filetype != MH_OBJECT:
+        return "target-identity-error: object-artifact-kind-mismatch"
+    ""
+
+fn darwin_object_target_identity_digest_v1(
+    target_triple: text, architecture: text, cpu_features: text,
+    deployment_target: text, sdk_identity: text, backend: text,
+    optimization: text, object_format: text, codegen_provider_receipt: text
+) -> text:
+    val values = [target_triple, architecture, cpu_features, deployment_target,
+        sdk_identity, backend, optimization, object_format, codegen_provider_receipt]
+    for value in values:
+        if not native_identity_value_valid_v1(value): return ""
+    if not digest_is_sha256(sdk_identity) or not digest_is_sha256(codegen_provider_receipt):
+        return ""
+    var body = "simple-darwin-object-target-identity-v1|policy=darwin-relocatable-object-v1"
+    for value in values:
+        body = body + "|" + value.len().to_text() + ":" + value
+    sha256_text(body)
 
 fn canonical_darwin_target_triple_v1(value: text) -> text:
     val parts = value.trim().lower().split("-")
@@ -293,39 +323,55 @@ fn native_action_input_error_v1(
         if identity.runtime_artifact_digest != expected_runtime_artifact_digest:
             return "target-identity-error: runtime-artifact-digest-mismatch"
         if not digest_is_sha256(identity.sdk_identity) or
-                not digest_is_sha256(identity.linker_tool_identity) or
-                not digest_is_sha256(identity.runtime_provider_receipt) or
-                not digest_is_sha256(identity.runtime_artifact_digest):
+                not digest_is_sha256(identity.runtime_provider_receipt):
             return "target-identity-error: invalid-darwin-bound-identity"
         val live_sdk_identity = darwin_sdk_identity_v1(expected_sdk_root)
         if live_sdk_identity == "" or live_sdk_identity != identity.sdk_identity:
             return "target-identity-error: current-sdk-identity-mismatch"
-        val live_linker_tool_identity = darwin_link_tool_identity_v1(cache_dir)
-        if live_linker_tool_identity == "" or
-                live_linker_tool_identity != identity.linker_tool_identity:
-            return "target-identity-error: current-linker-tool-identity-mismatch"
-        val live_runtime_identity =
-            darwin_runtime_provider_manifest_content_identity_v1(
-                cache_dir + "/native_runtime_provider_manifest.receipt",
-                identity.architecture
+        if expected_artifact_kind == "object":
+            # These fields describe executable runtime linkage. Empty means
+            # not applicable; it does not assert that aggregation ran no ld -r.
+            if identity.linker_tool_identity != "" or identity.runtime_artifact_digest != "" or
+                    expected_runtime_artifact_digest != "":
+                return "target-identity-error: object-runtime-linkage-not-applicable"
+            if identity.object_format != "mach-o" or identity.linker_policy != "darwin-relocatable-object-v1":
+                return "target-identity-error: object-policy-mismatch"
+            val object_identity = darwin_object_target_identity_digest_v1(
+                identity.target_triple, identity.architecture, identity.cpu_features,
+                identity.deployment_target, identity.sdk_identity, identity.backend,
+                identity.optimization, identity.object_format, identity.runtime_provider_receipt)
+            if object_identity == "" or object_identity != identity.target_identity_digest:
+                return "target-identity-error: darwin-object-target-identity-mismatch"
+        else:
+            if not digest_is_sha256(identity.linker_tool_identity) or
+                    not digest_is_sha256(identity.runtime_artifact_digest):
+                return "target-identity-error: invalid-darwin-bound-identity"
+            val live_linker_tool_identity = darwin_link_tool_identity_v1(cache_dir)
+            if live_linker_tool_identity == "" or
+                    live_linker_tool_identity != identity.linker_tool_identity:
+                return "target-identity-error: current-linker-tool-identity-mismatch"
+            val live_runtime_identity =
+                darwin_runtime_provider_manifest_content_identity_v1(
+                    cache_dir + "/native_runtime_provider_manifest.receipt",
+                    identity.architecture
+                )
+            if live_runtime_identity == "" or
+                    live_runtime_identity != identity.runtime_artifact_digest:
+                return "target-identity-error: current-runtime-provider-bytes-mismatch"
+            if identity.object_format != "mach-o":
+                return "target-identity-error: object-format-mismatch"
+            if identity.linker_policy != "darwin-dead-strip-v1":
+                return "target-identity-error: linker-policy-mismatch"
+            val target_identity = darwin_target_identity_digest_v1(
+                identity.target_triple, identity.architecture, identity.cpu_features,
+                identity.deployment_target,
+                identity.sdk_identity, identity.backend, identity.optimization,
+                identity.object_format, identity.linker_policy,
+                identity.linker_tool_identity,
+                identity.runtime_provider_receipt, identity.runtime_artifact_digest
             )
-        if live_runtime_identity == "" or
-                live_runtime_identity != identity.runtime_artifact_digest:
-            return "target-identity-error: current-runtime-provider-bytes-mismatch"
-        if identity.object_format != "mach-o":
-            return "target-identity-error: object-format-mismatch"
-        if identity.linker_policy != "darwin-dead-strip-v1":
-            return "target-identity-error: linker-policy-mismatch"
-        val target_identity = darwin_target_identity_digest_v1(
-            identity.target_triple, identity.architecture, identity.cpu_features,
-            identity.deployment_target,
-            identity.sdk_identity, identity.backend, identity.optimization,
-            identity.object_format, identity.linker_policy,
-            identity.linker_tool_identity,
-            identity.runtime_provider_receipt, identity.runtime_artifact_digest
-        )
-        if target_identity.len() == 0 or identity.target_identity_digest != target_identity:
-            return "target-identity-error: darwin-target-identity-mismatch"
+            if target_identity.len() == 0 or identity.target_identity_digest != target_identity:
+                return "target-identity-error: darwin-target-identity-mismatch"
     val tool_absolute = native_tool_absolute_path_v1(repo_root, identity.tool_path)
     if tool_absolute == "" or not file_exists(tool_absolute) or
             file_hash_sha256(tool_absolute) != identity.tool_artifact_digest or
@@ -451,7 +497,8 @@ export NativeActionInputIdentityV1
 export native_action_input_receipt_text_v1, parse_native_action_input_receipt_v1
 export native_action_input_error_v1, load_current_native_action_input_v1
 export darwin_target_identity_digest_v1, publish_current_native_action_input_v1
-export darwin_macho_slice_error_v1
+export darwin_macho_slice_error_v1, darwin_object_artifact_error_v1
+export darwin_object_target_identity_digest_v1
 export canonical_darwin_target_triple_v1, canonical_darwin_deployment_target_v1
 export canonical_darwin_cpu_features_v1, darwin_sdk_identity_v1
 export darwin_link_tool_identity_v1

@@ -22,6 +22,24 @@ require() {
   fi
 }
 
+# A repeated guard in another function cannot prove this boundary is guarded.
+require_in_function() {
+  pattern=$1
+  file=$2
+  function_name=$3
+  label=$4
+  if ! awk -v name="$function_name" -v pattern="$pattern" '
+    /^fn / {
+      active = index($0, "fn " name "(") == 1
+    }
+    active && index($0, pattern) { found = 1 }
+    END { exit !found }
+  ' "$file"; then
+    echo "FAIL: $label" >&2
+    exit 1
+  fi
+}
+
 reject() {
   pattern=$1
   file=$2
@@ -51,8 +69,13 @@ require 'reverse_reference_receipt_digest_v1' "$native" 'M3 publication does not
 require 'reverse_reference_key_encode_v1' "$native" 'M3 publication does not copy exact admitted M2 key frames'
 reject 'val key = ReverseReferenceKeyV1(' "$native" 'M3 synthesizes reverse-reference keys instead of consuming M2 receipt keys'
 require 'rt_path_absolute' "$path_io" 'filesystem canonicalization is absent'
-require 'if root != canonical_root:' "$path_io" 'manifest roots need not use canonical spelling'
-require 'if path != canonical_path:' "$path_io" 'Phase 2 artifacts need not use canonical spelling'
+require_in_function 'if path != canonical:' "$path_io" phase_compatibility_path_canonical_spelling_io_v1 'shared canonical spelling guard does not compare resolved paths'
+require_in_function 'if not phase_compatibility_path_canonical_spelling_io_v1(spelling, canonical_root):' "$path_io" phase_compatibility_canonical_directory_io_v1 'manifest roots need not use canonical spelling'
+require_in_function 'if not phase_compatibility_path_canonical_spelling_io_v1(spelling, canonical_path):' "$path_io" phase_compatibility_existing_artifact_io_v1 'Phase 2 artifacts need not use canonical spelling'
+require_in_function 'if not phase_compatibility_path_canonical_spelling_io_v1(spelling, canonical_path):' "$path_io" phase_compatibility_existing_manifest_io_v1 'Manifests need not use canonical spelling'
+require_in_function 'if not phase_compatibility_directory_chain_io_v1(canonical_root):' "$path_io" phase_compatibility_canonical_directory_io_v1 'manifest roots can traverse Windows reparse points'
+require_in_function 'if not phase_compatibility_directory_chain_io_v1(phase_compatibility_path_parent_io_v1(canonical_path)):' "$path_io" phase_compatibility_existing_artifact_io_v1 'Phase 2 artifact parents can traverse Windows reparse points'
+require_in_function 'if not phase_compatibility_directory_chain_io_v1(phase_compatibility_path_parent_io_v1(canonical_path)):' "$path_io" phase_compatibility_existing_manifest_io_v1 'Manifest parents can traverse Windows reparse points'
 require 'rt_file_is_regular_no_follow' "$path_io" 'Phase 2 reads can follow a symlink leaf'
 require 'destination-already-exists' "$path_io" 'Phase 3 immutable destinations can be replaced'
 require 'rt_path_separator() != "/"' "$path_io" 'non-Unix path rules are silently accepted'
@@ -90,7 +113,7 @@ require '"emitted-symbol-relocation"' "$incremental" 'private-body invalidation 
 require 'An import proves interface consumption, not SCC membership.' "$incremental" 'ordinary imports are not distinguished from SCC peers'
 reject 'incremental_publish_module_scc_artifact_v1(dependency, source, deps_iface)' "$incremental" 'ordinary imports are promoted to SCC membership'
 require 'chmod -R a-w "${stage2_cache_absolute}"' "$bootstrap" 'Phase 2 cache is not made read-only before Phase 3'
-require 'cmp -s "${phase2_cache_before_stage3}"' "$bootstrap" 'Phase 2 mutation snapshot gate is absent'
+require 'bootstrap_stage3_require_equal "Phase 2 cache immutability"' "$bootstrap" 'Phase 2 mutation snapshot gate is absent'
 require 'phase2_manifest_sha_before_stage3' "$bootstrap" 'manifest immutability digest gate is absent'
 require 'mkdir -p "${stage3_provenance_cache}"' "$bootstrap" 'Phase 3 canonical root is not created before manifest publication'
 
