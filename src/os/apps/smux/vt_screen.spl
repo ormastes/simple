@@ -1,4 +1,4 @@
-use os.apps.smux.vt_snapshot.{vt_history_text, vt_history_count, vt_set_history_limit, vt_text, vt_styled_text, vt_replies, vt_clear_replies, vt_bracketed_paste, vt_cursor_visible, vt_alt_screen}
+use os.apps.smux.vt_snapshot.{vt_history_text, vt_history_count, vt_set_history_limit, vt_text, vt_styled_text, vt_replies, vt_clear_replies, vt_bracketed_paste, vt_cursor_visible, vt_alt_screen, vt_application_cursor}
 use os.apps.smux.vt_retention.*
 use std.common.text_bytes.{text_to_bytes}
 # vt_screen.spl — The visible screen of a terminal pane.
@@ -18,7 +18,7 @@ use std.common.text_bytes.{text_to_bytes}
 # ED (J), ECH (X), ICH/DCH (@ P), IL/DL (L M), SU/SD (S T) and the scroll
 # region (r); synchronized output (CSI ?2026 h/l, so a capture never shows a
 # half-drawn frame); the alternate screen (?1049 / ?1047 / ?47); cursor
-# visibility (?25); bracketed paste (?2004); and SGR attributes (m) kept per
+# visibility (?25); application cursor (?1); bracketed paste (?2004); and SGR attributes (m) kept per
 # cell for the styled capture.
 #
 # Terminal queries a TUI sends at startup get a pending reply (`vt_replies`)
@@ -64,7 +64,7 @@ pub fn vt_new(rows: i64, cols: i64) -> VtScreen:
     val r = if rows > 0: rows else: 24
     val c = if cols > 0: cols else: 80
     val modes = VtModes(cursor_visible: true, bracketed: false,
-        pen: _pen_default(), pen_sgr: "", replies: "", osc: "")
+        pen: _pen_default(), pen_sgr: "", replies: "", osc: "", application_cursor: false)
     val alt = VtAlt(on: false, cells: [], attrs: [], wrapped: [], cell_loss: [], row: 0, col: 0)
     VtScreen(rows: r, cols: c, cells: _blank_grid(r, c, " "),
         attrs: _blank_grid(r, c, ""), wrapped: vt_wrap_new(r), cell_loss: vt_loss_new(r), row: 0, col: 0, saved_row: 0,
@@ -452,9 +452,11 @@ fn _dec_mode(s0: VtScreen, n: i64, on: bool) -> VtScreen:
             s.frozen_history_loss = []
             s = vt_mark_dirty(s, not vt_view_equal(s0, s))
         return s
-    if n == 25 or n == 2004:
+    if n == 1 or n == 25 or n == 2004:
         var m = s.modes
-        if n == 25:
+        if n == 1:
+            m.application_cursor = on
+        elif n == 25:
             m.cursor_visible = on
         else:
             m.bracketed = on
@@ -471,6 +473,8 @@ fn _dec_mode_state(s: VtScreen, n: i64) -> i64:
     var is_set = false
     if n == 2026:
         is_set = s.frozen.len() > 0
+    elif n == 1:
+        is_set = s.modes.application_cursor
     elif n == 25:
         is_set = s.modes.cursor_visible
     elif n == 2004:
@@ -746,5 +750,5 @@ pub fn vt_resize(screen: VtScreen, rows: i64, cols: i64) -> VtScreen:
 
 export VtScreen, vt_new, vt_feed, vt_resize, vt_text, vt_styled_text,
     vt_replies, vt_clear_replies, vt_bracketed_paste, vt_cursor_visible,
-    vt_alt_screen
+    vt_alt_screen, vt_application_cursor
 export vt_history_text, vt_history_count, vt_set_history_limit
