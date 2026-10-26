@@ -20,3 +20,15 @@ keep `/src/` stripping for source files.
 Evidence: `test/01_unit/app/lsp/lsp_feature_layer_matrix_spec.spl` passes relative paths and
 asserts the exact `feature` id; an absolute-path call is the repro above (seed bin/simple.exe).
 No spec covers the absolute-path form yet.
+
+## Resolution (2026-10-27)
+
+`relative_to_src` (`src/app/cli/_QueryVisibility/symbol_resolution.spl`) now first calls the new
+`repo_relative_path`: it normalises `\` to `/` and strips the process-cwd prefix (the repo root when run
+from it), then applies the existing `/src/` and leading `src/` stripping unchanged. All id builders
+(`feature_id_of`, `boundary_module`, `layer_dir_name`, `peer_path_tail`, reason strings) go through it.
+Limit: an absolute path outside the cwd is left as is (no `.git` ancestor walk).
+
+Coverage: new `it` in `test/01_unit/app/lsp/lsp_feature_layer_matrix_spec.spl` (REQ-LSP-MATRIX-002) passes
+cwd-built absolute paths and asserts `test.fixtures.mdsoc_matrix.feature_a`. Before: 6/7 (new case failed);
+after: 7/7. Reruns: feature_layer_matrix 16/16, query_visibility_feature 11/11, lsp_visibility_support 45/45.

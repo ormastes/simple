@@ -9,3 +9,4 @@ Plan: `doc/03_plan/test/language_primitive_mdsoc_visibility_test_plan.md`.
 - REQ-MDSOC-LAYER-ENFORCEMENT-001: the numbered layer dependency rules are enforced (layer N can only import layers with number <= N).
 - REQ-MDSOC-FEATURE-PORTS-001: feature stage port structs can be constructed and their fields are accessible.
 - REQ-MDSOC-MEMBER-VIS-001: member visibility enforcement works correctly in HIR lowering.
+- REQ-LSP-MATRIX-002: lsp_visibility derives the same repo-relative module/feature ids for an absolute (Windows) path as for the repo-relative path.
