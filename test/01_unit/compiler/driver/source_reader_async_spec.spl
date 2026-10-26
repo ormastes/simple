@@ -100,3 +100,27 @@ describe "SourceReader async":
         expect(ready_run.done_order[1]).to_equal(sync_run.done_order[1])
         expect(ready_run.tldr[0]).to_equal(sync_run.tldr[0])
         expect(ready_run.tldr[1]).to_equal(sync_run.tldr[1])
+
+    it "pending async parses count as in flight, so the budget is never over-admitted":
+        var entries: [FileFiberEntryV1] = []
+        for i in 0..4:
+            entries = entries.push(FileFiberEntryV1(module_key: "b{i}", path: "virtual/b{i}.spl", est_bytes: 10, content: "fn b{i}(): 0\n"))
+        var run = file_fiber_begin_v1(entries, [0], 10)
+        val reader = SlowReader(tag: "slow")
+        var rounds = 0
+        var max_reserved = 0
+        while not file_fiber_finished_v1(run) and rounds < 200:
+            rounds = rounds + 1
+            run.advance(_imports)
+            if run.sched.reserved > max_reserved: max_reserved = run.sched.reserved
+            for i in run.take_parse_requests():
+                run.park_async(i, reader.update_tldr_async(run.entries[i].path))
+            for d in run.poll_async():
+                run.parse_done(d.index, reader.read_tldr(run.entries[d.index].path), d.err)
+            # futures stay pending for several rounds before resolving
+            if rounds % 6 == 0:
+                for k in 0..run.async_fut.len():
+                    val _done = run.async_fut[k].complete("")
+        file_fiber_end_v1(run)
+        expect(run.done_order.len()).to_equal(4)
+        expect(max_reserved <= 10).to_be(true)
