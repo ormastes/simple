@@ -1,7 +1,7 @@
 # Workaround annotation malformed: refresh fails on every native-build (2026-10-27)
 
 **Date:** 2026-10-27
-**Status:** open
+**Status:** fixed (annotations); lock item not a defect, see Resolution
 **Evidence:** `C:/dev/hircfg-probe/logs3/*.log`, `C:/dev/hircfg-probe/logs/`
 **Compiler:** `bin/simple native-build` on release/1.0.0
 **Severity:** P1 (blocks all native-build on the release branch)
@@ -100,3 +100,15 @@ Native-build is completely blocked on release/1.0.0, preventing:
 
 **General hardening**:
 1. Make the lock file stale-safe: read the lock, check its timestamp, and retry after a timeout rather than blocking indefinitely.
+
+## Resolution (2026-10-27)
+
+- All 12 `@workaround doc/...` sites now read `@workaround bug=<id> reason=see doc/...` and sit
+  directly above their block (explanatory comments moved above the tag). Pinned by
+  `test/01_unit/app/bug/workaround_annotation_format_spec.spl`. That spec parses the five files
+  with the registry parser: it fails on the pre-fix tree and passes after.
+- Stale lock: no code change. `workarounds.sdn.lock` is an OS lock (`rt_file_lock` uses
+  `LockFileEx` / `flock`), and the OS releases it when the holder exits. A leftover lock file
+  therefore cannot block. "writer lock unavailable" means a live holder outlasted the 5 s wait,
+  e.g. concurrent builds in one checkout. Deleting the file by age would break mutual exclusion,
+  because on POSIX unlinking a held lock lets a second process lock a fresh inode.

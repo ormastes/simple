@@ -1,0 +1,50 @@
+# Executable specification: every @workaround annotation in the files named
+# by bug workaround_annotation_malformed_refresh_fails_2026-10-27 parses under
+# the registry grammar (bug= first, optional reason=, directly above code).
+# @req REQ-SSPEC-APP
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use app.bug.workaround_index.{parse_workaround_source}
+
+val SITES = [
+    "src/compiler/70.backend/linker/elf/archive_file.spl",
+    "src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl",
+    "src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/row_value_helpers.spl",
+    "src/lib/nogc_sync_mut/io/retained_file.spl",
+    "src/lib/scv/compile_source_inventory.spl"
+]
+
+fn parse_error(path: text) -> text:
+    val result = parse_workaround_source(path, file_read(path))
+    if result.is_err(): result.unwrap_err() else: ""
+
+describe "workaround annotation format (bug= required)":
+    it "rejects the doc/<path> form":
+        val result = parse_workaround_source("x.spl",
+            "# @workaround doc/08_tracking/bug/x.md: why\nfn f() -> i64:\n    0\n")
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects free text after bug= without reason=":
+        val result = parse_workaround_source("x.spl",
+            "# @workaround bug=x_bug_2026_10_27 (doc/08_tracking/bug/x.md)\nfn f() -> i64:\n    0\n")
+        expect(result.is_err()).to_equal(true)
+
+    it "accepts bug= with reason= directly above code":
+        val result = parse_workaround_source("x.spl",
+            "# @workaround bug=x_bug_2026_10_27 reason=see doc/08_tracking/bug/x.md\nfn f() -> i64:\n    0\n")
+        expect(result.is_ok()).to_equal(true)
+
+    it "parses every annotation in the previously malformed files":
+        for path in SITES:
+            step("parse {path}")
+            expect(parse_error(path)).to_equal("")
+
+    it "names only bug ids registered in bug_db.sdn":
+        val db = file_read("doc/08_tracking/bug/bug_db.sdn")
+        for path in SITES:
+            val result = parse_workaround_source(path, file_read(path))
+            if result.is_ok():
+                for link in result.unwrap():
+                    step("{path}:{link.line} bug={link.bug_id}")
+                    expect(db.contains(link.bug_id)).to_equal(true)
