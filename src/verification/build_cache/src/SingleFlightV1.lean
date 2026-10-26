@@ -13,6 +13,9 @@
   Correspondence (manual, pinned by source_bindings.txt):
     join      ↔ join_at (now = none ↔ join(), started_ms = -1)
     complete  ↔ complete (woken := waiters, flight/leader removed)
+                (complete_flight/forget: retention of `result` is not modeled;
+                 only waiters can read it, and a waiter-less completion retains
+                 nothing, so no observable behaviour differs - reviewed 2026-10-27)
     redrive   ↔ redrive (`now - started < timeout` ⇔ `now < started + timeout`)
   No sorry, no axioms.
 -/
