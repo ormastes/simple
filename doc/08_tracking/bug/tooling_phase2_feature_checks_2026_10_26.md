@@ -289,3 +289,11 @@ recovery policy after Astra reviewed the differing bodies. Native production
 probe is running (session37004, astra-cmm/probe-run). Historical system suites
 with local fake parsers are being replaced with production-owner assertions;
 their previous pass claims are not accepted as feature evidence.
+
+The reviewed MCP/LSP shared transport classifier compiled/linked and executed
+17 production-owner cases /18 actual assertions (astra-mcp/transport-run).
+This independently proves admission of JSON root/malformed lines and retention
+of valid standard/vendor framing headers and blank separators. Full server
+dispatch, byte/error regression suites and canonical SSpecs remain unverified.
+CMM probe1 passed HIR and reports no ambiguous methods, but stops at14 MIR
+payload/type diagnostics; no executable/parser behavioral checks ran.

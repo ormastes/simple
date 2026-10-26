@@ -1,0 +1,29 @@
+use std.spec
+use std.common.encoding.external_text.{external_text_decode, utf8_format}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_decode, io_text_encode}
+
+describe "External text I/O typed payload preservation":
+    it "retains every codec error field when wrapping the actual decoder failure":
+        step("Compare the raw decoder's failure with the public I/O error payload")
+        val invalid_inputs: [[u8]] = [[255u8], [65u8, 255u8], [240u8, 159u8]]
+        for bytes in invalid_inputs:
+            val format = utf8_format()
+            match external_text_decode(bytes, format):
+                case Ok(_): fail("invalid raw UTF-8 input was accepted")
+                case Err(expected):
+                    match io_text_decode(bytes, format):
+                        case Ok(_): fail("I/O wrapper accepted a decoder failure")
+                        case Err(actual):
+                            match actual:
+                                case TextIoError.Codec(codec):
+                                    expect(codec.kind).to_equal(expected.kind)
+                                    expect(codec.byte_offset).to_equal(expected.byte_offset)
+                                    expect(codec.reason).to_equal(expected.reason)
+                                case _: fail("decoder failure lost its Codec error variant")
+
+    it "retains NUL and non-ASCII byte values through successful payloads":
+        step("Encode and decode the same valid UTF-8 byte carrier without dropping octets")
+        val bytes: [u8] = [65u8, 0u8, 240u8, 159u8, 152u8, 128u8]
+        val decoded = io_text_decode(bytes, utf8_format()).unwrap()
+        expect(io_text_encode(decoded, utf8_format()).unwrap()).to_equal(bytes)
+        expect(io_text_decode([], utf8_format()).unwrap()).to_equal("")

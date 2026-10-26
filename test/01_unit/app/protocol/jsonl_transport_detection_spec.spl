@@ -1,0 +1,28 @@
+use std.spec
+use app.protocol.framing.{frame_line_is_jsonl_payload}
+
+describe "JSONL and framed header transport admission":
+    it "passes every JSON root kind to the protocol validator":
+        step("Do not consume non-object JSON values as framing headers")
+        val values = ["{" + "}", "[]", "null", "true", "false", "7", "-2.5", "\"text:with-colon\""]
+        for value in values:
+            expect(frame_line_is_jsonl_payload(value + "\n")).to_equal(true)
+
+    it "passes malformed payload lines through for a parse-error response":
+        step("Leave JSON syntax validation with the owning protocol parser")
+        expect(frame_line_is_jsonl_payload("  [1,]\r\n")).to_equal(true)
+        expect(frame_line_is_jsonl_payload("garbage\n")).to_equal(true)
+        expect(frame_line_is_jsonl_payload(":")).to_equal(true)
+
+    it "keeps standard and vendor header fields in the framing owner":
+        step("Accept header names without requiring Content-Length to arrive first")
+        expect(frame_line_is_jsonl_payload("Content-Length: 42\r\n")).to_equal(false)
+        expect(frame_line_is_jsonl_payload("Content-Type: application/json\r\n")).to_equal(false)
+        expect(frame_line_is_jsonl_payload("X-Simple_Trace: on\n")).to_equal(false)
+        expect(frame_line_is_jsonl_payload("X-Trace!#$%&'*+-.^_`|~: on")).to_equal(false)
+
+    it "does not select JSONL for empty separator lines":
+        step("Leave blank lines available to terminate the framing header block")
+        expect(frame_line_is_jsonl_payload("")).to_equal(false)
+        expect(frame_line_is_jsonl_payload("\r\n")).to_equal(false)
+        expect(frame_line_is_jsonl_payload(" \t\n")).to_equal(false)
