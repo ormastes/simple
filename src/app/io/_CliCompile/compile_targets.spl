@@ -64,6 +64,7 @@ use app.build.targets.action_identity.{
     NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
     darwin_target_identity_digest_v1, publish_current_native_action_input_v1,
     load_current_native_action_input_v1, darwin_macho_slice_error_v1,
+    darwin_object_artifact_error_v1, darwin_object_target_identity_digest_v1,
     canonical_darwin_target_triple_v1, canonical_darwin_deployment_target_v1,
     canonical_darwin_cpu_features_v1, darwin_sdk_identity_v1,
     darwin_link_tool_identity_v1
@@ -149,7 +150,11 @@ fn _publish_and_admit_darwin_native_action_v1(
     val architecture = target_triple.split("-")[0]
     val cpu = env_get("SIMPLE_NATIVE_CPU") ?? ""
     val cpu_features = canonical_darwin_cpu_features_v1(cpu)
-    val artifact_error = darwin_macho_slice_error_v1(output, architecture)
+    val object_output = artifact_kind == "object"
+    val artifact_error = if object_output:
+        darwin_object_artifact_error_v1(output, architecture)
+    else:
+        darwin_macho_slice_error_v1(output, architecture)
     if artifact_error != "": return artifact_error
     val deployment_target = canonical_darwin_deployment_target_v1(
         env_get("MACOSX_DEPLOYMENT_TARGET") ?? ""
@@ -164,14 +169,16 @@ fn _publish_and_admit_darwin_native_action_v1(
     if provider_evidence.len() != 1:
         return "target-identity-error: native-provider-identity-missing"
     val exact_provider_receipt = provider_evidence[0]
-    val runtime_artifact_digest = _native_build_runtime_manifest_identity(
-        cache_dir, architecture
-    )
-    if runtime_artifact_digest == "":
-        return "target-identity-error: runtime-provider-manifest-missing-or-invalid"
-    val linker_tool_identity = darwin_link_tool_identity_v1(cache_dir)
-    if linker_tool_identity == "":
-        return "target-identity-error: linker-tool-identity-missing-or-invalid"
+    var runtime_artifact_digest = ""
+    var linker_tool_identity = ""
+    val linker_policy = if object_output: "darwin-relocatable-object-v1" else: "darwin-dead-strip-v1"
+    if not object_output:
+        runtime_artifact_digest = _native_build_runtime_manifest_identity(cache_dir, architecture)
+        if runtime_artifact_digest == "":
+            return "target-identity-error: runtime-provider-manifest-missing-or-invalid"
+        linker_tool_identity = darwin_link_tool_identity_v1(cache_dir)
+        if linker_tool_identity == "":
+            return "target-identity-error: linker-tool-identity-missing-or-invalid"
     val repo_root = rt_path_absolute(".")
     var closure_inputs: [ImportedClosureInputV1] = []
     var entry = _native_build_relative_identity_path(repo_root, entry_point)
@@ -200,11 +207,15 @@ fn _publish_and_admit_darwin_native_action_v1(
     )
     if not digest_is_sha256(closure): return closure
     val optimization = "opt=" + opt_level.to_text() + "|release=" + release.to_text()
-    val target_identity = darwin_target_identity_digest_v1(
-        target_triple, architecture, cpu_features, deployment_target, sdk_identity, backend,
-        optimization, "mach-o", "darwin-dead-strip-v1",
-        linker_tool_identity, exact_provider_receipt, runtime_artifact_digest
-    )
+    val target_identity = if object_output:
+        darwin_object_target_identity_digest_v1(
+            target_triple, architecture, cpu_features, deployment_target, sdk_identity,
+            backend, optimization, "mach-o", exact_provider_receipt)
+    else:
+        darwin_target_identity_digest_v1(
+            target_triple, architecture, cpu_features, deployment_target, sdk_identity, backend,
+            optimization, "mach-o", linker_policy,
+            linker_tool_identity, exact_provider_receipt, runtime_artifact_digest)
     val producer_abi = sha256_text("simple-native-action-producer-v1|" + tool_artifact)
     val cache_namespace = target_cache_namespace_v1(
         producer_abi, target_identity, if release: "release" else: "debug", artifact_kind
@@ -224,7 +235,7 @@ fn _publish_and_admit_darwin_native_action_v1(
         cpu_features: cpu_features,
         deployment_target: deployment_target, sdk_identity: sdk_identity,
         backend: backend, optimization: optimization, object_format: "mach-o",
-        linker_policy: "darwin-dead-strip-v1",
+        linker_policy: linker_policy,
         linker_tool_identity: linker_tool_identity,
         runtime_provider_receipt: exact_provider_receipt,
         runtime_artifact_digest: runtime_artifact_digest,
