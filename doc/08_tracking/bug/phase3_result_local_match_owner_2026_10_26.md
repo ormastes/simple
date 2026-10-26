@@ -1,7 +1,7 @@
 # Phase 3 Result local match loses its declared enum owner
 
-Status: OPEN; six method-call sites have a behavioral native workaround check;
-four generic codec sites remain unresolved. Production-owner qualification pending.
+Status: OPEN; native behavioral mechanisms qualified for six method-call sites
+and four generic codec sites. Combined production-owner qualification pending.
 Canonical ID: `phase3_result_local_match_owner_2026_10_26`.
 Authoritative DB reconciliation is pending: no qualified full CLI is available.
 
@@ -78,3 +78,62 @@ No fixture object is a production dependency witness or a donation to Stage 3.
 No broad SPipe/core/MCP qualification or underlying compiler fix is claimed.
 The working/staged direct-env guards passed; executable specs under
 `doc/06_spec` counted zero. Diff whitespace checks passed.
+
+## Renewed codec repair batch, 2026-10-26
+
+After the first three-cycle escalation, the user renewed the binary-first
+request and authorized a new bounded repair batch. This batch also stopped
+after three source/verification cycles. The producer and runtime lineage stayed
+unchanged. Both final fixtures requested 80 threads; actual HIR pools were
+bounded to six or seven workers for their two-module closures.
+
+The retained form decodes `Result<bool, text>` on a non-generic, explicitly
+typed parameter into `HcEnumWireSlotState`. The generic encoder keeps an
+explicitly typed local state and its original write/reject operations. Each
+wire call still runs exactly once; an error rejects and returns before append.
+This introduces one small state record per scalar wire check. The existing
+conservative writer precharge is unchanged.
+
+Restore uses an explicitly specialized `Result<T, text>` parameter helper.
+Both `hc_restore_enum_nil_result<T>` and `enum_wire_restore_nil<T>` receive
+explicit type arguments. The success value and the original
+`reject_malformed(detail); return nil` sequence are retained. Native checks
+verified error mutation through this helper boundary, including the returned
+nil and exact error detail; no ABI reinterpretation or unchecked cast is used.
+
+The first forms compiled but their diagnostics had unrelated inference errors:
+a generic wrapper returned a state record into an inferred local, and a
+restored nominal enum was passed to an inferred `enum_wire_nil_slot$i64`.
+The final fixtures keep typed state inside the generic caller and use explicit
+nominal locals and type arguments for downstream enum-wire calls.
+
+The generator's 33 `hc_restore_enum_nil` call sites were audited. All directly
+return from a decoder with an explicit nominal return type, and all prototypes
+are qualified constructors of that same type. There are zero owner mismatches
+across AsmLocation, DimExprKind, EffectKind, HirExprKind, HirPatternKind,
+HirTypeKind, and TypeKind. They do not introduce the inferred result local that
+broke the diagnostic. The generator and generated codec therefore stay intact.
+Audit: `build/native_probe/result-parameter-owner/generated-restore-call-audit.json`.
+
+Final native behavioral evidence:
+
+- `native_wire_bool_result_parameter.spl`: known true nil flag, real false
+  scalar as non-nil, and malformed slot with its exact error all passed.
+  Executable SHA-256:
+  `a85ddf3daa1507aaf97d439549749032adad18f0c46e6fc096b72817eecaa6e6`.
+- `native_wire_restore_result_parameter.spl`: both explicit generic and
+  concrete Result parameter extraction restored real wire nil; malformed
+  slots returned nil and propagated the exact reader error. Passed.
+  Executable SHA-256:
+  `7634955261791abb87bc9c1e001521dd262d6879ccdd3397b6a1d889e38a789c`.
+
+Logs, source snapshots, original capsule receipts, and relink manifests remain
+under `C:/dev/wt-p3wa/build/native_probe/result-parameter-owner`. Cycle 2 built
+and linked native objects but failed subsequent SMF packaging. Cycle 3 used
+`--mode one-binary`; it built and linked both entries but still returned 1
+after linking. The executables above were strict diagnostic relinks of those
+actual emitted objects, hash-checked canonical 41 C runtime owners from the
+frozen a0 source, and canonical entry shims derived from actual object symbols.
+Both relinks and executions returned 0. The native-build command itself is
+still FAIL; this is not a full pipeline PASS, cache admission, or production
+object donation. No fourth cycle was run.
