@@ -309,3 +309,17 @@ match or overlapping patch is insufficient to reject a PR: every changed
 path, behavior, test, and document must already be covered before closing it
 as fully duplicated. Read current review comments and genuine failures before
 any admin merge; concurrent owner landings can invalidate an earlier inventory.
+
+## Latest user-directed default-off landing — 2026-10-26
+
+The user requested landing fixes and implementations on `release/1.0.0` with
+source-to-object file workers OFF even while full verification is outstanding.
+This supersedes the earlier default-on landing order: unset resolves to
+`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`, explicit `SIMPLE_FILE_WORKERS=1`
+opts in, and `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` retains precedence.
+
+No tests or source builds were rerun for this default-only adjustment. Existing
+producer identities, PR #4865's historical enablement, native failures and
+qualification gaps above remain evidence of their original runs. The source
+policy update does not imply a successful per-file self-rebuild, overlap
+receipt, or full Phase 3 PASS.

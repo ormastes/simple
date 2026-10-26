@@ -1,0 +1,145 @@
+# Pure metadata projection, not endpoint/lease authentication. The owner must
+# authenticate before supplying its immutable snapshot and expected binding.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.request_validation_v1.{mux_validate_target_v1}
+use std.common.contracts.mux.wire_validation_v1.{mux_wire_validate_snapshot_v1, mux_wire_same_handle_v1}
+
+fn metadata_error(kind: MuxErrorKindV1, detail: text) -> MuxErrorV1:
+    MuxErrorV1(kind: kind, detail: detail, request_id: 0, commit_state: MuxCommitStateV1.NotApplied,
+        observed_revision: nil, affected: [], cleanup_pending: false)
+
+fn metadata_retention_error() -> MuxErrorV1:
+    metadata_error(MuxErrorKindV1.Unavailable, "metadata collection retention failed")
+
+fn metadata_bind(snapshot: MuxSnapshotV1, namespace: text, handle: MuxHandleV1) -> Result<(), MuxErrorV1>:
+    if snapshot.namespace != namespace or not mux_wire_same_handle_v1(snapshot.handle, handle):
+        return Err(metadata_error(MuxErrorKindV1.InvalidTarget, "snapshot binding differs"))
+    if mux_wire_validate_snapshot_v1(snapshot).is_err():
+        return Err(metadata_error(MuxErrorKindV1.InvalidRequest, "invalid metadata graph"))
+    return Ok(())
+
+fn metadata_keep_ref(target: MuxObjectRefV1?, retained: Dict<text, bool>) -> MuxObjectRefV1?:
+    match target:
+        case Some(reference):
+            if retained.contains_key(reference.object_id): return Some(reference)
+        case nil: ()
+    return nil
+
+fn metadata_layout(layout: MuxLayoutStateV1, retained: Dict<text, bool>) -> Result<MuxLayoutStateV1, MuxErrorV1>:
+    var rectangles: [MuxPaneRectV1] = []
+    for item in layout.rectangles:
+        if retained.contains_key(item.pane.object_id):
+            val prior = rectangles.len()
+            rectangles.push(item)
+            if rectangles.len() != prior + 1: return Err(metadata_retention_error())
+    return Ok(MuxLayoutStateV1(kind: layout.kind, canvas: layout.canvas, rectangles: rectangles))
+
+pub fn core_mux_metadata_snapshot_v1(snapshot: MuxSnapshotV1, namespace: text, handle: MuxHandleV1, scope: MuxScopeV1, visibility: MuxVisibilityV1) -> Result<MuxSnapshotV1, MuxErrorV1>:
+    metadata_bind(snapshot, namespace, handle)?
+    var session_filter: MuxObjectRefV1? = nil
+    var window_filter: MuxObjectRefV1? = nil
+    match scope:
+        case MuxScopeV1.Namespace: ()
+        case MuxScopeV1.Session(target):
+            mux_validate_target_v1(handle, target, MuxObjectKindV1.Session)?
+            var found = false
+            for session in snapshot.sessions:
+                if session.identity == target: found = true
+            if not found: return Err(metadata_error(MuxErrorKindV1.InvalidTarget, "session is absent from snapshot"))
+            session_filter = Some(target)
+        case MuxScopeV1.Window(target):
+            mux_validate_target_v1(handle, target, MuxObjectKindV1.Window)?
+            for window in snapshot.windows:
+                if window.identity == target:
+                    window_filter = Some(target)
+                    session_filter = Some(window.session)
+            if window_filter == nil: return Err(metadata_error(MuxErrorKindV1.InvalidTarget, "window is absent from snapshot"))
+    var session_ids: Dict<text, bool> = {}
+    for session in snapshot.sessions:
+        if session_filter == nil or session_filter == Some(session.identity):
+            val prior = session_ids.len()
+            session_ids[session.identity.object_id] = true
+            if session_ids.len() != prior + 1 or not session_ids.contains_key(session.identity.object_id):
+                return Err(metadata_retention_error())
+    var window_ids: Dict<text, bool> = {}
+    for window in snapshot.windows:
+        if session_ids.contains_key(window.session.object_id) and (window_filter == nil or window_filter == Some(window.identity)):
+            val prior = window_ids.len()
+            window_ids[window.identity.object_id] = true
+            if window_ids.len() != prior + 1 or not window_ids.contains_key(window.identity.object_id):
+                return Err(metadata_retention_error())
+    var panes: [MuxPaneStateV1] = []
+    var pane_ids: Dict<text, bool> = {}
+    for pane in snapshot.panes:
+        var included = window_ids.contains_key(pane.window.object_id)
+        if not visibility.include_hidden and pane.hidden: included = false
+        if not visibility.include_exited:
+            match pane.child:
+                case MuxChildStateV1.Exited(_, _, _): included = false
+                case _: ()
+        if included:
+            val prior_panes = panes.len()
+            panes.push(pane)
+            if panes.len() != prior_panes + 1: return Err(metadata_retention_error())
+            val prior_ids = pane_ids.len()
+            pane_ids[pane.identity.object_id] = true
+            if pane_ids.len() != prior_ids + 1 or not pane_ids.contains_key(pane.identity.object_id):
+                return Err(metadata_retention_error())
+    var sessions: [MuxSessionStateV1] = []
+    for session in snapshot.sessions:
+        if session_ids.contains_key(session.identity.object_id):
+            var projected = session
+            projected.current_window = metadata_keep_ref(session.current_window, window_ids)
+            val prior = sessions.len()
+            sessions.push(projected)
+            if sessions.len() != prior + 1: return Err(metadata_retention_error())
+    var windows: [MuxWindowStateV1] = []
+    for window in snapshot.windows:
+        if window_ids.contains_key(window.identity.object_id):
+            var projected = window
+            projected.active_pane = metadata_keep_ref(window.active_pane, pane_ids)
+            projected.zoomed_pane = metadata_keep_ref(window.zoomed_pane, pane_ids)
+            projected.layout = metadata_layout(window.layout, pane_ids)?
+            projected.restore_layout = nil
+            if projected.zoomed_pane != nil:
+                match window.restore_layout:
+                    case Some(layout):
+                        val retained = metadata_layout(layout, pane_ids)?
+                        projected.restore_layout = Some(retained)
+                    case nil: ()
+            val prior = windows.len()
+            windows.push(projected)
+            if windows.len() != prior + 1: return Err(metadata_retention_error())
+    var clients: [MuxClientStateV1] = []
+    for client in snapshot.clients:
+        val included = match scope:
+            case MuxScopeV1.Namespace: true
+            case MuxScopeV1.Session(target): client.context.session == Some(target)
+            case MuxScopeV1.Window(target): client.context.window == Some(target)
+        if included:
+            var projected = client
+            projected.context = MuxContextV1(client: client.context.client,
+                session: metadata_keep_ref(client.context.session, session_ids),
+                window: metadata_keep_ref(client.context.window, window_ids),
+                pane: metadata_keep_ref(client.context.pane, pane_ids))
+            val prior = clients.len()
+            clients.push(projected)
+            if clients.len() != prior + 1: return Err(metadata_retention_error())
+    val result = MuxSnapshotV1(backend: snapshot.backend, namespace: snapshot.namespace, handle: snapshot.handle,
+        revision: snapshot.revision, sessions: sessions, windows: windows, panes: panes, clients: clients,
+        limits: snapshot.limits, capabilities: snapshot.capabilities)
+    if mux_wire_validate_snapshot_v1(result).is_err():
+        return Err(metadata_error(MuxErrorKindV1.InvalidRequest, "filtered metadata graph is unrepresentable"))
+    return Ok(result)
+
+pub fn core_mux_current_context_v1(snapshot: MuxSnapshotV1, namespace: text, handle: MuxHandleV1, client_ref: MuxObjectRefV1) -> Result<MuxContextV1, MuxErrorV1>:
+    metadata_bind(snapshot, namespace, handle)?
+    mux_validate_target_v1(handle, client_ref, MuxObjectKindV1.Client)?
+    for client in snapshot.clients:
+        if client.identity == client_ref:
+            # Nil self-reference is permitted in the DTO. Bind this response to
+            # the existing exact client, without deriving focus or other refs.
+            return Ok(MuxContextV1(client: Some(client.identity), session: client.context.session,
+                window: client.context.window, pane: client.context.pane))
+    return Err(metadata_error(MuxErrorKindV1.InvalidTarget, "client is absent from snapshot"))

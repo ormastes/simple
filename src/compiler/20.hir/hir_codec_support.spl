@@ -537,35 +537,58 @@ fn hc_read_char(r: FlatPoolReader, raw: text) -> char:
 
 # Only the generated enum schema calls these boundaries. It supplies the
 # actual variant arity/index, never an inferred runtime tuple shape.
+# @workaround bug=phase3_result_local_match_owner_2026_10_26 recover=ae4f795121b2e5af958fd5d69d4af3cdef88074b reason=decode-Result-on-concrete-parameter-and-keep-writer-mutation-in-caller
+struct HcEnumWireSlotState:
+    valid: bool
+    is_nil: bool
+    detail: text
+
+# @workaround bug=phase3_result_local_match_owner_2026_10_26 recover=ae4f795121b2e5af958fd5d69d4af3cdef88074b reason=typed-parameter-retains-Result-owner
+fn hc_enum_wire_slot_state(slot: Result<bool, text>) -> HcEnumWireSlotState:
+    match slot:
+        case Ok(is_nil): HcEnumWireSlotState(valid: true, is_nil: is_nil, detail: "")
+        case Err(detail): HcEnumWireSlotState(valid: false, is_nil: false, detail: detail)
+
 fn hc_enc_enum_bool<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: bool):
     if not w._can_append(0, 128, 16): return
     unsafe(capabilities: [ffi]):
-        val slot: Result<bool, text> = enum_wire_nil_slot(node, arity, index)
-        match slot:
-            case Ok(is_nil):
-                if is_nil: w.put_nil_bool_wire()
-                else: w.put_bool(value)
-            case Err(detail): w.reject(detail)
+        # @workaround bug=phase3_result_local_match_owner_2026_10_26 recover=ae4f795121b2e5af958fd5d69d4af3cdef88074b reason=explicit-generic-binding-and-concrete-Result-parameter
+        val slot: HcEnumWireSlotState = hc_enum_wire_slot_state(enum_wire_nil_slot<T>(node, arity, index))
+        if not slot.valid:
+            w.reject(slot.detail)
+            return
+        if slot.is_nil: w.put_nil_bool_wire()
+        else: w.put_bool(value)
 
 fn hc_enc_enum_text<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: text):
     if not w._can_append(0, 128, 16): return
     unsafe(capabilities: [ffi]):
-        val slot: Result<bool, text> = enum_wire_nil_slot(node, arity, index)
-        match slot:
-            case Ok(is_nil):
-                if is_nil: w.put_nil_text_wire()
-                else: w.put_text(value)
-            case Err(detail): w.reject(detail)
+        # @workaround bug=phase3_result_local_match_owner_2026_10_26 recover=ae4f795121b2e5af958fd5d69d4af3cdef88074b reason=explicit-generic-binding-and-concrete-Result-parameter
+        val slot: HcEnumWireSlotState = hc_enum_wire_slot_state(enum_wire_nil_slot<T>(node, arity, index))
+        if not slot.valid:
+            w.reject(slot.detail)
+            return
+        if slot.is_nil: w.put_nil_text_wire()
+        else: w.put_text(value)
 
 fn hc_enc_enum_char<T>(w: HirCodecWriter, node: T, arity: i64, index: i64, value: char):
     if not w._can_append(0, 128, 16): return
     unsafe(capabilities: [ffi]):
-        val slot: Result<bool, text> = enum_wire_nil_slot(node, arity, index)
-        match slot:
-            case Ok(is_nil):
-                if is_nil: w.put_nil_text_wire()
-                else: hc_put_char(w, value)
-            case Err(detail): w.reject(detail)
+        # @workaround bug=phase3_result_local_match_owner_2026_10_26 recover=ae4f795121b2e5af958fd5d69d4af3cdef88074b reason=explicit-generic-binding-and-concrete-Result-parameter
+        val slot: HcEnumWireSlotState = hc_enum_wire_slot_state(enum_wire_nil_slot<T>(node, arity, index))
+        if not slot.valid:
+            w.reject(slot.detail)
+            return
+        if slot.is_nil: w.put_nil_text_wire()
+        else: hc_put_char(w, value)
+
+# @workaround bug=phase3_result_local_match_owner_2026_10_26 recover=ae4f795121b2e5af958fd5d69d4af3cdef88074b reason=typed-Result-parameter-with-explicit-payload-specialization
+fn hc_restore_enum_nil_result<T>(r: FlatPoolReader, restored_result: Result<T, text>) -> T:
+    match restored_result:
+        case Ok(restored): return restored
+        case Err(detail):
+            r.reject_malformed(detail)
+            return nil
 
 # @workaround bug=a174_enum_scalar_codec_wire_boundary_2026_10_16 recover=5c3e501759ae833a828b14b4e23c9238c73b76a6 reason=preserve-wire-nil-without-untyped-enum-payload-joins
 fn hc_restore_enum_nil<T>(r: FlatPoolReader, prototype: T, arity: i64, slots: [i64]) -> T:
@@ -578,12 +601,8 @@ fn hc_restore_enum_nil<T>(r: FlatPoolReader, prototype: T, arity: i64, slots: [i
     if not r.reserve(4096 + arity * 16) or not r.charge_work(16 + arity * 2 + slots.len()):
         return nil
     unsafe(capabilities: [ffi]):
-        val restored_result: Result<T, text> = enum_wire_restore_nil(prototype, arity, slots)
-        match restored_result:
-            case Ok(restored): return restored
-            case Err(detail):
-                r.reject_malformed(detail)
-                return nil
+        # @workaround bug=phase3_result_local_match_owner_2026_10_26 recover=ae4f795121b2e5af958fd5d69d4af3cdef88074b reason=explicit-type-arguments-avoid-unspecialized-Result-helper
+        return hc_restore_enum_nil_result<T>(r, enum_wire_restore_nil<T>(prototype, arity, slots))
 
 fn hc_decode_reject(r: FlatPoolReader):
     r.reject_malformed("unknown_tag_or_discriminant")

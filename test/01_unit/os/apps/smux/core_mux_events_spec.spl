@@ -1,0 +1,159 @@
+"""
+REQ-CMUX-008/010: bounded lease-scoped event retention and reconciliation.
+Pure production journal controls, NOT_RUN; values are not native observations.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.core_mux_events.*
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.wire_values_06_v1.{mux_wire_size_mux_event_batch_v1, mux_wire_encode_mux_event_batch_v1}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.text_bytes.{text_to_bytes}
+
+fn event_handle() -> MuxHandleV1:
+    return MuxHandleV1(owner_id: "events-owner", owner_generation: 7, lease_id: "events-lease")
+
+fn event_setup(count: i64 = 4, bytes: i64 = 4096) -> CoreMuxEventJournalV1:
+    step("event_setup: construct bounded retention for one explicit lease")
+    return core_mux_events_new_v1(event_handle(), count, bytes).unwrap()
+
+fn event_check_batch(batch: MuxEventBatchV1, first: u64, last: u64, cursors: [u64], lost: bool):
+    step("event_check_batch: compare cursors and reconciliation against expected values")
+    expect(batch.owner_id).to_equal("events-owner")
+    expect(batch.owner_generation).to_equal(7)
+    expect(batch.from_cursor).to_equal(first)
+    expect(batch.to_cursor).to_equal(last)
+    expect(batch.reconciliation_required).to_equal(lost)
+    expect(batch.events.len()).to_equal(cursors.len())
+    for index in 0..cursors.len(): expect(batch.events[index].cursor).to_equal(cursors[index])
+
+fn event_poll(st: CoreMuxEventJournalV1, after: u64 = 0, count: i64 = 1024, bytes: i64 = 4096) -> MuxEventBatchV1:
+    return core_mux_events_poll_v1(st, event_handle(), after, MuxEventLimitsV1(max_events: count, max_bytes: bytes)).unwrap()
+
+fn event_target(id: text) -> MuxObjectRefV1:
+    return MuxObjectRefV1(owner_id: "events-owner", owner_generation: 7,
+        kind: MuxObjectKindV1.Pane, object_id: id)
+
+describe "Bounded per-lease CoreMux events":
+    it "checks retention bounds and exact lease binding without granting authentication":
+        val st = event_setup()
+        event_check_batch(event_poll(st), 0, 0, [], false)
+        for count in [0, 1025]:
+            expect(core_mux_events_new_v1(event_handle(), count, 4096).is_err()).to_equal(true)
+        for bytes in [255, 1048577]:
+            expect(core_mux_events_new_v1(event_handle(), 4, bytes).is_err()).to_equal(true)
+        for handle in [MuxHandleV1(owner_id: "events-owner", owner_generation: 7, lease_id: "other"),
+            MuxHandleV1(owner_id: "other", owner_generation: 7, lease_id: "events-lease"),
+            MuxHandleV1(owner_id: "events-owner", owner_generation: 8, lease_id: "events-lease")]:
+            expect(core_mux_events_can_advance_v1(st, handle, 1).is_err()).to_equal(true)
+            expect(core_mux_events_append_v1(st, handle, nil, 1, MuxEventKindV1.LeaseRevoked).is_err()).to_equal(true)
+            expect(core_mux_events_poll_v1(st, handle, 0, MuxEventLimitsV1(max_events: 1, max_bytes: 4096)).is_err()).to_equal(true)
+
+    it "assigns contiguous cursors and retains arbitrary causal IDs and revisions":
+        val first = core_mux_events_append_v1(event_setup(), event_handle(), Some(99u64), 8, MuxEventKindV1.ObjectCreated(event_target("p1"))).unwrap()
+        val second = core_mux_events_append_v1(first, event_handle(), Some(1u64), 9, MuxEventKindV1.ContentAvailable(event_target("p1"), 17)).unwrap()
+        val batch = event_poll(second)
+        event_check_batch(batch, 0, 2, [1u64, 2u64], false)
+        expect(batch.events[0].causal_request_id).to_equal(Some(99u64))
+        expect(batch.events[1].causal_request_id).to_equal(Some(1u64))
+        expect(batch.events[1].observed_revision).to_equal(9)
+        expect(first.last_cursor).to_equal(1)
+        expect(first.events.len()).to_equal(1)
+
+    it "marks oldest count eviction and clears reconciliation only after its loss floor":
+        var st = event_setup(2)
+        for revision in [1u64, 2u64, 3u64]:
+            st = core_mux_events_append_v1(st, event_handle(), nil, revision, MuxEventKindV1.LeaseRevoked).unwrap()
+        expect(st.discarded_through).to_equal(1)
+        event_check_batch(event_poll(st), 0, 3, [2u64, 3u64], true)
+        event_check_batch(event_poll(st, 1), 1, 3, [2u64, 3u64], false)
+        event_check_batch(event_poll(st, 3), 3, 3, [], false)
+        expect(core_mux_events_poll_v1(st, event_handle(), 4, MuxEventLimitsV1(max_events: 2, max_bytes: 4096)).is_err()).to_equal(true)
+
+    it "counts canonical byte overhead and refuses an insufficient next-event budget":
+        val one = core_mux_events_append_v1(event_setup(), event_handle(), nil, 1, MuxEventKindV1.ObjectChanged(event_target("p1"))).unwrap()
+        val batch = event_poll(one)
+        val budget = mux_wire_size_mux_event_batch_v1(batch).unwrap()
+        val encoded = text_to_bytes(sdn_encode_canonical(mux_wire_encode_mux_event_batch_v1(batch)))
+        expect(encoded.len() <= budget).to_equal(true)
+        var st = event_setup(4, budget)
+        st = core_mux_events_append_v1(st, event_handle(), nil, 1, MuxEventKindV1.ObjectChanged(event_target("p1"))).unwrap()
+        st = core_mux_events_append_v1(st, event_handle(), nil, 2, MuxEventKindV1.ObjectChanged(event_target("p2"))).unwrap()
+        expect(st.events.len()).to_equal(1)
+        expect(st.discarded_through).to_equal(1)
+        expect(core_mux_events_poll_v1(st, event_handle(), 0, MuxEventLimitsV1(max_events: 4, max_bytes: budget - 1)).is_err()).to_equal(true)
+        event_check_batch(event_poll(st, 0, 4, budget), 0, 2, [2u64], true)
+
+    it "consumes an oversized valid observation as explicit loss and resumes later retention":
+        var st = event_setup(4, 512)
+        st = core_mux_events_append_v1(st, event_handle(), nil, 1, MuxEventKindV1.LeaseRevoked).unwrap()
+        expect(st.events.len()).to_equal(1)
+        st = core_mux_events_append_v1(st, event_handle(), nil, 2, MuxEventKindV1.ObjectChanged(event_target("p".repeat(128)))).unwrap()
+        expect(st.last_cursor).to_equal(2)
+        expect(st.discarded_through).to_equal(2)
+        expect(st.events.len()).to_equal(0)
+        event_check_batch(event_poll(st), 0, 2, [], true)
+        st = core_mux_events_append_v1(st, event_handle(), nil, 3, MuxEventKindV1.LeaseRevoked).unwrap()
+        event_check_batch(event_poll(st, 1), 1, 3, [3u64], true)
+        event_check_batch(event_poll(st, 2), 2, 3, [3u64], false)
+
+    it "refuses malformed observations without cursor or retention mutation":
+        val st = event_setup()
+        expect(core_mux_events_append_v1(st, event_handle(), Some(0u64), 1, MuxEventKindV1.LeaseRevoked).is_err()).to_equal(true)
+        val foreign = MuxObjectRefV1(owner_id: "foreign", owner_generation: 7, kind: MuxObjectKindV1.Pane, object_id: "p")
+        expect(core_mux_events_append_v1(st, event_handle(), nil, 1, MuxEventKindV1.ObjectCreated(foreign)).is_err()).to_equal(true)
+        expect(core_mux_events_append_v1(st, event_handle(), nil, 1, MuxEventKindV1.ObjectChanged(event_target(""))).is_err()).to_equal(true)
+        event_check_batch(event_poll(st), 0, 0, [], false)
+
+    it "preflights every serial before effects and never wraps the final u64 cursor":
+        # Pure boundary state, not fabricated native execution or authority.
+        val near = CoreMuxEventJournalV1(handle: event_handle(), last_cursor: 18446744073709551614u64,
+            discarded_through: 18446744073709551614u64, events: [], max_events: 4, max_bytes: 4096)
+        expect(core_mux_events_can_advance_v1(near, event_handle(), 1).is_ok()).to_equal(true)
+        expect(core_mux_events_can_advance_v1(near, event_handle(), 2).is_err()).to_equal(true)
+        val last = core_mux_events_append_v1(near, event_handle(), nil, 1, MuxEventKindV1.LeaseRevoked).unwrap()
+        expect(last.last_cursor).to_equal(18446744073709551615u64)
+        expect(core_mux_events_can_advance_v1(last, event_handle(), 0).is_ok()).to_equal(true)
+        expect(core_mux_events_can_advance_v1(last, event_handle(), 1).is_err()).to_equal(true)
+        expect(core_mux_events_append_v1(last, event_handle(), nil, 2, MuxEventKindV1.LeaseRevoked).is_err()).to_equal(true)
+        event_check_batch(event_poll(last, 18446744073709551614u64), 18446744073709551614u64, 18446744073709551615u64, [18446744073709551615u64], false)
+
+    it "paginates without consuming retained records or silently skipping the next event":
+        var st = event_setup()
+        for revision in [1u64, 2u64, 3u64]:
+            st = core_mux_events_append_v1(st, event_handle(), nil, revision, MuxEventKindV1.LeaseRevoked).unwrap()
+        event_check_batch(event_poll(st, 0, 1), 0, 1, [1u64], false)
+        event_check_batch(event_poll(st, 0, 1), 0, 1, [1u64], false)
+        event_check_batch(event_poll(st, 1, 1), 1, 2, [2u64], false)
+        expect(st.events.len()).to_equal(3)
+        expect(core_mux_events_poll_v1(st, event_handle(), 0, MuxEventLimitsV1(max_events: 1, max_bytes: 1)).is_err()).to_equal(true)
+
+    it "rejects malformed internal retention and invalid requested limits":
+        val empty = event_setup()
+        val invalid = CoreMuxEventJournalV1(handle: event_handle(), last_cursor: 2,
+            discarded_through: 0, events: [], max_events: 4, max_bytes: 4096)
+        expect(core_mux_events_can_advance_v1(invalid, event_handle(), 1).is_err()).to_equal(true)
+        # Admission invariant controls, not injected allocator failures.
+        val event = MuxEventV1(cursor: 1, causal_request_id: nil, observed_revision: 1, kind: MuxEventKindV1.LeaseRevoked)
+        val missing_tail = CoreMuxEventJournalV1(handle: event_handle(), last_cursor: 2,
+            discarded_through: 0, events: [event], max_events: 4, max_bytes: 4096)
+        expect(core_mux_events_poll_v1(missing_tail, event_handle(), 0, MuxEventLimitsV1(max_events: 4, max_bytes: 4096)).is_err()).to_equal(true)
+        val duplicate = CoreMuxEventJournalV1(handle: event_handle(), last_cursor: 2,
+            discarded_through: 0, events: [event, event], max_events: 4, max_bytes: 4096)
+        expect(core_mux_events_append_v1(duplicate, event_handle(), nil, 2, MuxEventKindV1.LeaseRevoked).is_err()).to_equal(true)
+        expect(core_mux_events_can_advance_v1(empty, event_handle(), -1).is_err()).to_equal(true)
+        expect(core_mux_events_can_advance_v1(empty, event_handle(), 1025).is_err()).to_equal(true)
+        expect(core_mux_events_poll_v1(empty, event_handle(), 0, MuxEventLimitsV1(max_events: 0, max_bytes: 4096)).is_err()).to_equal(true)
+
+    it "bounds escaped Unicode notification data using the actual canonical serializer":
+        val notification = MuxNotificationReceiptV1(notification_id: "notice-한😀-\"-\\", state: MuxNotificationStateV1.Queued)
+        val st = core_mux_events_append_v1(event_setup(), event_handle(), nil, 5, MuxEventKindV1.Notification(notification)).unwrap()
+        val batch = event_poll(st)
+        val encoded = text_to_bytes(sdn_encode_canonical(mux_wire_encode_mux_event_batch_v1(batch)))
+        val bound = mux_wire_size_mux_event_batch_v1(batch).unwrap()
+        expect(encoded.len() <= bound).to_equal(true)
+        expect(bound <= st.max_bytes).to_equal(true)
+        event_check_batch(batch, 0, 1, [1u64], false)

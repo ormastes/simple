@@ -17,6 +17,7 @@ incomplete family, missing `.rr`) falls back to the interface-digest rule.
 # @tag:generics
 
 use std.spec
+use std.io_runtime.{dir_create_all, file_write, getpid}
 use compiler.common.cache_contract.generic_tldr_view_v1.*
 use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_empty_v1}
 use compiler.frontend.cache_artifact.generic_tldr_projector.*
@@ -28,9 +29,12 @@ use compiler.driver.cache.generic_tldr_view_table_v1.{generic_tldr_view_table_ne
 use compiler.driver.cache.reader.concrete_instance_reader_v1.{ConcreteInstanceReaderV1,
     concrete_instance_reader_new_v1, reader_concrete_instance_v1}
 use compiler.driver.cache.generic_specialization_list_v1.*
-use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_sealed_manifest_v1}
+use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_list_of_module_v1,
+    generic_spec_sealed_manifest_v1}
 use compiler.driver.cache.module_artifacts_v1.{module_tldr_generic_spec_section_v1,
-    module_tldr_generic_spec_section_mono_v1, MonoGenericUsesV1}
+    module_tldr_generic_spec_section_mono_v1, module_tldr_generic_spec_ctx_section_v1,
+    module_tldr_companion_path_v1, module_tldr_companion_render_sections_v1,
+    module_tldr_update_generic_spec_from_mono_v1, GenericSpecInputsV1, MonoGenericUsesV1}
 use compiler.driver.cache.reverse_reference_projection_v2.{SealedForwardManifestV2,
     reverse_reference_project_generation_v2}
 use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceReceiptReadV1}
@@ -197,6 +201,50 @@ describe "generic-spec list: .rr forward reads":
         val m = generic_spec_forward_manifest_v1("app/a.spl", specs_of("val x: Pair<i64> = y\n"))
         expect(m.ordered_reads.len()).to_equal(1)
         expect(m.ordered_reads[0].completeness == SemanticCoverageV1.Conservative).to_equal(true)
+
+    it "a fresh sectionless companion is unknown; mono publishes explicit complete-empty":
+        val emit_time = module_tldr_generic_spec_section_v1("pub fn empty() -> i64:\n    1\n",
+            "src.empty", [], [], "src/empty.spl", "unused-tldr-root", guard())
+        expect(emit_time.starts_with("generic-spec|")).to_equal(true)
+        val emit_decoded = generic_specialization_section_decode_v1(emit_time.substring(13))
+        expect(emit_decoded.ok).to_equal(true)
+        expect(emit_decoded.list.complete).to_equal(false)
+        expect(emit_decoded.list.specs.len()).to_equal(0)
+
+        val root = "build/test_tmp/generic_spec_absence_{getpid()}"
+        val source_path = root + "/src/empty.spl"
+        val tldr_root = root + "/cache/tldr"
+        val source = "pub fn empty() -> i64:\n    1\n"
+        expect(dir_create_all(root + "/src")).to_equal(true)
+        expect(dir_create_all(tldr_root + "/" + root + "/src")).to_equal(true)
+        expect(file_write(source_path, source)).to_equal(true)
+
+        # This is the parse-fiber/legacy producer shape: valid source digest,
+        # but no generic-spec or generic-spec-ctx section.
+        val tldr_path = module_tldr_companion_path_v1(tldr_root, source_path)
+        val sectionless = module_tldr_companion_render_sections_v1("src.empty", source, ["summary|empty"])
+        expect(file_write(tldr_path, sectionless)).to_equal(true)
+        val absent = generic_spec_list_of_module_v1(source_path, tldr_root)
+        expect(absent == nil).to_equal(true)
+        expect(generic_spec_sealed_manifest_v1(source_path, absent).sealed).to_equal(false)
+        expect(module_tldr_update_generic_spec_from_mono_v1(source_path, tldr_root,
+            MonoGenericUsesV1(owners: [], names: [], args: [], complete: true)) != "").to_equal(true)
+
+        # The post-mono writer requires its persisted parse context. With that
+        # context, complete-empty is represented by a real section, not absence.
+        val context = module_tldr_generic_spec_ctx_section_v1(GenericSpecInputsV1(
+            guard_root: guard(), import_names: [], imports_unknown: false, import_paths: []))
+        expect(file_write(tldr_path,
+            module_tldr_companion_render_sections_v1("src.empty", source, ["summary|empty", context]))).to_equal(true)
+        expect(module_tldr_update_generic_spec_from_mono_v1(source_path, tldr_root,
+            MonoGenericUsesV1(owners: [], names: [], args: [], complete: true))).to_equal("")
+        val published = generic_spec_list_of_module_v1(source_path, tldr_root)
+        match published:
+            case Some(list):
+                expect(list.complete).to_equal(true)
+                expect(list.specs.len()).to_equal(0)
+            case nil:
+                expect(false).to_equal(true)
 
 describe "incremental planner: exact generic-instance invalidation":
     it "recompiles only .rr consumers of a changed template's instances":
