@@ -49,7 +49,7 @@ use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1,
     shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1, shard_commit_live_footprint_v1}
 use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib}
-use app.io.sysinfo_ops.{process_peak_rss_kb}
+use app.io.sysinfo_ops.{process_peak_rss_kb, cpu_count}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
@@ -57,7 +57,7 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_sha
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
     hir_shard_recovery_failed_rows_v1, hir_shard_recovery_replacements_dispatchable}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1}
-use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1, NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1, NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, native_file_worker_pool_request_v1,
     NATIVE_FILE_WORKER_QUEUE_ENV_V1, NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, NATIVE_FILE_WORKER_OWNER_ENV_V1,
     NativeFileWorkerReceiptV1, native_file_workers_selected_v1, native_file_worker_spec_from_args_v1,
     native_file_worker_spec_valid_v1, native_file_worker_child_args_v1, native_file_worker_batch_from_env_v1,
@@ -1388,8 +1388,15 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
 # Returns the MIR ledger to link from, "fail", "" (in-process fallback) or
 # "skip" (pool not admitted; caller runs the two-pass path).
 fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout_ms: i64) -> text:
-    val hir_count = native_build_hir_shard_count(args)
-    val mir_parallel = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000))
+    # Admission-only argv: an unrequested thread count defaults to the host CPU
+    # count (native_file_worker_pool_request_v1). Children keep the original argv.
+    var admit_args = args
+    val requested = native_build_requested_shard_threads(args)
+    val pool_request = native_file_worker_pool_request_v1(requested, cpu_count())
+    if requested <= 0 and pool_request > 1:
+        admit_args = admit_args.push("--threads={pool_request}")
+    val hir_count = native_build_hir_shard_count(admit_args)
+    val mir_parallel = native_build_shard_threads(admit_args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000))
     val parallel = if hir_count < mir_parallel: hir_count else: mir_parallel
     if parallel <= 1:
         eprint "[file-worker] not admitted hir_count={hir_count} mir_parallel={mir_parallel}; two-pass path"
