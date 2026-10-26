@@ -123,3 +123,23 @@ without a merged1..6 range; process exits0 and frames parse exactly. Captures:
 markdown-blocks.stdout/.stderr. Added two meaningful SSpec regressions, UNRUN
 under the unavailable general runner. Unicode source-position semantics and
 remaining advertised methods still require checks before landing.
+
+## Markdown UTF-16 positions and actual method checks
+
+The prior candidate emitted endCharacter12 for a heading requiring6 UTF-16
+units and returned no action for a line3 quickfix. Numeric position parsing
+used optional text-to-integer conversion, the same old-producer hazard as IDs.
+Phase2 Markdown attempt five replaces it with overflow-checked decimal parsing,
+maps inbound completion columns from UTF-16 to whole UTF-8 code points, and
+counts outbound symbol/edit columns in UTF-16. JSON string values now use the
+shared decoder, preserving Unicode escapes and surrogate pairs.
+
+The19-module candidate compiled/linked. Actual native requests verified escaped
+Korean/emoji document content, symbol endCharacter6, definition target line2,
+line3 quickfix replacement, and Unicode line4 edit endCharacter9 with exact
+new text. Completion and heading hover responses were also observed in that
+exchange; no broader correctness is inferred merely from a result response.
+Captures: markdown-utf16.stdout/.stderr; build evidence markdown-utf16/.
+Added a meaningful UTF-16 conversion SSpec, authored/UNRUN. The general runner
+still crashes before examples. No overall verification PASS or merged feature
+is claimed. Five Markdown Phase2 build/repair cycles accounted, one remaining.

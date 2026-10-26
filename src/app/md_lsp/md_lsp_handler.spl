@@ -4,6 +4,7 @@
 # (same pattern as json_helpers.spl / lsp_transport.spl).
 
 use std.common.markdown
+use std.common.json.tokenizer.{json_unescape_string}
 use app.md_lsp.md_lsp_markdown.{split_lines, parse_blocks_with_ranges, compute_folding_ranges}
 use .md_lsp_workspace.{MdWorkspace, MdDocument}
 
@@ -63,42 +64,61 @@ fn _lsp_find_field(json: text, field: text) -> i64:
     -1
 
 fn _lsp_extract_number(json: text, start: i64) -> i64:
-    var num_str = ""
+    var value: i64 = 0
     var i = start
     while i < json.len():
-        val ch = _mh_char_at(json, i)
-        if ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9":
-            num_str = num_str + ch
-        else:
+        val digit = json.byte_at(i) - 48
+        if digit < 0 or digit > 9:
             break
+        if value > 922337203685477580 or (value == 922337203685477580 and digit > 7):
+            return -1
+        value = value * 10 + digit
         i = i + 1
-    num_str.to_i64() ?? -1
+    if i == start: -1 else: value
 
 fn _lsp_extract_string(json: text, start: i64) -> text:
-    if start >= json.len() or _mh_char_at(json, start) != "\"":
+    if start >= json.len() or json.byte_at(start) != 34:
         return ""
-    var result = ""
     var i = start + 1
     while i < json.len():
-        val ch = _mh_char_at(json, i)
-        if ch == "\"":
-            return result
-        if ch == "\\":
+        val byte = json.byte_at(i)
+        if byte == 34:
+            return json_unescape_string(json.slice(start + 1, i))
+        if byte == 92:
             i = i + 1
-            if i < json.len():
-                val next = _mh_char_at(json, i)
-                if next == "n":
-                    result = result + "\n"
-                elif next == "r":
-                    result = result + "\r"
-                elif next == "t":
-                    result = result + "\t"
-                else:
-                    result = result + next
-        else:
-            result = result + ch
         i = i + 1
-    result
+    ""
+
+# Internal text is valid UTF-8; LSP's default position unit is UTF-16.
+fn md_lsp_utf16_length(value: text) -> i64:
+    var units: i64 = 0
+    var i = 0
+    while i < value.len():
+        val byte = value.byte_at(i)
+        if byte < 128:
+            i = i + 1
+        elif byte < 224:
+            i = i + 2
+        elif byte < 240:
+            i = i + 3
+        else:
+            i = i + 4
+            units = units + 1
+        units = units + 1
+    units
+
+fn md_lsp_utf16_byte_offset(value: text, character: i64) -> i64:
+    var units: i64 = 0
+    var i = 0
+    while i < value.len() and units < character:
+        val byte = value.byte_at(i)
+        val width = if byte < 128: 1 elif byte < 224: 2 elif byte < 240: 3 else: 4
+        val step_units = if width == 4: 2 else: 1
+        if units + step_units > character:
+            break
+        i = i + width
+        units = units + step_units
+    i
 
 fn _lsp_extract_balanced(json: text, start: i64, open_ch: text) -> text:
     val close_ch = if open_ch == "{" then "}" else "]"
@@ -256,7 +276,7 @@ fn md_lsp_completion_raw(params_json: text, req_id: text, workspace: MdWorkspace
     val char_num = pos.1
     val doc = workspace.get_document(uri)
     val current_line = _md_lsp_get_line(doc.content, line_num)
-    val prefix = if char_num <= current_line.len() then current_line.substring(0, char_num) else current_line
+    val prefix = current_line.slice(0, md_lsp_utf16_byte_offset(current_line, char_num))
 
     var items = "["
     var first = true
@@ -427,7 +447,7 @@ fn md_lsp_document_symbol_raw(params_json: text, req_id: text, workspace: MdWork
                 k = k + 1
             val heading_text = l.substring(k, l.len())
             val start_pos = "{" + _jp("line", str(block.from_line)) + "," + _jp("character", "0") + "}"
-            val end_pos = "{" + _jp("line", str(block.from_line)) + "," + _jp("character", str(l.len())) + "}"
+            val end_pos = "{" + _jp("line", str(block.from_line)) + "," + _jp("character", str(md_lsp_utf16_length(l))) + "}"
             val range = "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}"
             val location = "{" + _jp("uri", _js(uri)) + "," + _jp("range", range) + "}"
             # LSP SymbolKind 25 = "key" — used for headings/sections per spec
@@ -517,7 +537,7 @@ fn _md_lsp_quickfix_line(line: text) -> text:
 
 fn _md_lsp_build_line_replace_action(uri: text, line_num: i64, old_line: text, new_line: text) -> text:
     val start_pos = "{" + _jp("line", str(line_num)) + "," + _jp("character", "0") + "}"
-    val end_pos = "{" + _jp("line", str(line_num)) + "," + _jp("character", str(old_line.len())) + "}"
+    val end_pos = "{" + _jp("line", str(line_num)) + "," + _jp("character", str(md_lsp_utf16_length(old_line))) + "}"
     val range = "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}"
     val edit = "{" + _jp("range", range) + "," + _jp("newText", _js(new_line)) + "}"
     val text_edits = "[" + edit + "]"
