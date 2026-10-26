@@ -12,3 +12,12 @@
   (_get_shell cmd vs sh: single-quoted args `'file'`/`'requester'` are literal under cmd.exe, timeout prefix stripped).
   Spec result after fix: 2 pass, 4 fail (now with ERROR -32603 payload).
 - Repro: `bin/simple.exe test test/01_unit/app/mcp/mcp_visibility_requester_spec.spl --no-session-daemon`
+
+## Resolution (2026-10-27)
+- Root cause 2: `shell_cmd` built a single shell string (`timeout 30 <bin> run ... '<file>' ... 2>/dev/null`) and
+  ran it via cmd/sh; under the spec's in-process Windows environment the shell selection/quoting/`timeout`
+  prefix broke the child. The working sibling (`src/app/simple_lsp_mcp/tools.spl`) uses literal argv.
+- Fix: `handle_simple_visibility` and `handle_simple_symbols` (src/app/mcp/main_lazy_diag_tools.spl) now call
+  `mcp_run_argv(_bin, ["run", "src/app/cli/query_visibility.spl", ...], 30000, 262144)` (no shell, no quoting).
+- Result: mcp_visibility_requester_spec 2/6 -> 6/6; lsp_visibility_requester_spec 5/5 (unchanged).
+- Note: `mcp_run_argv` merges stderr into output (the old command dropped it via `2>/dev/null`).
