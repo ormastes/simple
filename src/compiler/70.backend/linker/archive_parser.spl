@@ -15,6 +15,8 @@
 #   - "//": extended name table (for long filenames)
 # ============================================================================
 
+use std.common.text_bytes.{bytes_to_text}
+
 # Archive magic bytes: "!<arch>\n"
 val AR_MAGIC_0: i64 = 0x21  # '!'
 val AR_MAGIC_1: i64 = 0x3C  # '<'
@@ -129,16 +131,40 @@ fn ar_bytes_to_text_raw(bytes: [u8], offset: i64, max_len: i64) -> text:
 
 """Look up a long name in the extended name table starting at byte offset n."""
 fn ar_lookup_extended_name(name_table: text, n: i64) -> text:
-    var result = ""
+    # Find the terminator, then take one slice: per-character concatenation
+    # was quadratic and, under @no_gc, never released its garbage.
     var i = n
     val tlen = name_table.len()
     while i < tlen:
         val ch = name_table[i:i + 1]
-        if ch == "/" or ch == "\n":
-            return result
-        result = result + ch
+        # "\n" ends MSVC (NUL, mapped to "\n") and GNU entries; "/" only as
+        # GNU's "/\n" pair, so paths such as "dir/x.obj" stay whole.
+        if ch == "\n" or (ch == "/" and name_table[i + 1:i + 2] == "\n"):
+            return name_table[n:i]
         i = i + 1
-    result
+    if n >= tlen: return ""
+    name_table[n:tlen]
+
+"""
+Build the extended name table text for bytes[offset .. offset+size] in one
+pass. MSVC lib.exe terminates entries with NUL rather than GNU's "/\n", so NUL
+becomes "\n" (a lookup terminator); other non-printable bytes become "?" so
+byte offsets stay character offsets.
+"""
+fn ar_name_table_text(bytes: [u8], offset: i64, size: i64) -> text:
+    var clean: [u8] = []
+    var i = offset
+    val end = if offset + size < bytes.len(): offset + size else: bytes.len()
+    while i < end:
+        val b = bytes[i] as i64
+        if b == 0x00:
+            clean.push(0x0A as u8)
+        elif b == 0x0A or (b >= 32 and b <= 126):
+            clean.push(b as u8)
+        else:
+            clean.push(0x3F as u8)
+        i = i + 1
+    bytes_to_text(clean)
 
 """Parse a non-negative decimal integer from a text string."""
 fn ar_parse_decimal_text(s: text) -> i64:
@@ -271,14 +297,7 @@ pub fn ar_parse(bytes: [u8]) -> Result<ArReader, text>:
             val data_off = scan_offset + AR_HEADER_SIZE
 
             if raw_name == "//":
-                # Build the extended name table as a text string
-                var ntbl = ""
-                var ni = data_off
-                val ntbl_end = data_off + size
-                while ni < ntbl_end:
-                    ntbl = ntbl + ar_byte_to_char(bytes[ni] as i64)
-                    ni = ni + 1
-                name_table = ntbl
+                name_table = ar_name_table_text(bytes, data_off, size)
 
             # Advance: data + 1-byte padding if size is odd
             var next = data_off + size
