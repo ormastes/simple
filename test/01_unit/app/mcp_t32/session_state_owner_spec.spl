@@ -1,0 +1,37 @@
+use std.spec
+use app.mcp_t32.session_state.{McpT32Core, McpT32Session, McpT32HistoryItem, t32_session_core_count, t32_compact_history}
+
+fn owner_history(count: i64) -> [McpT32HistoryItem]:
+    var items: [McpT32HistoryItem] = []
+    var index = 0
+    while index < count:
+        items = items.push(McpT32HistoryItem(command: "cmd-" + str(index), result: "value-" + str(index), session_id: "session", core_id: "core", request_id: "request-" + str(index)))
+        index = index + 1
+    items
+
+describe "T32 session state owner":
+    it "counts concrete session cores without an erased optional-field loop":
+        step("Read the real session core field through its typed owner")
+        val empty = McpT32Session(id: "empty", host: "localhost", port: 20000, intercom_name: "", architecture: "arm", connected: false, cores: [])
+        expect(t32_session_core_count(empty)).to_equal(0)
+        val session = McpT32Session(id: "two", host: "localhost", port: 20000, intercom_name: "", architecture: "arm", connected: true, cores: [McpT32Core(core_id: "0", label: "first", instance_binding: "a"), McpT32Core(core_id: "1", label: "second", instance_binding: "b")])
+        expect(t32_session_core_count(session)).to_equal(2)
+
+    it "keeps history unchanged at the compaction threshold":
+        step("Retain every record until history exceeds five hundred entries")
+        val empty: [McpT32HistoryItem] = []
+        expect(t32_compact_history(empty).len()).to_equal(0)
+        val kept = t32_compact_history(owner_history(500))
+        expect(kept.len()).to_equal(500)
+        expect(kept[0].command).to_equal("cmd-0")
+        expect(kept[499].request_id).to_equal("request-499")
+
+    it "preserves the ordered suffix and request identity after compaction":
+        step("Drop the same first two hundred fifty records as the original range")
+        val kept = t32_compact_history(owner_history(501))
+        expect(kept.len()).to_equal(251)
+        expect(kept[0].command).to_equal("cmd-250")
+        expect(kept[0].result).to_equal("value-250")
+        expect(kept[0].session_id).to_equal("session")
+        expect(kept[0].core_id).to_equal("core")
+        expect(kept[250].request_id).to_equal("request-500")

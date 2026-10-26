@@ -297,3 +297,27 @@ of valid standard/vendor framing headers and blank separators. Full server
 dispatch, byte/error regression suites and canonical SSpecs remain unverified.
 CMM probe1 passed HIR and reports no ambiguous methods, but stops at14 MIR
 payload/type diagnostics; no executable/parser behavioral checks ran.
+
+## Final reviewed T32/CMM packet and bounded results
+
+Astra reviewed the actual method consolidation, explicit strict/tolerant
+recovery policy and typed Err-preserving expression extraction at9constructor
+sites. Source-parser logic now has a single pure owner; public source/file
+facades delegate to it and retain file-reading behavior. Two historical fake
+system suites were replaced by82statement and80expression production-parser
+scenarios. Their expected results remain UNRUN, including the original compact
+double-negation case, whose concrete grammar issue is recorded separately.
+
+Combined T32/CMM extension cycle2 built/linked the production state-owner probe
+but execution failed an assertion (exit1). Its11 authored assertions must not
+be reported passed; exact failed assertion remains unlocalized. Cycle3's pure
+production-parser probe compiled8HIR/MIR modules and then crashed139 before
+object emission, peak234060KiB. This probe has no file-I/O dependency; removing
+the unrelated closure did not qualify the immutable compiler or parser behavior.
+Evidence: astra-cmm/state-run/ and pure-source-run/. All3extension cycles are
+accounted. Retain native failures and the reviewed source without false PASS.
+
+The next mandatory prerequisite is a rebuilt qualified compiler containing the
+reviewed actual-owner repairs, followed by Hello and the original Result
+regression, canonical SSpecs and real feature checks. Neither a source review
+nor debugger exit0 supplies those results. GitHub landing remains blocked.

@@ -14,7 +14,6 @@
 use cmm_tokens.{CmmTokenKind, CmmToken}
 use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan, CmmDialogItem}
 use cmm_ast.{span, span_range, merge_spans}
-use cmm_dialog_model.{cmm_dialog_parse_modifier}
 use cmm_parser_core.{CmmParser, CmmParseError, to_upper_cmm}
 use cmm_parser_expr.{is_access_class}
 
@@ -308,11 +307,16 @@ impl CmmParser:
         if self.at_stmt_end():
             return Err(self.make_error("Expected filename after DO"))
 
-        match self.parse_expression():
-            case Ok(file_expr):
-                var args = self.collect_remaining_exprs()
-                Ok(CmmStmt.DoCall(file_expr, args, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # @workaround bug=phase2_result_payload_native_crash_2026_10_26
+        # Keep error propagation, then cross the existing concrete expression owner.
+        val expression_result = self.parse_expression()
+        match expression_result:
+            case Err(error): return Err(error)
+            case _: ()
+        val file_expr = self.unwrap_expr(expression_result)
+        var args = self.collect_remaining_exprs()
+        Ok(CmmStmt.DoCall(file_expr, args, span(start_tok.line, start_tok.column)))
+
 
     # ENDDO [return values...]
     me parse_enddo() -> Result<CmmStmt, CmmParseError>:
@@ -327,11 +331,16 @@ impl CmmParser:
         if self.at_stmt_end():
             return Err(self.make_error("Expected filename after RUN"))
 
-        match self.parse_expression():
-            case Ok(file_expr):
-                var args = self.collect_remaining_exprs()
-                Ok(CmmStmt.RunCall(file_expr, args, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # @workaround bug=phase2_result_payload_native_crash_2026_10_26
+        # Keep error propagation, then cross the existing concrete expression owner.
+        val expression_result = self.parse_expression()
+        match expression_result:
+            case Err(error): return Err(error)
+            case _: ()
+        val file_expr = self.unwrap_expr(expression_result)
+        var args = self.collect_remaining_exprs()
+        Ok(CmmStmt.RunCall(file_expr, args, span(start_tok.line, start_tok.column)))
+
 
     # END — terminate script (may have trailing tokens to skip)
     me parse_end() -> Result<CmmStmt, CmmParseError>:
@@ -393,18 +402,18 @@ impl CmmParser:
             if pct_line.found:
                 self.advance()  # consume %
                 self.advance()  # consume LINE
-                names.push("%LINE")
+                names = names.push("%LINE")
             if not pct_line.found:
                 # Try to consume a macro name
                 var got_macro = false
                 match self.peek().kind:
                     case CmmTokenKind.MacroRef(name):
                         self.advance()
-                        names.push(name)
+                        names = names.push(name)
                         got_macro = true
                     case CmmTokenKind.MacroRecRef(name):
                         self.advance()
-                        names.push("&" + name)
+                        names = names.push("&" + name)
                         got_macro = true
                     case _: ()
                 if not got_macro:
@@ -582,59 +591,79 @@ impl CmmParser:
         if self.at_stmt_end():
             return Ok(CmmStmt.CloseFile(CmmExpr.ExprEmpty, span(start_tok.line, start_tok.column)))
 
-        match self.parse_expression():
-            case Ok(channel_expr):
-                # Consume remaining args (in case of CLOSE #1 /mode etc.)
-                var params = self.collect_remaining_exprs()
-                Ok(CmmStmt.CloseFile(channel_expr, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # @workaround bug=phase2_result_payload_native_crash_2026_10_26
+        # Keep error propagation, then cross the existing concrete expression owner.
+        val expression_result = self.parse_expression()
+        match expression_result:
+            case Err(error): return Err(error)
+            case _: ()
+        val channel_expr = self.unwrap_expr(expression_result)
+        # Consume remaining args (in case of CLOSE #1 /mode etc.)
+        var params = self.collect_remaining_exprs()
+        Ok(CmmStmt.CloseFile(channel_expr, span(start_tok.line, start_tok.column)))
+
 
     # READ #n [%LINE] &var1 &var2 ...
     me parse_read() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume READ
 
         # Parse file channel
-        match self.parse_expression():
-            case Ok(channel_expr):
-                # Collect all remaining tokens: macro names, format specifiers, expressions
-                var names: [text] = []
-                while not self.at_stmt_end():
-                    match self.peek().kind:
-                        case CmmTokenKind.MacroRef(name):
-                            self.advance()
-                            names.push(name)
-                        case CmmTokenKind.MacroRecRef(name):
-                            self.advance()
-                            names.push(name)
-                        case _:
-                            # Consume any remaining expressions (format specifiers, etc.)
-                            match self.parse_expression():
-                                case Ok(e): ()
-                                case Err(e): break
-                Ok(CmmStmt.ReadFile(channel_expr, names, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # @workaround bug=phase2_result_payload_native_crash_2026_10_26
+        # Keep error propagation, then cross the existing concrete expression owner.
+        val expression_result = self.parse_expression()
+        match expression_result:
+            case Err(error): return Err(error)
+            case _: ()
+        val channel_expr = self.unwrap_expr(expression_result)
+        # Collect all remaining tokens: macro names, format specifiers, expressions
+        var names: [text] = []
+        while not self.at_stmt_end():
+            match self.peek().kind:
+                case CmmTokenKind.MacroRef(name):
+                    self.advance()
+                    names = names.push(name)
+                case CmmTokenKind.MacroRecRef(name):
+                    self.advance()
+                    names = names.push(name)
+                case _:
+                    # Consume any remaining expressions (format specifiers, etc.)
+                    match self.parse_expression():
+                        case Ok(e): ()
+                        case Err(e): break
+        Ok(CmmStmt.ReadFile(channel_expr, names, span(start_tok.line, start_tok.column)))
+
 
     # WRITE #n expr1 expr2
     me parse_write() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume WRITE
 
         # Parse file channel
-        match self.parse_expression():
-            case Ok(channel_expr):
-                var exprs = self.collect_remaining_exprs()
-                Ok(CmmStmt.WriteFile(channel_expr, exprs, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # @workaround bug=phase2_result_payload_native_crash_2026_10_26
+        # Keep error propagation, then cross the existing concrete expression owner.
+        val expression_result = self.parse_expression()
+        match expression_result:
+            case Err(error): return Err(error)
+            case _: ()
+        val channel_expr = self.unwrap_expr(expression_result)
+        var exprs = self.collect_remaining_exprs()
+        Ok(CmmStmt.WriteFile(channel_expr, exprs, span(start_tok.line, start_tok.column)))
+
 
     # WRITEB #n expr1 expr2 (binary write)
     me parse_writeb() -> Result<CmmStmt, CmmParseError>:
         val start_tok = self.advance()  # consume WRITEB
 
         # Parse file channel
-        match self.parse_expression():
-            case Ok(channel_expr):
-                var exprs = self.collect_remaining_exprs()
-                Ok(CmmStmt.WriteBFile(channel_expr, exprs, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # @workaround bug=phase2_result_payload_native_crash_2026_10_26
+        # Keep error propagation, then cross the existing concrete expression owner.
+        val expression_result = self.parse_expression()
+        match expression_result:
+            case Err(error): return Err(error)
+            case _: ()
+        val channel_expr = self.unwrap_expr(expression_result)
+        var exprs = self.collect_remaining_exprs()
+        Ok(CmmStmt.WriteBFile(channel_expr, exprs, span(start_tok.line, start_tok.column)))
+
 
     # APPEND file expr1 expr2
     me parse_append() -> Result<CmmStmt, CmmParseError>:
@@ -643,11 +672,16 @@ impl CmmParser:
         if self.at_stmt_end():
             return Err(self.make_error("Expected filename after APPEND"))
 
-        match self.parse_expression():
-            case Ok(file_expr):
-                var exprs = self.collect_remaining_exprs()
-                Ok(CmmStmt.AppendFile(file_expr, exprs, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # @workaround bug=phase2_result_payload_native_crash_2026_10_26
+        # Keep error propagation, then cross the existing concrete expression owner.
+        val expression_result = self.parse_expression()
+        match expression_result:
+            case Err(error): return Err(error)
+            case _: ()
+        val file_expr = self.unwrap_expr(expression_result)
+        var exprs = self.collect_remaining_exprs()
+        Ok(CmmStmt.AppendFile(file_expr, exprs, span(start_tok.line, start_tok.column)))
+
 
     # PRINT expr1 expr2 ...
     # Also handles PRINT %ERROR "msg", PRINT %WARNING "msg",
@@ -680,12 +714,17 @@ impl CmmParser:
         if self.at_stmt_end():
             return Err(self.make_error("Expected expression after WAIT"))
 
-        match self.parse_expression():
-            case Ok(expr):
-                # Consume optional remaining expressions (timeout, etc.)
-                var params = self.collect_remaining_exprs()
-                Ok(CmmStmt.WaitStmt(expr, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # @workaround bug=phase2_result_payload_native_crash_2026_10_26
+        # Keep error propagation, then cross the existing concrete expression owner.
+        val expression_result = self.parse_expression()
+        match expression_result:
+            case Err(error): return Err(error)
+            case _: ()
+        val expr = self.unwrap_expr(expression_result)
+        # Consume optional remaining expressions (timeout, etc.)
+        var params = self.collect_remaining_exprs()
+        Ok(CmmStmt.WaitStmt(expr, span(start_tok.line, start_tok.column)))
+
 
     # =========================================================================
     # Dialog statement
@@ -706,7 +745,7 @@ impl CmmParser:
             return self.parse_generic_command()
 
         self.advance()  # consume (
-        val modifier = cmm_dialog_parse_modifier(self)
+        val modifier = self.parse_dialog_modifier()
         var items: [CmmDialogItem] = []
         self.skip_newlines()
 
@@ -719,16 +758,22 @@ impl CmmParser:
             else if self.check_kind("Comment"):
                 self.advance()
             else if self.check_kind("Eof"):
+                if self.recover_unclosed:
+                    self.warnings = self.warnings.push("Line " + str(start_tok.line) + ": unclosed DIALOG block — reached end of file")
+                    return Ok(CmmStmt.DialogBlock(modifier, items, span(start_tok.line, start_tok.column)))
                 return Err(self.make_error("Unterminated DIALOG block"))
             else:
                 # Try to parse a dialog item
                 match self.parse_dialog_item():
                     case Ok(item):
-                        items.push(item)
+                        items = items.push(item)
                     case Err(e):
                         # Error recovery: skip to next line within dialog
                         self.skip_to_next_line()
 
+        if self.recover_unclosed:
+            self.warnings = self.warnings.push("Line " + str(start_tok.line) + ": unclosed DIALOG block — reached end of file")
+            return Ok(CmmStmt.DialogBlock(modifier, items, span(start_tok.line, start_tok.column)))
         Err(self.make_error("Unterminated DIALOG block"))
 
     # Parse a single dialog item line.
@@ -860,15 +905,21 @@ impl CmmParser:
                 self.advance()  # consume )
                 return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
             if self.check_kind("Eof"):
+                if self.recover_unclosed:
+                    self.warnings = self.warnings.push("Line " + str(start_tok.line) + ": unclosed block — reached end of file without closing )")
+                    return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
                 return Err(self.make_error("Unterminated block — expected )"))
             if self.check_kind("Newline"):
                 val nl_tok = self.advance()
-                stmts.push(CmmStmt.EmptyLine(span(nl_tok.line, nl_tok.column)))
+                stmts = stmts.push(CmmStmt.EmptyLine(span(nl_tok.line, nl_tok.column)))
             else if self.check_kind("Comment"):
-                self.push_comment_stmt(stmts)
+                stmts = self.push_comment_stmt(stmts)
             else:
-                self.parse_block_statement_into(stmts)
+                stmts = self.parse_block_statement_into(stmts)
 
+        if self.recover_unclosed:
+            self.warnings = self.warnings.push("Line " + str(start_tok.line) + ": unclosed block — reached end of file without closing )")
+            return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
         Err(self.make_error("Unterminated block — expected )"))
 
     # Parse the body following a control-flow keyword.
@@ -908,13 +959,18 @@ impl CmmParser:
             else:
                 return Ok(CmmStmt.MacroAssign(name, empty_expr, span(start_tok.line, start_tok.column)))
 
-        match self.parse_expression():
-            case Ok(value_expr):
-                if is_recursive:
-                    Ok(CmmStmt.MacroRecAssign(name, value_expr, span(start_tok.line, start_tok.column)))
-                else:
-                    Ok(CmmStmt.MacroAssign(name, value_expr, span(start_tok.line, start_tok.column)))
-            case Err(e): Err(e)
+        # @workaround bug=phase2_result_payload_native_crash_2026_10_26
+        # Keep error propagation, then cross the existing concrete expression owner.
+        val expression_result = self.parse_expression()
+        match expression_result:
+            case Err(error): return Err(error)
+            case _: ()
+        val value_expr = self.unwrap_expr(expression_result)
+        if is_recursive:
+            Ok(CmmStmt.MacroRecAssign(name, value_expr, span(start_tok.line, start_tok.column)))
+        else:
+            Ok(CmmStmt.MacroAssign(name, value_expr, span(start_tok.line, start_tok.column)))
+
 
     # =========================================================================
     # Device-qualified command
@@ -958,33 +1014,39 @@ impl CmmParser:
 
     # Advance and push a comment statement into the stmts list.
     # Extracts comment text from the current Comment token.
-    me push_comment_stmt(stmts: [CmmStmt]):
+    me push_comment_stmt(existing: [CmmStmt]) -> [CmmStmt]:
+        var stmts = existing
         val c_tok = self.peek()
         val c_text = self.extract_comment_text()
         self.advance()
-        stmts.push(CmmStmt.CommentLine(c_text, span(c_tok.line, c_tok.column)))
+        stmts = stmts.push(CmmStmt.CommentLine(c_text, span(c_tok.line, c_tok.column)))
+        stmts
 
     # Parse a statement inside a block, push result into stmts, handle errors.
     # Also consumes trailing newline or comment after the statement.
-    me parse_block_statement_into(stmts: [CmmStmt]):
+    me parse_block_statement_into(existing: [CmmStmt]) -> [CmmStmt]:
+        var stmts = existing
         val statement_result: Result<CmmStmt, CmmParseError> = self.parse_statement()
         match statement_result:
             case Ok(stmt):
-                stmts.push(stmt)
+                stmts = stmts.push(stmt)
                 # Skip remaining tokens on this line, but stop at ) which closes the block
                 self.skip_to_next_line_or_rparen()
             case Err(e):
                 val tok = self.peek()
-                val msg = "Failed to parse block statement"
-                self.errors.push("Line " + str(tok.line) + ": " + msg)
-                stmts.push(CmmStmt.ErrorNode(msg, span(tok.line, tok.column)))
+                val msg = if self.recover_unclosed: e.message else: "Failed to parse block statement"
+                val error_line = if self.recover_unclosed: e.line else: tok.line
+                val error_column = if self.recover_unclosed: e.column else: tok.column
+                self.errors = self.errors.push("Line " + str(error_line) + ": " + msg)
+                stmts = stmts.push(CmmStmt.ErrorNode(msg, span(error_line, error_column)))
                 self.skip_to_next_line()
         # Consume trailing newline or comment
         if not self.is_at_end():
             if self.check_kind("Newline"):
                 self.advance()
             else if self.check_kind("Comment"):
-                self.push_comment_stmt(stmts)
+                stmts = self.push_comment_stmt(stmts)
+        stmts
 
     # Extract comment text from the current token (must be Comment kind).
     fn extract_comment_text() -> text:
@@ -1206,10 +1268,10 @@ impl CmmParser:
             match self.peek().kind:
                 case CmmTokenKind.MacroRef(name):
                     self.advance()
-                    names.push(name)
+                    names = names.push(name)
                 case CmmTokenKind.MacroRecRef(name):
                     self.advance()
-                    names.push(name)
+                    names = names.push(name)
                 case _:
                     # Check for %name pattern (format-typed local variable)
                     if self.check_op("%"):
@@ -1218,7 +1280,7 @@ impl CmmParser:
                         if maybe_name.?:
                             val n = maybe_name ?? ""
                             self.advance()
-                            names.push("%" + n)
+                            names = names.push("%" + n)
                         else:
                             # Not %name, put back
                             self.rewind_one()
@@ -1247,7 +1309,7 @@ impl CmmParser:
                 val saved_pos = self.cursor_position()
                 match self.parse_expression():
                     case Ok(expr):
-                        exprs.push(expr)
+                        exprs = exprs.push(expr)
                     case Err(e):
                         # Restore position and stop — don't consume tokens
                         # that might belong to the next statement
