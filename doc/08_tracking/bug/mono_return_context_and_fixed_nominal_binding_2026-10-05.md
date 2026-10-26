@@ -54,3 +54,46 @@ walk was added to the recursive binder. Actual memory/performance measurements
 and all new native execution remain UNRUN, not inferred PASS. General expected
 context propagation through untyped if/match/block expressions remains outside
 this narrow repair; existing checked expression metadata still applies.
+
+## 2026-10-25 argument-evidence candidate (OPEN)
+
+The existing checked-result-context repair did not infer the argument types of
+bare builtin Ok/Err calls or unresolved local inherent method calls. A guarded
+direct-pass baseline established four unresolved partial-Result calls and three
+unresolved impl-Result calls, with zero queued symbols/bodies. Every diagnostic
+reported missing concrete local argument evidence. The rejection is deliberate
+and remains unchanged; expected return context cannot authorize unknown input.
+
+The candidate assigns explicit serialized compiler-owned Result constructor tags
+only after lexical lookup misses. Mono derives a partial Result from one concrete
+payload of such a tagged call, and validates the whole partial shape and payload
+owner. User functions with the same printed name do not receive constructor
+identity. A second, local-only path recovers a concrete declared method result
+only from exact qualified lookup plus positive nongeneric inherent-impl ownership.
+Trait/unsupported associations poison that proof even if the same symbol also
+appears in an inherent impl. Imported and dynamic methods remain unanswered.
+
+Final bounded cycle: eight executed, six passed, two failed, zero skipped/dropped;
+peak RSS921,248KiB, raw status1, quiescent1, all recorded inputs unchanged. Six
+passing cases establish unknown-argument rejection, user-Ok shadow rejection,
+payload/context conflict rejection, exact local inherent method return evidence,
+trait-only rejection, and trait/inherent symbol collision rejection in both orders.
+The two original direct-pass examples encountered an rt_enum_id enum typed-ABI
+error before completed specialization/body evidence. Do not call those examples
+fixed or dismiss their failures as preexisting without an equivalent baseline.
+The same ABI error class was observed in separate earlier cases; that fact does
+not prove causation for these two changed paths. Six-cycle cap reached; no retries.
+
+Retained receipts in the review worktree:
+- generic-context-qualification-20261025-02:12executed8passed4failed.
+- generic-nominal-qualification-20261025-01:8executed8passed.
+- generic-context-direct-owner-diagnostic-20261025-01 and -02:2executed0passed.
+- generic-context-result-evidence-postfix-20261025-01:8executed6passed2failed.
+
+@workaround: the retained/local method-ownership proof is not serialized in the
+archive-facts transport; archive-restored workers without it fail closed. The
+portable-body validator's refusal of nonzero builtin tags remains intact, so the
+new Result tags are not a claim of portable/archive qualification. These are
+explicit compatibility limits pending separate native Phase3 evidence, not a
+reason to relax the validator. Both original source workarounds remain in place.
+No runtime, SFFI, fixed Phase2, Rust, or frozen-source changes were performed.
