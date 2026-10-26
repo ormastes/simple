@@ -1,0 +1,351 @@
+#!/bin/sh
+# stage2-build-watchdog.shs -- liveness/resource watchdog for builds driven by
+# the phase-2 (stage2) compiler.
+#
+# Relationship to existing tooling: scripts/bootstrap/bootstrap-progress-watch.shs
+# samples one PID tree on Linux (/proc) and macOS (ps) and NEVER acts; the RSS
+# guard (scripts/resource/process-tree-rss-watchdog.*) is Linux/macOS only. Neither
+# runs on native Windows, where stage2 builds are driven, and neither knows about
+# first-object latency or silent "exit 0, no output". This script keeps the same
+# sample vocabulary (tree CPU delta, tree RSS, stall streak) and adds a
+# Windows sampler (PowerShell Get-CimInstance Win32_Process), the extra verdicts,
+# and opt-in kill (--kill-on-stall / --kill-on-rss), which only ever signals PIDs
+# in the watched tree.
+#
+# Usage:
+#   stage2-build-watchdog.shs --log FILE --root-pid PID [--cache-dir DIR] [opts]
+#   stage2-build-watchdog.shs --log FILE [--cache-dir DIR] [opts] -- CMD ARGS...
+#   stage2-build-watchdog.shs --selftest
+# Exit: 0 PASS, 1 FAIL/STALL/KILLED, 2 could not monitor (fail closed).
+
+usage() {
+  cat <<'EOF'
+Usage: stage2-build-watchdog.shs --log FILE (--root-pid PID | -- CMD...) [options]
+  --log FILE            build log to watch for growth (wrapped CMD output is appended)
+  --root-pid PID        existing tree root (Windows: Win32 PID; Linux: PID)
+  --cache-dir DIR       look for *.o / *.obj here (first-object detection)
+  --expect-output FILE  must exist non-empty after a clean exit (default: CMD's -o value)
+  --interval S          sample period (default 15)
+  --first-object-s S    warn if no object within S seconds (default 10)
+  --stall-min M         no log growth and tree CPU < 5% of one core for M minutes (default 5)
+  --serial-min M        >4 procs but < 1.5 cores for M minutes (default 3)
+  --rss-rate-gb-min G   per-process RSS growth warning (default 3)
+  --rss-cap-gb G        tree RSS cap (default 80% of RAM)
+  --kill-on-stall       terminate the watched tree on STALL
+  --kill-on-rss         terminate the watched tree when over the RSS cap
+  --stall-s S / --serial-s S   same as the -min options, in seconds
+  --selftest            run fixtures first and exit
+Final line: VERDICT — PASS|FAIL|STALL|KILLED <reason> first_object_s=<n> wall_s=<n> peak_tree_rss_gb=<n>
+EOF
+}
+
+now() { date +%s; }
+
+# kill -0 succeeds on an uncollected zombie, so also reject state Z.
+child_alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  if [ -r "/proc/$1/status" ] && grep -q "^State:.*Z" "/proc/$1/status" 2>/dev/null; then return 1; fi
+  return 0
+}
+
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) wd_windows=1 ;;
+  *) wd_windows=0 ;;
+esac
+
+log=; root_pid=; cache_dir=; expect_out=; interval=15; first_s=10
+stall_s=300; serial_s=180; rate_gb=3; cap_gb=; kill_stall=0; kill_rss=0; selftest=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --log) log=${2:-}; shift 2 ;;
+    --root-pid) root_pid=${2:-}; shift 2 ;;
+    --cache-dir) cache_dir=${2:-}; shift 2 ;;
+    --expect-output) expect_out=${2:-}; shift 2 ;;
+    --interval) interval=${2:-}; shift 2 ;;
+    --first-object-s) first_s=${2:-}; shift 2 ;;
+    --stall-min) stall_s=$(( ${2:-5} * 60 )); shift 2 ;;
+    --stall-s) stall_s=${2:-}; shift 2 ;;
+    --serial-min) serial_s=$(( ${2:-3} * 60 )); shift 2 ;;
+    --serial-s) serial_s=${2:-}; shift 2 ;;
+    --rss-rate-gb-min) rate_gb=${2:-}; shift 2 ;;
+    --rss-cap-gb) cap_gb=${2:-}; shift 2 ;;
+    --kill-on-stall) kill_stall=1; shift ;;
+    --kill-on-rss) kill_rss=1; shift ;;
+    --selftest) selftest=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "stage2-build-watchdog: unknown option '$1'" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+self=$0
+case "$self" in /*|?:*) ;; *) self="$(pwd)/$self" ;; esac
+
+# ---------------------------------------------------------------- selftest
+if [ "$selftest" = 1 ]; then
+  st=$(mktemp -d "${TMPDIR:-/tmp}/s2wd-selftest.XXXXXX") || { echo "VERDICT — ERROR selftest: mktemp failed" ; exit 2; }
+  bad=0
+  run_fx() { # name want_verdict want_rc extra-watchdog-args... -- cmd...
+    fx_name=$1; fx_want=$2; fx_rc_want=$3; shift 3
+    fx_out=$(sh "$self" --log "$st/$fx_name.log" --interval 1 "$@" 2>&1)
+    fx_rc=$?
+    fx_last=$(printf '%s\n' "$fx_out" | tail -n 1)
+    case "$fx_last" in
+      "VERDICT — $fx_want"*) fx_ok=1 ;;
+      *) fx_ok=0 ;;
+    esac
+    if [ "$fx_ok" = 1 ] && [ "$fx_rc" = "$fx_rc_want" ]; then
+      echo "selftest $fx_name: ok ($fx_last rc=$fx_rc)"
+    else
+      echo "selftest $fx_name: FAILED want '$fx_want' rc=$fx_rc_want got rc=$fx_rc"; printf '%s\n' "$fx_out" | tail -n 8
+      bad=1
+    fi
+  }
+  mkdir -p "$st/cache"
+  # 1. never writes anything and burns no CPU -> STALL (killed)
+  run_fx stall STALL 1 --stall-s 4 --first-object-s 2 --kill-on-stall -- sh -c 'sleep 60'
+  # 2. exits 0 but the -o output never appears -> SILENT_FAIL
+  run_fx silentfail "FAIL SILENT_FAIL" 1 --first-object-s 2 -- sh -c 'exit 0' sh -o "$st/missing.bin"
+  # 3. writes an object quickly and the output -> PASS
+  run_fx pass PASS 0 --cache-dir "$st/cache" --first-object-s 5 -- sh -c 'echo x > "$1/a.o"; echo y > "$2"; sleep 2' sh "$st/cache" "$st/out.bin" -o "$st/out.bin"
+  rm -rf "$st"
+  if [ "$bad" != 0 ]; then echo "VERDICT — FAIL selftest fixtures failed"; exit 1; fi
+  echo "selftest: all fixtures passed"
+  # fall through only when no build was requested
+  if [ -z "$log" ] && [ -z "$root_pid" ] && [ $# -eq 0 ]; then exit 0; fi
+fi
+
+# ---------------------------------------------------------------- validate
+die2() { echo "VERDICT — ERROR could not monitor: $1 first_object_s=none wall_s=0 peak_tree_rss_gb=0"; exit 2; }
+[ -n "$log" ] || die2 "--log is required"
+case "$interval$first_s$stall_s$serial_s" in ''|*[!0-9]*) die2 "numeric option expected" ;; esac
+[ "$interval" -gt 0 ] 2>/dev/null || die2 "--interval must be positive"
+wrapped=0
+if [ $# -gt 0 ]; then wrapped=1; fi
+if [ "$wrapped" = 0 ]; then
+  case "$root_pid" in ''|*[!0-9]*) die2 "need --root-pid PID or -- CMD" ;; esac
+fi
+mkdir -p "$(dirname -- "$log")" 2>/dev/null
+[ -e "$log" ] || : >"$log"
+work=$(mktemp -d "${TMPDIR:-/tmp}/s2wd.XXXXXX") || die2 "mktemp failed"
+trap 'rm -rf "$work"' EXIT
+
+# expected output: explicit, else the value after -o in the wrapped command
+if [ -z "$expect_out" ] && [ "$wrapped" = 1 ]; then
+  prev_a=
+  for a in "$@"; do
+    [ "$prev_a" = "-o" ] && expect_out=$a
+    prev_a=$a
+  done
+fi
+
+# ---------------------------------------------------------------- samplers
+ps1="$work/snap.ps1"
+if [ "$wd_windows" = 1 ]; then
+  cat >"$ps1" <<'EOF'
+$m = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+"MEM " + [int64]($m / 1024)
+Get-CimInstance Win32_Process | ForEach-Object {
+  $c = ''
+  if ($_.CommandLine) { $c = ($_.CommandLine -replace '\s+', ' ') }
+  '{0} {1} {2} {3} {4}|{5}' -f $_.ProcessId, $_.ParentProcessId, [int64](($_.KernelModeTime + $_.UserModeTime) / 100000), [int64]($_.WorkingSetSize / 1024), ($_.Name -replace ' ', '_'), $c
+}
+EOF
+  ps1_win=$(cygpath -w "$ps1")
+fi
+
+# Writes "$work/snap" : first line "MEM <kb>", then "pid ppid cpu_cs rss_kb name|cmdline".
+take_snapshot() {
+  if [ "$wd_windows" = 1 ]; then
+    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$ps1_win" 2>/dev/null | tr -d '\r' >"$work/snap.new"
+    snap_rc=$?
+  else
+    {
+      echo "MEM $(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
+      for d in /proc/[0-9]*; do
+        p=${d#/proc/}
+        read -r st <"$d/stat" 2>/dev/null || continue
+        nm=${st#*(}; nm=${nm%)*}
+        rest=${st##*) }
+        set -- $rest
+        read -r _ rpg _ <"$d/statm" 2>/dev/null || rpg=0
+        cmd=$(tr '\0' ' ' <"$d/cmdline" 2>/dev/null)
+        echo "$p $2 $(( ${12:-0} + ${13:-0} )) $(( rpg * 4 )) ${nm}|${cmd}"
+      done
+    } >"$work/snap.new" 2>/dev/null
+    snap_rc=0
+  fi
+  [ "$snap_rc" = 0 ] && [ "$(wc -l <"$work/snap.new")" -gt 5 ] || return 1
+  mv -f "$work/snap.new" "$work/snap"
+}
+
+# Reads $work/snap + $work/prev ; writes $work/tree: P lines then SUM line (or GONE).
+compute_tree() {
+  awk -v root="$1" -v prevf="$work/prev" '
+    BEGIN { while ((getline l < prevf) > 0) { split(l, a, " "); pc[a[1]] = a[3]; pr[a[1]] = a[4] } }
+    $1 == "MEM" { next }
+    { pid = $1; par[pid] = $2; cpu[pid] = $3; rss[pid] = $4; rest = $0
+      for (k = 0; k < 4; k++) sub(/^[^ ]+ /, "", rest); info[pid] = rest; ord[++n] = pid }
+    END {
+      if (!(root in cpu)) { print "GONE"; exit }
+      intree[root] = 1; ch = 1
+      while (ch) { ch = 0
+        for (i = 1; i <= n; i++) { p = ord[i]
+          if (!(p in intree) && (par[p] in intree) && p != par[p]) { intree[p] = 1; ch = 1 } } }
+      for (i = 1; i <= n; i++) { p = ord[i]; if (!(p in intree)) continue
+        np++; tc += cpu[p]; tr += rss[p]
+        d = (p in pc && cpu[p] >= pc[p]) ? cpu[p] - pc[p] : cpu[p]
+        dc += d; dr = (p in pr) ? rss[p] - pr[p] : 0
+        print "P", p, d, rss[p], dr, info[p] }
+      print "SUM", np, tc, tr, dc }' "$work/snap" >"$work/tree"
+}
+
+kill_tree() {
+  grep '^P ' "$work/tree" | while read -r _ kp _; do
+    if [ "$wd_windows" = 1 ]; then taskkill //F //PID "$kp" >/dev/null 2>&1; else kill -9 "$kp" 2>/dev/null; fi
+  done
+}
+
+gb_to_kb() { awk -v g="$1" 'BEGIN{printf "%d", g * 1048576}'; }
+kb_to_gb() { awk -v k="$1" 'BEGIN{printf "%.2f", k / 1048576}'; }
+
+# ---------------------------------------------------------------- launch
+t0=$(now)
+child=
+if [ "$wrapped" = 1 ]; then
+  "$@" >>"$log" 2>&1 &
+  child=$!
+  if [ "$wd_windows" = 1 ] && [ -r "/proc/$child/winpid" ]; then root=$(cat "/proc/$child/winpid"); else root=$child; fi
+else
+  root=$root_pid
+fi
+
+# ---------------------------------------------------------------- loop
+: >"$work/prev"
+first_obj=-1; log_prev=$(wc -c <"$log" 2>/dev/null || echo 0); prev_t=$t0
+stall_acc=0; serial_acc=0; stall_hit=0; slow_warned=0; serial_warned=0
+peak_kb=0; verdict_kill=; kill_reason=; snap_fail=0; samples=0; cap_kb=
+alive=1
+
+while :; do
+  if ! take_snapshot; then
+    snap_fail=$((snap_fail + 1))
+    echo "[wd] snapshot failed ($snap_fail)"
+    if [ "$snap_fail" -ge 3 ]; then
+      [ "$wrapped" = 1 ] && kill "$child" 2>/dev/null
+      die2 "process sampler failed 3 times"
+    fi
+    sleep "$interval"; continue
+  fi
+  snap_fail=0
+  t=$(now); dt=$((t - prev_t)); [ "$dt" -ge 1 ] || dt=1
+  elapsed=$((t - t0))
+  # msys exec can swap the native PID under a stable msys PID; re-read each sample
+  if [ "$wrapped" = 1 ] && [ "$wd_windows" = 1 ] && [ -r "/proc/$child/winpid" ]; then root=$(cat "/proc/$child/winpid"); fi
+  compute_tree "$root"
+  if grep -q '^GONE' "$work/tree"; then
+    if [ "$samples" = 0 ] && { [ "$wrapped" = 0 ] || child_alive "$child"; }; then
+      [ "$wrapped" = 1 ] && kill "$child" 2>/dev/null
+      die2 "root pid $root not found in process snapshot"
+    fi
+    alive=0
+  else
+    set -- $(grep '^SUM ' "$work/tree")
+    nproc=$2; rss_kb=$4; dcpu=$5
+    [ "$rss_kb" -gt "$peak_kb" ] && peak_kb=$rss_kb
+    if [ -z "$cap_kb" ]; then
+      ram_kb=$(awk '$1=="MEM"{print $2; exit}' "$work/snap")
+      case "$ram_kb" in ""|*[!0-9]*) [ "$wrapped" = 1 ] && kill "$child" 2>/dev/null; die2 "could not read total RAM" ;; esac
+      if [ -n "$cap_gb" ]; then cap_kb=$(gb_to_kb "$cap_gb"); else cap_kb=$((ram_kb * 80 / 100)); fi
+    fi
+    cores100=$((dcpu * 100 / (dt * 100)))   # hundredths of a core: cs delta / dt
+    logsz=$(wc -c <"$log" 2>/dev/null || echo 0); grow=$((logsz - log_prev)); log_prev=$logsz
+
+    # first object
+    nobj=0
+    if [ -n "$cache_dir" ] && [ -d "$cache_dir" ]; then
+      nobj=$(find "$cache_dir" \( -name '*.o' -o -name '*.obj' \) 2>/dev/null | wc -l)
+    fi
+    if [ "$nobj" -eq 0 ] && grep -q -F '[native-build] compiled' "$log" 2>/dev/null; then nobj=1; fi
+    if [ "$first_obj" -lt 0 ] && [ "$nobj" -gt 0 ]; then first_obj=$elapsed; fi
+
+    echo "[wd +${elapsed}s] procs=$nproc cpu=${cores100}%core rss=$(kb_to_gb "$rss_kb")GB log=+${grow}B objs=$nobj stall=${stall_acc}s"
+
+    busiest=$(grep '^P ' "$work/tree" | sort -k3,3nr -k4,4nr | head -n 1)
+    if [ "$first_obj" -lt 0 ] && [ "$elapsed" -ge "$first_s" ] && [ "$slow_warned" = 0 ]; then
+      slow_warned=1
+      set -- $busiest; bpid=$2; bcmd=$(printf '%s' "$busiest" | cut -d' ' -f6- | cut -c1-200)
+      bphase=$(printf '%s' "$bcmd" | grep -o -E '[^ \\/"]+\.spl' | head -n 1)
+      echo "[wd] FIRST_OBJECT_SLOW: no object after ${elapsed}s; busiest pid=$bpid phase=${bphase:-?} argv=$bcmd"
+    fi
+
+    # stall: no log growth AND tree CPU < 5% of a core (5 hundredths)
+    if [ "$grow" -le 0 ] && [ "$cores100" -lt 5 ]; then stall_acc=$((stall_acc + dt)); else stall_acc=0; fi
+    if [ "$stall_acc" -ge "$stall_s" ]; then
+      if [ "$stall_hit" = 0 ]; then
+        stall_hit=1
+        echo "[wd] STALL: no log growth and tree CPU < 5% core for ${stall_acc}s; process table:"
+        grep '^P ' "$work/tree" | awk -v dt="$dt" '{ st = ($3 / dt >= 1) ? "BUSY" : "idle"; printf "[wd]   %s pid=%s cpu_delta=%scs rss=%sKB ", st, $2, $3, $4; $1=$2=$3=$4=$5=""; print substr($0, 6, 160) }'
+      fi
+      if [ "$kill_stall" = 1 ]; then kill_reason="STALL"; kill_tree; alive=0; fi
+    fi
+
+    # serial
+    if [ "$nproc" -gt 4 ] && [ "$cores100" -lt 150 ]; then serial_acc=$((serial_acc + dt)); else serial_acc=0; fi
+    if [ "$serial_acc" -ge "$serial_s" ] && [ "$serial_warned" = 0 ]; then
+      serial_warned=1
+      echo "[wd] SERIAL: ${serial_acc}s with $nproc procs but only ${cores100}% of one core (low parallelism)"
+    fi
+
+    # rss
+    rate_kb=$(gb_to_kb "$rate_gb")
+    grep '^P ' "$work/tree" | while read -r _ rp _ rr rd rn; do
+      if [ "$rd" -gt 0 ] && [ $((rd * 60 / dt)) -gt "$rate_kb" ]; then
+        echo "[wd] RSS: pid=$rp ${rn%%|*} growing $((rd * 60 / dt / 1024)) MB/min (rss $((rr / 1024)) MB)"
+      fi
+    done
+    if [ "$rss_kb" -gt "$cap_kb" ]; then
+      echo "[wd] RSS: tree $(kb_to_gb "$rss_kb")GB over cap $(kb_to_gb "$cap_kb")GB"
+      if [ "$kill_rss" = 1 ]; then kill_reason="RSS cap exceeded"; kill_tree; alive=0; fi
+    fi
+  fi
+  samples=$((samples + 1))
+  cp -f "$work/snap" "$work/prev"; prev_t=$t
+  [ "$alive" = 1 ] || break
+  [ "$wrapped" = 1 ] && ! child_alive "$child" && break
+  i=0
+  while [ "$i" -lt "$interval" ]; do
+    [ "$wrapped" = 1 ] && ! child_alive "$child" && break
+    sleep 1; i=$((i + 1))
+  done
+done
+
+# ---------------------------------------------------------------- verdict
+rc=unknown
+if [ "$wrapped" = 1 ]; then
+  wait "$child"
+  rc=$?
+fi
+wall=$(( $(now) - t0 ))
+fo=$first_obj; [ "$fo" -ge 0 ] || fo=none
+tail_fields="first_object_s=$fo wall_s=$wall peak_tree_rss_gb=$(kb_to_gb "$peak_kb")"
+
+if [ -n "$kill_reason" ]; then
+  case "$kill_reason" in
+    STALL) v="STALL killed tree after ${stall_acc}s with no progress"; rcv=1 ;;
+    *) v="KILLED $kill_reason"; rcv=1 ;;
+  esac
+  echo "VERDICT — $v $tail_fields"
+  exit $rcv
+fi
+if [ "$wrapped" = 1 ] && [ "$rc" != 0 ]; then
+  echo "VERDICT — FAIL build exited rc=$rc $tail_fields"; exit 1
+fi
+if [ "$wrapped" = 0 ] && [ -z "$expect_out" ]; then
+  echo "VERDICT — ERROR root exited but its exit code is unknowable without --expect-output $tail_fields"; exit 2
+fi
+if [ -n "$expect_out" ] && [ ! -s "$expect_out" ]; then
+  echo "VERDICT — FAIL SILENT_FAIL build exited ${rc} but expected output missing/empty: $expect_out $tail_fields"; exit 1
+fi
+echo "VERDICT — PASS exit rc=$rc${expect_out:+ output=$expect_out} $tail_fields"
+exit 0
