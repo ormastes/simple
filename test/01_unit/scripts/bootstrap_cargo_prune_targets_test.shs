@@ -12,11 +12,14 @@ grep -q 'bootstrap_cargo_prune_targets "${bootstrap_cargo_repo}/build/c"' "$src"
 fx=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
 trap 'rm -rf "$fx"' EXIT
 c="$fx/build/c"
-mkdir -p "$c/k1" "$c/k2" "$c/k3" "$c/k4"
-touch -d '4 minutes ago' "$c/k1"; touch -d '3 minutes ago' "$c/k2"
-touch -d '2 minutes ago' "$c/k3"; touch -d '1 minute ago' "$c/k4"
+mkdir -p "$c/k1" "$c/k2" "$c/k3" "$c/k4" "$c/k0/bootstrap"
+# k0 is old at the top but a lane is writing inside it: in use, never evicted.
+touch -t 202601010100 "$c/k0"; : > "$c/k0/bootstrap/live.o"
+touch -t 202601010101 "$c/k1"; touch -t 202601010102 "$c/k2"
+touch -t 202601010103 "$c/k3"; touch -t 202601010104 "$c/k4"
 SIMPLE_CARGO_TARGET_KEEP=2 bootstrap_cargo_prune_targets "$c" k1 2>/dev/null ||
   { echo "FAIL — prune returned nonzero"; exit 1; }
-for k in k1 k4; do [ -d "$c/$k" ] || { echo "FAIL — $k wrongly evicted"; exit 1; }; done
+for k in k1 k4 k0; do [ -d "$c/$k" ] || { echo "FAIL — $k wrongly evicted"; exit 1; }; done
 for k in k2 k3; do [ ! -e "$c/$k" ] || { echo "FAIL — $k not evicted"; exit 1; }; done
-echo "PASS — 4 cargo targets checked, current + newest kept, 2 evicted"
+[ -z "$(ls -A "$c" | grep -e '\.evict\.' -e '^\.prune')" ] || { echo "FAIL — eviction leftovers"; exit 1; }
+echo "PASS — 5 cargo targets checked, current + newest + in-use kept, 2 evicted"

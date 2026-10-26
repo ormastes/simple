@@ -244,45 +244,43 @@ bootstrap_authority_rust_cargo_cache_common_dir() (
   bootstrap_authority_git_common_dir "$1"
 )
 
-# Prune old Cargo target directories, keeping only the current key and the newest
-# ${SIMPLE_CARGO_TARGET_KEEP:-2} directories total (by mtime).
+# Prune build/c/<config-key> cargo targets (~2.8 GB each): keep the current
+# key plus the newest others, SIMPLE_CARGO_TARGET_KEEP (default 2) in total.
+# The current key is touched first so repeat calls keep it newest. A key with
+# any file modified in the last 6 hours is treated as in use by another lane
+# and never removed. Eviction renames first so a partly deleted dir is never
+# adopted as a cache.
 bootstrap_cargo_prune_targets() {
   [ "$#" -eq 2 ] || return 64
-  bc_prune_dir=$1
-  bc_prune_key=$2
+  bc_prune_dir=$1 bc_prune_key=$2
   bc_prune_keep=${SIMPLE_CARGO_TARGET_KEEP:-2}
-
-  # Validate SIMPLE_CARGO_TARGET_KEEP is a positive integer
   case "${bc_prune_keep}" in
     [1-9]|[1-9][0-9]*) ;;
-    *)
-      echo "error: SIMPLE_CARGO_TARGET_KEEP must be a positive integer (got '${bc_prune_keep}')" >&2
-      return 1
-      ;;
+    *) echo "error: SIMPLE_CARGO_TARGET_KEEP must be a positive integer (got '${bc_prune_keep}')" >&2; return 1 ;;
   esac
-
-  # Return 0 if build/c does not exist
   [ -d "${bc_prune_dir}" ] || return 0
-
-  # List directories by mtime (newest first) and keep current key + newest others
+  [ ! -d "${bc_prune_dir}/${bc_prune_key}" ] || touch "${bc_prune_dir}/${bc_prune_key}"
+  bc_prune_recent="${bc_prune_dir}/.prune-recent.$$"
+  touch -d '6 hours ago' "${bc_prune_recent}" 2>/dev/null || : > "${bc_prune_recent}"
   bc_prune_kept=0
-  for bc_prune_d in $(ls -1dt "${bc_prune_dir}"/* 2>/dev/null); do
+  ls -1dt -- "${bc_prune_dir}"/* 2>/dev/null | while IFS= read -r bc_prune_d; do
     [ -d "$bc_prune_d" ] || continue
-    bc_prune_name="${bc_prune_d##*/}"
-
-    # Always keep the current key
-    if [ "${bc_prune_name}" = "${bc_prune_key}" ]; then
-      continue
+    bc_prune_name=${bc_prune_d##*/}
+    case "$bc_prune_name" in *.evict.*) rm -rf "$bc_prune_d"; continue ;; esac
+    [ "$bc_prune_name" != "$bc_prune_key" ] || continue
+    if [ "$bc_prune_kept" -lt "$((bc_prune_keep - 1))" ]; then
+      bc_prune_kept=$((bc_prune_kept + 1)); continue
     fi
-
-    # Count and keep up to (keep-1) other directories
-    if [ "${bc_prune_kept}" -lt "$((bc_prune_keep - 1))" ]; then
-      bc_prune_kept=$((bc_prune_kept + 1))
+    if [ -n "$(find "$bc_prune_d" -maxdepth 4 -newer "$bc_prune_recent" -print 2>/dev/null | head -1)" ]; then
+      echo "bootstrap: keeping in-use cargo target $bc_prune_name" >&2; continue
+    fi
+    if mv "$bc_prune_d" "$bc_prune_d.evict.$$" && rm -rf "$bc_prune_d.evict.$$"; then
+      echo "bootstrap: evicted cargo target $bc_prune_name" >&2
     else
-      # Remove directories beyond the limit
-      rm -rf "$bc_prune_d" && echo "bootstrap: evicted cargo target ${bc_prune_name}" >&2
+      echo "bootstrap: warning: could not evict cargo target $bc_prune_name" >&2
     fi
   done
+  rm -f "${bc_prune_recent}"
   return 0
 }
 
@@ -335,7 +333,6 @@ bootstrap_authority_rust_cargo_target() (
   fi
   bootstrap_cargo_target="${bootstrap_cargo_repo}/build/c/${bootstrap_cargo_config_key}"
   # Prune old cargo targets, keeping only current key + newest others
-  bootstrap_cargo_prune_targets "${bootstrap_cargo_repo}/build/c" "${bootstrap_cargo_config_key}" || return $?
   bootstrap_cargo_native=$(cygpath -am "${bootstrap_cargo_target}") || return 1
   case "${bootstrap_cargo_native}" in
     [A-Za-z]:/*) ;;
@@ -351,6 +348,7 @@ bootstrap_authority_rust_cargo_target() (
       "${#bootstrap_cargo_native}" >&2
     return 1
   fi
+  bootstrap_cargo_prune_targets "${bootstrap_cargo_repo}/build/c" "${bootstrap_cargo_config_key}" || return $?
   printf '%s\n' "${bootstrap_cargo_target}"
 )
 
