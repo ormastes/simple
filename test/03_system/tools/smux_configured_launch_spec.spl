@@ -4,9 +4,14 @@
 use std.spec.{describe, it, expect, step}
 use app.io.mod.{env_get}
 use std.sosix.host.{sosix_file_exists}
-use std.sosix.pty.{PtyLaunchV1, PtyLaunchModeV1, PtyEnvironmentChangeV1, sosix_pty_cleanup_pending}
+use std.sosix.pty.{PtyLaunchV1, PtyLaunchModeV1, PtyEnvironmentChangeV1, sosix_pty_cleanup_pending, sosix_pty_close}
+use std.sosix.stdio.{sosix_println}
 use std.sosix.process.{sosix_process_exists}
 use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use std.sosix.entropy.{sosix_random_hex}
+use os.apps.smux.api.{smux_create_session, smux_list_windows, smux_list_panes,
+    smux_pane_spawn_configured, smux_owner_snapshot, smux_attach_leased,
+    smux_detach_leased, smux_capture, smux_kill_session}
 use os.apps.smux.service.{ServiceState, PaneRecord}
 use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
 use os.apps.smux.pane_configured_launch_service.{pane_spawn_configured_pty_state}
@@ -73,6 +78,44 @@ fn configured_child_observe(launch: PtyLaunchV1, marker: text) -> ConfiguredChil
         observed: observed, existed: existed, overwrite_refused: refused, cleaned: cleaned,
         remains: remains, incarnation: incarnation)
 
+fn configured_api_output(session_id: text, window_id: text, pane_id: text, marker: text) -> bool:
+    val begin = sosix_time_now_monotonic_ms()
+    var now = begin
+    var attempts = 0
+    var observed = false
+    while not observed and attempts < 200 and begin >= 0 and now >= begin and now - begin < 5000:
+        val captured = smux_capture(session_id, window_id, pane_id, 60)
+        if captured.is_ok(): observed = captured.unwrap().content.contains(marker)
+        if not observed: sosix_sleep_ms(25)
+        attempts = attempts + 1
+        now = sosix_time_now_monotonic_ms()
+    return observed
+
+fn configured_api_cleanup(session_id: text) -> bool:
+    if session_id == "": return true
+    var attempts = 0
+    var cleaned = false
+    while not cleaned and attempts < 200:
+        val result = smux_kill_session(session_id)
+        cleaned = result.is_ok()
+        if not cleaned: sosix_sleep_ms(25)
+        attempts = attempts + 1
+    return cleaned
+
+# Test-owned cleanup tokens only, captured from matching real API PID/ancestry.
+# No service state is reconstructed or published. Retain false-close authority.
+fn configured_api_close_tokens(owned_tokens: [i64]) -> [i64]:
+    var pending = owned_tokens
+    var attempts = 0
+    while pending.len() > 0 and attempts < 200:
+        var retained: [i64] = []
+        for handle in pending:
+            if not sosix_pty_close(handle as i32): retained.push(handle)
+        pending = retained
+        if pending.len() > 0: sosix_sleep_ms(25)
+        attempts = attempts + 1
+    return pending
+
 describe "configured PTY launch composition with real children":
     it "preserves literal Exec argv cwd environment changes and child identity":
         step("Require the admitted compiled fixture and private Unicode-space working directory")
@@ -116,3 +159,108 @@ describe "configured PTY launch composition with real children":
         expect(result.overwrite_refused).to_equal(true)
         expect(result.incarnation).to_equal(1u64)
         expect(sosix_pty_cleanup_pending()).to_equal(0)
+
+    it "publishes a real configured child through the public API and preserves it across client detach":
+        step("Allocate only this case's uniquely named session without resetting the global owner")
+        val nonce = sosix_random_hex(16) ?? ""
+        val image = env_get("SIMPLE_TEST_CONFIGURED_CHILD")
+        val directory = env_get("SIMPLE_TEST_CONFIGURED_CWD")
+        val fixture_ready = image != "" and sosix_file_exists(image) and directory.contains(" ") and directory.contains("한글") and env_get("SMUX_CONFIGURED_REMOVE") == "erase-me" and env_get("SMUX_CONFIGURED_KEEP") == "parent-kept"
+        val before = smux_owner_snapshot()
+        var session_id = ""
+        var window_id = ""
+        var pane_id = ""
+        if nonce != "":
+            session_id = smux_create_session("configured-api-" + nonce).id
+        if session_id != "":
+            val windows = smux_list_windows(session_id)
+            if windows.len() == 1:
+                window_id = windows[0].id
+                val panes = smux_list_panes(session_id, window_id)
+                if panes.len() == 1: pane_id = panes[0].id
+        var pid: i64 = -1
+        var second_pid: i64 = -1
+        var owned_tokens: [i64] = []
+        var bound = false
+        var refused = false
+        var attached = false
+        var detached = false
+        var observed = false
+        var after_detach = false
+        var existed = false
+        var same_child = false
+        var no_attachment = false
+        if fixture_ready and pane_id != "":
+            val launch = PtyLaunchV1(mode: PtyLaunchModeV1.Exec(image,
+                [directory, "", "two words", "quote\"inside", "trail\\", "한글😀", "&echo NOT_SHELL"]),
+                cwd: Some(directory), environment: [PtyEnvironmentChangeV1.Set("SMUX_CONFIGURED_SET", "value 한글😀"),
+                    PtyEnvironmentChangeV1.Remove("SMUX_CONFIGURED_REMOVE")])
+            step("Launch through the public API and bind the real authoritative child snapshot")
+            val started = smux_pane_spawn_configured(session_id, window_id, pane_id, launch)
+            if started.is_ok(): pid = started.unwrap()
+            val launched = smux_owner_snapshot()
+            val pi = launched.find_pane_idx(pane_id)
+            if pid > 0 and pi >= 0:
+                val child = launched.get_pane(pi)
+                val owns_first = child.child_pid == pid and child.pty_fd >= 0 and child.pty_fd <= 2147483647 and child.pane.id == pane_id and child.pane.session_id == session_id and child.pane.window_id == window_id
+                if owns_first: owned_tokens.push(child.pty_fd)
+                bound = owns_first and child.child_incarnation == 1u64
+                val duplicate = smux_pane_spawn_configured(session_id, window_id, pane_id, launch)
+                if duplicate.is_ok(): second_pid = duplicate.unwrap()
+                val after_duplicate = smux_owner_snapshot()
+                val di = after_duplicate.find_pane_idx(pane_id)
+                if di >= 0:
+                    val retained = after_duplicate.get_pane(di)
+                    refused = duplicate.is_err() and retained.child_pid == pid and retained.pty_fd == child.pty_fd and retained.child_incarnation == child.child_incarnation
+                    # If overwrite refusal regresses, keep cleanup authority for
+                    # BOTH real returned children, not only the latest registry.
+                    val owns_second = second_pid > 0 and retained.child_pid == second_pid and retained.pty_fd >= 0 and retained.pty_fd <= 2147483647 and retained.pane.id == pane_id and retained.pane.session_id == session_id and retained.pane.window_id == window_id
+                    if owns_second and not owned_tokens.contains(retained.pty_fd): owned_tokens.push(retained.pty_fd)
+                observed = configured_api_output(session_id, window_id, pane_id, "CONFIGURED_CHILD_OBSERVED_ALL_FIELDS")
+                val client_id = "configured-client-" + nonce
+                val token = smux_attach_leased(session_id, client_id, 80, 24)
+                val attached_snapshot = smux_owner_snapshot()
+                val ci = attached_snapshot.find_client_idx(client_id)
+                attached = token.is_ok() and ci >= 0
+                if ci >= 0: attached = attached and attached_snapshot.get_client(ci).session_id == session_id
+                step("Detach the actual leased client while retaining the child and captured content")
+                if token.is_ok():
+                    detached = smux_detach_leased(session_id, client_id, token.unwrap()).is_ok()
+                val after = smux_owner_snapshot()
+                val ai = after.find_pane_idx(pane_id)
+                if ai >= 0:
+                    val retained = after.get_pane(ai)
+                    same_child = retained.child_pid == pid and retained.pty_fd == child.pty_fd and retained.child_incarnation == child.child_incarnation
+                no_attachment = after.find_client_idx(client_id) < 0 and after.client_count == before.client_count
+                after_detach = configured_api_output(session_id, window_id, pane_id, "CONFIGURED_CHILD_OBSERVED_ALL_FIELDS")
+                existed = sosix_process_exists(pid)
+        step("Clean only this owned session before all fixture and behavior assertions")
+        val cleaned = configured_api_cleanup(session_id)
+        # Exclusive provider: no new opens occur between captured authority and
+        # these idempotent closes. Never close a merely observed foreign token.
+        val unresolved_tokens = configured_api_close_tokens(owned_tokens)
+        for handle in unresolved_tokens:
+            sosix_println("CONFIGURED_API_UNCLOSED_PTY: {handle}")
+        if unresolved_tokens.len() > 0:
+            sosix_println("CONFIGURED_API_OWNED_PIDS: {pid},{second_pid}")
+        val final_state = smux_owner_snapshot()
+        val removed = session_id != "" and final_state.find_session_idx(session_id) < 0 and final_state.find_pane_idx(pane_id) < 0
+        val remains = (pid > 0 and sosix_process_exists(pid)) or (second_pid > 0 and sosix_process_exists(second_pid))
+        expect(cleaned).to_equal(true)
+        expect(unresolved_tokens.len()).to_equal(0)
+        expect(remains).to_equal(false)
+        expect(sosix_pty_cleanup_pending()).to_equal(0)
+        expect(fixture_ready).to_equal(true)
+        expect(nonce != "").to_equal(true)
+        expect(removed).to_equal(true)
+        expect(final_state.session_count).to_equal(before.session_count)
+        expect(final_state.client_count).to_equal(before.client_count)
+        expect(bound).to_equal(true)
+        expect(refused).to_equal(true)
+        expect(observed).to_equal(true)
+        expect(attached).to_equal(true)
+        expect(detached).to_equal(true)
+        expect(no_attachment).to_equal(true)
+        expect(after_detach).to_equal(true)
+        expect(existed).to_equal(true)
+        expect(same_child).to_equal(true)

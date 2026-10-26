@@ -1,6 +1,6 @@
 # Configured PTY launch composition: source candidate
 
-Status: **WARN / NOT_RUN**. Nine pure admission cases and two actual-child cases authored; zero executed. The child fixture is **NOT_BUILT**. Independent review is pending. No build, compiler, native helper, product or SSpec launch occurred. No API, existing pane I/O, WPL, system-provider, or common-validation owner was edited.
+Status: **WARN / NOT_RUN**. Current cycle 3: nine pure admission cases and three actual-child cases authored; zero executed. The child fixture is **NOT_BUILT**. Cycle-3 independent review is pending. No build, compiler, native helper, product or SSpec launch occurred. This author edited no API, existing pane I/O, WPL, system-provider, or common-validation owner. Cycle-1 text below describes its historical isolated-owner scope; the appended API integration section records root's later seam.
 
 Approved interface: `pane_spawn_configured_pty_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, launch: SosixPtyLaunchV1) -> PanePidUpdate`. The local type name aliases existing `std.sosix.pty.PtyLaunchV1`; no new public launch ABI is introduced.
 
@@ -26,3 +26,19 @@ The native cases have no deterministic failed-close injection, no native executi
 - `std.sosix.environment` has a checked implementation in `src/lib/nogc_async_mut/sosix/environment.spl`, but no corresponding `src/lib/nogc_sync_mut/sosix/environment.spl`. Strict configured sync resolution therefore cannot simply import that generic environment owner. Root explicitly approved existing `app.io.mod` env/cwd facade fallback in the test and child fixture. The code adds no raw extern or runtime leaf call and no cross-family alias. A generic common owner extraction requires separate review; this lane does not expand library-family resolution.
 
 Exact candidate paths and hashes are retained in `build/review/smux-configured-launch-source-v1.sdn`. Runtime qualification and generated-manual checks remain pending.
+
+## Cycle 2: root-owned API seam and third actual-child scenario
+
+Root added `smux_pane_spawn_configured` with closing/configuration guards, existing configured-state owner delegation, concrete-fd pending-close registration only when a state commit exists, and one publication of that result. Root extracted six read-only list/active/focused queries into `service_queries.spl`, preserving the public API signatures and leaving one authoritative registry. This author did not change those production owners. Root's appended `doc/05_design/smux_api_owner_extraction_2026-10-25.md` records the integration boundary; independent review owns final disposition of that code.
+
+The third actual-child case uses only public API create/list/configured-launch/attach/detach/capture/kill operations and authoritative read-only snapshots. It reuses the unchanged admitted-artifact precondition and computed-success child fixture. Secure entropy gives unique session/client names; no unsupported nonce-echo claim is made. PID, fd, incarnation, ancestry, concrete attachment membership, output and process presence bind the observations to the real retained child before and after detach. No reset, direct-state launch, shadow registry, broad cleanup, or passing missing-fixture branch is introduced. Cleanup precedes all assertions, and only the case's session and returned PIDs are targeted/observed.
+
+The two older direct-state native scenarios and nine pure cases remain source-authored NOT_RUN. The new scenario is also NOT_RUN and demonstrates intended in-process API coverage only, not network dispatch or a persistent daemon. It cannot replace native failed-close/quarantine fault evidence or the required producer/runtime/fixture/Job receipt. Exact cycle-2 pins, including root API/query/design and the existing seven-path candidate, are in `build/review/smux-configured-launch-source-v2.sdn`; v1 remains historical and unchanged.
+
+## Cycle 3: retain known native cleanup authority across a broken overwrite
+
+Root found that the cycle-2 API test retained the original PID but could lose its cleanup fd if a broken implementation replaced the pane's child. Killing the currently published session would then close only its latest child. This is a fixture cleanup gap; no production change is needed.
+
+The corrected test retains only actual tokens whose authoritative snapshot matches a positive PID returned by that API call plus exact pane/session/window ancestry and the i32 handle bound. A distinct second returned owner is retained separately. After API session teardown, a generic checked-close loop bounded to 200 rounds discharges all captured tokens without rebuilding or publishing ServiceState. Failed closes remain in the returned pending-token list and are reported with the known PIDs before assertions. The test preserves the original API cleanup outcome, so later native cleanup cannot turn failed session teardown into a pass. All cleanup occurs before process absence, global pending, or behavior assertions.
+
+The exclusive-provider/no-intervening-open condition and configured owner's idempotent-close contract are required. Foreign/unbound tokens are not closed; external Job ownership remains the backstop for such unknown effects. Runtime failure-path behavior remains unexecuted. Only the system spec, its manual, and this report changed in cycle 3; production API/query/design and the compiled-fixture source are unchanged. Exact pins are retained in `build/review/smux-configured-launch-source-v3.sdn`; v1 and v2 remain historical.
