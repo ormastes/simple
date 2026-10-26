@@ -2765,6 +2765,16 @@ impl MirLowering:
                             val field_kind = enum_payload_nominal_kind(field_owner, self.symbols)
                             if field_args.len() == 0 and (field_kind == 1 or field_kind == 2 or field_kind == 3):
                                 return Some(declared_field)
+                        # A declared builtin `Result<..>` field
+                        # (`owned.query.is_err()` with `query: Result<[Row], E>`)
+                        # is the same declared-owner evidence. Without it the
+                        # unannotated field receiver carries no type on the
+                        # native entry path and is_ok/is_err fall through to
+                        # `unresolved method call`. Generic owners stay out:
+                        # an unsubstituted payload must not leak to unwrap.
+                        case HirTypeKind.Result(_, _):
+                            if not self.hir_type_mentions_type_param(declared_field, self.symbols):
+                                return Some(declared_field)
                         case _: ()
             case _: ()
         nil
@@ -6106,7 +6116,7 @@ impl MirLowering:
 
     me lower_struct_array_initializer_v1(expression: HirExpr, owner: text,
         field_index: i64, declared: HirType?
-    ) -> LocalId:
+    ) -> LocalId?:
         # Literal-only contextual admission. Casts, variables, functions and
         # ordinary uncontextualized [] retain their existing lowering path.
         if val expected = declared:
@@ -6402,6 +6412,7 @@ impl MirLowering:
                 match field_hir_types[fi].kind:
                     case HirTypeKind.Function(_, _, _): function_slot = true
                     case _: ()
+            val field_errors_before = self.errors.len()
             var v = if function_slot:
                 val declared_slot = self.declared_field_type_in_current_table(struct_name, fi, field_hir_types[fi])
                 if not lambda_abi_type_resolved(declared_slot):
@@ -6412,7 +6423,12 @@ impl MirLowering:
                 val declared = if fi < field_hir_types.len(): Some(field_hir_types[fi]) else: nil
                 self.lower_struct_array_initializer_v1(chosen, struct_name, fi, declared)
             if v == nil:
-                self.error("unsupported struct field initializer (cannot lower to a value)", nil)
+                # A nil here is often the initializer's own failure already
+                # reported with its exact span (e.g. lower_struct_array_initializer_v1
+                # returns nil after "enum payload array element type mismatch").
+                # Only report when nothing explained it, and always with a span.
+                if self.errors.len() == field_errors_before:
+                    self.error_fatal("unsupported struct field initializer (cannot lower to a value)", Some(chosen.span))
                 ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
                 field_type_names.push("")
                 instance_field_types.push(MirType.i64())

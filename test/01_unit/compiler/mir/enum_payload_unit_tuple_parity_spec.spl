@@ -78,6 +78,29 @@ describe "unit and empty tuple payload parity":
         expect(enum_payload_hir_mir_alias_compatible(nested_hir,
             MirType(kind: MirTypeKind.Tuple([tuple0_mir])), symbols, owners)).to_be(false)
 
+    it "admits a text param's fat-pointer carrier in a declared (text, text) tuple element":
+        # `headers: [("Location", url)]` with `url: text`: the literal lowers
+        # to Opaque("str"), the param to lower_type(Str) = (Ptr(U8), U64).
+        val symbols = SymbolTable.new()
+        val owners: Dict<text, i64> = {}
+        val str_hir = unit_parity_hir_type(HirTypeKind.Str)
+        val pair_hir = unit_parity_hir_type(HirTypeKind.Tuple([str_hir, str_hir]))
+        val literal_mir = MirType(kind: MirTypeKind.Opaque("str"))
+        val param_mir = MirType(kind: MirTypeKind.Tuple([
+            MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+            MirType(kind: MirTypeKind.U64)]))
+        val pair_mir = MirType(kind: MirTypeKind.Tuple([literal_mir, param_mir]))
+        expect(enum_payload_hir_mir_alias_compatible(str_hir, param_mir, symbols, owners)).to_be(true)
+        expect(enum_payload_hir_mir_alias_compatible(pair_hir, pair_mir, symbols, owners)).to_be(true)
+        val pair_expression = HirExpr(kind: HirExprKind.TupleLit([]), has_type_: false,
+            type_: unit_parity_hir_type(HirTypeKind.Error), span: Span.empty())
+        expect(unit_parity_check_expression(pair_expression, pair_hir, nil, pair_mir)).to_be(true)
+        # Still strict: a (Ptr(U8), I64) pair or a bare i64 is not text.
+        expect(enum_payload_hir_mir_alias_compatible(str_hir, MirType(kind: MirTypeKind.Tuple([
+            MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+            MirType.i64()])), symbols, owners)).to_be(false)
+        expect(enum_payload_hir_mir_alias_compatible(str_hir, MirType.i64(), symbols, owners)).to_be(false)
+
     it "rejects nil before remembered or source unit evidence":
         val unit = unit_parity_hir_type(HirTypeKind.Unit)
         val tuple0 = unit_parity_hir_type(HirTypeKind.Tuple([]))

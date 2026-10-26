@@ -1,0 +1,128 @@
+#!/bin/sh
+# Self-hosted DB/web SIMD qualification (exit criterion 4 of the levelled
+# vector provider plan): an admitted pure-Simple compiler (Stage 2+) native-
+# builds the Simple DB and HTTP-server provider consumers, which then load the
+# levelled provider DSO built by check-vector-provider-levels.shs.
+#
+#   pure_database_bitmap_query      PureDatabase full-scan queries via the provider
+#   http_vector_parser_live_socket  loopback HTTP server parsing via the provider
+#   vector_provider_perf_probe      db/http hot paths: scalar vs every cap
+#
+# PASS requires: both consumers pass on the full DSO; the perf probe reports
+# level == the host's admitted level (from the levels gate results) on the full
+# DSO, every op served by the provider, and full-DSO ns/op below scalar for
+# both db and http. Per-cap timings are recorded, not gated (bandwidth-bound
+# bitmap AND does not scale monotonically with width).
+#
+# Usage: check-vector-provider-selfhost-apps.shs ABS_OUT COMPILER RUNTIME_PATH LEVELS_OUT
+#   COMPILER     admitted pure-Simple compiler (never the Rust seed)
+#   RUNTIME_PATH runtime authority directory for hosted linking
+#   LEVELS_OUT   ABS_OUT of a passing check-vector-provider-levels.shs run
+# Env: BACKEND (default cranelift).
+set -u
+out=${1:?usage: check-vector-provider-selfhost-apps.shs ABS_OUT COMPILER RUNTIME_PATH LEVELS_OUT}
+compiler=${2:?compiler required}
+runtime=${3:?runtime path required}
+levels=${4:?levels output required}
+case "$out" in /*) ;; *) echo 'ERROR — nothing was checked (absolute ABS_OUT required)'; exit 2;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+backend=${BACKEND:-cranelift}
+
+case $(uname -s) in
+    # MinGW clang is the default Windows lane; the compiler's unhinted link
+    # flavor is still msvc, so pin the ABI explicitly.
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) triple=x86_64-w64-windows-gnu; ext=dll; exe=.exe
+        SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI:-gnu}; export SIMPLE_WINDOWS_ABI ;;
+    Linux) triple=x86_64-linux-gnu; ext=so; exe= ;;
+    *) echo "UNSUPPORTED: $(uname -s)"; exit 77 ;;
+esac
+pdir=$levels/$triple
+full=$pdir/simple_vector_provider_levelled.$ext
+[ -f "$full" ] || { echo "ERROR — nothing was checked (missing $full; run check-vector-provider-levels.shs run first)"; exit 2; }
+host_level=$(sed -n "s/^host $triple admits L\([0-9]\).*/\1/p" "$levels/results.txt" 2>/dev/null | head -1)
+[ -z "$host_level" ] && host_level=$(grep -o 'admits L[0-9]' "$levels/build.log" 2>/dev/null | head -1 | tr -dc 0-9)
+[ -n "$host_level" ] || { echo "ERROR — nothing was checked (host level unknown in $levels)"; exit 2; }
+"$compiler" --version 2>&1 | grep -qi 'rust seed' && { echo 'ERROR — nothing was checked (compiler is the Rust seed)'; exit 2; }
+
+mkdir -p "$out"
+: >"$out/results.txt"
+# Provider admission only accepts relative build/providers/ paths
+# (os/smf/provider_loader.spl), so stage the DSOs there and run from $root.
+cd "$root" || exit 2
+mkdir -p build/providers
+cp "$pdir"/simple_vector_provider_levelled*."$ext" build/providers/ || {
+    echo 'ERROR — nothing was checked (could not stage provider DSOs)'; exit 2; }
+full=build/providers/simple_vector_provider_levelled.$ext
+fails=0 checked=0
+note() { printf '%s\n' "$*" | tee -a "$out/results.txt"; }
+fail() { note "FAIL $*"; fails=$((fails + 1)); }
+sha() { sha256sum "$1" | cut -d' ' -f1; }
+ident() { sed -n "s/.*$1 UINT64_C(0x\([0-9a-f]*\)).*/\1/p" "$pdir/id4/provider_identity.h"; }
+
+build() { # name src
+    bin=$out/$1$exe
+    rm -f "$bin"
+    t0=$(date +%s)
+    # Same native-build contract as the Stage-2 sanity probe
+    # (scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs).
+    SIMPLE_RUNTIME_PATH=$runtime SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=$root/src \
+    SIMPLE_BINARY=$compiler SIMPLE_BIN=$compiler SIMPLE_BOOTSTRAP_DRIVER=$compiler \
+    SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
+    SIMPLE_SCV_INVENTORY_COLD_INIT=${SIMPLE_SCV_INVENTORY_COLD_INIT:-1} \
+        "$compiler" native-build --backend "$backend" --runtime-bundle core-c-bootstrap \
+        --entry-closure --entry "$2" --cache-dir "$out/$1.cache" \
+        --mode one-binary --output "$bin" >"$out/$1.build.log" 2>&1
+    rc=$?
+    checked=$((checked + 1))
+    if [ "$rc" -ne 0 ] || [ ! -x "$bin" ]; then
+        fail "build $1 rc=$rc (log $out/$1.build.log)"; return 1
+    fi
+    note "ok   build $1 in $(( $(date +%s) - t0 ))s ($(stat -c %s "$bin") bytes)"
+}
+
+digest=$(sha "$full")
+vt=test/02_integration/app/vector_provider
+
+if build db_query "$vt/pure_database_bitmap_query.spl"; then
+    pid=$(printf '%u' "0x$(ident SIMPLE_VECTOR_PROVIDER_ID)")
+    iid=$(printf '%u' "0x$(ident SIMPLE_VECTOR_IMPLEMENTATION_ID)")
+    log=$("$out/db_query$exe" "$full" "$digest" "$pid" "$iid" 2>&1); rc=$?
+    printf '%s\n' "$log" >"$out/db_query.run.log"
+    if [ "$rc" -eq 0 ] && printf '%s' "$log" | grep -q PURE_DATABASE_BITMAP_PROVIDER_PASS; then
+        note "ok   PureDatabase queries via provider: $(printf '%s' "$log" | grep PURE_DATABASE_BITMAP_PROVIDER_PASS | cut -c1-80)"
+    else fail "PureDatabase provider query rc=$rc (log $out/db_query.run.log)"; fi
+fi
+
+if build http_server "$vt/http_vector_parser_live_socket.spl"; then
+    log=$("$out/http_server$exe" "$full" "$digest" 2>&1); rc=$?
+    printf '%s\n' "$log" >"$out/http_server.run.log"
+    if [ "$rc" -eq 0 ] && printf '%s' "$log" | grep -q HTTP_VECTOR_LIVE_SOCKET_PROBE_COMPLETE; then
+        note "ok   HTTP live-socket server via provider"
+    else fail "HTTP live-socket server rc=$rc (log $out/http_server.run.log)"; fi
+fi
+
+field() { printf '%s\n' "$1" | sed -n "s/.* $2=\([^ ]*\).*/\1/p" | head -1; }
+if build perf "test/03_system/tools/vector_provider_perf_probe.spl"; then
+    for which in db http; do
+        tag=$(printf '%s' "$which" | tr a-z A-Z)
+        s=$("$out/perf$exe" "$which" scalar 2>&1 | grep "PERF_$tag")
+        sns=$(field "$s" ns_per_op)
+        note "     $which scalar ns_per_op=$sns"
+        for cap in 1 2 3 full; do
+            if [ "$cap" = full ]; then dso=$full; else dso=build/providers/simple_vector_provider_levelled_cap$cap.$ext; fi
+            r=$("$out/perf$exe" "$which" "cap$cap" "$dso" "$(sha "$dso")" 2>&1 | grep "PERF_$tag")
+            note "     $which cap$cap level=$(field "$r" level) ns_per_op=$(field "$r" ns_per_op) used=$(field "$r" provider_used)"
+            [ "$cap" = full ] || continue
+            checked=$((checked + 1))
+            lv=$(field "$r" level) ns=$(field "$r" ns_per_op) used=$(field "$r" provider_used)
+            if [ "$lv" != "$host_level" ]; then fail "$which full DSO executed level=$lv, host admits L$host_level"
+            elif [ -z "$used" ] || [ "${used%/*}" != "${used#*/}" ]; then fail "$which provider_used=$used (not every op)"
+            elif [ -z "$ns" ] || [ -z "$sns" ] || [ "$ns" -ge "$sns" ]; then fail "$which full DSO ns_per_op=$ns not below scalar $sns"
+            else note "ok   $which L$lv ns_per_op=$ns vs scalar $sns ($((sns / (ns > 0 ? ns : 1)))x)"; fi
+        done
+    done
+fi
+
+if [ "$fails" -ne 0 ]; then echo "FAIL — $checked checked, $fails failed (results: $out/results.txt)"; exit 1; fi
+[ "$checked" -gt 0 ] || { echo 'ERROR — nothing was checked'; exit 2; }
+echo "PASS — $checked checked, 0 failed, host level L$host_level (results: $out/results.txt)"

@@ -32,6 +32,17 @@ use os.smf.provider_loader.{
     provider_session_vector_call_owned_v1, provider_session_close_owned_v1
 }
 use std.nogc_sync_mut.sffi.system.{args}
+use os.posix.dynlib.{DynLibKind, dynlib_symbol}
+
+# Levelled providers export `simple_vector_selected_level_v1() -> i32`
+# (1=SSE2, 2=x86-64-v2, 3=AVX2, 4=AVX-512); legacy providers lack it (-1).
+extern fn rt_call_ptr_0(fn_ptr: i64) -> i64
+
+fn _selected_level(lib: DynLibKind) -> i64:
+    val ptr = dynlib_symbol(lib, "simple_vector_selected_level_v1")
+    if ptr <= 0:
+        return -1
+    rt_call_ptr_0(ptr)
 
 val DB_WORDS_V1: i64 = 32768
 val DB_ROW_COUNT_V1: i64 = 1048576
@@ -85,6 +96,7 @@ fn bench_db_provider(path: text, digest: text, mode: text) -> i32:
         print("PERF_FAIL db session open: {opened.status} {opened.reason}")
         return 1
     var session = opened.session
+    val level = _selected_level(session.loader_session.library)
     val lhs = RowBitmap(row_count: DB_ROW_COUNT_V1, words: _db_words())
     val rhs = RowBitmap(row_count: DB_ROW_COUNT_V1, words: _db_words())
     var used: i64 = 0
@@ -98,7 +110,7 @@ fn bench_db_provider(path: text, digest: text, mode: text) -> i32:
         op = op + 1
     val total = now_ns() - start
     val closed = row_bitmap_vector_session_close_owned_v1(session)
-    print("PERF_DB mode={mode} ops={DB_OPS_V1} words={DB_WORDS_V1} total_ns={total} ns_per_op={total / DB_OPS_V1} provider_used={used}/{DB_OPS_V1} close_status={closed.status}")
+    print("PERF_DB mode={mode} level={level} ops={DB_OPS_V1} words={DB_WORDS_V1} total_ns={total} ns_per_op={total / DB_OPS_V1} provider_used={used}/{DB_OPS_V1} close_status={closed.status}")
     0
 
 fn bench_http_scalar() -> i32:
@@ -134,6 +146,7 @@ fn bench_http_provider(path: text, digest: text, mode: text) -> i32:
         print("PERF_FAIL http session open: {opened.status} {opened.reason}")
         return 1
     var session = opened.session
+    val level = _selected_level(session.loader_session.library)
     # 1 MiB of 'A' with a single CRLF at the very end: every scan runs the
     # whole span. Fill via one raw u32 write (262144 words).
     val ptr = raw_alloc(HTTP_BYTES_V1)
@@ -169,7 +182,7 @@ fn bench_http_provider(path: text, digest: text, mode: text) -> i32:
     val total = now_ns() - start
     raw_free(ptr, HTTP_BYTES_V1)
     val closed = http_vector_parser_session_close_owned_v1(session)
-    print("PERF_HTTP mode={mode} bytes={HTTP_BYTES_V1} ops={HTTP_OPS_V1} total_ns={total} ns_per_op={total / HTTP_OPS_V1} provider_used={used}/{HTTP_OPS_V1} response_status={last_status} found={last_found} fill_words={wrote} close_status={closed.status}")
+    print("PERF_HTTP mode={mode} level={level} bytes={HTTP_BYTES_V1} ops={HTTP_OPS_V1} total_ns={total} ns_per_op={total / HTTP_OPS_V1} provider_used={used}/{HTTP_OPS_V1} response_status={last_status} found={last_found} fill_words={wrote} close_status={closed.status}")
     0
 
 fn main() -> i32:
