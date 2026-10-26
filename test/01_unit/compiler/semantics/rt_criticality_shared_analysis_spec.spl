@@ -1,0 +1,92 @@
+# Real policy differential: an invalid nonempty grant list selects the
+# unchanged digest/adjusted-graph route while granting no effect exemptions.
+# Execution/performance UNRUN without an admitted general test CLI.
+use std.spec.*
+use compiler.semantics.rt_criticality.*
+use compiler.semantics.rt_criticality_validation.*
+
+fn function_fact(module: text, name: text, id: i64, effects: i64,
+        calls: [text] = [], hal: bool = false) -> RtCriticalFunctionFactsV1:
+    RtCriticalFunctionFactsV1(declaration: RtCriticalFunctionDeclarationV1(
+        module_key: module, module_path: module + ".spl", module_name: module,
+        symbol_id: id, name: name, is_rt_hal: hal, line: 1),
+        own_effects: effects, effect_units: rt_observed_effect_units(effects), raw_callees: calls)
+
+fn claim(module: text, name: text, profile: text = "critical", hal: bool = false) -> RtCriticalContractClaimV1:
+    RtCriticalContractClaimV1(registry_key: module + ":" + name,
+        path: module, fn_name: name, profile: profile, reason: "reviewed lower tier",
+        raw_bounds: "", is_hal: hal)
+
+fn diagnostic_rows(items: [RtCriticalDiagnostic]) -> [text]:
+    var rows: [text] = []
+    for item in items:
+        rows.push((if item.severity == RtCriticalDiagnosticSeverity.Error: "E:" else: "W:") + item.message)
+    rows
+
+fn refused_grant() -> [RtBoundCapability]:
+    [RtBoundCapability(subject_id: "not-a-root", closure_digest: "stale",
+        effect: RT_EFFECT_ALLOC, max_units: 1, review_id: "review")]
+
+describe "RT invocation-local shared analysis":
+    it "matches unchanged digest admission for 100 roots over 1000 actual function facts":
+        var functions: [RtCriticalFunctionFactsV1] = []
+        var claims: [RtCriticalContractClaimV1] = []
+        for index in 0..1000:
+            val name = "fn{index}"
+            functions.push(function_fact("m", name, index, RT_EFFECT_ALLOC))
+            if index < 100: claims.push(claim("m", name))
+        val analysis = RtCriticalSharedAnalysisV1()
+        val shared = validate_rt_criticality_claim_facts_with_analysis_v1(
+            ["m"], functions, [], claims, false, analysis)
+        val baseline = validate_rt_criticality_claim_facts_v1(
+            ["m"], functions, refused_grant(), claims, false)
+        expect(diagnostic_rows(shared)).to_equal(diagnostic_rows(baseline))
+        expect(shared.len()).to_equal(100)
+        expect(analysis.graph_builds).to_equal(1)
+
+    it "preserves unknown, ambiguous, path aliases and lower-tier diagnostic order":
+        val functions = [function_fact("m", "same", 1, RT_EFFECT_ALLOC),
+            function_fact("m", "same", 2, RT_EFFECT_BLOCKING),
+            function_fact("other", "same", 3, 0),
+            function_fact("m", "low", 4, RT_EFFECT_ALLOC)]
+        val claims = [claim("m", "missing"), claim("m", "same"),
+            claim("other.spl", "same"), claim("m", "low", "strict")]
+        val modules = ["m", "other.spl"]
+        val shared = validate_rt_criticality_claim_facts_v1(modules, functions, [], claims, false)
+        val baseline = validate_rt_criticality_claim_facts_v1(modules, functions, refused_grant(), claims, false)
+        expect(diagnostic_rows(shared)).to_equal(diagnostic_rows(baseline))
+        expect(shared.len()).to_equal(3)
+        val rows = diagnostic_rows(shared).join("\n")
+        expect(rows).to_contain("claim:m:missing")
+        expect(rows).to_contain("claim:m:same")
+        expect(rows).to_contain("RT-W-STEADY-ALLOCATION-001")
+
+    it "does not reuse the ordinary graph for HAL-only admission":
+        val functions = [function_fact("m", "hal_entry", 1, 0, hal: true)]
+        val analysis = RtCriticalSharedAnalysisV1()
+        val result = validate_rt_criticality_claim_facts_with_analysis_v1(
+            ["m"], functions, [], [claim("m", "hal_entry", hal: true)], false, analysis)
+        val baseline = validate_rt_criticality_claim_facts_v1(
+            ["m"], functions, refused_grant(), [claim("m", "hal_entry", hal: true)], false)
+        expect(diagnostic_rows(result)).to_equal(diagnostic_rows(baseline))
+        expect(result.len()).to_equal(0)
+        expect(analysis.graph_builds).to_equal(0)
+
+    it "keeps matching and stale digest-bound capability semantics":
+        val functions = [function_fact("m", "alloc", 1, RT_EFFECT_ALLOC)]
+        val facts = rt_criticality_graph_facts_v1(functions)
+        val root = rt_stable_fn_id("m", 1)
+        val matching = [RtBoundCapability(subject_id: root,
+            closure_digest: rt_closure_digest(root, facts), effect: RT_EFFECT_ALLOC,
+            max_units: 1, review_id: "review")]
+        val analysis = RtCriticalSharedAnalysisV1()
+        val accepted = validate_rt_criticality_claim_facts_with_analysis_v1(
+            ["m"], functions, matching, [claim("m", "alloc")], false, analysis)
+        expect(accepted.len()).to_equal(0)
+        expect(analysis.graph_builds).to_equal(0)
+        val stale = [RtBoundCapability(subject_id: root, closure_digest: "stale",
+            effect: RT_EFFECT_ALLOC, max_units: 1, review_id: "review")]
+        val refused = validate_rt_criticality_claim_facts_v1(
+            ["m"], functions, stale, [claim("m", "alloc")], false)
+        expect(refused.len()).to_equal(1)
+        expect(refused[0].message).to_contain("UNBOUNDED-ALLOCATION")
