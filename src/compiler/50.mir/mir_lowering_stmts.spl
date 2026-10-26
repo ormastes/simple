@@ -2236,12 +2236,30 @@ impl MirLowering:
         var element_index = 0
         while element_index < elements.len():
             val target_element: HirExpr = elements[element_index]
+            var element_type = if target_element.has_type_:
+                val tgt_elem_ty: HirType = target_element.type_
+                self.lower_type(tgt_elem_ty)
+            else:
+                MirType.i64()
+            # An untyped target (`[a, c] = b`) carries no HIR type; a packed [u8]
+            # source still pins the element type to u8.
+            if val source_mir_type = self.local_mir_type_of(value_local):
+                match source_mir_type.kind:
+                    case MirTypeKind.Array(source_elem_type, _):
+                        if rt_enum_discriminant(source_elem_type.kind) == rt_enum_discriminant(MirTypeKind.U8):
+                            element_type = source_elem_type
+                    case _: pass
             var get_builder = self.builder
             val index_local = get_builder.emit_const_int(element_index)
+            val runtime_array = self.local_is_runtime_array(value_local)
+            val typed_u8_runtime_read = (runtime_array and
+                rt_enum_discriminant(element_type.kind) == rt_enum_discriminant(MirTypeKind.U8))
+            val getter_name = if typed_u8_runtime_read: "rt_bytes_u8_at" else: "rt_array_get"
+            val getter_params = if typed_u8_runtime_read: [MirType.ptr(element_type, false), MirType.i64()] else: [MirType.ptr(MirType.i64(), false), MirType.i64()]
             val get_operand = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_array_get"),
+                MirConstValue.Str(getter_name),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                    params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
+                    params: getter_params,
                     return_type: MirType.i64(), is_variadic: false)))
             ))
             val raw_result = get_builder.emit_call(
@@ -2250,12 +2268,13 @@ impl MirLowering:
                 MirType.i64())
             self.builder = get_builder
             if val raw_element = raw_result:
-                val element_type = if target_element.has_type_:
-                    val tgt_elem_ty: HirType = target_element.type_
-                    self.lower_type(tgt_elem_ty)
+                var decoded_element = raw_element
+                if typed_u8_runtime_read:
+                    var decode_builder = self.builder
+                    decoded_element = decode_builder.emit_cast(mir_operand_copy(raw_element), element_type)
+                    self.builder = decode_builder
                 else:
-                    MirType.i64()
-                val decoded_element = self.decode_runtime_value(raw_element, element_type)
+                    decoded_element = self.decode_runtime_value(raw_element, element_type)
                 self.lower_assign(target_element, nil, decoded_element, target_element.kind)
             element_index = element_index + 1
 
@@ -2505,15 +2524,23 @@ impl MirLowering:
                     # the element, it does not alias or share the backing
                     # buffer, and the write below is the unchanged rt_array_set.
                     val elem_type = self.compound_elem_mir_type(base, receiver, value_local)
+                    val use_typed_u8 = rt_enum_discriminant(elem_type.kind) == rt_enum_discriminant(MirTypeKind.U8)
+                    val getter_name = if use_typed_u8: "rt_bytes_u8_at" else: "rt_array_get"
                     val array_get_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_array_get"),
+                        MirConstValue.Str(getter_name),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(elem_type, false), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                     ))
                     var b_aget = self.builder
                     val array_get_res = b_aget.emit_call(array_get_op, [mir_operand_copy(receiver), mir_operand_copy(index_local)], MirType.i64())
                     self.builder = b_aget
                     if val array_raw = array_get_res:
-                        val elem_current = self.decode_runtime_value(array_raw, elem_type)
+                        var elem_current = array_raw
+                        if use_typed_u8:
+                            var cur_builder = self.builder
+                            elem_current = cur_builder.emit_cast(mir_operand_copy(array_raw), elem_type)
+                            self.builder = cur_builder
+                        else:
+                            elem_current = self.decode_runtime_value(array_raw, elem_type)
                         elem_value = self.lower_compound_combine(elem_current, op.unwrap(), value_local, elem_type)
                 # Bug iso_transfer_sites_missing_move_return_assign_field
                 # (2026-08-06 follow-up), CONFLICT-FLAG (mir_lowering_stmts.spl
