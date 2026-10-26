@@ -198,3 +198,29 @@ owner) performed no successful conversion and remain in separate retained logs.
 T32 CLI changed-input verification is live, exec session85862, evidence
 build/tooling-phase2/t32-cli-materialized, pinned Phase2 producer and unchanged
 feature source. No CLI execution or PASS inferred from successful link setup.
+
+## Materialized follow-up failures and process-facade repair
+
+Materialized T32 CLI collection reached the real source helper and failed HIR
+on unresolved rt_process_run in src/app/mcp_t32/json_helpers.spl:328. This
+supersedes the placeholder's missing-export diagnostic. The helper already
+imports std.io_runtime.process_run; changed only the erroneous direct runtime
+call to that established platform facade, preserving arguments and tuple/error
+semantics. Its owner resolves POSIX tool paths on Windows and uses the bounded
+process path there. Actual behavior is still required, not inferred from import.
+New build: t32-cli-process-facade/, session10511, RUNNING at last observation.
+
+Materialized production wrapper-generator attempt also terminated exit139 at
+MIR0/93, peak704540 KiB. This rules out missing alias materialization as a
+sufficient remedy for that crash. Canonical examples executed remain zero.
+Evidence: spec-generator-materialized/. Four runner-path attempts accounted;
+do not rerun this input without a compiler-owner repair or new diagnostic.
+
+The corrected T32 CLI source passes HIR and reached MIR0/143, but the build
+remains live; no executable behavior is claimed. The working direct-env guard
+now FAILS on direct rt_env/rt_process calls exposed through materialized
+src/app/{cmm_lsp,mcp_t32,t32_cli} aliases. These are existing underlying example
+sources newly visible as app leaves, not a PASS to suppress. Facade migration
+and normal gate verification remain necessary before feature landing. Preserve
+materializer-created junctions/hardlinks; do not stage their apparent link
+deletions or unrelated command/document aliases in a source commit.
