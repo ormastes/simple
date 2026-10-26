@@ -218,3 +218,33 @@ describe "qualified record field owner":
         expect(lowering.errors.len()).to_equal(1)
         expect(lowering.errors[0].fatal).to_equal(true)
         expect(lowering.errors[0].message).to_contain("absent from exact value layout")
+
+    it "registers local Struct default 37 under the selected declaration layout":
+        val source = "struct Child:\n    value: i64 = 37\n\nfn make() -> Child:\n    Child()\n"
+        val parsed = parse_full_frontend(source, "provider/child.spl", "provider/child.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("provider/child.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        var lowering = MirLowering.new(hir.symbols)
+        lowering.lower_module(hir)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        val symbol = hir.symbols.lookup("Child") ?? SymbolId(id: -1)
+        if val owner = hir.symbols.get_symbol_raw(symbol.id):
+            val key = lowering.struct_value_layout_key(owner)
+            expect(key).to_contain("::Child")
+            expect(lowering.struct_field_has_default[key]).to_equal([true])
+            var retained_37 = false
+            match lowering.struct_field_default_expr[key][0].kind:
+                case HirExprKind.IntLit(value, _): retained_37 = value == 37
+                case _: ()
+            expect(retained_37).to_equal(true)
+        else:
+            expect(symbol.id).to_be_greater_than(-1)
+
+    it "does not install qualified defaults against a different registered field order":
+        var lowering = qualified_record_owner_fixture()
+        val default = HirExpr(kind: HirExprKind.IntLit(37, nil), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()), span: Span.empty())
+        val key = "src/provider/facts.spl::Facts"
+        lowering.register_struct_default_layout_v1(key, ["count", "admitted"], [true, true], [default, default])
+        expect(lowering.struct_field_has_default.has(key)).to_equal(false)

@@ -731,6 +731,20 @@ impl MirLowering:
         self.error_fatal("ambiguous struct/class value owner '{symbol.name}': no module-qualified layout matched", Some(symbol.span))
         ""
 
+    me register_struct_default_layout_v1(key: text, fields: [text], flags: [bool], defaults: [HirExpr]):
+        # Default expressions must belong to the same declaration/order as the
+        # selected layout; never recover qualified defaults from a bare alias.
+        if self.struct_field_order_conflict_warned.contains(key): return
+        if not self.struct_field_order.has(key): return
+        val registered = self.struct_field_order[key]
+        if registered.len() != fields.len(): return
+        var index = 0
+        while index < fields.len():
+            if registered[index] != fields[index]: return
+            index = index + 1
+        self.struct_field_has_default[key] = flags
+        self.struct_field_default_expr[key] = defaults
+
     me struct_owner_method_key(owner: text, method: text) -> text:
         """`{owner}::{method}` dispatch-row key for a receiver's recorded owner.
 
@@ -1291,16 +1305,21 @@ impl MirLowering:
                 if composite_struct == nil:
                     composite_struct_i = composite_struct_i + 1
                     continue
+                var struct_has_default: [bool] = []
+                var struct_default_expr: [HirExpr] = []
+                var composite_field_names: [text] = []
+                var composite_field_i = 0
+                while composite_field_i < composite_struct.fields.len():
+                    composite_field_names.push(composite_struct.fields[composite_field_i].name)
+                    struct_has_default.push(composite_struct.fields[composite_field_i].has_default)
+                    struct_default_expr.push(composite_struct.fields[composite_field_i].default)
+                    composite_field_i = composite_field_i + 1
                 if not self.struct_field_has_default.has(composite_struct.name):
-                    var struct_has_default: [bool] = []
-                    var struct_default_expr: [HirExpr] = []
-                    var composite_field_i = 0
-                    while composite_field_i < composite_struct.fields.len():
-                        struct_has_default.push(composite_struct.fields[composite_field_i].has_default)
-                        struct_default_expr.push(composite_struct.fields[composite_field_i].default)
-                        composite_field_i = composite_field_i + 1
                     self.struct_field_has_default[composite_struct.name] = struct_has_default
                     self.struct_field_default_expr[composite_struct.name] = struct_default_expr
+                if val owner = composite_module.symbols.get_symbol_raw(composite_struct.symbol.id):
+                    val exact_key = self.declared_struct_layout_key(self.composite_layout_key(owner))
+                    self.register_struct_default_layout_v1(exact_key, composite_field_names, struct_has_default, struct_default_expr)
                 composite_struct_i = composite_struct_i + 1
             val composite_class_keys: [SymbolId] = composite_module.classes.keys()
             var composite_class_i = 0
@@ -3012,6 +3031,9 @@ impl MirLowering:
             # `Point(x:3,y:4)` paren-constructor Call into aggregate construction
             # by looking up the callee name here (structs only, not classes).
             self.struct_field_order[struct_def.name] = field_names
+            if val owner = module.symbols.get_symbol_raw(struct_def.symbol.id):
+                val exact_key = self.declared_struct_layout_key(self.composite_layout_key(owner))
+                self.register_struct_default_layout_v1(exact_key, field_names, field_has_default, field_default_expr)
             si = si + 1
 
         # Build enum variant registry. Explicit values win; omitted variants
