@@ -21,6 +21,6 @@ Frontend and HIR phases complete; the failure is at backend session admission.
 
 ## Suspected area
 
-`src/compiler/00.common/backend_plugin/receipt.spl` (BACKEND_PLUGIN_TARGET
+`src/compiler/70.backend/backend_plugin/builtin_adapter.spl` (`builtin_backend_target`, line 130, accepts `arm` but not `armv7`; `supports_target` check at line 193; BACKEND_PLUGIN_TARGET
 check): the armv7 Windows triple is not in the accepted target set of the
 backend plugin, while i686 and aarch64 mingw triples are.
