@@ -1,0 +1,91 @@
+# Data capture for an actual selected ordinary default use. These records do
+# not prove consulted layout/callable/enum/global metadata or lexical replay.
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.common.loop_codec_account_v1.{mir_loop_codec_charge_v1}
+use compiler.hir.hir_types.{SymbolId, SymbolTable, HirSymbol}
+use compiler.hir.hir_definitions.{HirExpr}
+use compiler.hir.hir_codec_support.{HirCodecWriter, HirCodecSymbolOccurrenceV1}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_expr, hc_enc_hir_symbol}
+use compiler.mir.hir_expression_artifact_v1.{mir_hir_expression_header_v1}
+use compiler.mir.source_region_default_binding_types_v1.*
+use compiler.mir.canonical_enum_serialization_budget_v1.{canonical_enum_dict_count_v1,
+    canonical_enum_sum_v1, canonical_enum_product_v1, canonical_enum_text_bound_v1}
+
+fn default_binding_writer_v1(account: MirLoopResourceAccountV1) -> Result<HirCodecWriter, text>:
+    mir_loop_codec_charge_v1(account, 256, 256)?
+    var writer = HirCodecWriter.create_accounted_v1(8 * 1024 * 1024,
+        128 * 1024 * 1024, 1000000, account)?
+    writer.canonical = false
+    if not writer.begin_symbol_inventory_v1():
+        return Err("SOURCE-DEFAULT-BINDING: inventory reservation refused")
+    Ok(writer)
+
+fn default_binding_enqueue_v1(queue: [i64], references: [HirCodecSymbolOccurrenceV1],
+        account: MirLoopResourceAccountV1) -> Result<[i64], text>:
+    var result = queue
+    var index = 0
+    while index < references.len():
+        mir_loop_codec_charge_v1(account, 32)?
+        val reference = references[index]
+        if reference.ordinal != index:
+            return Err("SOURCE-DEFAULT-BINDING: schema occurrence order differs")
+        index = index + 1
+        # Absence and unresolved sentinels stay in the encoded observation.
+        # A later operation proof decides whether they are legal at that use.
+        if not reference.present or reference.value < 0: continue
+        mir_loop_codec_charge_v1(account, canonical_enum_product_v1(result.len(), 16)?)?
+        var seen = false
+        for existing in result:
+            if existing == reference.value: seen = true
+        if seen: continue
+        val growth = canonical_enum_product_v1(canonical_enum_sum_v1(result.len(), 1)?, 32)?
+        mir_loop_codec_charge_v1(account, growth, growth)?
+        result = result.push(reference.value)
+    Ok(result)
+
+fn source_region_capture_default_bindings_v1(expression: HirExpr, symbols: SymbolTable,
+        original: SymbolId, ordinal: i64, target_key: text,
+        account: MirLoopResourceAccountV1) -> Result<MirSourceDefaultCapturedExpressionV1, text>:
+    mir_loop_codec_charge_v1(account, 128, 512)?
+    if symbols == nil or original == nil or original.id < 0 or ordinal < 0:
+        return Err("SOURCE-DEFAULT-BINDING: actual occurrence identity absent")
+    val key_bytes = canonical_enum_text_bound_v1(target_key, account)?
+    mir_loop_codec_charge_v1(account, key_bytes)?
+    if target_key == "": return Err("SOURCE-DEFAULT-BINDING: target lifetime selector absent")
+    var writer = default_binding_writer_v1(account)?
+    hc_enc_hir_expr(writer, expression)
+    if not writer.ok: return Err("SOURCE-DEFAULT-BINDING: expression codec refused")
+    val blob = writer.finish_with_header(mir_hir_expression_header_v1())
+    if not writer.ok: return Err("SOURCE-DEFAULT-BINDING: expression byte bound refused")
+    val references = writer.symbol_inventory_v1.occurrences
+    var queue = default_binding_enqueue_v1([], references, account)?
+    var records: [MirSourceDefaultSymbolRecordV1] = []
+    var cursor = 0
+    while cursor < queue.len():
+        mir_loop_codec_charge_v1(account, 64)?
+        val id = queue[cursor]
+        val count = canonical_enum_sum_v1(canonical_enum_dict_count_v1(symbols.symbols, account)?, 1)?
+        mir_loop_codec_charge_v1(account, canonical_enum_product_v1(count, 2)?)?
+        if not symbols.symbols.has(id):
+            return Err("SOURCE-DEFAULT-BINDING: referenced target symbol absent")
+        val symbol: HirSymbol = symbols.symbols[id]
+        if symbol == nil or symbol.id == nil or symbol.id.id != id:
+            return Err("SOURCE-DEFAULT-BINDING: target symbol key differs")
+        var record_writer = default_binding_writer_v1(account)?
+        hc_enc_hir_symbol(record_writer, symbol)
+        if not record_writer.ok: return Err("SOURCE-DEFAULT-BINDING: target symbol codec refused")
+        val bytes = record_writer.finish_with_header("mir-source-default-symbol-v1")
+        if not record_writer.ok: return Err("SOURCE-DEFAULT-BINDING: target symbol bytes refused")
+        val children = record_writer.symbol_inventory_v1.occurrences
+        val growth = canonical_enum_product_v1(canonical_enum_sum_v1(records.len(), 1)?, 128)?
+        mir_loop_codec_charge_v1(account, growth, growth)?
+        records = records.push(MirSourceDefaultSymbolRecordV1(symbol: id,
+            bytes: bytes, references: children))
+        # Enqueue from the serialized record's real type/reference closure.
+        # Queue membership handles self/mutually named type cycles once.
+        queue = default_binding_enqueue_v1(queue, children, account)?
+        cursor = cursor + 1
+    mir_loop_codec_charge_v1(account, 64, 256)?
+    Ok(MirSourceDefaultCapturedExpressionV1(blob: blob,
+        bindings: MirSourceDefaultBindingsV1(original: original.id, ordinal: ordinal,
+            target_key: target_key, expression_references: references, symbols: records)))

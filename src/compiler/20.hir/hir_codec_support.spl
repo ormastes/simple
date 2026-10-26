@@ -147,6 +147,15 @@ pub class HirDecodeAuditObserver:
             charged_work_units: self.charged_work_units,
             overflowed: self.overflowed)
 
+struct HirCodecSymbolOccurrenceV1:
+    ordinal: i64
+    role: text
+    present: bool
+    value: i64
+
+class HirCodecSymbolInventoryV1:
+    occurrences: [HirCodecSymbolOccurrenceV1]
+
 class HirCodecWriter:
     parts: [text]
     chunks: [text]
@@ -166,6 +175,35 @@ class HirCodecWriter:
     resource_account_v1: MirLoopResourceAccountV1? = nil
     accounted_visits_v1: i64 = 0
     accounted_depth_v1: i64 = 0
+    # Nullable nominal carrier: ordinary writers allocate no Optional box.
+    symbol_inventory_v1: HirCodecSymbolInventoryV1 = nil
+
+    me begin_symbol_inventory_v1() -> bool:
+        if not self.ok: return false
+        if self.resource_account_v1 == nil or self.symbol_inventory_v1 != nil:
+            self.reject("symbol inventory requires one actual accounted writer")
+            return false
+        if not self.charge_work(32) or not self.reserve(512): return false
+        self.symbol_inventory_v1 = HirCodecSymbolInventoryV1(occurrences: [])
+        true
+
+    me record_symbol_reference_v1(value: i64, present: bool, role: text) -> bool:
+        val inventory = self.symbol_inventory_v1
+        if inventory == nil: return self.accounted_continue_v1()
+        if not self.charge_work(16): return false
+        val count = inventory.occurrences.len()
+        val bytes = text_byte_len(role)
+        # Preserve every schema role/occurrence, including absent nodes and
+        # negative unresolved sentinels. They never manufacture target symbols.
+        if count < 0 or count > 36028797018963964 or bytes < 0 or bytes > 1152921504606846975:
+            self.reject_bounds("symbol_inventory_size")
+            return false
+        val growth = (count + 1) * 128 + bytes * 2 + 64
+        if not self.charge_work((count + 1) * 16 + bytes * 2 + 64) or not self.reserve(growth):
+            return false
+        inventory.occurrences = inventory.occurrences.push(HirCodecSymbolOccurrenceV1(
+            ordinal: count, role: role, present: present, value: value))
+        true
 
     # Generated traversal calls these before heap access and each child loop.
     # Legacy nil-account traversal keeps its prior behavior, including errors.

@@ -415,7 +415,7 @@ class EmitCounter:
         v
 
 fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCounter,
-        required_node: bool = false) -> text:
+        required_node: bool = false, symbol_role: text = "SymbolId") -> text:
     """Statements that write one value `v` of `type_text`."""
     val s = u.classify(type_text)
     if s.cat == "prim_i64":
@@ -445,32 +445,37 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         val bind_k = c.next()
         var out = indent + "val enc_node_v" + "{bind_k}" + ": " + _strip_default(s.name).trim() + " = " + v + "\n"
         out = out + (if record_presence: indent + "if not enc_node_v{bind_k}.?:\n" else: indent + "if enc_node_v{bind_k} == nil:\n")
+        if s.name == "SymbolId":
+            out = out + indent + "    if not w.record_symbol_reference_v1(0, false, \"" + symbol_role + "\"): return\n"
         if required_node:
             out = out + indent + "    w.reject(\"missing_required_hir_module_function_entry\")\n"
         else:
             out = out + indent + "    w.put_i64(0)\n"
         out = out + indent + "else:\n"
         out = out + indent + "    w.put_i64(1)\n"
-        out = out + indent + "    " + callee + "(w, enc_node_v{bind_k})\n"
+        val role_argument = if s.name == "SymbolId": ", \"" + symbol_role + "\"" else: ""
+        out = out + indent + "    " + callee + "(w, enc_node_v{bind_k}" + role_argument + ")\n"
         return out
     val k = c.next()
     if s.cat == "opt":
         var out = indent + "if val o{k} = " + v + ":\n"
         out = out + indent + "    w.put_i64(1)\n"
-        out = out + _emit_enc(u, s.a, "o{k}", indent + "    ", c)
+        out = out + _emit_enc(u, s.a, "o{k}", indent + "    ", c, false, symbol_role)
         out = out + indent + "else:\n"
+        if _strip_default(s.a).trim() == "SymbolId":
+            out = out + indent + "    if not w.record_symbol_reference_v1(0, false, \"" + symbol_role + "\"): return\n"
         out = out + indent + "    w.put_i64(0)\n"
         return out
     if s.cat == "list":
         var out = indent + "w.put_i64(if " + v + " == nil: 0 else: " + v + ".len())\n"
         out = out + indent + "for e{k} in (" + v + " ?? []):\n"
-        out = out + _emit_enc(u, s.a, "e{k}", indent + "    ", c)
+        out = out + _emit_enc(u, s.a, "e{k}", indent + "    ", c, false, symbol_role)
         return out
     if s.cat == "pair":
         var out = indent + "w.put_i64(if " + v + " == nil: 0 else: " + v + ".len())\n"
         out = out + indent + "for (pa{k}, pb{k}) in (" + v + " ?? []):\n"
-        out = out + _emit_enc(u, s.a, "pa{k}", indent + "    ", c)
-        out = out + _emit_enc(u, s.b, "pb{k}", indent + "    ", c)
+        out = out + _emit_enc(u, s.a, "pa{k}", indent + "    ", c, false, symbol_role)
+        out = out + _emit_enc(u, s.b, "pb{k}", indent + "    ", c, false, symbol_role)
         return out
     if s.cat == "dict":
         # Preserve the dictionary key type across the empty-array branch.
@@ -488,8 +493,8 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         out = out + indent + "ks{k} = " + order_fn + "(ks{k})\n"
         out = out + indent + "w.put_i64(ks{k}.len())\n"
         out = out + indent + "for dk{k} in ks{k}:\n"
-        out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c, required_node)
-        out = out + _emit_enc(u, s.b, v + "[dk{k}]", indent + "    ", c, required_node)
+        out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c, required_node, symbol_role + ".key")
+        out = out + _emit_enc(u, s.b, v + "[dk{k}]", indent + "    ", c, required_node, symbol_role + ".value")
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")
 
@@ -665,7 +670,8 @@ fn _codec_accounted_encoder_guards_v1(source: text) -> text:
     guarded.join("\n") + "\n"
 
 fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
-    var parts: [text] = ["fn " + enc_fn_name(decl.name) + "(w: HirCodecWriter, node: " + decl.name + "):\n"]
+    val symbol_argument = if decl.name == "SymbolId": ", role: text = \"SymbolId\"" else: ""
+    var parts: [text] = ["fn " + enc_fn_name(decl.name) + "(w: HirCodecWriter, node: " + decl.name + symbol_argument + "):\n"]
     # Fail closed on a nil node: live compiler state can present a nil/corrupt
     # composite (erased-read draw; measured hc_enc_span SIGSEGV at address 0x8
     # encoding app.cli.check_dbs on the stage2 candidate, 2026-10-18). A nil
@@ -701,17 +707,19 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     val helper = if shape.cat == "prim_bool": "hc_enc_enum_bool" elif shape.cat == "prim_char": "hc_enc_enum_char" else: "hc_enc_enum_text"
                     parts.push("            " + helper + "(w, node, " + "{fields.len()}" + ", " + "{field_index}" + ", b_" + f.binder + ")\n")
                 else:
-                    parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
+                    parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c, false, decl.name + "." + row.variant + "." + f.binder))
                 field_index = field_index + 1
             idx = idx + 1
         parts.push("        case _: w.reject(\"unencodable " + decl.name + " enum\")\n")
         return _codec_accounted_encoder_guards_v1(parts.join(""))
     var body: [text] = []
+    if decl.name == "SymbolId":
+        body.push("    if not w.record_symbol_reference_v1(node.id, true, role): return\n")
     for f in decl.fields:
         # A function dictionary entry cannot represent an absent declaration.
         # Enforce in the actual presence branch, not a separate live-state read.
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry))
+        body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry, decl.name + "." + f.binder))
     if body.len() == 0:
         body.push("    val _leaf = 0\n")
     _codec_accounted_encoder_guards_v1(parts.join("") + body.join(""))
