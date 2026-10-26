@@ -143,3 +143,24 @@ Captures: markdown-utf16.stdout/.stderr; build evidence markdown-utf16/.
 Added a meaningful UTF-16 conversion SSpec, authored/UNRUN. The general runner
 still crashes before examples. No overall verification PASS or merged feature
 is claimed. Five Markdown Phase2 build/repair cycles accounted, one remaining.
+
+## Markdown transport headers: final sixth cycle
+
+A valid Content-Length-first / Content-Type-second request exposed truncated
+body consumption in the old header loop. Final Markdown cycle six consumes all
+headers through the blank separator, rejects duplicate lengths, and parses
+decimal lengths with overflow/invalid-character refusal. The19-module native
+candidate compiled/linked (markdown-headers). Actual exchanges passed two
+consecutive initialize requests for each header order; IDs11/12 and frame
+boundaries matched. Negative, junk-suffixed and overflowing lengths refused
+without emitting a fabricated JSON response. Captures: markdown-headers-*.
+No further Markdown repair/build cycles under the six-cycle cap.
+
+The general runner's second attempt enables supported SIMPLE_COMPILER_TRACE
+for diagnosis, retains checks/limits and remains live (session59391). A smaller
+existing production wrapper owner was located:
+std.test_runner.test_result_wrapper.preprocess_spipe_native_result_file_in.
+It preserves authored helpers/imports and lowers real cases to the framework's
+rt_bdd counters/results, rejecting zero execution. A small generator entry may
+call this function to run focused authored specs without replacing the runner
+framework or claiming full runner qualification. Execution is still pending.
