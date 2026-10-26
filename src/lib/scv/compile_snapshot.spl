@@ -22,7 +22,8 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
     file_read_regular_no_follow_bounded_bytes,
-    secure_temp_dir_raw, file_publish_noreplace_raw}
+    secure_temp_dir_raw, file_publish_noreplace_raw, file_modified_time}
+use std.io_runtime.{env_get}
 use std.nogc_sync_mut.io_runtime.{
     dir_list, dir_remove, file_rename, file_copy, file_hash_sha256_or_empty, file_size,
     process_is_running
@@ -821,6 +822,11 @@ fn scv_compile_snapshot_acquire_cost_v1(
         inventory_digest)
     if not admitted.valid:
         return admitted
+    # Bound the store: every distinct source tree publishes a full copy
+    # (~170 MB on Windows), and nothing else evicted them (1.2 GB measured in
+    # one worktree, 2026-10-26).
+    scv_compile_snapshot_retain_newest_v1(owned_cache_root, revision_id,
+        scv_compile_snapshot_max_keep_v1())
     ScvCompileSnapshotV1(
         valid: true,
         reason: if source_drifted: "ok-source-drifted" else: "ok",
@@ -876,6 +882,53 @@ fn scv_compile_snapshot_gc_v1(
             removed = removed + 1
     removed
 
+# SIMPLE_SCV_SNAPSHOT_MAX (default 4, matching the cache max-branches limit).
+fn scv_compile_snapshot_max_keep_v1() -> i64:
+    val raw = env_get("SIMPLE_SCV_SNAPSHOT_MAX")
+    if raw != "":
+        val parsed = raw.to_i64()
+        if parsed != nil and parsed! > 0:
+            return parsed!
+    4
+
+# Evicts the least recently published snapshots (receipt mtime, then name)
+# until at most max_keep remain. `keep` is never evicted; only snapshots
+# that pass scv_compile_snapshot_gc_v1's provenance+receipt check are removed.
+fn scv_compile_snapshot_retain_newest_v1(
+    cache_root: text, keep: text, max_keep: i64
+) -> i64:
+    val snapshots_root = "{cache_root}/snapshots"
+    if max_keep <= 0 or not dir_exists(snapshots_root):
+        return 0
+    var names: [text] = []
+    var stamps: [i64] = []
+    for name in dir_list(snapshots_root):
+        if name.starts_with("."):
+            continue
+        names.push(name)
+        stamps.push(file_modified_time("{cache_root}/receipts/{name}.receipt"))
+    var live = names.len()
+    var removed = 0
+    while live > max_keep:
+        var victim = -1
+        var index = 0
+        while index < names.len():
+            if names[index] != "" and names[index] != keep:
+                if (victim < 0 or stamps[index] < stamps[victim] or
+                        (stamps[index] == stamps[victim] and names[index] < names[victim])):
+                    victim = index
+            index = index + 1
+        if victim < 0:
+            break
+        var retained: [text] = []
+        for name in names:
+            if name != "" and name != names[victim]:
+                retained.push(name)
+        removed = removed + scv_compile_snapshot_gc_v1(cache_root, retained, 1)
+        names[victim] = ""
+        live = live - 1
+    removed
+
 fn scv_compile_snapshot_cleanup_v1(snapshot: ScvCompileSnapshotV1) -> bool:
     if not snapshot.valid or snapshot.snapshot_root == "":
         return false
@@ -902,6 +955,7 @@ export scv_compile_snapshot_acquire_cost_v1
 export scv_compile_snapshot_source_candidate_for_v1
 export scv_compile_snapshot_recover_v1
 export scv_compile_snapshot_gc_v1
+export scv_compile_snapshot_retain_newest_v1
 export scv_compile_snapshot_cleanup_v1
 export scv_compile_snapshot_reuse_marks_v1
 export scv_compile_snapshot_reuse_source_v1
