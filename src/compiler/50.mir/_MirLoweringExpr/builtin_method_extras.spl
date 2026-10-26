@@ -660,7 +660,9 @@ impl MirLowering:
         over operands that are themselves proven. Never the MIR type: an
         untracked struct handle is an i64 word at MIR too. 0 = not proven."""
         if val static_type = self.enum_match_expr_type(expr):
-            return self.builtin_numeric_kind_of_hir(static_type)
+            val static_kind = self.builtin_numeric_kind_of_hir(static_type)
+            if static_kind != 0:
+                return static_kind
         var numeric_kind = 0
         match expr.kind:
             case IntLit(_, int_suffix):
@@ -685,6 +687,21 @@ impl MirLowering:
                     case HirBinOp.Div: arithmetic = true
                     case HirBinOp.Mod: arithmetic = true
                     case _: ()
+                # Bitwise and shift operators over integer operands are integer
+                # (`(v & 15u64).to_i64()` must not be taken for a text receiver).
+                var bitwise = false
+                match binary_op:
+                    case HirBinOp.BitAnd: bitwise = true
+                    case HirBinOp.BitOr: bitwise = true
+                    case HirBinOp.BitXor: bitwise = true
+                    case HirBinOp.Shl: bitwise = true
+                    case HirBinOp.Shr: bitwise = true
+                    case _: ()
+                if bitwise:
+                    val bit_left_kind = self.builtin_numeric_expr_kind(binary_left)
+                    val bit_right_kind = self.builtin_numeric_expr_kind(binary_right)
+                    if (bit_left_kind == 1 or bit_left_kind == 2) and (bit_right_kind == 1 or bit_right_kind == 2):
+                        numeric_kind = bit_left_kind
                 if arithmetic:
                     val left_kind = self.builtin_numeric_expr_kind(binary_left)
                     val right_kind = self.builtin_numeric_expr_kind(binary_right)
@@ -692,6 +709,9 @@ impl MirLowering:
                         numeric_kind = left_kind
                         if right_kind == 3:
                             numeric_kind = 3
+            case Cast(cast_inner, cast_target):
+                # `x as u64` / the desugared suffix literal `5u64`.
+                numeric_kind = self.builtin_numeric_kind_of_hir(cast_target)
             case Index(index_base, _):
                 # An element of a DECLARED numeric array (`xs[0]` on `[i64]`).
                 if val index_base_type = self.enum_match_expr_type(index_base):
@@ -738,6 +758,23 @@ impl MirLowering:
         the two default widths are recorded, and only when the local's MIR
         type agrees; an initialiser that is not proven records nothing."""
         val init_kind = self.builtin_numeric_expr_kind(init)
+        # `val v = 0x..u64` / `val v = x as u64`: the suffix literal is a Cast
+        # whose target is the declared width. Record that exact integer type
+        # (a 64-bit value lives in an I64 or U64 MIR local) so `v.to_i64()` is
+        # recognised as numeric rather than as an erased text receiver.
+        match init.kind:
+            case Cast(_, cast_init_target):
+                match cast_init_target.kind:
+                    case HirTypeKind.Int(cast_init_bits, _):
+                        if cast_init_bits == 64 and not self.builtin_local_has_custom_owner(local) and not self.is_runtime_value_local(local.id):
+                            if val cast_init_mir = self.local_mir_type_of(local):
+                                match cast_init_mir.kind:
+                                    case MirTypeKind.I64 | MirTypeKind.U64:
+                                        self.remember_local_hir_type(local.id, cast_init_target, 0, 0)
+                                        return
+                                    case _: ()
+                    case _: ()
+            case _: ()
         if init_kind != 1 and init_kind != 3:
             return
         if self.builtin_local_has_custom_owner(local) or self.is_runtime_value_local(local.id):
