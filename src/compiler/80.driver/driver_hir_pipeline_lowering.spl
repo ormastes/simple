@@ -1888,7 +1888,23 @@ impl CompilerDriver:
                 # frozen surface's import_target_indices, as in streaming.
                 if hir_shard_deps_wanted_v1():
                     var legacy_dep_paths: [text] = []
-                    val legacy_surface_index = if retained_module_surfaces.index_by_name.contains_key(name): retained_module_surfaces.index_by_name[name] else: -1
+                    # Compatibility spellings may lack a scalar alias; resolve by
+                    # physical source owner, and fail closed when neither finds the
+                    # surface (an own-path-only record would admit MIR with no edges).
+                    var legacy_surface_index: i64 = -1
+                    if retained_module_surfaces.index_by_name.contains_key(name):
+                        legacy_surface_index = retained_module_surfaces.index_by_name[name]
+                    else:
+                        var probe = 0
+                        while probe < retained_module_surfaces.surfaces.len() and legacy_surface_index < 0:
+                            if retained_module_surfaces.surfaces[probe].source_index == source_idx:
+                                legacy_surface_index = probe
+                            probe = probe + 1
+                    if legacy_surface_index < 0:
+                        val missing = "HIR shard deps record: missing module surface for {name} ({src.path})"
+                        hir_shard_guard_block(missing)
+                        self.ctx.add_error(missing)
+                        return false
                     for dep_source_index in hir_shard_dep_source_indices_v1(retained_module_surfaces, legacy_surface_index, self.ctx.sources.len()):
                         legacy_dep_paths = legacy_dep_paths.push(self.ctx.sources[dep_source_index].path)
                     val legacy_records_err = hir_shard_publish_records_v1(src.path, hir_shard_key, legacy_dep_paths)
