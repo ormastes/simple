@@ -19,16 +19,16 @@ written; the one open follow-up is the AOP match-shard driver wiring #4401.
 | 3. Typed DataFrame collections | nothing in range | TODO (unchanged) |
 | 4. mold-based MDSOC++ linker | linker-adjacent only: mswsock default lib (#4507), COMDAT instance dedup for non-LLVM backends (#4603) | TODO (unchanged) |
 | 5. Kernel/extension aspects, binary size | AOP pointcut-affected invalidation plan (#4511, `incremental_rebuild_plan_v1`); directory match-shard driver wiring #4401 still open. Provider/size work: none in range | IN_PROGRESS per 2026-10-11 note; cache part partial |
-| 6. Compile optimization | per-module lowering default, whole-program behind `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (#4525 #4547); objects streamed during MIR, batch 8 (#4566); HIR admission linear (#4557), validation blob removed (#4562), admission paths normalised once (#4552); cache scope published before shard spawn, HIR cache decoupled from `SIMPLE_FRONTEND_CACHE=0` (#4565); Stage 2 cache content-keyed (#4559); file-worker claim loop and per-file default (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"`, enabled 2026-10-26; explicit `SIMPLE_FILE_WORKERS=0` opts out); P-A..P-H and generic cache packages tracked in `compiler/cache/cache_perfile_plan_index_2026-10-25.md`. Native overlap qualification remains pending | IN_PROGRESS (Windows native lane); no default-lane overlap receipt yet |
+| 6. Compile optimization | per-module lowering default, whole-program behind `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (#4525 #4547); objects streamed during MIR, batch 8 (#4566); HIR admission linear (#4557), validation blob removed (#4562), admission paths normalised once (#4552); cache scope published before shard spawn, HIR cache decoupled from `SIMPLE_FRONTEND_CACHE=0` (#4565); Stage 2 cache content-keyed (#4559); file-worker claim loop, with latest user override setting `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` on 2026-10-26; explicit `SIMPLE_FILE_WORKERS=1` opts in; P-A..P-H and generic cache packages tracked in `compiler/cache/cache_perfile_plan_index_2026-10-25.md`. Native overlap qualification remains pending | IN_PROGRESS (Windows native lane); no default-lane overlap receipt yet |
 | 7. Profile-switchable containers | `CollectionFeedbackState` snapshot only (#4535, parse-side state move) | TODO (unchanged) |
 
 Cross-item decisions taken today (details and evidence in the index §2):
 persisted cache tiers are packed AST + TLDR, generic instances per concrete key,
 AOP weave bodies, objects, lib/bin — HIR stays in memory and there is no
 general MIR cache; `.spab` is the default parse-cache format with `.fpc` as the
-opt-out fallback; as of 2026-10-26, unset `SIMPLE_FILE_WORKERS` selects the
-barrier-free `--file-worker` lane, with explicit `SIMPLE_FILE_WORKERS=0` as
-the opt-out;
+opt-out fallback; by the latest 2026-10-26 override, unset `SIMPLE_FILE_WORKERS` leaves the
+barrier-free `--file-worker` lane off, with explicit `SIMPLE_FILE_WORKERS=1` as
+the opt-in;
 mono is module-scoped always inside the file-worker lane and global outside it;
 shards, file workers and `--parse-fibers` children coexist, and in-process
 fibers wait on `ParseContext` stages 3-4; single-flight futures replace locks
@@ -58,10 +58,10 @@ E-MONO-040 fails closed for imported generics: #4651 `6c257d14918`.
 reviewer (comment), pending merge. Merge release_phase3 into
 release/1.0.0: #4704 OPEN.
 
-**Default enabled 2026-10-26:** unset `SIMPLE_FILE_WORKERS` selects the
-per-file worker pool; explicit `SIMPLE_FILE_WORKERS=0` opts out. Native
+**Latest user override, 2026-10-26:** unset `SIMPLE_FILE_WORKERS` leaves the
+per-file worker pool off; explicit `SIMPLE_FILE_WORKERS=1` opts in. Native
 qualification remains pending: build Stage 3 from these sources, self-rebuild
-through the default lane, and retain an overlap receipt from
+through the explicitly selected lane, and retain an overlap receipt from
 `scripts/check/check-per-file-overlap-receipt.shs`.
 
 **Stage evidence (in progress, not a retained measurement):** stage2 built cold
@@ -441,3 +441,8 @@ when a relevant change invalidates its evidence or a required gate demands it.
 After three fix/verify cycles, report the remaining blocker and stop that lane.
 Never mark missing host evidence as a pass. The seven-item program is complete
 only when every required host/item cell is DONE or has an accepted scope exclusion.
+
+The latest default-off landing is user-directed and unverified by a new runtime
+run. It supersedes PR #4865's earlier default enablement without changing that
+historical landing or any retained native evidence. Whole-program precedence
+and all remaining acceptance gates are unchanged.

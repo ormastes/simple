@@ -1,9 +1,10 @@
 # Bootstrap options, shard knobs and cache protocol state
 
-Dated 2026-10-25, against `release/1.0.0`, with the per-file worker default
-updated 2026-10-26. Each item names the PR or file it was checked against.
-Opt-in means the default is off unless an item says otherwise; the true
-per-file worker pipeline is now selected when `SIMPLE_FILE_WORKERS` is unset.
+Dated 2026-10-25, against `release/1.0.0`, with the latest user-directed
+per-file worker default updated 2026-10-26. Each item names the PR or file it
+was checked against. The true per-file worker pipeline is off when
+`SIMPLE_FILE_WORKERS` is unset; `SIMPLE_FILE_WORKERS=1` explicitly opts in.
+This source default update is being landed without new runtime verification.
 
 ## Essential applications after Stage 4
 
@@ -140,8 +141,8 @@ leaders (#4441), and #4525, which makes per-module lowering the default.
   for `SIMPLE_FILE_WORKERS` when unset is the
   single constant `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1` in
   `src/compiler/80.driver/driver_build/native_file_worker_v1.spl` (now
-  `"1"`). Unset selects the per-file `src → obj` worker pool;
-  `SIMPLE_FILE_WORKERS=0` opts out, and
+  `"0"`). Unset or `SIMPLE_FILE_WORKERS=0` leaves the pool off;
+  `SIMPLE_FILE_WORKERS=1` explicitly selects the per-file `src → obj` pool, and
   `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` keeps the whole-program route. The Stage 3
   scripts pass the knob through when set (exactly `0` or `1`, anything else
   is refused) and hash it into the Stage 3 args receipt; unset adds nothing,
