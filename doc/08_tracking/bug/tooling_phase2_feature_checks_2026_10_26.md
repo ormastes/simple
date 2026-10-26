@@ -164,3 +164,20 @@ It preserves authored helpers/imports and lowers real cases to the framework's
 rt_bdd counters/results, rejecting zero execution. A small generator entry may
 call this function to run focused authored specs without replacing the runner
 framework or claiming full runner qualification. Execution is still pending.
+
+## Canonical wrapper execution blocker collected
+
+The traced general runner terminated exit139. Its last trace identifies
+MIR module start idx0 app.test_runner_new.main, after HIR/monomorphization;
+this is a boundary observation, not a proven defect in that entry function.
+The smaller generator importing the existing production wrapper owner also
+terminated exit139 at MIR entry after a93-module closure. Its source invokes
+preprocess_spipe_native_result_file_in for the authored Markdown/parser specs;
+it did not run, so no generated spec or BDD example execution is claimed.
+Evidence: sspec-runner-traced/ and spec-generator/ under build/tooling-phase2.
+
+This is three distinct runner-path diagnostic attempts (general, traced,
+smaller production generator), all retained. Stop the unchanged shared crash
+loop and investigate the compiler owner before any further build retry. Existing
+native wire/probe checks remain focused evidence, not canonical SSpec PASS.
+No feature is landed while its mandatory verification is unavailable.
