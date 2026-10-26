@@ -1,0 +1,60 @@
+# True-per-file PR1: the coordinator publishes the parse-closure request once;
+# every shard/file-worker child reuses it (zero walks) or fails loudly.
+use std.spec
+use std.spec.step
+use app.cli.native_build_parse_closure_owner.{native_build_parse_closure_reuse_decision_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_request_identity_matches_v1}
+
+fn admit_error_for(roots: [text]) -> text:
+    if native_entry_closure_request_identity_matches_v1("/owner", "src/main.spl", roots, "producer",
+            "/owner", "src/main.spl", ["src/app", "src/lib"], "producer"):
+        ""
+    else:
+        "closure request rejected: entry-closure-request-identity-mismatch"
+
+describe "parse closure publish-once reuse":
+    it "reuses a matching inherited request with no closure walk":
+        step("child with an admitted request reuses it")
+        val decision = native_build_parse_closure_reuse_decision_v1(true, true,
+            "/cache/closure-request-1/request.v1", "abc123", admit_error_for(["src/app", "src/lib"]))
+        expect(decision.is_ok()).to_equal(true)
+        expect(decision.unwrap()).to_equal(true)
+
+    it "fails a child whose request digest or identity mismatches":
+        step("mismatch is an error, never a silent re-walk")
+        val decision = native_build_parse_closure_reuse_decision_v1(true, true,
+            "/cache/closure-request-1/request.v1", "abc123", admit_error_for(["src/lib", "src/app"]))
+        expect(decision.is_err()).to_equal(true)
+        expect(decision.unwrap_err().contains("mismatch")).to_equal(true)
+
+    it "fails a child with a missing publication":
+        step("missing path or digest is an error")
+        val no_path = native_build_parse_closure_reuse_decision_v1(true, true, "", "abc123", "")
+        val no_digest = native_build_parse_closure_reuse_decision_v1(true, true, "/cache/r/request.v1", "", "")
+        expect(no_path.is_err()).to_equal(true)
+        expect(no_digest.is_err()).to_equal(true)
+        expect(no_path.unwrap_err().contains("missing")).to_equal(true)
+
+    it "lets only the coordinator publish (the single walk)":
+        step("non-child publishes its own request")
+        val decision = native_build_parse_closure_reuse_decision_v1(false, true, "", "", "")
+        expect(decision.is_ok()).to_equal(true)
+        expect(decision.unwrap()).to_equal(false)
+
+    it "replays entry-closure-publication-conflict: a child never re-publishes":
+        step("phase-3 log: shards raced the coordinator to publish; children must only consume")
+        # Every child outcome under an expected publication is reuse or error,
+        # never Ok(false) (which would make the child a second publisher).
+        val reused = native_build_parse_closure_reuse_decision_v1(true, true, "/c/r/request.v1", "d", "")
+        val missing = native_build_parse_closure_reuse_decision_v1(true, true, "", "", "")
+        val conflicted = native_build_parse_closure_reuse_decision_v1(true, true, "/c/r/request.v1", "d",
+            "closure request rejected: entry-closure-publication-conflict")
+        expect(reused.unwrap()).to_equal(true)
+        expect(missing.is_err()).to_equal(true)
+        expect(conflicted.is_err()).to_equal(true)
+        expect(conflicted.unwrap_err().contains("entry-closure-publication-conflict")).to_equal(true)
+
+    it "leaves non-closure builds alone (no publication expected)":
+        step("child without --entry-closure keeps its legacy path")
+        val decision = native_build_parse_closure_reuse_decision_v1(true, false, "", "", "")
+        expect(decision.unwrap()).to_equal(false)
