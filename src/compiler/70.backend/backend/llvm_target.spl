@@ -110,6 +110,56 @@ pub fn llvm_explicit_codegen_target(target_triple: text) -> Result<CodegenTarget
         return Err("invalid LLVM target triple '{target_triple}': expected arch-vendor-os[-environment]")
     llvm_codegen_target_from_explicit_arch(parts[0])
 
+
+# Single OS classification shared by object-format and hosted-triple logic.
+# Returns [object_format, os, vendor, env_kind] or [] for an unknown OS.
+# arch only disambiguates the generic OS "unknown" (wasm vs elf).
+# env_kind: "keep" (use the triple's own env), "none", "gnu", "winenv"
+# (llvm_hosted_windows_env()).
+pub fn llvm_classify_os(os: text, arch: text) -> [text]:
+    if os.starts_with("mingw"):
+        return ["coff", "windows", "w64", "gnu"]
+    if os == "windows" or os == "win32":
+        return ["coff", "windows", "pc", "winenv"]
+    if os == "cygwin":
+        return ["coff", "cygwin", "pc", "gnu"]
+    if os.starts_with("darwin") or os.starts_with("macos") or os.starts_with("ios"):
+        return ["macho", os, "apple", "none"]
+    if os.starts_with("linux"):
+        return ["elf", os, "unknown", "keep"]
+    if os.starts_with("freebsd") or os.starts_with("netbsd") or os.starts_with("openbsd"):
+        return ["elf", os, "unknown", "none"]
+    if os == "unknown":
+        if arch.starts_with("wasm"):
+            return ["wasm", os, "unknown", "none"]
+        return ["elf", os, "unknown", "none"]
+    if os.starts_with("wasi"):
+        return ["wasm", os, "unknown", "none"]
+    if os == "uefi":
+        return ["coff", os, "unknown", "none"]
+    if os == "simpleos" or os == "none" or os == "elf":
+        return ["elf", os, "unknown", "none"]
+    []
+
+# vendor/os/env of an explicit requested triple (SIMPLE_NATIVE_BUILD_TARGET).
+# Ok([]) when the request is not a 3/4-part triple (a plain selector: the host
+# is the legitimate fallback); Err for an explicit triple with an unknown OS.
+pub fn llvm_requested_triple_os_parts(requested: text) -> Result<[text], text>:
+    val parts = requested.split("-")
+    if parts.len() > 4:
+        return Err("invalid requested target triple '{requested}': expected arch-vendor-os[-environment]")
+    if parts.len() < 3:
+        return Ok([])
+    val cls = llvm_classify_os(parts[2], parts[0])
+    if cls.len() == 0:
+        return Err("unknown OS '{parts[2]}' in requested target triple '{requested}': refusing to fall back to the host")
+    val env = match cls[3]:
+        case "keep": if parts.len() == 4: parts[3] else: ""
+        case "gnu": if parts.len() == 4: parts[3] else: "gnu"
+        case "winenv": if parts.len() == 4: parts[3] else: llvm_hosted_windows_env()
+        case _: ""
+    Ok([cls[2], cls[1], env])
+
 impl LlvmTargetTriple:
     static fn from_target(target: CodegenTarget) -> LlvmTargetTriple:
         """Create target triple from codegen target (hosted mode with OS)."""
@@ -186,21 +236,32 @@ impl LlvmTargetTriple:
             val detected_host_os = host_os()
 
             # Map host OS to LLVM triple components (os, vendor, env)
-            val os_result = match detected_host_os:
+            var os_result = match detected_host_os:
                 case "linux": "linux"
                 case "freebsd": "freebsd"
                 case "macos": "darwin"
                 case "windows": "windows"
                 case _: "linux"
-            val vendor_result = match detected_host_os:
+            var vendor_result = match detected_host_os:
                 case "macos": "apple"
                 case "windows": "pc"
                 case _: "unknown"
-            val env_result = match detected_host_os:
-                case "freebsd": nil
-                case "macos": nil
+            var env_result = match detected_host_os:
+                case "freebsd": None
+                case "macos": None
                 case "windows": Some(llvm_hosted_windows_env())
                 case _: Some("gnu")
+            # An explicit requested triple decides OS/vendor/env (and therefore
+            # the object format); the compiler host is only the fallback for
+            # an unspecified target. Without this a Windows host emitted COFF
+            # for aarch64-linux and x86_64-simpleos.
+            val requested_parts = match llvm_requested_triple_os_parts(requested_target):
+                case Ok(p): p
+                case Err(e): panic(e)
+            if requested_parts.len() == 3:
+                vendor_result = requested_parts[0]
+                os_result = requested_parts[1]
+                env_result = if requested_parts[2] == "": None else: Some(requested_parts[2])
 
             match target:
                 case X86_64:
@@ -236,8 +297,10 @@ impl LlvmTargetTriple:
         # - macOS (Mach-O): m:o
         # - Windows (COFF): m:w
         # - ELF (Linux, FreeBSD): m:e
-        val is_macho = self.os == "darwin"
-        val is_coff = self.os == "windows"
+        val os_class = llvm_classify_os(self.os, self.arch)
+        val os_format = if os_class.len() == 0: "elf" else: os_class[0]
+        val is_macho = os_format == "macho"
+        val is_coff = os_format == "coff"
         match self.arch:
             case "x86_64":
                 if is_macho:
