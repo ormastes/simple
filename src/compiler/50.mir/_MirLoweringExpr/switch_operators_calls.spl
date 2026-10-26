@@ -6139,11 +6139,21 @@ impl MirLowering:
         if self.nogc_strict and not ownership_known:
             self.error_fatal("unresolved ownership type at constructor storage transfer", Some(source.span))
         false
-    me lower_struct_construct(symbol: SymbolId, struct_name: text, args: [HirCallArg]) -> LocalId:
+    me lower_struct_construct(symbol: SymbolId, fallback_struct_name: text, args: [HirCallArg]) -> LocalId:
         """Lower `Point(x:3, y:4)` (or `Point{...}`) into an aggregate: one i64
         word per field, in declared field order. Named args are matched by name;
         otherwise falls back to positional order. Yields a pointer to the
         constructed storage (see backend translate_aggregate Struct branch)."""
+        var struct_name = fallback_struct_name
+        if val declaration = self.symbols.get_symbol_raw(symbol.id):
+            if declaration.kind == SymbolKind.Struct:
+                struct_name = self.declared_struct_layout_key(self.composite_layout_key(declaration))
+                if not self.struct_field_order.has(struct_name):
+                    self.error_fatal("missing struct provider metadata for {struct_name}", Some(declaration.span))
+                    var missing_builder = self.builder
+                    val missing_value = missing_builder.emit_const_int(0)
+                    self.builder = missing_builder
+                    return missing_value
         val field_names = self.struct_field_order[struct_name]
         var field_hir_types: [HirType] = []
         if self.struct_field_hir_type.has(struct_name):
@@ -8184,6 +8194,10 @@ impl MirLowering:
             if mir_expr_symbol_id_value(direct_symbol) >= 0:
                 if val present_constructor_info = self.symbols.get_symbol_raw(direct_symbol.id):
                     val constructor_info: HirSymbol = present_constructor_info
+                    # Resolve Struct metadata in the shared constructor before
+                    # any bare-name gate can borrow another provider's row.
+                    if constructor_info.kind == SymbolKind.Struct:
+                        return self.lower_struct_construct(direct_symbol, direct_name, args)
                     val candidate = mir_class_identity(constructor_info)
                     if constructor_info.kind == SymbolKind.Class:
                         constructor_name = candidate

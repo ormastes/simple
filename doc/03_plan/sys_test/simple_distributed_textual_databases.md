@@ -116,3 +116,41 @@ The five canonical steps remain visible. Happy, boundary, and failure names are 
 | NFR-015 | should prove that it runs one pure semantic core through all capability fixtures | should prove that it keeps subprocess network OS and runtime code in adapters | should prove that it rejects forbidden provider SDK or raw runtime dependency in the core | `check_replica_contract` | Missing: explicit fail-fast |
 
 Every REQ-001..REQ-036 and NFR-001..NFR-015 has three executable, behavior-specific cases. The table is a coverage design, not an admission result.
+
+## REQ-014 durable causality oracle continuation — 2026-10-20
+
+Three REQ-014 scenario bodies now drive the existing production local
+settlement queue, signed receipt readback, actual Git semantic/identity
+snapshots, and fresh-process queue readback. These are authored, UNEXECUTED
+oracles; no full requirement or host PASS is claimed.
+
+- A Q -> P graph plus concurrent R arrives P/R/Q. The expected order is derived
+  independently from available nodes and canonical batch-ID comparisons.
+- Isolated authorities receive P/R/Q versus Q/P/R; their observed order must
+  match while original signed dependencies and patch bytes remain unchanged.
+- An unavailable external predecessor blocks preparation. Queue generation,
+  serialized content, attempt counter and both remote references stay unchanged.
+
+`db_causality_fixture.spl` reopens each persisted enqueue, Prepared,
+AwaitingIndex and LocalIndexObserved generation in
+`queue_reopen_probe.spl`, a separately spawned process under the source-matched
+pure-Simple runtime. The child independently decodes the pinned policy and
+reopens the production store; it compares the actual head and canonical queue
+digest. The 120-second per-child timeout is explicit. Repeated child startup is
+intentional acceptance instrumentation for process-boundary durability, not a
+production request strategy.
+
+The reference-size local bare-remote fixture does not certify protected GitHub
+settlement or Operating-B scalability. Requirement scope remains unchanged.
+The top-level historical status/table predates these three new oracles; its
+REQ-014 fail-fast entry is superseded by this addendum only. Generate the manual
+from an admitted run before verification can PASS. Sidecars: N/A for authoring;
+root owns this source continuation; retained final review remains pending.
+
+Runtime identity follow-up: the suite retains an `Item2CausalRuntime` value
+binding the admitted candidate and provenance SHA-256 values. Each child
+invocation checks both files before and after execution; missing or changed
+identity fails the example. Successful child output is retained in
+`build/test-artifacts/item2-causality-<pid>-<head>.txt` with the expected queue
+head/digest, runtime/provenance digests, exit code, stdout and stderr. These are
+future run artifacts, not files produced during source authoring.

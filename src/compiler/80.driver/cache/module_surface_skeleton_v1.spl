@@ -70,18 +70,189 @@ fn _skel_header_v1(lines: [text], index: i64) -> (i64, bool):
         end = end + 1
     (-1, true)
 
-# For each line, whether it STARTS inside a triple-quoted string (`"""` or
-# `r"""`). Without this, a function whose body embeds column-0 string content
-# (GPU kernel source in `r"""` literals) was cut at the first column-0 content
-# line, and the leaked content was parsed as code (P4-RAWSTR).
+# Identifier character policy mirrors compiler.core.lexer_chars.is_ident_char.
+fn _skel_ident_char_v1(c: text) -> bool:
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(c)
+
+fn _skel_expr_has_word_v1(line: text, start: i64, end: i64, word: text) -> bool:
+    var i = start
+    while i + word.len() <= end:
+        if line.substring(i, i + word.len()) == word:
+            var left_ok = i == start
+            if not left_ok:
+                left_ok = not _skel_ident_char_v1(line.substring(i - 1, i))
+            var right_ok = i + word.len() == end
+            if not right_ok:
+                right_ok = not _skel_ident_char_v1(line.substring(i + word.len(), i + word.len() + 1))
+            if left_ok and right_ok:
+                return true
+        i = i + 1
+    false
+
+fn _skel_expr_ends_with_word_v1(line: text, start: i64, end: i64, word: text) -> bool:
+    if end - start < word.len():
+        return false
+    if line.substring(end - word.len(), end) != word:
+        return false
+    var left_ok = end - word.len() <= start
+    if not left_ok:
+        left_ok = not _skel_ident_char_v1(line.substring(end - word.len() - 1, end - word.len()))
+    left_ok
+
+# Match lexer_struct.fs_nested_string_may_open for the small question the
+# skeleton needs: whether a quote inside `{...}` can begin a nested operand.
+fn _skel_nested_string_may_open_v1(line: text, start: i64, quote_pos: i64, paren_depth: i64) -> bool:
+    if paren_depth > 0:
+        return true
+    if (_skel_expr_has_word_v1(line, start, quote_pos, "if") or
+        _skel_expr_has_word_v1(line, start, quote_pos, "else") or
+        _skel_expr_has_word_v1(line, start, quote_pos, "match")):
+        return true
+    var end = quote_pos
+    while end > start and (line.substring(end - 1, end) == " " or line.substring(end - 1, end) == "\t"):
+        end = end - 1
+    if end <= start:
+        return false
+    val last = line.substring(end - 1, end)
+    if end - start >= 2:
+        val prev = line.substring(end - 2, end - 1)
+        if last == "=" and (prev == "=" or prev == "!" or prev == "<" or prev == ">"):
+            return true
+        if last == "?" and prev == "?":
+            return true
+    if (last == "<" or last == ">" or last == "+" or last == "-" or
+        last == "*" or last == "/" or last == "%" or last == "," or
+        last == "(" or last == "["):
+        return true
+    _skel_expr_ends_with_word_v1(line, start, end, "and") or
+        _skel_expr_ends_with_word_v1(line, start, end, "or") or
+        _skel_expr_ends_with_word_v1(line, start, end, "not") or
+        _skel_expr_ends_with_word_v1(line, start, end, "in")
+
+# Find the matching `}` for ordinary-string interpolation. A failed
+# lookahead means `{` is literal, matching lexer_struct.scan_string; this keeps
+# braces in CSS/JSON-like strings from carrying quote state onto later lines.
+fn _skel_interpolation_end_v1(line: text, start: i64) -> i64:
+    var depth = 1
+    var paren_depth = 0
+    var nested_quote = ""
+    var escaped = false
+    var i = start + 1
+    while i < line.len():
+        val c = line.substring(i, i + 1)
+        if nested_quote != "":
+            if escaped:
+                escaped = false
+            elif c == "\\":
+                escaped = true
+            elif c == nested_quote:
+                nested_quote = ""
+        elif c == "\"":
+            if not _skel_nested_string_may_open_v1(line, start + 1, i, paren_depth):
+                return -1
+            nested_quote = c
+        elif c == "'":
+            nested_quote = c
+        elif c == "{":
+            depth = depth + 1
+        elif c == "}":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        elif c == "(" or c == "[":
+            paren_depth = paren_depth + 1
+        elif c == ")" or c == "]":
+            paren_depth = paren_depth - 1
+        i = i + 1
+    -1
+
+fn _skel_raw_string_prefix_v1(line: text, quote_pos: i64) -> bool:
+    if quote_pos <= 0:
+        return false
+    if line.substring(quote_pos - 1, quote_pos) != "r":
+        return false
+    if quote_pos == 1:
+        return true
+    not _skel_ident_char_v1(line.substring(quote_pos - 2, quote_pos - 1))
+
+# For each line, whether it STARTS inside a multiline string (or a normal
+# string continued by a backslash-newline). Comments and ordinary quoted
+# literals must not let delimiter-looking text poison later declarations.
 fn _skel_string_continuations_v1(lines: [text]) -> [bool]:
-    var inside = false
+    var triple = ""
+    var continued_quote = ""
     var out: [bool] = []
     for line in lines:
-        out.push(inside)
-        val quotes = line.split("\"\"\"").len() - 1
-        if quotes % 2 == 1:
-            inside = not inside
+        out.push(triple != "" or continued_quote != "")
+        var continued_next_line = false
+        var i = 0
+        while i < line.len():
+            if triple != "":
+                if i + 3 <= line.len() and line.substring(i, i + 3) == triple:
+                    triple = ""
+                    i = i + 3
+                else:
+                    i = i + 1
+            elif continued_quote != "":
+                val c = line.substring(i, i + 1)
+                if c == "\\":
+                    if i + 1 == line.len():
+                        continued_next_line = true
+                        i = line.len()
+                    else:
+                        i = i + 2
+                elif c == continued_quote:
+                    continued_quote = ""
+                    i = i + 1
+                elif (continued_quote == "\"" or continued_quote == "'") and c == "{" and i + 1 < line.len() and
+                        line.substring(i + 1, i + 2) != "\"" and
+                        line.substring(i + 1, i + 2) != "'":
+                    val close_brace = _skel_interpolation_end_v1(line, i)
+                    if close_brace >= 0:
+                        i = close_brace + 1
+                    else:
+                        i = i + 1
+                else:
+                    i = i + 1
+            else:
+                val c = line.substring(i, i + 1)
+                if c == "#":
+                    i = line.len()
+                elif c == "\"" or c == "'":
+                    val delim = c + c + c
+                    if i + 3 <= line.len() and line.substring(i, i + 3) == delim:
+                        triple = delim
+                        i = i + 3
+                    else:
+                        val raw = c == "\"" and _skel_raw_string_prefix_v1(line, i)
+                        var closed = false
+                        i = i + 1
+                        while i < line.len() and not closed:
+                            val body_char = line.substring(i, i + 1)
+                            if body_char == c:
+                                closed = true
+                                i = i + 1
+                            elif body_char == "\\" and not raw:
+                                if i + 1 == line.len():
+                                    continued_quote = c
+                                    continued_next_line = true
+                                    i = line.len()
+                                else:
+                                    i = i + 2
+                            elif body_char == "{" and i + 1 < line.len() and
+                                    line.substring(i + 1, i + 2) != "\"" and
+                                    line.substring(i + 1, i + 2) != "'" and not raw:
+                                val close_brace = _skel_interpolation_end_v1(line, i)
+                                if close_brace >= 0:
+                                    i = close_brace + 1
+                                else:
+                                    i = i + 1
+                            else:
+                                i = i + 1
+                else:
+                    i = i + 1
+        if continued_quote != "" and not continued_next_line:
+            continued_quote = ""
     out
 
 pub fn module_surface_skeleton_v1(source: text) -> text:
