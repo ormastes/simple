@@ -2380,9 +2380,8 @@ static int rt_core_immortal_registry_resize(size_t new_cap) {
     return 1;
 }
 
-static int rt_core_register_immortal_ptr(void* ptr) {
+static int rt_core_register_immortal_ptr_locked_v1(void* ptr) {
     if (!ptr) return 0;
-    rt_core_immortal_registry_acquire();
     /* grow at 70% load; tombstones count as occupancy since they lengthen
      * probe chains exactly as live entries do */
     if ((rt_core_immortal_registry_len + rt_core_immortal_registry_tombs + 1) * 10
@@ -2397,7 +2396,6 @@ static int rt_core_register_immortal_ptr(void* ptr) {
             new_cap = rt_core_immortal_registry_cap;
         }
         if (!rt_core_immortal_registry_resize(new_cap)) {
-            rt_core_immortal_registry_release();
             return 0;
         }
     }
@@ -2405,8 +2403,13 @@ static int rt_core_register_immortal_ptr(void* ptr) {
     if (inserted) {
         atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
     }
-    rt_core_immortal_registry_release();
     return 1;
+}
+
+static int rt_core_register_immortal_ptr(void* ptr) {
+    rt_core_immortal_registry_acquire();
+    int result=rt_core_register_immortal_ptr_locked_v1(ptr);
+    rt_core_immortal_registry_release(); return result;
 }
 
 static int rt_core_is_registered_immortal_ptr(void* ptr) {
@@ -8564,6 +8567,8 @@ static SplArray* rt_core_array_new(int64_t cap, uint8_t flags) {
 SplArray* rt_array_new(int64_t cap) {
     return rt_core_array_new(cap, 0);
 }
+
+#include "runtime_dict_snapshot_v1.inc"
 
 /* Typed Simple arrays use the ordinary tagged-slot array ABI. The interpreter
  * allocates the requested length and fills every slot with numeric zero. */
