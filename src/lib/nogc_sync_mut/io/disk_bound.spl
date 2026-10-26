@@ -6,14 +6,31 @@ artifacts, runtime objects): measure a directory and sweep its oldest files
 indexes) and `*.tmp` (in-flight publishes) are never counted or removed.
 """
 
-use std.nogc_sync_mut.io_runtime.{dir_walk, dir_exists, file_size_signed, file_delete, env_get_opt}
+use std.nogc_sync_mut.io_runtime.{dir_walk, dir_exists, file_size_signed, file_delete, env_get_opt,
+    file_exists, file_write, dir_create}
 use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+
+fn _disk_bound_basename(path: text) -> text:
+    val canonical = path.replace("\\", "/")
+    canonical.substring(canonical.last_index_of("/") + 1)
+
+fn _disk_bound_used_path(dir: text, path: text) -> text:
+    "{dir}/.used/" + _disk_bound_basename(path)
+
+# Records a cache hit on `path` (an entry under dir) so the sweep treats it
+# as recently used. The marker is an empty file whose mtime is the last use;
+# it is removed together with its entry.
+pub fn disk_bound_mark_used(dir: text, path: text):
+    if not dir_exists(dir + "/.used"):
+        val _made = dir_create(dir + "/.used", true)
+    val _written = file_write(_disk_bound_used_path(dir, path), "")
 
 fn _disk_bound_is_entry(path: text) -> bool:
     val canonical = path.replace("\\", "/")
     val name = canonical.substring(canonical.last_index_of("/") + 1)
     # candidate-* receipts are another build's in-flight publish.
-    not canonical.contains("/.by-source/") and not canonical.ends_with(".tmp") and
+    not canonical.contains("/.by-source/") and not canonical.contains("/.used/") and
+        not canonical.ends_with(".tmp") and
         not name.starts_with("candidate-")
 
 pub fn disk_bound_dir_bytes(dir: text) -> i64:
@@ -39,11 +56,16 @@ pub fn disk_bound_sweep(dir: text, target_bytes: i64) -> i64:
         if _disk_bound_is_entry(path) and not dir_exists(path):
             val size = file_size_signed(path)
             if size >= 0:
-                # mtime 0 = unreadable: order it last, never first.
-                val mtime = file_modified_time(path)
-                val stamp = if mtime > 0: "{mtime}" else: "999999999999"
-                val zeros = "000000000000"
-                val pad = zeros.substring(0, 12 - stamp.len())
+                # Last use = max(entry mtime, hit marker mtime); within one
+                # second a used entry outranks an unused one. mtime 0 means
+                # unreadable: order it last, never first.
+                val used_path = _disk_bound_used_path(dir, path)
+                val used = if file_exists(used_path): file_modified_time(used_path) else: 0
+                val written = file_modified_time(path)
+                val last = if used > written: used else: written
+                val stamp = if written <= 0: "9999999999999" else: "{last * 2 + (if used > 0: 1 else: 0)}"
+                val zeros = "0000000000000"
+                val pad = zeros.substring(0, 13 - stamp.len())
                 rows.push(pad + stamp + "|{size}|" + path)
                 total = total + size
     val ordered = rows.sort()
@@ -55,7 +77,9 @@ pub fn disk_bound_sweep(dir: text, target_bytes: i64) -> i64:
         if parts.len() < 3:
             continue
         val size = parts[1].to_i64() ?? 0
-        if file_delete(parts[2:].join("|")):
+        val victim = parts[2:].join("|")
+        if file_delete(victim):
+            val _marker = file_delete(_disk_bound_used_path(dir, victim))
             total = total - size
             removed = removed + 1
     removed
