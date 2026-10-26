@@ -6147,13 +6147,27 @@ impl MirLowering:
         var struct_name = fallback_struct_name
         if val declaration = self.symbols.get_symbol_raw(symbol.id):
             if declaration.kind == SymbolKind.Struct:
-                struct_name = self.declared_struct_layout_key(self.composite_layout_key(declaration))
-                if not self.struct_field_order.has(struct_name):
-                    self.error_fatal("missing struct provider metadata for {struct_name}", Some(declaration.span))
+                # Resolve construction through declaration provenance so two
+                # same-named struct providers keep their registered layouts.
+                struct_name = self.struct_value_layout_key(declaration)
+                if struct_name == "":
+                    # The identity helper already emitted the ambiguity fatal.
                     var missing_builder = self.builder
                     val missing_value = missing_builder.emit_const_int(0)
                     self.builder = missing_builder
                     return missing_value
+                if not self.struct_field_order.has(struct_name):
+                    self.error_fatal("missing exact struct construction layout '{struct_name}'", Some(declaration.span))
+                    var missing_builder = self.builder
+                    val missing_value = missing_builder.emit_const_int(0)
+                    self.builder = missing_builder
+                    return missing_value
+        if not self.struct_field_order.has(struct_name):
+            self.error_fatal("missing exact struct construction layout '{struct_name}'", nil)
+            var missing_builder = self.builder
+            val missing_value = missing_builder.emit_const_int(0)
+            self.builder = missing_builder
+            return missing_value
         val field_names = self.struct_field_order[struct_name]
         var field_hir_types: [HirType] = []
         if self.struct_field_hir_type.has(struct_name):
