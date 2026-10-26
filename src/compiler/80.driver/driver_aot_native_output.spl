@@ -1,4 +1,5 @@
 use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_keep_newest_dirs, disk_bound_cap_bytes}
 use std.common.cache_host_authority_v1.{CacheRootAuthorityV1, CacheObjectAuthorityV1, CacheTempAuthorityV1,
     cache_host_open_root_v1, cache_host_root_valid_v1, cache_host_open_read_v1,
     cache_host_object_valid_v1, cache_host_size_v1, cache_host_pread_receipt_v1,
@@ -2095,10 +2096,19 @@ impl CompilerDriver:
             options_identity: "backend={effective_backend}|opt={driver_opt_level}|release={is_release}|symbols={symbol_mode}|storage={sha256_text(storage_identity)}|environment={environment_identity.digest}",
             provider_identity: provider_receipt_hash,
             emitter_scheme: NATIVE_CACHE_EMITTER_SCHEME_V1)
-        val (base_cache_scope_root, _) = driver_native_build_cache_scope(
+        val (base_cache_scope_root, base_cache_scope_name) = driver_native_build_cache_scope(
             effective_backend, cache_dir, native_target, native_cpu,
             driver_opt_level, symbol_mode, storage_identity,
             environment_identity.digest, provider_receipt_hash)
+        # Bounded: every compiler/option identity gets its own scope dir and
+        # nothing removed old ones. Keep the current scope plus the newest,
+        # SIMPLE_NATIVE_CACHE_SCOPES_KEEP (default 6: the default root is shared
+        # by every backend/opt/target combination) in total; scopes used in
+        # the last 6 hours (another lane) are never removed. Legacy
+        # "scope-<16hex>" dirs from the previous naming can never match again.
+        val _scopes_evicted = disk_bound_keep_newest_dirs(cache_dir, base_cache_scope_name, "s", 33,
+            disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6), 21600)
+        val _legacy_evicted = disk_bound_keep_newest_dirs(cache_dir, "", "scope-", 22, 1, 21600)
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")
