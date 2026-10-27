@@ -1,0 +1,305 @@
+# Local SCV draft blob ownership only. This module does not implement or
+# advertise gateway wire operations, network authorization, snapshot plans, or
+# Git publication. The host creates and retains store_root as a private 0700
+# directory beneath a host-owned private ancestor, and durably syncs store_root
+# plus the ancestor entry naming it before use. This owner validates its
+# canonical/no-follow path identity but cannot inspect portable OS ownership
+# or sync ancestors above store_root.
+# Request content is native bytes bounded by their exact byte count.
+use app.io.mod.{dir_create, dir_remove_all, file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes, file_write_bytes, file_is_regular_no_follow, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_contains, path_entry_present}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use app.scv.db.local_store.{db_local_path_scope}
+
+const SCV_DRAFT_BLOB_MAX_BYTES_V1: i64 = 1048576
+const SCV_DRAFT_RECORD_MAX_BYTES_V1: i64 = 4096
+
+pub struct ScvDraftBlobAdmittedScopeV1:
+    repository_id: text
+    principal_id: text
+    can_read: bool
+    can_write: bool
+
+pub struct ScvDraftBlobRequestV1:
+    repository_id: text
+    principal_id: text
+    request_id: text
+    content_sha256: text
+    bytes: [u8]
+
+pub struct ScvDraftBlobReceiptV1:
+    repository_id: text
+    principal_id: text
+    request_id: text
+    content_sha256: text
+    byte_count: i64
+    state: text
+
+impl ScvDraftBlobReceiptV1:
+    fn __eq__(other: ScvDraftBlobReceiptV1) -> bool:
+        self.repository_id == other.repository_id and self.principal_id == other.principal_id and
+            self.request_id == other.request_id and self.content_sha256 == other.content_sha256 and
+            self.byte_count == other.byte_count and self.state == other.state
+
+struct _ScvDraftBlobPathsV1:
+    scoped_root: text
+    objects: text
+    requests: text
+    object: text
+    intent: text
+    receipt: text
+
+fn _scv_draft_blob_id_valid_v1(value: text) -> bool:
+    if value.len() <= 0 or value.len() > 128 or value == "." or value == "..": return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or
+                (code >= 97 and code <= 122) or code == 45 or code == 46 or code == 95):
+            return false
+    true
+
+fn _scv_draft_blob_hex_valid_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn _scv_draft_blob_scope_valid_v1(scope: ScvDraftBlobAdmittedScopeV1) -> bool:
+    _scv_draft_blob_id_valid_v1(scope.repository_id) and _scv_draft_blob_id_valid_v1(scope.principal_id)
+
+fn _scv_draft_blob_store_root_v1(root: text) -> Result<text, text>:
+    if root.len() <= 0 or root.len() > 4096 or root.ends_with("/"):
+        return Err("SCV_DRAFT_BLOB_ROOT")
+    if db_local_path_scope(root, []) != "" or not dir_is_real_no_follow(root):
+        return Err("SCV_DRAFT_BLOB_ROOT")
+    match path_final_existing(root):
+        case Ok(identity):
+            if identity.path != root: return Err("SCV_DRAFT_BLOB_ROOT")
+            Ok(root)
+        case Err(_): Err("SCV_DRAFT_BLOB_ROOT")
+
+fn _scv_draft_blob_repository_hash_v1(repository_id: text) -> text:
+    sha256_text("scv-gateway-draft-repository-v1\n{repository_id.len()}:{repository_id}\n")
+
+fn _scv_draft_blob_principal_hash_v1(principal_id: text) -> text:
+    sha256_text("scv-gateway-draft-principal-v1\n{principal_id.len()}:{principal_id}\n")
+
+fn _scv_draft_blob_request_key_v1(repository_id: text, principal_id: text, request_id: text) -> text:
+    sha256_text("scv-gateway-draft-request-key-v1\n{repository_id.len()}:{repository_id}\n{principal_id.len()}:{principal_id}\n{request_id.len()}:{request_id}\n")
+
+fn _scv_draft_blob_paths_v1(root: text, scope: ScvDraftBlobAdmittedScopeV1,
+                            request_id: text, digest: text) -> _ScvDraftBlobPathsV1:
+    val repository_hash = _scv_draft_blob_repository_hash_v1(scope.repository_id)
+    val principal_hash = _scv_draft_blob_principal_hash_v1(scope.principal_id)
+    val scoped = "{root}/repositories/{repository_hash}/principals/{principal_hash}"
+    val objects = "{scoped}/objects"
+    val requests = "{scoped}/requests"
+    val request_key = _scv_draft_blob_request_key_v1(scope.repository_id, scope.principal_id, request_id)
+    _ScvDraftBlobPathsV1(scoped_root: scoped, objects: objects, requests: requests,
+        object: "{objects}/{digest}.blob", intent: "{requests}/{request_key}.intent.sdn",
+        receipt: "{requests}/{request_key}.receipt.sdn")
+
+fn _scv_draft_blob_record_v1(kind: text, state: text, repository_id: text,
+                            principal_id: text, request_id: text,
+                            digest: text, byte_count: i64) -> text:
+    "version: 1\nrecord_type: draft_blob_{kind}\nstate: {state}\nrepository_id: {repository_id}\nprincipal_id: {principal_id}\nrequest_id: {request_id}\ncontent_sha256: {digest}\nbyte_count: {byte_count}\n"
+
+fn _scv_draft_blob_paths_scope_v1(root: text, paths: _ScvDraftBlobPathsV1) -> bool:
+    db_local_path_scope(root, ["repositories", paths.scoped_root[root.len() + 1:],
+        paths.scoped_root[root.len() + 1:] + "/objects", paths.scoped_root[root.len() + 1:] + "/requests"]) == ""
+
+fn _scv_draft_blob_directory_v1(root: text, relative: text) -> Result<text, text>:
+    if db_local_path_scope(root, []) != "": return Err("SCV_DRAFT_BLOB_SCOPE")
+    var path = root
+    var parent = match path_final_existing(root):
+        Ok(identity): identity
+        Err(_): return Err("SCV_DRAFT_BLOB_SCOPE")
+    for part in relative.split("/"):
+        if part == "" or part == "." or part == ".." or part.contains("\\"):
+            return Err("SCV_DRAFT_BLOB_SCOPE")
+        path = "{path}/{part}"
+        val present = match path_entry_present(path):
+            Ok(value): value
+            Err(_): return Err("SCV_DRAFT_BLOB_SCOPE")
+        if not present:
+            if not dir_create(path, false): return Err("SCV_DRAFT_BLOB_DIRECTORY")
+        # Re-sync each parent even when it already exists. A different writer
+        # may have created this entry but not yet crossed its durability barrier.
+        if not directory_fsync(parent.path): return Err("SCV_DRAFT_BLOB_SYNC")
+        if not dir_is_real_no_follow(path): return Err("SCV_DRAFT_BLOB_SCOPE")
+        val identity = match path_final_existing(path):
+            Ok(value): value
+            Err(_): return Err("SCV_DRAFT_BLOB_SCOPE")
+        if identity.path != path or not path_identity_contains(parent, identity):
+            return Err("SCV_DRAFT_BLOB_SCOPE")
+        parent = identity
+    if not directory_fsync(path): return Err("SCV_DRAFT_BLOB_SYNC")
+    Ok(path)
+
+fn _scv_draft_blob_read_bytes_v1(path: text, limit: i64) -> Result<[u8], text>:
+    if not file_is_regular_no_follow(path): return Err("SCV_DRAFT_BLOB_FILE")
+    match path_final_existing(path):
+        case Ok(identity):
+            if identity.path != path: return Err("SCV_DRAFT_BLOB_FILE")
+            file_read_regular_no_follow_bounded_bytes(path, limit)
+        case Err(_): Err("SCV_DRAFT_BLOB_FILE")
+
+fn _scv_draft_blob_read_record_v1(path: text) -> Result<text, text>:
+    if not file_is_regular_no_follow(path): return Err("SCV_DRAFT_BLOB_RECORD")
+    match path_final_existing(path):
+        case Ok(identity):
+            if identity.path != path: return Err("SCV_DRAFT_BLOB_RECORD")
+            file_read_regular_no_follow_bounded(path, SCV_DRAFT_RECORD_MAX_BYTES_V1)
+        case Err(_): Err("SCV_DRAFT_BLOB_RECORD")
+
+fn _scv_draft_blob_publish_record_staged_v1(directory: text, destination: text,
+                                             stage: text, value: text) -> Result<bool, text>:
+    val staged = "{stage}/record.sdn"
+    if not file_write_bytes(staged, value.bytes()) or not file_fsync(staged) or not directory_fsync(stage):
+        return Err("SCV_DRAFT_BLOB_SYNC")
+    if _scv_draft_blob_read_record_v1(staged)? != value: return Err("SCV_DRAFT_BLOB_STAGE_READBACK")
+    val published = file_publish_noreplace(staged, destination)?
+    if _scv_draft_blob_read_record_v1(destination)? != value: return Err("SCV_DRAFT_BLOB_RECORD_COLLISION")
+    if not file_fsync(destination) or not directory_fsync(directory): return Err("SCV_DRAFT_BLOB_SYNC")
+    Ok(published)
+
+fn _scv_draft_blob_publish_record_v1(directory: text, destination: text, value: text) -> Result<bool, text>:
+    val stage = secure_temp_dir(directory, "stage-")?
+    if not dir_is_real_no_follow(stage) or not stage.starts_with("{directory}/stage-"):
+        return Err("SCV_DRAFT_BLOB_STAGE_SCOPE")
+    val directory_identity = path_final_existing(directory)?
+    val stage_identity = path_final_existing(stage)?
+    if stage_identity.path != stage or not path_identity_contains(directory_identity, stage_identity):
+        return Err("SCV_DRAFT_BLOB_STAGE_SCOPE")
+    val result = _scv_draft_blob_publish_record_staged_v1(directory, destination, stage, value)
+    if not dir_is_real_no_follow(stage) or path_final_existing(stage)? != stage_identity:
+        return Err("SCV_DRAFT_BLOB_STAGE_SCOPE")
+    if not dir_remove_all(stage): return Err("SCV_DRAFT_BLOB_STAGE_CLEANUP")
+    result
+
+fn _scv_draft_blob_publish_object_staged_v1(directory: text, destination: text,
+                                             stage: text, bytes: [u8], digest: text) -> Result<bool, text>:
+    val staged = "{stage}/object.blob"
+    if not file_write_bytes(staged, bytes) or not file_fsync(staged) or not directory_fsync(stage):
+        return Err("SCV_DRAFT_BLOB_SYNC")
+    val staged_bytes = _scv_draft_blob_read_bytes_v1(staged, SCV_DRAFT_BLOB_MAX_BYTES_V1)?
+    if staged_bytes != bytes or sha256_u8_hex(staged_bytes) != digest:
+        return Err("SCV_DRAFT_BLOB_STAGE_READBACK")
+    val published = file_publish_noreplace(staged, destination)?
+    val stored = _scv_draft_blob_read_bytes_v1(destination, SCV_DRAFT_BLOB_MAX_BYTES_V1)?
+    if stored != bytes or sha256_u8_hex(stored) != digest:
+        return Err("SCV_DRAFT_BLOB_OBJECT_COLLISION")
+    if not file_fsync(destination) or not directory_fsync(directory): return Err("SCV_DRAFT_BLOB_SYNC")
+    Ok(published)
+
+fn _scv_draft_blob_publish_object_v1(directory: text, destination: text,
+                                    bytes: [u8], digest: text) -> Result<bool, text>:
+    val stage = secure_temp_dir(directory, "stage-")?
+    if not dir_is_real_no_follow(stage) or not stage.starts_with("{directory}/stage-"):
+        return Err("SCV_DRAFT_BLOB_STAGE_SCOPE")
+    val directory_identity = path_final_existing(directory)?
+    val stage_identity = path_final_existing(stage)?
+    if stage_identity.path != stage or not path_identity_contains(directory_identity, stage_identity):
+        return Err("SCV_DRAFT_BLOB_STAGE_SCOPE")
+    val result = _scv_draft_blob_publish_object_staged_v1(directory, destination, stage, bytes, digest)
+    if not dir_is_real_no_follow(stage) or path_final_existing(stage)? != stage_identity:
+        return Err("SCV_DRAFT_BLOB_STAGE_SCOPE")
+    if not dir_remove_all(stage): return Err("SCV_DRAFT_BLOB_STAGE_CLEANUP")
+    result
+
+fn _scv_draft_blob_verified_object_v1(path: text, digest: text, byte_count: i64) -> Result<[u8], text>:
+    if byte_count < 0 or byte_count > SCV_DRAFT_BLOB_MAX_BYTES_V1: return Err("SCV_DRAFT_BLOB_LENGTH")
+    val bytes = _scv_draft_blob_read_bytes_v1(path, SCV_DRAFT_BLOB_MAX_BYTES_V1)?
+    if bytes.len() as i64 != byte_count or sha256_u8_hex(bytes) != digest:
+        return Err("SCV_DRAFT_BLOB_INTEGRITY")
+    Ok(bytes)
+
+fn _scv_draft_blob_put_scope_v1(root: text, scope: ScvDraftBlobAdmittedScopeV1,
+                                request: ScvDraftBlobRequestV1) -> Result<_ScvDraftBlobPathsV1, text>:
+    if not scope.can_write: return Err("SCV_DRAFT_BLOB_WRITE_DENIED")
+    if not _scv_draft_blob_scope_valid_v1(scope) or request.repository_id != scope.repository_id or
+       request.principal_id != scope.principal_id or not _scv_draft_blob_id_valid_v1(request.request_id):
+        return Err("SCV_DRAFT_BLOB_AUTH_SCOPE")
+    val bytes = request.bytes
+    if bytes.len() as i64 > SCV_DRAFT_BLOB_MAX_BYTES_V1: return Err("SCV_DRAFT_BLOB_QUOTA")
+    if not _scv_draft_blob_hex_valid_v1(request.content_sha256) or sha256_u8_hex(bytes) != request.content_sha256:
+        return Err("SCV_DRAFT_BLOB_DIGEST")
+    val checked_root = _scv_draft_blob_store_root_v1(root)?
+    val paths = _scv_draft_blob_paths_v1(checked_root, scope, request.request_id, request.content_sha256)
+    Ok(paths)
+
+pub fn scv_draft_blob_put_v1(store_root: text, admitted_scope: ScvDraftBlobAdmittedScopeV1,
+                             request: ScvDraftBlobRequestV1) -> Result<ScvDraftBlobReceiptV1, text>:
+    # This scope is a trusted in-process value from the host policy resolver.
+    # The request identity fields bind to it; they never create authorization.
+    val paths = _scv_draft_blob_put_scope_v1(store_root, admitted_scope, request)?
+    if not _scv_draft_blob_paths_scope_v1(store_root, paths): return Err("SCV_DRAFT_BLOB_SCOPE")
+    val relative = paths.scoped_root[store_root.len() + 1:]
+    val objects_relative = relative + "/objects"
+    val requests_relative = relative + "/requests"
+    val requests = _scv_draft_blob_directory_v1(store_root, requests_relative)?
+    val objects = _scv_draft_blob_directory_v1(store_root, objects_relative)?
+    val count = request.bytes.len() as i64
+    val intent = _scv_draft_blob_record_v1("request", "intent", admitted_scope.repository_id,
+        admitted_scope.principal_id, request.request_id, request.content_sha256, count)
+    val receipt_text = _scv_draft_blob_record_v1("receipt", "local_durable", admitted_scope.repository_id,
+        admitted_scope.principal_id, request.request_id, request.content_sha256, count)
+    val intent_present = match path_entry_present(paths.intent):
+        Ok(value): value
+        Err(_): return Err("SCV_DRAFT_BLOB_SCOPE")
+    if intent_present:
+        if _scv_draft_blob_read_record_v1(paths.intent)? != intent:
+            return Err("SCV_DRAFT_BLOB_IDEMPOTENCY_CONFLICT")
+        # Recovery cannot perform any object effect until the prior intent and
+        # its name are durable, including when another writer created them.
+        if not file_fsync(paths.intent) or not directory_fsync(requests):
+            return Err("SCV_DRAFT_BLOB_SYNC")
+    else:
+        _scv_draft_blob_publish_record_v1(requests, paths.intent, intent)?
+    val receipt_present = match path_entry_present(paths.receipt):
+        Ok(value): value
+        Err(_): return Err("SCV_DRAFT_BLOB_SCOPE")
+    if receipt_present:
+        if _scv_draft_blob_read_record_v1(paths.receipt)? != receipt_text:
+            return Err("SCV_DRAFT_BLOB_RECEIPT_CONFLICT")
+        _scv_draft_blob_verified_object_v1(paths.object, request.content_sha256, count)?
+        # An identical concurrent writer may have published, but not yet
+        # synced, these immutable names. Establish both barriers before ACK.
+        if not file_fsync(paths.receipt) or not file_fsync(paths.object) or
+           not directory_fsync(requests) or not directory_fsync(objects):
+            return Err("SCV_DRAFT_BLOB_SYNC")
+        return Ok(ScvDraftBlobReceiptV1(repository_id: admitted_scope.repository_id,
+            principal_id: admitted_scope.principal_id, request_id: request.request_id,
+            content_sha256: request.content_sha256, byte_count: count, state: "local_durable"))
+    _scv_draft_blob_publish_object_v1(objects, paths.object, request.bytes, request.content_sha256)?
+    _scv_draft_blob_verified_object_v1(paths.object, request.content_sha256, count)?
+    _scv_draft_blob_publish_record_v1(requests, paths.receipt, receipt_text)?
+    # The receipt is the local acknowledgment boundary. Verify it and its object
+    # again before returning; callers still cannot infer network acceptance.
+    if _scv_draft_blob_read_record_v1(paths.receipt)? != receipt_text:
+        return Err("SCV_DRAFT_BLOB_RECEIPT_READBACK")
+    _scv_draft_blob_verified_object_v1(paths.object, request.content_sha256, count)?
+    Ok(ScvDraftBlobReceiptV1(repository_id: admitted_scope.repository_id,
+        principal_id: admitted_scope.principal_id, request_id: request.request_id,
+        content_sha256: request.content_sha256, byte_count: count, state: "local_durable"))
+
+pub fn scv_draft_blob_get_v1(store_root: text, admitted_scope: ScvDraftBlobAdmittedScopeV1,
+                             content_sha256: text) -> Result<[u8], text>:
+    # Check capability and scope before deriving a path or touching the store.
+    if not admitted_scope.can_read: return Err("SCV_DRAFT_BLOB_READ_DENIED")
+    if not _scv_draft_blob_scope_valid_v1(admitted_scope) or not _scv_draft_blob_hex_valid_v1(content_sha256):
+        return Err("SCV_DRAFT_BLOB_AUTH_SCOPE")
+    val root = _scv_draft_blob_store_root_v1(store_root)?
+    val repository_hash = _scv_draft_blob_repository_hash_v1(admitted_scope.repository_id)
+    val principal_hash = _scv_draft_blob_principal_hash_v1(admitted_scope.principal_id)
+    val relative = "repositories/{repository_hash}/principals/{principal_hash}"
+    val objects_relative = "{relative}/objects"
+    if db_local_path_scope(root, ["repositories", relative, objects_relative]) != "":
+        return Err("SCV_DRAFT_BLOB_SCOPE")
+    val object = "{root}/{objects_relative}/{content_sha256}.blob"
+    val bytes = _scv_draft_blob_read_bytes_v1(object, SCV_DRAFT_BLOB_MAX_BYTES_V1)?
+    if sha256_u8_hex(bytes) != content_sha256: return Err("SCV_DRAFT_BLOB_INTEGRITY")
+    Ok(bytes)
