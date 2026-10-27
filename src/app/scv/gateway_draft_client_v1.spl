@@ -5,7 +5,16 @@ use std.scv.gateway_draft_protocol_v1.{ScvGatewayDraftRequestV1, ScvGatewayDraft
 use std.nogc_sync_mut.http_client.bounded_endpoint_v1.{BoundedHttpTargetV1,
     bounded_http_target_v1, bounded_http_bearer_valid_v1}
 use std.nogc_sync_mut.http_client.bounded_transport_v1.{bounded_http_post_with_request_limit_v1}
-use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_u8_fast_hex, sha256_text}
+use app.scv.gateway_draft_store_v1.{ScvDraftSnapshotRootReceiptV1, scv_snapshot_offline_pin_import_v1}
+use std.scv.gateway_snapshot_replication_v1.{ScvGatewaySnapshotManifestV1,
+    ScvGatewaySnapshotRequestV1, ScvGatewaySnapshotResponseV1,
+    SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1, scv_gateway_snapshot_request_encode_v1,
+    scv_gateway_snapshot_response_decode_v1, scv_gateway_snapshot_manifest_validate_v1,
+    ScvGatewaySnapshotObjectRefV1, SCV_GATEWAY_SNAPSHOT_MAX_MISSING_V1,
+    ScvGatewaySnapshotReadRequestV1, ScvGatewaySnapshotReadResponseV1,
+    scv_gateway_snapshot_read_request_encode_v1, scv_gateway_snapshot_read_response_decode_v1,
+    scv_gateway_snapshot_manifest_decode_v1}
 
 pub struct ScvGatewayDraftClientConfigV1:
     endpoint: text
@@ -14,6 +23,19 @@ pub struct ScvGatewayDraftClientConfigV1:
     allow_loopback_http: bool
     timeout_ms: i64
     tls_address: text
+
+pub struct ScvGatewaySnapshotClientConfigV1:
+    endpoint: text
+    repository: text
+    principal_id: text
+    allow_loopback_http: bool
+    timeout_ms: i64
+    tls_address: text
+
+pub struct ScvGatewayFetchedSnapshotV1:
+    manifest: ScvGatewaySnapshotManifestV1
+    manifest_wire: text
+    objects: Dict<text, [u8]>
 
 fn _draft_client_subject_id_valid_v1(value: text) -> bool:
     if value.len() <= 0 or value.len() > 128 or value == "." or value == "..": return false
@@ -70,5 +92,151 @@ pub fn scv_gateway_draft_client_get_v1(config: ScvGatewayDraftClientConfigV1,
         method: "get", request_id: request_id, content_sha256: content_sha256, bytes: [])
     scv_gateway_draft_client_call_v1(config, request, credentials)
 
-export ScvGatewayDraftClientConfigV1, scv_gateway_draft_client_target_v1
+pub fn scv_gateway_snapshot_client_publish_v1(config: ScvGatewaySnapshotClientConfigV1,
+        id: text, request_id: text, manifest: ScvGatewaySnapshotManifestV1,
+        credentials: fn() -> Result<text, text>) -> Result<ScvGatewaySnapshotResponseV1, text>:
+    if config.timeout_ms < 1 or config.timeout_ms > 60000 or
+        not _draft_client_subject_id_valid_v1(config.repository) or
+        not _draft_client_subject_id_valid_v1(config.principal_id): return Err("snapshot_client_subject")
+    val target = bounded_http_target_v1(config.endpoint, config.tls_address, config.allow_loopback_http)?
+    if target.path != "/scv/snapshot/v1": return Err("snapshot_client_path")
+    val request = ScvGatewaySnapshotRequestV1(version: 1, id: id, repository: config.repository,
+        request_id: request_id, manifest: manifest)
+    val wire = match scv_gateway_snapshot_request_encode_v1(request, config.repository, config.principal_id):
+        case Ok(value): value
+        case Err(_): return Err("snapshot_client_request_invalid")
+    val token = match credentials():
+        case Ok(value): value
+        case Err(_): return Err("snapshot_client_credentials_unavailable")
+    if not bounded_http_bearer_valid_v1(token): return Err("snapshot_client_credentials_invalid")
+    val source = match bounded_http_post_with_request_limit_v1(target, token, wire,
+            config.timeout_ms, SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1,
+            SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1):
+        case Ok(value): value
+        case Err(_): return Err("snapshot_client_transport_failed")
+    scv_gateway_snapshot_response_decode_v1(source, request,
+        config.repository, config.principal_id)
+
+fn _snapshot_client_object_v1(manifest: ScvGatewaySnapshotManifestV1,
+        object_id: text) -> ScvGatewaySnapshotObjectRefV1:
+    for object in manifest.objects:
+        if object.object_id == object_id: return object
+    ScvGatewaySnapshotObjectRefV1(kind: "", object_id: "", content_sha256: "", byte_count: -1)
+
+pub fn scv_gateway_snapshot_client_replicate_v1(config: ScvGatewaySnapshotClientConfigV1,
+        id: text, request_id: text, manifest: ScvGatewaySnapshotManifestV1,
+        local_objects: Dict<text, [u8]>, credentials: fn() -> Result<text, text>) -> Result<ScvGatewaySnapshotResponseV1, text>:
+    scv_gateway_snapshot_manifest_validate_v1(manifest, config.repository, config.principal_id)?
+    if not config.endpoint.ends_with("/scv/snapshot/v1"): return Err("snapshot_client_path")
+    val draft_endpoint = config.endpoint.replace("/scv/snapshot/v1", "/scv/draft/v1")
+    val draft_config = ScvGatewayDraftClientConfigV1(endpoint: draft_endpoint,
+        repository: config.repository, principal_id: config.principal_id,
+        allow_loopback_http: config.allow_loopback_http, timeout_ms: config.timeout_ms,
+        tls_address: config.tls_address)
+    var attempt = 0
+    while attempt <= 256:
+        val response = scv_gateway_snapshot_client_publish_v1(config, id, request_id,
+            manifest, credentials)?
+        if response.status != "needs_inputs": return Ok(response)
+        if response.missing_object_ids.len() == 0 or
+            response.missing_object_ids.len() > SCV_GATEWAY_SNAPSHOT_MAX_MISSING_V1:
+            return Err("snapshot_client_missing_invalid")
+        for object_id in response.missing_object_ids:
+            val descriptor = _snapshot_client_object_v1(manifest, object_id)
+            if descriptor.byte_count < 0 or not local_objects.contains_key(object_id):
+                return Err("snapshot_client_local_input_missing")
+            val bytes = local_objects[object_id]
+            if bytes.len() as i64 != descriptor.byte_count or sha256_u8_hex(bytes) != descriptor.content_sha256:
+                return Err("snapshot_client_local_input_integrity")
+            val pin_id = scv_gateway_snapshot_manifest_validate_v1(manifest,
+                config.repository, config.principal_id)?.snapshot_pin_id
+            val transfer_id = sha256_u8_hex("{pin_id}|{object_id}".bytes())
+            val put = scv_gateway_draft_client_put_v1(draft_config,
+                "snapshot-{transfer_id}", "snapshot-{transfer_id}", bytes, credentials)?
+            if put.status != "ok" or put.state != "local_durable" or
+                put.content_sha256 != descriptor.content_sha256 or put.byte_count != descriptor.byte_count:
+                return Err("snapshot_client_upload_rejected")
+        attempt = attempt + 1
+    Err("snapshot_client_retry_limit")
+
+pub fn scv_gateway_snapshot_client_read_v1(config: ScvGatewaySnapshotClientConfigV1,
+        id: text, request_id: text, snapshot_id: text,
+        credentials: fn() -> Result<text, text>) -> Result<ScvGatewaySnapshotReadResponseV1, text>:
+    if config.timeout_ms < 1 or config.timeout_ms > 60000 or
+        not _draft_client_subject_id_valid_v1(config.repository) or
+        not _draft_client_subject_id_valid_v1(config.principal_id) or
+        not config.endpoint.ends_with("/scv/snapshot/v1/read"):
+        return Err("snapshot_read_client_subject")
+    val target = bounded_http_target_v1(config.endpoint, config.tls_address, config.allow_loopback_http)?
+    if target.path != "/scv/snapshot/v1/read": return Err("snapshot_read_client_path")
+    val request = ScvGatewaySnapshotReadRequestV1(version: 1, id: id,
+        repository: config.repository, request_id: request_id, snapshot_id: snapshot_id)
+    val wire = scv_gateway_snapshot_read_request_encode_v1(request, config.repository)?
+    val token = match credentials():
+        case Ok(value): value
+        case Err(_): return Err("snapshot_read_credentials_unavailable")
+    if not bounded_http_bearer_valid_v1(token): return Err("snapshot_read_credentials_invalid")
+    val source = match bounded_http_post_with_request_limit_v1(target, token, wire,
+            config.timeout_ms, SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1,
+            SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1):
+        case Ok(value): value
+        case Err(_): return Err("snapshot_read_transport_failed")
+    scv_gateway_snapshot_read_response_decode_v1(source, request,
+        config.repository, config.principal_id)
+
+pub fn scv_gateway_snapshot_client_fetch_v1(config: ScvGatewaySnapshotClientConfigV1,
+        request_id: text, snapshot_id: text,
+        credentials: fn() -> Result<text, text>) -> Result<ScvGatewayFetchedSnapshotV1, text>:
+    if not config.endpoint.ends_with("/scv/snapshot/v1"): return Err("snapshot_fetch_client_path")
+    val read_config = ScvGatewaySnapshotClientConfigV1(endpoint:
+        config.endpoint.replace("/scv/snapshot/v1", "/scv/snapshot/v1/read"),
+        repository: config.repository, principal_id: config.principal_id,
+        allow_loopback_http: config.allow_loopback_http, timeout_ms: config.timeout_ms,
+        tls_address: config.tls_address)
+    val read_request_id = "read-" + sha256_text("{snapshot_id}|{request_id}")
+    val root = scv_gateway_snapshot_client_read_v1(read_config, "read-{read_request_id}",
+        read_request_id, snapshot_id, credentials)?
+    if root.status != "ok" or root.state != "snapshot_local_readback":
+        return Err("snapshot_fetch_root_unavailable")
+    val manifest = scv_gateway_snapshot_manifest_decode_v1(root.manifest_wire,
+        config.repository, config.principal_id)?
+    val check = scv_gateway_snapshot_manifest_validate_v1(manifest,
+        config.repository, config.principal_id)?
+    if check.snapshot_pin_id != snapshot_id or check.manifest_sha256 != root.manifest_sha256:
+        return Err("snapshot_fetch_root_integrity")
+    val draft_config = ScvGatewayDraftClientConfigV1(endpoint:
+        config.endpoint.replace("/scv/snapshot/v1", "/scv/draft/v1"),
+        repository: config.repository, principal_id: config.principal_id,
+        allow_loopback_http: config.allow_loopback_http, timeout_ms: config.timeout_ms,
+        tls_address: config.tls_address)
+    var local_objects: Dict<text, [u8]> = {}
+    for object in manifest.objects:
+        val object_request = "object-" + sha256_text("{snapshot_id}|{object.object_id}|{request_id}")
+        val response = scv_gateway_draft_client_get_v1(draft_config,
+            object_request, object_request, object.content_sha256, credentials)?
+        if response.state != "local_readback" or response.byte_count != object.byte_count or
+            response.content_sha256 != object.content_sha256 or
+            response.payload.len() as i64 != object.byte_count or sha256_u8_hex(response.payload) != object.content_sha256:
+            return Err("snapshot_fetch_object_integrity")
+        if object.kind == "source_bytes" and "sha256_" + sha256_u8_hex(response.payload) != object.object_id:
+            return Err("snapshot_fetch_source_identity")
+        if object.kind == "syntax_node" and "syntax_node_" + sha256_u8_fast_hex(response.payload) != object.object_id:
+            return Err("snapshot_fetch_node_identity")
+        local_objects[object.object_id] = response.payload
+    Ok(ScvGatewayFetchedSnapshotV1(manifest: manifest, manifest_wire: root.manifest_wire,
+        objects: local_objects))
+
+pub fn scv_gateway_snapshot_client_fetch_pin_v1(config: ScvGatewaySnapshotClientConfigV1,
+        request_id: text, snapshot_id: text, local_store_root: text,
+        credentials: fn() -> Result<text, text>) -> Result<ScvDraftSnapshotRootReceiptV1, text>:
+    val fetched = scv_gateway_snapshot_client_fetch_v1(config, request_id, snapshot_id, credentials)?
+    scv_snapshot_offline_pin_import_v1(local_store_root, fetched.manifest,
+        fetched.manifest_wire, fetched.objects)
+
+export ScvGatewayDraftClientConfigV1, ScvGatewaySnapshotClientConfigV1, ScvGatewayFetchedSnapshotV1
+export scv_gateway_draft_client_target_v1
 export scv_gateway_draft_client_call_v1, scv_gateway_draft_client_put_v1, scv_gateway_draft_client_get_v1
+export scv_gateway_snapshot_client_publish_v1
+export scv_gateway_snapshot_client_replicate_v1
+export scv_gateway_snapshot_client_read_v1, scv_gateway_snapshot_client_fetch_v1
+export scv_gateway_snapshot_client_fetch_pin_v1

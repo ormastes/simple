@@ -2,10 +2,14 @@
 # @cover src/lib/scv/gateway_snapshot_replication_v1.spl 80%
 use std.spec.*
 use std.scv.gateway_snapshot_replication_v1.*
+use std.scv.compile_snapshot_values_v1.{scv_compile_snapshot_revision_id_v1,
+    scv_compile_snapshot_provenance_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 
 fn snapshot_replication_fixture_v1() -> ScvGatewaySnapshotManifestV1:
-    val inventory = "src/main.spl|sha256_{sha256_u8_hex([0u8, 255u8, 65u8])}|3"
+    val bytes: [u8] = [0u8, 255u8, 65u8]
+    val source_digest = sha256_u8_hex(bytes)
+    val inventory = "src/main.spl|sha256_{source_digest}|3"
     val inventory_digest = sha256_text(inventory)
     val tree_id = "scv-tree-v1-{inventory_digest}"
     val revision_id = scv_compile_snapshot_revision_id_v1(tree_id, inventory_digest)
@@ -17,7 +21,34 @@ fn snapshot_replication_fixture_v1() -> ScvGatewaySnapshotManifestV1:
         source_domain: "compile-inventory-v1", config_digest: sha256_text("config fixture"),
         revision_id: revision_id, commit_id: commit_id, tree_id: tree_id,
         inventory_digest: inventory_digest, inventory_count: 1, provenance: provenance,
-        inventory: inventory, objects: [], structural_recipes: [])
+        inventory: inventory, objects: [ScvGatewaySnapshotObjectRefV1(kind: "source_bytes",
+            object_id: "sha256_" + source_digest, content_sha256: source_digest, byte_count: 3)],
+        structural_recipes: [])
+
+fn snapshot_replication_inventory_v1(inventory: text) -> ScvGatewaySnapshotManifestV1:
+    var manifest = snapshot_replication_fixture_v1()
+    manifest.inventory = inventory
+    manifest.inventory_digest = sha256_text(inventory)
+    val rows: [text] = if inventory == "": [] else: inventory.split("\n")
+    manifest.inventory_count = rows.len() as i64
+    manifest.tree_id = "scv-tree-v1-{manifest.inventory_digest}"
+    manifest.revision_id = scv_compile_snapshot_revision_id_v1(manifest.tree_id,
+        manifest.inventory_digest)
+    val commit_hash = sha256_text("simple/scv-compile-commit/v1|{manifest.tree_id}|{manifest.inventory_count}")
+    manifest.commit_id = "scv-compile-v1-" + commit_hash
+    manifest.provenance = scv_compile_snapshot_provenance_v1(manifest.revision_id,
+        manifest.commit_id, manifest.tree_id, manifest.inventory_digest, manifest.inventory_count)
+    manifest.objects = []
+    for row in rows:
+        val fields = row.split("|")
+        if fields.len() == 3 and fields[1].starts_with("sha256_"):
+            var already_present = false
+            for object in manifest.objects:
+                if object.object_id == fields[1]: already_present = true
+            if not already_present:
+                manifest.objects.push(ScvGatewaySnapshotObjectRefV1(kind: "source_bytes",
+                    object_id: fields[1], content_sha256: fields[1][7:], byte_count: fields[2].to_i64() ?? -1))
+    manifest
 
 describe "SCV compile snapshot replication manifest v1":
     it "recomputes immutable snapshot identity and source rows from canonical inventory":
@@ -36,32 +67,22 @@ describe "SCV compile snapshot replication manifest v1":
             "repo-alpha", "principal-1").is_err()).to_equal(true)
 
     it "rejects noncanonical rows, duplicate paths, path-prefix collisions, and malformed counts":
-        var manifest = snapshot_replication_fixture_v1()
-        manifest.inventory = "src/main.spl|sha256_{sha256_u8_hex([0u8, 255u8, 65u8])}|03"
+        var manifest = snapshot_replication_inventory_v1(
+            "src/main.spl|sha256_{sha256_u8_hex([0u8, 255u8, 65u8])}|03")
         expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
             "repo-alpha", "principal-1").is_err()).to_equal(true)
-        manifest = snapshot_replication_fixture_v1()
         val digest = sha256_u8_hex([0u8, 255u8, 65u8])
-        manifest.inventory = "src/main.spl|sha256_{digest}|3\nsrc/main.spl|sha256_{digest}|3"
+        manifest = snapshot_replication_inventory_v1(
+            "src/main.spl|sha256_{digest}|3\nsrc/main.spl|sha256_{digest}|3")
         expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
             "repo-alpha", "principal-1").is_err()).to_equal(true)
-        manifest = snapshot_replication_fixture_v1()
-        manifest.inventory = "src|sha256_{digest}|3\nsrc/main.spl|sha256_{digest}|3"
+        manifest = snapshot_replication_inventory_v1(
+            "src|sha256_{digest}|3\nsrc/main.spl|sha256_{digest}|3")
         expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
             "repo-alpha", "principal-1").is_err()).to_equal(true)
 
     it "accepts an explicitly empty inventory without inventing source objects":
-        var manifest = snapshot_replication_fixture_v1()
-        manifest.inventory = ""
-        manifest.inventory_digest = sha256_text("")
-        manifest.inventory_count = 0
-        manifest.tree_id = "scv-tree-v1-{manifest.inventory_digest}"
-        manifest.revision_id = scv_compile_snapshot_revision_id_v1(manifest.tree_id,
-            manifest.inventory_digest)
-        val commit_hash = sha256_text("simple/scv-compile-commit/v1|{manifest.tree_id}|0")
-        manifest.commit_id = "scv-compile-v1-" + commit_hash
-        manifest.provenance = scv_compile_snapshot_provenance_v1(manifest.revision_id,
-            manifest.commit_id, manifest.tree_id, manifest.inventory_digest, 0)
+        var manifest = snapshot_replication_inventory_v1("")
         val checked = scv_gateway_snapshot_manifest_validate_v1(manifest,
             "repo-alpha", "principal-1").unwrap()
         expect(checked.source_paths.len()).to_equal(0)

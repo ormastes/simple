@@ -1,0 +1,589 @@
+"""Authenticated compile-source snapshot manifest and closure protocol v1."""
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.scv.compile_snapshot_values_v1.{scv_compile_snapshot_revision_id_v1,
+    scv_compile_snapshot_provenance_v1}
+use std.scv.core.{scv_worktree_path_safe}
+
+pub val SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1: i64 = 524288
+pub val SCV_GATEWAY_SNAPSHOT_MAX_OBJECTS_V1: i64 = 4096
+pub val SCV_GATEWAY_SNAPSHOT_MAX_MISSING_V1: i64 = 256
+pub val SCV_GATEWAY_SNAPSHOT_MAX_TOTAL_BYTES_V1: i64 = 67108864
+
+pub struct ScvGatewaySnapshotObjectRefV1:
+    kind: text
+    object_id: text
+    content_sha256: text
+    byte_count: i64
+
+impl ScvGatewaySnapshotObjectRefV1:
+    fn __eq__(other: ScvGatewaySnapshotObjectRefV1) -> bool:
+        self.kind == other.kind and self.object_id == other.object_id and
+            self.content_sha256 == other.content_sha256 and self.byte_count == other.byte_count
+
+pub struct ScvGatewayStructuralRecipeV1:
+    path: text
+    raw_content_id: text
+    root_id: text
+    object_ids: [text]
+
+impl ScvGatewayStructuralRecipeV1:
+    fn __eq__(other: ScvGatewayStructuralRecipeV1) -> bool:
+        self.path == other.path and self.raw_content_id == other.raw_content_id and
+            self.root_id == other.root_id and self.object_ids == other.object_ids
+
+pub struct ScvGatewaySnapshotManifestV1:
+    version: i64
+    repository: text
+    principal_id: text
+    source_domain: text
+    config_digest: text
+    revision_id: text
+    commit_id: text
+    tree_id: text
+    inventory_digest: text
+    inventory_count: i64
+    provenance: text
+    inventory: text
+    objects: [ScvGatewaySnapshotObjectRefV1]
+    structural_recipes: [ScvGatewayStructuralRecipeV1]
+
+impl ScvGatewaySnapshotManifestV1:
+    fn __eq__(other: ScvGatewaySnapshotManifestV1) -> bool:
+        self.version == other.version and self.repository == other.repository and
+            self.principal_id == other.principal_id and self.source_domain == other.source_domain and
+            self.config_digest == other.config_digest and self.revision_id == other.revision_id and
+            self.commit_id == other.commit_id and self.tree_id == other.tree_id and
+            self.inventory_digest == other.inventory_digest and self.inventory_count == other.inventory_count and
+            self.provenance == other.provenance and self.inventory == other.inventory and
+            self.objects == other.objects and self.structural_recipes == other.structural_recipes
+
+pub struct ScvGatewaySnapshotManifestCheckV1:
+    revision_id: text
+    snapshot_pin_id: text
+    manifest_sha256: text
+    source_paths: [text]
+    source_content_ids: [text]
+    source_digests: [text]
+    source_byte_counts: [i64]
+
+pub struct ScvGatewaySnapshotRequestV1:
+    version: i64
+    id: text
+    repository: text
+    request_id: text
+    manifest: ScvGatewaySnapshotManifestV1
+
+pub struct ScvGatewaySnapshotReadRequestV1:
+    version: i64
+    id: text
+    repository: text
+    request_id: text
+    snapshot_id: text
+
+pub struct ScvGatewaySnapshotReadResponseV1:
+    version: i64
+    id: text
+    repository: text
+    principal_id: text
+    request_id: text
+    snapshot_id: text
+    manifest_sha256: text
+    status: text
+    state: text
+    manifest_wire: text
+    error: text
+
+pub struct ScvGatewaySnapshotResponseV1:
+    version: i64
+    id: text
+    repository: text
+    principal_id: text
+    request_id: text
+    snapshot_id: text
+    manifest_sha256: text
+    status: text
+    state: text
+    missing_object_ids: [text]
+    error: text
+
+impl ScvGatewaySnapshotResponseV1:
+    fn __eq__(other: ScvGatewaySnapshotResponseV1) -> bool:
+        self.version == other.version and self.id == other.id and self.repository == other.repository and
+            self.principal_id == other.principal_id and self.request_id == other.request_id and
+            self.snapshot_id == other.snapshot_id and self.manifest_sha256 == other.manifest_sha256 and
+            self.status == other.status and self.state == other.state and
+            self.missing_object_ids == other.missing_object_ids and self.error == other.error
+
+fn _snapshot_id_valid_v1(value: text, bound: i64) -> bool:
+    if value.len() <= 0 or value.len() > bound or value == "." or value == "..": return false
+    for byte in value.bytes():
+        val ch = byte.to_i64()
+        if not ((ch >= 48 and ch <= 57) or (ch >= 65 and ch <= 90) or
+            (ch >= 97 and ch <= 122) or ch == 45 or ch == 46 or ch == 95): return false
+    true
+
+fn _snapshot_hex_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for byte in value.bytes():
+        val ch = byte.to_i64()
+        if not ((ch >= 48 and ch <= 57) or (ch >= 97 and ch <= 102)): return false
+    true
+
+fn _snapshot_raw_content_id_v1(value: text) -> bool:
+    value.starts_with("sha256_") and value.len() == 71 and _snapshot_hex_v1(value[7:])
+
+fn _snapshot_syntax_id_v1(value: text) -> bool:
+    value.starts_with("syntax_node_") and value.len() == 76 and _snapshot_hex_v1(value[12:])
+
+fn _snapshot_sorted_unique_v1(values: [text]) -> bool:
+    var previous = ""
+    for value in values:
+        if value == "" or (previous != "" and value <= previous): return false
+        previous = value
+    true
+
+fn _snapshot_pin_id_valid_v1(value: text) -> bool:
+    value.starts_with("scv-snapshot-pin-v1-") and value.len() == 84 and _snapshot_hex_v1(value[20:])
+
+fn _snapshot_manifest_fields_v1(manifest: ScvGatewaySnapshotManifestV1,
+        repository: text, principal_id: text) -> Result<ScvGatewaySnapshotManifestCheckV1, text>:
+    if manifest.version != 1 or manifest.source_domain != "compile-inventory-v1" or
+        not _snapshot_id_valid_v1(manifest.repository, 128) or manifest.repository != repository or
+        not _snapshot_id_valid_v1(manifest.principal_id, 128) or manifest.principal_id != principal_id or
+        not _snapshot_hex_v1(manifest.config_digest): return Err("snapshot_subject_invalid")
+    if manifest.inventory.len() > SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1 or
+        manifest.provenance.len() > 2048 or manifest.inventory_count < 0 or
+        manifest.inventory_count > SCV_GATEWAY_SNAPSHOT_MAX_OBJECTS_V1 or
+        manifest.objects.len() > SCV_GATEWAY_SNAPSHOT_MAX_OBJECTS_V1 or
+        manifest.structural_recipes.len() > SCV_GATEWAY_SNAPSHOT_MAX_OBJECTS_V1:
+        return Err("snapshot_manifest_limit")
+    if manifest.inventory.contains("\r") or manifest.inventory.ends_with("\n") or
+        sha256_text(manifest.inventory) != manifest.inventory_digest or
+        not _snapshot_hex_v1(manifest.inventory_digest): return Err("snapshot_inventory_digest")
+    val rows: [text] = if manifest.inventory == "": [] else: manifest.inventory.split("\n")
+    if rows.len() as i64 != manifest.inventory_count: return Err("snapshot_inventory_count")
+    var paths: [text] = []
+    var content_ids: [text] = []
+    var digests: [text] = []
+    var byte_counts: [i64] = []
+    var prior_path = ""
+    for row in rows:
+        val fields = row.split("|")
+        if fields.len() != 3 or not scv_worktree_path_safe(fields[0]) or
+            not _snapshot_raw_content_id_v1(fields[1]) or fields[0] <= prior_path:
+            return Err("snapshot_inventory_row")
+        val count = fields[2].to_i64() ?? -1
+        if count < 0 or "{count}" != fields[2]: return Err("snapshot_inventory_count_invalid")
+        if prior_path != "" and fields[0].starts_with(prior_path + "/"):
+            return Err("snapshot_inventory_path_prefix")
+        paths.push(fields[0])
+        content_ids.push(fields[1])
+        digests.push(fields[1][7:])
+        byte_counts.push(count)
+        prior_path = fields[0]
+    # Prefix conflicts can be separated by lexically adjacent rows, so test each
+    # path's ancestor prefixes against the canonical path vector.
+    for path in paths:
+        var prefix = ""
+        val parts = path.split("/")
+        var index = 0
+        while index + 1 < parts.len():
+            prefix = if prefix == "": parts[index] else: prefix + "/" + parts[index]
+            if paths.contains(prefix): return Err("snapshot_inventory_path_prefix")
+            index = index + 1
+    val expected_tree = "scv-tree-v1-{manifest.inventory_digest}"
+    val expected_commit_hash = sha256_text("simple/scv-compile-commit/v1|{expected_tree}|{rows.len()}")
+    val expected_commit = "scv-compile-v1-" + expected_commit_hash
+    val expected_revision = scv_compile_snapshot_revision_id_v1(expected_tree, manifest.inventory_digest)
+    val expected_provenance = scv_compile_snapshot_provenance_v1(expected_revision,
+        expected_commit, expected_tree, manifest.inventory_digest, rows.len() as i64)
+    if manifest.tree_id != expected_tree or manifest.commit_id != expected_commit or
+        manifest.revision_id != expected_revision or manifest.provenance != expected_provenance:
+        return Err("snapshot_identity_mismatch")
+    var source_ref_ids: [text] = []
+    for index in 0..paths.len():
+        if not source_ref_ids.contains(content_ids[index]): source_ref_ids.push(content_ids[index])
+    var object_ids: [text] = []
+    var previous_object = ""
+    var object_bytes_total = 0
+    for object in manifest.objects:
+        if object.byte_count < 0 or object.byte_count > 1048576 or
+            not _snapshot_hex_v1(object.content_sha256) or
+            object.object_id <= previous_object: return Err("snapshot_object_order")
+        object_bytes_total = object_bytes_total + object.byte_count
+        if object_bytes_total > SCV_GATEWAY_SNAPSHOT_MAX_TOTAL_BYTES_V1:
+            return Err("snapshot_total_limit")
+        if object.kind == "source_bytes" or object.kind == "structural_payload":
+            if not _snapshot_raw_content_id_v1(object.object_id) or object.object_id[7:] != object.content_sha256:
+                return Err("snapshot_object_identity")
+        elif object.kind == "syntax_node":
+            if not _snapshot_syntax_id_v1(object.object_id): return Err("snapshot_object_identity")
+        else: return Err("snapshot_object_kind")
+        object_ids.push(object.object_id)
+        previous_object = object.object_id
+    for content_id in source_ref_ids:
+        if not object_ids.contains(content_id): return Err("snapshot_source_object_missing")
+    for index in 0..content_ids.len():
+        val source_object = _snapshot_object_lookup_v1(manifest.objects, content_ids[index])
+        if source_object.kind != "source_bytes" or source_object.byte_count != byte_counts[index]:
+            return Err("snapshot_source_object_binding")
+    var prior_recipe_path = ""
+    for recipe in manifest.structural_recipes:
+        if not scv_worktree_path_safe(recipe.path) or not paths.contains(recipe.path) or
+            not content_ids.contains(recipe.raw_content_id) or not _snapshot_syntax_id_v1(recipe.root_id) or
+            recipe.path <= prior_recipe_path or not recipe.object_ids.contains(recipe.root_id) or
+            not _snapshot_sorted_unique_v1(recipe.object_ids):
+            return Err("snapshot_structural_recipe_invalid")
+        var source_index = 0
+        while source_index < paths.len() and paths[source_index] != recipe.path:
+            source_index = source_index + 1
+        if source_index >= paths.len() or content_ids[source_index] != recipe.raw_content_id:
+            return Err("snapshot_structural_raw_mismatch")
+        for object_id in recipe.object_ids:
+            if not object_ids.contains(object_id): return Err("snapshot_structural_object_missing")
+        prior_recipe_path = recipe.path
+    var expected_object_ids: [text] = []
+    for content_id in source_ref_ids: expected_object_ids.push(content_id)
+    for recipe in manifest.structural_recipes:
+        for object_id in recipe.object_ids:
+            if not expected_object_ids.contains(object_id): expected_object_ids.push(object_id)
+    if expected_object_ids.len() != object_ids.len(): return Err("snapshot_object_set_mismatch")
+    for object_id in object_ids:
+        if not expected_object_ids.contains(object_id): return Err("snapshot_object_set_mismatch")
+    var estimate = manifest.inventory.len() + manifest.provenance.len() + 2048
+    for object in manifest.objects:
+        estimate = estimate + object.kind.len() + object.object_id.len() + object.content_sha256.len() + 64
+    for recipe in manifest.structural_recipes:
+        estimate = estimate + recipe.path.len() + recipe.raw_content_id.len() + recipe.root_id.len() + 96
+        for object_id in recipe.object_ids: estimate = estimate + object_id.len() + 8
+    if estimate > SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1: return Err("snapshot_manifest_limit")
+    val manifest_wire = _snapshot_manifest_canonical_v1(manifest)
+    val manifest_sha256 = sha256_u8_hex(manifest_wire.bytes())
+    val snapshot_pin_id = "scv-snapshot-pin-v1-" + manifest_sha256
+    Ok(ScvGatewaySnapshotManifestCheckV1(revision_id: expected_revision, snapshot_pin_id: snapshot_pin_id,
+        manifest_sha256: manifest_sha256,
+        source_paths: paths, source_content_ids: content_ids, source_digests: digests,
+        source_byte_counts: byte_counts))
+
+fn _snapshot_object_lookup_v1(objects: [ScvGatewaySnapshotObjectRefV1], object_id: text) -> ScvGatewaySnapshotObjectRefV1:
+    for object in objects:
+        if object.object_id == object_id: return object
+    ScvGatewaySnapshotObjectRefV1(kind: "", object_id: "", content_sha256: "", byte_count: -1)
+
+pub fn scv_gateway_snapshot_manifest_validate_v1(manifest: ScvGatewaySnapshotManifestV1,
+        pinned_repository: text, pinned_principal: text) -> Result<ScvGatewaySnapshotManifestCheckV1, text>:
+    _snapshot_manifest_fields_v1(manifest, pinned_repository, pinned_principal)
+
+pub fn scv_gateway_snapshot_pin_id_v1(manifest: ScvGatewaySnapshotManifestV1,
+        pinned_repository: text, pinned_principal: text) -> Result<text, text>:
+    Ok(scv_gateway_snapshot_manifest_validate_v1(manifest, pinned_repository, pinned_principal)?.snapshot_pin_id)
+
+pub fn scv_gateway_snapshot_manifest_encode_v1(manifest: ScvGatewaySnapshotManifestV1,
+        pinned_repository: text, pinned_principal: text) -> Result<text, text>:
+    scv_gateway_snapshot_manifest_validate_v1(manifest, pinned_repository, pinned_principal)?
+    val wire = _snapshot_manifest_canonical_v1(manifest)
+    if wire.len() > SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1: return Err("snapshot_manifest_limit")
+    Ok(wire)
+
+fn _snapshot_manifest_canonical_v1(manifest: ScvGatewaySnapshotManifestV1) -> text:
+    var object_rows: [SdnValue] = []
+    for object in manifest.objects:
+        val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(object.kind),
+            "object_id": SdnValue.String(object.object_id), "content_sha256": SdnValue.String(object.content_sha256),
+            "byte_count": SdnValue.Int(object.byte_count)}
+        object_rows.push(SdnValue.Dict(fields))
+    var recipe_rows: [SdnValue] = []
+    for recipe in manifest.structural_recipes:
+        var ids: [SdnValue] = []
+        for id in recipe.object_ids: ids.push(SdnValue.String(id))
+        val fields: Dict<text, SdnValue> = {"path": SdnValue.String(recipe.path),
+            "raw_content_id": SdnValue.String(recipe.raw_content_id), "root_id": SdnValue.String(recipe.root_id),
+            "object_ids": SdnValue.Array(ids)}
+        recipe_rows.push(SdnValue.Dict(fields))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(manifest.version),
+        "repository": SdnValue.String(manifest.repository), "principal_id": SdnValue.String(manifest.principal_id),
+        "source_domain": SdnValue.String(manifest.source_domain), "config_digest": SdnValue.String(manifest.config_digest),
+        "revision_id": SdnValue.String(manifest.revision_id), "commit_id": SdnValue.String(manifest.commit_id),
+        "tree_id": SdnValue.String(manifest.tree_id), "inventory_digest": SdnValue.String(manifest.inventory_digest),
+        "inventory_count": SdnValue.Int(manifest.inventory_count), "provenance": SdnValue.String(manifest.provenance),
+        "inventory": SdnValue.String(manifest.inventory), "objects": SdnValue.Array(object_rows),
+        "structural_recipes": SdnValue.Array(recipe_rows)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn _snapshot_fields_v1(source: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if source.len() <= 0 or source.len() > SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1:
+        return Err("snapshot_wire_limit")
+    val limits = SdnStrictLimitsV1(max_source_bytes: SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1,
+        max_depth: 5, max_nodes: SCV_GATEWAY_SNAPSHOT_MAX_OBJECTS_V1 * 8,
+        max_rows: 0, max_cells: 0, max_columns: 32)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(_): return Err("snapshot_sdn_invalid")
+    match parsed.value:
+        case Dict(fields):
+            for key in fields.keys():
+                if not names.contains(key): return Err("snapshot_unknown_field")
+            for key in names:
+                if not fields.contains_key(key): return Err("snapshot_missing_field")
+            Ok(fields)
+        case _: Err("snapshot_mapping_required")
+
+fn _snapshot_text_v1(value: SdnValue) -> Result<text, text>:
+    match value:
+        case String(text_value): Ok(text_value)
+        case _: Err("snapshot_text_required")
+
+fn _snapshot_int_v1(value: SdnValue) -> Result<i64, text>:
+    match value:
+        case Int(integer): Ok(integer)
+        case _: Err("snapshot_integer_required")
+
+fn _snapshot_string_array_v1(value: SdnValue) -> Result<[text], text>:
+    match value:
+        case Array(items):
+            var result: [text] = []
+            for item in items: result.push(_snapshot_text_v1(item)?)
+            Ok(result)
+        case _: Err("snapshot_array_required")
+
+pub fn scv_gateway_snapshot_manifest_decode_v1(source: text, pinned_repository: text,
+        pinned_principal: text) -> Result<ScvGatewaySnapshotManifestV1, text>:
+    val names = ["version", "repository", "principal_id", "source_domain", "config_digest", "revision_id",
+        "commit_id", "tree_id", "inventory_digest", "inventory_count", "provenance", "inventory",
+        "objects", "structural_recipes"]
+    val fields = _snapshot_fields_v1(source, names)?
+    var objects: [ScvGatewaySnapshotObjectRefV1] = []
+    match fields["objects"]:
+        case Array(rows):
+            if rows.len() > SCV_GATEWAY_SNAPSHOT_MAX_OBJECTS_V1: return Err("snapshot_object_limit")
+            for row in rows:
+                val item = _snapshot_fields_v1(sdn_encode_canonical(row), ["kind", "object_id", "content_sha256", "byte_count"])?
+                objects.push(ScvGatewaySnapshotObjectRefV1(kind: _snapshot_text_v1(item["kind"])? ,
+                    object_id: _snapshot_text_v1(item["object_id"])? ,
+                    content_sha256: _snapshot_text_v1(item["content_sha256"])? ,
+                    byte_count: _snapshot_int_v1(item["byte_count"])?))
+        case _: return Err("snapshot_objects_required")
+    var recipes: [ScvGatewayStructuralRecipeV1] = []
+    match fields["structural_recipes"]:
+        case Array(rows):
+            if rows.len() > SCV_GATEWAY_SNAPSHOT_MAX_OBJECTS_V1: return Err("snapshot_recipe_limit")
+            for row in rows:
+                val item = _snapshot_fields_v1(sdn_encode_canonical(row), ["path", "raw_content_id", "root_id", "object_ids"])?
+                recipes.push(ScvGatewayStructuralRecipeV1(path: _snapshot_text_v1(item["path"])? ,
+                    raw_content_id: _snapshot_text_v1(item["raw_content_id"])? ,
+                    root_id: _snapshot_text_v1(item["root_id"])? , object_ids: _snapshot_string_array_v1(item["object_ids"])?))
+        case _: return Err("snapshot_recipes_required")
+    val manifest = ScvGatewaySnapshotManifestV1(version: _snapshot_int_v1(fields["version"])? ,
+        repository: _snapshot_text_v1(fields["repository"])? , principal_id: _snapshot_text_v1(fields["principal_id"])? ,
+        source_domain: _snapshot_text_v1(fields["source_domain"])? , config_digest: _snapshot_text_v1(fields["config_digest"])? ,
+        revision_id: _snapshot_text_v1(fields["revision_id"])? , commit_id: _snapshot_text_v1(fields["commit_id"])? ,
+        tree_id: _snapshot_text_v1(fields["tree_id"])? , inventory_digest: _snapshot_text_v1(fields["inventory_digest"])? ,
+        inventory_count: _snapshot_int_v1(fields["inventory_count"])? , provenance: _snapshot_text_v1(fields["provenance"])? ,
+        inventory: _snapshot_text_v1(fields["inventory"])? , objects: objects, structural_recipes: recipes)
+    val checked = scv_gateway_snapshot_manifest_encode_v1(manifest, pinned_repository, pinned_principal)?
+    if checked != source: return Err("snapshot_manifest_noncanonical")
+    Ok(manifest)
+
+pub fn scv_gateway_snapshot_request_encode_v1(request: ScvGatewaySnapshotRequestV1,
+        pinned_repository: text, pinned_principal: text) -> Result<text, text>:
+    if request.version != 1 or not _snapshot_id_valid_v1(request.id, 128) or
+        not _snapshot_id_valid_v1(request.repository, 128) or request.repository != pinned_repository or
+        not _snapshot_id_valid_v1(request.request_id, 128): return Err("snapshot_request_subject")
+    val manifest = scv_gateway_snapshot_manifest_encode_v1(request.manifest,
+        request.repository, pinned_principal)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "id": SdnValue.String(request.id),
+        "repository": SdnValue.String(request.repository), "request_id": SdnValue.String(request.request_id),
+        "manifest": SdnValue.String(manifest)}
+    val wire = sdn_encode_canonical(SdnValue.Dict(fields))
+    if wire.len() > SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1: return Err("snapshot_wire_limit")
+    Ok(wire)
+
+pub fn scv_gateway_snapshot_request_decode_v1(source: text, pinned_repository: text,
+        pinned_principal: text) -> Result<ScvGatewaySnapshotRequestV1, text>:
+    val fields = _snapshot_fields_v1(source, ["version", "id", "repository", "request_id", "manifest"])?
+    val request = ScvGatewaySnapshotRequestV1(version: _snapshot_int_v1(fields["version"])? ,
+        id: _snapshot_text_v1(fields["id"])? , repository: _snapshot_text_v1(fields["repository"])? ,
+        request_id: _snapshot_text_v1(fields["request_id"])? ,
+        manifest: scv_gateway_snapshot_manifest_decode_v1(_snapshot_text_v1(fields["manifest"])?,
+            pinned_repository, pinned_principal)?)
+    val checked = scv_gateway_snapshot_request_encode_v1(request, pinned_repository, pinned_principal)?
+    if checked != source: return Err("snapshot_request_noncanonical")
+    Ok(request)
+
+pub fn scv_gateway_snapshot_read_request_encode_v1(request: ScvGatewaySnapshotReadRequestV1,
+        pinned_repository: text) -> Result<text, text>:
+    if request.version != 1 or not _snapshot_id_valid_v1(request.id, 128) or
+        not _snapshot_id_valid_v1(request.repository, 128) or request.repository != pinned_repository or
+        not _snapshot_id_valid_v1(request.request_id, 128) or not _snapshot_pin_id_valid_v1(request.snapshot_id):
+        return Err("snapshot_read_subject")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "id": SdnValue.String(request.id),
+        "repository": SdnValue.String(request.repository), "request_id": SdnValue.String(request.request_id),
+        "snapshot_id": SdnValue.String(request.snapshot_id)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn scv_gateway_snapshot_read_request_decode_v1(source: text, pinned_repository: text) -> Result<ScvGatewaySnapshotReadRequestV1, text>:
+    val fields = _snapshot_fields_v1(source, ["version", "id", "repository", "request_id", "snapshot_id"])?
+    val request = ScvGatewaySnapshotReadRequestV1(version: _snapshot_int_v1(fields["version"])? ,
+        id: _snapshot_text_v1(fields["id"])? , repository: _snapshot_text_v1(fields["repository"])? ,
+        request_id: _snapshot_text_v1(fields["request_id"])? , snapshot_id: _snapshot_text_v1(fields["snapshot_id"])? )
+    val canonical = scv_gateway_snapshot_read_request_encode_v1(request, pinned_repository)?
+    if canonical != source: return Err("snapshot_read_request_noncanonical")
+    Ok(request)
+
+pub fn scv_gateway_snapshot_read_response_encode_v1(response: ScvGatewaySnapshotReadResponseV1,
+        request: ScvGatewaySnapshotReadRequestV1, expected_principal: text) -> Result<text, text>:
+    if response.version != 1 or response.id != request.id or response.repository != request.repository or
+        response.principal_id != expected_principal or response.request_id != request.request_id or
+        response.snapshot_id != request.snapshot_id: return Err("snapshot_read_response_subject")
+    if response.status == "ok":
+        if response.state != "snapshot_local_readback" or response.error != "" or
+            response.manifest_wire.len() == 0 or response.manifest_wire.len() > SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1:
+            return Err("snapshot_read_response_invalid")
+        val manifest = scv_gateway_snapshot_manifest_decode_v1(response.manifest_wire,
+            request.repository, expected_principal)?
+        val check = scv_gateway_snapshot_manifest_validate_v1(manifest, request.repository, expected_principal)?
+        if check.snapshot_pin_id != request.snapshot_id or check.manifest_sha256 != response.manifest_sha256:
+            return Err("snapshot_read_manifest_subject")
+    elif response.status == "error" or response.status == "denied":
+        if response.state != "" or response.manifest_wire != "" or not _snapshot_error_code_v1(response.error):
+            return Err("snapshot_read_error_invalid")
+    else: return Err("snapshot_read_status_invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(response.version),
+        "id": SdnValue.String(response.id), "repository": SdnValue.String(response.repository),
+        "principal_id": SdnValue.String(response.principal_id), "request_id": SdnValue.String(response.request_id),
+        "snapshot_id": SdnValue.String(response.snapshot_id), "manifest_sha256": SdnValue.String(response.manifest_sha256),
+        "status": SdnValue.String(response.status), "state": SdnValue.String(response.state),
+        "manifest": SdnValue.String(response.manifest_wire), "error": SdnValue.String(response.error)}
+    val wire = sdn_encode_canonical(SdnValue.Dict(fields))
+    if wire.len() > SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1: return Err("snapshot_read_wire_limit")
+    Ok(wire)
+
+pub fn scv_gateway_snapshot_read_response_decode_v1(source: text,
+        request: ScvGatewaySnapshotReadRequestV1, pinned_repository: text,
+        expected_principal: text) -> Result<ScvGatewaySnapshotReadResponseV1, text>:
+    val fields = _snapshot_fields_v1(source, ["version", "id", "repository", "principal_id", "request_id",
+        "snapshot_id", "manifest_sha256", "status", "state", "manifest", "error"])?
+    val response = ScvGatewaySnapshotReadResponseV1(version: _snapshot_int_v1(fields["version"])? ,
+        id: _snapshot_text_v1(fields["id"])? , repository: _snapshot_text_v1(fields["repository"])? ,
+        principal_id: _snapshot_text_v1(fields["principal_id"])? , request_id: _snapshot_text_v1(fields["request_id"])? ,
+        snapshot_id: _snapshot_text_v1(fields["snapshot_id"])? , manifest_sha256: _snapshot_text_v1(fields["manifest_sha256"])? ,
+        status: _snapshot_text_v1(fields["status"])? , state: _snapshot_text_v1(fields["state"])? ,
+        manifest_wire: _snapshot_text_v1(fields["manifest"])? , error: _snapshot_text_v1(fields["error"])? )
+    if response.version != 1 or response.id != request.id or response.repository != pinned_repository or
+        response.principal_id != expected_principal or response.request_id != request.request_id or
+        response.snapshot_id != request.snapshot_id: return Err("snapshot_read_response_subject")
+    if response.status == "ok":
+        if response.state != "snapshot_local_readback" or response.error != "": return Err("snapshot_read_response_invalid")
+        val manifest = scv_gateway_snapshot_manifest_decode_v1(response.manifest_wire,
+            pinned_repository, expected_principal)?
+        val check = scv_gateway_snapshot_manifest_validate_v1(manifest, pinned_repository, expected_principal)?
+        if check.snapshot_pin_id != request.snapshot_id or check.manifest_sha256 != response.manifest_sha256:
+            return Err("snapshot_read_manifest_subject")
+    elif response.status == "error" or response.status == "denied":
+        if response.state != "" or response.manifest_wire != "" or not _snapshot_error_code_v1(response.error):
+            return Err("snapshot_read_error_invalid")
+    else: return Err("snapshot_read_status_invalid")
+    if sdn_encode_canonical(SdnValue.Dict(fields)) != source: return Err("snapshot_read_response_noncanonical")
+    Ok(response)
+
+pub fn scv_gateway_snapshot_response_encode_v1(response: ScvGatewaySnapshotResponseV1,
+        request: ScvGatewaySnapshotRequestV1, expected_principal: text) -> Result<text, text>:
+    val manifest_check = scv_gateway_snapshot_manifest_validate_v1(request.manifest,
+        request.repository, expected_principal)?
+    if response.version != 1 or response.id != request.id or response.repository != request.repository or
+        response.request_id != request.request_id or response.principal_id != expected_principal or
+        response.snapshot_id != manifest_check.snapshot_pin_id or
+        response.manifest_sha256 != manifest_check.manifest_sha256: return Err("snapshot_response_subject")
+    if response.status == "needs_inputs":
+        if response.state != "" or response.error != "" or response.missing_object_ids.len() == 0 or
+            response.missing_object_ids.len() > SCV_GATEWAY_SNAPSHOT_MAX_MISSING_V1:
+            return Err("snapshot_missing_response_invalid")
+        for object_id in response.missing_object_ids:
+            if not _snapshot_object_ids_v1(request.manifest).contains(object_id): return Err("snapshot_missing_subject")
+    elif response.status == "ok":
+        if response.state != "snapshot_local_durable" or response.error != "" or response.missing_object_ids.len() != 0:
+            return Err("snapshot_receipt_invalid")
+    elif response.status == "denied" or response.status == "error":
+        if response.state != "" or response.missing_object_ids.len() != 0 or not _snapshot_error_code_v1(response.error):
+            return Err("snapshot_error_response_invalid")
+    else: return Err("snapshot_status_invalid")
+    val missing: [SdnValue] = []
+    var prior = ""
+    for object_id in response.missing_object_ids:
+        if object_id <= prior: return Err("snapshot_missing_order")
+        missing.push(SdnValue.String(object_id))
+        prior = object_id
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "id": SdnValue.String(response.id),
+        "repository": SdnValue.String(response.repository), "principal_id": SdnValue.String(response.principal_id),
+        "request_id": SdnValue.String(response.request_id), "snapshot_id": SdnValue.String(response.snapshot_id),
+        "manifest_sha256": SdnValue.String(response.manifest_sha256),
+        "status": SdnValue.String(response.status), "state": SdnValue.String(response.state),
+        "missing_object_ids": SdnValue.Array(missing), "error": SdnValue.String(response.error)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn _snapshot_object_ids_v1(manifest: ScvGatewaySnapshotManifestV1) -> [text]:
+    var ids: [text] = []
+    for object in manifest.objects: ids.push(object.object_id)
+    ids
+
+fn _snapshot_error_code_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 80: return false
+    for byte in value.bytes():
+        val ch = byte.to_i64()
+        if not ((ch >= 97 and ch <= 122) or (ch >= 48 and ch <= 57) or ch == 95): return false
+    true
+
+pub fn scv_gateway_snapshot_response_decode_v1(source: text,
+        request: ScvGatewaySnapshotRequestV1, pinned_repository: text,
+        expected_principal: text) -> Result<ScvGatewaySnapshotResponseV1, text>:
+    val fields = _snapshot_fields_v1(source, ["version", "id", "repository", "principal_id", "request_id",
+        "snapshot_id", "manifest_sha256", "status", "state", "missing_object_ids", "error"])?
+    val missing = _snapshot_string_array_v1(fields["missing_object_ids"])?
+    if missing.len() > SCV_GATEWAY_SNAPSHOT_MAX_MISSING_V1: return Err("snapshot_missing_limit")
+    var previous_missing = ""
+    for object_id in missing:
+        if object_id <= previous_missing: return Err("snapshot_missing_order")
+        previous_missing = object_id
+    val response = ScvGatewaySnapshotResponseV1(version: _snapshot_int_v1(fields["version"])? ,
+        id: _snapshot_text_v1(fields["id"])? , repository: _snapshot_text_v1(fields["repository"])? ,
+        principal_id: _snapshot_text_v1(fields["principal_id"])? , request_id: _snapshot_text_v1(fields["request_id"])? ,
+        snapshot_id: _snapshot_text_v1(fields["snapshot_id"])? , manifest_sha256: _snapshot_text_v1(fields["manifest_sha256"])? ,
+        status: _snapshot_text_v1(fields["status"])? ,
+        state: _snapshot_text_v1(fields["state"])? , missing_object_ids: missing, error: _snapshot_text_v1(fields["error"])? )
+    val manifest_check = scv_gateway_snapshot_manifest_validate_v1(request.manifest,
+        pinned_repository, expected_principal)?
+    if response.version != 1 or response.id != request.id or response.repository != pinned_repository or
+        response.principal_id != expected_principal or response.request_id != request.request_id or
+        response.snapshot_id != manifest_check.snapshot_pin_id or
+        response.manifest_sha256 != manifest_check.manifest_sha256: return Err("snapshot_response_subject")
+    if response.status == "needs_inputs":
+        if response.state != "" or response.error != "" or missing.len() == 0 or
+            missing.len() > SCV_GATEWAY_SNAPSHOT_MAX_MISSING_V1: return Err("snapshot_missing_response_invalid")
+        for object_id in missing:
+            if not _snapshot_object_ids_v1(request.manifest).contains(object_id): return Err("snapshot_missing_subject")
+    elif response.status == "ok":
+        if response.state != "snapshot_local_durable" or response.error != "" or missing.len() != 0:
+            return Err("snapshot_receipt_invalid")
+    elif response.status == "denied" or response.status == "error":
+        if response.state != "" or missing.len() != 0 or not _snapshot_error_code_v1(response.error):
+            return Err("snapshot_error_response_invalid")
+    else: return Err("snapshot_status_invalid")
+    val canonical = sdn_encode_canonical(SdnValue.Dict(fields))
+    if canonical != source: return Err("snapshot_response_noncanonical")
+    Ok(response)
+
+export ScvGatewaySnapshotObjectRefV1, ScvGatewayStructuralRecipeV1, ScvGatewaySnapshotManifestV1
+export ScvGatewaySnapshotManifestCheckV1, ScvGatewaySnapshotRequestV1, ScvGatewaySnapshotResponseV1
+export ScvGatewaySnapshotReadRequestV1, ScvGatewaySnapshotReadResponseV1
+export SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1, SCV_GATEWAY_SNAPSHOT_MAX_OBJECTS_V1
+export SCV_GATEWAY_SNAPSHOT_MAX_MISSING_V1, SCV_GATEWAY_SNAPSHOT_MAX_TOTAL_BYTES_V1
+export scv_gateway_snapshot_manifest_validate_v1, scv_gateway_snapshot_manifest_encode_v1
+export scv_gateway_snapshot_pin_id_v1
+export scv_gateway_snapshot_manifest_decode_v1, scv_gateway_snapshot_request_encode_v1, scv_gateway_snapshot_request_decode_v1
+export scv_gateway_snapshot_read_request_encode_v1, scv_gateway_snapshot_read_request_decode_v1
+export scv_gateway_snapshot_read_response_encode_v1, scv_gateway_snapshot_read_response_decode_v1
+export scv_gateway_snapshot_response_encode_v1, scv_gateway_snapshot_response_decode_v1
