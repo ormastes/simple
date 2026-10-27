@@ -26,6 +26,12 @@ class JobsTests(unittest.TestCase):
         for name in ('config/simple.test.sdn', 'config/sdoctest.sdn',
                      'src/app/test_runner_new/main.spl',
                      'src/app/test_runner_new/test_runner_main.spl',
+                     'src/app/test_daemon/light_protocol.spl',
+                     'src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl',
+                     'src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl',
+                     'src/lib/nogc_sync_mut/spec.spl',
+                     'src/lib/nogc_sync_mut/test_runner/test_runner_output.spl',
+                     'src/lib/nogc_sync_mut/test_runner/sdoctest/runner.spl',
                      'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl',
               'src/lib/nogc_sync_mut/test_runner/test_runner_args.spl',
               'src/lib/nogc_sync_mut/test_runner/test_runner_types.spl',
@@ -84,6 +90,17 @@ class JobsTests(unittest.TestCase):
         with patch('sys.argv', self.args(output, 40, '--resume-prepared')), patch.object(module.subprocess, 'run') as child, contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as error: module.main()
             self.assertEqual(error.exception.code, 2)
+            child.assert_not_called()
+        self.assertFalse((output / 'stdout.log').exists())
+
+    def test_prepared_evidence_producer_change_cannot_launch(self):
+        output = self.root / 'prepared-producer-change'
+        with patch('sys.argv', self.args(output, 4, '--prepare-only')):
+            self.assertEqual(module.main(), 0)
+        producer = self.source / 'src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl'
+        producer.write_bytes(b'changed evidence accounting\n')
+        with patch('sys.argv', self.args(output, 4, '--resume-prepared')), patch.object(module.subprocess, 'run') as child, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit): module.main()
             child.assert_not_called()
         self.assertFalse((output / 'stdout.log').exists())
 
