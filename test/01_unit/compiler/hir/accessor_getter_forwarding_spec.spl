@@ -2,6 +2,7 @@
 # that HIR lowering forwards a field read `recv.x` with no real field `x` to
 # get_x() / is_x() / x(), that a real field wins, and that the undefined-field
 # error is opt-in via SIMPLE_STRICT_FIELD_FORWARDING=1.
+# Default-off: a warning W-HIR-FIELD-001 (REQ-SELFHOST-ACCESSOR-002).
 # @req REQ-SELFHOST-ACCESSOR-001
 # requirements: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
 
@@ -64,7 +65,11 @@ fn probe_tail(probe_body: text, flag: text) -> [text]:
         msgs = msgs + m + "\n"
     env_set_process("SIMPLE_STRICT_FIELD_FORWARDING", "")
     strict_field_forwarding_reset()
-    [tag, "{lowering.errors.len()}", msgs]
+    var hard = 0
+    for rec in lowering.diagnostic_recovered:
+        if not rec:
+            hard = hard + 1
+    [tag, "{lowering.errors.len()}", msgs, "{hard}"]
 
 describe "HIR accessor forwarding for field reads":
     it "forwards recv.celsius to get_celsius()":
@@ -113,3 +118,36 @@ describe "HIR accessor forwarding for field reads":
         step("given static get_stat only when reading t.stat then no method call is lowered")
         val r = probe_tail("t.stat", "")
         expect(r[0]).to_equal("field:stat")
+
+# @req REQ-SELFHOST-ACCESSOR-002
+# Default (flag off): an undefined field that falls through forwarding is a
+# COMPILER WARNING with file:line and a "did you mean" hint; never an error.
+# probe body sits on line 20 of the generated source (DECLS is 18 lines, +blank).
+describe "HIR undefined-field warning (REQ-SELFHOST-ACCESSOR-002)":
+    it "warns with file, line and name when the flag is off":
+        step("given unknown field t.nope when flag is off then a W-HIR-FIELD-001 warning names file:line")
+        val r = probe_tail("t.nope", "")
+        expect(r[2].contains("[W-HIR-FIELD-001] undefined field `nope`")).to_equal(true)
+        expect(r[2].contains("testdata/accessor_fwd.spl:20")).to_equal(true)
+
+    it "still lowers the module with no error when warning":
+        step("given unknown field when flag is off then the field read remains and no error is counted")
+        val r = probe_tail("t.nope", "")
+        expect(r[0]).to_equal("field:nope")
+        expect(r[3]).to_equal(probe_tail("t.level", "")[3])
+
+    it "suggests the closest field and its accessor":
+        step("given typo levl when flag is off then the warning suggests field level and method get_level")
+        val r = probe_tail("t.levl", "")
+        expect(r[2].contains("did you mean field `level` / method `get_level`")).to_equal(true)
+
+    it "turns into an error under the strict flag":
+        step("given unknown field when SIMPLE_STRICT_FIELD_FORWARDING=1 then an error and no warning")
+        val r = probe_tail("t.nope", "1")
+        expect(r[2].contains("W-HIR-FIELD-001")).to_equal(false)
+        expect(r[3]).to_equal("{(probe_tail("t.level", "")[3]).to_i64() + 1}")
+
+    it "does not warn for a real field or a forwarded getter":
+        step("given real field level and forwarded celsius when flag is off then no warning is emitted")
+        expect(probe_tail("t.level", "")[2].contains("W-HIR-FIELD-001")).to_equal(false)
+        expect(probe_tail("t.celsius", "")[2].contains("W-HIR-FIELD-001")).to_equal(false)
