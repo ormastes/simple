@@ -8,7 +8,7 @@
 use app.io.mod.{file_exists, file_size}
 use std.common.io.read_only_file_view.{read_only_file_view_read_beneath_bounded_v1}
 use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
-use std.nogc_sync_mut.io.path_identity.{path_entry_present}
+use std.nogc_sync_mut.io.path_identity.{path_entry_present, path_final_existing, path_identity_contains}
 use std.scv.core.{scv_object_path, scv_chunk_path, scv_object_ref_safe, scv_worktree_path_safe, scv_rel_path}
 use std.scv.store.{scv_repo_exists, scv_hash_text, scv_restore_bookmarks_error,
     scv_content_id_for_u8}
@@ -218,6 +218,29 @@ fn _restore_preflight_ancestors_v1(rel: text) -> [text]:
         i = i + 1
     out
 
+fn _restore_preflight_target_ancestors_v1(root: text, rel: text) -> text:
+    val root_final = match path_final_existing(root):
+        Ok(value): value
+        Err(error): return "ERROR cannot resolve workspace root: {error}\n"
+    var canonical_root = root_final.path.replace("\\", "/")
+    if not canonical_root.ends_with("/"):
+        canonical_root = canonical_root + "/"
+    for ancestor in _restore_preflight_ancestors_v1(rel):
+        val spelling = "{root}/{ancestor}"
+        val present = match path_entry_present(spelling):
+            Ok(value): value
+            Err(error): return "ERROR cannot inspect target parent {ancestor}: {error}\n"
+        if not present:
+            return ""
+        val resolved = match path_final_existing(spelling):
+            Ok(value): value
+            Err(error): return "ERROR cannot resolve target parent {ancestor}: {error}\n"
+        val expected = "{canonical_root}{ancestor}"
+        val resolved_path = resolved.path.replace("\\", "/")
+        if not path_identity_contains(root_final, resolved) or resolved_path != expected:
+            return "ERROR unsafe target parent: {ancestor}\n"
+    ""
+
 fn _restore_preflight_validate_tree_v1(root: text, tree_content: text) -> Result<i64, text>:
     var seen: Dict<text, bool> = {}
     var descendants: Dict<text, bool> = {}
@@ -397,7 +420,11 @@ fn scv_restore_preflight(root: text, op: text) -> text:
     for line in tree_content.split("\n"):
         val trimmed = line.trim()
         if trimmed != "":
-            target_paths[trimmed.split("|")[0]] = true
+            val rel = trimmed.split("|")[0]
+            val parent_error = _restore_preflight_target_ancestors_v1(root, rel)
+            if parent_error != "":
+                return parent_error
+            target_paths[rel] = true
     var current_paths: Dict<text, bool> = {}
     var current_count = 0
     var current_bytes = 0

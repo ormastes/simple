@@ -102,7 +102,8 @@ files above the same 16 MiB preflight limit. It does not change repository
 files, authorize a later restore, or claim
 concurrency safety. It validates canonical `file_` and `sha256_` prefixes
 before passing target rows to the existing structural reconstruction owner,
-and rejects target files whose paths are file ancestors of other target paths.
+checks existing target parents for canonical in-root paths, and rejects target
+files whose paths are file ancestors of other target paths.
 The check admits at most 10,000 target/current rows, 64 MiB of raw bytes per
 target or current view, 32 direct parents per operation/commit, and 256
 bookmarks; small object records are capped at 256 KiB and tree/status/WAL text

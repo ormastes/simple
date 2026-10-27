@@ -90,6 +90,11 @@ HEAD unchanged.
 file objects for both `a` and `a/b`. The preflight rejects the file/descendant
 collision before reporting any restore plan.
 
+**Rejects a missing target below a symlink parent.** The fixture places a
+symlinked directory in the repository and creates a target path beneath it.
+The preflight rejects the noncanonical parent without creating the external
+leaf.
+
 ## Running and interpreting the evidence
 
 Run the system spec with the admitted pure-Simple runtime and regenerate this
