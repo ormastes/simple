@@ -25,6 +25,11 @@ fn _syntax_pack_file_read_v1(path: text, bound: i64) -> ScvSyntaxPackBufferV1:
         Ok(bytes): ScvSyntaxPackBufferV1(bytes: bytes, error: "")
         Err(error): ScvSyntaxPackBufferV1(bytes: [], error: "ERROR {error}\n")
 
+fn _syntax_pack_append_bytes_v1(output: [u8], more: [u8]) -> [u8]:
+    var result = output
+    for byte in more: result.push(byte)
+    result
+
 fn _syntax_pack_dir_v1(root: text) -> text:
     "{scv_objects_dir(root)}/{SCV_SYNTAX_PACK_DIR_V1}"
 
@@ -99,8 +104,8 @@ fn _syntax_pack_index_parse_v1(root: text) -> (text, [text], [i64], text):
         if parts.len() != 3 or parts[0] != "entry:" or not _syntax_pack_ref_v1(parts[1]):
             return ("", [], [], "ERROR syntax pack index row\n")
         val size = _syntax_pack_number_v1(parts[2])
-        if size < 0 or size > SCV_SYNTAX_PACK_RECORD_BOUND_V1 or ids.contains(parts[1]):
-            return ("", [], [], "ERROR syntax pack index duplicate or bound\n")
+        if size < 0 or size > SCV_SYNTAX_PACK_RECORD_BOUND_V1:
+            return ("", [], [], "ERROR syntax pack index bound\n")
         if ids.len() > 0 and ids[ids.len() - 1] >= parts[1]:
             return ("", [], [], "ERROR syntax pack index order\n")
         ids.push(parts[1])
@@ -157,6 +162,9 @@ fn _syntax_pack_archive_verify_v1(bytes: [u8], expected_ids: [text], expected_si
         val record = bytes[data_start:data_end]
         if _syntax_pack_node_id_v1(record) != parts[1]:
             return ("", "ERROR syntax pack logical id mismatch\n")
+        val (is_byte_dag, record_schema_error) = _syntax_pack_byte_dag_record_v1(record)
+        if record_schema_error != "" or not is_byte_dag:
+            return ("", if record_schema_error != "": record_schema_error else: "ERROR non-byte-DAG syntax record in pack\n")
         val (endline, endline_end, endline_error) = _syntax_pack_line_v1(bytes, data_end + 1)
         if endline_error != "" or endline != "endentry":
             return ("", "ERROR syntax pack entry terminator\n")
@@ -185,6 +193,7 @@ fn scv_structural_pack_read_v1(root: text, id: text) -> (text, text):
 
 fn scv_structural_pack_verify_v1(root: text) -> text:
     val (pack_id, ids, sizes, index_error) = _syntax_pack_index_parse_v1(root)
+    if index_error == "NOT_INDEXED": return "ERROR no syntax pack index\n"
     if index_error != "": return index_error
     val path = "{_syntax_pack_dir_v1(root)}/{pack_id}.pack"
     if not file_exists(path): return "ERROR missing indexed syntax pack: {pack_id}\n"
@@ -225,11 +234,13 @@ fn _scv_structural_pack_write_locked_v1(root: text) -> text:
     if not directory_fsync(scv_objects_dir(root)) or not directory_fsync(pack_dir):
         return "ERROR cannot sync syntax pack parent directory\n"
     var ids: [text] = []
+    var ids_seen: Dict<text, bool> = {}
     val loose_dir = "{scv_objects_dir(root)}/syntax"
     if file_exists(loose_dir):
         for path in dir_walk(loose_dir):
             val id = _syntax_pack_last_path_v1(path)
             if not _syntax_pack_ref_v1(id): continue
+            if ids_seen.contains_key(id): continue
             val buffer = _syntax_pack_file_read_v1(path, SCV_SYNTAX_PACK_RECORD_BOUND_V1)
             if buffer.error != "": return buffer.error
             val (is_byte_dag, classify_error) = _syntax_pack_byte_dag_record_v1(buffer.bytes)
@@ -237,7 +248,8 @@ fn _scv_structural_pack_write_locked_v1(root: text) -> text:
             if is_byte_dag:
                 if _syntax_pack_node_id_v1(buffer.bytes) != id:
                     return "ERROR structural record id mismatch: {id}\n"
-                if not ids.contains(id): ids.push(id)
+                ids_seen[id] = true
+                ids.push(id)
     val (_, old_ids, _old_sizes, old_error) = _syntax_pack_index_parse_v1(root)
     if old_error != "" and old_error != "NOT_INDEXED": return old_error
     if old_error == "":
@@ -245,12 +257,15 @@ fn _scv_structural_pack_write_locked_v1(root: text) -> text:
         if not old_verify.starts_with("format=scv-syntax-record-pack-v1"):
             return old_verify
     for id in old_ids:
-        if not ids.contains(id): ids.push(id)
+        if not ids_seen.contains_key(id):
+            ids_seen[id] = true
+            ids.push(id)
     ids.sort()
     if ids.len() == 0 or ids.len() > SCV_SYNTAX_PACK_RECORD_COUNT_BOUND_V1:
         return "ERROR syntax pack record count bound\n"
     var sizes: [i64] = []
-    var pack: [u8] = "format: scv-syntax-record-pack-v1\ncodec: identity\nrecords: {ids.len()}\n".bytes()
+    var pack: [u8] = []
+    pack = _syntax_pack_append_bytes_v1(pack, "format: scv-syntax-record-pack-v1\ncodec: identity\nrecords: {ids.len()}\n".bytes())
     for id in ids:
         var record: [u8] = []
         val loose = scv_object_path(root, "syntax", id)
@@ -267,10 +282,10 @@ fn _scv_structural_pack_write_locked_v1(root: text) -> text:
         if record.len() > SCV_SYNTAX_PACK_RECORD_BOUND_V1:
             return "ERROR syntax pack record bound\n"
         sizes.push(record.len())
-        pack = pack + "entry: {id} {record.len()}\n".bytes()
-        for byte in record: pack.push(byte)
+        pack = _syntax_pack_append_bytes_v1(pack, "entry: {id} {record.len()}\n".bytes())
+        pack = _syntax_pack_append_bytes_v1(pack, record)
         pack.push(10u8)
-        pack = pack + "endentry\n".bytes()
+        pack = _syntax_pack_append_bytes_v1(pack, "endentry\n".bytes())
         if pack.len() > SCV_SYNTAX_PACK_BYTES_BOUND_V1:
             return "ERROR syntax pack archive bound\n"
     val pack_id = _syntax_pack_hash_bytes_v1(pack)
@@ -288,11 +303,13 @@ fn _scv_structural_pack_write_locked_v1(root: text) -> text:
         return "ERROR syntax pack readback mismatch\n"
     val (_, archive_error) = _syntax_pack_archive_verify_v1(published.bytes, ids, sizes, "")
     if archive_error != "": return archive_error
-    var index_body = "format: scv-syntax-record-index-v1\npack: {pack_id}\nrecords: {ids.len()}\n"
+    var index_rows: [text] = []
     var i = 0
     while i < ids.len():
-        index_body = index_body + "entry: {ids[i]} {sizes[i]}\n"
+        index_rows.push("entry: {ids[i]} {sizes[i]}\n")
         i = i + 1
+    val index_row_text = index_rows.join("")
+    val index_body = "format: scv-syntax-record-index-v1\npack: {pack_id}\nrecords: {ids.len()}\n{index_row_text}"
     val index = index_body + "index_hash: syntax_index_{sha256_u8_fast_hex(index_body.bytes())}\n"
     val index_path = _syntax_pack_index_path_v1(root)
     if not atomic_write_bytes(index_path, index.bytes()):
@@ -323,19 +340,26 @@ fn scv_structural_pack_status_v1(root: text) -> text:
 fn scv_syntax_pack_closure_v1(root: text, seeds: text) -> Result<text, text>:
     var reachable = seeds
     var pending: [text] = []
-    var visited = ""
+    var additions: [text] = []
+    var visited: Dict<text, bool> = {}
+    var queued: Dict<text, bool> = {}
+    var members: Dict<text, bool> = {}
     for id in seeds.split("\n"):
         val item = id.trim()
-        if _syntax_pack_ref_v1(item) and not pending.contains(item): pending.push(item)
+        if item == "": continue
+        members[item] = true
+        if _syntax_pack_ref_v1(item) and not queued.contains_key(item):
+            pending.push(item)
+            queued[item] = true
     var visits = 0
     while pending.len() > 0:
         val id = pending[pending.len() - 1]
         pending.pop()
-        if scv_line_set_contains(visited, id): continue
+        if visited.contains_key(id): continue
         visits = visits + 1
         if visits > SCV_SYNTAX_PACK_RECORD_COUNT_BOUND_V1:
             return Err("ERROR syntax pack GC traversal bound\n")
-        visited = visited + id + "\n"
+        visited[id] = true
         val record_bytes = _syntax_pack_record_v1(root, id)?
         val record = match validated_utf8_bytes_to_text_linear(record_bytes):
             Ok(value): value
@@ -347,7 +371,9 @@ fn scv_syntax_pack_closure_v1(root: text, seeds: text) -> Result<text, text>:
                 if payload != "":
                     if not _syntax_pack_digest_ref_v1(payload, "sha256_"):
                         return Err("ERROR malformed syntax payload reference: {id}\n")
-                    if not scv_line_set_contains(reachable, payload): reachable = reachable + payload + "\n"
+                    if not members.contains_key(payload):
+                        members[payload] = true
+                        additions.push(payload)
             elif trimmed.starts_with("children:"):
                 val child_list = trimmed[9:].trim()
                 if child_list != "":
@@ -355,8 +381,15 @@ fn scv_syntax_pack_closure_v1(root: text, seeds: text) -> Result<text, text>:
                         val child_id = child.trim()
                         if not _syntax_pack_ref_v1(child_id):
                             return Err("ERROR malformed syntax child reference: {id}\n")
-                        if not scv_line_set_contains(reachable, child_id): reachable = reachable + child_id + "\n"
-                        if not pending.contains(child_id): pending.push(child_id)
+                        if not members.contains_key(child_id):
+                            members[child_id] = true
+                            additions.push(child_id)
+                        if not queued.contains_key(child_id):
+                            pending.push(child_id)
+                            queued[child_id] = true
+    if additions.len() > 0:
+        val prefix = if reachable.ends_with("\n") or reachable == "": "" else: "\n"
+        reachable = reachable + prefix + additions.join("\n") + "\n"
     Ok(reachable)
 
 export scv_structural_pack_read_v1, scv_structural_pack_verify_v1
