@@ -112,6 +112,30 @@ describe "scv event journal integration (E-03)":
         expect(_events_lines(root)).to_equal(0)
         dir_remove_all(root)
 
+    it "rejects blank batches and reports replay write failures instead of zero successes":
+        step("Keep a blank pending batch and surface blocked event-log replay")
+        val blank_root = _repo("blank-pending")
+        expect(scv_event_batch_record(blank_root, "b1", "created", "a.txt", "")).to_equal(true)
+        expect(file_write(scv_event_batch_pending_path(blank_root, "b1"), "\n")).to_equal(true)
+        expect(scv_event_batch_commit(blank_root, "b1")).to_equal(false)
+        expect(file_exists(scv_event_batch_pending_path(blank_root, "b1"))).to_equal(true)
+
+        val blocked_root = _repo("blocked-replay")
+        expect(scv_event_batch_record(blocked_root, "b1", "created", "a.txt", "")).to_equal(true)
+        dir_create(scv_journal_events_path(blocked_root), true)
+        expect(scv_event_batch_replay(blocked_root)).to_equal(-1)
+        expect(file_exists(scv_event_batch_pending_path(blocked_root, "b1"))).to_equal(true)
+        val script = [
+            "REPO=$(pwd)",
+            "cd \"{blocked_root}\"",
+            "SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" event-replay"
+        ].join("\n") + "\n"
+        val (out, err, code) = process_run("/bin/sh", ["-c", script])
+        expect(code).to_equal(1)
+        expect("{out}{err}").to_contain("ERROR event-replay failed")
+        dir_remove_all(blank_root)
+        dir_remove_all(blocked_root)
+
     it "retains the no-events response for a fresh journal directory":
         step("Read the event view before the first event log exists")
         val root = _repo("empty-events")
