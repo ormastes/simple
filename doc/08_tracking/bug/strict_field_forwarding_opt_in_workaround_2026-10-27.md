@@ -35,4 +35,4 @@ coverage: 0 / ~1570 compiler files, unproven for cross-file owners.
 Next step: rerun the census with the full module graph (imported type tables) once the
 phase-3 full CLI exists; use that count to size step 1 of the removal plan.
 
-- **DB reconciliation pending:** bug id `strict-field-forwarding-opt-in-20261027` is not in bug_db.sdn yet; add it with `bin/simple bug-add` when the DB lane allows it.
+- **DB reconciliation:** registered in bug_db.sdn (bugs_active + bugs) on 2026-10-27.
