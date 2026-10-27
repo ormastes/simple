@@ -52,12 +52,23 @@ fn _peek(data: [u8], bp: i64, n: i64) -> i64:
 # longer codes fall back to the bit-by-bit canonical decoder.
 val FAST_BITS = 9
 
+# Canonical Huffman decoder tables (see huffman_build).
+struct HuffTable:
+    counts: [i64]
+    symbols: [i64]
+    fast: [i64]
+
+# Result of an inflate step: decoded bytes plus the end bit/byte position.
+struct InflateOut:
+    output: [u8]
+    end: i64
+
 # Build a canonical Huffman decoder from per-symbol code lengths.
 # Returns [counts, symbols, fast]: counts[len] = number of codes of that length,
 # symbols = symbol values sorted by (length, symbol) -- the puff layout; fast is a
 # 2^FAST_BITS table indexed by the next FAST_BITS input bits (LSB-first) holding
 # (symbol << 4) | code_length, or 0 when the code is longer than FAST_BITS.
-fn huffman_build(lengths: [i64]) -> [Any]:
+fn huffman_build(lengths: [i64]) -> HuffTable:
     var counts: [i64] = []
     var offs: [i64] = []
     var i = 0
@@ -108,7 +119,7 @@ fn huffman_build(lengths: [i64]) -> [Any]:
             n = n + 1
         code = code << 1
         l = l + 1
-    return [counts, symbols, fast]
+    return HuffTable(counts: counts, symbols: symbols, fast: fast)
 
 # RFC 1951 3.2.2: a code must not be over-subscribed. An incomplete code is
 # only tolerated as the single one-bit code that zlib also accepts
@@ -186,13 +197,13 @@ fn _fixed_litlen_lengths() -> [i64]:
 # (history + block; negative = unbounded).
 # Returns [block_output, new_bp] -- the NEW bytes only -- or nil on malformed or
 # truncated input.
-fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64, lit: [Any], dist: [Any]) -> [Any]?:
-    val lc: [i64] = lit[0]
-    val ls: [i64] = lit[1]
-    val lf: [i64] = lit[2]
-    val dc: [i64] = dist[0]
-    val ds: [i64] = dist[1]
-    val df: [i64] = dist[2]
+fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64, lit: HuffTable, dist: HuffTable) -> InflateOut?:
+    val lc: [i64] = lit.counts
+    val ls: [i64] = lit.symbols
+    val lf: [i64] = lit.fast
+    val dc: [i64] = dist.counts
+    val ds: [i64] = dist.symbols
+    val df: [i64] = dist.fast
     var bp = bp0
     val hlen = history.len()
     var out: [u8] = []
@@ -251,10 +262,10 @@ fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i
                     out.push(if src < hlen: history[src] else: out[src - hlen])
                     src = src + 1
                     j = j + 1
-    return [out, bp]
+    return InflateOut(output: out, end: bp)
 
 # Fixed-Huffman tables (RFC 1951 3.2.6) as [literal/length, distance]; built once per stream.
-fn _fixed_tables() -> [Any]:
+fn _fixed_tables() -> [HuffTable]:
     var dist_lengths: [i64] = []
     var i = 0
     while i < 32:
@@ -263,7 +274,7 @@ fn _fixed_tables() -> [Any]:
     return [huffman_build(_fixed_litlen_lengths()), huffman_build(dist_lengths)]
 
 # Dynamic-Huffman block (RFC 1951 3.2.7): read the code-length tables, then the body.
-fn _inflate_dynamic(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64) -> [Any]?:
+fn _inflate_dynamic(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64) -> InflateOut?:
     var bp = bp0
     if bp + 14 > total:
         return nil
@@ -291,9 +302,9 @@ fn _inflate_dynamic(data: [u8], bp0: i64, total: i64, history: [u8], max_output:
     if not _huffman_lengths_valid(clen_lengths, false, false):
         return nil
     val clen_huff = huffman_build(clen_lengths)
-    val clen_counts: [i64] = clen_huff[0]
-    val clen_symbols: [i64] = clen_huff[1]
-    val clen_fast: [i64] = clen_huff[2]
+    val clen_counts: [i64] = clen_huff.counts
+    val clen_symbols: [i64] = clen_huff.symbols
+    val clen_fast: [i64] = clen_huff.fast
 
     # Decode the hlit+hdist literal/length + distance code lengths
     val want = hlit + hdist
@@ -352,15 +363,15 @@ fn _inflate_dynamic(data: [u8], bp0: i64, total: i64, history: [u8], max_output:
 # after a non-final block is accepted (RFC 7692 sync flush) and a BFINAL block must
 # end exactly at the end of `input`. Returns [output, end_byte] or nil, where
 # end_byte is the offset just past the last byte consumed.
-fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> [Any]?:
+fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> InflateOut?:
     if input.len() == 0 or max_output == 0:
         var empty: [u8] = []
-        return [empty, 0]
+        return InflateOut(output: empty, end: 0)
 
     val total = input.len() * 8
     var bp = start * 8
     var out: [u8] = []
-    var fixed_tables: [Any] = []
+    var fixed_tables: [HuffTable] = []
 
     loop:
         # BFINAL (1 bit) and BTYPE (2 bits), LSB-first
@@ -397,20 +408,20 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> [Any
             val br = if btype == BLOCK_FIXED: _inflate_codes(input, bp, total, out, max_output, fixed_tables[0], fixed_tables[1]) else: _inflate_dynamic(input, bp, total, out, max_output)
             if br == nil:
                 return nil
-            val block_out: [u8] = br[0]
+            val block_out: [u8] = br!.output
             if out.len() == 0:
                 out = block_out
             else:
                 for b in block_out:
                     out.push(b)
-            bp = br[1]
+            bp = br!.end
 
         val consumed_bytes = (bp + 7) >> 3
 
         if bfinal == 1:
             if not member and consumed_bytes != input.len():
                 return nil
-            return [out, consumed_bytes]
+            return InflateOut(output: out, end: consumed_bytes)
 
         # Non-final block with the input fully consumed: this is a sync-flush
         # stream (RFC 7692 permessage-deflate), which legitimately carries no
@@ -418,7 +429,7 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> [Any
         if consumed_bytes >= input.len():
             if member:
                 return nil
-            return [out, consumed_bytes]
+            return InflateOut(output: out, end: consumed_bytes)
 
 # Decompress a complete DEFLATE stream without allowing output beyond max_output.
 # A negative max_output preserves the legacy unbounded API.
@@ -426,13 +437,13 @@ fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
     val r = _inflate_core(input, 0, max_output, false)
     if r == nil:
         return nil
-    val out: [u8] = r[0]
+    val out: [u8] = r!.output
     return out
 
 # Decompress ONE DEFLATE stream that starts at byte offset `start` of `input` and
 # must end with a BFINAL block; bytes after it are left alone (a gzip member
-# trailer follows). Returns [output, end_byte] or nil.
-fn inflate_member(input: [u8], start: i64) -> [Any]?:
+# trailer follows). Returns InflateOut(output, end byte) or nil.
+fn inflate_member(input: [u8], start: i64) -> InflateOut?:
     _inflate_core(input, start, -1, true)
 
 # Decompress a complete DEFLATE stream (one or more blocks).
