@@ -25,8 +25,12 @@ fn capture_test_cursor_v1(sequence: i64) -> ScvBuildCursorV1:
     ScvBuildCursorV1(epoch: "capture-test-epoch", sequence: sequence)
 
 fn capture_test_transaction_v1(sequence: i64, upserts: [BuildInputEntryV1], deleted: [text]) -> BuildCaptureTransactionV1:
-    BuildCaptureTransactionV1(expected_cursor: capture_test_cursor_v1(sequence - 1),
-        cursor: capture_test_cursor_v1(sequence), upserts: upserts, deleted_paths: deleted)
+    BuildCaptureTransactionV1(cursor: capture_test_cursor_v1(sequence),
+        upserts: upserts, deleted_paths: deleted, renames: [])
+
+fn capture_test_apply_v1(state: BuildCaptureStateV1, transaction: BuildCaptureTransactionV1) -> Result<BuildCaptureStateV1, text>:
+    scv_build_capture_apply_v1(state, capture_test_cursor_v1(transaction.cursor.sequence - 1),
+        "transaction-{transaction.cursor.sequence}", transaction)
 
 describe "SCV build capture V1":
     it "retains exact binary bytes and copies caller payloads":
@@ -173,8 +177,8 @@ describe "SCV build capture V1":
         step("setup: open the managed owner at the initial source bytes")
         val base = capture_test_entry_v1("src/main", "disk", "worktree")
         var state = scv_build_capture_open_v1(capture_test_universe_v1(), [base], "capture-test-epoch").unwrap()
-        state = scv_build_capture_apply_v1(state, capture_test_transaction_v1(1, [capture_test_entry_v1("src/main", "editor-one", "editor")], [])).unwrap()
-        state = scv_build_capture_apply_v1(state, capture_test_transaction_v1(2, [capture_test_entry_v1("src/main", "editor-two", "editor")], [])).unwrap()
+        state = capture_test_apply_v1(state, capture_test_transaction_v1(1, [capture_test_entry_v1("src/main", "editor-one", "editor")], [])).unwrap()
+        state = capture_test_apply_v1(state, capture_test_transaction_v1(2, [capture_test_entry_v1("src/main", "editor-two", "editor")], [])).unwrap()
         expect(state.applied_sequence).to_equal(0)
         expect(state.cursor.sequence).to_equal(2)
         step("freeze: drain queued acknowledgements at the exact requested cursor")
@@ -187,21 +191,21 @@ describe "SCV build capture V1":
         # @req REQ-SCV-BUILD-CAPTURE-05
         var state = scv_build_capture_open_v1(capture_test_universe_v1(), [capture_test_entry_v1("src/a", "old", "worktree")], "capture-test-epoch").unwrap()
         val old = scv_build_freeze_v1(state, capture_test_cursor_v1(0)).unwrap()
-        state = scv_build_capture_apply_v1(state, capture_test_transaction_v1(1, [], ["src/a"])).unwrap()
+        state = capture_test_apply_v1(state, capture_test_transaction_v1(1, [], ["src/a"])).unwrap()
         expect(scv_build_snapshot_read_v1(scv_build_freeze_v1(state, capture_test_cursor_v1(1)).unwrap(), "src/a")).to_equal(Err("build-path-absent"))
-        state = scv_build_capture_apply_v1(state, capture_test_transaction_v1(2, [capture_test_entry_v1("src/a", "new", "editor")], [])).unwrap()
+        state = capture_test_apply_v1(state, capture_test_transaction_v1(2, [capture_test_entry_v1("src/a", "new", "editor")], [])).unwrap()
         expect(scv_build_snapshot_read_v1(scv_build_freeze_v1(state, capture_test_cursor_v1(2)).unwrap(), "src/a").unwrap()).to_equal("new".bytes())
         expect(scv_build_snapshot_read_v1(old, "src/a").unwrap()).to_equal("old".bytes())
 
     it "rejects cursor holes replay and epoch changes before acknowledgement":
         # @req REQ-SCV-BUILD-CAPTURE-06
         val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
-        expect(scv_build_capture_apply_v1(state, capture_test_transaction_v1(2, [], []))).to_equal(Err("build-transaction-cursor-gap"))
-        val next = scv_build_capture_apply_v1(state, capture_test_transaction_v1(1, [], [])).unwrap()
-        expect(scv_build_capture_apply_v1(next, capture_test_transaction_v1(1, [], []))).to_equal(Err("build-transaction-cursor-gap"))
+        expect(capture_test_apply_v1(state, capture_test_transaction_v1(2, [], []))).to_equal(Err("build-transaction-cursor-gap"))
+        val next = capture_test_apply_v1(state, capture_test_transaction_v1(1, [], [])).unwrap()
+        expect(scv_build_capture_apply_v1(next, capture_test_cursor_v1(0), "different-transaction", capture_test_transaction_v1(1, [], []))).to_equal(Err("build-transaction-cursor-gap"))
         var transaction = capture_test_transaction_v1(1, [], [])
         transaction.cursor.epoch = "different-epoch"
-        expect(scv_build_capture_apply_v1(state, transaction)).to_equal(Err("build-transaction-cursor-gap"))
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-transaction-cursor-gap"))
         expect(scv_build_freeze_v1(state, capture_test_cursor_v1(2))).to_equal(Err("build-barrier-cursor-mismatch"))
 
     it "refuses a barrier after the owner reports unresolved capture coverage":
@@ -209,7 +213,40 @@ describe "SCV build capture V1":
         val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
         val unknown = scv_build_capture_unknown_v1(state, "watcher-overflow-reconcile-required")
         expect(scv_build_freeze_v1(unknown, capture_test_cursor_v1(0))).to_equal(Err("build-capture-unknown:watcher-overflow-reconcile-required"))
-        expect(scv_build_capture_apply_v1(unknown, capture_test_transaction_v1(1, [], []))).to_equal(Err("build-capture-unknown:watcher-overflow-reconcile-required"))
+        expect(capture_test_apply_v1(unknown, capture_test_transaction_v1(1, [], []))).to_equal(Err("build-capture-unknown:watcher-overflow-reconcile-required"))
+
+    it "accepts exact transaction replay and rejects changed payload under the same ID":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
+        val transaction = capture_test_transaction_v1(1, [capture_test_entry_v1("src/a", "one", "editor")], [])
+        val next = capture_test_apply_v1(state, transaction).unwrap()
+        val replayed = capture_test_apply_v1(next, transaction).unwrap()
+        expect(replayed.cursor.sequence).to_equal(1)
+        expect(replayed.pending.len()).to_equal(1)
+        val changed = capture_test_transaction_v1(1, [capture_test_entry_v1("src/a", "different", "editor")], [])
+        expect(capture_test_apply_v1(next, changed)).to_equal(Err("build-transaction-id-collision"))
+
+    it "applies explicit rename only after checking the exact previous entry digest":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val entry = capture_test_entry_v1("src/old", "same bytes", "worktree")
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [entry], "capture-test-epoch").unwrap()
+        val rename = BuildCaptureRenameV1(from_path: "src/old", to_path: "src/new", expected_entry_digest: scv_build_entry_digest_v1(entry))
+        var transaction = BuildCaptureTransactionV1(cursor: capture_test_cursor_v1(1), upserts: [], deleted_paths: [], renames: [rename])
+        val next = capture_test_apply_v1(state, transaction).unwrap()
+        val frozen = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_read_v1(frozen, "src/old")).to_equal(Err("build-path-absent"))
+        expect(scv_build_snapshot_read_v1(frozen, "src/new").unwrap()).to_equal(entry.bytes)
+        transaction.renames[0].expected_entry_digest = capture_test_digest_v1()
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-rename-precondition-failed"))
+
+    it "requires a fresh epoch to reconcile an unknown managed universe":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
+        val unknown = scv_build_capture_unknown_v1(state, "gap")
+        expect(scv_build_capture_reconcile_v1(unknown, capture_test_universe_v1(), [], "capture-test-epoch")).to_equal(Err("build-reconcile-epoch-reused"))
+        val reconciled = scv_build_capture_reconcile_v1(unknown, capture_test_universe_v1(), [capture_test_entry_v1("src/a", "reconciled", "worktree")], "new-epoch").unwrap()
+        val frozen = scv_build_freeze_v1(reconciled, ScvBuildCursorV1(epoch: "new-epoch", sequence: 0)).unwrap()
+        expect(scv_build_snapshot_read_v1(frozen, "src/a").unwrap()).to_equal("reconciled".bytes())
 
     it "rejects tampered snapshots before byte or absence delivery":
         # @req REQ-SCV-BUILD-CAPTURE-06
