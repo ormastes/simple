@@ -13023,6 +13023,7 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
  * worker above this point -- and every later user in this file -- can use it.
  * This file used to carry a forward-declared, separately-defined copy. */
 #include "platform/runtime_win_long_path.h"
+#include "platform/runtime_win_excl_file.h"
 #endif
 static int rt_bucket2_fsync_path(const char* path) {
     if (!path) return 0;
@@ -17544,7 +17545,15 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
 int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+#if defined(_WIN32)
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    return rt_win_file_copy_create_excl_no_follow(src, dst);
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -17594,7 +17603,15 @@ int rt_file_copy_create_excl_no_follow(
 int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+#if defined(_WIN32)
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    return rt_win_file_link_create_excl_no_follow(src, dst);
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else

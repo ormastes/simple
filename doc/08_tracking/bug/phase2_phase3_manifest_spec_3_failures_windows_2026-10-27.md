@@ -22,7 +22,8 @@ Two causes:
   matched (`wrong-phase3-cache-root`). Fix: normalize the spec roots with `.replace("\\", "/")`
   like the Windows-separators example already did.
 
-## 3. "leave no final object when publication is interrupted" (Windows-only, OPEN)
+## 3. "leave no final object when publication is interrupted" (Windows-only, FIXED)
+Fixed by Windows implementations: `src/runtime/platform/runtime_win_excl_file.h` (used by runtime.c and runtime_native.c) and `win_excl` in file_ops.rs (seed). Spec 14/14 on Windows; focused spec test/02_integration/runtime/excl_copy_link_no_follow_spec.spl; C probe src/runtime/test/rt_win_excl_file_selfcheck.c. Original diagnosis follows.
 `rt_file_copy_create_excl_no_follow` and `rt_file_link_create_excl_no_follow` are explicit
 stubs returning false under `_WIN32`/`#[cfg(not(unix))]` in ALL three runtimes:
 `src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs` (seed),
