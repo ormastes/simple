@@ -1,0 +1,123 @@
+"""
+SCVN-B03: reject unreadable inputs and failed publications while retaining
+legitimate empty files and arbitrary bytes. These fixtures use real files;
+expected digests and retained destination bytes are independent oracles.
+"""
+# @req REQ-SCVN-B03-READ, REQ-SCVN-B03-PUBLISH
+use std.spec.{describe, it, expect}
+use app.io.mod (process_run, file_write, file_read, file_exists, dir_create)
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, file_read_bytes}
+use std.nogc_sync_mut.database.atomic.{atomic_write, atomic_write_bytes}
+use std.scv.store.{scv_init_repo, scv_content_id_for_file_checked, scv_write_text, scv_write_chunk_from_file}
+use std.scv.file_buffer.{ScvFileBuffer, scv_file_buffer_read, scv_file_buffer_read_bounded, scv_file_buffer_content_id, scv_file_buffer_write_objects}
+
+fn storage_fixture() -> text:
+    val (out, err, code) = process_run("mktemp", ["-d", "/tmp/scv-storage-failure.XXXXXX"])
+    expect(code).to_equal(0)
+    expect(err).to_equal("")
+    out.trim()
+
+describe "SCVN-B03 fallible storage":
+    it "distinguishes absent input from the standard empty-file digest":
+        val root = storage_fixture()
+        expect(file_write("{root}/empty", "")).to_equal(true)
+        val expected = "sha256_e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        expect(scv_content_id_for_file_checked("{root}/empty")).to_equal(Ok(expected))
+        match scv_content_id_for_file_checked("{root}/missing"):
+            Ok(id): fail("missing input was hashed as {id}")
+            Err(error): expect(error).to_contain("ERROR")
+        match scv_content_id_for_file_checked(root):
+            Ok(id): fail("directory input was hashed as {id}")
+            Err(error): expect(error).to_contain("ERROR")
+
+    it "does not hash or publish a failed FileBuffer as an empty file":
+        val root = storage_fixture()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        val buffer = scv_file_buffer_read("{root}/missing")
+        expect(buffer.error).to_contain("ERROR")
+        expect(scv_file_buffer_content_id(buffer)).to_equal(Err(buffer.error))
+        expect(scv_file_buffer_write_objects(root, "missing", buffer, 0)).to_equal(Err(buffer.error))
+        val empty_chunk = "{root}/.scv/objects/chunks/sha256_e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.blob"
+        expect(file_exists(empty_chunk)).to_equal(false)
+
+    it "rejects invalid and excessive bounds and accepts the exact byte limit":
+        val root = storage_fixture()
+        expect(file_write("{root}/value", "abc")).to_equal(true)
+        expect(scv_file_buffer_read_bounded("{root}/value", -1).error).to_contain("invalid")
+        val excess = scv_file_buffer_read_bounded("{root}/value", 2)
+        expect(excess.error).to_contain("over bound")
+        expect(excess.bytes.len()).to_equal(0)
+        val exact = scv_file_buffer_read_bounded("{root}/value", 3)
+        expect(exact.error).to_equal("")
+        expect(exact.bytes).to_equal([97u8, 98u8, 99u8])
+        expect(scv_file_buffer_content_id(exact)).to_equal(Ok("sha256_ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))
+
+    it "keeps captured binary bytes after the source changes":
+        val root = storage_fixture()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        val original: [u8] = [0u8, 255u8, 128u8, 65u8, 10u8]
+        expect(file_write_bytes("{root}/binary", original)).to_equal(true)
+        val buffer = scv_file_buffer_read("{root}/binary")
+        expect(file_write("{root}/binary", "replacement")).to_equal(true)
+        val (file_id, chunk) = scv_file_buffer_write_objects(root, "binary", buffer, 0).unwrap()
+        expect(file_read_bytes("{root}/.scv/objects/chunks/{chunk}.blob").unwrap()).to_equal(original)
+        expect(file_exists("{root}/.scv/objects/files/{file_id}.sdn")).to_equal(true)
+
+    it "fails text publication without overwriting the admitted destination":
+        val root = storage_fixture()
+        val path = "{root}/record"
+        expect(file_write(path, "admitted")).to_equal(true)
+        dir_create("{path}.tmp", true)
+        expect(atomic_write(path, "candidate")).to_equal(false)
+        expect(scv_write_text(path, "candidate")).to_equal(false)
+        expect(file_read(path)).to_equal("admitted")
+
+    it "atomically publishes binary bytes and preserves them when the next staging write fails":
+        val root = storage_fixture()
+        val path = "{root}/record"
+        val admitted: [u8] = [0u8, 255u8, 128u8, 10u8]
+        expect(atomic_write_bytes(path, admitted)).to_equal(true)
+        expect(file_read_bytes(path).unwrap()).to_equal(admitted)
+        dir_create("{path}.tmp", true)
+        expect(atomic_write_bytes(path, [65u8])).to_equal(false)
+        expect(file_read_bytes(path).unwrap()).to_equal(admitted)
+
+    it "rejects a failed chunk staging write before publishing a chunk id":
+        val root = storage_fixture()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/abc", "abc")).to_equal(true)
+        val chunk = "sha256_ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        val destination = "{root}/.scv/objects/chunks/{chunk}.blob"
+        dir_create("{destination}.tmp", true)
+        match scv_write_chunk_from_file(root, "{root}/abc"):
+            Ok(id): fail("failed chunk write acknowledged {id}")
+            Err(error): expect(error).to_contain("cannot publish chunk")
+        expect(file_exists(destination)).to_equal(false)
+
+    it "reports a rename failure while retaining the destination directory":
+        val root = storage_fixture()
+        val destination = "{root}/directory"
+        dir_create(destination, true)
+        expect(file_write("{destination}/marker", "retained")).to_equal(true)
+        expect(atomic_write_bytes(destination, [0u8, 255u8])).to_equal(false)
+        expect(file_read("{destination}/marker")).to_equal("retained")
+
+    it "refuses a symlink instead of silently capturing a different pathname":
+        val root = storage_fixture()
+        expect(file_write("{root}/source", "abc")).to_equal(true)
+        val (out, err, code) = process_run("ln", ["-s", "{root}/source", "{root}/alias"])
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(scv_file_buffer_read("{root}/source").error).to_equal("")
+        expect(scv_file_buffer_read("{root}/alias").error).to_contain("ERROR")
+
+    it "rejects corrupt existing chunks rather than acknowledging deduplication":
+        val root = storage_fixture()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/abc", "abc")).to_equal(true)
+        val destination = "{root}/.scv/objects/chunks/sha256_ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.blob"
+        expect(file_write(destination, "tampered")).to_equal(true)
+        match scv_write_chunk_from_file(root, "{root}/abc"):
+            Ok(id): fail("corrupt existing chunk acknowledged {id}")
+            Err(error): expect(error).to_contain("corrupt existing chunk")
+        expect(file_read(destination)).to_equal("tampered")

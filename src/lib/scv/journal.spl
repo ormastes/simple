@@ -10,6 +10,7 @@ use app.io.mod (file_exists, file_read, file_delete, dir_create, dir_list)
 use std.scv.core.{scv_repo_dir, scv_head_path, scv_workspace_path, scv_status_index_path, scv_object_path}
 use std.scv.store.{scv_repo_exists, scv_write_text, scv_fault_exit, scv_object_field, scv_commit_tree}
 use std.scv.maintenance.{scv_rebuild_object_index}
+use std.io_runtime.{read_file_text_result}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 fn scv_journal_dir(root: text) -> text:
@@ -33,7 +34,11 @@ fn scv_journal_decode(value: text) -> text:
     value.split("%0A").join("\n").split("%20").join(" ").split("%25").join("%")
 
 fn scv_journal_append(path: text, line: text) -> bool:
-    val old = if file_exists(path): file_read(path) else: ""
+    var old = ""
+    if file_exists(path):
+        old = match read_file_text_result(path):
+            Ok(content): content
+            Err(error): return false
     scv_write_text(path, "{old}{line}\n")
 
 # Append-only event record: one line per repository mutation.
@@ -42,8 +47,8 @@ fn scv_journal_record_event(root: text, op_id: text, kind: text, refs: text, sha
     val line = "op={op_id} kind={kind} refs={refs} sha={sha} utc={current_time_ms()}"
     scv_journal_append(scv_journal_events_path(root), line)
 
-fn scv_journal_read_file(path: text) -> text:
-    if file_exists(path): file_read(path) else: "-"
+fn scv_journal_read_file(path: text) -> Result<text, text>:
+    if file_exists(path): read_file_text_result(path) else: Ok("-")
 
 # WAL transaction open: record the pre-publication head/workspace state and the
 # commit about to be published, then the fault point "wal" (simulated crash
@@ -51,12 +56,19 @@ fn scv_journal_read_file(path: text) -> text:
 fn scv_wal_begin(root: text, tx_id: text, new_commit: text) -> bool:
     dir_create(scv_journal_dir(root), true)
     val wal = scv_journal_wal_path(root)
-    val head_old = scv_journal_encode(scv_journal_read_file(scv_head_path(root)))
-    val ws_old = scv_journal_encode(scv_journal_read_file(scv_workspace_path(root)))
-    scv_journal_append(wal, "BEGIN op={tx_id} utc={current_time_ms()}")
-    scv_journal_append(wal, "SET path=HEAD_OP old={head_old}")
-    scv_journal_append(wal, "SET path=meta/workspaces.sdn old={ws_old}")
-    scv_journal_append(wal, "NEW commit={new_commit}")
+    val head_content = match scv_journal_read_file(scv_head_path(root)):
+        Ok(content): content
+        Err(error): return false
+    val ws_content = match scv_journal_read_file(scv_workspace_path(root)):
+        Ok(content): content
+        Err(error): return false
+    val head_old = scv_journal_encode(head_content)
+    val ws_old = scv_journal_encode(ws_content)
+    # Publish the complete recovery record before touching mutable roots. A
+    # failed component append must never be acknowledged as an open WAL.
+    val record = "BEGIN op={tx_id} utc={current_time_ms()}\nSET path=HEAD_OP old={head_old}\nSET path=meta/workspaces.sdn old={ws_old}\nNEW commit={new_commit}"
+    if not scv_journal_append(wal, record):
+        return false
     scv_fault_exit("wal")
     true
 
@@ -74,11 +86,12 @@ fn scv_wal_line_value(line: text, key: text) -> text:
             return part["{key}=".len():]
     ""
 
-fn scv_wal_restore(root: text, rel: text, encoded: text):
+fn scv_wal_restore(root: text, rel: text, encoded: text) -> bool:
     val path = if rel == "HEAD_OP": scv_head_path(root) else: scv_workspace_path(root)
     if encoded == "-":
         if file_exists(path):
-            file_delete(path)
+            return file_delete(path)
+        true
     else:
         scv_write_text(path, scv_journal_decode(encoded))
 
@@ -90,12 +103,15 @@ fn scv_wal_recover(root: text) -> text:
     val wal = scv_journal_wal_path(root)
     if not file_exists(wal):
         return "wal clean\n"
+    val wal_content = match read_file_text_result(wal):
+        Ok(content): content
+        Err(error): return "ERROR cannot read WAL: {error}\n"
     var tx_id = ""
     var head_old = ""
     var ws_old = ""
     var new_commit = ""
     var open_tx = false
-    for line in file_read(wal).split("\n"):
+    for line in wal_content.split("\n"):
         val trimmed = line.trim()
         if trimmed.starts_with("BEGIN "):
             tx_id = scv_wal_line_value(trimmed, "op")
@@ -115,18 +131,25 @@ fn scv_wal_recover(root: text) -> text:
                 open_tx = false
     if not open_tx:
         return "wal clean\n"
-    val head_now = scv_journal_read_file(scv_head_path(root))
+    val head_now = match scv_journal_read_file(scv_head_path(root)):
+        Ok(content): content
+        Err(error): return "ERROR cannot read operation head for recovery: {error}\n"
     val head_was = if head_old == "-": "-" else: scv_journal_decode(head_old)
     if head_now != head_was:
         # Head was published: complete the transaction (roll forward).
         if new_commit != "":
-            scv_write_text(scv_workspace_path(root), "default: {new_commit}\n")
-        scv_journal_append(wal, "COMMIT op={tx_id} recovered=forward")
+            if not scv_write_text(scv_workspace_path(root), "default: {new_commit}\n"):
+                return "ERROR cannot recover workspace\n"
+        if not scv_journal_append(wal, "COMMIT op={tx_id} recovered=forward"):
+            return "ERROR cannot record WAL recovery\n"
         "wal recovered op={tx_id} forward\n"
     else:
-        scv_wal_restore(root, "HEAD_OP", head_old)
-        scv_wal_restore(root, "meta/workspaces.sdn", ws_old)
-        scv_journal_append(wal, "ABORT op={tx_id} recovered=rollback")
+        if not scv_wal_restore(root, "HEAD_OP", head_old):
+            return "ERROR cannot recover operation head\n"
+        if not scv_wal_restore(root, "meta/workspaces.sdn", ws_old):
+            return "ERROR cannot recover workspace\n"
+        if not scv_journal_append(wal, "ABORT op={tx_id} recovered=rollback"):
+            return "ERROR cannot record WAL rollback\n"
         "wal recovered op={tx_id} rollback\n"
 
 # --- rebuild-db (MIG-11) -----------------------------------------------------

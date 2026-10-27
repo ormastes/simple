@@ -1,9 +1,10 @@
 # SCV byte-exact object store and operation metadata.
 
-use app.io.mod (file_exists, file_read, file_write, file_copy, file_delete, file_size, file_modified_time, dir_create, process_run)
-use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use app.io.mod (file_exists, file_read, file_copy, file_delete, file_size, file_modified_time, dir_create, process_run)
 use std.common.crypto.sha256.{sha256_u8_fast_hex}
-use std.nogc_sync_mut.database.atomic.{atomic_write}
+use std.nogc_sync_mut.database.atomic.{atomic_write, atomic_write_bytes}
+use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_content_id}
+use std.scv.alloc_bounds.{scv_bound_object_bytes}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.scv.core.{scv_repo_dir, scv_meta_dir, scv_objects_dir, scv_parsers_dir, scv_head_path, scv_status_index_path, scv_workspace_path, scv_bookmarks_path, scv_parser_lock_path, scv_langmap_path, scv_parser_index_path, scv_object_index_path, scv_object_path, scv_chunk_path, scv_line_set_contains, scv_metadata_path_safe, scv_object_ref_safe, scv_worktree_path_safe}
 use std.scv.core.{scv_state_private, scv_state_valid, scv_format_path, scv_current_format_version}
@@ -26,10 +27,7 @@ fn scv_fault_exit(point: text):
         exit(3)
 
 fn scv_write_text(path: text, content: text) -> bool:
-    if atomic_write(path, content):
-        true
-    else:
-        file_write(path, content)
+    atomic_write(path, content)
 
 fn scv_i64_bytes_to_u8(values: [i64]) -> [u8]:
     var out: [u8] = []
@@ -49,9 +47,11 @@ fn scv_text_to_u8(value: text) -> [u8]:
 fn scv_hash_text(prefix: text, value: text) -> text:
     "{prefix}_{sha256_u8_fast_hex(scv_text_to_u8(value))}"
 
-fn scv_content_id_for_file(path: text) -> text:
-    val bytes = file_read_bytes(path) ?? []
-    "sha256_{sha256_u8_fast_hex(bytes)}"
+fn scv_content_id_for_file_checked(path: text) -> Result<text, text>:
+    scv_file_buffer_content_id(scv_file_buffer_read(path))
+
+fn scv_content_id_for_file(path: text) -> Result<text, text>:
+    scv_content_id_for_file_checked(path)
 
 fn scv_content_id_for_bytes(bytes: [i64]) -> text:
     "sha256_{sha256_u8_fast_hex(scv_i64_bytes_to_u8(bytes))}"
@@ -59,12 +59,19 @@ fn scv_content_id_for_bytes(bytes: [i64]) -> text:
 fn scv_content_id_for_u8(bytes: [u8]) -> text:
     "sha256_{sha256_u8_fast_hex(bytes)}"
 
-fn scv_write_chunk_u8(root: text, bytes: [u8]) -> text:
+fn scv_write_chunk_u8(root: text, bytes: [u8]) -> Result<text, text>:
+    val bound_error = scv_bound_object_bytes(bytes.len())
+    if bound_error != "":
+        return Err(bound_error)
     val id = scv_content_id_for_u8(bytes)
     val dst = scv_chunk_path(root, id)
-    if not file_exists(dst):
-        file_write_bytes(dst, bytes)
-    id
+    if file_exists(dst):
+        val actual = scv_content_id_for_file_checked(dst)?
+        if actual != id:
+            return Err("ERROR corrupt existing chunk: {id}\n")
+    elif not atomic_write_bytes(dst, bytes):
+        return Err("ERROR cannot publish chunk: {id}\n")
+    Ok(id)
 
 fn scv_chunk_min_size() -> i64:
     2048
@@ -79,16 +86,12 @@ fn scv_cdc_boundary(rolling: i64, chunk_len: i64) -> bool:
         return true
     (rolling & 0x7FF) == 0
 
-fn scv_write_chunk_bytes(root: text, bytes: [i64]) -> text:
-    val id = scv_content_id_for_bytes(bytes)
-    val dst = scv_chunk_path(root, id)
-    if not file_exists(dst):
-        file_write_bytes(dst, scv_i64_bytes_to_u8(bytes))
-    id
+fn scv_write_chunk_bytes(root: text, bytes: [i64]) -> Result<text, text>:
+    scv_write_chunk_u8(root, scv_i64_bytes_to_u8(bytes))
 
-fn scv_chunk_payload_from_u8(root: text, bytes: [u8]) -> text:
+fn scv_chunk_payload_from_u8(root: text, bytes: [u8]) -> Result<text, text>:
     if bytes.len() <= scv_chunk_min_size():
-        return ""
+        return Ok("")
     var payload = "chunks:\n"
     var part: [u8] = []
     var offset = 0
@@ -100,36 +103,21 @@ fn scv_chunk_payload_from_u8(root: text, bytes: [u8]) -> text:
         rolling = ((rolling * 257) + value + (i % 251)) & 0xFFFFF
         val chunk_len = i - offset + 1
         if scv_cdc_boundary(rolling, chunk_len) or i == bytes.len() - 1:
-            val part_id = scv_write_chunk_u8(root, part)
+            val part_id = scv_write_chunk_u8(root, part)?
             payload = payload + "{part_id}|{offset}|{part.len()}\n"
             part = []
             offset = i + 1
             rolling = 0
         i = i + 1
-    payload
+    Ok(payload)
 
-fn scv_file_chunk_payload(root: text, path: text, size: i64) -> text:
-    if size <= scv_chunk_min_size():
-        return ""
-    val bytes = file_read_bytes(path) ?? []
-    var payload = "chunks:\n"
-    var part: [i64] = []
-    var offset = 0
-    var rolling = 0
-    var i = 0
-    while i < bytes.len():
-        val value = (bytes[i] as i64) & 0xFF
-        part.push(value)
-        rolling = ((rolling * 257) + value + (i % 251)) & 0xFFFFF
-        val chunk_len = i - offset + 1
-        if scv_cdc_boundary(rolling, chunk_len) or i == bytes.len() - 1:
-            val part_id = scv_write_chunk_bytes(root, part)
-            payload = payload + "{part_id}|{offset}|{part.len()}\n"
-            part = []
-            offset = i + 1
-            rolling = 0
-        i = i + 1
-    payload
+fn scv_file_chunk_payload(root: text, path: text, size: i64) -> Result<text, text>:
+    val buffer = scv_file_buffer_read(path)
+    if buffer.error != "":
+        return Err(buffer.error)
+    if buffer.size != size:
+        return Err("ERROR file changed before chunking: {path}\n")
+    scv_chunk_payload_from_u8(root, buffer.bytes)
 
 fn scv_create_parent_dir(path: text) -> bool:
     val parts = path.split("/")
@@ -174,24 +162,35 @@ fn scv_init_repo(root: text) -> text:
     dir_create(scv_parsers_dir(root), true)
     for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax", "packs"]:
         dir_create("{scv_objects_dir(root)}/{kind}", true)
-    scv_write_text(scv_status_index_path(root), "")
-    scv_write_text(scv_workspace_path(root), "default:\n")
-    scv_write_text(scv_bookmarks_path(root), "")
+    if not scv_write_text(scv_status_index_path(root), ""):
+        return "ERROR cannot initialize status index\n"
+    if not scv_write_text(scv_workspace_path(root), "default:\n"):
+        return "ERROR cannot initialize workspace\n"
+    if not scv_write_text(scv_bookmarks_path(root), ""):
+        return "ERROR cannot initialize bookmarks\n"
     # Modern (format-2) parser lock: empty row file; rows are 8-field
     # `parser|...` entries appended by parser-install. The legacy 3-line
     # header form is still accepted by fsck as STALE for old repos.
-    scv_write_text(scv_parser_lock_path(root), "")
-    scv_write_text(scv_format_path(root), "version: {scv_current_format_version()}\n")
-    scv_write_text(scv_langmap_path(root), "")
-    scv_write_text(scv_parser_index_path(root), "")
-    scv_write_text(scv_object_index_path(root), "")
+    if not scv_write_text(scv_parser_lock_path(root), ""):
+        return "ERROR cannot initialize parser lock\n"
+    if not scv_write_text(scv_format_path(root), "version: {scv_current_format_version()}\n"):
+        return "ERROR cannot initialize format marker\n"
+    if not scv_write_text(scv_langmap_path(root), ""):
+        return "ERROR cannot initialize language map\n"
+    if not scv_write_text(scv_parser_index_path(root), ""):
+        return "ERROR cannot initialize parser index\n"
+    if not scv_write_text(scv_object_index_path(root), ""):
+        return "ERROR cannot initialize object index\n"
     val view_payload = "heads:\nbookmarks:\nworkspaces:\ndefault:\n"
     val view_id = scv_hash_text("view", view_payload)
-    scv_write_text(scv_object_path(root, "operations", view_id), view_payload)
+    if not scv_write_text(scv_object_path(root, "operations", view_id), view_payload):
+        return "ERROR cannot initialize operation view\n"
     val op_payload = "parents:\nview: {view_id}\nmetadata: init\n"
     val op_id = scv_hash_text("op", "{op_payload}{current_time_ms()}")
-    scv_write_text(scv_object_path(root, "operations", op_id), op_payload)
-    scv_write_text(scv_head_path(root), "{op_id}\n")
+    if not scv_write_text(scv_object_path(root, "operations", op_id), op_payload):
+        return "ERROR cannot initialize operation\n"
+    if not scv_write_text(scv_head_path(root), "{op_id}\n"):
+        return "ERROR cannot initialize operation head\n"
     "initialized\n"
 
 fn scv_current_op(root: text) -> text:
@@ -208,29 +207,30 @@ fn scv_read_workspace_commit(root: text) -> text:
             return line[8:].trim()
     ""
 
-fn scv_write_chunk_from_file(root: text, path: text) -> text:
-    val id = scv_content_id_for_file(path)
-    val dst = scv_chunk_path(root, id)
-    if not file_exists(dst):
-        file_write_bytes(dst, file_read_bytes(path) ?? [])
-    id
+fn scv_write_chunk_from_file(root: text, path: text) -> Result<text, text>:
+    val buffer = scv_file_buffer_read(path)
+    if buffer.error != "":
+        return Err(buffer.error)
+    scv_write_chunk_u8(root, buffer.bytes)
 
-fn scv_write_file_object(root: text, rel: text, chunk: text, size: i64, mtime: i64) -> text:
-    val payload = "path: {rel}\nchunk: {chunk}\nsize: {size}\nmtime: {mtime}\n{scv_file_chunk_payload(root, \"{root}/{rel}\", size)}"
+fn scv_write_file_object(root: text, rel: text, chunk: text, size: i64, mtime: i64) -> Result<text, text>:
+    val buffer = scv_file_buffer_read("{root}/{rel}")
+    val actual = scv_file_buffer_content_id(buffer)?
+    if actual != chunk or buffer.size != size:
+        return Err("ERROR file changed before publication: {rel}\n")
+    val (id, stored_chunk) = scv_write_file_object_from_bytes(root, rel, buffer.bytes, mtime)?
+    Ok(id)
+
+fn scv_write_file_object_from_bytes(root: text, rel: text, bytes: [u8], mtime: i64) -> Result<(text, text), text>:
+    val chunk = scv_write_chunk_u8(root, bytes)?
+    val chunk_payload = scv_chunk_payload_from_u8(root, bytes)?
+    val payload = "path: {rel}\nchunk: {chunk}\nsize: {bytes.len()}\nmtime: {mtime}\n{chunk_payload}"
     val id = scv_hash_text("file", payload)
     val path = scv_object_path(root, "files", id)
     if not file_exists(path):
-        scv_write_text(path, payload)
-    id
-
-fn scv_write_file_object_from_bytes(root: text, rel: text, bytes: [u8], mtime: i64) -> (text, text):
-    val chunk = scv_write_chunk_u8(root, bytes)
-    val payload = "path: {rel}\nchunk: {chunk}\nsize: {bytes.len()}\nmtime: {mtime}\n{scv_chunk_payload_from_u8(root, bytes)}"
-    val id = scv_hash_text("file", payload)
-    val path = scv_object_path(root, "files", id)
-    if not file_exists(path):
-        scv_write_text(path, payload)
-    (id, chunk)
+        if not scv_write_text(path, payload):
+            return Err("ERROR cannot publish file object: {id}\n")
+    Ok((id, chunk))
 
 fn scv_write_tree_object(root: text, lines: [text]) -> text:
     var payload = ""
@@ -239,7 +239,8 @@ fn scv_write_tree_object(root: text, lines: [text]) -> text:
     val id = scv_hash_text("tree", payload)
     val path = scv_object_path(root, "trees", id)
     if not file_exists(path):
-        scv_write_text(path, payload)
+        if not scv_write_text(path, payload):
+            return "ERROR cannot publish tree object: {id}\n"
     id
 
 fn scv_change_latest(root: text, change_id: text) -> text:
@@ -263,7 +264,8 @@ fn scv_alloc_change_id(root: text) -> text:
     val path = scv_change_seq_path(root)
     val prev = if file_exists(path): file_read(path).trim().to_i64() ?? 0 else: 0
     val seq = prev + 1
-    scv_write_text(path, "{seq}\n")
+    if not scv_write_text(path, "{seq}\n"):
+        return "ERROR cannot allocate change id\n"
     scv_hash_text("change", "alloc:{seq}:{current_time_ms()}")
 
 fn scv_change_record(root: text, change_id: text) -> text:
@@ -283,7 +285,7 @@ fn scv_change_state(root: text, change_id: text) -> text:
 
 # Immutable change identity + mutable latest pointer (§14.2). Preserves
 # state/origin/created_operation across rewrites; upgrades v1 records on write.
-fn scv_write_change_record(root: text, change_id: text, latest: text, predecessors: text):
+fn scv_write_change_record(root: text, change_id: text, latest: text, predecessors: text) -> bool:
     val existing = scv_change_record(root, change_id)
     var state = scv_object_field(existing, "state")
     if state == "":
@@ -311,7 +313,6 @@ fn scv_set_change_state(root: text, change_id: text, state: text) -> bool:
         created = scv_current_op(root)
     val payload = "format: 2\nlatest: {latest}\npredecessors: {predecessors}\nstate: {state}\norigin: {origin}\ncreated_operation: {created}\n"
     scv_write_text(scv_object_path(root, "changes", change_id), payload)
-    true
 
 fn scv_new_change_id_multi(parents: [text], tree: text) -> text:
     if parents.len() == 0:
@@ -334,6 +335,8 @@ fn scv_commit_parents(root: text, commit_id: text) -> [text]:
     out
 
 fn scv_write_commit_multi(root: text, parents: [text], tree: text, state: text, author: text, committer: text) -> text:
+    if tree.starts_with("ERROR"):
+        return tree
     val change_id = scv_new_change_id_multi(parents, tree)
     val parents_joined = parents.join(" ")
     var payload = "change: {change_id}\nparents: {parents_joined}\ntree: {tree}\nstate: {state}\n"
@@ -344,21 +347,29 @@ fn scv_write_commit_multi(root: text, parents: [text], tree: text, state: text, 
     val id = scv_hash_text("commit", payload)
     val path = scv_object_path(root, "commits", id)
     if not file_exists(path):
-        scv_write_text(path, payload)
+        if not scv_write_text(path, payload):
+            return "ERROR cannot publish commit object: {id}\n"
     val previous = scv_change_latest(root, change_id)
     val predecessors = if previous != "" and previous != id: previous else: ""
-    scv_write_change_record(root, change_id, id, predecessors)
+    if not scv_write_change_record(root, change_id, id, predecessors):
+        return "ERROR cannot publish change record: {change_id}\n"
     id
 
 fn scv_write_commit_with_change(root: text, parent: text, tree: text, state: text, change_id: text) -> text:
+    if tree.starts_with("ERROR"):
+        return tree
+    if change_id.starts_with("ERROR"):
+        return change_id
     val payload = "change: {change_id}\nparents: {parent}\ntree: {tree}\nstate: {state}\n"
     val id = scv_hash_text("commit", payload)
     val path = scv_object_path(root, "commits", id)
     if not file_exists(path):
-        scv_write_text(path, payload)
+        if not scv_write_text(path, payload):
+            return "ERROR cannot publish commit object: {id}\n"
     val previous = scv_change_latest(root, change_id)
     val predecessors = if previous != "" and previous != id: previous else: ""
-    scv_write_change_record(root, change_id, id, predecessors)
+    if not scv_write_change_record(root, change_id, id, predecessors):
+        return "ERROR cannot publish change record: {change_id}\n"
     id
 
 fn scv_write_commit(root: text, parent: text, tree: text, state: text) -> text:
@@ -413,7 +424,8 @@ fn scv_write_tag_object(root: text, name: text, target: text, target_type: text,
     val id = scv_hash_text("tag", payload)
     val path = scv_object_path(root, "tags", id)
     if not file_exists(path):
-        scv_write_text(path, payload)
+        if not scv_write_text(path, payload):
+            return "ERROR cannot publish tag object\n"
     id
 
 fn scv_tag_name_valid(name: text) -> bool:
@@ -462,14 +474,18 @@ fn scv_write_operation(root: text, parent_op: text, commit: text, metadata: text
         return bookmark_error
     val view_payload = "heads:\n{commit}\nbookmarks:\n{bookmarks}workspaces:\ndefault: {commit}\n"
     val view_id = scv_hash_text("view", view_payload)
-    scv_write_text(scv_object_path(root, "operations", view_id), view_payload)
+    if not scv_write_text(scv_object_path(root, "operations", view_id), view_payload):
+        return "ERROR cannot publish operation view\n"
     val payload = "parents: {parent_op}\nview: {view_id}\nmetadata: {metadata}\n"
     val op_id = scv_hash_text("op", "{payload}{current_time_ms()}")
-    scv_write_text(scv_object_path(root, "operations", op_id), payload)
+    if not scv_write_text(scv_object_path(root, "operations", op_id), payload):
+        return "ERROR cannot publish operation\n"
     scv_fault_exit("operation")
-    scv_write_text(scv_head_path(root), "{op_id}\n")
+    if not scv_write_text(scv_head_path(root), "{op_id}\n"):
+        return "ERROR cannot publish operation head\n"
     scv_fault_exit("head")
-    scv_write_text(scv_workspace_path(root), "default: {commit}\n")
+    if not scv_write_text(scv_workspace_path(root), "default: {commit}\n"):
+        return "ERROR cannot publish operation workspace\n"
     # SCV-IMPL-B-05: every explicit revision dual-writes to the native shadow
     # and is compared (tree/content/parent DAG/refs/reachability) when
     # shadow-write is enabled. Fail-closed via the shadow_write log row; the
@@ -600,7 +616,7 @@ fn scv_restore_tree_entry_error(root: text, parts: [text]) -> text:
         return "ERROR missing chunk: {chunk}\n"
     if file_size(chunk_path) != size:
         return "ERROR chunk size mismatch: {chunk}\n"
-    if scv_content_id_for_file(chunk_path) != chunk:
+    if scv_content_id_for_file(chunk_path) != Ok(chunk):
         return "ERROR corrupt chunk: {chunk}\n"
     ""
 
@@ -635,9 +651,17 @@ fn scv_restore_commit(root: text, commit: text) -> text:
         val chunk = parts[2]
         val dst = "{root}/{rel}"
         scv_create_parent_dir(dst)
-        file_write_bytes(dst, file_read_bytes(scv_chunk_path(root, chunk)) ?? [])
+        val buffer = scv_file_buffer_read(scv_chunk_path(root, chunk))
+        val actual = match scv_file_buffer_content_id(buffer):
+            Ok(id): id
+            Err(error): return error
+        if actual != chunk:
+            return "ERROR corrupt chunk before restore: {chunk}\n"
+        if not atomic_write_bytes(dst, buffer.bytes):
+            return "ERROR cannot restore file: {rel}\n"
         restored = restored + 1
-    scv_write_text(scv_status_index_path(root), tree_content)
+    if not scv_write_text(scv_status_index_path(root), tree_content):
+        return "ERROR cannot restore status index\n"
     "restored {restored}\n"
 
 fn scv_restore_op(root: text, op: text) -> text:
@@ -663,9 +687,12 @@ fn scv_restore_op(root: text, op: text) -> text:
     val result = scv_restore_commit(root, commit)
     if result.starts_with("ERROR"):
         return result
-    scv_write_text(scv_head_path(root), "{op}\n")
-    scv_write_text(scv_workspace_path(root), "default: {commit}\n")
-    scv_write_text(scv_bookmarks_path(root), bookmarks)
+    if not scv_write_text(scv_head_path(root), "{op}\n"):
+        return "ERROR cannot restore operation head\n"
+    if not scv_write_text(scv_workspace_path(root), "default: {commit}\n"):
+        return "ERROR cannot restore workspace\n"
+    if not scv_write_text(scv_bookmarks_path(root), bookmarks):
+        return "ERROR cannot restore bookmarks\n"
     result
 
 fn scv_mark_current_state(root: text, state: text) -> text:
