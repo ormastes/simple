@@ -29,3 +29,17 @@ emits validated outgoing-use evidence, no consumer or receipt is published and
 the bridge reports compiler-semantic-producer unavailable. No second scheduler
 or accepted semantic root is introduced. Broader all-domain integration remains
 incomplete. Parent alone owns any later durable graph publication/CAS.
+
+This bridge never invokes managed eviction or source GC. Its private staging
+roots remain retained with the session; no active lease is released early.
+Shared retention-store root admission/pinning and worker-reap lease release
+remain a separate required integration before enabling managed eviction.
+
+Durable records bind capture unknown reason, retired epochs/history digest,
+and feed floor/event IDs. This initial production profile accepts sequence zero,
+no events and no retired epochs only; it cannot reopen advanced/reconciled
+histories. Unknown state is durably poisoned before production refusal. A later
+fresh constructor cannot overwrite that marker: exact retained-record comparison
+fails. Recovery requires a new explicitly owned run/state directory until a
+real producer reconciliation/replay owner is integrated. No field reset clears
+a gap or permits A→B→A epoch reuse.

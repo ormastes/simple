@@ -3,7 +3,10 @@ use app.buildrunner.scv_cli_plan_v1.{BuildRunnerScvPlanV1, build_runner_scv_plan
 use app.buildrunner.scv_session_record_v1.{build_runner_scv_record_parse_v1, build_runner_scv_record_encode_v1}
 use app.buildrunner.scv_admission_v1.{BuildRunnerScvAdmissionV1, build_runner_scv_bind_v1,
     build_runner_scv_revalidate_v1, build_runner_scv_admission_digest_v1}
-use app.buildrunner.task_context.{build_runner_context_decode_v1}
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_decode_v1}
+use app.buildrunner.scv_managed_session_v1.{BuildRunnerScvManagedV1, BuildRunnerScvManagedSetV1,
+    build_runner_scv_managed_context_error_v1, build_runner_scv_managed_open_v1,
+    build_runner_scv_managed_retain_v1, build_runner_scv_managed_task_error_v1}
 use app.bootstrap_builder.worker.{builder_worker_environment_digest_v1}
 use app.bootstrap_builder.cli_args.{BuilderCliV1}
 use app.bootstrap_builder.contracts.{BuildTaskV1, BuildRunV1, builder_task_identity_v1}
@@ -26,6 +29,7 @@ pub struct BuildRunnerScvSessionV1:
     bindings: Dict<text, BuildRunnerScvAdmissionV1>
     record_path: text
     record_payload: text
+    managed: BuildRunnerScvManagedSetV1
 
 fn build_runner_scv_environment_v1(scopes: [text]) -> Result<bool, text>:
     for name in ["SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_COMMIT_ID",
@@ -39,7 +43,7 @@ fn build_runner_scv_environment_v1(scopes: [text]) -> Result<bool, text>:
     if not scopes.contains(library): return Err("scv-external-library-root-unsupported")
     Ok(true)
 
-fn build_runner_scv_context_v1(task: BuildTaskV1, checkout: text) -> Result<text, text>:
+fn build_runner_scv_task_context_v1(task: BuildTaskV1, checkout: text) -> Result<BuildRunnerTaskContextV1, text>:
     val path = "task-context/" + task.id + ".sdn"
     var expected = ""
     for input in task.inputs:
@@ -50,6 +54,10 @@ fn build_runner_scv_context_v1(task: BuildTaskV1, checkout: text) -> Result<text
     val context = build_runner_context_decode_v1(payload)?
     if builder_worker_environment_digest_v1()? != context.environment_digest:
         return Err("scv-task-environment-drift")
+    Ok(context)
+
+fn build_runner_scv_context_v1(task: BuildTaskV1, checkout: text) -> Result<text, text>:
+    val context = build_runner_scv_task_context_v1(task, checkout)?
     Ok(context.backend)
 
 fn build_runner_scv_bind_tasks_v1(run: BuildRunV1, checkout: text,
@@ -122,7 +130,23 @@ pub fn build_runner_scv_session_open_v1(run: BuildRunV1, config: BuilderCliV1,
     if retained != "":
         if retained != payload: return Err("scv-retained-session-binding-differs")
     elif not file_atomic_write(record_path, payload): return Err("scv-session-binding-publish-failed")
-    Ok(Some(BuildRunnerScvSessionV1(adapter: adapter, bindings: bindings, record_path: record_path, record_payload: payload)))
+    var managed_tasks: Dict<text, BuildRunnerScvManagedV1> = {}
+    var unavailable: Dict<text, text> = {}
+    for task in run.tasks:
+        val context = build_runner_scv_task_context_v1(task, config.source_root)?
+        val managed_error = build_runner_scv_managed_context_error_v1(context)
+        if managed_error == "scv-managed-target-and-configuration-unavailable":
+            unavailable[task.id] = managed_error
+        else:
+            if managed_error != "": return Err(managed_error)
+            var paths: [text] = []
+            for input in bindings[task.id].source_inputs: paths.push(input.path)
+            managed_tasks[task.id] = build_runner_scv_managed_open_v1(task, context,
+                adapter, paths, config.source_root, config.state)?
+    val managed = build_runner_scv_managed_retain_v1(payload, managed_tasks, unavailable,
+        config.state, retained != "")?
+    Ok(Some(BuildRunnerScvSessionV1(adapter: adapter, bindings: bindings,
+        record_path: record_path, record_payload: payload, managed: managed)))
 
 pub fn build_runner_scv_task_error_v1(session: BuildRunnerScvSessionV1?, task: BuildTaskV1, checkout: text) -> text:
     if session == nil: return ""
@@ -148,17 +172,26 @@ pub fn build_runner_scv_task_error_v1(session: BuildRunnerScvSessionV1?, task: B
         case Ok(payload):
             if payload != owner.record_payload: return "scv-session-binding-changed"
         case Err(_): return "scv-session-binding-unavailable"
-    ""
+    build_runner_scv_managed_task_error_v1(owner.managed, task)
 
 pub fn build_runner_scv_source_root_v1(session: BuildRunnerScvSessionV1?) -> text:
     if session == nil: "" else: session.unwrap().adapter.legacy.snapshot_root
 
+pub fn build_runner_scv_task_root_v1(session: BuildRunnerScvSessionV1?, task: BuildTaskV1) -> text:
+    if val owner = session:
+        if owner.managed.tasks.contains_key(task.id): return owner.managed.tasks[task.id].staging_root
+        return owner.adapter.legacy.snapshot_root
+    ""
+
 pub fn build_runner_scv_source_paths_v1(session: BuildRunnerScvSessionV1?, task: BuildTaskV1) -> [text]:
     var paths: [text] = []
     if val owner = session:
+        if owner.managed.tasks.contains_key(task.id):
+            for input in task.inputs: paths.push(input.path)
+            return paths
         if owner.bindings.contains_key(task.id):
             for input in owner.bindings[task.id].source_inputs: paths.push(input.path)
     paths
 
 export BuildRunnerScvSessionV1, build_runner_scv_session_open_v1, build_runner_scv_task_error_v1
-export build_runner_scv_source_root_v1, build_runner_scv_source_paths_v1
+export build_runner_scv_source_root_v1, build_runner_scv_source_paths_v1, build_runner_scv_task_root_v1
