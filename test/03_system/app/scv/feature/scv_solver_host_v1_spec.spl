@@ -1,0 +1,218 @@
+# SCVN-P01/P03/P04/P05 and SCVN-S02 local source draft proposal slice.
+# Authored executable specification; NOT executed: admitted runtime unavailable.
+use std.spec.*
+use std.scv.solver_contract_v1.*
+use std.scv.solver_source_v1.*
+use std.scv.solver_host_v1.*
+use std.scv.solver_budget_v1.*
+use test.fixtures.scv.solver_host_v1_fixture.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+describe "Reviewed source built-in through the shared solver host":
+    it "combines an exact evidenced move with an independent body edit as a draft":
+        step("setup")
+        val input = setup_scv_fixture()
+        step("capture")
+        val request = freeze_scv_candidate(input)
+        val policy = setup_scv_policy(request.binding)
+        step("exercise")
+        val solved = exercise_scv_operation(request, policy, input)
+        step("evidence")
+        val evidence = collect_scv_evidence(solved)
+        step("assert")
+        expect(evidence.status).to_equal("needs_inputs")
+        expect(evidence.execution_status).to_equal("unqualified-builtin-execution")
+        expect(evidence.complete_proposal).to_equal(false)
+        expect(solved.candidate.unwrap().path).to_equal(input.left.path)
+        expect(solved.candidate.unwrap().file_uid).to_equal(input.base.file_uid)
+        check_exact_subject(evidence, request, policy)
+        check_byte_preservation(solved, input, input.right.bytes)
+        check_expected_conflicts(evidence, [])
+        check_cold_warm_equivalence(request, policy, input)
+
+    it "preserves both incompatible byte edits as a typed source conflict":
+        step("setup")
+        var input = setup_scv_fixture()
+        input.left.bytes = [108u8]
+        input.moves[0].expected_side_bytes_digest = sha256_u8_hex(input.left.bytes)
+        val request = freeze_scv_candidate(input)
+        val solved = solve_source_v1(request, setup_scv_policy(request.binding), input)
+        step("assert")
+        check_expected_conflicts(solved.result, ["SOURCE_BYTE_CONFLICT"])
+        expect(solved.inputs.left.bytes).to_equal([108u8])
+        expect(solved.inputs.right.bytes).to_equal(input.right.bytes)
+        expect(solved.result.conflicts[0].input_key).to_equal(solved.result.input_binding_key)
+
+    it "retains empty and invalid byte sequences without making an AST claim":
+        step("setup")
+        var input = setup_scv_fixture()
+        input.right.bytes = []
+        var request = freeze_scv_candidate(input)
+        var solved = solve_source_v1(request, setup_scv_policy(request.binding), input)
+        step("assert")
+        check_byte_preservation(solved, input, [])
+        expect(solved.result.status).to_equal("needs_inputs")
+        input.right.bytes = [0u8, 255u8, 254u8]
+        request = freeze_scv_candidate(input)
+        solved = solve_source_v1(request, setup_scv_policy(request.binding), input)
+        check_byte_preservation(solved, input, [0u8, 255u8, 254u8])
+        expect(solved.result.required_checks[6].check_id).to_equal("source.bytes:language-parse")
+        expect(solved.result.required_checks[6].required_producer_id).to_equal("unavailable:source.bytes:language-parse")
+
+    it "binds actual bytes before giving an outcome a reusable cache key":
+        step("setup")
+        var input = setup_scv_fixture()
+        val request = freeze_scv_candidate(input)
+        val policy = setup_scv_policy(request.binding)
+        input.right.bytes = [0u8]
+        val solved = solve_source_v1(request, policy, input)
+        step("assert")
+        expect(solved.result.status).to_equal("failed")
+        expect(solved.result.deterministic_result_key).to_equal("")
+        expect(solved.candidate).to_be_nil()
+        expect(solved.inputs.right.bytes).to_equal([0u8])
+
+    it "cannot approve a candidate policy or provider edit through the request":
+        step("setup")
+        val input = setup_scv_fixture()
+        var request = freeze_scv_candidate(input)
+        val accepted = setup_scv_policy(request.binding)
+        request.binding.policy_revision = "candidate-self-approved-policy"
+        val solved = solve_source_v1(request, accepted, input)
+        step("assert")
+        expect(solved.result.status).to_equal("failed")
+        expect(solved.candidate).to_be_nil()
+        expect(solved.result.required_checks.len()).to_equal(10)
+
+    it "does not treat matching arbitrary malformed or nonsecure pins as an executing artifact":
+        step("setup")
+        val input = setup_scv_fixture()
+        for pin in ["arbitrary-label", "sha256:malformed", "md5:00000000000000000000000000000000"]:
+            var request = freeze_scv_candidate(input)
+            request.binding.parser_lock_digest = pin
+            request.binding.solver_lock_digest = pin
+            val policy = setup_scv_policy(request.binding)
+            val solved = solve_source_v1(request, policy, input)
+            step("assert")
+            expect(solved.result.status).to_equal("needs_inputs")
+            expect(solved.result.execution_status).to_equal("unqualified-builtin-execution")
+            expect(solved.result.deterministic_result_key).to_equal("")
+            expect(solved.result.complete_proposal).to_equal(false)
+            check_byte_preservation(solved, input, input.right.bytes)
+
+    it "refuses unsupported third-party providers without implying isolation":
+        step("setup")
+        val input = setup_scv_fixture()
+        val request = freeze_scv_candidate(input)
+        var policy = setup_scv_policy(request.binding)
+        policy.solver.provider_id = "thirdparty.native.solver"
+        val solved = solve_source_v1(request, policy, input)
+        step("assert")
+        expect(solved.result.status).to_equal("unsupported")
+        expect(solved.candidate).to_be_nil()
+        expect(solved.inputs.base.bytes).to_equal(input.base.bytes)
+
+    it "rejects moves with stale byte, path, identity or revision preconditions":
+        step("setup")
+        for field in ["byte", "path", "identity", "revision"]:
+            var input = setup_scv_fixture()
+            if field == "byte": input.moves[0].expected_base_bytes_digest = "stale"
+            elif field == "path": input.moves[0].from_path = "other.spl"
+            elif field == "identity": input.moves[0].file_uid = "other-id"
+            else: input.moves[0].base_revision = "stale-revision"
+            val request = freeze_scv_candidate(input)
+            val solved = solve_source_v1(request, setup_scv_policy(request.binding), input)
+            step("assert")
+            check_expected_conflicts(solved.result, ["SOURCE_MOVE_EVIDENCE_REQUIRED"])
+
+    it "gives copies distinct identity and never aligns them as an evidenced move":
+        step("setup")
+        var input = setup_scv_fixture()
+        val copied = source_copy_proposal_v1(input.base, "copy-B", "src/copy.spl").unwrap()
+        expect(copied.file_uid).to_equal("copy-B")
+        expect(copied.bytes).to_equal(input.base.bytes)
+        expect(source_copy_proposal_v1(input.base, input.base.file_uid, "copy.spl").is_err()).to_equal(true)
+        input.left = copied
+        val request = freeze_scv_candidate(input)
+        val solved = solve_source_v1(request, setup_scv_policy(request.binding), input)
+        step("assert")
+        check_expected_conflicts(solved.result, ["SOURCE_IDENTITY_MISMATCH"])
+
+    it "preserves inputs on cancellation and logical or payload resource refusal":
+        step("setup")
+        val input = setup_scv_fixture()
+        var request = freeze_scv_candidate(input)
+        val policy = setup_scv_policy(request.binding)
+        request.cancelled = true
+        val cancelled = solve_source_v1(request, policy, input)
+        request.cancelled = false
+        request.logical_work_budget = 0
+        val limited = solve_source_v1(request, policy, input)
+        request.logical_work_budget = 1000000
+        request.memory_budget = 0
+        val memory = solve_source_v1(request, policy, input)
+        step("assert")
+        expect(cancelled.result.status).to_equal("cancelled")
+        expect(limited.result.status).to_equal("resource_limited")
+        expect(memory.result.status).to_equal("resource_limited")
+        expect(cancelled.inputs.right.bytes).to_equal(input.right.bytes)
+        expect(limited.result.deterministic_result_key).to_equal("")
+
+    it "changes cache keys for accepted routing schema policy and producer pins":
+        step("setup")
+        val request = freeze_scv_candidate(setup_scv_fixture())
+        val policy = setup_scv_policy(request.binding)
+        val key = solver_result_key_v1(request, policy)
+        for field in ["routing", "schema", "policy", "provider", "identity", "profile", "config", "scope"]:
+            var changed = request
+            var pinned = policy
+            if field == "routing": changed.binding.routing_revision = "route-B"
+            elif field == "schema": changed.binding.schema_revision = "schema-B"
+            elif field == "policy": changed.binding.policy_revision = "policy-B"
+            elif field == "provider": pinned.solver.lock_digest = "artifact-B"
+            elif field == "identity": changed.binding.identity_map_revision = "identity-B"
+            elif field == "profile": changed.binding.profile_digest = "profile-B"
+            elif field == "config": changed.binding.configuration_digest = "config-B"
+            else: changed.binding.authorization_scope = "scope-B"
+            step("assert")
+            expect(solver_result_key_v1(changed, pinned) == key).to_equal(false)
+
+    it "refuses oversized metadata before hashing even when raw contents are empty":
+        step("setup")
+        var input = setup_scv_fixture()
+        val request = freeze_scv_candidate(input)
+        val policy = setup_scv_policy(request.binding)
+        input.base.bytes = []
+        input.left.bytes = []
+        input.right.bytes = []
+        input.base.path = "p".repeat(20000)
+        val solved = solve_source_v1(request, policy, input)
+        step("assert")
+        expect(solved.result.status).to_equal("resource_limited")
+        expect(solved.result.deterministic_result_key).to_equal("")
+        expect(solved.candidate).to_be_nil()
+        expect(solved.inputs.base.path.len()).to_equal(20000)
+        var malicious = request
+        malicious.binding.routing_revision = "r".repeat(20000)
+        expect(solve_source_v1(malicious, policy, setup_scv_fixture()).result.status).to_equal("resource_limited")
+
+    it "charges aggregate metadata without arithmetic overflow":
+        step("setup")
+        val budget = SolverBudgetV1(limit: 9223372036854775807, spent: 9223372036854775800, limited: false)
+        step("assert")
+        val refused = solver_budget_charge_v1(budget, 100)
+        expect(refused.limited).to_equal(true)
+        expect(refused.spent).to_equal(budget.spent)
+        expect(solver_budget_charge_v1(SolverBudgetV1(limit: 100, spent: 0, limited: false), 9223372036854775807).limited).to_equal(true)
+
+    it "composes disjoint plans in accepted order and rejects overlapping effects":
+        step("setup")
+        val first = SolverAccessV1(domain: "source.bytes", object_id: "file-A", start_byte: 0, end_byte: 2, whole_object: false)
+        val disjoint = SolverAccessV1(domain: "source.bytes", object_id: "file-A", start_byte: 3, end_byte: 4, whole_object: false)
+        val overlap = SolverAccessV1(domain: "source.bytes", object_id: "file-A", start_byte: 1, end_byte: 3, whole_object: false)
+        val one = SolverPlanAccessV1(plan_id: "first", reads: [], writes: [first])
+        val two = SolverPlanAccessV1(plan_id: "second", reads: [], writes: [disjoint])
+        val bad = SolverPlanAccessV1(plan_id: "overlap", reads: [overlap], writes: [])
+        step("assert")
+        expect(solver_compose_disjoint_v1([one, two]).unwrap()).to_equal(["first", "second"])
+        expect(solver_compose_disjoint_v1([one, bad]).is_err()).to_equal(true)
