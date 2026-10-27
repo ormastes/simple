@@ -182,14 +182,76 @@ landing this before PR2c. This PR lands that work and adds the following
 - Still open: a module that is picked but never claimed
   (`native_file_unit_loop_v1.spl:59` `[branch-only]`) needs one real per-file lane run.
 
-### PR 4 - leaf-first scheduling + time-to-first-object metric
+### Generic instances from TLDR (PR 4-6, after PR 3)
+State on release/1.0.0 (f8d318f9e8b):
+- `generic-spec` (the `.rr` usage-ref input, #4383 reverse_reference_projection_v2
+  via `generic_spec_rr_producer_v1.spl:35-86`) is emitted only AFTER mono, by
+  `driver_publish_generic_spec_from_mono_v1` (`driver_hir_pipeline_passes.spl:428`)
+  from `mono_scoped_generic_uses_v1` / `mono_scoped_generic_fn_instances_v1`
+  (`monomorphize_integration.spl:5203-5212`). The source TLDR summary
+  `tldr_summary_v1.spl` (#5007; sections export/decl/fallback, :5-9) emits none.
+- P-G6 consumer: `run_file_worker_instances_v1` (`native_build_main.spl:1533`,
+  called at :1507 after the MIR queue drains, before link) reads every module's
+  list, keys bodies via `generic_instance_lists_with_body_v1`
+  (`generic_instance_object_producer_v1.spl:137`), plans with
+  `file_worker_instances_plan_v1` and runs single-flight jobs with
+  `file_worker_instances_run_v1` (`native_file_worker_instances_v1.spl:81,100`).
+  Incomplete plan = no instance objects; using objects keep COMDAT copies.
+- P-G5b owners: HIR cache key published per module (`driver_hir_cache.spl:1046`,
+  `native_file_worker_v1.spl:392-430` hirkey records); a missing owner body is
+  loaded by `driver_template_owner_body_v1` (`driver_hir_pipeline_passes.spl:90`)
+  through `template_body_loader_v1.spl:25`.
+- E-MONO-040: `monomorphize_integration.spl:1858` (unknown field type args) and
+  :3511-3516 (template not visible; `module_scoped_missing_args_suffix_v1` :3520
+  keys the missing instance). Discovery is per using module during mono, not link.
+- Hard-coded instance needs: no literal table was found (grep for instance-need /
+  builtin / prelude instance tables). The implicit need list is the per-module
+  COMDAT fallback; G2 deletes that fallback path once the TLDR set is complete.
+
+#### PR 4 (G1) - TLDR producers emit generic usage
+- Files: `tldr_summary_v1.spl` (`tldr_summary_entries_v1` :96 adds
+  `use|<callee module_id> <stable_symbol_id> args=<k1 US k2>` rows, in the
+  `.rr` usage-ref key shape of `reverse_reference_key.spl`);
+  `generic_spec_rr_producer_v1.spl` (`generic_spec_list_of_module_v1` reads the
+  summary rows, not only the post-mono section); `driver_hir_pipeline_passes.spl:428`
+  keeps writing the post-mono list and must agree with the summary.
+- Spec red->green: `test/01_unit/compiler/driver/tldr_generic_usage_spec.spl`:
+  explicit and inferred type args, imported generic fn and type, nested
+  instance, cfg variants all kept; a module that uses a generic but emits no row
+  is red. Mirror in `test/unit/`.
+- Measure: instance rows per module on the probe and stage3 batch; rows equal the
+  post-mono `generic-spec` set (0 missing, 0 extra).
+
+#### PR 5 (G2) - instance set = union of TLDR needs, owners via P-G5b
+- Files: `generic_instance_build_plan_v1.spl` (`generic_instance_needed_v1` :59
+  unions summary rows, dedup by ConcreteTldrKey); `generic_instance_object_producer_v1.spl`
+  (`generic_instance_lists_with_body_v1` :137 assigns the owner from the P-G5b HIR
+  key); delete the per-module COMDAT fallback needs. An instance reached in mono
+  but absent from every TLDR fails closed with E-MONO-040 (:3511).
+- Spec: `test/01_unit/compiler/driver/generic_instance_union_spec.spl` (dedup,
+  owner = defining module, missing-from-TLDR -> E-MONO-040). Mirror in `test/unit/`.
+- Measure: instance count, duplicate keys after union = 0.
+
+#### PR 6 (G3) - build instance objects before link, once, in the per-file pool
+- Files: `native_build_main.spl` (`run_file_worker_instances_v1` :1533 moves
+  ahead of the MIR drain wait, jobs run in the per-file pool);
+  `native_file_worker_instances_v1.spl` (`file_worker_instances_run_v1` :100,
+  claim by owner only). `file_worker_instances_link_v1` (:1585) errors on any
+  instance not in the plan.
+- Spec: `test/01_unit/compiler/driver/generic_instance_prelink_spec.spl`:
+  each key built exactly once by its owner; link-time discovery of a missing
+  instance is an error. Mirror in `test/unit/`.
+- Measure: instance count, duplicate-build count = 0 (claim receipts),
+  time to first object unchanged or better.
+
+### PR 7 - leaf-first scheduling + time-to-first-object metric
 - Files: `driver_build/native_file_unit_loop_v1.spl` (`[branch-only]`; order by
   import depth, leaves first); `native_build_main.spl` emits `[first-object] ms=`.
 - Spec: `test/01_unit/compiler/driver/leaf_first_schedule_spec.spl`; mirror in
   `test/unit/`.
 - Gate: time-to-first-object <= 10 s on the probe.
 
-### PR 5 - async node tasks + one Invoker trait (after #4910)
+### PR 8 - async node tasks + one Invoker trait (after #4910)
 - New `src/compiler/80.driver/driver_build/invoker_v1.spl`: `trait Invoker` with
   `ProcessInvoker` (one child per batch, from #4962) and `FiberInvoker`
   (`file_fiber_v1.spl`). This lane owns the trait.

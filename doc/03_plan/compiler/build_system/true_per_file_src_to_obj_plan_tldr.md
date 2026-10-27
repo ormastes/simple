@@ -23,8 +23,16 @@ PRs, in order (consider landing 3 before 2c to avoid a rebase):
 3. Land #4962 (B1-B4 resolved per Fable re-review) + owner-pid lease for
    orphan picks + real per-file lane run. Several refs are branch-only
    (`work/per-file-single-process-pipeline`).
-4. Leaf-first scheduling, `[first-object] ms=` metric, <= 10 s gate.
-5. Invoker trait: process + fiber invokers, async node tasks (after #4910).
+4. G1: `tldr_summary_v1.spl` emits generic usage rows (callee module_id +
+   stable_symbol_id + concrete args, `.rr` key shape); today only post-mono
+   `driver_hir_pipeline_passes.spl:428` writes `generic-spec`. Spec + row-count.
+5. G2: instance set = union of TLDR needs, dedup by key, owners via P-G5b HIR
+   key; drop COMDAT fallback needs; absent-from-TLDR = E-MONO-040. Spec.
+6. G3: build instances before link once by owner in the per-file pool, reusing
+   P-G6 (`native_build_main.spl:1533`); link-time discovery is an error. Measure
+   instance count, duplicate builds = 0, time to first object.
+7. Leaf-first scheduling, `[first-object] ms=` metric, <= 10 s gate.
+8. Invoker trait: process + fiber invokers, async node tasks (after #4910).
 
 Every PR: spec red->green (plus `test/unit/` mirror where the divergence guard
 needs it), time-to-first-object, total, peak RSS under external harness
