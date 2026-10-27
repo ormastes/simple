@@ -255,3 +255,78 @@ describe "SCV build capture V1":
         expect(scv_build_snapshot_valid_v1(frozen)).to_equal(false)
         expect(scv_build_snapshot_read_v1(frozen, "src/a")).to_equal(Err("build-snapshot-invalid"))
         expect(scv_build_snapshot_list_v1(frozen, "src")).to_equal(Err("build-snapshot-invalid"))
+
+    it "rejects noncanonical array order even when its canonical ID matches":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val a = capture_test_entry_v1("src/a", "a", "worktree")
+        val b = capture_test_entry_v1("src/b", "b", "worktree")
+        var frozen = scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [a, b], capture_test_cursor_v1(0)).unwrap()
+        frozen.entries[0] = b
+        frozen.entries[1] = a
+        expect(scv_build_snapshot_valid_v1(frozen)).to_equal(false)
+
+    it "rejects duplicate scopes and a regular-file ancestor":
+        # @req REQ-SCV-BUILD-CAPTURE-03
+        var universe = capture_test_universe_v1()
+        universe.complete_scopes = ["src", "src"]
+        expect(scv_build_snapshot_freeze_v1(universe, [], capture_test_cursor_v1(0))).to_equal(Err("build-complete-scopes-invalid"))
+        val entries = [capture_test_entry_v1("src/a", "file", "worktree"), capture_test_entry_v1("src/a/b", "child", "worktree")]
+        expect(scv_build_snapshot_freeze_v1(capture_test_universe_v1(), entries, capture_test_cursor_v1(0))).to_equal(Err("build-parent-not-directory"))
+
+    it "copies queued editor payloads before acknowledging the transaction":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
+        var transaction = capture_test_transaction_v1(1, [capture_test_entry_v1("src/a", "abc", "editor")], [])
+        val next = capture_test_apply_v1(state, transaction).unwrap()
+        transaction.upserts[0].bytes[0] = 90
+        val frozen = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_read_v1(frozen, "src/a").unwrap()).to_equal("abc".bytes())
+
+    it "invalidates a complete empty-directory negative after acknowledged creation":
+        # @req REQ-SCV-BUILD-CAPTURE-04
+        val empty = BuildInputEntryV1(path: "src/empty", kind: "directory", mode: 493,
+            bytes: [], origin: "worktree", producer_digest: capture_test_digest_v1())
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [empty], "capture-test-epoch").unwrap()
+        val before = scv_build_freeze_v1(state, capture_test_cursor_v1(0)).unwrap()
+        expect(scv_build_snapshot_list_v1(before, "src/empty").unwrap()).to_equal([])
+        val next = capture_test_apply_v1(state, capture_test_transaction_v1(1, [capture_test_entry_v1("src/empty/new", "new", "editor")], [])).unwrap()
+        val after = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_list_v1(after, "src/empty").unwrap()).to_equal(["src/empty/new"])
+        expect(scv_build_snapshot_list_v1(before, "src/empty").unwrap()).to_equal([])
+
+    it "moves an explicit directory and all descendants in one acknowledged transaction":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val directory = BuildInputEntryV1(path: "src/old", kind: "directory", mode: 493,
+            bytes: [], origin: "worktree", producer_digest: capture_test_digest_v1())
+        val child = capture_test_entry_v1("src/old/nested/a", "contents", "worktree")
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [directory, child], "capture-test-epoch").unwrap()
+        val rename = BuildCaptureRenameV1(from_path: "src/old", to_path: "src/new", expected_entry_digest: scv_build_entry_digest_v1(directory))
+        val transaction = BuildCaptureTransactionV1(cursor: capture_test_cursor_v1(1), upserts: [], deleted_paths: [], renames: [rename])
+        val next = capture_test_apply_v1(state, transaction).unwrap()
+        val after = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_read_v1(after, "src/new/nested/a").unwrap()).to_equal("contents".bytes())
+        expect(scv_build_snapshot_list_v1(after, "src/old")).to_equal(Err("build-path-absent"))
+
+    it "rejects rename collisions cycles and regular destination parents":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val a = capture_test_entry_v1("src/a", "a", "worktree")
+        val b = capture_test_entry_v1("src/b", "b", "worktree")
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [a, b], "capture-test-epoch").unwrap()
+        var rename = BuildCaptureRenameV1(from_path: "src/a", to_path: "src/b", expected_entry_digest: scv_build_entry_digest_v1(a))
+        var transaction = BuildCaptureTransactionV1(cursor: capture_test_cursor_v1(1), upserts: [], deleted_paths: [], renames: [rename])
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-rename-target-exists"))
+        transaction.renames[0].to_path = "src/a/child"
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-rename-descendant-cycle"))
+        transaction.renames[0].to_path = "src/b/child"
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-parent-not-directory"))
+
+    it "deletes an explicit captured directory with every captured descendant":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val directory = BuildInputEntryV1(path: "src/old", kind: "directory", mode: 493,
+            bytes: [], origin: "worktree", producer_digest: capture_test_digest_v1())
+        val child = capture_test_entry_v1("src/old/nested/a", "contents", "worktree")
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [directory, child], "capture-test-epoch").unwrap()
+        val next = capture_test_apply_v1(state, capture_test_transaction_v1(1, [], ["src/old"])).unwrap()
+        val after = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_list_v1(after, "src/old")).to_equal(Err("build-path-absent"))
+        expect(scv_build_snapshot_read_v1(after, "src/old/nested/a")).to_equal(Err("build-path-absent"))
