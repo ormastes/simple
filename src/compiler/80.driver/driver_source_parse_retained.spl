@@ -1,6 +1,8 @@
 # CompilerDriver phase-2 source parsing.
 
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.cache.retained_source_traversal_observation_v1.{
+    RetainedSourceTraversalReceiptV1, parse_retained_source_with_observation_v1}
 use std.io_runtime.{env_set, exit}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.driver.driver_types.{CompileContext}
@@ -109,10 +111,39 @@ use compiler.driver.driver_source_parse_support.{
     _driver_publish_frontend_cache_scope, dtrace
 }
 
+fn _retire_source_observations_v1(driver: CompilerDriver):
+    driver.source_traversal_diagnostic_v1 = nil
+    # Exhaustion poisons diagnostic issuance, never ordinary parsing.
+    if driver.source_traversal_generation_v1 == 9223372036854775807:
+        driver.source_traversal_generation_v1 = -1
+    elif driver.source_traversal_generation_v1 >= 0:
+        driver.source_traversal_generation_v1 = driver.source_traversal_generation_v1 + 1
+
 impl CompilerDriver:
     me parse_all_impl() -> (CompileContext, bool):
+        self.source_traversal_diagnostic_v1 = nil
+        if (self.ctx.config.contains_key("scv_source_observations_v1") and
+                self.ctx.config["scv_source_observations_v1"] == "1"):
+            match self.parse_all_with_source_observations_v1():
+                case Ok(receipt):
+                    match receipt.projection_v1(self):
+                        case Ok(projection):
+                            self.source_traversal_diagnostic_v1 = Some(projection)
+                        case Err(reason): self.ctx.add_error(reason)
+                    _ = receipt.close_v1()
+                case Err(reason): self.ctx.add_error(reason)
+            return (self.ctx, self.ctx.error_count_value == 0)
         if driver_streaming_surface_enabled(self.ctx):
+            _retire_source_observations_v1(self)
             return self.parse_all_streaming_surfaces_impl()
+        self.parse_all_retained_observation_v1(nil)
+
+    pub me parse_all_retained_observation_v1(
+        observation: RetainedSourceTraversalReceiptV1?
+    ) -> (CompileContext, bool):
+        # The observed entrypoint already reserved its new generation. Direct
+        # and default unobserved calls must retire older receipts as well.
+        if observation == nil: _retire_source_observations_v1(self)
         val log = self.ctx.logger
         val sources = self.ctx.sources
         log_debug("parsing sources")
@@ -196,11 +227,8 @@ impl CompilerDriver:
                 if not _driver_parse_shard_owns(source.path):
                     progress_parse_done = progress_parse_done + 1
                     continue
-                val selected_entry_module = self.parse_full_frontend_selected_v1(
-                    source.content,
-                    source.path,
-                    source.module_name
-                )
+                val selected_entry_module = parse_retained_source_with_observation_v1(
+                    self, source, observation)
                 if selected_entry_module.is_err():
                     self.ctx.add_error(selected_entry_module.unwrap_err())
                     val rejected_ctx: CompileContext = self.ctx
@@ -435,11 +463,8 @@ impl CompilerDriver:
                 if driver_source_matches_entry(
                     self.ctx, source.path, source.module_name
                 ):
-                    val selected_entry_module = self.parse_full_frontend_selected_v1(
-                        source.content,
-                        source.path,
-                        source.module_name
-                    )
+                    val selected_entry_module = parse_retained_source_with_observation_v1(
+                        self, source, observation)
                     if selected_entry_module.is_err():
                         self.ctx.add_error(selected_entry_module.unwrap_err())
                         val rejected_ctx: CompileContext = self.ctx
@@ -537,11 +562,8 @@ impl CompilerDriver:
             log_build_progress("parse", "files", src_idx, sources.len(),
                 source.path, 1, 6, 0, 0, "running")
             log_phase("phase2:parse:file:start {source.path}")
-            val selected_module = self.parse_full_frontend_selected_v1(
-                source.content,
-                source.path,
-                source.module_name
-            )
+            val selected_module = parse_retained_source_with_observation_v1(
+                self, source, observation)
             if selected_module.is_err():
                 self.ctx.add_error(selected_module.unwrap_err())
                 val rejected_ctx: CompileContext = self.ctx

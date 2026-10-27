@@ -1,0 +1,279 @@
+# Actual retained-parser observations, not five-owner semantic completion.
+# Only the existing selected frontend executes inside the recording transition.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.driver_core_types.{SourceFile, CompileMode}
+use compiler.common.cache_contract.retained_source_traversal_v1.{
+    RetainedSourceInputV1, RetainedSourceTraversalSubjectV1,
+    RetainedSourceParseObservationV1, RetainedSourceTraversalProjectionV1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, semantic_query_read_manifest_valid_v1}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_text_valid_v1, three_payload_contract_max_items_v1}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_source_parse_selected.*
+use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled,
+    driver_source_entry_closure_enabled, driver_source_entry_request}
+use compiler.driver.driver_source_parse_support.{driver_parse_env_get_v1,
+    driver_parse_shard_active}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.core.parser.{par_had_error_get}
+
+class RetainedSourceTraversalReceiptV1:
+    frozen_sources: [SourceFile]
+    subject: RetainedSourceTraversalSubjectV1
+    source_indices: Dict<text, i64>
+    seen: [bool]
+    reads: [SemanticQueryReadV1]
+    observations: [RetainedSourceParseObservationV1]
+    sealed: bool
+    closed: bool
+
+fn _frame_traversal_v1(value: text) -> text:
+    val bytes = value.to_bytes()
+    bytes.len().to_string() + ":" + value
+
+fn _source_key_traversal_v1(source: SourceFile) -> text:
+    _frame_traversal_v1(source.path) + _frame_traversal_v1(source.module_name)
+
+fn _context_traversal_v1(driver: CompilerDriver) -> text:
+    val ctx = driver.ctx
+    val policy = match ctx.frontend_advisory_policy:
+        case FrontendAdvisoryPreprocessPolicyV1.Reference: "reference"
+        case FrontendAdvisoryPreprocessPolicyV1.PreferSimd: "prefer-simd"
+        case FrontendAdvisoryPreprocessPolicyV1.RequireSimd: "require-simd"
+    var material = "simple.retained-source.frontend-context.v1\u0000"
+    for field in [ctx.native_target, ctx.options.cli_mode_text,
+            (ctx.options.mode == CompileMode.Aot).to_string(),
+            (ctx.options.mode == CompileMode.Check).to_string(),
+            ctx.options.library_mode.to_string(), policy,
+            ctx.environment_variant_frontend_owner_id.to_string(),
+            ctx.environment_variant_frontend_session_id.to_string(),
+            ctx.environment_variant_frontend_generation.to_string(),
+            ctx.environment_variant_frontend_cache_identity]:
+        material = material + _frame_traversal_v1(field)
+    var keys = ctx.config.keys()
+    keys.sort()
+    for key in keys:
+        material = material + _frame_traversal_v1(key) +
+            _frame_traversal_v1(ctx.config[key])
+    sha256_text(material)
+
+fn _supported_traversal_v1(driver: CompilerDriver) -> bool:
+    # The V1 subject is the complete ordinary retained input list. Worker
+    # skeletons, interfaces, conditional target inventory and selected entry
+    # closures require their own observation profile rather than silent reuse.
+    (not driver_streaming_surface_enabled(driver.ctx) and
+        not driver_parse_shard_active() and
+        not driver_source_entry_closure_enabled(driver.ctx) and
+        driver_source_entry_request(driver.ctx) == "" and
+        (driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? "") == "" and
+        (driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? "") == "" and
+        driver.ctx.runtime_std_full_inventory_selection == nil)
+
+fn _begin_traversal_v1(driver: CompilerDriver
+) -> Result<RetainedSourceTraversalReceiptV1, text>:
+    if not _supported_traversal_v1(driver):
+        return Err("source-traversal-unsupported-route")
+    if driver.identity_id <= 0 or driver.ctx.has_errors():
+        return Err("source-traversal-invalid-driver")
+    if (driver.source_traversal_generation_v1 < 0 or
+            driver.source_traversal_generation_v1 == 9223372036854775807):
+        return Err("source-traversal-generation-exhausted")
+    val generation = driver.source_traversal_generation_v1 + 1
+    val sources = driver.ctx.sources
+    if sources.len() == 0 or sources.len() > three_payload_contract_max_items_v1():
+        return Err("source-traversal-source-bounds")
+    var frozen: [SourceFile] = []
+    var rows: [RetainedSourceInputV1] = []
+    var seen: [bool] = []
+    var indices: Dict<text, i64> = {}
+    var paths: Dict<text, bool> = {}
+    var names: Dict<text, bool> = {}
+    var total_bytes: i64 = 0
+    val context_digest = _context_traversal_v1(driver)
+    var material = "simple.retained-source.subject.v1\u0000" +
+        _frame_traversal_v1(driver.identity_id.to_string()) +
+        _frame_traversal_v1(generation.to_string()) +
+        _frame_traversal_v1(context_digest) +
+        _frame_traversal_v1(sources.len().to_string())
+    for source in sources:
+        if (not three_payload_contract_text_valid_v1(source.path, false) or
+                not three_payload_contract_text_valid_v1(source.module_name, false)):
+            return Err("source-traversal-source-identity-invalid")
+        if paths.contains_key(source.path) or names.contains_key(source.module_name):
+            return Err("source-traversal-duplicate-source")
+        val bytes = source.content.to_bytes()
+        val source_bytes = bytes.len()
+        if source_bytes > 67108864 or total_bytes > 67108864 - source_bytes:
+            return Err("source-traversal-source-bounds")
+        total_bytes = total_bytes + source_bytes
+        val digest = sha256_text("simple.source.v1\u0000" + source.content)
+        indices[_source_key_traversal_v1(source)] = frozen.len()
+        paths[source.path] = true
+        names[source.module_name] = true
+        frozen.push(SourceFile(path: source.path, content: source.content,
+            module_name: source.module_name))
+        rows.push(RetainedSourceInputV1(path: source.path,
+            module_name: source.module_name, source_digest: digest))
+        seen.push(false)
+        material = material + _frame_traversal_v1(source.path) +
+            _frame_traversal_v1(source.module_name) + _frame_traversal_v1(digest)
+    val subject = RetainedSourceTraversalSubjectV1(
+        driver_identity: driver.identity_id, traversal_generation: generation,
+        native_target: driver.ctx.native_target,
+        selected_frontend_context_digest: context_digest, sources: rows,
+        subject_digest: sha256_text(material))
+    driver.source_traversal_generation_v1 = generation
+    Ok(RetainedSourceTraversalReceiptV1(frozen_sources: frozen, subject: subject,
+        source_indices: indices, seen: seen, reads: [], observations: [],
+        sealed: false, closed: false))
+
+fn _query_traversal_v1(subject: RetainedSourceTraversalSubjectV1) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "retained-source-traversal",
+        stable_entity_id: subject.driver_identity.to_string(),
+        semantic_profile_digest: subject.selected_frontend_context_digest,
+        parameter_digest: subject.subject_digest)
+
+impl RetainedSourceTraversalReceiptV1:
+    fn _current_context_v1(driver: CompilerDriver) -> bool:
+        (driver.identity_id == self.subject.driver_identity and
+            driver.source_traversal_generation_v1 == self.subject.traversal_generation and
+            driver.ctx.native_target == self.subject.native_target and
+            _context_traversal_v1(driver) == self.subject.selected_frontend_context_digest)
+
+    fn _current_sources_v1(driver: CompilerDriver) -> bool:
+        if not self._current_context_v1(driver): return false
+        val current = driver.ctx.sources
+        if current.len() != self.frozen_sources.len(): return false
+        for index in 0..current.len():
+            val actual = current[index]
+            val frozen = self.frozen_sources[index]
+            if (actual.path != frozen.path or actual.module_name != frozen.module_name or
+                    actual.content != frozen.content): return false
+        true
+
+    me _parse_selected_v1(driver: CompilerDriver, source: SourceFile
+    ) -> Result<ParserModule, text>:
+        if self.closed or self.sealed: return Err("source-traversal-closed")
+        if not self._current_context_v1(driver):
+            return Err("source-traversal-subject-changed")
+        val key = _source_key_traversal_v1(source)
+        if not self.source_indices.contains_key(key):
+            return Err("source-traversal-unobserved-source")
+        val index = self.source_indices[key]
+        if source.content != self.frozen_sources[index].content:
+            return Err("source-traversal-subject-changed")
+        if self.seen[index]: return Err("source-traversal-source-already-observed")
+        # Mark before execution: a failed or rejected parse cannot be retried
+        # under this same observation owner to erase the attempted read.
+        self.seen[index] = true
+        val parsed = driver.parse_full_frontend_selected_v1(
+            source.content, source.path, source.module_name)
+        if parsed.is_err() or par_had_error_get(): return parsed
+        val module = parsed.unwrap()
+        var function_names: [text] = []
+        var witness = "simple.retained-source.parsed-functions.v1\u0000"
+        for name in module.function_order:
+            function_names.push(name)
+            witness = witness + _frame_traversal_v1(name)
+        self.observations.push(RetainedSourceParseObservationV1(
+            source_index: index, function_names: function_names))
+        val row = self.subject.sources[index]
+        val consumer = _query_traversal_v1(self.subject)
+        self.reads.push(SemanticQueryReadV1(
+            producer: SemanticQueryKeyV1(kind: "retained-source-input",
+                stable_entity_id: key,
+                semantic_profile_digest: self.subject.selected_frontend_context_digest,
+                parameter_digest: sha256_text(key)),
+            consumer: consumer, facet: "frontend-source-bytes",
+            ordinal: self.reads.len(), consumed_fingerprint: row.source_digest,
+            witness_digest: sha256_text(witness), partition_id: source.path,
+            completeness: SemanticCoverageV1.Unknown))
+        parsed
+
+    me _seal_v1(driver: CompilerDriver) -> Result<(), text>:
+        if self.closed or self.sealed: return Err("source-traversal-closed")
+        if not _supported_traversal_v1(driver) or not self._current_sources_v1(driver):
+            return Err("source-traversal-subject-changed")
+        if driver.ctx.has_errors(): return Err("source-traversal-parse-failed")
+        if self.reads.len() != self.frozen_sources.len():
+            return Err("source-traversal-incomplete")
+        for observed in self.seen:
+            if not observed: return Err("source-traversal-incomplete")
+        val manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: _query_traversal_v1(self.subject), ordered_reads: self.reads)
+        if not semantic_query_read_manifest_valid_v1(manifest):
+            return Err("source-traversal-manifest-invalid")
+        self.sealed = true
+        Ok(())
+
+    pub fn projection_v1(driver: CompilerDriver
+    ) -> Result<RetainedSourceTraversalProjectionV1, text>:
+        if self.closed: return Err("source-traversal-closed")
+        if not self.sealed: return Err("source-traversal-incomplete")
+        if not self._current_sources_v1(driver):
+            return Err("source-traversal-subject-changed")
+        # Rebuild every exposed array. Public DTO edits cannot mutate retained
+        # observations or the frozen source subject behind this receipt.
+        var rows: [RetainedSourceInputV1] = []
+        for row in self.subject.sources:
+            rows.push(RetainedSourceInputV1(path: row.path,
+                module_name: row.module_name, source_digest: row.source_digest))
+        val subject = RetainedSourceTraversalSubjectV1(
+            driver_identity: self.subject.driver_identity,
+            traversal_generation: self.subject.traversal_generation,
+            native_target: self.subject.native_target,
+            selected_frontend_context_digest: self.subject.selected_frontend_context_digest,
+            sources: rows, subject_digest: self.subject.subject_digest)
+        var observations: [RetainedSourceParseObservationV1] = []
+        for observed in self.observations:
+            var names: [text] = []
+            for name in observed.function_names: names.push(name)
+            observations.push(RetainedSourceParseObservationV1(
+                source_index: observed.source_index, function_names: names))
+        var reads: [SemanticQueryReadV1] = []
+        for read in self.reads: reads.push(read)
+        Ok(RetainedSourceTraversalProjectionV1(subject: subject,
+            query_reads: SemanticQueryReadManifestV1(schema: 1,
+                consumer: _query_traversal_v1(subject), ordered_reads: reads),
+            observations: observations, semantic_authorized: false))
+
+    pub me close_v1() -> Result<(), text>:
+        if self.closed: return Err("source-traversal-closed")
+        self.closed = true
+        self.frozen_sources = []
+        self.source_indices = {}
+        self.seen = []
+        self.reads = []
+        self.observations = []
+        Ok(())
+
+pub fn parse_retained_source_with_observation_v1(driver: CompilerDriver,
+    source: SourceFile, observation: RetainedSourceTraversalReceiptV1?
+) -> Result<ParserModule, text>:
+    match observation:
+        case Some(receipt): receipt._parse_selected_v1(driver, source)
+        case nil: driver.parse_full_frontend_selected_v1(
+            source.content, source.path, source.module_name)
+
+impl CompilerDriver:
+    pub me parse_all_with_source_observations_v1(
+    ) -> Result<RetainedSourceTraversalReceiptV1, text>:
+        self.source_traversal_diagnostic_v1 = nil
+        val receipt = _begin_traversal_v1(self)?
+        # This is the existing retained compiler loop. Its parser results are
+        # the same values committed to ctx.modules, with no second parse pass.
+        val result = self.parse_all_retained_observation_v1(Some(receipt))
+        if not result[1]:
+            _ = receipt.close_v1()
+            return Err("source-traversal-parse-failed")
+        match receipt._seal_v1(self):
+            case Ok(_): pass
+            case Err(reason):
+                _ = receipt.close_v1()
+                return Err(reason)
+        Ok(receipt)
+
+export RetainedSourceTraversalReceiptV1
