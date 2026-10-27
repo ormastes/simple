@@ -8,6 +8,29 @@ fn scv_wal_line_value(line: text, key: text) -> text:
             return part["{key}=".len():]
     ""
 
+fn scv_wal_exact_fields(line: text, kind: text, required: [text], optional: [text]) -> bool:
+    val parts = line.split(" ")
+    if parts.len() < required.len() + 1 or parts.len() > required.len() + optional.len() + 1:
+        return false
+    if parts[0] != kind:
+        return false
+    var seen: [text] = []
+    var index = 1
+    while index < parts.len():
+        val pair = parts[index].split("=")
+        if pair.len() != 2 or pair[0] == "" or pair[1] == "" or seen.contains(pair[0]):
+            return false
+        if not required.contains(pair[0]) and not optional.contains(pair[0]):
+            return false
+        if pair[0] == "recovered" and pair[1] != "forward" and pair[1] != "rollback":
+            return false
+        seen.push(pair[0])
+        index = index + 1
+    for key in required:
+        if not seen.contains(key):
+            return false
+    true
+
 fn scv_wal_parse(wal_content: text) -> [text]:
     var tx_id = ""
     var head_old = ""
@@ -22,6 +45,8 @@ fn scv_wal_parse(wal_content: text) -> [text]:
         if trimmed == "":
             continue
         elif trimmed.starts_with("BEGIN "):
+            if not scv_wal_exact_fields(trimmed, "BEGIN", ["op", "utc"], []):
+                return ["ERROR malformed WAL: invalid BEGIN fields; state preserved"]
             if open_tx:
                 return ["ERROR malformed WAL: nested BEGIN while op={tx_id} is pending; state preserved"]
             tx_id = scv_wal_line_value(trimmed, "op")
@@ -35,6 +60,8 @@ fn scv_wal_parse(wal_content: text) -> [text]:
             have_commit = false
             open_tx = true
         elif trimmed.starts_with("SET "):
+            if not scv_wal_exact_fields(trimmed, "SET", ["path", "old"], []):
+                return ["ERROR malformed WAL: invalid SET fields; state preserved"]
             if not open_tx:
                 return ["ERROR malformed WAL: SET without BEGIN; state preserved"]
             val path = scv_wal_line_value(trimmed, "path")
@@ -54,6 +81,8 @@ fn scv_wal_parse(wal_content: text) -> [text]:
             else:
                 return ["ERROR malformed WAL: unknown SET path; state preserved"]
         elif trimmed.starts_with("NEW "):
+            if not scv_wal_exact_fields(trimmed, "NEW", ["commit"], []):
+                return ["ERROR malformed WAL: invalid NEW fields; state preserved"]
             if not open_tx or have_commit:
                 return ["ERROR malformed WAL: unexpected or duplicate NEW; state preserved"]
             new_commit = scv_wal_line_value(trimmed, "commit")
@@ -61,6 +90,9 @@ fn scv_wal_parse(wal_content: text) -> [text]:
                 return ["ERROR malformed WAL: NEW has no commit id; state preserved"]
             have_commit = true
         elif trimmed.starts_with("COMMIT ") or trimmed.starts_with("ABORT "):
+            val kind = if trimmed.starts_with("COMMIT "): "COMMIT" else: "ABORT"
+            if not scv_wal_exact_fields(trimmed, kind, ["op"], ["recovered"]):
+                return ["ERROR malformed WAL: invalid transaction terminator fields; state preserved"]
             if not open_tx or scv_wal_line_value(trimmed, "op") != tx_id:
                 return ["ERROR malformed WAL: unmatched transaction terminator; state preserved"]
             if not have_head or not have_workspace or not have_commit:
