@@ -1,3 +1,5 @@
+#include "runtime.h"
+
 #include <stdint.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -7,13 +9,6 @@
 #else
 #include <pthread.h>
 #endif
-
-int64_t rt_par_atomic_add_i64(int64_t*, int64_t);
-int64_t rt_par_atomic_sub_i64(int64_t*, int64_t);
-int64_t rt_par_atomic_xchg_i64(int64_t*, int64_t);
-int64_t rt_par_atomic_cmpxchg_i64(int64_t*, int64_t, int64_t);
-int64_t rt_par_atomic_min_i64(int64_t*, int64_t);
-int64_t rt_par_atomic_max_i64(int64_t*, int64_t);
 
 #define CHECK(test) do { if (!(test)) { fprintf(stderr, "atomic check failed: line %d\n", __LINE__); return 1; } } while (0)
 #define THREADS 8
@@ -37,6 +32,16 @@ static void* increment(void* argument) {
 int main(void) {
     _Atomic int64_t value = 7;
     int64_t* ptr = (int64_t*)&value;
+    CHECK(rt_par_atomic_i64_is_lock_free(NULL) == 0);
+    if (_Alignof(_Atomic int64_t) > 1) {
+        unsigned char unaligned_storage[sizeof(_Atomic int64_t) + _Alignof(_Atomic int64_t)];
+        uintptr_t unaligned_addr = (uintptr_t)unaligned_storage + 1;
+        if (unaligned_addr % _Alignof(_Atomic int64_t) == 0) unaligned_addr += 1;
+        CHECK(rt_par_atomic_i64_is_lock_free((int64_t*)unaligned_addr) == 0);
+    }
+    int64_t expected_lock_free = sizeof(_Atomic int64_t) == sizeof(int64_t) &&
+        _Alignof(_Atomic int64_t) <= sizeof(int64_t) && atomic_is_lock_free(&value) ? 1 : 0;
+    CHECK(rt_par_atomic_i64_is_lock_free(ptr) == expected_lock_free);
     CHECK(rt_par_atomic_add_i64(ptr, 5) == 7 && atomic_load(&value) == 12);
     CHECK(rt_par_atomic_sub_i64(ptr, 3) == 12 && atomic_load(&value) == 9);
     CHECK(rt_par_atomic_xchg_i64(ptr, -4) == 9 && atomic_load(&value) == -4);
@@ -68,6 +73,6 @@ int main(void) {
     int64_t count = THREADS * ITERATIONS;
     CHECK(atomic_load(&counter) == count);
     CHECK(sum == count * (count - 1) / 2);
-    puts("PASS core parallel atomics: old values, cmpxchg failure, signed boundaries, 160000 contended increments");
+    puts("PASS core parallel atomics: lock-free capability ABI, null/alignment rejection, old values, cmpxchg failure, signed boundaries, 160000 contended increments");
     return 0;
 }
