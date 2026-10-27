@@ -1,0 +1,88 @@
+"""Real filesystem evidence for SCV verified host operations.
+
+These cases intentionally inspect the files and journal after each command.
+The operation receipt alone is never treated as proof of an effect.
+"""
+use std.spec.{describe, it, expect, step}
+use std.scv.verified_host_operations_v1.*
+use app.io.mod.{dir_create, dir_remove_all, file_exists, file_read, file_read_bytes, file_write_bytes}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn host_ops_test_root_v1() -> text:
+    val root = "/tmp/scv-host-ops-v1-{current_time_ms()}"
+    dir_create(root, true)
+    dir_create("{root}/.scv/journal", true)
+    root
+
+describe "SCV verified host operations V1":
+    it "copies exact bytes and records only observed success":
+        # @req REQ-SCV-HOST-CAPTURE-01
+        val root = host_ops_test_root_v1()
+        val bytes: [u8] = [0, 255, 10, 128]
+        file_write_bytes("{root}/source.bin", bytes)
+        step("copy: request an explicit source and absent destination")
+        val receipt = scv_host_copy_v1(root, "copy-1", "source.bin", "copy.bin")
+        step("assert: receipt, source, destination, and event journal agree")
+        expect(receipt.status).to_equal("success")
+        expect(file_read_bytes("{root}/source.bin")).to_equal(bytes)
+        expect(file_read_bytes("{root}/copy.bin")).to_equal(bytes)
+        val events = file_read("{root}/.scv/journal/events.log")
+        expect(events.contains("op=copy-1 kind=host_success")).to_equal(true)
+        expect(events.contains("before_sha256=")).to_equal(true)
+        dir_remove_all(root)
+
+    it "does not overwrite a destination or change the source on refusal":
+        # @req REQ-SCV-HOST-CAPTURE-02
+        val root = host_ops_test_root_v1()
+        val source: [u8] = [1, 2, 3]
+        val destination: [u8] = [9, 8, 7]
+        file_write_bytes("{root}/source.bin", source)
+        file_write_bytes("{root}/destination.bin", destination)
+        val receipt = scv_host_copy_v1(root, "copy-existing", "source.bin", "destination.bin")
+        expect(receipt.status).to_equal("failed")
+        expect(file_read_bytes("{root}/source.bin")).to_equal(source)
+        expect(file_read_bytes("{root}/destination.bin")).to_equal(destination)
+        val events = file_read("{root}/.scv/journal/events.log")
+        expect(events.contains("op=copy-existing kind=host_failed")).to_equal(true)
+        expect(events.contains("op=copy-existing kind=host_success")).to_equal(false)
+        dir_remove_all(root)
+
+    it "archives and verifies exact bytes before deleting the requested path":
+        # @req REQ-SCV-HOST-CAPTURE-03
+        val root = host_ops_test_root_v1()
+        val bytes: [u8] = [0, 13, 255, 42]
+        file_write_bytes("{root}/remove.bin", bytes)
+        step("delete: archive a verified byte copy before unlink")
+        val receipt = scv_host_delete_v1(root, "delete-1", "remove.bin")
+        step("assert: the source is absent and the receipt archive matches the original")
+        expect(receipt.status).to_equal("success")
+        expect(file_exists("{root}/remove.bin")).to_equal(false)
+        expect(file_read_bytes(receipt.archive_path)).to_equal(bytes)
+        val events = file_read("{root}/.scv/journal/events.log")
+        expect(events.contains("op=delete-1 kind=host_success")).to_equal(true)
+        expect(events.contains("archive_sha256=")).to_equal(true)
+        dir_remove_all(root)
+
+    it "refuses replay of a completed operation id without repeating effects":
+        # @req REQ-SCV-HOST-CAPTURE-04
+        val root = host_ops_test_root_v1()
+        val bytes: [u8] = [65, 0, 66]
+        file_write_bytes("{root}/source.bin", bytes)
+        val first = scv_host_copy_v1(root, "replayed", "source.bin", "copy.bin")
+        val event_before = file_read("{root}/.scv/journal/events.log")
+        val second = scv_host_copy_v1(root, "replayed", "source.bin", "copy.bin")
+        val event_after = file_read("{root}/.scv/journal/events.log")
+        expect(first.status).to_equal("success")
+        expect(second.status).to_equal("failed")
+        expect(event_after).to_equal(event_before)
+        expect(file_read_bytes("{root}/source.bin")).to_equal(bytes)
+        expect(file_read_bytes("{root}/copy.bin")).to_equal(bytes)
+        dir_remove_all(root)
+
+    it "rejects path escape and unsupported leaf types without journaled success":
+        # @req REQ-SCV-HOST-CAPTURE-05
+        val root = host_ops_test_root_v1()
+        val receipt = scv_host_delete_v1(root, "escape-1", "../outside")
+        expect(receipt.status).to_equal("failed")
+        expect(file_exists("{root}/.scv/journal/events.log")).to_equal(false)
+        dir_remove_all(root)
