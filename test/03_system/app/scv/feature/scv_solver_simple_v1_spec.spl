@@ -1,0 +1,109 @@
+# Tests authored before implementation; native execution requires an admitted runtime.
+# SCVN-S02: admitted entity-edit proposal adapter; no CLI integration claim.
+use std.spec.*
+use std.common.text_bytes.{text_to_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.solver_source_v1.*
+use std.scv.solver_simple_v1.*
+use std.scv.solver_simple_host_v1.*
+use test.fixtures.scv.solver_simple_v1_fixture.*
+
+describe "Simple admitted entity edits produce drafts through the source host":
+    it "combines disjoint function body edits with exact byte reconstruction":
+        step("freeze exact base and side revisions")
+        val input = setup_simple_source_fixture()
+        step("replay admitted independent entity edits")
+        val solved = exercise_simple_source_fixture(input)
+        step("check exact draft bytes and independent validation boundary")
+        expect(solved.candidate.unwrap().bytes).to_equal(text_to_bytes("fn alpha() -> i64:\n    10\n\nfn beta() -> i64:\n    20\n"))
+        expect(solved.result.status).to_equal("needs_inputs")
+        expect(solved.result.execution_status).to_equal("unqualified-builtin-execution")
+        expect(solved.result.complete_proposal).to_equal(false)
+        expect(solved.result.deterministic_result_key).to_equal("")
+        expect(solved.result.required_checks.len()).to_equal(10)
+        expect(solved.result.required_checks[6].required_producer_id).to_equal("unavailable:source.simple:language-parse")
+        expect(solved.inputs.raw.base.bytes).to_equal(input.raw.base.bytes)
+
+    it "combines a verified file move and both independent body edits":
+        var input = setup_simple_source_fixture()
+        input.raw.left.path = "src/moved.spl"
+        input.raw.moves = [SourceMoveEvidenceV1(operation_id: "move-file", producer_id: "accepted-editor", file_uid: input.raw.base.file_uid, base_revision: input.raw.base.revision, side_revision: input.raw.left.revision, from_path: input.raw.base.path, to_path: input.raw.left.path, expected_base_bytes_digest: sha256_u8_hex(input.raw.base.bytes), expected_side_bytes_digest: sha256_u8_hex(input.raw.left.bytes))]
+        val solved = exercise_simple_source_fixture(input)
+        expect(solved.candidate.unwrap().path).to_equal("src/moved.spl")
+        expect(solved.candidate.unwrap().file_uid).to_equal(input.raw.base.file_uid)
+
+    it "rejects concurrent changes to the same entity even at disjoint ranges":
+        var input = setup_simple_source_fixture()
+        input.edits[1].entity_uid = input.edits[0].entity_uid
+        check_simple_source_conflict(input, "SIMPLE_ENTITY_CONFLICT")
+
+    it "requires full side replay including all unrecorded bytes":
+        var input = setup_simple_source_fixture()
+        input.raw.left.bytes = input.raw.left.bytes + text_to_bytes("# unrecorded edit\n")
+        check_simple_source_conflict(input, "SIMPLE_SIDE_RECONSTRUCTION")
+
+    it "rejects duplicate operation IDs across source moves and edits":
+        var input = setup_simple_source_fixture()
+        input.edits[1].operation_id = input.edits[0].operation_id
+        check_simple_source_conflict(input, "SIMPLE_DUPLICATE_OPERATION")
+
+    it "rejects stale revision identity-map and content preconditions":
+        var stale = setup_simple_source_fixture()
+        stale.edits[0].base_revision = "stale-base"
+        check_simple_source_conflict(stale, "SIMPLE_EDIT_PRECONDITION")
+        var identity = setup_simple_source_fixture()
+        identity.edits[0].identity_map_revision = "stale-map"
+        check_simple_source_conflict(identity, "SIMPLE_EDIT_PRECONDITION")
+        var content = setup_simple_source_fixture()
+        content.edits[0].expected_base_digest = "stale-content"
+        check_simple_source_conflict(content, "SIMPLE_EDIT_PRECONDITION")
+
+    it "rejects invalid and overlapping ranges before slicing":
+        var input = setup_simple_source_fixture()
+        input.edits[0].start_byte = -1
+        check_simple_source_conflict(input, "SIMPLE_EDIT_PRECONDITION")
+        input = setup_simple_source_fixture()
+        input.edits[1].start_byte = input.edits[0].start_byte
+        input.edits[1].end_byte = input.edits[0].end_byte
+        input.edits[1].expected_base_digest = input.edits[0].expected_base_digest
+        input.raw.right.bytes = input.raw.base.bytes[0:input.edits[1].start_byte] + input.edits[1].replacement + input.raw.base.bytes[input.edits[1].end_byte:]
+        check_simple_source_conflict(input, "SIMPLE_RANGE_CONFLICT")
+
+    it "refuses two point insertions at the same base boundary":
+        var input = setup_simple_source_fixture()
+        input.edits[0].end_byte = input.edits[0].start_byte
+        input.edits[0].expected_base_digest = sha256_u8_hex([])
+        input.raw.left.bytes = input.raw.base.bytes[0:input.edits[0].start_byte] + input.edits[0].replacement + input.raw.base.bytes[input.edits[0].start_byte:]
+        input.edits[1].start_byte = input.edits[0].start_byte
+        input.edits[1].end_byte = input.edits[0].start_byte
+        input.edits[1].expected_base_digest = sha256_u8_hex([])
+        input.raw.right.bytes = input.raw.base.bytes[0:input.edits[1].start_byte] + input.edits[1].replacement + input.raw.base.bytes[input.edits[1].start_byte:]
+        check_simple_source_conflict(input, "SIMPLE_RANGE_CONFLICT")
+
+    it "binds operations against the separately accepted policy":
+        var input = setup_simple_source_fixture()
+        val request = freeze_simple_source_fixture(input)
+        val policy = setup_simple_source_policy(request)
+        input.edits[0].entity_uid = "candidate-invented-identity"
+        val solved = solve_simple_source_v1(request, policy, input)
+        expect(solved.result.status).to_equal("failed")
+        expect(solved.candidate).to_be_nil()
+
+    it "retains invalid source and literal conflict markers without self validation":
+        var input = setup_simple_source_fixture()
+        input.edits[0].replacement = text_to_bytes("bad syntax <<<<<<< literal") + [0u8]
+        input.raw.left.bytes = input.raw.base.bytes[0:input.edits[0].start_byte] + input.edits[0].replacement + input.raw.base.bytes[input.edits[0].end_byte:]
+        val solved = exercise_simple_source_fixture(input)
+        expect(solved.candidate.unwrap().bytes.contains(0u8)).to_equal(true)
+        expect(solved.inputs.raw.left.bytes).to_equal(input.raw.left.bytes)
+        expect(solved.result.validation_status).to_equal("external-validation-required")
+
+    it "preserves cancellation and pre-serialization budget refusal":
+        val input = setup_simple_source_fixture()
+        var request = freeze_simple_source_fixture(input)
+        val policy = setup_simple_source_policy(request)
+        request.cancelled = true
+        expect(solve_simple_source_v1(request, policy, input).result.status).to_equal("cancelled")
+        request.cancelled = false
+        request.logical_work_budget = 1
+        expect(solve_simple_source_v1(request, policy, input).result.status).to_equal("resource_limited")
