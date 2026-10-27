@@ -26,3 +26,20 @@ This checkpoint does not complete the requested 1,602-category audit. Canonical 
 ## Append-only correction precedence
 
 Later correction files supersede the archived row for the named `bug_id` while leaving `reviewed_categories.sdn`, the original evidence pages, captured hashes, and original partition counts unchanged. When a correction exists, readers should use its revised fields and rationale for the current classification and retain the original row as historical provenance. The [append-only correction register](corrections.sdn) currently has one entry: [GPU type mapper struct symbol ID layout](correction_gpu_type_mapper_struct_symbolid_layout_2026-10-24.md). The original 415/1,187/0 accounting is a historical snapshot, not a recount after corrections.
+
+
+## V2 full-lane review snapshot (2026-10-27)
+
+[V2 categories](reviewed_categories_v2.sdn), [residual IDs](residual_ids_v2.sdn), [manifest and receipts](manifest_v2.sdn), and [accepted evidence by lane](evidence_v2/) capture one consistent read of the ten final lane exports. Lane 04 uses `merged_review04.csv` and its merge receipt, not the earlier primary export. CSVs, V2 progress/partition files, and merge/overlay receipts are bound by SHA-256 in the V2 manifest.
+
+- The frozen source set contains 1,602 unique IDs. V2 has 600 accepted classifications and 1,002 still needing evidence; none are missing.
+- All 600 accepted classifications remain `untested`. Accepted means the review classification was accepted; it does not mean a test passed, a bug was closed, or a fix was runtime-verified.
+- Accepted actions: 395 keep open, 173 fixed pending verification, 31 fix candidate, and 1 close invalid candidate. The invalid candidate is `font_registry_bungee_digest_mismatch_blocks_selected_outline_path_2026-08-15`; no canonical invalid closure was applied.
+- The V2 row for `gpu_type_mapper_struct_symbolid_layout_2026-10-24` includes the correction already recorded in the append-only V1 correction register: valid, solution unknown, structural change unknown, keep open.
+- Related merged code-fix PR receipts: [#5034](https://github.com/ormastes/simple/pull/5034), [#5035](https://github.com/ormastes/simple/pull/5035), [#5036](https://github.com/ormastes/simple/pull/5036), [#5041](https://github.com/ormastes/simple/pull/5041), [#5042](https://github.com/ormastes/simple/pull/5042), [#5043](https://github.com/ormastes/simple/pull/5043), [#5048](https://github.com/ormastes/simple/pull/5048), [#5049](https://github.com/ormastes/simple/pull/5049), and [#5054](https://github.com/ormastes/simple/pull/5054). PRs #5048, #5049, and #5054 postdate the frozen assessment SHA and are recorded as related implementation receipts, not promoted into its evidence. Documentation PRs #5053 and #5057 are not code-fix receipts.
+
+## Revision precedence
+
+V1 files, their manifest, and the append-only V1 correction register remain historical records. V2 is the later full-ID classification snapshot: for current classification lookup, use the V2 row for each ID, including the corrected Vulkan mapper row. The V2 review target remains the frozen `c0b3ad911f4cb00c0f3550b05baa8d06347d17d0`; merged post-freeze fixes do not change the assessment SHA or confer runtime qualification.
+
+This remains partial progress toward the full user goal. Canonical bug database writes and runtime-qualified build evidence remain held pending the user's build-exception decision. No bug DB, CRC, or status files were changed, and no compiler or SSpec was run for this documentation snapshot. No full-audit PASS is claimed.
