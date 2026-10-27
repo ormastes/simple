@@ -2,7 +2,8 @@
 # Design: doc/01_research/app/tools/scv/scv_v2_final_report_2026-08-25.md §16.1,
 # migration stabilization doc §7. Events are one line-framed record per repo
 # mutation; the WAL records the intended HEAD_OP/workspace publication with
-# BEGIN/COMMIT and recovery uses HEAD_OP to choose rollback or roll-forward.
+# BEGIN/COMMIT. Pending recovery remains read-only unless exact publication
+# ownership is recorded; the current WAL format cannot establish that binding.
 # This journal lock serializes journal writers; it does not make an unrelated
 # mutable HEAD publisher atomic, and the legacy recovery heuristic is not a
 # proof against concurrent non-SCV writers.
@@ -16,6 +17,7 @@ use std.path.{dirname, basename}
 use std.scv.core.{scv_repo_dir, scv_head_path, scv_workspace_path, scv_status_index_path, scv_object_path}
 use std.scv.store.{scv_repo_exists, scv_write_text, scv_fault_exit, scv_object_field, scv_commit_tree}
 use std.scv.maintenance.{scv_rebuild_object_index}
+use std.scv.wal_format.{scv_wal_line_value, scv_wal_parse}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 fn scv_journal_dir(root: text) -> text:
@@ -218,77 +220,42 @@ fn scv_wal_commit(root: text, tx_id: text) -> bool:
 fn scv_wal_abort(root: text, tx_id: text) -> bool:
     scv_journal_append(root, scv_journal_wal_path(root), "ABORT op={tx_id}")
 
-fn scv_wal_line_value(line: text, key: text) -> text:
-    for part in line.split(" "):
-        if part.starts_with("{key}="):
-            return part["{key}=".len():]
-    ""
-
-fn scv_wal_restore(root: text, rel: text, encoded: text) -> bool:
-    val path = if rel == "HEAD_OP": scv_head_path(root) else: scv_workspace_path(root)
-    if encoded == "-":
-        if file_exists(path):
-            return file_delete(path)
-        true
-    else:
-        scv_write_text(path, scv_journal_decode(encoded))
-
-# On-open recovery: if the trailing transaction has a BEGIN without a matching
-# COMMIT/ABORT, decide by the single publication point (HEAD_OP). Head already
-# advanced -> roll FORWARD (publish the recorded workspace pointer); head
-# unchanged -> roll BACK the mutable files to their recorded old state.
+# On-open recovery: the WAL has no immutable expected operation id, and the
+# journal lock does not own the publisher. Preserve every pending transaction
+# and fail closed; neither matching nor changed HEAD_OP proves ownership.
 fn scv_wal_recover_locked(root: text) -> text:
     val wal = scv_journal_wal_path(root)
-    if not file_exists(wal):
-        return "wal clean\n"
-    val wal_content = match scv_journal_safe_read(wal):
-        Ok(content): content
+    val wal_content = match scv_journal_optional_read_locked(root, wal):
+        Ok(content):
+            if content == "": return "wal clean\n"
+            content
         Err(error): return "ERROR cannot read WAL: {error}\n"
-    var tx_id = ""
-    var head_old = ""
-    var ws_old = ""
-    var new_commit = ""
-    var open_tx = false
-    for line in wal_content.split("\n"):
-        val trimmed = line.trim()
-        if trimmed.starts_with("BEGIN "):
-            tx_id = scv_wal_line_value(trimmed, "op")
-            head_old = ""
-            ws_old = ""
-            new_commit = ""
-            open_tx = true
-        elif trimmed.starts_with("SET "):
-            if scv_wal_line_value(trimmed, "path") == "HEAD_OP":
-                head_old = scv_wal_line_value(trimmed, "old")
-            else:
-                ws_old = scv_wal_line_value(trimmed, "old")
-        elif trimmed.starts_with("NEW "):
-            new_commit = scv_wal_line_value(trimmed, "commit")
-        elif trimmed.starts_with("COMMIT ") or trimmed.starts_with("ABORT "):
-            if scv_wal_line_value(trimmed, "op") == tx_id:
-                open_tx = false
-    if not open_tx:
+    val parsed = scv_wal_parse(wal_content)
+    if parsed[0] == "clean":
         return "wal clean\n"
-    val head_now = match scv_journal_read_file(scv_head_path(root)):
+    if parsed[0].starts_with("ERROR"):
+        return parsed[0] + "\n"
+    if parsed.len() != 5 or parsed[0] != "pending":
+        return "ERROR WAL parser returned an invalid state; state preserved\n"
+    val tx_id = parsed[1]
+    val head_old = parsed[2]
+    val ws_old = parsed[3]
+    val head_now = match scv_journal_read_file(root, scv_head_path(root)):
         Ok(content): content
         Err(error): return "ERROR cannot read operation head for recovery: {error}\n"
     val head_was = if head_old == "-": "-" else: scv_journal_decode(head_old)
     if head_now != head_was:
-        # Head was published: complete the transaction (roll forward).
-        if new_commit != "":
-            if not scv_write_text(scv_workspace_path(root), "default: {new_commit}\n"):
-                return "ERROR cannot recover workspace\n"
-        if not scv_journal_append_locked(root, wal, "COMMIT op={tx_id} recovered=forward"):
-            return "ERROR cannot record WAL recovery\n"
-        "wal recovered op={tx_id} forward\n"
-    else:
-        if not scv_wal_restore(root, "HEAD_OP", head_old):
-            return "ERROR cannot recover operation head\n"
-        if not scv_wal_restore(root, "meta/workspaces.sdn", ws_old):
-            return "ERROR cannot recover workspace\n"
-        if not scv_journal_append_locked(root, wal, "ABORT op={tx_id} recovered=rollback"):
-            return "ERROR cannot record WAL rollback\n"
-        "wal recovered op={tx_id} rollback\n"
+        return "ERROR unresolved WAL: operation head differs from recorded pre-state and has no exact candidate binding; state preserved\n"
+    val ws_now = match scv_journal_read_file(root, scv_workspace_path(root)):
+        Ok(content): content
+        Err(error): return "ERROR cannot read workspace for recovery: {error}\n"
+    val ws_was = if ws_old == "-": "-" else: scv_journal_decode(ws_old)
+    if ws_now != ws_was:
+        return "ERROR unresolved WAL: workspace differs from recorded pre-state; state preserved\n"
+    # The journal lock does not own the publisher: scv_wal_begin releases it
+    # before scv_write_operation. Matching pre-state therefore cannot prove
+    # that the writer has retired; preserve this pending WAL without mutation.
+    "ERROR unresolved WAL: recorded pre-state remains but publication ownership is unbound; state preserved\n"
 
 fn scv_wal_recover(root: text) -> text:
     val lock = scv_journal_lock(root)
@@ -322,6 +289,8 @@ fn scv_rebuild_db(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR — nothing was checked (repository not initialized)\n"
     var out = scv_wal_recover(root)
+    if out.starts_with("ERROR"):
+        return out
     val commit = scv_journal_head_commit(root)
     if commit == "":
         return "ERROR — nothing was checked (no published head commit)\n"
