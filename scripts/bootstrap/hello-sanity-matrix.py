@@ -114,6 +114,15 @@ def verify_capture_receipt(capture, output, linker):
         raise ValueError("native reproduction archive/output/linker identity mismatch")
 
 
+def matrix_status(phase, native_status, interpreter_status):
+    """Phase 2 is compiler-only; its configured skip is not an interpreter pass."""
+    if native_status == "FAIL":
+        return "FAIL"
+    if interpreter_status != "PASS" and not (phase == 2 and interpreter_status == "SKIPPED"):
+        return "FAIL"
+    return native_status
+
+
 def runtime_identity(root):
     return {str(path.relative_to(root)): digest(path)
             for path in root.rglob("*") if path.is_file() and
@@ -586,9 +595,10 @@ class Matrix:
         barrier = threading.Barrier(len(self.args.lanes))
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.args.lanes) + 1) as pool:
             futures = [pool.submit(self.lane, name, barrier) for name in self.args.lanes]
-            interpreter = pool.submit(self.interpreter) if not self.args.skip_interpreter else None
+            configured_skip = self.args.phase == 2
+            interpreter = pool.submit(self.interpreter) if not configured_skip and not self.args.skip_interpreter else None
             rows = [future.result() for future in futures]
-            interpreter_result = interpreter.result() if interpreter else {"status": "UNRUN"}
+            interpreter_result = interpreter.result() if interpreter else {"status": "SKIPPED" if configured_skip else "UNRUN"}
         for name, sha in fixture_hashes.items():
             if digest(self.root / FIXTURES / name) != sha:
                 raise ValueError("fixture changed during matrix")
@@ -597,7 +607,7 @@ class Matrix:
         passed = sum(row["status"] == "PASS" for row in rows)
         complete_native = set(self.args.lanes) == set(LANES)
         native_status = "FAIL" if passed != len(rows) else "PASS" if complete_native else "PARTIAL"
-        status = "FAIL" if passed != len(rows) or interpreter_result["status"] != "PASS" else "PASS" if complete_native else "PARTIAL"
+        status = matrix_status(self.args.phase, native_status, interpreter_result["status"])
         if self.children:
             status = "RUNNING_FINALIZATION"
         sdn(self.out / "result.sdn", {"phase": self.args.phase, "compiler_sha256": self.sha,
