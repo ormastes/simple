@@ -112,7 +112,26 @@ After admission, run once with the admitted runtime:
 
 Compiler/core runtime and MCP native smoke checks, generated-manual review,
 coverage, configuration variants, and native semantic/latency/RSS evidence
-remain pending. The existing parser owner was 1599 lines at the base and needs
-a dedicated semantics-preserving split; the present change adds narrow hooks
-and does not claim compliance with the 800-line owner limit. This is not a
-verify PASS or release authorization.
+remain pending. This is not a verify PASS or release authorization.
+
+## Parser owner extraction
+
+The previous parser owner was 1599 lines at the base and 1643 lines after the
+integration. It is now a six-line registration facade over four bounded owners:
+`driver_source_parse_support.spl` (shared functions/state),
+`driver_source_parse_selected.spl` (selected frontend and per-file surfaces),
+`driver_source_parse_streaming.spl` (streaming registry and phase dispatch), and
+`driver_source_parse_retained.spl` (retained parsing). Each is under 800 lines.
+Definitions retain their exact lexical bytes and support state remains in one
+module. The facade preserves selected → streaming → retained registration order
+and re-exports the prior helper APIs.
+
+Existing source-text contracts read the actual owners through
+`test/helpers/compiler_source_parse_owners.spl`. That helper reconstructs their
+definition blocks in the original order, retaining existing method-boundary
+and whole-implementation negative assertions. It copies no implementation or
+passing fixture. The two TLDR closure guards read their streaming owner directly;
+the import-owner audit scans all four actual owners. An independent static
+extraction check reconstructs the pre-split file byte-for-byte, and checks that
+existing assertions were not deleted or rewritten. Runtime method registration
+and native linking still require the admitted compiler checks above.
