@@ -16,13 +16,17 @@ use std.scv.distributed_identity.{entity_ref_canonical, entity_ref_provisional}
 use std.common.crypto.sha256.{sha256_text}
 use test.fixtures.scv.db_schema_v2_fixture.{setup_scv_fixture, setup_scv_schema_uid, setup_scv_legacy_patch, exercise_scv_schema_change}
 
-fn setup_scv_rows_schema_input_v1() -> DbRowsSchemaInputV1:
+fn setup_scv_rows_schema_input_v1(duplicate: bool = false, concurrent: bool = false) -> DbRowsSchemaInputV1:
     val original = setup_scv_fixture()
     val uid = original.columns[0].column_uid
     val rename = exercise_scv_schema_change(original, uid, 20u64, DbSchemaChangeV2.RenameColumn(uid, "summary"))
     val current = db_schema_apply_v2(original, rename).unwrap()
     val row = entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false))
     var state = MaterializedState(rows: [DbRow(entity: entity_ref_canonical(row), kind: "task", fields: [DbField(name: "title", value: DbValue.Text("draft"))], revision: "row-v1", tombstoned: false)], accepted: [], revision: "")
+    if duplicate:
+        val other = entity_ref_provisional(setup_scv_schema_uid("task", 2u64, false))
+        state.rows.push(DbRow(entity: entity_ref_canonical(other), kind: "task", fields: [DbField(name: "title", value: DbValue.Text("edited offline"))], revision: "other-row-v1", tombstoned: false))
+    if concurrent: state.rows[0].fields[0].value = DbValue.Text("concurrent change")
     state.revision = db_state_digest(state).unwrap()
     var patch = setup_scv_legacy_patch("old-v1-schema")
     patch.base_revision = state.revision

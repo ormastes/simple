@@ -1,5 +1,5 @@
 use std.spec.*
-use std.scv.solver_db_rows_schema_v1.*
+use std.scv.solver_db_adapters_v1.{solve_db_rows_schema_v1}
 use std.scv.db_schema_identity_v2.*
 use std.scv.db_schema_codec_v2.*
 use std.scv.db_schema_merge_v2.*
@@ -8,6 +8,7 @@ use std.scv.db_reducer.{db_field_value}
 use std.scv.db_patch.{DbValue, db_value_bytes}
 use std.scv.db_patch_codec.{db_patch_decode}
 use std.scv.db_snapshot.{db_snapshot_decode, db_snapshot_encode}
+use std.common.crypto.sha256.{sha256_text}
 use test.fixtures.scv.db_schema_v2_fixture.{exercise_scv_schema_change, exercise_scv_schema_add}
 use test.fixtures.scv.solver_host_v1_fixture.{setup_scv_policy}
 use test.fixtures.scv.solver_db_rows_schema_v1_fixture.*
@@ -38,66 +39,178 @@ describe "Schema-aware textual database row proposals":
             expect(check.subject_digest).to_equal(solved.result.candidate_root.unwrap())
 
     it "retains independent nullable additions and their identity without padding old rows":
+        step("Given independent schema additions and an old-schema row update")
         val original = setup_scv_rows_schema_input_v1()
         var input = original
         val left = exercise_scv_schema_add(original.accepted_current_schema, 2u64, "labels", false, DbDefaultRuleV2.NoDefault)
         val right = exercise_scv_schema_add(original.accepted_current_schema, 2u64, "priority", true, DbDefaultRuleV2.Constant(DbValue.Text("normal")))
         input.accepted_current_schema = db_schema_merge_v2(original.accepted_current_schema, left, right).unwrap().candidate.unwrap()
         val request = freeze_scv_rows_schema_request_v1(input)
+        step("When the schema-aware DB adapter previews the update")
         val solved = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
+        step("Then both columns remain and the old row gains no invented cells")
         expect(solved.result.conflicts.len()).to_equal(0)
         expect(solved.preview.unwrap().proposed.rows[0].fields.len()).to_equal(1)
         expect(solved.inputs.accepted_current_schema.columns.len()).to_equal(3)
         expect(solved.result.validation_status).to_equal("external-validation-required")
 
     it "preserves malformed submitted bytes as a draft without a preview":
+        step("Given patch bytes changed after the host freezes its input binding")
         var input = setup_scv_rows_schema_input_v1()
         val request = freeze_scv_rows_schema_request_v1(input)
         input.submitted_patch = input.submitted_patch + "unparsed bytes\n"
+        step("When the submitted bytes disagree with that binding")
         val solved = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
+        step("Then the draft retains every byte and produces no preview")
         expect(solved.preview).to_be_nil()
         expect(solved.result.candidate_root).to_be_nil()
         expect(solved.inputs.submitted_patch).to_equal(input.submitted_patch)
         expect(solved.result.status).to_equal("failed")
 
+    it "runs the existing transaction-wide uniqueness checks after the scalar edit":
+        step("Given another row already has the incoming title")
+        val input = setup_scv_rows_schema_input_v1(true)
+        val request = freeze_scv_rows_schema_request_v1(input)
+        step("When the existing reducer checks the combined rows")
+        val solved = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
+        step("Then uniqueness blocks the candidate and preserves the snapshot")
+        var codes: [text] = []
+        for conflict in solved.result.conflicts: codes.push(conflict.code)
+        expect(codes).to_contain("SCVDB_UNIQUE_COLLISION")
+        expect(solved.result.candidate_root).to_be_nil()
+        expect(db_value_bytes(solved.preview.unwrap().proposed.rows[0].fields[0].value).unwrap()).to_equal(db_value_bytes(DbValue.Text("draft")).unwrap())
+        expect(solved.inputs.submitted_snapshot).to_equal(input.submitted_snapshot)
+
+    it "retains both scalar alternatives instead of choosing a textual winner":
+        step("Given both writers changed the same scalar differently")
+        val input = setup_scv_rows_schema_input_v1(false, true)
+        val request = freeze_scv_rows_schema_request_v1(input)
+        step("When the original signed update is previewed")
+        val solved = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
+        step("Then the reducer retains the conflicting alternatives")
+        var codes: [text] = []
+        for conflict in solved.result.conflicts: codes.push(conflict.code)
+        expect(codes).to_contain("SCVDB_CONCURRENT_FIELD")
+        expect(solved.result.candidate_root).to_be_nil()
+        expect(solved.preview.unwrap().conflict_records.len()).to_equal(1)
+
+    it "requires a reviewed migration when an existing default changes":
+        step("Given the current schema changes an existing column default")
+        var input = setup_scv_rows_schema_input_v1()
+        val schema = input.accepted_current_schema
+        val uid = schema.columns[0].column_uid
+        val operation = exercise_scv_schema_change(schema, uid, 22u64, DbSchemaChangeV2.SetDefault(uid, DbDefaultRuleV2.Constant(DbValue.Text("new default"))))
+        input.accepted_current_schema = db_schema_apply_v2(schema, operation).unwrap()
+        val request = freeze_scv_rows_schema_request_v1(input)
+        step("When an old-schema update requests a preview")
+        val solved = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
+        step("Then a definition migration is required")
+        expect(solved.preview).to_be_nil()
+        expect(solved.result.conflicts[0].code).to_equal("SCVDB_SCHEMA_DEFINITION_MIGRATION_REQUIRED")
+
+    it "reaches the strict V1 reader for host-bound malformed input and retains it":
+        step("Given the host freezes the exact malformed patch bytes")
+        var input = setup_scv_rows_schema_input_v1()
+        var request = freeze_scv_rows_schema_request_v1(input)
+        input.submitted_patch = input.submitted_patch + "unparsed bytes\n"
+        request.binding.left_model_id = sha256_text(input.submitted_patch)
+        step("When the existing strict V1 reader parses them")
+        val solved = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
+        step("Then parsing fails while retaining the entire submitted patch")
+        expect(solved.result.status).to_equal("failed")
+        expect(solved.result.conflicts[0].code).to_equal("SCVDB_SNAPSHOT_HEX")
+        expect(solved.inputs.submitted_patch).to_equal(input.submitted_patch)
+        expect(solved.preview).to_be_nil()
+
+    it "requires explicit type and merge-policy migrations for old-schema writes":
+        step("Given frozen definitions change the authored type or merge policy")
+        val original = setup_scv_rows_schema_input_v1()
+        val schema = original.accepted_current_schema
+        val uid = schema.columns[0].column_uid
+        var typed = original
+        # Independently frozen external definitions, not a claim that the V2
+        # operation owner supports executing type/policy migrations.
+        var type_schema = schema
+        type_schema.columns[0].logical_type = "u64"
+        typed.accepted_current_schema = db_schema_seal_v2(type_schema).unwrap()
+        val type_request = freeze_scv_rows_schema_request_v1(typed)
+        step("When old-schema writes encounter those definitions")
+        val type_result = solve_db_rows_schema_v1(type_request, setup_scv_policy(type_request.binding), typed)
+        expect(type_result.result.conflicts[0].code).to_equal("SCVDB_SCHEMA_MIGRATION_REQUIRED")
+        expect(type_result.preview).to_be_nil()
+        var changed_policy = original
+        var policy_schema = schema
+        policy_schema.columns[0].merge_policy = "authority-v2"
+        changed_policy.accepted_current_schema = db_schema_seal_v2(policy_schema).unwrap()
+        val policy_request = freeze_scv_rows_schema_request_v1(changed_policy)
+        val policy_result = solve_db_rows_schema_v1(policy_request, setup_scv_policy(policy_request.binding), changed_policy)
+        step("Then both unsupported migrations remain explicit")
+        expect(policy_result.result.conflicts[0].code).to_equal("SCVDB_SCHEMA_POLICY_MIGRATION_REQUIRED")
+        expect(policy_result.preview).to_be_nil()
+
+    it "rejects a valid replacement schema that differs from the accepted mapping pin":
+        step("Given a valid schema differs from the accepted mapping identity")
+        var input = setup_scv_rows_schema_input_v1()
+        val request = freeze_scv_rows_schema_request_v1(input)
+        input.accepted_current_schema = input.accepted_original_schema
+        var request_with_current_revision = request
+        request_with_current_revision.binding.schema_revision = input.accepted_current_schema.revision
+        step("When the replacement catalog is supplied")
+        val solved = solve_db_rows_schema_v1(request_with_current_revision, setup_scv_policy(request_with_current_revision.binding), input)
+        step("Then the mapping pin blocks reduction")
+        expect(solved.preview).to_be_nil()
+        expect(solved.result.conflicts[0].code).to_equal("SCVDB_SCHEMA_IDENTITY_BINDING")
+
     it "requires the exact host-pinned historical schema and never guesses mapping":
+        step("Given the historical V1 binding digest is missing")
         var input = setup_scv_rows_schema_input_v1()
         input.historical_binding.binding_digest = "missing"
         val request = freeze_scv_rows_schema_request_v1(setup_scv_rows_schema_input_v1())
+        step("When the adapter resolves column identity")
         val solved = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
+        step("Then it requests inputs and preserves the signed patch")
         expect(solved.preview).to_be_nil()
         expect(solved.result.status).to_equal("needs_inputs")
         expect(solved.result.conflicts[0].code).to_equal("SCVDB_SCHEMA_V1_BINDING_DIGEST")
         expect(solved.inputs.submitted_patch).to_equal(input.submitted_patch)
 
     it "keeps drop and old-schema update conflicts explicit":
+        step("Given the edited column is now tombstoned")
         var input = setup_scv_rows_schema_input_v1()
         val schema = input.accepted_current_schema
         val uid = schema.columns[0].column_uid
         input.accepted_current_schema = db_schema_apply_v2(schema, exercise_scv_schema_change(schema, uid, 21u64, DbSchemaChangeV2.DropColumn(uid))).unwrap()
         val request = freeze_scv_rows_schema_request_v1(input)
+        step("When its old-schema value update arrives")
         val solved = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
+        step("Then the drop and update remain a conflict")
         expect(solved.preview).to_be_nil()
         expect(solved.result.conflicts[0].code).to_equal("SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
 
     it "rejects a source solver profile before interpreting database bytes":
+        step("Given a source provider is selected for a database request")
         val input = setup_scv_rows_schema_input_v1()
         val request = freeze_scv_rows_schema_request_v1(input)
         var policy = setup_scv_policy(request.binding)
         policy.solver.provider_id = "scv.solver.source-bytes.v1"
+        step("When host preflight checks the provider domain")
         val solved = solve_db_rows_schema_v1(request, policy, input)
+        step("Then the request is unsupported and has no text fallback")
         expect(solved.result.status).to_equal("unsupported")
         expect(solved.preview).to_be_nil()
 
     it "bounds input bytes before readers and retains them on cancellation":
+        step("Given oversized input and a restrictive request budget")
         var input = setup_scv_rows_schema_input_v1()
         var request = freeze_scv_rows_schema_request_v1(input)
         input.submitted_patch = "x".repeat(200000)
         request.memory_budget = 100
+        step("When the request exceeds the budget or is cancelled")
         val limited = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
         expect(limited.result.status).to_equal("resource_limited")
         expect(limited.preview).to_be_nil()
         request.cancelled = true
         val cancelled = solve_db_rows_schema_v1(request, setup_scv_policy(request.binding), input)
+        step("Then typed refusals retain the exact submitted text")
         expect(cancelled.result.status).to_equal("cancelled")
         expect(cancelled.inputs.submitted_patch).to_equal(input.submitted_patch)
