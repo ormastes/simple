@@ -4,7 +4,7 @@
 # and @cfg per-declaration conditionals.
 # Extracted from parser.spl.
 
-use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_os_is_unix, cfg_feature_enabled}
+use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_os_is_unix, cfg_feature_enabled, cfg_guard_context_identity_v1}
 use std.nogc_sync_mut.io_runtime.{env_get}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{
     FrontendCfgDecisionV1, FrontendTargetPreprocessV1}
@@ -459,7 +459,105 @@ fn _pp_marker_count(stack_is_marker: [bool], upto: i64) -> i64:
         i = i + 1
     n
 
+# ===== Strip-decision record (target-neutral HIR cache key) =====
+# Every arm the preprocessor keeps or strips by TARGET evaluation (top-level or
+# binding-declaring @when/@elif/@else, per-declaration @cfg) is logged here,
+# unconditionally and independent of _pp_target_mode. Arms rewritten to
+# `__cfg_when__` markers are NOT logged: they keep every arm. The log is the
+# ordered (kind, condition, kept/stripped) decisions of the LAST preprocess;
+# zero decisions == target-neutral. See hir_cfg_decl_select_design.md section 3.
+#
+# Memo: every run (marker mode with the flag on, or target-receipted mode) is
+# recorded under (content_hash, cfg_guard_context_identity_v1(), native_target,
+# mode), so one target's result is never served to another and a target-receipted
+# run (which flat-strips chains) can never be read back as a marker-mode answer.
+# The driver declares which mode its parse uses (pp_declare_parse_scope); a
+# neutral answer is only ever read from a marker-mode entry while the declared
+# mode is marker. Anything else is unknown (-1), which callers treat as non-neutral.
+extern fn rt_hash_text(content: text) -> i64
+
+var pp_strip_log: text = ""
+var pp_strip_count: i64 = 0
+var pp_strip_memo_log: Dict<text, text> = {}
+var pp_strip_memo_count: Dict<text, i64> = {}
+var pp_scope_mode: text = ""
+var pp_scope_target: text = ""
+
+fn _pp_strip_note(kind: text, condition: text, kept: bool):
+    pp_strip_count = pp_strip_count + 1
+    pp_strip_log = pp_strip_log + kind + "|" + condition + "|" + (if kept: "kept" else: "stripped") + "\n"
+
+fn pp_last_strip_decision_count() -> i64:
+    pp_strip_count
+
+fn pp_last_strip_decision_log() -> text:
+    pp_strip_log
+
+# Driver declaration of the parse mode its sources go through: target-receipted
+# (selection active) or marker. Undeclared == "" == neutral is never granted.
+fn pp_declare_parse_scope(target_receipted: bool, native_target: text):
+    pp_scope_mode = if target_receipted: "target" else: "marker"
+    pp_scope_target = native_target
+
+fn pp_declared_target() -> text:
+    pp_scope_target
+
+fn pp_declared_marker_mode() -> bool:
+    pp_scope_mode == "marker"
+
+fn pp_strip_memo_size() -> i64:
+    pp_strip_memo_count.len()
+
+fn _pp_memo_key(content_hash: i64, native_target: text, mode: text) -> text:
+    "{content_hash}|" + cfg_guard_context_identity_v1() + "|{native_target.len()}:{native_target}|" + mode
+
+# Decision count recorded by a MARKER-mode run for (content, identity, native_target),
+# or -1 when unknown or when the declared parse mode is not marker.
+fn pp_marker_strip_count(content_hash: i64, native_target: text) -> i64:
+    if pp_scope_mode != "marker":
+        return -1
+    pp_strip_memo_count[_pp_memo_key(content_hash, native_target, "marker")] ?? -1
+
+fn pp_marker_strip_log(content_hash: i64, native_target: text) -> text:
+    pp_strip_memo_log[_pp_memo_key(content_hash, native_target, "marker")] ?? ""
+
+# Entry recorded by a target-receipted run (inspection only).
+fn pp_target_strip_count(content_hash: i64, native_target: text) -> i64:
+    pp_strip_memo_count[_pp_memo_key(content_hash, native_target, "target")] ?? -1
+
+# Make sure a marker-mode entry exists for `source` under `native_target`.
+# Runs the preprocessor (same function the parser calls) ONLY when the driver
+# declared marker mode; otherwise records nothing and the answer stays unknown.
+fn pp_ensure_marker_strip_decisions(source: text, native_target: text):
+    if not _pp_cfg_select_flag() or pp_scope_mode != "marker":
+        return
+    if pp_marker_strip_count(rt_hash_text(source), native_target) >= 0:
+        return
+    val saved_log = pp_strip_log
+    val saved_count = pp_strip_count
+    val saved_target = pp_scope_target
+    pp_scope_target = native_target
+    _pp_preprocess_conditionals(source)
+    pp_scope_target = saved_target
+    pp_strip_log = saved_log
+    pp_strip_count = saved_count
+
 fn _pp_preprocess_conditionals(source: text) -> text:
+    pp_strip_log = ""
+    pp_strip_count = 0
+    val out = _pp_preprocess_conditionals_body(source)
+    if pp_state._pp_target_mode:
+        val tgt = pp_scope_target + "|{pp_state._pp_target_os}/{pp_state._pp_target_arch}"
+        val k = _pp_memo_key(rt_hash_text(source), tgt, "target")
+        pp_strip_memo_log[k] = pp_strip_log
+        pp_strip_memo_count[k] = pp_strip_count
+    elif _pp_cfg_select_flag():
+        val k = _pp_memo_key(rt_hash_text(source), pp_scope_target, "marker")
+        pp_strip_memo_log[k] = pp_strip_log
+        pp_strip_memo_count[k] = pp_strip_count
+    out
+
+fn _pp_preprocess_conditionals_body(source: text) -> text:
     # The compiler closure is overwhelmingly ordinary source. Avoid building
     # three full line arrays when none of the recognized directives can occur.
     if not _pp_may_have_conditionals(source):
@@ -517,6 +615,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 continue
             _pp_target_record(source_line, "when", cond, parent, cond_ok,
                 current, "", 0, 0)
+            _pp_strip_note("when", cond, cond_ok)
             out_lines.push("")
             continue
 
@@ -550,6 +649,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 active = current
                 _pp_target_record(source_line, "elif", cond, parent,
                     condition_result, current, "", 0, 0)
+                _pp_strip_note("elif", cond, current)
             elif pp_state._pp_target_mode:
                 pp_state._pp_target_error = "@elif without @when at line {source_line}"
             out_lines.push("")
@@ -574,6 +674,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 active = current
                 _pp_target_record(source_line, "else", "", parent,
                     not taken, current, "", 0, 0)
+                _pp_strip_note("else", "", current)
             elif pp_state._pp_target_mode:
                 pp_state._pp_target_error = "@else without @when at line {source_line}"
             out_lines.push("")
@@ -758,6 +859,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 _pp_target_record(cfg_index + 1, "cfg", cfg_cond, parent,
                     condition_result, cfg_ok, excluded_kind,
                     excluded_start, excluded_end)
+                _pp_strip_note("cfg", cfg_cond, condition_result)
                 final_lines.push("")
                 cfg_index = cfg_index + 1
             if cfg_ok:
@@ -853,6 +955,7 @@ fn preprocess_conditionals(source: text) -> text:
 # ===== Exports =====
 
 export _pp_preprocess_conditionals, preprocess_conditionals, _pp_cfg_select_flag
+export pp_declared_target, pp_last_strip_decision_count, pp_last_strip_decision_log, pp_declare_parse_scope, pp_strip_memo_size, pp_marker_strip_count, pp_marker_strip_log, pp_target_strip_count, pp_ensure_marker_strip_decisions
 export _pp_preprocess_conditionals_target_receipted_v1
 
 # ===== PreprocessorState snapshot (ParseContext stage 1) =====

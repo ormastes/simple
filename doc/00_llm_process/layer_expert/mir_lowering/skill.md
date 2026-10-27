@@ -566,3 +566,16 @@ programs never change layout. Rules to keep when editing:
   `enum_match_expr_type` falls back to it. Symbol-free returns only (the
   registry rejects `Named` payloads, which are table-local ids).
   Spec: `test/01_unit/compiler/mir/imported_trait_method_declared_return_spec.spl`.
+
+- HIR cache key neutral rule (plan step 4): with `SIMPLE_HIR_CFG_SELECT=1`, `hir_cache_key`
+  (`80.driver/driver_hir_cache.spl`) replaces the target fold with the constant
+  `hir-target-neutral-v1` only when the source made ZERO preprocessor strip decisions AND every
+  surface in its closure did (`hir_closure_all_neutral`, set by `hir_cache_closure_digest_from_rows`).
+  Target-dependent code therefore must stay in MIR/object keys; a file with a top-level `@cfg`
+  or binding-declaring `@when` stays target-keyed and also folds its strip-decision digest.
+  Decisions come from `pp_last_strip_decision_count()` / the memo `pp_recorded_strip_*` in
+  `parser_preprocessor.spl`. Spec: `test/01_unit/compiler/80.driver/hir_cache_key_neutral_spec.spl`.
+  Neutrality is read ONLY from a marker-mode memo entry keyed by (content hash, cfg identity,
+  native target, mode), and only while the driver declared marker mode (`pp_declare_parse_scope`).
+  A target-receipted parse (flat-strips chains) or an unknown entry is never neutral; the key path
+  never re-runs the preprocessor in another mode to manufacture a neutral answer.
