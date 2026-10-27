@@ -33,3 +33,13 @@ the dedicated I64/F64/TEXT/BOOL tags), and route `(<type>)?` through the same re
 ## Specs
 - Prevention (in-development): `test/01_unit/compiler/20.hir/bootstrap_regressions/option_generic_inner_type_gaps_spec.spl`.
 - Passing sibling (#3914 reproducer + working shapes): `test/01_unit/compiler/20.hir/bootstrap_regressions/option_generic_inner_type_spec.spl`.
+
+## 2026-10-28 attempt-5 evidence and narrow repair
+
+The exact phase2 compiler `8d21317328ccb2b32ba707d2485c3c8ca6c4d02592952537e7754a6d006cb116` rejects the stage3 `compiler.backend.interpreter_calls` interface at `InterpreterBackendImpl::try_call_builtin`, whose source declares `Option<Result<Value, BackendError>>`. The retained HIR symbol 615 actually has `Function([Named(548), text, Array<Named(51)>], Optional<Any>)`; Value still resolves as Named(51) in the argument, and the entire nested Result is absent. The guarded RTI converter correctly reports E-RTI-007. Evidence: `/tmp/simple-luna-direct-phase3-20261028/attempt5`, frozen source `source-aeae` at aeae829519e.
+
+A minimal no-import `nested_result.spl` compiled and printed `42` with that same compiler, but its retained symbol metadata is also Optional<Any>, rather than the declared Optional<Result<i64,text>>. Execution success does not prove signature preservation: the current ownerless-unqualified-function ABI fallback masks that metadata defect. The independent metadata assertion is RED and hash-bound in `/tmp/simple-option-composite-tdd-20261028/metadata-red.sdn`; raw executable PASS remains separate.
+
+A separate parser-only native test driver calls the actual parser/type registry across Result, array, Dict, tuple, and working controls. Its baseline compiler crashed with SIGABRT in native codegen of `compiler.frontend.core._AstExpr.accessors` after 276 seconds; eight modules had reached the codegen queue. This is BUILD_FAIL, not a semantic RED or a passing test. Its watchdog ended quiescent with zero observer errors; logs and caches are preserved under `/tmp/simple-option-composite-tdd-20261028/red`. No identical retry or seed-tooling substitution was made.
+
+The proposed source repair retains the four dedicated primitive Option tags and registers every other parsed inner tag, without the numeric named/callable gate. Exhaustion emits an explicit parser error rather than successful erasure. Tests extend the existing prevention owner with nominal Result payloads, postfix Result control, actual Any preservation, and registry-exhaustion rejection with shared-pool restoration. The RTI Any rejection is unchanged. Green verification remains OPEN; postfix callable gaps and general compiler admission are not claimed fixed.

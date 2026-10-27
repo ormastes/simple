@@ -58,7 +58,7 @@ use compiler.core.types.{union_type_register}
 use compiler.core.types.{dict_type_register}
 use compiler.core.types.{tuple_type_register}
 use compiler.core.types.{array_generic_type_register}
-use compiler.core.types.{option_generic_type_register, is_option_generic_tag, is_function_tag}
+use compiler.core.types.{option_generic_type_register, is_option_generic_tag}
 use compiler.core.types.{named_generic_instance_register}
 use compiler.core.types.{result_type_register}
 use compiler.core.types.{isolated_type_register}
@@ -1098,12 +1098,15 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 # the same way, so the payload reached MIR as Optional(Any) and
                 # `if val f = self.opt_fn` / `.unwrap()` had no proven arity
                 # (bug: native_optional_fn_payload_binding_arity_mir_2026_10_20).
-                val inner_is_callable = is_function_tag(inner_type)
-                if inner_type >= TYPE_NAMED_BASE or inner_is_callable:
-                    val opt_generic_tag = option_generic_type_register(inner_type)
-                    if opt_generic_tag >= 0:
-                        return parser_absorb_optional_suffix(opt_generic_tag)
-                return parser_absorb_optional_suffix(TYPE_OPTION)
+                # Composite inners (Result/Dict/tuple/array/reference) also
+                # have valid interned tags below TYPE_NAMED_BASE. Preserve
+                # every parsed inner instead of silently replacing those
+                # semantic declarations with Optional(Any).
+                val opt_generic_tag = option_generic_type_register(inner_type)
+                if opt_generic_tag < 0:
+                    parser_error("too many distinct Option<T> annotations")
+                    return parser_absorb_optional_suffix(TYPE_OPTION)
+                return parser_absorb_optional_suffix(opt_generic_tag)
             # Preserve Result<T,E> generic args for match payload typing.
             if type_name == "Result":
                 if has_extra_type:
