@@ -1,0 +1,149 @@
+# Frozen production phase-2 caller, with a full-source surface oracle.
+# Runtime evidence is pending an admitted self-hosted Linux runtime.
+use std.spec
+use std.io_runtime.{file_write, rt_env_get, rt_env_set, getpid}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, cwd, time_now_unix_micros}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.driver_core_types.{CompileMode, driver_core_compile_options_default}
+use compiler.driver.driver.{compiler_driver_create, CompilerDriver}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_route_frozen_inputs_v1,
+    tldr_imports_memo_reset_v1, tldr_closure_walk_check_v1}
+use compiler.driver.driver_tldr_frozen_surface_route_v1.{tldr_frozen_surface_lane_error_v1}
+use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.driver.perf.compiler_work_counters.{compiler_work_counters_reset_v1,
+    compiler_work_counters_snapshot_v1}
+use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+val FROZEN_A = "pub fn base(x: i64) -> i64:\n    x + 7\n"
+val FROZEN_B = "use pkg.a.{base}\n\npub fn mid(x: i64) -> i64:\n    base(x)\n"
+val FROZEN_C = "use pkg.b.{mid}\n\npub fn leaf(x: i64) -> i64:\n    mid(x)\n"
+
+fn frozen_flag(value: text):
+    rt_env_set("SIMPLE_TLDR_IMPORTS", value)
+    tldr_imports_memo_reset_v1()
+
+fn frozen_driver(paths: [text], root: text) -> CompilerDriver:
+    var options = driver_core_compile_options_default()
+    options.input_files = paths
+    options.mode = CompileMode.Check
+    options.bootstrap_input_count = 0
+    options.native_source_roots = ["src"]
+    options.native_source_snapshot_root = root
+    val driver = compiler_driver_create(options)
+    val (_loaded_ctx, loaded) = driver.load_sources_impl()
+    expect(loaded).to_equal(true)
+    driver
+
+describe "frozen TLDR route admission":
+    it "refuses missing and duplicate declared identities without opening a path":
+        expect(tldr_route_frozen_inputs_v1(["absent.spl"], ["pkg.b"],
+            [FROZEN_B], [true]).unwrap_err()).to_contain("DECLARED-UNIVERSE")
+        expect(tldr_route_frozen_inputs_v1(["a.spl", "b.spl"], ["pkg.a", "pkg.a"],
+            [FROZEN_A, FROZEN_A], [true, false]).unwrap_err()).to_contain("duplicate module")
+        expect(tldr_route_frozen_inputs_v1(["a.spl"], [], [], []).unwrap_err()).to_contain("unaligned")
+
+    it "uses frozen source fallback for an inferred return type":
+        val source = "pub fn value():\n    13\n"
+        val route = tldr_route_frozen_inputs_v1(["does-not-exist.spl"],
+            ["value"], [source], [false]).unwrap()
+        expect(route.parse_texts).to_equal([source])
+        expect(route.fallbacks).to_equal(1)
+        expect(route.source_parses).to_equal(1)
+        expect(route.interface_parses).to_equal(0)
+
+    it "preserves trait default bodies through frozen source fallback":
+        val source = "trait Value:\n    fn value(self) -> i64:\n        13\n"
+        val route = tldr_route_frozen_inputs_v1(["absent.spl"],
+            ["value"], [source], [false]).unwrap()
+        expect(route.parse_texts).to_equal([source])
+        expect(route.fallbacks).to_equal(1)
+
+    it "refuses advice and unsupported native bodies without a closure walk":
+        expect(tldr_route_frozen_inputs_v1(["aspect.spl"], ["aspect"],
+            ["on pc{call(*)}:\n    pass\n"], [true]).unwrap_err()).to_contain("GLOBAL-FACET")
+        expect(tldr_frozen_surface_lane_error_v1(true, false, false, true, false, false)).to_contain("BODY-REQUIRED")
+        expect(tldr_frozen_surface_lane_error_v1(true, false, false, false, false, true)).to_contain("CFG-RECEIPT")
+        expect(tldr_frozen_surface_lane_error_v1(false, false, false, false, false, false)).to_contain("UNSUPPORTED-LANE")
+        expect(tldr_closure_walk_check_v1(true, "oracle").is_err()).to_equal(true)
+
+describe "production frozen phase-2 surface caller":
+    it "matches cold source surfaces and records actual source and interface parses after live edits":
+        val saved_flag = rt_env_get("SIMPLE_TLDR_IMPORTS") ?? ""
+        val saved_worker = rt_env_get("SIMPLE_HIR_SHARD") ?? ""
+        val saved_skeleton = rt_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? ""
+        val saved_parse = rt_env_get("SIMPLE_PARSE_SHARD") ?? ""
+        val saved_mir = rt_env_get("SIMPLE_MIR_SHARD_ONLY_PATHS") ?? ""
+        val saved_queue = rt_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
+        val root = cwd() + "/build/test_tmp/tldr_frozen-" + getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root + "/src/pkg")).to_equal(true)
+        val paths = [root + "/src/pkg/a.spl", root + "/src/pkg/b.spl", root + "/src/pkg/c.spl"]
+        val contents = [FROZEN_A, FROZEN_B, FROZEN_C]
+        for index in 0..paths.len(): expect(file_write(paths[index], contents[index])).to_equal(true)
+        rt_env_set("SIMPLE_HIR_SHARD", "")
+        rt_env_set("SIMPLE_PARSE_SHARD", "")
+        rt_env_set("SIMPLE_MIR_SHARD_ONLY_PATHS", "")
+        rt_env_set("SIMPLE_HIR_SHARD_QUEUE", "")
+        frozen_flag("")
+        val cold = frozen_driver(paths, root)
+        expect(cold.stage_parse().is_none()).to_equal(true)
+        val oracle = module_surfaces_from_modules(cold.ctx.modules, cold.ctx.sources,
+            cold.ctx.options.library_mode).unwrap()
+
+        frozen_flag("1")
+        val route = frozen_driver(paths, root)
+        # A real existing HIR-worker selector owns exactly the leaf in this
+        # fixture; all other declared inventory members need summary surfaces.
+        val bucket = driver_parse_shard_hash(paths[2]) % 65521
+        expect(driver_parse_shard_hash(paths[0]) % 65521 == bucket).to_equal(false)
+        expect(driver_parse_shard_hash(paths[1]) % 65521 == bucket).to_equal(false)
+        rt_env_set("SIMPLE_HIR_SHARD", "{bucket}/65521")
+        rt_env_set("SIMPLE_HIR_WORKER_SKELETON", "1")
+        for path in paths: expect(file_write(path, "invalid live worktree input\n")).to_equal(true)
+        compiler_work_counters_reset_v1()
+        val parser_before = flat_parse_module_body_calls()
+        expect(route.stage_parse().is_none()).to_equal(true)
+        expect(route.streaming_surface_owner_ready).to_equal(true)
+        expect(route.tldr_surface_source_parses).to_equal(1)
+        expect(route.tldr_surface_interface_parses).to_equal(2)
+        expect(compiler_work_counters_snapshot_v1().parser_scheduled).to_equal(3)
+        expect(flat_parse_module_body_calls() - parser_before).to_equal(3)
+        val routed = route.streaming_module_surfaces_owner
+        expect(routed.surfaces.len()).to_equal(oracle.surfaces.len())
+        for index in 0..oracle.surfaces.len():
+            val full = oracle.surfaces[index]
+            val summarized = routed.surfaces[index]
+            expect(summarized.module_name).to_equal(full.module_name)
+            expect(summarized.canonical_path).to_equal(full.canonical_path)
+            expect(summarized.content_length).to_equal(full.content_length)
+            expect(summarized.content_hash).to_equal(full.content_hash)
+            expect(summarized.semantic_cacheable).to_equal(full.semantic_cacheable)
+            expect(summarized.semantic_hash0).to_equal(full.semantic_hash0)
+            expect(summarized.semantic_hash1).to_equal(full.semantic_hash1)
+            expect(summarized.semantic_hash2).to_equal(full.semantic_hash2)
+            expect(summarized.semantic_hash3).to_equal(full.semantic_hash3)
+            expect(summarized.callable_names).to_equal(full.callable_names)
+            expect(summarized.import_target_names).to_equal(full.import_target_names)
+            expect(route.ctx.source_identities_owner[index]).to_equal(sha256_text(contents[index]))
+        # Original frozen source must remain authoritative for later HIR.
+        expect(route.ctx.source_contents_owner).to_equal(contents)
+        # A second independent context claims the full inventory. It must not
+        # inherit the first context's static slice or overwrite its counters.
+        for index in 0..paths.len(): expect(file_write(paths[index], contents[index])).to_equal(true)
+        rt_env_set("SIMPLE_HIR_SHARD", "")
+        val following = frozen_driver(paths, root)
+        expect(following.stage_parse().is_none()).to_equal(true)
+        expect(following.tldr_surface_source_parses).to_equal(3)
+        expect(following.tldr_surface_interface_parses).to_equal(0)
+        expect(route.tldr_surface_source_parses).to_equal(1)
+        expect(route.tldr_surface_interface_parses).to_equal(2)
+        val refused_queue = frozen_driver(paths, root)
+        rt_env_set("SIMPLE_HIR_SHARD_QUEUE", root + "/unadmitted-dynamic-queue")
+        expect(refused_queue.stage_parse().is_none()).to_equal(false)
+        expect(refused_queue.ctx.error_message_at(0)).to_contain("dynamic HIR claims")
+        rt_env_set("SIMPLE_HIR_SHARD", saved_worker)
+        rt_env_set("SIMPLE_HIR_WORKER_SKELETON", saved_skeleton)
+        rt_env_set("SIMPLE_PARSE_SHARD", saved_parse)
+        rt_env_set("SIMPLE_MIR_SHARD_ONLY_PATHS", saved_mir)
+        rt_env_set("SIMPLE_HIR_SHARD_QUEUE", saved_queue)
+        frozen_flag(saved_flag)
