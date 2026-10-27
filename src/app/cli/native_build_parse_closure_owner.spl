@@ -2,7 +2,7 @@
 # no inventory, source text, or source-scan container crosses this boundary.
 use app.io.env_ops.{env_set}
 use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1}
-use std.io_runtime.{dir_create_all, getpid}
+use std.io_runtime.{dir_create_all, getpid, time_now_monotonic_ms}
 use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
 use std.nogc_sync_mut.fs.host_path.{host_path_release_cached_platform_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
@@ -18,6 +18,11 @@ use app.compiler_entrypoint.entry_closure_selection.{compiler_entry_closure_publ
 use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
 use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1,
     native_entry_closure_request_publish_v1}
+
+# Set by the publishing coordinator; every descendant (parse/HIR/MIR shard,
+# --file-worker and their children) inherits it and is a consumer only. The
+# SIMPLE_*_SHARD vars are set inside the child (compile_targets), too late.
+pub val NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1 = "SIMPLE_PARSE_CLOSURE_CONSUMER"
 
 struct NativeBuildParseClosurePublicationV1:
     path: text
@@ -70,7 +75,10 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
         authority.snapshot.commit_id, authority.snapshot.tree_id,
         authority.snapshot.inventory_digest, entry_identity, selected_roots,
         library_mode_closure_digest_v1(policy_digest, library_mode), file_hash_sha256(producer))
-    val request_root = frontend_cache_dir + "/closure-request-" + getpid().to_text()
+    # pid + start time: file_create_exclusive below must not collide with a
+    # dead coordinator's leftover request under a reused pid.
+    val request_root = frontend_cache_dir + "/closure-request-" + getpid().to_text() +
+        "-" + time_now_monotonic_ms().to_text()
     if frontend_cache_dir == "" or not dir_create_all(request_root):
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure request requires private frontend cache")
@@ -90,12 +98,34 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
             "parse-shard closure request publication failed: " + request_digest.unwrap_err())
     NativeBuildParseClosurePublicationV1(request_path, request_digest.unwrap(), paths.len(), "")
 
+# Publish-once decision for an inherited closure request (true-per-file PR1).
+# Ok(true): a shard/file-worker child reuses the coordinator's request, zero
+# walks. Ok(false): a coordinator publishes its own (exactly once). Err: a
+# child whose request is missing or failed admission (digest/identity
+# mismatch) fails loudly; it never silently re-walks the closure.
+# admit_error is "" when native_build_closure_request_admit_v1 admitted the
+# request (digest + native_entry_closure_request_identity_matches_v1).
+# publication_expected: this build runs --entry-closure with a frontend cache,
+# so the coordinator is the ONLY publisher. A child never becomes a second
+# publisher (the race behind entry-closure-publication-conflict).
+pub fn native_build_parse_closure_reuse_decision_v1(shard_child: bool,
+        publication_expected: bool, inherited_path: text, inherited_digest: text,
+        admit_error: text) -> Result<bool, text>:
+    if not shard_child or not publication_expected:
+        return Ok(false)
+    if inherited_path == "" or inherited_digest == "":
+        return Err("parse-closure request missing in shard child; refusing to re-walk the closure")
+    if admit_error != "":
+        return Err("parse-closure request mismatch: " + admit_error)
+    Ok(true)
+
 fn native_build_parse_closure_clear_v1() -> bool:
     # Evaluate both setters even when the first fails. An absent request path
     # is the permission marker; no child is launched after any failed setter.
     val path_cleared = env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
     val digest_cleared = env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
-    path_cleared and digest_cleared
+    val consumer_cleared = env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
+    path_cleared and digest_cleared and consumer_cleared
 
 pub fn native_build_publish_parse_closure_v1(source_root: text, roots: [text],
         entry_identity: text, policy_digest: text, producer: text,
@@ -137,7 +167,8 @@ pub fn native_build_publish_parse_closure_v1(source_root: text, roots: [text],
     # OS environment setters copy strings. Only these two small retained
     # values survive; selection/request bytes retain all original validation.
     if not env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", publication.digest) or
-            not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", publication.path):
+            not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", publication.path) or
+            not env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "1"):
         val _cleared = native_build_parse_closure_clear_v1()
         eprint "error: parse-shard closure request publication failed"
         return false

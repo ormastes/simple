@@ -13,7 +13,9 @@ use app.cli.native_build_output_plan.{native_build_is_value_consuming_flag,
     native_build_mir_output_requires_full_set_v1}
 use app.cli.native_build_mir_selective_admission.{native_mir_selective_admission_v1,
     native_mir_selective_disk_bytes_v1, native_mir_selective_requested_workers_v1}
-use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1}
+use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1,
+    native_build_parse_closure_reuse_decision_v1, NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1}
+use app.io._CliCompile.native_build_closure_request_admit.{native_build_closure_request_admit_v1}
 use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
@@ -1978,58 +1980,18 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
-    if not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "") or
-            not env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", ""):
+    # --refresh-source-authority replaced the authority above, so a request
+    # prepublished (bootstrap_main) under the pre-refresh authority can no
+    # longer admit. Drop it; this coordinator republishes after the refresh.
+    if native_build_closure_drop_prepublished_v1(request.refresh):
         eprint "error: stale parse closure request could not be cleared"
         return 1
-    # Compute the complete frozen selection once, even with no parse shards.
-    # Parse shards partition parse work only; HIR/MIR shard workers and the
-    # real worker admit the same request (native_build_closure_request_admit)
-    # instead of each re-walking the entry closure. The bootstrap capsule's
-    # stage3 process route reaches this point too, but passes its cache via
-    # SIMPLE_FRONTEND_CACHE_DIR rather than --cache-dir.
-    var closure_request_dir = frontend_cache_dir
-    if closure_request_dir == "":
-        closure_request_dir = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
-    if args.contains("--entry-closure") and closure_request_dir != "":
-        # With parse shards a failed publication stays fatal (unchanged
-        # contract). Without shards it only costs the workers their own walk,
-        # exactly the pre-publication behaviour, so it degrades to that.
-        var publish_error = ""
-        val source_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
-        val roots = native_build_authority_source_roots_v1(args, source_root)
-        if roots.len() == 0:
-            publish_error = "parse-shard closure request has no authority roots"
-        else:
-            var selected_entry = ""
-            var entry_arg_index = 0
-            while entry_arg_index < args.len():
-                val entry_arg = args[entry_arg_index]
-                if entry_arg == "--entry" and entry_arg_index + 1 < args.len():
-                    entry_arg_index = entry_arg_index + 1
-                    selected_entry = args[entry_arg_index]
-                elif entry_arg.starts_with("--entry="):
-                    selected_entry = entry_arg.substring(8)
-                elif native_build_is_value_consuming_flag(entry_arg):
-                    entry_arg_index = entry_arg_index + 1
-                elif not entry_arg.starts_with("-") and selected_entry == "":
-                    selected_entry = entry_arg
-                entry_arg_index = entry_arg_index + 1
-            val absolute_entry = path_absolute(selected_entry).replace("\\", "/")
-            if not absolute_entry.starts_with(source_root + "/"):
-                publish_error = "parse-shard closure entry outside source authority"
-            elif not native_build_publish_parse_closure_v1(source_root, roots,
-                    absolute_entry.substring(source_root.len() + 1),
-                    policy.handoff.policy_digest, simple_bin, closure_request_dir,
-                    library_policy.mode):
-                publish_error = "parse-shard closure request publication failed"
-        if publish_error != "":
-            env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
-            env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
-            if shard_count > 0:
-                eprint "error: " + publish_error
-                return 1
-            eprint "[parse-closure] WARNING: " + publish_error + "; workers walk their own closure"
+    val _closure_reused = match native_build_closure_publish_once_v1(args, frontend_cache_dir,
+            policy.handoff.policy_digest, simple_bin, library_policy.mode):
+        case Ok(value): value
+        case Err(reason):
+            eprint "error: " + reason
+            return 1
     if shard_count > 0:
         run_parse_shards(forwarded_args, shard_count, simple_bin, native_build_timeout_ms(args))
     # The request stays published for the HIR/MIR shard workers and the real
@@ -2141,6 +2103,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
     env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
+    env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
     env_set("SIMPLE_MIR_SHARD_LINK", old_mir_link)
     env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_mir_export_dir)
     val output_path = requested_output
@@ -2324,10 +2287,111 @@ fn native_build_has_entry(args: [text]) -> bool:
         i = i + 1
     false
 
-pub fn native_build_authority_source_roots_v1(args: [text], root: text) -> [text]:
-    # Extract only source selection; the worker remains the CLI validator.
-    # Reuse its default root policy and this coordinator's value-flag table,
-    # so an output path or backend value cannot become a positional entry.
+# Publish-once owner (true-per-file PR1). Ok(true): an inherited request was
+# admitted and is reused (zero walks) -- a shard/file-worker child, or this
+# coordinator after bootstrap_main already published before its prepass.
+# Ok(false): nothing expected, or this call published (the single walk).
+# Err: missing/mismatched inherited request or failed publication; never a
+# silent re-walk. Must run after the source-authority step.
+pub fn native_build_closure_publish_once_v1(args: [text], frontend_cache_dir: text,
+        policy_digest: text, simple_bin: text, library_mode: text) -> Result<bool, text>:
+    # Publisher marks itself and descendants consumers; SIMPLE_*_SHARD is set
+    # inside the child (compile_targets), too late to be the only signal.
+    val closure_child = (env_get(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1) ?? "") == "1" or
+        native_build_shard_child_env_v1(env_get("SIMPLE_PARSE_SHARD") ?? "",
+        env_get("SIMPLE_HIR_SHARD") ?? "", env_get("SIMPLE_MIR_SHARD") ?? "")
+    # The bootstrap capsule's stage3 process route passes its cache via
+    # SIMPLE_FRONTEND_CACHE_DIR rather than --cache-dir.
+    var closure_request_dir = frontend_cache_dir
+    if closure_request_dir == "":
+        closure_request_dir = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+    val closure_publication_expected = args.contains("--entry-closure") and closure_request_dir != ""
+    val inherited_request = env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? ""
+    val inherited_digest = env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? ""
+    val selection = native_build_entry_and_sources_v1(args)
+    var closure_admit_error = ""
+    if closure_child and closure_publication_expected and inherited_request != "" and
+            inherited_digest != "":
+        if selection.len() == 0:
+            closure_admit_error = "no entry for closure admission"
+        else:
+            val admitted = native_build_closure_request_admit_v1(selection[0], selection[1:])
+            if admitted.is_err(): closure_admit_error = admitted.unwrap_err()
+    val reuse_decision = native_build_parse_closure_reuse_decision_v1(closure_child,
+        closure_publication_expected, inherited_request, inherited_digest, closure_admit_error)
+    if reuse_decision.is_err():
+        return Err(reuse_decision.unwrap_err())
+    if reuse_decision.unwrap():
+        print "[parse-closure] reused request={inherited_digest}"
+        return Ok(true)
+    if not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "") or
+            not env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "") or
+            not env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, ""):
+        return Err("stale parse closure request could not be cleared")
+    if not closure_publication_expected:
+        return Ok(false)
+    # Only the coordinator publishes; any failure (including
+    # entry-closure-publication-conflict) is fatal.
+    var publish_error = ""
+    val source_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+    val roots = native_build_authority_source_roots_v1(args, source_root)
+    if roots.len() == 0 or selection.len() == 0:
+        publish_error = "parse-shard closure request has no authority roots"
+    else:
+        val absolute_entry = path_absolute(selection[0]).replace("\\", "/")
+        if not absolute_entry.starts_with(source_root + "/"):
+            publish_error = "parse-shard closure entry outside source authority"
+        elif not native_build_publish_parse_closure_v1(source_root, roots,
+                absolute_entry.substring(source_root.len() + 1),
+                policy_digest, simple_bin, closure_request_dir, library_mode):
+            publish_error = "parse-shard closure request publication failed"
+    if publish_error != "":
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
+        env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
+        return Err(publish_error)
+    Ok(false)
+
+# True only when clearing was needed (refresh) and failed.
+pub fn native_build_closure_drop_prepublished_v1(refresh: bool) -> bool:
+    if not refresh: return false
+    val a = env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
+    val b = env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
+    val c = env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
+    not (a and b and c)
+
+# bootstrap_main coordinator route: publish once after the authority step and
+# BEFORE the file-worker/HIR/MIR prepass, so its children only consume.
+# Uses the same producer binding, policy digest and library mode that
+# run_native_build_worker would, so the later in-process call reuses it.
+pub fn native_build_coordinator_prepublish_closure_v1(worker_args: [text]) -> bool:
+    val library_policy = match library_mode_parse_args_v1(worker_args):
+        case Ok(value): value
+        case Err(reason):
+            eprint reason
+            return false
+    val simple_bin = match bootstrap_native_build_producer_binding(
+            cli_kernel_executable_path(), env_get("SIMPLE_BINARY") ?? "", env_get("SIMPLE_BIN") ?? ""):
+        case Ok(binary): binary
+        case Err(reason):
+            eprint "error: " + reason
+            return false
+    val policy = match environment_variant_policy_handoff_prepare_v1(worker_args):
+        case Ok(value): value
+        case Err(failure):
+            eprint "error: native-build could not collect a valid environment variant policy: " +
+                environment_variant_policy_handoff_owner_error_label_v1(failure)
+            return false
+    match native_build_closure_publish_once_v1(worker_args,
+            native_build_frontend_cache_dir_arg(worker_args), policy.handoff.policy_digest,
+            simple_bin, library_policy.mode):
+        case Ok(_): true
+        case Err(reason):
+            eprint "error: " + reason
+            false
+
+# [entry, --source dirs...] for child-side closure admission; [] without entry.
+fn native_build_entry_and_sources_v1(args: [text]) -> [text]:
     var entry = ""
     var sources: [text] = []
     var index = 0
@@ -2347,7 +2411,20 @@ pub fn native_build_authority_source_roots_v1(args: [text], root: text) -> [text
         elif not arg.starts_with("-") and entry == "":
             entry = arg
         index = index + 1
-    if entry == "" or root == "": return []
+    if entry == "": return []
+    var out: [text] = [entry]
+    for source in sources:
+        out.push(source)
+    out
+
+pub fn native_build_authority_source_roots_v1(args: [text], root: text) -> [text]:
+    # Extract only source selection; the worker remains the CLI validator.
+    # Reuse its default root policy and this coordinator's value-flag table,
+    # so an output path or backend value cannot become a positional entry.
+    val selection = native_build_entry_and_sources_v1(args)
+    if selection.len() == 0 or root == "": return []
+    val entry = selection[0]
+    val sources = selection[1:]
     val absolute = compile_source_inventory_plain_checkout_v1(path_absolute(entry))
     if not absolute.starts_with(root + "/"): return []
     val relative = absolute.substring(root.len() + 1)
