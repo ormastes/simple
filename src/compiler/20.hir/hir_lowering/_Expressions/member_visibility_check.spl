@@ -1,0 +1,117 @@
+# HIR member visibility enforcement (REQ-MEMBER-VIS-001, REQ-MEMBER-VIS-002).
+# Field reads and aggregate construction of an IMPORTED composite are checked
+# against verdicts computed once per import (record_member_visibility).
+# Default: W-HIR-VIS-001 warning. SIMPLE_ENFORCE_MEMBER_VISIBILITY=1 (or a spec
+# calling member_visibility_strict_force) makes it a hard error.
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.dependency.member_visibility.{member_access_scope_for_modules, member_visibility_allows, aggregate_constructor_visibility_allows}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceComposite, ModuleSurfaceField}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name, module_surface_package_name_from_name}
+use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, _hir_expr_symbol_or_invalid}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+
+# @workaround bug=member-visibility-default-warning-20261027 reason=src-compiler-has-thousands-of-cross-module-reads-of-non-pub-fields
+var _member_visibility_strict_state: i64 = 0
+
+fn member_visibility_strict_enabled() -> bool:
+    if _member_visibility_strict_state == 0:
+        _member_visibility_strict_state = if (env_get_opt("SIMPLE_ENFORCE_MEMBER_VISIBILITY") ?? "") == "1": 1 else: 2
+    _member_visibility_strict_state == 1
+
+# Test hook: forget the cached flag so the next read re-queries the environment.
+fn member_visibility_strict_reset():
+    _member_visibility_strict_state = 0
+
+# Test hook: force strict (true) or warn-only (false) regardless of the environment.
+fn member_visibility_strict_force(strict: bool):
+    _member_visibility_strict_state = if strict: 1 else: 2
+
+fn member_vis_callee_path(e: Expr) -> text:
+    match e.kind:
+        case ExprKind.Ident(name):
+            return name
+        case _: ()
+    val dummy = Expr(kind: ExprKind.NilLit, span: e.span)
+    if hir_expr_kind_disc(e.kind) == hir_expr_kind_disc(ExprKind.Field(dummy, "")):
+        match e.kind:
+            case ExprKind.Field(base, member):
+                val prefix = member_vis_callee_path(base)
+                if prefix == "":
+                    return ""
+                return "{prefix}.{member}"
+            case _: ()
+    ""
+
+impl HirLowering:
+    me record_member_visibility(imported_mod: ModuleSurface, imported_name: text, composite: ModuleSurfaceComposite):
+        val requester = self.module_filename
+        val requester_package = module_surface_package_name_from_name(module_logical_name_from_path(requester))
+        val scope = member_access_scope_for_modules(
+            requester, requester_package, imported_mod.canonical_path,
+            module_surface_package_name(imported_mod), imported_mod.friends,
+            imported_mod.internal_exports.contains(imported_name))
+        val prefix = "{imported_mod.module_name}.{imported_name}"
+        var visibilities: [Visibility] = []
+        for raw_field in composite.fields:
+            val field: ModuleSurfaceField = raw_field
+            self.member_field_access_allowed["{prefix}#{field.name}"] = member_visibility_allows(field.visibility, scope)
+            visibilities = visibilities.push(field.visibility)
+        self.member_ctor_allowed[prefix] = aggregate_constructor_visibility_allows(visibilities, scope)
+
+    me report_member_visibility(message: text, key: text, span: Span):
+        if member_visibility_strict_enabled():
+            self.error(message, span)
+            return
+        val warn_key = "memvis:{self.module_filename}:{span.line}:{key}"
+        if self.accessor_warned_keys.contains(warn_key):
+            return
+        self.accessor_warned_keys = self.accessor_warned_keys.push(warn_key)
+        self.warning("[W-HIR-VIS-001] {message} at {self.module_filename}:{span.line}; mark the field `pub` / `pub(package)`", span)
+
+    me check_member_field_visible(base: HirExpr, field: text, span: Span):
+        if self.member_field_access_allowed.len() == 0:
+            return
+        var owner_id = self.field_owner_for_hir_expr(base)
+        val base_symbol = _hir_expr_symbol_or_invalid(base.kind)
+        if owner_id < 0 and base_symbol.is_valid():
+            owner_id = self.owner_type_id_for_base_raw(base_symbol.id)
+        if owner_id < 0:
+            return
+        unsafe(capabilities: [ffi]):
+            if val owner_symbol = self.symbols.get_symbol_raw(owner_id):
+                if val owner_module = owner_symbol.defining_module:
+                    val key = "{owner_module}.{owner_symbol.name}#{field}"
+                    if rt_dict_contains(self.member_field_access_allowed, key):
+                        if not self.member_field_access_allowed[key]:
+                            self.report_member_visibility("field `{field}` is not visible from this module", key, span)
+
+    me check_aggregate_constructor_visible(callee: HirExpr, callee_ast: Expr, span: Span):
+        if self.member_ctor_allowed.len() == 0:
+            return
+        val path = member_vis_callee_path(callee_ast)
+        val dot = path.last_index_of(".")
+        val spelling = if dot >= 0: path.substring(dot + 1, path.len()) else: path
+        var type_id = -1
+        val callee_symbol = _hir_expr_symbol_or_invalid(callee.kind)
+        if callee_symbol.is_valid():
+            type_id = callee_symbol.id
+        elif dot > 0:
+            type_id = self.symbols.lookup_qualified_type_raw(path.substring(0, dot), spelling)
+        if type_id < 0:
+            return
+        unsafe(capabilities: [ffi]):
+            if val type_symbol = self.symbols.get_symbol_raw(type_id):
+                if val type_module = type_symbol.defining_module:
+                    val key = "{type_module}.{type_symbol.name}"
+                    if rt_dict_contains(self.member_ctor_allowed, key):
+                        if not self.member_ctor_allowed[key]:
+                            self.report_member_visibility("aggregate constructor `{spelling}` is not visible from this module", "ctor:{key}", span)

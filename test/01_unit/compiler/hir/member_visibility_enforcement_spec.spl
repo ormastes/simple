@@ -11,6 +11,7 @@ use compiler.frontend.frontend.parse_full_frontend
 use compiler.frontend.parser_types.ParserModule
 use compiler.hir.hir_lowering.types.hirlowering_for_module
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Expressions.member_visibility_check.{member_visibility_strict_force, member_visibility_strict_reset}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 
 fn lower_consumer_errors(
@@ -19,9 +20,11 @@ fn lower_consumer_errors(
     provider_source: text,
     consumer_name: text,
     consumer_path: text,
-    consumer_source: text
+    consumer_source: text,
+    strict: bool = true
 ) -> [text]:
     val log = Logger(level: 0)
+    member_visibility_strict_force(strict)
     val provider = parse_full_frontend(
         provider_source, provider_path, provider_name, log)
     val consumer = parse_full_frontend(
@@ -36,6 +39,7 @@ fn lower_consumer_errors(
     val surfaces: ModuleSurfacesByName = surfaces_result.unwrap()
     var lowering = hirlowering_for_module(consumer_path, surfaces)
     lowering.lower_module(consumer)
+    member_visibility_strict_reset()
     lowering.diagnostic_messages
 
 fn messages_contain(messages: [text], wanted: text) -> bool:
@@ -46,6 +50,7 @@ fn messages_contain(messages: [text], wanted: text) -> bool:
 
 fn lower_reexport_consumer_errors() -> [text]:
     val log = Logger(level: 0)
+    member_visibility_strict_force(true)
     val leaf_source = "pub struct Vault:\n    secret: i64"
     val facade_source = "export use vault.leaf.\{Vault\}"
     val consumer_source = "use vault.facade.\{Vault\}\nfn steal(v: Vault) -> i64:\n    v.secret"
@@ -65,6 +70,7 @@ fn lower_reexport_consumer_errors() -> [text]:
     val consumer = parse_full_frontend(
         consumer_source, "src/client/consumer.spl", "client.consumer", log)
     lowering.lower_module(consumer)
+    member_visibility_strict_reset()
     lowering.diagnostic_messages
 
 describe "HIR member and aggregate constructor visibility enforcement":
@@ -217,3 +223,26 @@ describe "HIR member and aggregate constructor visibility enforcement":
         step("given private field accessed through re-export chain when reading then access is rejected")
         val errors = lower_reexport_consumer_errors()
         expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)
+
+    # @req REQ-MEMBER-VIS-002
+    it "default mode warns W-HIR-VIS-001 for a private imported field and still lowers":
+        step("given private field when default (non-strict) mode reads it then a warning, not an error, is emitted")
+        val messages = lower_consumer_errors(
+            "vault.provider", "src/vault/provider.spl",
+            "pub struct Vault:\n    secret: i64",
+            "client.consumer", "src/client/consumer.spl",
+            "use vault.provider.\{Vault\}\nfn steal(v: Vault) -> i64:\n    v.secret",
+            false)
+        expect(messages_contain(messages, "W-HIR-VIS-001")).to_be(true)
+        expect(messages_contain(messages, "HIR lowering error")).to_be(false)
+
+    # @req REQ-MEMBER-VIS-002
+    it "default mode emits no warning for a pub field":
+        step("given pub field when default mode reads it then no visibility diagnostic is emitted")
+        val messages = lower_consumer_errors(
+            "records.provider", "src/records/provider.spl",
+            "pub struct Record:\n    pub value: i64",
+            "client.consumer", "src/client/consumer.spl",
+            "use records.provider.\{Record\}\nfn read(r: Record) -> i64:\n    r.value",
+            false)
+        expect(messages_contain(messages, "W-HIR-VIS-001")).to_be(false)

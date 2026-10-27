@@ -77,3 +77,15 @@ so enabling enforcement unconditionally will reject self-hosted sources; needs a
   dependency/member_visibility_spec 10/10 -> 10/10; flat_pool_codec_roundtrip 18/18; flat_pool_truncation 13/13.
   Pre-existing and unchanged: facet_flat_decl_codec 0/2, frontend_shared_parse_cas_v1 2/4, flat_ast_if_else_bridge executed=0.
 - Remaining: HIR enforcement behind opt-in switch, then bulk `pub` migration / ratchet baseline.
+
+## Progress 2026-10-27 (b): HIR wiring written (UNMEASURED - spec runs paused for phase 3)
+- `_Expressions/member_visibility_check.spl` (new): per-import verdicts (`record_member_visibility`, called after
+  `struct_field_types_by_name[canonical]` in module_import_registration.spl), `check_member_field_visible` (Field arm,
+  before field type lookup), `check_aggregate_constructor_visible` (Call arm, on the lowered callee; qualified callee
+  resolved via `lookup_qualified_type_raw` on the AST dotted path). Dicts `member_field_access_allowed` /
+  `member_ctor_allowed` on HirLowering.
+- Default = W-HIR-VIS-001 warning; strict via SIMPLE_ENFORCE_MEMBER_VISIBILITY=1 or `member_visibility_strict_force`.
+  Workaround tracked in `member_visibility_default_warning_2026-10-27.md`.
+- Stored call result: `try_register_local_struct_type` (statements.spl) records the callee's declared nominal return type.
+- Spec harness forces strict; +2 REQ-MEMBER-VIS-002 its added (19 total).
+- Still open: SFFI fixture path, `use compiler.10.frontend...` IntLit segment parse error.
