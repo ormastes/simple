@@ -86,6 +86,7 @@ _without_shell_comment_lines() {
                 }
                 if (c == "\047" || c == "\"" || c == "`") { q = c; continue }
                 if (c == "\\") { i++; continue }
+                if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;]/)) break
                 if (c != "<" || substr(line, i + 1, 1) != "<" || substr(line, i + 2, 1) == "<") continue
                 i += 2
                 strip_tabs = 0
@@ -135,6 +136,9 @@ _without_shell_comment_lines() {
                 if (c == "#" && (i == 1 || substr($0, i - 1, 1) ~ /[ \t;]/)) break
             }
             if (!quote) here_doc($0)
+            # A backslash-newline removes the newline; it does not escape the
+            # first character of the following input record.
+            escape = 0
         }
     '
 }
@@ -569,6 +573,8 @@ selftest() {
     echo '#!/bin/sh' > "$_t/scripts/check/st-heredoc.shs"
     echo '#!/bin/sh' > "$_t/scripts/check/st-dot.shs"
     echo '#!/bin/sh' > "$_t/scripts/check/st-quoted.shs"
+    echo '#!/bin/sh' > "$_t/scripts/check/st-continued-quote.shs"
+    echo '#!/bin/sh' > "$_t/scripts/check/st-comment-heredoc.shs"
     {
         echo '# Example: sh scripts/check/st-comment.shs'
         echo 'command="sh scripts/check/st-string.shs"'
@@ -581,6 +587,15 @@ selftest() {
         echo '# sh scripts/check/st-quoted.shs'
         echo "'"
     } >> "$_t/scripts/check/st-direct.shs"
+    cat >> "$_t/scripts/check/st-direct.shs" <<'FIXTURE'
+command=\
+"
+# sh scripts/check/st-continued-quote.shs
+"
+: # <<ST_FAKE
+# sh scripts/check/st-comment-heredoc.shs
+ST_FAKE
+FIXTURE
     # lib helper: a sourced function library under scripts/check/lib/. It is
     # itself unreferenced, so to the old code it looked exactly like
     # st-orphan.shs. It must NOT be judged as a gate -- but it must still be a
@@ -606,7 +621,7 @@ selftest() {
     }
     _has() { $GREP -qx "$2" "$_w/$1" && echo yes || echo no; }
 
-    _assert "guards enumerated" 11 "$(wc -l < "$_w/guards" | tr -d ' ')"
+    _assert "guards enumerated" 13 "$(wc -l < "$_w/guards" | tr -d ' ')"
     _assert "lib helper stays a traversable node" yes \
         "$(_has guards st-lib-helper.shs)"
     _assert "lib helper is never judged an orphan" no \
@@ -627,14 +642,18 @@ selftest() {
         "$(_has reached st-dot.shs)"
     _assert "multiline quoted command text is retained" yes \
         "$(_has reached st-quoted.shs)"
+    _assert "continued multiline quote command text is retained" yes \
+        "$(_has reached st-continued-quote.shs)"
+    _assert "inline comment cannot open a fake here-document" yes \
+        "$(_has orphans st-comment-heredoc.shs)"
     _assert "optout guard is an orphan" yes "$(_has orphans st-optout.shs)"
     _assert "unlisted guard is an orphan" yes "$(_has orphans st-orphan.shs)"
     _assert "reachable guard is NOT an orphan" no "$(_has orphans st-direct.shs)"
 
     # The verdict the whole script exists to produce.
     comm -23 "$_w/orphans" "$_w/optout" > "$_w/st_unjust"
-    _assert "unjustified set contains only the two real orphans" \
-        "st-comment.shs st-orphan.shs" \
+    _assert "unjustified set contains only the three real orphans" \
+        "st-comment-heredoc.shs st-comment.shs st-orphan.shs" \
         "$(cat "$_w/st_unjust" | tr '\n' ' ' | sed 's/ *$//')"
 
     # A bare basename with no reason must be rejected, not silently honoured.
@@ -887,7 +906,7 @@ selftest() {
         echo "Fix the scan. Do NOT delete these fixtures."
         return 1
     fi
-    echo "check-guard-wiring: selftest 41/41 fixtures correct"
+    echo "check-guard-wiring: selftest 43/43 fixtures correct"
     return 0
 }
 
