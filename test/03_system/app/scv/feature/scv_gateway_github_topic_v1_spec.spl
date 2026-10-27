@@ -1,0 +1,326 @@
+# GitHub topic publication uses a scoped empty-expected lease update. These
+# local bare-repository scenarios test the Git transport without live writes.
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{cwd, dir_create, dir_remove_all, file_write, process_run_bounded}
+use app.io.file_ops.{secure_temp_dir_raw, directory_fsync}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.common.crypto.sha256.{sha256_text}
+use app.scv.db.git_candidate.{DbGitCandidateFile, DbGitCandidateRequest,
+    DbGitPreparedCandidate, DbGitCandidateTopicAttempt, db_git_candidate_prepare, db_git_candidate_commit_bytes,
+    db_git_candidate_publish_topic_create, db_git_candidate_cleanup}
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1}
+use app.scv.gateway_github_v1.{ScvGithubRepositoryV1, ScvGithubReadPolicyV1,
+    ScvGithubReadKindV1, ScvGithubReadRequestV1, ScvGithubReadResultV1,
+    ScvGithubVerificationV1}
+use app.scv.gateway_github_publish_v2.{ScvGatewayGithubPublishPolicyV2,
+    ScvGatewayGithubPublishRequestV2, scv_gateway_github_publish_prepare_v2}
+use app.scv.gateway_github_topic_v1.{ScvGithubTopicRefObservationV1,
+    ScvGatewayGithubTopicPortV1, scv_gateway_github_topic_publish_v1}
+use app.scv.gateway_config_v1.{ScvGatewayConfigV1}
+use app.scv.gateway_publish_service_v2.{scv_gateway_publish_request_encode_v2,
+    scv_gateway_publish_handle_v2}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpMethod, HttpStatus}
+
+struct TopicTransportFixtureV1:
+    root: text
+    source: text
+    remote: text
+    scratch: text
+    store: text
+    base: text
+    candidate: DbGitPreparedCandidate
+    policy: ScvGatewayGithubPublishPolicyV2
+    scope: ScvDraftBlobAdmittedScopeV1
+    request: ScvGatewayGithubPublishRequestV2
+    content_sha256: text
+
+var _topic_test_remote_v1 = ""
+var _topic_test_base_v1 = ""
+var _topic_test_read_calls_v1 = 0
+var _topic_test_push_calls_v1 = 0
+var _topic_test_mode_v1 = "normal"
+
+fn _topic_derived_ref_v1(fixture: TopicTransportFixtureV1) -> text:
+    val subject = "scv-gateway-github-topic-v2\n{fixture.policy.repository.repository_id.len()}:{fixture.policy.repository.repository_id}\n{fixture.scope.principal_id.len()}:{fixture.scope.principal_id}\n{fixture.request.request_id.len()}:{fixture.request.request_id}\n"
+    "refs/heads/scv/" + sha256_text(subject)[0:32]
+
+fn _topic_candidate_read_v1(policy: ScvGithubReadPolicyV1,
+        request: ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>:
+    if request.kind != ScvGithubReadKindV1.Ref: return Err("test_read_kind")
+    _topic_test_read_calls_v1 = _topic_test_read_calls_v1 + 1
+    Ok(ScvGithubReadResultV1(repository_id: policy.allowlist[0].repository_id,
+        github_repository_id: policy.allowlist[0].github_repository_id,
+        kind: ScvGithubReadKindV1.Ref, selector: request.selector,
+        oid: _topic_test_base_v1, tree_oid: "", parents: [], blob: [], requests: 3u64,
+        verification: ScvGithubVerificationV1.RefOidFieldMatched))
+
+fn _topic_read_ref_v1(policy: ScvGithubReadPolicyV1, selector: text,
+        lease_held: fn() -> bool) -> Result<ScvGithubTopicRefObservationV1, text>:
+    if lease_held(): return Err("test_lease_held")
+    _topic_test_read_calls_v1 = _topic_test_read_calls_v1 + 1
+    var oid = ""
+    if selector == "refs/heads/main":
+        oid = _topic_test_base_v1
+    else:
+        val (stdout, _stderr, code) = process_run_bounded("git",
+            ["--no-replace-objects", "-C", _topic_test_remote_v1,
+                "rev-parse", "--verify", selector], 30000, 65536)
+        if code == 0: oid = stdout.trim()
+    Ok(ScvGithubTopicRefObservationV1(repository_id: policy.allowlist[0].repository_id,
+        github_repository_id: policy.allowlist[0].github_repository_id, selector: selector,
+        exists: oid != "", oid: oid))
+
+fn _topic_create_ref_v1(candidate: DbGitPreparedCandidate, topic_ref: text,
+        lease_held: fn() -> bool) -> Result<DbGitCandidateTopicAttempt, text>:
+    _topic_test_push_calls_v1 = _topic_test_push_calls_v1 + 1
+    if _topic_test_mode_v1 == "race":
+        _topic_git_v1(_topic_test_remote_v1, ["update-ref", topic_ref, _topic_test_base_v1])
+    val attempt = db_git_candidate_publish_topic_create(candidate, topic_ref, lease_held)
+    if _topic_test_mode_v1 == "lost_ack":
+        match attempt:
+            case Ok(_): Err("test_lost_ack")
+            case Err(reason): Err(reason)
+    else:
+        attempt
+
+fn _topic_gateway_port_v1() -> ScvGatewayGithubTopicPortV1:
+    ScvGatewayGithubTopicPortV1(read_candidate: _topic_candidate_read_v1,
+        read_ref: _topic_read_ref_v1, create_ref: _topic_create_ref_v1)
+
+fn _topic_git_v1(root: text, args: [text]) -> text:
+    val prefix = ["--no-replace-objects", "-C", root, "-c", "core.hooksPath=/dev/null",
+        "-c", "commit.gpgsign=false", "-c", "user.name=SCV Topic Test",
+        "-c", "user.email=scv-topic-test@invalid"]
+    val (stdout, _stderr, code) = process_run_bounded("git", prefix + args, 30000, 65536)
+    expect(code).to_equal(0)
+    stdout.trim()
+
+fn _topic_fixture_v1() -> TopicTransportFixtureV1:
+    val allocated = secure_temp_dir_raw(path_final_existing(cwd()).unwrap().path,
+        "scv-github-topic-v1-")
+    expect(allocated.len()).to_be_greater_than(0)
+    val root = path_final_existing(allocated).unwrap().path
+    val source = root + "/source"
+    val remote = root + "/authority.git"
+    val scratch = root + "/scratch"
+    val store = root + "/outbox"
+    expect(dir_create(source, true)).to_equal(true)
+    expect(dir_create(remote, true)).to_equal(true)
+    expect(dir_create(scratch, true)).to_equal(true)
+    expect(dir_create(store, true)).to_equal(true)
+    expect(directory_fsync(store)).to_equal(true)
+    expect(directory_fsync(root)).to_equal(true)
+    expect(directory_fsync(path_final_existing(cwd()).unwrap().path)).to_equal(true)
+    _topic_git_v1(root, ["init", "--bare", "--template=", "--object-format=sha1", remote])
+    _topic_git_v1(root, ["init", "--template=", "--object-format=sha1", source])
+    expect(file_write(source + "/base.txt", "topic base\n")).to_equal(true)
+    _topic_git_v1(source, ["add", "--", "base.txt"])
+    _topic_git_v1(source, ["commit", "-m", "topic base"])
+    val base = _topic_git_v1(source, ["rev-parse", "HEAD"])
+    _topic_git_v1(source, ["push", "--no-force", remote, "HEAD:refs/heads/main"])
+    val candidate_request = DbGitCandidateRequest(source_root: source, remote: remote,
+        scratch_parent: scratch, expected_head: base, object_format: "sha1",
+        files: [DbGitCandidateFile(path: "state/topic.sdn", content: "version: 1\nvalue: topic\n")],
+        message: "SCV topic")
+    val candidate = db_git_candidate_prepare(candidate_request, \: false).unwrap()
+    val repository = ScvGithubRepositoryV1(repository_id: "repo-42", host: "github.com",
+        owner: "simple-org", repository: "simple-repo", github_repository_id: "4242")
+    val github = ScvGithubReadPolicyV1(allowlist: [repository], timeout_ms: 5000,
+        maximum_response_bytes: 2097152, maximum_blob_bytes: 1048576, maximum_requests: 3u64)
+    val policy = ScvGatewayGithubPublishPolicyV2(repository: repository, github: github,
+        remote: remote, source_root: source, scratch_parent: scratch, outbox_root: store,
+        principal_id: "scv-service", base_ref: "refs/heads/main", allow_prepare: true,
+        allow_reconcile: true, allow_topic_publish: true)
+    val scope = ScvDraftBlobAdmittedScopeV1(repository_id: "repo-42",
+        principal_id: "scv-service", can_read: true, can_write: true)
+    val files = [DbGitCandidateFile(path: "state/topic.sdn",
+        content: "version: 1\nvalue: topic\n")]
+    val request = ScvGatewayGithubPublishRequestV2(repository_id: "repo-42",
+        request_id: "topic-request-1", base_ref: "refs/heads/main", expected_base_head: base,
+        candidate_oid: candidate.candidate_oid,
+        candidate_commit_bytes: db_git_candidate_commit_bytes(candidate).unwrap(), files: files,
+        rebuild_message_hint: "SCV topic")
+    _topic_test_remote_v1 = remote
+    _topic_test_base_v1 = base
+    _topic_test_read_calls_v1 = 0
+    _topic_test_push_calls_v1 = 0
+    _topic_test_mode_v1 = "normal"
+    val prepared = scv_gateway_github_publish_prepare_v2(policy, scope, request,
+        _topic_candidate_read_v1, \: false).unwrap()
+    TopicTransportFixtureV1(root: root, source: source, remote: remote,
+        scratch: scratch, store: store, base: base, candidate: candidate, policy: policy,
+        scope: scope, request: request, content_sha256: prepared.content_sha256)
+
+fn _topic_cleanup_v1(fixture: TopicTransportFixtureV1):
+    db_git_candidate_cleanup(fixture.candidate).unwrap()
+    expect(path_final_existing(fixture.root).unwrap().path).to_equal(fixture.root)
+    expect(dir_remove_all(fixture.root)).to_equal(true)
+
+fn _topic_ref_oid_v1(fixture: TopicTransportFixtureV1, topic_ref: text) -> text:
+    val (stdout, _stderr, code) = process_run_bounded("git",
+        ["--no-replace-objects", "-C", fixture.remote, "rev-parse", "--verify", topic_ref],
+        30000, 65536)
+    if code != 0: "" else: stdout.trim()
+
+describe "SCV GitHub topic create transport v1":
+    it "creates exactly one generated topic ref when absent":
+        step("setup: prepare a verified candidate and empty local bare topic target")
+        val fixture = _topic_fixture_v1()
+        val topic_ref = "refs/heads/scv/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(_topic_ref_oid_v1(fixture, topic_ref)).to_equal("")
+        step("exercise: issue the create-only empty-expected lease update")
+        val result = db_git_candidate_publish_topic_create(fixture.candidate,
+            topic_ref, \: false).unwrap()
+        step("assert: the only remote change is the candidate under the generated ref")
+        expect(result.candidate_oid).to_equal(fixture.candidate.candidate_oid)
+        expect(_topic_ref_oid_v1(fixture, topic_ref)).to_equal(fixture.candidate.candidate_oid)
+        expect(_topic_ref_oid_v1(fixture, "refs/heads/main")).to_equal(fixture.base)
+        _topic_cleanup_v1(fixture)
+
+    it "refuses an existing ancestor topic rather than advancing it":
+        step("setup: place the expected base at the generated topic ref")
+        val fixture = _topic_fixture_v1()
+        val topic_ref = "refs/heads/scv/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        _topic_git_v1(fixture.source, ["push", fixture.remote, "{fixture.base}:{topic_ref}"])
+        step("exercise: attempt the create-only update with a different descendant OID")
+        val result = db_git_candidate_publish_topic_create(fixture.candidate,
+            topic_ref, \: false)
+        step("assert: existing ref stays at its original OID after the refusal")
+        expect(result.is_err()).to_equal(true)
+        expect(_topic_ref_oid_v1(fixture, topic_ref)).to_equal(fixture.base)
+        _topic_cleanup_v1(fixture)
+
+    it "rejects arbitrary, protected, and malformed destination refs before transport":
+        step("setup: prepare one verified candidate")
+        val fixture = _topic_fixture_v1()
+        step("exercise: try refs outside the generated topic namespace")
+        expect(db_git_candidate_publish_topic_create(fixture.candidate,
+            "refs/heads/main", \: false).is_err()).to_equal(true)
+        expect(db_git_candidate_publish_topic_create(fixture.candidate,
+            "refs/heads/scv/../main", \: false).is_err()).to_equal(true)
+        expect(db_git_candidate_publish_topic_create(fixture.candidate,
+            "refs/heads/scv/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:refs/heads/main", \: false).is_err()).to_equal(true)
+        step("assert: the bare repository has no branch from rejected input")
+        expect(_topic_ref_oid_v1(fixture, "refs/heads/main")).to_equal(fixture.base)
+        _topic_cleanup_v1(fixture)
+
+    it "reconciles an acknowledged write lost in transit and makes an exact retry idempotent":
+        step("setup: durably prepare one candidate and leave its generated topic absent")
+        val fixture = _topic_fixture_v1()
+        _topic_test_mode_v1 = "lost_ack"
+        step("exercise: create the topic, then simulate loss of the process acknowledgement")
+        val first = scv_gateway_github_topic_publish_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _topic_gateway_port_v1(), \: false).unwrap()
+        expect(first.transport).to_equal("transport_unknown")
+        expect(first.state).to_equal("topic_branch_published")
+        expect(first.publication).to_equal("not_acceptance")
+        step("exercise: retry the same durable request after exact ref readback")
+        _topic_test_mode_v1 = "normal"
+        val retry = scv_gateway_github_topic_publish_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _topic_gateway_port_v1(), \: false).unwrap()
+        step("assert: the retry reports the exact OID without a second push")
+        expect(retry.state).to_equal("topic_branch_published")
+        expect(_topic_test_push_calls_v1).to_equal(1)
+        expect(retry.candidate_oid).to_equal(fixture.request.candidate_oid)
+        expect(retry.publication).to_equal("not_acceptance")
+        _topic_cleanup_v1(fixture)
+
+    it "refuses a known different topic head without issuing a Git push":
+        step("setup: occupy the generated topic ref with its base ancestor")
+        val fixture = _topic_fixture_v1()
+        val derived_ref = _topic_derived_ref_v1(fixture)
+        _topic_git_v1(fixture.remote, ["update-ref", derived_ref, fixture.base])
+        step("exercise: submit the prepared candidate for the already different ref")
+        val result = scv_gateway_github_topic_publish_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _topic_gateway_port_v1(), \: false).unwrap()
+        step("assert: the divergent ref is reported as conflict and remains untouched")
+        expect(result.state).to_equal("topic_ref_conflict")
+        expect(_topic_test_push_calls_v1).to_equal(0)
+        expect(_topic_ref_oid_v1(fixture, derived_ref)).to_equal(fixture.base)
+        expect(result.topic_ref).to_equal(derived_ref)
+        _topic_cleanup_v1(fixture)
+
+    it "rejects a topic created after preflight without fast-forwarding the ancestor":
+        step("setup: leave the deterministic topic absent and arrange a competing creator")
+        val fixture = _topic_fixture_v1()
+        val derived_ref = _topic_derived_ref_v1(fixture)
+        _topic_test_mode_v1 = "race"
+        step("exercise: race a base-ancestor ref into the target before the conditional push")
+        val result = scv_gateway_github_topic_publish_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _topic_gateway_port_v1(), \: false).unwrap()
+        step("assert: empty-expected lease rejects the competing ref and preserves its OID")
+        expect(result.state).to_equal("topic_ref_conflict")
+        expect(_topic_ref_oid_v1(fixture, derived_ref)).to_equal(fixture.base)
+        expect(result.publication).to_equal("not_acceptance")
+        _topic_cleanup_v1(fixture)
+
+    it "fails closed before Git when the durable prepared outbox cannot be read":
+        step("setup: prepare an outbox, then replace its trusted root with an absent path")
+        val fixture = _topic_fixture_v1()
+        var denied_policy = fixture.policy
+        denied_policy.outbox_root = fixture.root + "/missing-outbox"
+        step("exercise: attempt topic publication with no certified durable envelope")
+        val result = scv_gateway_github_topic_publish_v1(denied_policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _topic_gateway_port_v1(), \: false)
+        step("assert: refuse before reads or writes and preserve the existing main ref")
+        expect(result.is_err()).to_equal(true)
+        expect(_topic_test_push_calls_v1).to_equal(0)
+        expect(_topic_ref_oid_v1(fixture, "refs/heads/main")).to_equal(fixture.base)
+        _topic_cleanup_v1(fixture)
+
+    it "requires a distinct host publish capability before any gateway lookup":
+        step("setup: use a prepared request with topic writing disabled by host policy")
+        val fixture = _topic_fixture_v1()
+        var denied_policy = fixture.policy
+        denied_policy.allow_topic_publish = false
+        _topic_test_read_calls_v1 = 0
+        step("exercise: try the topic operation through the normal service port")
+        val result = scv_gateway_github_topic_publish_v1(denied_policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _topic_gateway_port_v1(), \: false)
+        step("assert: deny before GitHub read, outbox access, or Git mutation")
+        expect(result.is_err()).to_equal(true)
+        expect(_topic_test_read_calls_v1).to_equal(0)
+        expect(_topic_test_push_calls_v1).to_equal(0)
+        _topic_cleanup_v1(fixture)
+
+    it "rejects unauthenticated topic publication before any GitHub read or Git effect":
+        step("setup: encode a publish request for a durably prepared candidate")
+        val fixture = _topic_fixture_v1()
+        val gateway = ScvGatewayConfigV1(repository: "repo-42", listen_host: "127.0.0.1",
+            listen_port: 24321, bearer_token_env: "SCV_TEST_TOKEN", github: fixture.policy.github)
+        val body = scv_gateway_publish_request_encode_v2("publish", fixture.request,
+            fixture.content_sha256).unwrap()
+        val http = HttpRequest(method: HttpMethod.Post, path: "/scv/v2/publish", query: "",
+            headers: [("Content-Type", "application/sdn")], body: body)
+        _topic_test_read_calls_v1 = 0
+        step("exercise: submit the topic operation without a bearer credential")
+        val response = scv_gateway_publish_handle_v2(gateway, fixture.policy,
+            "abcdefghijklmnopqrstuvwxyz012345", http, _topic_candidate_read_v1, \: false)
+        step("assert: reject before reading GitHub or invoking Git")
+        expect(response.status).to_equal(HttpStatus.Unauthorized)
+        expect(_topic_test_read_calls_v1).to_equal(0)
+        expect(_topic_test_push_calls_v1).to_equal(0)
+        _topic_cleanup_v1(fixture)
+
+    it "requires host topic-write policy for the authenticated publish endpoint":
+        step("setup: prepare a valid caller and disable only the host topic-write capability")
+        val fixture = _topic_fixture_v1()
+        var denied_policy = fixture.policy
+        denied_policy.allow_topic_publish = false
+        val gateway = ScvGatewayConfigV1(repository: "repo-42", listen_host: "127.0.0.1",
+            listen_port: 24321, bearer_token_env: "SCV_TEST_TOKEN", github: fixture.policy.github)
+        val token = "abcdefghijklmnopqrstuvwxyz012345"
+        val body = scv_gateway_publish_request_encode_v2("publish", fixture.request,
+            fixture.content_sha256).unwrap()
+        val http = HttpRequest(method: HttpMethod.Post, path: "/scv/v2/publish", query: "",
+            headers: [("Authorization", "Bearer " + token),
+                ("Content-Type", "application/sdn")], body: body)
+        _topic_test_read_calls_v1 = 0
+        step("exercise: call the actual HTTP dispatch with a valid bearer token")
+        val response = scv_gateway_publish_handle_v2(gateway, denied_policy,
+            token, http, _topic_candidate_read_v1, \: false)
+        step("assert: host policy denies before outbox, GitHub read, or Git write")
+        expect(response.status).to_equal(HttpStatus.Forbidden)
+        expect(_topic_test_read_calls_v1).to_equal(0)
+        expect(_topic_test_push_calls_v1).to_equal(0)
+        _topic_cleanup_v1(fixture)
