@@ -1,5 +1,13 @@
 # Concurrency Design (Incremental)
 
+**Current integration direction (2026-10-27):** retain this historical actor
+design; use the [async infrastructure architecture](../../../04_architecture/language/async_infrastructure.md)
+and [library detail design](../../lib/runtime/async_infrastructure.md) for
+Future/Promise/AsyncRef, task ownership, hosted/embedded interfaces, resource
+factories and native/pure-Simple backend contracts. Existing scheduler and
+native I/O implementations are reused; their existence is not whole-runtime
+qualification. Current-state statements below retain their original scope.
+
 ## Goals
 - Actor-based concurrency with mailbox semantics; eventual work-stealing scheduler per `concurrency.md`.
 - Support fire-and-forget `spawn`, message passing (`send`/`recv`/`reply`), and `join` on actor handles.

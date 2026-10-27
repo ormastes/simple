@@ -1,6 +1,13 @@
 <!-- codex-design -->
 # Simple Ring and Async Base Architecture
 
+**2026-10-27 integration addendum:** the
+[language/library async infrastructure architecture](language/async_infrastructure.md)
+reuses this canonical ABI and the existing hosted/embedded, native-driver and
+fiber owners. It defines shared refs, live Future/Promise/join semantics,
+resource/index factories, backend-neutral interfaces and their TDD gates.
+This cross-link does not upgrade historical implementation/evidence status.
+
 ## Status
 
 Proposed V1 architecture. This document freezes ownership and migration
