@@ -123,58 +123,31 @@ fn windows_os_suffix(target: Target) -> &'static str {
 
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
 
-/// Default x86-64 CPU profile for LLVM codegen.
+/// Default x86-64 CPU profile for LLVM codegen: always the `x86-64` (v1)
+/// baseline, so the base binary runs on any x86_64 machine. Wider code
+/// (x86-64-v2..v4) ships as CPU-tier artifacts selected at runtime
+/// (doc/05_design/compiler/simd/cpu_tier_multibuild.md), never by widening
+/// from the builder's CPUID, which proves nothing about the target machine.
 ///
-/// This is the knob that decides whether LLVM's loop and SLP vectorizers --
-/// both enabled in `optimize_module_ir` -- are allowed to emit AVX-512. It was
-/// pinned to `x86-64-v3`, i.e. AVX2, so on a host with full AVX-512 support
-/// every natively built binary (the DB server, the HTTP server, the software
-/// renderer) was vectorized at 256 bits and never 512, with nothing in the
-/// build output saying so.
-///
-/// Widening follows the same discipline as the pure-Simple auto-vectorizer's
-/// planning level (`auto_vectorize_target.spl`), for the same reason: a CPU
-/// name is a REQUEST, not proof about the execution domain.
-///
-///   * the output must target the host -- a cross-compiled artifact must never
-///     be widened from the builder's CPUID, or it will fault on the machine it
-///     was built for;
-///   * AVX-512 F, VL and BW must all be present, VL because LLVM still emits
-///     128/256-bit forms for short trips and BW because byte/word lanes are
-///     otherwise unencodable;
-///   * anything short of that returns the previous `x86-64-v3` baseline, so
-///     this can only widen, never narrow.
-///
-/// `SIMPLE_X86_64_DEFAULT_CPU` overrides the choice outright, which is the
-/// escape hatch for reproducible builds that must not vary with the builder.
+/// `SIMPLE_X86_64_DEFAULT_CPU` overrides the choice outright (each level name
+/// maps to itself; unknown values fall back to the baseline).
 fn default_x86_64_cpu_name(triple: &str) -> &'static str {
-    const BASELINE: &str = "x86-64-v3";
-    const WIDE: &str = "x86-64-v4";
+    const BASELINE: &str = "x86-64";
 
+    // Return the default x86_64 baseline (v1, 2003+) for maximum compatibility.
+    // Under the CPU tier design, v2-v4 builds come from tier artifacts via
+    // native cache scope tier canonicalization, not host feature detection.
+    // Explicit SIMPLE_X86_64_DEFAULT_CPU env var overrides allow per-build selection.
     if let Ok(forced) = std::env::var("SIMPLE_X86_64_DEFAULT_CPU") {
         return match forced.trim() {
-            "x86-64-v4" => WIDE,
-            "x86-64-v3" => BASELINE,
+            "x86-64-v4" => "x86-64-v4",
+            "x86-64-v3" => "x86-64-v3",
             "x86-64-v2" => "x86-64-v2",
-            "x86-64" => "x86-64",
+            "x86-64" | "x86-64-v1" => "x86-64",
             _ => BASELINE,
         };
     }
 
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Host-targeting only. `triple` is the requested output triple; if it
-        // is not an x86_64 triple the caller is cross-compiling and the host
-        // receipt proves nothing about the target.
-        let targets_host = triple.starts_with("x86_64") || triple.starts_with("amd64");
-        if targets_host
-            && std::is_x86_feature_detected!("avx512f")
-            && std::is_x86_feature_detected!("avx512vl")
-            && std::is_x86_feature_detected!("avx512bw")
-        {
-            return WIDE;
-        }
-    }
     let _ = triple;
     BASELINE
 }
@@ -2056,47 +2029,9 @@ mod default_x86_64_cpu_tests {
         // The builder's CPUID says nothing about the machine the artifact will
         // run on. Widening here produces a binary that faults on its target.
         with_forced(None, || {
-            assert_eq!(default_x86_64_cpu_name("aarch64-unknown-linux-gnu"), "x86-64-v3");
-            assert_eq!(default_x86_64_cpu_name("riscv64-unknown-elf"), "x86-64-v3");
-            assert_eq!(default_x86_64_cpu_name("wasm32-unknown-unknown"), "x86-64-v3");
-        });
-    }
-
-    #[test]
-    fn never_narrows_below_the_previous_baseline() {
-        // Whatever the host reports, the answer must be at least the v3 that
-        // was hardcoded before, or this is a regression rather than an upgrade.
-        with_forced(None, || {
-            for triple in ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "amd64-foo"] {
-                let got = default_x86_64_cpu_name(triple);
-                assert!(
-                    got == "x86-64-v3" || got == "x86-64-v4",
-                    "{triple} resolved to {got}, which is below the v3 baseline"
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn host_targeting_widens_exactly_when_the_host_admits_avx512() {
-        // The decision must track the real capability probe, not a guess.
-        with_forced(None, || {
-            // `cfg!` is a VALUE, not a compilation gate: on aarch64 the
-            // `is_x86_feature_detected!` arms still had to compile and the
-            // macro rejects the target outright ("This macro cannot be used
-            // on the current target"), so the whole `simple-compiler` lib
-            // TEST target failed to build on every non-x86 host -- no Rust
-            // unit test in this crate could run on an arm64 macOS box. A real
-            // `#[cfg]` on the binding keeps the x86_64 probe byte-identical
-            // and gives other architectures the only answer they can have.
-            #[cfg(target_arch = "x86_64")]
-            let expected_wide = std::is_x86_feature_detected!("avx512f")
-                && std::is_x86_feature_detected!("avx512vl")
-                && std::is_x86_feature_detected!("avx512bw");
-            #[cfg(not(target_arch = "x86_64"))]
-            let expected_wide = false;
-            let got = default_x86_64_cpu_name("x86_64-unknown-linux-gnu");
-            assert_eq!(got == "x86-64-v4", expected_wide, "got {got}");
+            assert_eq!(default_x86_64_cpu_name("aarch64-unknown-linux-gnu"), "x86-64");
+            assert_eq!(default_x86_64_cpu_name("riscv64-unknown-elf"), "x86-64");
+            assert_eq!(default_x86_64_cpu_name("wasm32-unknown-unknown"), "x86-64");
         });
     }
 
@@ -2117,7 +2052,7 @@ mod default_x86_64_cpu_tests {
     #[test]
     fn an_unrecognised_override_falls_back_to_the_baseline() {
         with_forced(Some("znver9-turbo"), || {
-            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64-v3");
+            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64");
         });
     }
 }
