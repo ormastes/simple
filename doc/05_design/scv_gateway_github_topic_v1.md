@@ -46,6 +46,37 @@ The live wrapper accepts only the configured canonical GitHub HTTPS remote.
 All states use `publication: not_acceptance`. They do not import, accept,
 settle, merge, or update protected branches.
 
+## Landing readback
+
+The authenticated service also accepts `method: landing-reconcile`. It uses
+two independent host capabilities: `allow_landing_reconcile` admits the remote
+read, and `allow_landing_observation_write` admits the durable observation.
+The request carries the same immutable candidate/outbox identity; repository,
+topic head, and protected base are derived from host policy.
+
+The live provider queries PR pages for the configured owner and generated
+topic branch, follows explicit page numbers up to eight 100-row pages, and
+fetches detail only for one unique match. It reads the current protected ref
+and verifies numeric repository identity both before and after the observation.
+Raw response size and nesting are bounded. Tests inject raw JSON responses into
+the same strict decoder.
+
+Complete empty discovery is `landing_not_found`; an open PR is
+`review_pending`; closed unmerged is `closed_unmerged`; multiple matches are
+`landing_ambiguous`. Incomplete pages, transport errors, repository changes,
+fork heads, changed head OIDs, malformed merge metadata, and other identity
+disagreements remain `upstream_unknown`. Each observation is stored under a
+digest of its exact SDN bytes, so an open-to-merged transition gets a new key
+and an identical retry reuses its key.
+
+A merged PR is only `observed_merged_needs_validation`. Its actual merge commit
+and current protected-ref OID are recorded with `required_checks`,
+`protected_ref_ancestry`, and `native_import` marked unavailable/unverified.
+No required-check evidence owner, protected-ancestry verifier, actual merged
+tree validator, or admitted native history importer currently exists in this
+gateway. It therefore emits neither `upstream_accepted` nor
+`accepted_result_imported`.
+
 ## External observation
 
 Each live ref observation performs bounded `gh api` GETs for repository

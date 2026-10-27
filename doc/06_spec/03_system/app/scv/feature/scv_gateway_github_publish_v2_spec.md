@@ -34,8 +34,9 @@ means readback did not establish that exact state. Every response carries
 merged PR, or imported accepted results.
 
 The host policy keeps `allow_prepare`, `allow_reconcile`, and
-`allow_topic_publish` separate. This slice enables only the first two; a topic
-publisher requires its own explicit host grant.
+`allow_topic_publish` separate. Landing readback additionally requires both
+`allow_landing_reconcile` and `allow_landing_observation_write`; neither implies
+topic write permission.
 
 The executable server entry point is `scv gateway publish-serve --config
 <native.sdn> --development-loopback --reason <audit reason>`. The v2 policy is
@@ -48,6 +49,18 @@ The reconciliation read path verifies the immutable object bytes but does not
 reissue or prove a local durable receipt. The preparation and retry paths do
 reissue the draft store `put` and verify the returned durable receipt before
 acknowledging `export_prepared`.
+
+The additive `landing-reconcile` method validates the same durable envelope,
+queries only the configured numeric repository, generated topic head, and
+protected base, then persists each raw-decoded PR observation under a
+digest-derived outbox key. Complete absence, review pending, closed unmerged,
+ambiguous, and unknown results remain distinct. A merged PR is
+`observed_merged_needs_validation` with its actual merge commit and the current
+protected-ref head; its status explicitly leaves required checks, ancestry, and
+native import unverified/unavailable. This service does not yet emit
+`upstream_accepted` or `accepted_result_imported` because there is no admitted
+required-check provider, actual merge-tree verifier, or native history import
+owner.
 
 ## Qualification
 
