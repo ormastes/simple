@@ -1,0 +1,134 @@
+"""Emitted LLVM declarations for imported globals in flat bootstrap IR."""
+
+use std.spec
+use std.spec.step
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.llvm_ir_builder.{llvm_ir_builder_build, llvm_ir_builder_handle}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{bootstrap_mir_functions_reset, bootstrap_mir_modules_add}
+
+fn imported_static(id: i64, name: text, type_: MirType) -> MirStatic:
+    MirStatic(
+        symbol: SymbolId(id: id), name: name, type_: type_, init: nil,
+        is_mutable: false, alignment: type_.alignment(),
+        visibility: Visibility.Public, is_external: true)
+
+fn provider_static(id: i64, name: text, type_: MirType, value: i64) -> MirStatic:
+    val symbol = SymbolId(id: id)
+    MirStatic(
+        symbol: symbol, name: name, type_: type_,
+        init: Some(MirConstant(
+            symbol: symbol, name: name, type_: type_,
+            value: MirConstValue.Int(value))),
+        is_mutable: false, alignment: type_.alignment(),
+        visibility: Visibility.Public, is_external: false)
+
+fn static_module(name: text, rows: [MirStatic]) -> MirModule:
+    var statics: Dict<SymbolId, MirStatic> = {}
+    var i = 0
+    while i < rows.len():
+        statics[rows[i].symbol] = rows[i]
+        i = i + 1
+    MirModule(name: name, functions: {}, statics: statics,
+        constants: {}, types: {})
+
+fn imported_global_reader(symbol: SymbolId, name: text) -> MirModule:
+    val i64_type = MirType.i64()
+    val pointer_type = MirType(kind: MirTypeKind.Ref(i64_type, true))
+    val function = MirFunction(
+        symbol: SymbolId(id: symbol.id + 1000), name: "read_imported",
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: [
+            MirLocal(id: LocalId(id: 0), name: Some("address"), type_: pointer_type, kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 1), name: Some("value"), type_: i64_type, kind: LocalKind.Temp, is_ghost: false)
+        ],
+        blocks: [MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.GlobalAddr(LocalId(id: 0), symbol, false), span: nil),
+                MirInst(kind: MirInstKind.Load(LocalId(id: 1), mir_operand_copy(LocalId(id: 0))), span: nil)
+            ],
+            terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 1))))
+        )],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[symbol] = imported_static(symbol.id, name, i64_type)
+    MirModule(name: "imported.reader", functions: functions,
+        statics: statics, constants: {}, types: {})
+
+fn emit_registered_statics() -> text:
+    val translator = MirToLlvm.create(
+        "bootstrap.imported.globals", CodegenTarget.X86_64, nil)
+    translator.emit_bootstrap_statics(llvm_ir_builder_handle(translator.builder))
+    llvm_ir_builder_build(translator.builder)
+
+fn declaration_lines(ir: text, symbol: text) -> i64:
+    var count = 0
+    val line_prefix = "@g_{symbol} = "
+    for line in ir.split("\n"):
+        if line.starts_with(line_prefix): count = count + 1
+    count
+
+describe "LLVM bootstrap imported global declarations":
+    it "emits typed declarations for imported scalar globals once per canonical name":
+        step("Register repeated aliases and emit the aggregate static rows")
+        val symbol = "app_cli_closure_probe_types__PROBE_GLOBAL"
+        bootstrap_mir_functions_reset()
+        bootstrap_mir_modules_add(static_module("consumer_a", [
+            imported_static(101, symbol, MirType.i64()),
+            imported_static(102, symbol, MirType.i64()),
+            imported_static(103, "consumer_types__SMALL_GLOBAL", MirType.i32())]))
+        val llvm = emit_registered_statics()
+        expect(declaration_lines(llvm, symbol)).to_equal(1)
+        expect(llvm).to_contain("@g_{symbol} = external global i64")
+        expect(declaration_lines(llvm, "consumer_types__SMALL_GLOBAL")).to_equal(1)
+        expect(llvm).to_contain("@g_consumer_types__SMALL_GLOBAL = external global i32")
+        expect(llvm.contains("@g_{symbol} = global")).to_equal(false)
+        val read_ir = MirToLlvm.create(
+            "imported.reader", CodegenTarget.X86_64, nil
+        ).translate_module(imported_global_reader(SymbolId(id: 104), symbol))
+        expect(read_ir).to_contain("getelementptr i8, ptr @g_{symbol}, i64 0  ; GlobalAddr")
+        expect(read_ir).to_contain("load i64, ptr %l0")
+        bootstrap_mir_functions_reset()
+
+    it "lets a provider definition win when consumer rows precede it":
+        step("Register consumer aliases before the aggregate provider row")
+        val symbol = "app_cli_closure_probe_types__PROBE_GLOBAL"
+        bootstrap_mir_functions_reset()
+        bootstrap_mir_modules_add(static_module("consumer", [
+            imported_static(201, symbol, MirType.i64()),
+            imported_static(202, symbol, MirType.i64())]))
+        bootstrap_mir_modules_add(static_module("provider", [
+            provider_static(301, symbol, MirType.i64(), 47)]))
+        val llvm = emit_registered_statics()
+        expect(declaration_lines(llvm, symbol)).to_equal(1)
+        expect(llvm).to_contain("@g_{symbol} = global i64 47")
+        expect(llvm.contains("@g_{symbol} = external global")).to_equal(false)
+        bootstrap_mir_functions_reset()
+
+    it "lets a provider definition win when it precedes consumer rows":
+        step("Register the aggregate provider row before consumer aliases")
+        val symbol = "app_cli_closure_probe_types__PROBE_GLOBAL"
+        bootstrap_mir_functions_reset()
+        bootstrap_mir_modules_add(static_module("provider", [
+            provider_static(401, symbol, MirType.i64(), 53)]))
+        bootstrap_mir_modules_add(static_module("consumer", [
+            imported_static(501, symbol, MirType.i64()),
+            imported_static(502, symbol, MirType.i64())]))
+        val llvm = emit_registered_statics()
+        expect(declaration_lines(llvm, symbol)).to_equal(1)
+        expect(llvm).to_contain("@g_{symbol} = global i64 53")
+        expect(llvm.contains("@g_{symbol} = external global")).to_equal(false)
+        bootstrap_mir_functions_reset()
