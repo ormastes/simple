@@ -77,3 +77,14 @@ V4 keeps the V3 scoped aggregate as its immutable base and replaces its 505 resi
 - The Bungee font registry row remains the only eligible invalid candidate, with no closure applied. The rejected cross-engine invalid proposal remains valid and keep-open.
 
 This checkpoint does not mutate canonical bug status, apply invalid closures, or claim a full compiler build/runtime pass. Canonical writes and runtime-qualified build evidence remain pending the user's build-exception decision. V3 and all older artifacts remain immutable historical checkpoints. No compiler, system tests, or live bug database were run for V4.
+
+
+## V5 residual31 revision 2 consolidation
+
+V5 supersedes the V4 residual classification with the independently approved revision 2 overlay. It preserves the V4 1,571 accepted rows and applies the 31-row overlay exactly once: six accepted (cases 4, 6, 9, 10, 11, 26) and 25 `needs_more_evidence`. The resulting partition is 1,577 accepted / 25 residual / 0 missing across the same 1,602 authoritative IDs. Revision 1’s all-31 acceptance was withdrawn and is not used.
+
+The approved source CSV, Markdown, author receipt, independent GO report and delta receipt are copied byte-for-byte under [evidence_v5](evidence_v5/); [row-level evidence updates](evidence_v5/residual31_revision2.md) preserve each row’s evidence references, rationale and correction. [V5 categories](reviewed_categories_v5.sdn), [residual IDs](residual_ids_v5.sdn), and [merge receipt](merge_receipt_v5.sdn) record the admitted fields and accounting. [Manifest V5](manifest_v5.sdn) binds the V4 lineage, approved overlay, review receipts and V5 outputs.
+
+Among these 31 updated residual rows, only release-wrapper case 4 has a known source remedy, marked `fixed_pending_verification`; all 31 overlay rows remain `untested`. V5 adds no invalid-closure candidate. One inherited HOST_PROTOCOL source-policy record remains the only reproducible record; no compiled Simple runtime is qualified, full Phase 3 remains `UNRUN`, and 1,601 records remain untested.
+
+For current classification lookup use V5; V1–V4 files remain immutable historical snapshots. The release base includes PR #5101, which applied the prior V4 canonical migration, including the Bungee row’s invalid closure (the record remains visible). V5 itself made no database or status write: its six accepted and 25 needs-more-evidence overlay rows have not been applied to the canonical database. Runtime qualification remains outstanding pending the user’s build-exception decision; no compiler build or SSpec was run for V5.
