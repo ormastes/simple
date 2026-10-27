@@ -1,0 +1,204 @@
+# SCVN-D01: separate V2 model. Never extend DbValue/DbPatch V1 wire enums.
+use std.scv.distributed_identity.*
+use std.scv.db_patch.{DbValue, db_value_bytes}
+use std.scv.db_canonical.{db_canonical_text}
+
+enum DbDefaultRuleV2:
+    NoDefault
+    Constant(value: DbValue)
+
+enum DbCellStateV2:
+    Absent
+    Null
+    Value(value: DbValue)
+    Defaulted(value: DbValue, migration_uid: EntityUid, introduction_revision: text)
+    Tombstoned
+
+struct DbConstraintDefinitionV2:
+    constraint_uid: EntityUid
+    kind: text
+    columns: [EntityUid]
+    expression: text
+
+struct DbColumnDefinitionV2:
+    column_uid: EntityUid
+    name: text
+    logical_type: text
+    nullable: bool
+    default_rule: DbDefaultRuleV2
+    introduction_default: DbDefaultRuleV2
+    introduction_revision: text
+    introduction_migration: EntityUid
+    constraints: [DbConstraintDefinitionV2]
+    merge_policy: text
+    visibility: text
+    presentation_order: u64
+    tombstone: bool
+
+struct DbSchemaOperationReceiptV2:
+    operation_uid: EntityUid
+    payload_digest: text
+
+struct DbSchemaV2:
+    table_uid: EntityUid
+    table_name: text
+    parent_revision: text
+    merge_parent_revision: text
+    revision: text
+    columns: [DbColumnDefinitionV2]
+    applied_operations: [DbSchemaOperationReceiptV2]
+    tombstone: bool
+
+struct DbCellAddressV2:
+    table_uid: EntityUid
+    column_uid: EntityUid
+    row: EntityRef
+
+enum DbSchemaChangeV2:
+    AddColumn(column: DbColumnDefinitionV2)
+    RenameColumn(column_uid: EntityUid, name: text)
+    DropColumn(column_uid: EntityUid)
+    MoveColumnPresentation(column_uid: EntityUid, order: u64)
+    AlterType(column_uid: EntityUid, logical_type: text)
+    SetDefault(column_uid: EntityUid, rule: DbDefaultRuleV2)
+    SetNullability(column_uid: EntityUid, nullable: bool)
+    SetMergePolicy(column_uid: EntityUid, policy: text)
+    AddConstraint(column_uid: EntityUid, constraint: DbConstraintDefinitionV2)
+    DropConstraint(column_uid: EntityUid, constraint_uid: EntityUid)
+
+struct DbSchemaOperationV2:
+    operation_uid: EntityUid
+    base_revision: text
+    expected_definition: text
+    dependencies: [EntityUid]
+    change: DbSchemaChangeV2
+
+fn db_schema_uid_equal_v2(left: EntityUid, right: EntityUid) -> bool:
+    if not entity_uid_validate(left).valid or not entity_uid_validate(right).valid: return false
+    entity_ref_canonical(entity_ref_provisional(left)) == entity_ref_canonical(entity_ref_provisional(right))
+
+fn db_schema_digest_valid_v2(digest: text) -> bool:
+    if digest.len() != 64: return false
+    for index in 0..digest.len():
+        val code = digest.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn db_schema_uid_validate_v2(uid: EntityUid, kind: text, namespace: text) -> Result<bool, text>:
+    val checked = entity_uid_validate(uid)
+    if not checked.valid: return Err(checked.code)
+    if uid.entity_kind != kind: return Err("SCVDB_SCHEMA_UID_KIND")
+    if uid.database_namespace != namespace: return Err("SCVDB_SCHEMA_UID_NAMESPACE")
+    Ok(true)
+
+fn db_schema_default_validate_v2(rule: DbDefaultRuleV2) -> Result<bool, text>:
+    match rule:
+        NoDefault: Ok(true)
+        Constant(value):
+            match value:
+                Absent: return Err("SCVDB_SCHEMA_ABSENT_DEFAULT")
+                _: ()
+            val encoded = db_value_bytes(value)?
+            Ok(encoded.len() > 0)
+
+fn db_schema_value_type_v2(value: DbValue, logical_type: text) -> Result<bool, text>:
+    val encoded = db_value_bytes(value)?
+    match value:
+        Text(_): Ok(logical_type == "text")
+        Unsigned(_): Ok(logical_type == "u64")
+        Flag(_): Ok(logical_type == "bool")
+        Reference(_): Ok(logical_type == "entity_ref")
+        List(_): Ok(logical_type == "list")
+        Set(_): Ok(logical_type == "set")
+        ObservedSet(_): Ok(logical_type == "observed_set")
+        CausalSet(_): Ok(logical_type == "causal_set")
+        Absent: Ok(false)
+
+fn db_schema_default_type_v2(rule: DbDefaultRuleV2, logical_type: text) -> Result<bool, text>:
+    match rule:
+        NoDefault: Ok(true)
+        Constant(value):
+            if not db_schema_value_type_v2(value, logical_type)?: return Err("SCVDB_SCHEMA_DEFAULT_TYPE")
+            Ok(true)
+
+fn db_schema_column_index_v2(schema: DbSchemaV2, uid: EntityUid) -> i64:
+    var index = 0
+    while index < schema.columns.len():
+        if db_schema_uid_equal_v2(schema.columns[index].column_uid, uid): return index
+        index = index + 1
+    -1
+
+fn db_schema_column_validate_v2(column: DbColumnDefinitionV2, namespace: text) -> Result<bool, text>:
+    val checked_uid = db_schema_uid_validate_v2(column.column_uid, "column", namespace)?
+    val checked_migration = db_schema_uid_validate_v2(column.introduction_migration, "migration", namespace)?
+    if column.name == "" or column.logical_type == "" or column.merge_policy == "" or column.visibility == "":
+        return Err("SCVDB_SCHEMA_COLUMN_DEFINITION")
+    val supported_types = ["text", "u64", "bool", "entity_ref", "list", "set", "observed_set", "causal_set"]
+    if not supported_types.contains(column.logical_type): return Err("SCVDB_SCHEMA_UNSUPPORTED_TYPE")
+    if column.introduction_revision == "": return Err("SCVDB_SCHEMA_INTRODUCTION")
+    val checked_default = db_schema_default_validate_v2(column.default_rule)?
+    val checked_introduction = db_schema_default_validate_v2(column.introduction_default)?
+    val default_type = db_schema_default_type_v2(column.default_rule, column.logical_type)?
+    val introduction_type = db_schema_default_type_v2(column.introduction_default, column.logical_type)?
+    var constraint_ids: [text] = []
+    for constraint in column.constraints:
+        val checked_constraint = db_schema_uid_validate_v2(constraint.constraint_uid, "constraint", namespace)?
+        if constraint.kind == "" or constraint.columns.len() == 0: return Err("SCVDB_SCHEMA_CONSTRAINT")
+        val key = entity_ref_canonical(entity_ref_provisional(constraint.constraint_uid))
+        if constraint_ids.contains(key): return Err("SCVDB_SCHEMA_CONSTRAINT_ID_COLLISION")
+        constraint_ids.push(key)
+        for uid in constraint.columns:
+            val checked_target = db_schema_uid_validate_v2(uid, "column", namespace)?
+    Ok(true)
+
+fn db_schema_validate_v2(schema: DbSchemaV2) -> Result<bool, text>:
+    val namespace = schema.table_uid.database_namespace
+    val checked_table = db_schema_uid_validate_v2(schema.table_uid, "table", namespace)?
+    if schema.table_name == "": return Err("SCVDB_SCHEMA_TABLE_NAME")
+    if schema.columns.len() > 4096 or schema.applied_operations.len() > 16384: return Err("SCVDB_SCHEMA_QUOTA")
+    var ids: [text] = []
+    var names: [[u8]] = []
+    var constraint_ids: [text] = []
+    for column in schema.columns:
+        val checked_column = db_schema_column_validate_v2(column, namespace)?
+        val key = entity_ref_canonical(entity_ref_provisional(column.column_uid))
+        if ids.contains(key): return Err("SCVDB_SCHEMA_UID_COLLISION")
+        ids.push(key)
+        if not column.tombstone:
+            val name = db_canonical_text(column.name)?
+            if names.contains(name): return Err("SCVDB_SCHEMA_NAME_COLLISION")
+            names.push(name)
+            for constraint in column.constraints:
+                val constraint_key = entity_ref_canonical(entity_ref_provisional(constraint.constraint_uid))
+                if constraint_ids.contains(constraint_key): return Err("SCVDB_SCHEMA_CONSTRAINT_ID_COLLISION")
+                constraint_ids.push(constraint_key)
+                for target in constraint.columns:
+                    val target_index = db_schema_column_index_v2(schema, target)
+                    if target_index < 0: return Err("SCVDB_SCHEMA_CONSTRAINT_TARGET")
+                    if schema.columns[target_index].tombstone: return Err("SCVDB_SCHEMA_CONSTRAINT_TARGET")
+    var operations: [text] = []
+    for receipt in schema.applied_operations:
+        val checked_operation = db_schema_uid_validate_v2(receipt.operation_uid, "migration", namespace)?
+        val key = entity_ref_canonical(entity_ref_provisional(receipt.operation_uid))
+        if operations.contains(key): return Err("SCVDB_SCHEMA_OPERATION_COLLISION")
+        if not db_schema_digest_valid_v2(receipt.payload_digest): return Err("SCVDB_SCHEMA_OPERATION_DIGEST")
+        operations.push(key)
+    Ok(true)
+
+fn db_cell_address_validate_v2(address: DbCellAddressV2) -> Result<bool, text>:
+    val namespace = address.table_uid.database_namespace
+    val table_valid = db_schema_uid_validate_v2(address.table_uid, "table", namespace)?
+    val column_valid = db_schema_uid_validate_v2(address.column_uid, "column", namespace)?
+    if not entity_ref_validate(address.row).valid: return Err("SCVDB_SCHEMA_ROW_REFERENCE")
+    if val uid = address.row.provisional:
+        if uid.database_namespace != namespace: return Err("SCVDB_SCHEMA_ROW_NAMESPACE")
+    if val alias = address.row.settled:
+        if alias.database_namespace != namespace: return Err("SCVDB_SCHEMA_ROW_NAMESPACE")
+    Ok(true)
+
+export DbDefaultRuleV2, DbCellStateV2, DbConstraintDefinitionV2, DbColumnDefinitionV2
+export DbSchemaOperationReceiptV2, DbSchemaV2, DbCellAddressV2, DbSchemaChangeV2, DbSchemaOperationV2
+export db_schema_uid_equal_v2, db_schema_uid_validate_v2, db_schema_default_validate_v2
+export db_schema_digest_valid_v2
+export db_schema_value_type_v2, db_schema_default_type_v2
+export db_schema_column_index_v2, db_schema_column_validate_v2, db_schema_validate_v2, db_cell_address_validate_v2
