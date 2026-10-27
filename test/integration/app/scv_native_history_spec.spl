@@ -7,8 +7,13 @@ use std.spec.{describe, it, expect, step}
 use app.io.mod.{dir_create, file_write, file_delete}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.scv.core.{scv_object_path, scv_workspace_path, scv_bookmarks_path}
-use std.scv.store.{scv_init_repo, scv_hash_text, scv_write_tree_object, scv_write_commit_multi}
-use std.scv.history.{ScvHistoryLimits, scv_history_limits, scv_history_walk, scv_log_all_parents, scv_change_log}
+use std.scv.store.{scv_init_repo, scv_hash_text, scv_write_tree_object, scv_write_commit_with_change, scv_commit_change}
+use std.scv.history.{ScvHistoryLimits, ScvHistoryRevision, scv_history_limits, scv_history_walk, scv_log_all_parents, scv_change_log}
+
+fn history_error(result: Result<[ScvHistoryRevision], text>) -> text:
+    match result:
+        Ok(_): "unexpected successful history"
+        Err(error): error
 
 fn history_repo(tag: text) -> text:
     val root = "/tmp/scv-native-history-{tag}-{current_time_ms()}"
@@ -18,7 +23,7 @@ fn history_repo(tag: text) -> text:
 
 fn history_commit(root: text, parents: [text], tag: text) -> text:
     val tree = scv_write_tree_object(root, [])
-    scv_write_commit_multi(root, parents, tree, "private_dirty", tag, "")
+    scv_write_commit_with_change(root, parents.join(" "), tree, "private_dirty", scv_hash_text("change", tag))
 
 fn history_alias(root: text, tag: text, parents: [text]) -> text:
     val id = scv_hash_text("commit", tag)
@@ -61,8 +66,7 @@ describe "Native SCV all-parent history":
         val b = history_alias(root, "cycle-b", [a])
         history_alias(root, "cycle-a", [b])
         val result = scv_history_walk(root, a, scv_history_limits())
-        expect(result.is_err()).to_be(true)
-        expect(result.unwrap_err()).to_contain("ERROR history cycle at {a}")
+        expect(history_error(result)).to_contain("ERROR history cycle at {a}")
 
     it "bounds nodes, parent edges, and cumulative decoded bytes":
         step("Traverse the same two-commit graph with independent small budgets")
@@ -72,19 +76,22 @@ describe "Native SCV all-parent history":
         val nodes = ScvHistoryLimits(max_commits: 1, max_edges: 10, max_bytes: 1048576)
         val edges = ScvHistoryLimits(max_commits: 10, max_edges: 1, max_bytes: 1048576)
         val bytes = ScvHistoryLimits(max_commits: 10, max_edges: 10, max_bytes: 1)
-        expect(scv_history_walk(root, child, nodes).unwrap_err()).to_contain("history commit limit")
-        expect(scv_history_walk(root, child, edges).unwrap_err()).to_contain("history edge limit")
-        expect(scv_history_walk(root, child, bytes).unwrap_err()).to_contain("history byte limit")
+        expect(history_error(scv_history_walk(root, child, nodes))).to_contain("history commit limit")
+        expect(history_error(scv_history_walk(root, child, edges))).to_contain("history edge limit")
+        expect(history_error(scv_history_walk(root, child, bytes))).to_contain("history byte limit")
 
     it "rejects nonregular objects and malformed required fields":
         step("Use a directory as a commit object, then duplicate a required field")
         val root = history_repo("read")
         val id = scv_hash_text("commit", "directory")
         expect(dir_create(scv_object_path(root, "commits", id), true)).to_be(true)
-        expect(scv_history_walk(root, id, scv_history_limits()).unwrap_err()).to_contain("cannot read history commit")
+        expect(history_error(scv_history_walk(root, id, scv_history_limits()))).to_contain("cannot read history commit")
         val bad = history_alias(root, "bad", [])
-        expect(file_write(scv_object_path(root, "commits", bad), "parents: \nparents: \n")).to_be(true)
-        expect(scv_history_walk(root, bad, scv_history_limits()).unwrap_err()).to_contain("invalid history commit")
+        val change = scv_hash_text("change", "fixture")
+        val tree = scv_hash_text("tree", "fixture")
+        val payload = "change: {change}\ntree: {tree}\nstate: private_dirty\nparents: \nparents: \n"
+        expect(file_write(scv_object_path(root, "commits", bad), payload)).to_be(true)
+        expect(history_error(scv_history_walk(root, bad, scv_history_limits()))).to_contain("duplicate parents")
 
     it "distinguishes unborn workspaces from missing bookmarks and unsafe references":
         step("Read an unborn workspace, absent bookmark, and corrupt workspace ref")
@@ -102,4 +109,28 @@ describe "Native SCV all-parent history":
         val root = history_repo("packed-only")
         val id = scv_hash_text("commit", "packed-only")
         expect(file_write("{root}/.scv/objects/packs/fixture.sdn", "commit: {id}\n")).to_be(true)
-        expect(scv_history_walk(root, id, scv_history_limits()).unwrap_err()).to_contain("cannot read history commit")
+        expect(history_error(scv_history_walk(root, id, scv_history_limits()))).to_contain("cannot read history commit")
+
+    it "reads v1 open changes from their latest even outside current workspace ancestry":
+        step("Select a v1 change after moving the workspace to an independent root")
+        val root = history_repo("selected-v1")
+        val selected = history_commit(root, [], "selected")
+        val other = history_commit(root, [], "other")
+        val change = scv_commit_change(root, selected)
+        expect(change == scv_commit_change(root, other)).to_be(false)
+        expect(file_write(scv_object_path(root, "changes", change), "latest: {selected}\npredecessors: \n")).to_be(true)
+        expect(file_write(scv_workspace_path(root), "default: {other}\n")).to_be(true)
+        val out = scv_change_log(root, change)
+        expect(out).to_contain("change_id {change} state=open latest={selected}")
+        expect(out).to_contain("commit_id {selected} ")
+        expect(out.contains("commit_id {other} ")).to_be(false)
+
+    it "rejects a change record pointing at another logical change":
+        step("Replace selected latest with an unrelated revision")
+        val root = history_repo("mismatch")
+        val selected = history_commit(root, [], "selected")
+        val other = history_commit(root, [], "other")
+        val change = scv_commit_change(root, selected)
+        expect(change == scv_commit_change(root, other)).to_be(false)
+        expect(file_write(scv_object_path(root, "changes", change), "latest: {other}\nstate: open\n")).to_be(true)
+        expect(scv_change_log(root, change)).to_contain("ERROR history change latest mismatch")
