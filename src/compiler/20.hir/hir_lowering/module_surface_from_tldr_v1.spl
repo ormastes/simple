@@ -18,9 +18,7 @@
 # Returns nil (fail closed) if ANY fallback| row exists, if a function sig has
 # no return type, or if the stub does not parse.
 #
-# Known limits: impl blocks are ordered by their sorted row text (source order
-# is not in the summary), so a module with several impls can digest differently
-# from its source; a `extern`/bodyless header is kept as written.
+# Known limits: a `extern`/bodyless header is kept as written.
 
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.parser_types.{ParserModule}
@@ -31,6 +29,14 @@ use compiler.common.driver_core_types.{SourceFile}
 fn _tldr_first_line(block: text) -> text:
     val nl = block.index_of("\n")
     if nl < 0: block else: block.substring(0, nl)
+
+# Extract impl block headers in source order from the impls| row.
+fn _tldr_impls_source_order_v1(rows: [text]) -> [text]:
+    for row in rows:
+        if row.starts_with("impls|"):
+            val specs = row.substring(6).split("\n")
+            return specs
+    []
 
 # Indented member headers of an impl / trait row get a `pass` body so the stub parses.
 fn _tldr_impl_with_bodies(block: text) -> text:
@@ -90,9 +96,25 @@ pub fn module_surface_tldr_stub_source_v1(rows: [text]) -> text?:
             parts.push(sig + "\n    pass")
         else:
             parts.push(sig)
-    for row in rows:
-        if row.starts_with("impl|"):
-            parts.push(_tldr_impl_with_bodies(row.substring(5)))
+    val impl_order = _tldr_impls_source_order_v1(rows)
+    if impl_order.len() > 0:
+        var used: [bool] = []
+        for r in rows:
+            used.push(false)
+        for header in impl_order:
+            val want = header.trim()
+            var i = 0
+            while i < rows.len():
+                val row = rows[i]
+                if not used[i] and row.starts_with("impl|") and _tldr_first_line(row.substring(5)).trim() == want:
+                    used[i] = true
+                    parts.push(_tldr_impl_with_bodies(row.substring(5)))
+                    break
+                i = i + 1
+    else:
+        for row in rows:
+            if row.starts_with("impl|"):
+                parts.push(_tldr_impl_with_bodies(row.substring(5)))
     Some(parts.join("\n") + "\n")
 
 pub fn module_surface_tldr_stub_module_v1(module_id: text, rows: [text]) -> ParserModule?:

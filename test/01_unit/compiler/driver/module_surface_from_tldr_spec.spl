@@ -51,34 +51,22 @@ describe "module_surface_from_tldr_v1":
         expect(surf.composite_names.contains("Point")).to_equal(true)
 
     it "returns None when a fallback row is present":
-        # Fixture with unsupported construct
+        # Fixture with unsupported construct (macro keyword)
         val SOURCE_WITH_FALLBACK: text = """
-        pub fn normal() -> i64:
-            1
+pub fn normal() -> i64:
+    1
 
-        extend enum SomeEnum:
-            NewVariant
-        """
+macro some_macro():
+    pass
+"""
         val tldr_entries = tldr_summary_entries_v1("test.module", SOURCE_WITH_FALLBACK)
-        var has_fallback = false
-        for row in tldr_entries:
-            if row.starts_with("fallback|"):
-                has_fallback = true
-
-        # Whether it has a fallback depends on the source, but our function must handle it
         val surface = module_surface_from_tldr_v1("test.module", tldr_entries)
-        if has_fallback:
-            expect(surface == nil).to_equal(true)
-        else:
-            expect(surface != nil).to_equal(true)
+        expect(surface == nil).to_equal(true)
 
     it "returns None when a function has no return type":
         val tldr_entries = tldr_summary_entries_v1("test.module", SOURCE_FN_NO_RETURN)
         val surface = module_surface_from_tldr_v1("test.module", tldr_entries)
-        # Function with no return type should cause surface to be nil
-        # (depending on how TLDR represents it)
-        # This test checks the expected behavior
-        pass_do_nothing
+        expect(surface == nil).to_equal(true)
 
     it "produces a surface with matching declaration names as source-parsed surface":
         # Parse the source normally
@@ -202,3 +190,66 @@ describe "module_surface_from_tldr_v1 digest and layout equality":
         expect(tldr_surface.enum_names).to_equal(source_surface.enum_names)
         expect(tldr_surface.trait_names).to_equal(source_surface.trait_names)
         expect(tldr_surface.constant_names).to_equal(source_surface.constant_names)
+
+    it "emits impl blocks in source order for 2+ impls in non-alphabetical order":
+        val SOURCE_MULTI_IMPLS: text = """
+pub trait Alpha:
+    fn alpha_fn(self) -> i64
+
+pub trait Zebra:
+    fn zebra_fn(self) -> i64
+
+pub struct Target:
+    val: i64
+
+impl Zebra for Target:
+    fn zebra_fn(self) -> i64:
+        self.val
+
+impl Alpha for Target:
+    fn alpha_fn(self) -> i64:
+        self.val + 1
+"""
+        val parsed = parse_and_build_module(SOURCE_MULTI_IMPLS, "test/multi_impls.spl")
+        val from_source = module_surface_canonical_digest_v1(parsed)
+
+        val tldr_rows = tldr_summary_entries_v1("test.multi_impls", SOURCE_MULTI_IMPLS)
+        val stub = module_surface_tldr_stub_module_v1("test.multi_impls", tldr_rows)
+        expect(stub != nil).to_equal(true)
+        val from_summary = module_surface_canonical_digest_v1(stub.unwrap())
+
+        # Both digests should be identical, proving source order is preserved
+        expect(from_summary).to_equal(from_source)
+
+    it "does not duplicate identical impl headers":
+        val SOURCE_DUP_IMPLS: text = """
+pub struct X:
+    v: i64
+
+pub struct Y:
+    v: i64
+
+impl X:
+    fn a(self) -> i64:
+        1
+
+impl X:
+    fn b(self) -> i64:
+        2
+
+impl X:
+    fn c(self) -> i64:
+        3
+
+impl Y:
+    fn d(self) -> i64:
+        4
+"""
+        val parsed = parse_and_build_module(SOURCE_DUP_IMPLS, "test/dup_impls.spl")
+        val from_source = module_surface_canonical_digest_v1(parsed)
+        val tldr_rows = tldr_summary_entries_v1("test.dup_impls", SOURCE_DUP_IMPLS)
+        val stub = module_surface_tldr_stub_module_v1("test.dup_impls", tldr_rows)
+        expect(stub != nil).to_equal(true)
+        expect(module_surface_canonical_digest_v1(stub.unwrap())).to_equal(from_source)
+        val surf = module_surface_from_tldr_v1("test.dup_impls", tldr_rows).unwrap()
+        expect(surf.impls.len()).to_equal(4)

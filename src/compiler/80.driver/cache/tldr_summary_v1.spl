@@ -12,7 +12,7 @@
 # Decl identity = (module_id, stable_symbol_id).
 #
 # Wire form:
-#   tldr-summary-v1\nmodule: <id>\nsource: sha256:<hex>\ndigest: sha256:<hex>\n
+#   tldr-summary-v1.1\nmodule: <id>\nsource: sha256:<hex>\ndigest: sha256:<hex>\n
 #   <section records, sorted>
 # `digest` is sha256 over the full rendered section body (struct fields,
 # signatures, variants), NOT interface_digest_of_source (under-captures fields).
@@ -37,7 +37,7 @@ use compiler.semantics.symbol_id.stable_id.{SymbolComponents, stable_symbol_id}
 
 extern fn rt_process_start_identity(pid: i64) -> i64
 
-val TLDR_SUMMARY_MAGIC_V1: text = "tldr-summary-v1"
+val TLDR_SUMMARY_MAGIC_V1: text = "tldr-summary-v1.1"
 val TLDR_PUBLISH_RETRIES_V1: i64 = 8
 val TLDR_LEASE_WAIT_STEPS_V1: i64 = 200
 
@@ -99,6 +99,7 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
     val lines = source.replace("\r\n", "\n").split("\n")
     var exported: [text] = []
     var use_stmts: [text] = []
+    var impl_stmts: [text] = []
     var attrs: [text] = []
     var li = 0
     while li < lines.len():
@@ -125,7 +126,13 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
                 stmt = stmt + "\n" + lines[li]
                 li = li + 1
             use_stmts.push(stmt)
-        if word == "import" or word == "impl" or word == "extend" or (word == "use" and not is_pub):
+        if word == "impl" or word == "extend":
+            # Source-ordered impl block header.
+            var impl_header = line.trim()
+            impl_stmts.push(impl_header)
+            attrs = []
+            continue
+        if word == "import" or (word == "use" and not is_pub):
             attrs = []
             continue
         if word == "use" or (word == "export" and rest.starts_with("use ")):
@@ -178,6 +185,8 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
         out.push("export|" + name)
     if use_stmts.len() > 0:
         out.push("use|" + use_stmts.join("\n"))
+    if impl_stmts.len() > 0:
+        out.push("impls|" + impl_stmts.join("\n"))
     out.sorted()
 
 pub fn tldr_summary_produce_v1(module_id: text, source: text) -> text:
