@@ -1,0 +1,450 @@
+# @no_gc
+# Internal fixed-capacity scalar arena for LocklessMapI64 and AsyncRefI64.
+#
+# This file deliberately has no SimpleRing, scheduler, Future, or executor
+# dependency. Handles are same-process raw-scope identities and remain valid
+# only until the owning map is closed after quiescence.
+
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64}
+use std.nogc_async_mut.atomic.{rt_par_atomic_i64_is_lock_free, rt_par_atomic_load_i64}
+
+extern fn rt_par_atomic_cmpxchg_i64(addr: i64, expected: i64, value: i64) -> i64
+
+const _CORE_MAGIC: i64 = 1280135504
+const _CORE_HEADER_BYTES: i64 = 64
+const _CORE_DESC_WORDS: i64 = 5
+const _CORE_OUTCOME_WORDS: i64 = 2
+const _CORE_WAITER_WORDS: i64 = 6
+const _CORE_MAX_CAPACITY: i64 = 1000000
+
+const CORE_CREATE_INVALID: i64 = 1
+const CORE_CREATE_UNSUPPORTED_ATOMICS: i64 = 2
+const CORE_CREATE_ALLOCATION_FAILED: i64 = 3
+const CORE_REQUEST_INVALID_SCOPE: i64 = -1
+const CORE_REQUEST_FULL: i64 = -2
+const CORE_REQUEST_DESCRIPTOR_FULL: i64 = -3
+const CORE_REQUEST_RECIPE_CONFLICT: i64 = -4
+const CORE_PUBLISH_INVALID_REF: i64 = -1
+const CORE_PUBLISH_NOT_STARTED: i64 = -2
+const CORE_PUBLISH_OUTCOME_FULL: i64 = -3
+const CORE_SUBSCRIBE_INVALID: i64 = -1
+const CORE_SUBSCRIBE_WAITER_FULL: i64 = -2
+
+const CORE_OUTCOME_SUCCESS: i64 = 1
+const CORE_OUTCOME_FAILURE: i64 = 2
+const CORE_WAITER_PENDING: i64 = 1
+const CORE_WAITER_CANCELLED: i64 = 2
+const CORE_WAITER_ACKED: i64 = 4
+
+fn _core_find_waiter_token_i64(
+    scope: i64, head_id: i64, ring_id: u64, slot: u64, generation: u64
+) -> i64:
+    var waiter_id = head_id
+    while waiter_id > 0:
+        val waiter = _core_waiter(scope, waiter_id - 1)
+        val same_token =
+            (rt_ptr_read_i64(waiter, 8) as u64) == ring_id and
+            (rt_ptr_read_i64(waiter, 16) as u64) == slot and
+            (rt_ptr_read_i64(waiter, 24) as u64) == generation
+        if same_token:
+            return waiter_id
+        waiter_id = rt_ptr_read_i64(waiter, 32)
+    0
+
+pub struct CoreCreateI64:
+    scope: i64
+    error: i64
+
+# Every exported core entry point below carries a copyable raw arena address.
+# Callers must prove that the scope is live and quiescently owned.
+@unsafe(reason: "returns a copyable raw arena scope; caller must retain it through all users", capabilities: [ffi])
+pub fn core_create_i64(
+    key_capacity: i64,
+    descriptor_capacity: i64,
+    outcome_capacity: i64,
+    waiter_capacity: i64
+) -> CoreCreateI64:
+    # Each published descriptor needs one terminal outcome. Requiring this
+    # bound makes OutcomeFull unreachable for an admitted key when the single
+    # try_start winner obeys the exclusive completion contract.
+    if key_capacity <= 0 or descriptor_capacity <= 0 or outcome_capacity < descriptor_capacity or waiter_capacity <= 0:
+        return CoreCreateI64(scope: 0, error: CORE_CREATE_INVALID)
+    if key_capacity > _CORE_MAX_CAPACITY or descriptor_capacity > _CORE_MAX_CAPACITY or
+       outcome_capacity > _CORE_MAX_CAPACITY or waiter_capacity > _CORE_MAX_CAPACITY:
+        return CoreCreateI64(scope: 0, error: CORE_CREATE_INVALID)
+
+    val directory_bytes = key_capacity * 8
+    val descriptor_bytes = descriptor_capacity * _CORE_DESC_WORDS * 8
+    val outcome_bytes = outcome_capacity * _CORE_OUTCOME_WORDS * 8
+    val waiter_bytes = waiter_capacity * _CORE_WAITER_WORDS * 8
+    val descriptor_start = _CORE_HEADER_BYTES + directory_bytes
+    val outcome_start = descriptor_start + descriptor_bytes
+    val waiter_start = outcome_start + outcome_bytes
+    val total_bytes = waiter_start + waiter_bytes
+    if total_bytes <= 0:
+        return CoreCreateI64(scope: 0, error: CORE_CREATE_INVALID)
+
+    val scope = rt_alloc(total_bytes)
+    if scope == 0:
+        return CoreCreateI64(scope: 0, error: CORE_CREATE_ALLOCATION_FAILED)
+
+    rt_ptr_write_i64(scope, 0, _CORE_MAGIC)
+    rt_ptr_write_i64(scope, 8, key_capacity)
+    rt_ptr_write_i64(scope, 16, descriptor_capacity)
+    rt_ptr_write_i64(scope, 24, outcome_capacity)
+    rt_ptr_write_i64(scope, 32, waiter_capacity)
+    rt_ptr_write_i64(scope, 40, 0)
+    rt_ptr_write_i64(scope, 48, 0)
+    rt_ptr_write_i64(scope, 56, 0)
+    val atomic_supported = unsafe(capabilities: [ffi]):
+        rt_par_atomic_i64_is_lock_free(scope + 40)
+    if atomic_supported != 1:
+        rt_free(scope)
+        return CoreCreateI64(scope: 0, error: CORE_CREATE_UNSUPPORTED_ATOMICS)
+    var index = 0
+    while index < key_capacity:
+        rt_ptr_write_i64(scope, _CORE_HEADER_BYTES + index * 8, 0)
+        index = index + 1
+    index = 0
+    while index < descriptor_capacity:
+        val base = descriptor_start + index * _CORE_DESC_WORDS * 8
+        rt_ptr_write_i64(scope, base, 0)
+        rt_ptr_write_i64(scope, base + 8, 0)
+        rt_ptr_write_i64(scope, base + 16, 0)
+        rt_ptr_write_i64(scope, base + 24, 0)
+        rt_ptr_write_i64(scope, base + 32, 0)
+        index = index + 1
+    index = 0
+    while index < outcome_capacity:
+        val base = outcome_start + index * _CORE_OUTCOME_WORDS * 8
+        rt_ptr_write_i64(scope, base, 0)
+        rt_ptr_write_i64(scope, base + 8, 0)
+        index = index + 1
+    index = 0
+    while index < waiter_capacity:
+        val base = waiter_start + index * _CORE_WAITER_WORDS * 8
+        rt_ptr_write_i64(scope, base, 0)
+        rt_ptr_write_i64(scope, base + 8, 0)
+        rt_ptr_write_i64(scope, base + 16, 0)
+        rt_ptr_write_i64(scope, base + 24, 0)
+        rt_ptr_write_i64(scope, base + 32, 0)
+        rt_ptr_write_i64(scope, base + 40, 0)
+        index = index + 1
+    CoreCreateI64(scope: scope, error: 0)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope", capabilities: [ffi])
+pub fn core_valid_scope_i64(scope: i64) -> bool:
+    scope != 0 and rt_ptr_read_i64(scope, 0) == _CORE_MAGIC
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope", capabilities: [ffi])
+pub fn core_key_capacity_i64(scope: i64) -> i64:
+    rt_ptr_read_i64(scope, 8)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope", capabilities: [ffi])
+pub fn core_descriptor_capacity_i64(scope: i64) -> i64:
+    rt_ptr_read_i64(scope, 16)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope", capabilities: [ffi])
+pub fn core_waiter_capacity_i64(scope: i64) -> i64:
+    rt_ptr_read_i64(scope, 32)
+
+@unsafe(reason: "frees a raw arena; caller proves every handle and user is quiescent", capabilities: [ffi])
+pub fn core_close_quiescent_i64(scope: i64):
+    if core_valid_scope_i64(scope):
+        rt_ptr_write_i64(scope, 0, 0)
+        rt_free(scope)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope", capabilities: [ffi])
+pub fn core_request_i64(scope: i64, key: i64, recipe_id: i64) -> i64:
+    if not core_valid_scope_i64(scope):
+        return CORE_REQUEST_INVALID_SCOPE
+    val key_capacity = core_key_capacity_i64(scope)
+    var probe = 0
+    var bucket = _core_bucket(key, key_capacity)
+    while probe < key_capacity:
+        val cell = _core_directory_cell(scope, bucket)
+        val published = _core_load(cell)
+        if published != 0:
+            val entry_id = published - 1
+            val descriptor = _core_descriptor(scope, entry_id)
+            if rt_ptr_read_i64(descriptor, 0) == key:
+                if rt_ptr_read_i64(descriptor, 8) != recipe_id:
+                    return CORE_REQUEST_RECIPE_CONFLICT
+                return entry_id + 1
+            bucket = _core_next_bucket(bucket, key_capacity)
+            probe = probe + 1
+        else:
+            val candidate = _core_reserve(scope + 40, rt_ptr_read_i64(scope, 16))
+            if candidate < 0:
+                val existing = core_find_i64(scope, key)
+                if existing > 0:
+                    val descriptor = _core_descriptor(scope, existing - 1)
+                    if rt_ptr_read_i64(descriptor, 8) != recipe_id:
+                        return CORE_REQUEST_RECIPE_CONFLICT
+                    return existing
+                return CORE_REQUEST_DESCRIPTOR_FULL
+            val descriptor = _core_descriptor(scope, candidate)
+            rt_ptr_write_i64(descriptor, 0, key)
+            rt_ptr_write_i64(descriptor, 8, recipe_id)
+            rt_ptr_write_i64(descriptor, 16, 0)
+            rt_ptr_write_i64(descriptor, 24, 0)
+            rt_ptr_write_i64(descriptor, 32, 0)
+            val previous = rt_par_atomic_cmpxchg_i64(cell, 0, candidate + 1)
+            if previous == 0:
+                return candidate + 1
+    CORE_REQUEST_FULL
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope", capabilities: [ffi])
+pub fn core_find_i64(scope: i64, key: i64) -> i64:
+    if not core_valid_scope_i64(scope):
+        return 0
+    val key_capacity = core_key_capacity_i64(scope)
+    var probe = 0
+    var bucket = _core_bucket(key, key_capacity)
+    while probe < key_capacity:
+        val published = _core_load(_core_directory_cell(scope, bucket))
+        if published == 0:
+            return 0
+        val entry_id = published - 1
+        val descriptor = _core_descriptor(scope, entry_id)
+        if rt_ptr_read_i64(descriptor, 0) == key:
+            return entry_id + 1
+        bucket = _core_next_bucket(bucket, key_capacity)
+        probe = probe + 1
+    0
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and entry index", capabilities: [ffi])
+pub fn core_valid_ref_i64(scope: i64, entry: i64) -> bool:
+    entry > 0 and core_valid_scope_i64(scope) and entry - 1 < core_descriptor_capacity_i64(scope)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and entry index", capabilities: [ffi])
+pub fn core_try_start_i64(scope: i64, entry: i64) -> bool:
+    if not core_valid_ref_i64(scope, entry):
+        return false
+    val descriptor = _core_descriptor(scope, entry - 1)
+    rt_par_atomic_cmpxchg_i64(descriptor + 24, 0, 1) == 0
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and entry index", capabilities: [ffi])
+pub fn core_outcome_i64(scope: i64, entry: i64) -> i64:
+    if not core_valid_ref_i64(scope, entry):
+        return 0
+    _core_load(_core_descriptor(scope, entry - 1) + 16)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and outcome index", capabilities: [ffi])
+pub fn core_outcome_kind_i64(scope: i64, outcome_id: i64) -> i64:
+    rt_ptr_read_i64(_core_outcome(scope, outcome_id - 1), 0)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and outcome index", capabilities: [ffi])
+pub fn core_outcome_value_i64(scope: i64, outcome_id: i64) -> i64:
+    rt_ptr_read_i64(_core_outcome(scope, outcome_id - 1), 8)
+
+# The caller must be the single non-overlapping, non-cancellable completion
+# publisher admitted by try_start for this entry. If it stops after reserving
+# an outcome but before publishing it, the entire scope must be abandoned;
+# supervisor retry is unsupported because the reservation cannot be reclaimed.
+# Concurrent competing publishers also consume bounded candidate outcomes.
+@unsafe(reason: "publishes through a raw scope; caller proves exclusive, non-cancellable completion", capabilities: [ffi])
+pub fn core_publish_i64(scope: i64, entry: i64, kind: i64, value: i64) -> i64:
+    if not core_valid_ref_i64(scope, entry):
+        return CORE_PUBLISH_INVALID_REF
+    val descriptor = _core_descriptor(scope, entry - 1)
+    if _core_load(descriptor + 16) != 0:
+        return 0
+    if _core_load(descriptor + 24) != 1:
+        return CORE_PUBLISH_NOT_STARTED
+    val outcome_id = _core_reserve(scope + 48, rt_ptr_read_i64(scope, 24))
+    if outcome_id < 0:
+        if _core_load(descriptor + 16) != 0:
+            return 0
+        return CORE_PUBLISH_OUTCOME_FULL
+    val outcome = _core_outcome(scope, outcome_id)
+    rt_ptr_write_i64(outcome, 0, kind)
+    rt_ptr_write_i64(outcome, 8, value)
+    if rt_par_atomic_cmpxchg_i64(descriptor + 16, 0, outcome_id + 1) == 0: 1 else: 0
+
+@unsafe(reason: "dereferences and mutates a caller-supplied raw arena scope and entry index", capabilities: [ffi])
+pub fn core_subscribe_i64(scope: i64, entry: i64, ring_id: u64, slot: u64, generation: u64) -> i64:
+    if not core_valid_ref_i64(scope, entry):
+        return CORE_SUBSCRIBE_INVALID
+    val descriptor = _core_descriptor(scope, entry - 1)
+    # Fast idempotence check avoids consuming waiter capacity. Repeat it after
+    # each failed head CAS below to close concurrent duplicate-token races.
+    # Existing interests are checked before terminal state so a canceled
+    # subscription remains idempotent after the shared result completes.
+    var initial_head = _core_load(descriptor + 32)
+    var initial_id = _core_find_waiter_token_i64(scope, initial_head, ring_id, slot, generation)
+    var terminal_without_interest = false
+    while initial_id == 0:
+        if _core_load(descriptor + 16) == 0:
+            break
+        val latest_head = _core_load(descriptor + 32)
+        if latest_head == initial_head:
+            terminal_without_interest = true
+            break
+        initial_head = latest_head
+        initial_id = _core_find_waiter_token_i64(scope, initial_head, ring_id, slot, generation)
+    if initial_id > 0:
+        return initial_id
+    if terminal_without_interest:
+        return 0
+    val waiter_id = _core_reserve(scope + 56, rt_ptr_read_i64(scope, 32))
+    if waiter_id < 0:
+        var full_check = _core_load(descriptor + 32)
+        var full_existing = _core_find_waiter_token_i64(scope, full_check, ring_id, slot, generation)
+        while full_existing == 0:
+            val is_terminal = _core_load(descriptor + 16) != 0
+            val latest_head = _core_load(descriptor + 32)
+            if latest_head != full_check:
+                full_check = latest_head
+                full_existing = _core_find_waiter_token_i64(scope, full_check, ring_id, slot, generation)
+            else:
+                if is_terminal:
+                    return 0
+                return CORE_SUBSCRIBE_WAITER_FULL
+        return full_existing
+    val waiter = _core_waiter(scope, waiter_id)
+    rt_ptr_write_i64(waiter, 0, entry)
+    rt_ptr_write_i64(waiter, 8, ring_id as i64)
+    rt_ptr_write_i64(waiter, 16, slot as i64)
+    rt_ptr_write_i64(waiter, 24, generation as i64)
+    rt_ptr_write_i64(waiter, 40, CORE_WAITER_PENDING)
+    var head = _core_load(descriptor + 32)
+    var linked = false
+    while not linked:
+        var existing_id = head
+        while existing_id != 0:
+            val existing = _core_waiter(scope, existing_id - 1)
+            val same_token =
+                (rt_ptr_read_i64(existing, 8) as u64) == ring_id and
+                (rt_ptr_read_i64(existing, 16) as u64) == slot and
+                (rt_ptr_read_i64(existing, 24) as u64) == generation
+            if same_token:
+                return existing_id
+            existing_id = rt_ptr_read_i64(existing, 32)
+        rt_ptr_write_i64(waiter, 32, head)
+        val previous = rt_par_atomic_cmpxchg_i64(descriptor + 32, head, waiter_id + 1)
+        if previous == head:
+            linked = true
+        else:
+            head = previous
+    # Completion racing registration is not consumer cancellation. Keep the
+    # linked interest live; poll observes an already-ready outcome, and the
+    # owner can still drain its wake record. Never synthesize CANCELLED here.
+    waiter_id + 1
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and entry index", capabilities: [ffi])
+pub fn core_waiter_head_i64(scope: i64, entry: i64) -> i64:
+    if not core_valid_ref_i64(scope, entry):
+        return 0
+    _core_load(_core_descriptor(scope, entry - 1) + 32)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_waiter_next_i64(scope: i64, waiter: i64) -> i64:
+    if not core_valid_waiter_i64(scope, waiter):
+        return 0
+    rt_ptr_read_i64(_core_waiter(scope, waiter - 1), 32)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_valid_waiter_i64(scope: i64, waiter: i64) -> bool:
+    waiter > 0 and core_valid_scope_i64(scope) and waiter <= core_waiter_capacity_i64(scope)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_waiter_owner_i64(scope: i64, waiter: i64) -> i64:
+    if not core_valid_waiter_i64(scope, waiter):
+        return 0
+    rt_ptr_read_i64(_core_waiter(scope, waiter - 1), 0)
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_waiter_ring_id_i64(scope: i64, waiter: i64) -> u64:
+    if not core_valid_waiter_i64(scope, waiter):
+        return 0u64
+    rt_ptr_read_i64(_core_waiter(scope, waiter - 1), 8) as u64
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_waiter_slot_i64(scope: i64, waiter: i64) -> u64:
+    if not core_valid_waiter_i64(scope, waiter):
+        return 0u64
+    rt_ptr_read_i64(_core_waiter(scope, waiter - 1), 16) as u64
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_waiter_generation_i64(scope: i64, waiter: i64) -> u64:
+    if not core_valid_waiter_i64(scope, waiter):
+        return 0u64
+    rt_ptr_read_i64(_core_waiter(scope, waiter - 1), 24) as u64
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_waiter_active_i64(scope: i64, waiter: i64) -> bool:
+    if not core_valid_waiter_i64(scope, waiter):
+        return false
+    _core_load(_core_waiter(scope, waiter - 1) + 40) == CORE_WAITER_PENDING
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_waiter_cancelled_i64(scope: i64, waiter: i64) -> bool:
+    if not core_valid_waiter_i64(scope, waiter):
+        return false
+    _core_load(_core_waiter(scope, waiter - 1) + 40) == CORE_WAITER_CANCELLED
+
+@unsafe(reason: "mutates a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_waiter_ack_i64(scope: i64, waiter: i64) -> bool:
+    if not core_valid_waiter_i64(scope, waiter):
+        return false
+    rt_par_atomic_cmpxchg_i64(_core_waiter(scope, waiter - 1) + 40, CORE_WAITER_PENDING, CORE_WAITER_ACKED) == CORE_WAITER_PENDING
+
+@unsafe(reason: "mutates a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_cancel_i64(scope: i64, waiter: i64) -> bool:
+    if not core_valid_waiter_i64(scope, waiter):
+        return false
+    rt_par_atomic_cmpxchg_i64(_core_waiter(scope, waiter - 1) + 40, CORE_WAITER_PENDING, CORE_WAITER_CANCELLED) == CORE_WAITER_PENDING
+
+@unsafe(reason: "dereferences a caller-supplied raw arena scope and waiter index", capabilities: [ffi])
+pub fn core_waiter_state_i64(scope: i64, waiter: i64) -> i64:
+    if not core_valid_waiter_i64(scope, waiter):
+        return 0
+    _core_load(_core_waiter(scope, waiter - 1) + 40)
+
+fn _core_bucket(key: i64, capacity: i64) -> i64:
+    val remainder = key % capacity
+    if remainder < 0: remainder + capacity else: remainder
+
+fn _core_next_bucket(bucket: i64, capacity: i64) -> i64:
+    if bucket + 1 == capacity: 0 else: bucket + 1
+
+fn _core_directory_cell(scope: i64, bucket: i64) -> i64:
+    scope + _CORE_HEADER_BYTES + bucket * 8
+
+fn _core_descriptor(scope: i64, entry_id: i64) -> i64:
+    val start = _CORE_HEADER_BYTES + rt_ptr_read_i64(scope, 8) * 8
+    scope + start + entry_id * _CORE_DESC_WORDS * 8
+
+fn _core_outcome(scope: i64, outcome_id: i64) -> i64:
+    val start = _CORE_HEADER_BYTES + rt_ptr_read_i64(scope, 8) * 8 +
+        rt_ptr_read_i64(scope, 16) * _CORE_DESC_WORDS * 8
+    scope + start + outcome_id * _CORE_OUTCOME_WORDS * 8
+
+fn _core_waiter(scope: i64, waiter_id: i64) -> i64:
+    val start = _CORE_HEADER_BYTES + rt_ptr_read_i64(scope, 8) * 8 +
+        rt_ptr_read_i64(scope, 16) * _CORE_DESC_WORDS * 8 +
+        rt_ptr_read_i64(scope, 24) * _CORE_OUTCOME_WORDS * 8
+    scope + start + waiter_id * _CORE_WAITER_WORDS * 8
+
+fn _core_load(cell: i64) -> i64:
+    unsafe(capabilities: [ffi]): rt_par_atomic_load_i64(cell)
+
+fn _core_reserve(counter: i64, capacity: i64) -> i64:
+    var current = _core_load(counter)
+    while current < capacity:
+        val previous = rt_par_atomic_cmpxchg_i64(counter, current, current + 1)
+        if previous == current:
+            return current
+        current = previous
+    -1
+
+export CoreCreateI64, core_create_i64, core_valid_scope_i64, core_key_capacity_i64
+export core_descriptor_capacity_i64, core_waiter_capacity_i64, core_close_quiescent_i64
+export core_request_i64, core_find_i64, core_valid_ref_i64, core_try_start_i64
+export core_outcome_i64, core_outcome_kind_i64, core_outcome_value_i64, core_publish_i64
+export core_subscribe_i64, core_waiter_head_i64, core_waiter_next_i64
+export core_waiter_ring_id_i64, core_waiter_slot_i64, core_waiter_generation_i64
+export core_valid_waiter_i64, core_waiter_owner_i64, core_waiter_active_i64
+export core_waiter_cancelled_i64, core_waiter_ack_i64
+export core_cancel_i64, core_waiter_state_i64
