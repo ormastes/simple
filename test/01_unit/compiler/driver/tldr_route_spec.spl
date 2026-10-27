@@ -11,6 +11,10 @@ use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_flag_on_v1, tldr_c
     tldr_route_import_specs_v1, tldr_route_worker_v1, tldr_import_handle_fill_v1, tldr_import_generic_body_v1, tldr_imports_enabled_v1, tldr_imports_memo_reset_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_v1}
 use compiler.driver.driver.{compiler_driver_create}
+use compiler.driver.cache.tldr_summary_v1.{tldr_summary_entries_v1}
+use compiler.driver.driver_tldr_surface_register_v1.{driver_register_tldr_surfaces_v1}
+use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
 use compiler.common.driver_compile_options.{driver_core_compile_options_default}
 use compiler.common.driver_core_modes.{CompileMode}
 
@@ -228,3 +232,67 @@ describe "TLDR import route gap and guard sites (PR2c)":
         val p = src.index_of("native_build_closure_publish_once_v1(args, frontend_cache_dir")
         expect(g > 0).to_equal(true)
         expect(p > g).to_equal(true)
+
+# 3-module fixture leaf -> b -> a, resolvable from the fixture src/ root.
+# Differential: the same leaf lowers (None) when its imports are satisfied by
+# real surfaces (closure inputs) or by summary-built surfaces; it stops on
+# "missing module surface" with neither.
+fn lower_inputs(root: text, inputs: [text], extras: [text]) -> text:
+    var options = driver_core_compile_options_default()
+    options.input_files = inputs
+    options.mode = CompileMode.Check
+    options.bootstrap_input_count = 0
+    options.native_source_roots = ["src"]
+    options.native_source_snapshot_root = root
+    var driver = compiler_driver_create(options)
+    val (_ctx, loaded) = driver.load_sources_impl()
+    if not loaded:
+        return "load-failed"
+    if not driver.stage_parse().is_none():
+        return "parse-failed"
+    if extras.len() > 0:
+        var built: [ModuleSurface] = []
+        for module_id in extras:
+            val rows = tldr_summary_entries_v1(module_id, file_read(root + "/src/" + module_id.replace(".", "/") + ".spl"))
+            match module_surface_from_tldr_v1(module_id, rows):
+                case Some(surface): built.push(surface)
+                case nil: return "surface-build-failed:" + module_id
+        val registered = driver_register_tldr_surfaces_v1(driver, built)
+        if registered != "":
+            return "register-failed:" + registered
+    var gap = ""
+    match driver.stage_lower_hir("check", false):
+        case Some(stop):
+            match stop:
+                case TypeError(errs): gap = errs.join(" | ")
+                case ResolveError(errs): gap = errs.join(" | ")
+                case _: gap = "other"
+        case None: gap = "none"
+    gap
+
+describe "TLDR summary surfaces differential (PR2d)":
+    it "flag OFF with the full chain as inputs lowers the leaf":
+        val saved = with_flag("")
+        val root = fixture_root("diff_a")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        expect(lower_inputs(root, [leaf, mods["pkg.b"], mods["pkg.a"]], [])).to_equal("none")
+        restore_flag(saved)
+
+    it "leaf alone with no surfaces fails with missing module surface":
+        val saved = with_flag("")
+        val root = fixture_root("diff_b")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        expect(mods.len()).to_equal(3)
+        expect(lower_inputs(root, [leaf], []).contains("missing module surface")).to_equal(true)
+        restore_flag(saved)
+
+    it "leaf alone lowers when b and a surfaces are built from TLDR summaries":
+        val saved = with_flag("1")
+        val root = fixture_root("diff_c")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        expect(mods.len()).to_equal(3)
+        expect(lower_inputs(root, [leaf], ["pkg.b", "pkg.a"])).to_equal("none")
+        restore_flag(saved)
