@@ -1,0 +1,82 @@
+# @req REQ-SCV-GATEWAY-SNAPSHOT-REPLICATION-001
+# @cover src/lib/scv/gateway_snapshot_replication_v1.spl 80%
+use std.spec.*
+use std.scv.gateway_snapshot_replication_v1.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+fn snapshot_replication_fixture_v1() -> ScvGatewaySnapshotManifestV1:
+    val inventory = "src/main.spl|sha256_{sha256_u8_hex([0u8, 255u8, 65u8])}|3"
+    val inventory_digest = sha256_text(inventory)
+    val tree_id = "scv-tree-v1-{inventory_digest}"
+    val revision_id = scv_compile_snapshot_revision_id_v1(tree_id, inventory_digest)
+    val commit_hash = sha256_text("simple/scv-compile-commit/v1|{tree_id}|1")
+    val commit_id = "scv-compile-v1-" + commit_hash
+    val provenance = scv_compile_snapshot_provenance_v1(revision_id, commit_id,
+        tree_id, inventory_digest, 1)
+    ScvGatewaySnapshotManifestV1(version: 1, repository: "repo-alpha", principal_id: "principal-1",
+        source_domain: "compile-inventory-v1", config_digest: sha256_text("config fixture"),
+        revision_id: revision_id, commit_id: commit_id, tree_id: tree_id,
+        inventory_digest: inventory_digest, inventory_count: 1, provenance: provenance,
+        inventory: inventory, objects: [])
+
+describe "SCV compile snapshot replication manifest v1":
+    it "recomputes immutable snapshot identity and source rows from canonical inventory":
+        val manifest = snapshot_replication_fixture_v1()
+        val checked = scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-alpha", "principal-1")
+        expect(checked.is_ok()).to_equal(true)
+        expect(checked.unwrap().revision_id).to_equal(manifest.revision_id)
+        expect(checked.unwrap().source_paths).to_equal(["src/main.spl"])
+        expect(checked.unwrap().source_digests).to_equal([sha256_u8_hex([0u8, 255u8, 65u8])])
+
+    it "rejects a caller-declared root that does not match the actual inventory identity":
+        var manifest = snapshot_replication_fixture_v1()
+        manifest.revision_id = "scv-revision-v1-" + "0".repeat(64)
+        expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-alpha", "principal-1").is_err()).to_equal(true)
+
+    it "rejects noncanonical rows, duplicate paths, path-prefix collisions, and malformed counts":
+        var manifest = snapshot_replication_fixture_v1()
+        manifest.inventory = "src/main.spl|sha256_{sha256_u8_hex([0u8, 255u8, 65u8])}|03"
+        expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-alpha", "principal-1").is_err()).to_equal(true)
+        manifest = snapshot_replication_fixture_v1()
+        val digest = sha256_u8_hex([0u8, 255u8, 65u8])
+        manifest.inventory = "src/main.spl|sha256_{digest}|3\nsrc/main.spl|sha256_{digest}|3"
+        expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-alpha", "principal-1").is_err()).to_equal(true)
+        manifest = snapshot_replication_fixture_v1()
+        manifest.inventory = "src|sha256_{digest}|3\nsrc/main.spl|sha256_{digest}|3"
+        expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-alpha", "principal-1").is_err()).to_equal(true)
+
+    it "accepts an explicitly empty inventory without inventing source objects":
+        var manifest = snapshot_replication_fixture_v1()
+        manifest.inventory = ""
+        manifest.inventory_digest = sha256_text("")
+        manifest.inventory_count = 0
+        manifest.tree_id = "scv-tree-v1-{manifest.inventory_digest}"
+        manifest.revision_id = scv_compile_snapshot_revision_id_v1(manifest.tree_id,
+            manifest.inventory_digest)
+        val commit_hash = sha256_text("simple/scv-compile-commit/v1|{manifest.tree_id}|0")
+        manifest.commit_id = "scv-compile-v1-" + commit_hash
+        manifest.provenance = scv_compile_snapshot_provenance_v1(manifest.revision_id,
+            manifest.commit_id, manifest.tree_id, manifest.inventory_digest, 0)
+        val checked = scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-alpha", "principal-1").unwrap()
+        expect(checked.source_paths.len()).to_equal(0)
+
+    it "rejects a different repository or principal pin":
+        val manifest = snapshot_replication_fixture_v1()
+        expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-other", "principal-1").is_err()).to_equal(true)
+        expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-alpha", "principal-other").is_err()).to_equal(true)
+
+    it "requires each optional structural recipe to reconstruct its linked source bytes":
+        var manifest = snapshot_replication_fixture_v1()
+        manifest.structural_recipes = [ScvGatewayStructuralRecipeV1(path: "src/main.spl",
+            raw_content_id: "sha256_{sha256_u8_hex([0u8, 255u8, 65u8])}",
+            root_id: "syntax_node_" + "0".repeat(64), object_ids: [])]
+        expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-alpha", "principal-1").is_err()).to_equal(true)
