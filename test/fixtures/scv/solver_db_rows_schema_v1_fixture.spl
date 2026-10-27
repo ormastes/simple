@@ -1,0 +1,48 @@
+use std.scv.solver_contract_v1.*
+use std.scv.solver_db_rows_schema_v1.*
+use std.scv.db_schema_identity_v2.*
+use std.scv.db_schema_codec_v2.*
+use std.scv.db_schema_merge_v2.*
+use std.scv.db_schema_migration_v2.*
+use std.scv.db_reducer.*
+use std.scv.db_schema.{DbEntityConstraint}
+use std.scv.db_patch.*
+use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
+use std.scv.db_snapshot.{db_snapshot_encode, db_snapshot_decode}
+use std.scv.db_policy_codec.*
+use std.scv.db_admission.{DbAdmissionPolicy, db_admission_policy_digest}
+use std.scv.db_confidentiality.{DbMetadataPolicy, db_metadata_policy_digest}
+use std.scv.distributed_identity.{entity_ref_canonical, entity_ref_provisional}
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.scv.db_schema_v2_fixture.{setup_scv_fixture, setup_scv_schema_uid, setup_scv_legacy_patch, exercise_scv_schema_change}
+
+fn setup_scv_rows_schema_input_v1() -> DbRowsSchemaInputV1:
+    val original = setup_scv_fixture()
+    val uid = original.columns[0].column_uid
+    val rename = exercise_scv_schema_change(original, uid, 20u64, DbSchemaChangeV2.RenameColumn(uid, "summary"))
+    val current = db_schema_apply_v2(original, rename).unwrap()
+    val row = entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false))
+    var state = MaterializedState(rows: [DbRow(entity: entity_ref_canonical(row), kind: "task", fields: [DbField(name: "title", value: DbValue.Text("draft"))], revision: "row-v1", tombstoned: false)], accepted: [], revision: "")
+    state.revision = db_state_digest(state).unwrap()
+    var patch = setup_scv_legacy_patch("old-v1-schema")
+    patch.base_revision = state.revision
+    patch.operations = [DbOperation.UpdateFields(row, [FieldEdit(field: "title", before: DbValue.Text("draft"), after: DbValue.Text("edited offline"))], RowPrecondition(base_row: state.revision, expected_revision: "row-v1", expected_fields: [DbField(name: "title", value: DbValue.Text("draft"))]))]
+    patch = db_patch_seal(patch).unwrap()
+    var metadata = DbMetadataPolicy(revision: "", rules: [])
+    metadata.revision = db_metadata_policy_digest(metadata).unwrap()
+    var admission = DbAdmissionPolicy(revision: "", repository: patch.repository, namespace: patch.namespace, epoch: patch.epoch, schema_revision: patch.schema_revision, reducer_revision: patch.reducer_revision, keys: [], metadata: metadata)
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    val merge = MergePolicy(repository: patch.repository, namespace: patch.namespace, epoch: patch.epoch, schema_revision: patch.schema_revision, reducer_revision: patch.reducer_revision, fields: [DbFieldSchema(kind: "task", field: "title", rule: FieldMergeRule.ScalarConflict)], constraints: [DbEntityConstraint(kind: "task", key_fields: ["title"], unique_fields: ["title"], references: [])])
+    var config = DbPolicyConfig(revision: "", admission: admission, merge: merge)
+    config.revision = db_policy_digest(config).unwrap()
+    val historical = DbV1SchemaBindingV2(v1_schema_revision: patch.schema_revision, original_schema_revision: original.revision, binding_digest: db_schema_v1_binding_digest_v2(patch.schema_revision, original).unwrap())
+    DbRowsSchemaInputV1(submitted_snapshot: db_snapshot_encode(state).unwrap(), submitted_patch: db_patch_encode(patch).unwrap(), accepted_policy: db_policy_encode(config).unwrap(), accepted_policy_revision: config.revision, historical_binding: historical, accepted_original_schema: original, accepted_current_schema: current)
+
+fn freeze_scv_rows_schema_request_v1(input: DbRowsSchemaInputV1) -> SolveRequestV1:
+    val patch = db_patch_decode(input.submitted_patch).unwrap()
+    val state = db_snapshot_decode(input.submitted_snapshot).unwrap()
+    val config = db_policy_decode(input.accepted_policy, input.accepted_policy_revision).unwrap()
+    val binding = SolveBindingV1(repository: patch.repository, namespace: patch.namespace, domain: "db.rows", base_revision: state.revision, left_revision: patch.payload_digest, right_revision: config.revision, base_model_id: sha256_text(input.submitted_snapshot), left_model_id: sha256_text(input.submitted_patch), right_model_id: sha256_text(input.accepted_policy), expected_root: sha256_text(input.submitted_snapshot), schema_revision: input.accepted_current_schema.revision, policy_revision: config.revision, routing_revision: "accepted-db-schema-rows-route", identity_map_revision: solver_db_rows_schema_identity_v1(input).unwrap(), parser_lock_digest: "accepted-v1-patch-reader", solver_lock_digest: "accepted-db-uid-reducer", profile_digest: "db-rows-schema-v1", configuration_digest: config.revision, operation_bundle_digest: patch.payload_digest, authorization_scope: "draft-db-rows")
+    SolveRequestV1(request_id: "db-schema-rows-request", binding: binding, logical_work_budget: 10000000, memory_budget: 10000000, cancelled: false)
+
+export setup_scv_rows_schema_input_v1, freeze_scv_rows_schema_request_v1
