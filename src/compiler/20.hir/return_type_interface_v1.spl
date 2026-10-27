@@ -117,6 +117,18 @@ fn rti_last_segment(name: text) -> text:
         i = i + 1
     name.substring(cut)
 
+fn rti_qualified_free_callable_v1(name: text) -> DeclRef?:
+    """A carried module.function name is an identity, not a leaf-name hint.
+    Method owner syntax belongs to method_return, not this free-call route."""
+    if rti_method_parts(name).len() > 0: return nil
+    var cut = -1
+    var index = 0
+    while index < name.len():
+        if name.char_code_at(index) == 46: cut = index
+        index = index + 1
+    if cut <= 0 or cut + 1 >= name.len(): return nil
+    Some(rti_fn_ref(rti_module_id(name.substring(0, cut)), name.substring(cut + 1)))
+
 fn rti_kind_display(kind: SymbolKind) -> text:
     match kind:
         case SymbolKind.Struct: "struct"
@@ -621,6 +633,27 @@ impl ReturnTypeInterfaceTable:
             case _: Err(rti_error("E-RTI-001", "callee expression shape is not covered by RTI v1 (closures/indirect calls)"))
 
     fn fn_return(symbols: SymbolTable, raw: i64, name: text) -> Result<ReturnTypeEntry, RtiError>:
+        # NamedVar deliberately preserves this identity across HIR transport:
+        # a table rename (and module-local raw id) need not survive that pass.
+        # Match the call lowerer's carried-name authority, never a suffix or
+        # an accidentally valid raw id belonging to a different declaration.
+        if val qualified = rti_qualified_free_callable_v1(name):
+            # HIR carries the original declaration name even for an imported
+            # alias. A consumer alias must not rewrite or reject this owner.
+            if val row = self.row_at(qualified):
+                return Ok(row.entry)
+            # Infer/unannotated functions intentionally publish no row. Keep
+            # their existing no-answer path only when the raw table proves
+            # this same free declaration; never rewrite that proof by alias.
+            if val symbol = symbols.get_symbol_raw(raw):
+                match symbol.kind:
+                    case SymbolKind.Function:
+                        val own_module = rti_symbol_module(symbols, raw)
+                        val own_decl = rti_fn_ref(own_module, rti_last_segment(symbol.name))
+                        if own_module != "" and rti_decl_ref_same(own_decl, qualified):
+                            return Err(rti_error("E-RTI-001", "qualified callee '{name}' has no return-type row for the same declared callable"))
+                    case _: ()
+            return Err(rti_error("E-RTI-002", "qualified callee '{name}' has no exact return-type row; raw symbol fallback is not authoritative"))
         var target = raw
         if raw < 0:
             target = rti_wildcard_callable(symbols, name)?

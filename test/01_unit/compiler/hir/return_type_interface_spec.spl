@@ -266,6 +266,67 @@ describe "return-type interface v1":
         expect(err_message(miss).contains("'gone'")).to_equal(true)
         expect(err_message(miss).contains("'m.e'")).to_equal(true)
 
+    it "keeps a qualified carried callee authoritative across a raw id collision":
+        val local = path_spelled_hir("fn main() -> i64:\n    0\n", "src/rti_collision/local.spl")
+        val raw_main = function_named(local, "main").symbol.id
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(local).unwrap()
+        val payload = RtType.Nominal(rti_type_ref("m.left", "struct", "Payload"), [])
+        val expected = RtType.OptionalT(payload)
+        table.register_rows([decided_row("m.left", "maybe", expected, 0)]).unwrap()
+        val carried = table.fn_return(local.symbols, raw_main, "m.left.maybe").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(carried).unwrap())).to_equal(rti_term_canonical_text(expected))
+        val ordinary = table.fn_return(local.symbols, raw_main, "main").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(ordinary).unwrap())).to_equal("b:i64")
+
+    it "never replaces a missing qualified owner with a local or suffix match":
+        val local = path_spelled_hir("fn main() -> i64:\n    0\n", "src/rti_collision/local.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(local).unwrap()
+        table.register_rows([decided_row("m.left", "maybe", RtType.Builtin("bool"), 0)]).unwrap()
+        val missing = table.fn_return(local.symbols, function_named(local, "main").symbol.id, "m.absent.maybe")
+        expect(err_code(missing)).to_equal("E-RTI-002")
+
+    it "keeps missing inferred rows unknown only with exact raw declaration proof":
+        val local = path_spelled_hir("fn loose():\n    0\n", "src/rti_infer/local.spl")
+        val provider = path_spelled_hir("fn loose():\n    1\n", "src/rti_infer/provider.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        expect(table.register_hir_module(local).unwrap().skipped_infer).to_equal(1)
+        expect(table.register_hir_module(provider).unwrap().skipped_infer).to_equal(1)
+        val local_raw = function_named(local, "loose").symbol.id
+        val provider_raw = function_named(provider, "loose").symbol.id
+        expect(err_code(table.fn_return(local.symbols, local_raw, "rti_infer.local.loose"))).to_equal("E-RTI-001")
+        expect(err_code(table.fn_return(provider.symbols, provider_raw, "rti_infer.provider.loose"))).to_equal("E-RTI-001")
+        expect(err_code(table.fn_return(local.symbols, local_raw, "rti_infer.provider.loose"))).to_equal("E-RTI-002")
+
+    it "keeps original qualified declarations authoritative over consumer aliases":
+        val local = path_spelled_hir("fn main() -> i64:\n    0\n", "src/rti_collision/local.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_rows([decided_row("m.left", "maybe", RtType.OptionalT(RtType.Builtin("i32")), 0)]).unwrap()
+        table.register_rows([decided_row("m.left", "choose", RtType.Builtin("bool"), 0)]).unwrap()
+        table.record_alias("m.left#choose", "maybe")
+        # Imported `maybe as choose` carries m.left.maybe; a real declaration
+        # m.left.choose is a different exact owner even in this consumer.
+        val entry = table.fn_return(local.symbols, -1, "m.left.maybe").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(entry).unwrap())).to_equal("opt(b:i32)")
+        val collision = table.fn_return(local.symbols, -1, "m.left.choose").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(collision).unwrap())).to_equal("b:bool")
+        table.record_alias("m.left#choose", "other")
+        val explicit = table.fn_return(local.symbols, -1, "m.left.choose").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(explicit).unwrap())).to_equal("b:bool")
+
+    it "keeps wildcard ambiguity loud while exact qualified names stay distinct":
+        val local = path_spelled_hir("fn main() -> i64:\n    0\nfn other() -> bool:\n    true\n", "src/rti_collision/local.spl")
+        var symbols = local.symbols
+        symbols.module_callables["m.left#maybe"] = function_named(local, "main").symbol.id
+        symbols.module_callables["m.right#maybe"] = function_named(local, "other").symbol.id
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_rows([decided_row("m.left", "maybe", RtType.Builtin("i32"), 0)]).unwrap()
+        table.register_rows([decided_row("m.right", "maybe", RtType.Builtin("bool"), 0)]).unwrap()
+        expect(err_code(table.fn_return(symbols, -1, "maybe"))).to_equal("E-RTI-006")
+        val entry = table.fn_return(symbols, -1, "m.right.maybe").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(entry).unwrap())).to_equal("b:bool")
+
     it "lets MIR own bare Ok/Err arms over imported callees":
         val hirs = fixture_hirs()
         expect(mir_subject_kind(hirs, "via_fn")).to_equal("Result")
