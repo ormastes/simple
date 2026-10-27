@@ -25,18 +25,45 @@ fn hir_shard_record_publish(path: text, content: text) -> bool:
 
 # All claim/terminal mutations are serialized; a failed lock never falls back
 # to duplicate static writers. Claims are immutable until the invocation ends.
+# Claim result codes. 1 = claimed, 0 = another owner holds it, negative =
+# a named failure (hir_shard_claim_reason_v1) so the worker's error says why.
+pub const HIR_SHARD_CLAIM_INVALID_ARGS_V1: i64 = -1
+pub const HIR_SHARD_CLAIM_LOCK_TIMEOUT_V1: i64 = -2
+pub const HIR_SHARD_CLAIM_PUBLISH_FAILED_V1: i64 = -3
+pub const HIR_SHARD_CLAIM_INVALID_CLAIM_V1: i64 = -4
+pub const HIR_SHARD_CLAIM_LEDGER_BLOCKED_V1: i64 = -5
+pub const HIR_SHARD_CLAIM_LOCK_ATTEMPTS_V1: i64 = 3
+
+pub fn hir_shard_claim_reason_v1(code: i64) -> text:
+    if code == HIR_SHARD_CLAIM_INVALID_ARGS_V1: return "invalid-args (empty or multi-line owner/path/key)"
+    if code == HIR_SHARD_CLAIM_LOCK_TIMEOUT_V1: return "lock-timeout (ledger .lock not acquired after retries)"
+    if code == HIR_SHARD_CLAIM_PUBLISH_FAILED_V1: return "publish-failed (claim temp write or rename failed)"
+    if code == HIR_SHARD_CLAIM_INVALID_CLAIM_V1: return "invalid-claim (existing claim record is corrupt)"
+    if code == HIR_SHARD_CLAIM_LEDGER_BLOCKED_V1: return "ledger-blocked (another participant already blocked the ledger)"
+    if code < 0: return "unknown-claim-failure ({code})"
+    "ok"
+
+# A transient lock timeout (e.g. a dying peer still holding .lock) is retried.
+fn hir_shard_lock_with_retry(lock_path: text, timeout_s: i64) -> i64:
+    var attempt: i64 = 0
+    var fd: i64 = -1
+    while fd < 0 and attempt < HIR_SHARD_CLAIM_LOCK_ATTEMPTS_V1:
+        fd = file_lock(lock_path, timeout_s)
+        attempt = attempt + 1
+    fd
+
 pub fn hir_shard_recovery_claim(queue: text, owner: text, path: text, key: text) -> i64:
     if owner == "" or path == "" or key == "" or owner.contains("\n") or path.contains("\n") or key.contains("\n"):
-        return -1
+        return HIR_SHARD_CLAIM_INVALID_ARGS_V1
     val base = hir_shard_record_base(queue, path)
-    val fd = file_lock("{queue}/.lock", 30)
-    if fd < 0: return -1
+    val fd = hir_shard_lock_with_retry("{queue}/.lock", 30)
+    if fd < 0: return HIR_SHARD_CLAIM_LOCK_TIMEOUT_V1
     var result: i64 = 0
     if not file_exists("{base}.claim"):
         val record = owner + "\n" + path + "\n" + key + "\n"
-        result = if hir_shard_record_publish("{base}.claim", record): 1 else: -1
+        result = if hir_shard_record_publish("{base}.claim", record): 1 else: HIR_SHARD_CLAIM_PUBLISH_FAILED_V1
     elif not hir_shard_claim_valid(file_read("{base}.claim")):
-        result = -1
+        result = HIR_SHARD_CLAIM_INVALID_CLAIM_V1
     val _released = file_unlock(fd)
     result
 
@@ -142,7 +169,17 @@ pub fn hir_shard_recovery_complete(queue: text, owner: text) -> bool:
 pub fn hir_shard_recovery_finished(queue: text, owner: text) -> bool:
     file_read("{queue}/{sha256_text(owner)}.done") == owner
 
+# A worker that crashed before claiming anything left nothing to seal and no
+# partial record; its unclaimed rows stay claimable by live workers, so it
+# fails only itself. Every other incomplete shape still blocks fail-closed.
+pub fn hir_shard_recovery_reap_blocks_ledger_v1(code: i64, progress: i64, sealed: i64, finished: bool) -> bool:
+    if code < 0 and progress == 0 and sealed == 0 and not finished: return false
+    sealed < 0 or progress < 0 or (not finished and progress == 0) or code == 0 or (code > 0 and sealed > 0)
+
+# The first BLOCKED reason wins: later participants that merely observed the
+# block must not overwrite the root cause.
 pub fn hir_shard_recovery_block(queue: text, reason: text) -> bool:
+    if file_exists("{queue}/BLOCKED"): return true
     file_write("{queue}/BLOCKED", reason)
 
 pub fn hir_shard_recovery_blocked(queue: text) -> bool:
