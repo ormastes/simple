@@ -54,6 +54,12 @@ fn snapshot_replication_manifest_v1(bytes: [u8]) -> ScvGatewaySnapshotManifestV1
         objects: [ScvGatewaySnapshotObjectRefV1(kind: "source_bytes", object_id: "sha256_" + digest,
             content_sha256: digest, byte_count: bytes.len() as i64)], structural_recipes: [])
 
+fn snapshot_replication_max_blob_v1() -> [u8]:
+    var bytes: [u8] = []
+    while bytes.len() < SCV_GATEWAY_DRAFT_MAX_BLOB_BYTES_V1:
+        bytes.push((bytes.len() % 251) as u8)
+    bytes
+
 fn snapshot_replication_http_v1(manifest: ScvGatewaySnapshotManifestV1,
         token: text) -> HttpRequest:
     var http = HttpRequest.new(HttpMethod.Post, "/scv/snapshot/v1")
@@ -124,6 +130,20 @@ fn snapshot_replication_structural_manifest_v1(payload_text: text) -> (ScvGatewa
     (manifest, object_bytes, raw_id)
 
 describe "SCV authenticated snapshot root publication v1":
+    it "should report an exactly maximum-sized source object as missing input":
+        val root = snapshot_replication_setup_root_v1()
+        val manifest = snapshot_replication_manifest_v1(snapshot_replication_max_blob_v1())
+        val response = scv_gateway_draft_handle_v1(snapshot_replication_config_v1(root),
+            [snapshot_replication_grant_v1()],
+            snapshot_replication_http_v1(manifest, SNAPSHOT_REPLICATION_TEST_TOKEN))
+        val request = ScvGatewaySnapshotRequestV1(version: 1, id: "wire-snapshot-1",
+            repository: "repo-alpha", request_id: "snapshot-1", manifest: manifest)
+        val decoded = scv_gateway_snapshot_response_decode_v1(response.body,
+            request, "repo-alpha", "principal-1").unwrap()
+        expect(decoded.status).to_equal("needs_inputs")
+        expect(decoded.missing_object_ids).to_equal([manifest.objects[0].object_id])
+        expect(dir_remove_all(root)).to_equal(true)
+
     it "returns only genuinely missing input IDs, then durably pins an exact complete root":
         val root = snapshot_replication_setup_root_v1()
         val config = snapshot_replication_config_v1(root)
