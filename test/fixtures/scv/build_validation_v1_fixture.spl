@@ -1,0 +1,45 @@
+# These copied inputs are diagnostic/forgery controls, never issuer authority.
+use std.scv.build_capture_v1.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.snapshot_contract_v1.*
+use compiler.frontend.snapshot.compile_snapshot_freezer.{source_blob_digest_v1}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{canonical_source_blob_cas_digest_v1}
+use compiler.driver.cache.gateway.scv_build_validation_receipt_v1.*
+
+pub fn setup_scv_build_snapshot_v1() -> BuildFrozenSnapshotV1:
+    val universe = BuildInputUniverseV1(namespace: "managed-build-inputs-v1",
+        path_policy_digest: scv_build_path_policy_digest_v1(), complete_scopes: ["src"],
+        configuration_digest: sha256_text("configuration"), target_digest: sha256_text("target"),
+        compiler_digest: sha256_text("compiler"), runtime_digest: sha256_text("runtime"),
+        environment_digest: sha256_text("environment"), external_roots: [])
+    val entry = BuildInputEntryV1(path: "src/a.spl", kind: "regular", mode: 420,
+        bytes: [102u8, 110u8, 32u8, 97u8, 10u8], origin: "worktree", producer_digest: "")
+    scv_build_snapshot_freeze_v1(universe, [entry], ScvBuildCursorV1(epoch: "capture-test", sequence: 1)).unwrap()
+
+pub fn setup_scv_build_source_blob_v1() -> SourceBlobV1:
+    val frozen = setup_scv_build_snapshot_v1()
+    val path = LogicalSourcePathV1(repository_namespace_digest: sha256_text("repository"),
+        module_relative_utf8: "src/a.spl", path_semantics: PathSemanticsV1.CaseSensitiveNfc)
+    SourceBlobV1(logical_path: path, source_bytes: frozen.entries[0].bytes,
+        source_digest: source_blob_digest_v1(frozen.entries[0].bytes),
+        encoding_policy: SourceEncodingPolicyV1.Utf8Exact, generated_provenance: nil)
+
+pub fn setup_scv_build_compiler_snapshot_v1() -> CompileSnapshotV1:
+    val frozen = setup_scv_build_snapshot_v1()
+    val blob = setup_scv_build_source_blob_v1()
+    CompileSnapshotV1(schema: 1, repository_namespace_digest: blob.logical_path.repository_namespace_digest,
+        path_policy_digest: frozen.universe.path_policy_digest,
+        source_entries: [SnapshotSourceEntryV1(logical_path: blob.logical_path,
+            source_blob_digest: canonical_source_blob_cas_digest_v1(blob))],
+        resolution_witnesses: [], negative_candidates: [], directory_generations: [], generated_inputs: [],
+        configuration_digest: frozen.universe.configuration_digest, target_layout_digest: frozen.universe.target_digest,
+        compiler_owner_digest: frozen.universe.compiler_digest, runtime_digest: frozen.universe.runtime_digest,
+        provider_manifests: [], toolchain_component_digests: [])
+
+pub fn setup_scv_build_receipt_v1() -> ScvBuildValidationReceiptV1:
+    ScvBuildValidationReceiptV1(requested_snapshot_id: sha256_text("build-snapshot"),
+        action_digest: sha256_text("action"), read_manifest_digest: sha256_text("manifest"),
+        semantic_generation_digest: sha256_text("generation"), compiler_digest: sha256_text("compiler"),
+        target_digest: sha256_text("target"), runtime_digest: sha256_text("runtime"),
+        configuration_digest: sha256_text("configuration"), environment_digest: sha256_text("environment"),
+        provider_lock_digest: sha256_text("provider-version-lock"), receipt_id: "", coverage: "semantic-complete-v1")

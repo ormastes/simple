@@ -1,0 +1,47 @@
+# These codec tests authenticate bytes/subject only; fixtures are not grants.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.gateway.scv_build_validation_receipt_v1.*
+use test.fixtures.scv.build_validation_v1_fixture.*
+
+describe "Durable build validation receipt contents":
+    it "roundtrips the exact canonical SDN subject with a content-bound receipt ID":
+        val sealed = scv_build_validation_receipt_seal_v1(setup_scv_build_receipt_v1()).unwrap()
+        val encoded = scv_build_validation_receipt_encode_v1(sealed).unwrap()
+        expect(encoded).to_start_with("schema = 1\n")
+        val decoded = scv_build_validation_receipt_decode_v1(encoded).unwrap()
+        expect(decoded.receipt_id).to_equal(sealed.receipt_id)
+        expect(scv_build_validation_receipt_matches_v1(decoded, sealed)).to_equal(true)
+
+    it "refuses corrupt truncated duplicated reordered and oversized records":
+        val sealed = scv_build_validation_receipt_seal_v1(setup_scv_build_receipt_v1()).unwrap()
+        val encoded = scv_build_validation_receipt_encode_v1(sealed).unwrap()
+        for bad in [encoded + "unknown = 1\n", encoded.substring(0, encoded.len() - 1),
+                "schema = 1\n" + encoded, encoded.replace("schema = 1", "schema = 2"), "x".repeat(8193)]:
+            expect(scv_build_validation_receipt_decode_v1(bad).is_err()).to_equal(true)
+
+    it "rejects replay against changed snapshots actions manifests generations domains and provider versions":
+        val original = scv_build_validation_receipt_seal_v1(setup_scv_build_receipt_v1()).unwrap()
+        for field in ["snapshot", "action", "reads", "generation", "compiler", "target", "runtime", "configuration", "environment", "providers"]:
+            var changed = setup_scv_build_receipt_v1()
+            val digest = sha256_text("stale-or-replayed")
+            if field == "snapshot": changed.requested_snapshot_id = digest
+            elif field == "action": changed.action_digest = digest
+            elif field == "reads": changed.read_manifest_digest = digest
+            elif field == "generation": changed.semantic_generation_digest = digest
+            elif field == "compiler": changed.compiler_digest = digest
+            elif field == "target": changed.target_digest = digest
+            elif field == "runtime": changed.runtime_digest = digest
+            elif field == "configuration": changed.configuration_digest = digest
+            elif field == "environment": changed.environment_digest = digest
+            else: changed.provider_lock_digest = digest
+            val sealed = scv_build_validation_receipt_seal_v1(changed).unwrap()
+            expect(scv_build_validation_receipt_matches_v1(original, sealed)).to_equal(false)
+
+    it "refuses a caller copied ID source-only coverage or a modified body":
+        var receipt = scv_build_validation_receipt_seal_v1(setup_scv_build_receipt_v1()).unwrap()
+        receipt.provider_lock_digest = sha256_text("changed-lock")
+        expect(scv_build_validation_receipt_encode_v1(receipt).is_err()).to_equal(true)
+        receipt = setup_scv_build_receipt_v1()
+        receipt.coverage = "source-only"
+        expect(scv_build_validation_receipt_seal_v1(receipt).is_err()).to_equal(true)
