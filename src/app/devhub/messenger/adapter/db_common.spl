@@ -21,7 +21,7 @@
 # denied. Defense in depth, not a second policy.
 
 use app.devhub.messenger.config.{
-    MessengerTarget, MESSENGER_DEFAULT_MAX_READ_BATCH
+    MessengerTarget, MessengerDbConfig, MESSENGER_DEFAULT_MAX_READ_BATCH
 }
 use app.devhub.messenger.policy.{
     check_read, check_agent_body_access
@@ -33,7 +33,7 @@ use app.devhub.messenger.plugin_access.{
     MessengerPortResult, MESSENGER_PORT_OK, MESSENGER_PORT_CONFIG_ERROR
 }
 use std.database.server.storage_port.{
-    database_storage_port_v1, StorageOpenResult, StoragePortError
+    database_storage_port_v1, DatabaseStoragePortV1, StorageOpenResult, StoragePortError
 }
 use std.database.sql.types.{DbRow, DbValue}
 use std.common.json.value.{json_value_escape_string}
@@ -106,19 +106,23 @@ enum DbReadOutcome:
 fn _read_table(target: MessengerTarget, format_name: text, table: text) -> DbReadOutcome:
     if target.db == nil:
         return DbReadOutcome.Failed(MessengerPortResult.config_error("target '{target.name}' has no db block"))
-    val db = target.db.?
+    # @workaround bug=runner_callback_field_owner_2026_10_11 reason=Retain the declared configuration owner at the optional record boundary on the pinned Phase 2 producer.
+    val db: MessengerDbConfig = target.db.?
     if not is_valid_sqlite_identifier(table):
         return DbReadOutcome.Failed(MessengerPortResult.config_error("table name '{table}' rejected by the identifier gate"))
     val secret = if format_name == "sqlcipher4": db.secret_ref else: ""
-    val port = database_storage_port_v1()
-    val opened = match port.open(db.path, format_name, secret):
+    # @workaround bug=runner_callback_field_owner_2026_10_11 reason=Keep the concrete storage port and returned enum owners through the configured callback dispatch boundary.
+    val port: DatabaseStoragePortV1 = database_storage_port_v1()
+    # @workaround bug=runner_callback_field_owner_2026_10_11 reason=Preserve the declared opened enum owner after the storage port callback dispatch.
+    val opened: StorageOpenResult = match port.open(db.path, format_name, secret):
         Ok(r):
             r
         Err(e):
             return DbReadOutcome.Failed(_map_open_error(e))
     val outcome = match opened:
         case StorageOpenResult.SqliteView(view):
-            val rows = match port.read_table(view, table):
+            # @workaround bug=runner_callback_field_owner_2026_10_11 reason=Retain the concrete row-array owner returned across the storage boundary.
+            val rows: [DbRow] = match port.read_table(view, table):
                 Ok(r):
                     r
                 Err(e):
@@ -140,6 +144,8 @@ fn _map_open_error(e: StoragePortError) -> MessengerPortResult:
             MessengerPortResult.config_error("authentication-failed (wrong key or modified database)")
         StoragePortError.CorruptSource(_):
             MessengerPortResult.config_error("corrupt-source")
+        StoragePortError.SnapshotUnavailable(_):
+            MessengerPortResult.config_error("snapshot-unavailable")
         StoragePortError.Io(_):
             MessengerPortResult.config_error("source-unavailable")
         StoragePortError.InvalidFormat(d):

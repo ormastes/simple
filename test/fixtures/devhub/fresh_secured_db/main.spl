@@ -1,0 +1,221 @@
+# Fresh secured database production acceptance. No old fixture constants or SSpec stubs.
+# provision.py supplies private encrypted files and an ephemeral synthetic secret.
+use std.io_runtime.{env_get, file_read_bytes_result, file_hash_sha256_or_empty, exit}
+use std.env.{env_set, env_unset}
+use std.database.sql.types.{DbRow}
+use std.database.server.storage_port.{
+    database_storage_port_v1, DatabaseStoragePortV1, StorageOpenResult,
+    storage_backend_sqlcipher4_open
+}
+use nogc_sync_mut.database.codec.codec_registry.{CodecSessionV1}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{
+    sqlcipher4_page_open_key, sqlcipher4_page_decode_with_session,
+    sqlcipher4_page_close, sqlcipher4_page1_salt
+}
+use app.devhub.messenger.config.{MessengerTarget, MessengerPolicy, MessengerDbConfig}
+use app.devhub.messenger.schema_profile.{SchemaProfile}
+use app.devhub.messenger.plugin_access.{
+    MessengerPortResult, MessengerReadPortV1, messenger_load_adapter, port_call_read
+}
+use app.devhub.messenger.adapter.sqlcipher_reader.{
+    messenger_register_sqlcipher4_adapter, messenger_sqlcipher4_list_rooms,
+    messenger_sqlcipher4_list_members, messenger_sqlcipher4_history,
+    messenger_sqlcipher4_fetch_message
+}
+
+val FRESH_SECRET_ENV = "SIMPLE_SECRET_MESSENGER_FRESH"
+val FRESH_SECRET_REF = "secret://messenger/fresh"
+
+fn require_fresh(condition: bool, boundary: text):
+    if not condition:
+        print "FAIL fresh secured DB: {boundary}"
+        exit(1)
+
+fn fresh_schema() -> SchemaProfile:
+    SchemaProfile(profile_id: "messenger.schema_profile.v1",
+        room_table: "room", room_id: "id", room_name: "title", room_created_at: "created_at",
+        member_table: "room_member", member_room_id: "room_id", member_identity_id: "user_id",
+        member_joined_at: "joined_at", member_left_at: "", member_role: "",
+        message_table: "messages", message_id: "id", message_room_id: "room_id",
+        message_sender_id: "sender_id", message_body: "body", message_created_at: "created_at",
+        message_updated_at: "", message_sequence: "seq", message_reply_to_id: "reply_to_id",
+        timestamp_unit: "s", sequence_kind: "monotonic_within_room")
+
+fn fresh_target(path: text) -> MessengerTarget:
+    val db = MessengerDbConfig(path: path, format: "sqlcipher4", access: "read_only",
+        snapshot_mode: "frozen_snapshot", profile: "sqlcipher4_4k_sha512", key_kind: "passphrase",
+        secret_ref: FRESH_SECRET_REF, cipher_page_size: 4096, cipher_kdf_iter: 256000,
+        cipher_kdf_algorithm: "pbkdf2_hmac_sha512", cipher_hmac_algorithm: "hmac_sha512",
+        cipher_page_hmac: true, cipher_hmac_pgno: "little_endian", cipher_reserved_bytes: 80,
+        cipher_plaintext_header_bytes: 0, immutable: true)
+    MessengerTarget(name: "fresh-owned-acceptance", read_provider: "sqlcipher4_database",
+        send_provider: "none", send_enabled: false, source_kind: "external_owned_by_messenger",
+        schema_profile_name: "messenger.schema_profile.v1", content_pipeline: "none",
+        cache_mode: "none", sync_policy: "on_demand", db: db, api: nil,
+        schema: fresh_schema(), policy: MessengerPolicy.deny_all())
+
+fn fresh_bytes(path: text) -> [u8]:
+    match file_read_bytes_result(path):
+        case Ok(bytes): bytes
+        case Err(_):
+            require_fresh(false, "file byte provider")
+            []
+
+fn fresh_direct_codec(path: text):
+    print "STAGE fresh byte provider"
+    val bytes: [u8] = fresh_bytes(path)
+    require_fresh(bytes.len() > 4096 * 5 and bytes.len() % 4096 == 0, "fresh multi-page geometry")
+    var first: [u8] = []
+    var later: [u8] = []
+    var i = 0
+    while i < 4096:
+        first.push(bytes[i])
+        later.push(bytes[4096 + i])
+        i = i + 1
+    val salt: [u8] = match sqlcipher4_page1_salt(first):
+        case Ok(value): value
+        case Err(_):
+            require_fresh(false, "file salt")
+            []
+    print "STAGE fresh direct key-session return"
+    val session: CodecSessionV1 = match sqlcipher4_page_open_key(FRESH_SECRET_REF, salt):
+        case Ok(value): value
+        case Err(_):
+            require_fresh(false, "direct key session")
+            return
+    require_fresh(session.open and session.codec_id == "sqlcipher4" and session.secret_material.len() == 80, "direct session field values")
+    print "STAGE fresh direct first-page authenticated decode"
+    val first_body: [u8] = match sqlcipher4_page_decode_with_session(1, first, session):
+        case Ok(value): value
+        case Err(_):
+            val _closed = sqlcipher4_page_close(session)
+            require_fresh(false, "direct first-page decode")
+            return
+    require_fresh(first_body.len() == 4016 and first_body[16] == 16u8 and first_body[17] == 0u8 and first_body[20] == 80u8, "direct decoded header values")
+    print "STAGE fresh direct later-page authenticated decode"
+    val later_body: [u8] = match sqlcipher4_page_decode_with_session(2, later, session):
+        case Ok(value): value
+        case Err(_):
+            val _closed = sqlcipher4_page_close(session)
+            require_fresh(false, "direct later-page decode")
+            return
+    require_fresh(later_body.len() == 4016 and later_body[0] == 13u8, "direct later-page values")
+    val _closed = sqlcipher4_page_close(session)
+    i = 0
+    while i < session.secret_material.len():
+        require_fresh(session.secret_material[i] == 0u8, "direct session close wipe")
+        i = i + 1
+    i = 0
+    while i < first_body.len():
+        first_body[i] = 0u8
+        later_body[i] = 0u8
+        i = i + 1
+    print "PASS fresh direct codec boundaries"
+
+fn fresh_read_storage(opened: StorageOpenResult):
+    val port: DatabaseStoragePortV1 = database_storage_port_v1()
+    match opened:
+        case StorageOpenResult.SqliteView(view):
+            require_fresh(view.page_size == 4096 and view.page_count > 5 and view.reserved_bytes == 80 and view.text_encoding == 1, "storage view field values")
+            val rows: [DbRow] = match port.read_table(view, "messages"):
+                case Ok(value): value
+                case Err(_):
+                    val _closed = port.close_view(view)
+                    require_fresh(false, "storage schema/interior/overflow rows")
+                    return
+            require_fresh(rows.len() == 46 and rows[0].values[0].to_text() == "11" and rows[4].values[3].to_text().len() > 11000, "storage exact row values and overflow")
+            require_fresh(port.close_view(view), "storage close")
+            var i = 0
+            while i < view.image.len():
+                require_fresh(view.image[i] == 0u8, "storage plaintext close wipe")
+                i = i + 1
+        case StorageOpenResult.NativeStore(_):
+            require_fresh(false, "explicit SQLCipher backend selection")
+
+fn fresh_ok(result: MessengerPortResult, stage: text):
+    require_fresh(result.status == "ok" and result.exit_code == 0 and result.error == "", stage)
+
+fn fresh_failure(result: MessengerPortResult, stage: text):
+    require_fresh(result.status == "config_error" and result.exit_code == 2 and result.payload == "", stage)
+    require_fresh(not result.error.contains(env_get(FRESH_SECRET_ENV)), "error secret redaction")
+
+fn main() -> i64:
+    val directory = env_get("DEVHUB_FRESH_DB_DIR")
+    require_fresh(directory != "" and env_get(FRESH_SECRET_ENV) != "", "fresh provisioning environment")
+    val path = directory + "/fresh.sqlcipher4"
+    val before = file_hash_sha256_or_empty(path)
+    require_fresh(before.len() == 64, "source hash provider")
+    fresh_direct_codec(path)
+    print "STAGE fresh direct storage control"
+    val direct: StorageOpenResult = match storage_backend_sqlcipher4_open(path, FRESH_SECRET_REF):
+        case Ok(value): value
+        case Err(_):
+            require_fresh(false, "direct secured snapshot storage open")
+            return 1
+    fresh_read_storage(direct)
+    print "STAGE fresh configured registered storage dispatch"
+    val port: DatabaseStoragePortV1 = database_storage_port_v1()
+    val registered: StorageOpenResult = match port.open(path, "sqlcipher4", FRESH_SECRET_REF):
+        case Ok(value): value
+        case Err(_):
+            require_fresh(false, "registered secured storage open")
+            return 1
+    fresh_read_storage(registered)
+    print "PASS fresh direct and registered storage rows"
+    require_fresh(messenger_register_sqlcipher4_adapter(), "Messenger adapter registration")
+    val adapter: MessengerReadPortV1 = match messenger_load_adapter("sqlcipher4_database"):
+        case Some(value): value
+        case nil:
+            require_fresh(false, "Messenger adapter resolution")
+            return 1
+    val target: MessengerTarget = fresh_target(path)
+    fresh_ok(port_call_read(adapter, target, "history", "user"), "registered Messenger admission")
+    print "STAGE fresh production Messenger verbs"
+    val rooms: MessengerPortResult = messenger_sqlcipher4_list_rooms(target, "user")
+    fresh_ok(rooms, "production rooms")
+    require_fresh(rooms.payload.contains("fresh general ✓") and rooms.payload.contains("\"count\":2"), "exact rooms")
+    val members: MessengerPortResult = messenger_sqlcipher4_list_members(target, "1", "user")
+    fresh_ok(members, "production members")
+    require_fresh(members.payload.contains("\"identity_id\":\"101\"") and members.payload.contains("\"count\":2") and not members.payload.contains("103"), "exact room members")
+    val history: MessengerPortResult = messenger_sqlcipher4_history(target, "1", 3, "user")
+    fresh_ok(history, "production ordered history")
+    require_fresh(history.payload.contains("\"count\":3") and history.payload.contains("tie-first") and history.payload.contains("tie-second") and history.payload.contains("unicode: 한글 héllo ✓"), "history values")
+    val first_index = history.payload.index_of("tie-first") ?? -1
+    val second_index = history.payload.index_of("tie-second") ?? -1
+    val unicode_index = history.payload.index_of("unicode:") ?? -1
+    require_fresh(first_index >= 0 and first_index < second_index and second_index < unicode_index, "stable sequence order")
+    require_fresh(history.payload.contains("\\\"quoted\\\"") and history.payload.contains("\\\\path\\nnext"), "JSON escaping")
+    require_fresh(not history.payload.contains("late-source-first") and not history.payload.contains("other-room-only"), "history limit and room isolation")
+    val fetched: MessengerPortResult = messenger_sqlcipher4_fetch_message(target, "15", "user")
+    fresh_ok(fetched, "production overflow fetch")
+    require_fresh(fetched.payload.contains("overflow: 한글 ✓") and fetched.payload.len() > 11000, "overflow body")
+    val absent: MessengerPortResult = messenger_sqlcipher4_fetch_message(target, "999999", "user")
+    fresh_ok(absent, "missing record")
+    require_fresh(absent.payload.contains("\"found\":false"), "missing record payload")
+    val denied: MessengerPortResult = messenger_sqlcipher4_history(target, "1", 3, "agent")
+    require_fresh(denied.status == "permission_denied" and denied.exit_code == 3 and denied.payload == "", "default agent body denial")
+    print "PASS fresh production rooms/members/history/fetch/policy"
+    val original = env_get(FRESH_SECRET_ENV)
+    require_fresh(env_set(FRESH_SECRET_ENV, "incorrect-synthetic-fresh-secret"), "wrong-secret setup")
+    val wrong: MessengerPortResult = messenger_sqlcipher4_history(target, "1", 3, "user")
+    require_fresh(env_set(FRESH_SECRET_ENV, original), "restore correct secret")
+    fresh_failure(wrong, "wrong-key fail closed")
+    require_fresh(not wrong.error.contains("incorrect-synthetic-fresh-secret"), "wrong-secret redaction")
+    val _removed = env_unset(FRESH_SECRET_ENV)
+    val missing: MessengerPortResult = messenger_sqlcipher4_history(target, "1", 3, "user")
+    require_fresh(env_set(FRESH_SECRET_ENV, original), "restore after missing secret")
+    fresh_failure(missing, "missing-secret fail closed")
+    val first_tamper: MessengerPortResult = messenger_sqlcipher4_history(fresh_target(directory + "/tamper_first.sqlcipher4"), "1", 3, "user")
+    val later_tamper: MessengerPortResult = messenger_sqlcipher4_history(fresh_target(directory + "/tamper_later.sqlcipher4"), "1", 3, "user")
+    fresh_failure(first_tamper, "first-page authentication failure")
+    fresh_failure(later_tamper, "later-page authentication failure")
+    require_fresh(first_tamper.error == wrong.error and later_tamper.error == wrong.error, "common authentication failure")
+    fresh_failure(messenger_sqlcipher4_history(fresh_target(directory + "/invalid_header.sqlcipher4"), "1", 3, "user"), "authenticated corrupt header")
+    fresh_failure(messenger_sqlcipher4_history(fresh_target(directory + "/malformed_rows.sqlcipher4"), "1", 1, "user"), "invalid matching sequence outside returned limit")
+    fresh_failure(messenger_sqlcipher4_history(fresh_target(directory + "/short.bin"), "1", 3, "user"), "invalid page geometry")
+    val recovered: MessengerPortResult = messenger_sqlcipher4_history(target, "1", 3, "user")
+    fresh_ok(recovered, "recovery after rejected inputs")
+    require_fresh(recovered.payload == history.payload, "recovery exact payload")
+    require_fresh(file_hash_sha256_or_empty(path) == before, "read-only source hash")
+    print "PASS fresh authentication negatives, recovery and read-only source"
+    0
