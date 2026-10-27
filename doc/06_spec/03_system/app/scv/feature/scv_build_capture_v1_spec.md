@@ -90,7 +90,15 @@ acknowledgement after an error.
 
 An unknown state refuses both transactions and freeze. Only explicit complete
 managed reconciliation through `scv_build_capture_reconcile_v1` in a fresh epoch
-restores a usable owner. Snapshot validation rebuilds the complete canonical
+restores a usable owner. The state retains every retired epoch across copies,
+unknown transitions and reconciliation; A→B→A is refused. The retained sequence
+is copied and digest-bound to the current epoch, and validation checks its
+uniqueness and integrity. The 1024-retired-epoch bound fails with
+`build-reconcile-epoch-history-exhausted`; it never drops old epochs to make
+room. Parent persistence must retain both `retired_epochs` and
+`epoch_history_digest` with the rest of the owner state. Opening a new logical
+owner is a separate parent-owned incarnation decision, not a reconciliation
+shortcut for forgetting history. Snapshot validation rebuilds the complete canonical
 subject and checks the legacy projection; a caller-supplied complete boolean,
 digest string or reordered array cannot grant authority.
 

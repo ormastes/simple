@@ -64,6 +64,8 @@ pub struct BuildCaptureStateV1:
     cursor: ScvBuildCursorV1
     pending: [BuildCaptureAcknowledgementV1]
     unknown_reason: text
+    retired_epochs: [text]
+    epoch_history_digest: text
 
 pub fn scv_build_path_policy_digest_v1() -> text:
     sha256_text("simple/scv-build-path-policy/v1|logical-relative-utf8-exact-case|slash|no-empty-dot-dotdot-control-backslash-colon-bar|no-unicode-fold|regular:420,493|directory:493,empty|symlink:511,exact-target,no-follow")
@@ -91,6 +93,23 @@ fn build_cursor_equal_v1(a: ScvBuildCursorV1, b: ScvBuildCursorV1) -> bool:
 
 fn build_frame_v1(value: text) -> text:
     "{value.len()}:" + value
+
+fn build_epoch_history_digest_v1(epoch: text, retired_epochs: [text]) -> text:
+    var subject = "simple/scv-build-epoch-history/v1" + build_frame_v1(epoch) +
+        build_frame_v1(retired_epochs.len().to_text())
+    for retired in retired_epochs: subject = subject + build_frame_v1(retired)
+    sha256_text(subject)
+
+fn build_epoch_history_valid_v1(state: BuildCaptureStateV1) -> bool:
+    if not build_cursor_valid_v1(state.cursor) or state.retired_epochs.len() > 1024: return false
+    if state.epoch_history_digest != build_epoch_history_digest_v1(state.cursor.epoch, state.retired_epochs): return false
+    val sorted = scv_snapshot_sorted_v2(state.retired_epochs)
+    var previous = ""
+    for epoch in sorted:
+        if epoch == state.cursor.epoch or epoch == previous: return false
+        if not build_cursor_valid_v1(ScvBuildCursorV1(epoch: epoch, sequence: 0)): return false
+        previous = epoch
+    true
 
 fn build_entry_copy_v1(entry: BuildInputEntryV1) -> BuildInputEntryV1:
     BuildInputEntryV1(path: entry.path, kind: entry.kind, mode: entry.mode,
@@ -388,9 +407,11 @@ pub fn scv_build_capture_open_v1(universe: BuildInputUniverseV1, initial_entries
     val snapshot = scv_build_snapshot_freeze_v1(universe, initial_entries, cursor)?
     Ok(BuildCaptureStateV1(universe: snapshot.universe, entries: snapshot.entries,
         base_snapshot_id: snapshot.snapshot_id, applied_sequence: 0, cursor: cursor,
-        pending: [], unknown_reason: ""))
+        pending: [], unknown_reason: "", retired_epochs: [],
+        epoch_history_digest: build_epoch_history_digest_v1(epoch, [])))
 
 pub fn scv_build_freeze_v1(state: BuildCaptureStateV1, expected_cursor: ScvBuildCursorV1) -> Result<BuildFrozenSnapshotV1, text>:
+    if not build_epoch_history_valid_v1(state): return Err("build-capture-epoch-history-invalid")
     if state.unknown_reason != "": return Err("build-capture-unknown:" + state.unknown_reason)
     if not build_cursor_equal_v1(state.cursor, expected_cursor): return Err("build-barrier-cursor-mismatch")
     if state.applied_sequence != 0 or state.pending.len() != state.cursor.sequence: return Err("build-capture-state-invalid")
@@ -434,6 +455,8 @@ pub fn scv_build_capture_apply_v1(state: BuildCaptureStateV1, expected_cursor: S
 
 fn build_state_copy_v1(state: BuildCaptureStateV1) -> BuildCaptureStateV1:
     var pending: [BuildCaptureAcknowledgementV1] = []
+    var retired_epochs: [text] = []
+    for epoch in state.retired_epochs: retired_epochs = retired_epochs.push(epoch)
     for acknowledgement in state.pending:
         pending = pending.push(BuildCaptureAcknowledgementV1(expected_cursor: acknowledgement.expected_cursor,
             transaction_id: acknowledgement.transaction_id, transaction_digest: acknowledgement.transaction_digest,
@@ -441,7 +464,8 @@ fn build_state_copy_v1(state: BuildCaptureStateV1) -> BuildCaptureStateV1:
     BuildCaptureStateV1(universe: build_universe_copy_v1(state.universe),
         entries: build_entries_copy_sorted_v1(state.entries), base_snapshot_id: state.base_snapshot_id,
         applied_sequence: state.applied_sequence, cursor: state.cursor, pending: pending,
-        unknown_reason: state.unknown_reason)
+        unknown_reason: state.unknown_reason, retired_epochs: retired_epochs,
+        epoch_history_digest: state.epoch_history_digest)
 
 pub fn scv_build_capture_unknown_v1(state: BuildCaptureStateV1, reason: text) -> BuildCaptureStateV1:
     var unknown = build_state_copy_v1(state)
@@ -450,5 +474,13 @@ pub fn scv_build_capture_unknown_v1(state: BuildCaptureStateV1, reason: text) ->
 
 pub fn scv_build_capture_reconcile_v1(state: BuildCaptureStateV1, universe: BuildInputUniverseV1,
         entries: [BuildInputEntryV1], new_epoch: text) -> Result<BuildCaptureStateV1, text>:
-    if new_epoch == state.cursor.epoch: return Err("build-reconcile-epoch-reused")
-    scv_build_capture_open_v1(universe, entries, new_epoch)
+    if not build_epoch_history_valid_v1(state): return Err("build-capture-epoch-history-invalid")
+    if new_epoch == state.cursor.epoch or state.retired_epochs.contains(new_epoch): return Err("build-reconcile-epoch-reused")
+    if state.retired_epochs.len() >= 1024: return Err("build-reconcile-epoch-history-exhausted")
+    var reconciled = scv_build_capture_open_v1(universe, entries, new_epoch)?
+    var retired_epochs: [text] = []
+    for epoch in state.retired_epochs: retired_epochs = retired_epochs.push(epoch)
+    retired_epochs = retired_epochs.push(state.cursor.epoch)
+    reconciled.retired_epochs = retired_epochs
+    reconciled.epoch_history_digest = build_epoch_history_digest_v1(new_epoch, retired_epochs)
+    Ok(reconciled)
