@@ -4,6 +4,29 @@
 # estimate exhausted the host commit limit and all died together).
 use std.spec
 use app.cli.shard_mem_clamp.{shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1, shard_commit_live_footprint_v1}
+use app.cli.shard_mem_clamp.{shard_commit_unmeasured_estimate_kib_v1, shard_worker_exit_hint_v1}
+
+fn warmup_admitted(headroom: i64, reserve: i64, est: i64, window: i64) -> i64:
+    var live: [i64] = []
+    while live.len() < window and (live.len() == 0 or shard_commit_spawn_admit_v1(headroom, reserve, est, live)):
+        live = live.push(0)
+    live.len()
+
+describe "unmeasured warmup admission (phase 3 6b0ba5f3 HIR alloc abort)":
+    it "does not fill an 8-slot window at the static 6 GB with no recorded peak":
+        # 80.4 GB free, 24 GiB reserve: real workers peaked at ~11 GB each.
+        val est = shard_commit_unmeasured_estimate_kib_v1(6000000, 0)
+        val admitted = warmup_admitted(80402160, 25165824, est, 8)
+        expect(admitted * 10989479 <= 80402160 - 4627064).to_equal(true)
+
+    it "trusts a recorded peak once one exists":
+        expect(shard_commit_unmeasured_estimate_kib_v1(6000000, 11000000)).to_equal(11000000)
+        expect(shard_commit_unmeasured_estimate_kib_v1(6000000, 1000)).to_equal(6000000)
+
+    it "names the commit cause on a 0xC0000409 worker exit":
+        expect(shard_worker_exit_hint_v1(-1073740791, "hir-shard").contains("SIMPLE_HIR_SHARD_WORKER_KB")).to_equal(true)
+        expect(shard_worker_exit_hint_v1(3221226505, "mir-shard").contains("SIMPLE_MIR_SHARD_WORKER_KB")).to_equal(true)
+        expect(shard_worker_exit_hint_v1(1, "hir-shard")).to_equal("")
 
 describe "measured commit admission":
     it "takes the larger of static estimate and measured peak":
