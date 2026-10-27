@@ -20,7 +20,7 @@ use std.nogc_sync_mut.compression.gzip.header.{
 }
 use std.nogc_sync_mut.compression.gzip.lz77.{lz77_compress}
 use std.nogc_sync_mut.compression.gzip.deflate.{deflate_block_stored, deflate_block_fixed}
-use std.nogc_sync_mut.compression.gzip.inflate.{inflate_member}
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate_member, InflateOut}
 
 # =============================================================================
 # GZIP COMPRESSION
@@ -106,19 +106,19 @@ fn gzip_decompress(data: [u8]) -> [u8]?:
         val header_info: [i64] = match gzip_header_parse_at(data, pos):
             case Some(info): info
             case nil: return nil
-        val body: [Any] = match inflate_member(data, gzip_header_size(header_info)):
+        val body: InflateOut = match inflate_member(data, gzip_header_size(header_info)):
             case Some(info): info
             case nil: return nil
-        val member: [u8] = body[0]
+        val member: [u8] = body.output
         # A missing (truncated) trailer follows the same nil failure path.
-        val footer_info: [i64] = match gzip_footer_parse(data, body[1]):
+        val footer_info: [i64] = match gzip_footer_parse(data, body.end):
             case Some(info): info
             case nil: return nil
         if not gzip_footer_validate(footer_info, member, member.len()):
             return nil
         for b in member:
             result.push(b)
-        pos = body[1] + 8
+        pos = body.end + 8
     return result
 
 # Compress with default level
@@ -155,10 +155,10 @@ fn gzip_get_metadata(data):
     val header_info: [i64] = match gzip_header_parse(data):
         case Some(info): info
         case nil: return nil
-    val body: [Any] = match inflate_member(data, gzip_header_size(header_info)):
+    val body: InflateOut = match inflate_member(data, gzip_header_size(header_info)):
         case Some(info): info
         case nil: return nil
-    val footer_info: [i64] = match gzip_footer_parse(data, body[1]):
+    val footer_info: [i64] = match gzip_footer_parse(data, body.end):
         case Some(info): info
         case nil: return nil
     return [header_info[1], header_info[3], header_info[2], footer_info[0], footer_info[1]]
@@ -181,12 +181,12 @@ fn gzip_extract_payload(data):
         case Some(info): info
         case nil: return nil
     val header_size = gzip_header_size(header_info)
-    val body: [Any] = match inflate_member(data, header_size):
+    val body: InflateOut = match inflate_member(data, header_size):
         case Some(info): info
         case nil: return nil
     var payload: [u8] = []
     var i = header_size
-    while i < body[1]:
+    while i < body.end:
         payload.push(data[i])
         i = i + 1
     return payload
