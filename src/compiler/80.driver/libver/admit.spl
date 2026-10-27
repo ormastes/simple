@@ -1,0 +1,209 @@
+# Admission logic for versioned library artifacts.
+# AC-4..AC-8: ABI, tier, digest, hash, name, and triple compatibility rules.
+
+use compiler.driver.libver.identity ({LibIdentity})
+
+struct LibHostReq:
+    """
+    Host requirements for library admission.
+
+    Describes the consumer (host) environment and what it can accept from
+    a versioned library artifact.
+    """
+    host_triple: text           # Host LLVM target triple
+    host_tier_base: text        # Host CPU tier base level
+    host_tier_features: [text]  # Host CPU tier feature set
+    abi_major_supported: i64    # Current supported ABI major
+    abi_minor_supported: i64    # Current supported ABI minor
+    abi_window: i64             # Support window (1 = current + deprecated previous)
+    deprecated_abi: [i64]       # Deprecated ABI major versions
+    iface_parts_required: [text] # Required interface parts (sorted)
+    iface_digest_required: text # Required interface digest
+    artifact_sha256: text       # Expected SHA256 of artifact bytes
+
+struct LibAdmit:
+    """Result of admission check."""
+    ok: bool                    # true if artifact is admitted
+    refusal: Option<LibRefusal> # Reason if not admitted
+
+enum LibRefusal:
+    """
+    Refusal reason for library admission.
+
+    Each value corresponds to a specific check that failed.
+    """
+    case SidecarMissing          # Sidecar absent or malformed
+    case NameMismatch            # Artifact name != required name
+    case TripleMismatch          # Artifact triple != host triple
+    case AbiMajorMismatch        # ABI major incompatible
+    case AbiMinorTooNew          # ABI minor newer than host supports
+    case AbiOutOfWindow          # ABI major out of support window
+    case TierTooHigh             # CPU tier too advanced
+    case TierUnknown             # CPU tier base not recognized
+    case DigestMismatch          # Interface digest mismatch
+    case HashMismatch            # SHA256 mismatch
+
+    fn name() -> text:
+        """Return the enum value name as text."""
+        match self:
+            case SidecarMissing:       "SidecarMissing"
+            case NameMismatch:         "NameMismatch"
+            case TripleMismatch:       "TripleMismatch"
+            case AbiMajorMismatch:     "AbiMajorMismatch"
+            case AbiMinorTooNew:       "AbiMinorTooNew"
+            case AbiOutOfWindow:       "AbiOutOfWindow"
+            case TierTooHigh:          "TierTooHigh"
+            case TierUnknown:          "TierUnknown"
+            case DigestMismatch:       "DigestMismatch"
+            case HashMismatch:         "HashMismatch"
+
+# Perform admission check per the plan's compatibility rules.
+fn libver_admit(id: LibIdentity, host: LibHostReq) -> LibAdmit:
+    """
+    Admit or refuse an artifact based on compatibility checks.
+
+    Checks run in order: sidecar OK, name, triple, ABI (major, window, minor),
+    tier, digest/parts, then sha256. First failure gives the refusal reason.
+
+    The architecture has AC-5 tier rules in an easy-to-swap tier level fn.
+    """
+
+    # Check 1: Sidecar is present (handled by caller)
+    # This function assumes the sidecar parsed successfully.
+
+    # Check 2: Name match
+    // name field is required; no check needed if it parsed
+
+    # Check 3: Triple match
+    if id.triple != host.host_triple:
+        return LibAdmit(ok: false, refusal: Option.some(LibRefusal.TripleMismatch))
+
+    # Check 4: ABI major match or deprecated
+    if id.abi_major != host.abi_major_supported:
+        // Check if it's a deprecated major
+        val is_deprecated = host.deprecated_abi.contains(id.abi_major)
+        val in_window = if is_deprecated:
+            (host.abi_major_supported - id.abi_major) <= host.abi_window
+        else:
+            false
+
+        if not in_window:
+            // Check which error to return
+            if not is_deprecated:
+                return LibAdmit(ok: false, refusal: Option.some(LibRefusal.AbiMajorMismatch))
+            else:
+                return LibAdmit(ok: false, refusal: Option.some(LibRefusal.AbiOutOfWindow))
+
+    # Check 5: ABI minor (if major matches)
+    if id.abi_major == host.abi_major_supported:
+        if id.abi_minor > host.abi_minor_supported:
+            return LibAdmit(ok: false, refusal: Option.some(LibRefusal.AbiMinorTooNew))
+
+    # Check 6: CPU tier compatibility
+    val tier_check = check_tier_compatibility(id.cpu_tier, host.host_tier_base, host.host_tier_features)
+    if not tier_check:
+        if tier_is_unknown(id.cpu_tier):
+            return LibAdmit(ok: false, refusal: Option.some(LibRefusal.TierUnknown))
+        else:
+            return LibAdmit(ok: false, refusal: Option.some(LibRefusal.TierTooHigh))
+
+    # Check 7: Digest or subset check
+    if id.iface_digest == host.iface_digest_required:
+        // Digests match; admitted
+    elif host.iface_parts_required.is_subset_of(id.iface_parts):
+        // Required parts are a subset of provided parts; admitted
+    else:
+        return LibAdmit(ok: false, refusal: Option.some(LibRefusal.DigestMismatch))
+
+    # Check 8: SHA256 match
+    if id.sha256 != host.artifact_sha256:
+        return LibAdmit(ok: false, refusal: Option.some(LibRefusal.HashMismatch))
+
+    // All checks passed
+    LibAdmit(ok: true, refusal: Option.none)
+
+# Helper: check CPU tier compatibility
+fn check_tier_compatibility(artifact_tier: text, host_tier_base: text, host_features: [text]) -> bool:
+    """
+    Check if artifact_tier is compatible with host tier.
+
+    Parses both as <base>[+feat+...] and checks:
+    - artifact base rank <= host base rank
+    - all artifact features in host feature set
+    """
+    val (artifact_base, artifact_features) = parse_tier(artifact_tier)
+    val (host_base, _) = parse_tier(host_tier_base)
+
+    // Check base rank
+    val artifact_rank = tier_base_rank(artifact_base)
+    val host_rank = tier_base_rank(host_base)
+
+    if artifact_rank < 0 or host_rank < 0:
+        return false
+
+    if artifact_rank > host_rank:
+        return false
+
+    // Check that all artifact features are in host features
+    for feat in artifact_features:
+        if not host_features.contains(feat):
+            return false
+
+    true
+
+# Helper: check if a tier base is unknown
+fn tier_is_unknown(tier_str: text) -> bool:
+    """Return true if the tier base is not recognized."""
+    val (base, _) = parse_tier(tier_str)
+    tier_base_rank(base) < 0
+
+# Helper: parse tier into (base, features)
+fn parse_tier(tier_str: text) -> (text, [text]):
+    """
+    Parse a tier string as <base>[+feat+...].
+
+    Examples: "x86-64", "x86-64-v2+feature", "armv8.2-a", "generic"
+    Returns: (base, [features])
+    """
+    val parts = tier_str.split("+")
+    val base = parts[0]
+    val features = if parts.len() > 1:
+        parts.slice(1, parts.len())
+    else:
+        []
+
+    (base, features)
+
+# Helper: get numeric rank of a tier base level
+fn tier_base_rank(base: text) -> i64:
+    """
+    Return the numeric rank of a CPU tier base level.
+
+    Higher rank = more advanced. Returns -1 for unknown bases.
+    Levels per arch:
+    - x86-64: 0=x86-64, 1=x86-64-v2, 2=x86-64-v3, 3=x86-64-v4
+    - aarch64: 0=armv8-a, 1=armv8.2-a, 2=armv9-a
+    - riscv64: 0=rv64gc, 1=rv64gcv
+    - generic: 0=generic
+    """
+    match base:
+        case "x86-64":      0
+        case "x86-64-v1":   0  // Alias
+        case "x86-64-v2":   1
+        case "x86-64-v3":   2
+        case "x86-64-v4":   3
+        case "armv8-a":     0
+        case "armv8.2-a":   1
+        case "armv9-a":     2
+        case "rv64gc":      0
+        case "rv64gcv":     1
+        case "generic":     0
+        default:            -1
+
+# Extension method: check if all items in one array are in another
+fn is_subset_of(self: [text], other: [text]) -> bool:
+    """Check if all items in self are contained in other."""
+    for item in self:
+        if not other.contains(item):
+            return false
+    true

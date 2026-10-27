@@ -1,0 +1,165 @@
+"""
+## Purpose and audience
+
+Executable specification for library version naming patterns (AC-3).
+Verifies that file-name builders produce the three naming forms exactly, and
+parsing a name recovers name, semver/ABI, triple, and tier. Written for
+engineers implementing library artifact naming and for reviewers verifying the
+naming contract.
+
+## Operator workflow
+
+Run: bin/simple test test/01_unit/compiler/driver/libver/libver_naming_spec.spl
+
+Every scenario calls real functions from src/compiler/80.driver/libver/naming.spl.
+
+## Verification guidance
+
+A naming build failure means the pattern drifted. A parsing failure means the
+inverse operation is incomplete. Re-read the builder and parser next to the
+failing expect before changing either side.
+"""
+
+# @manual_section: library version naming
+
+use compiler.driver.libver.naming ({name_stdlib, name_backend, name_tier_dylib, parse_stdlib_name, parse_backend_name, parse_tier_dylib_name})
+use std.spec.step
+
+describe "libver_naming: stdlib archive names":
+    # @req AC-3
+    it "builds stdlib archive name correctly":
+        step("Build stdlib archive name: libsimple_std-<semver>-<triple>-<tier>.a")
+        val name = name_stdlib("1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2")
+        expect(name).to_equal("libsimple_std-1.0.0-x86_64-unknown-linux-gnu-x86-64-v2.a")
+
+    it "parses stdlib archive name correctly":
+        step("Parse stdlib archive name back to components")
+        val name = "libsimple_std-2.5.3-aarch64-unknown-linux-gnu-armv8.2-a.a"
+        val parsed_opt = parse_stdlib_name(name)
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val (semver, triple, tier) = parsed_opt.unwrap()
+        expect(semver).to_equal("2.5.3")
+        expect(triple).to_equal("aarch64-unknown-linux-gnu")
+        expect(tier).to_equal("armv8.2-a")
+
+    it "round-trips stdlib name":
+        step("Build, then parse stdlib name")
+        val original_semver = "1.0.0-beta.1"
+        val original_triple = "riscv64-unknown-linux-gnu"
+        val original_tier = "rv64gcv"
+
+        val built = name_stdlib(original_semver, original_triple, original_tier)
+        val parsed_opt = parse_stdlib_name(built)
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val (semver, triple, tier) = parsed_opt.unwrap()
+        expect(semver).to_equal(original_semver)
+        expect(triple).to_equal(original_triple)
+        expect(tier).to_equal(original_tier)
+
+    it "rejects non-.a extension":
+        # @req AC-3
+        step("Parsing stdlib name without .a extension should fail")
+        val invalid = "libsimple_std-1.0.0-x86_64-unknown-linux-gnu-x86-64.so"
+        val parsed = parse_stdlib_name(invalid)
+        expect(parsed.is_none()).to_equal(true)  # oracle: .a is mandatory
+
+    it "rejects wrong prefix":
+        # @req AC-3
+        step("Parsing stdlib name with wrong prefix should fail")
+        val invalid = "simple_std-1.0.0-x86_64-unknown-linux-gnu-x86-64-v2.a"
+        val parsed = parse_stdlib_name(invalid)
+        expect(parsed.is_none()).to_equal(true)  # oracle: libsimple_std- prefix is mandatory
+
+describe "libver_naming: backend plugin names":
+    # @req AC-3
+    it "builds backend plugin name correctly":
+        step("Build backend plugin name: backend_<name>-<triple>-v<abi>.<ext>")
+        val name = name_backend("llvm", "x86_64-unknown-linux-gnu", 1, "so")
+        expect(name).to_equal("backend_llvm-x86_64-unknown-linux-gnu-v1.so")
+
+    it "parses backend plugin name correctly":
+        step("Parse backend plugin name back to components")
+        val name = "backend_clang-aarch64-unknown-linux-gnu-v2.dll"
+        val parsed_opt = parse_backend_name(name)
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val (plugin_name, triple, abi) = parsed_opt.unwrap()
+        expect(plugin_name).to_equal("clang")
+        expect(triple).to_equal("aarch64-unknown-linux-gnu")
+        expect(abi).to_equal(2)
+
+    it "round-trips backend name":
+        step("Build, then parse backend plugin name")
+        val original_name = "mybackend"
+        val original_triple = "x86_64-unknown-linux-gnu"
+        val original_abi: i64 = 3
+        val original_ext = "dylib"
+
+        val built = name_backend(original_name, original_triple, original_abi, original_ext)
+        val parsed_opt = parse_backend_name(built)
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val (plugin_name, triple, abi) = parsed_opt.unwrap()
+        expect(plugin_name).to_equal(original_name)
+        expect(triple).to_equal(original_triple)
+        expect(abi).to_equal(original_abi)
+
+describe "libver_naming: tier dylib names":
+    # @req AC-3
+    it "builds tier dylib name correctly":
+        step("Build tier dylib name: lib<name>-<semver>-<triple>-<tier>.<ext>")
+        val name = name_tier_dylib("simdlib", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v3", "so")
+        expect(name).to_equal("libsimdlib-1.0.0-x86_64-unknown-linux-gnu-x86-64-v3.so")
+
+    it "parses tier dylib name correctly":
+        step("Parse tier dylib name back to components")
+        val name = "libfastmath-2.3.1-aarch64-unknown-linux-gnu-armv9-a.a"
+        val parsed_opt = parse_tier_dylib_name(name)
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val (lib_name, semver, triple, tier) = parsed_opt.unwrap()
+        expect(lib_name).to_equal("fastmath")
+        expect(semver).to_equal("2.3.1")
+        expect(triple).to_equal("aarch64-unknown-linux-gnu")
+        expect(tier).to_equal("armv9-a")
+
+    it "round-trips tier dylib name":
+        step("Build, then parse tier dylib name")
+        val original_name = "mysimd"
+        val original_semver = "1.5.0-rc.1"
+        val original_triple = "riscv64-unknown-linux-gnu"
+        val original_tier = "rv64gcv"
+        val original_ext = "so"
+
+        val built = name_tier_dylib(original_name, original_semver, original_triple, original_tier, original_ext)
+        val parsed_opt = parse_tier_dylib_name(built)
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val (lib_name, semver, triple, tier) = parsed_opt.unwrap()
+        expect(lib_name).to_equal(original_name)
+        expect(semver).to_equal(original_semver)
+        expect(triple).to_equal(original_triple)
+        expect(tier).to_equal(original_tier)
+
+    it "rejects missing lib prefix":
+        # @req AC-3
+        step("Parsing dylib name without lib prefix should fail")
+        val invalid = "mylib-1.0.0-x86_64-unknown-linux-gnu-x86-64-v2.so"
+        val parsed = parse_tier_dylib_name(invalid)
+        expect(parsed.is_none()).to_equal(true)  # oracle: lib prefix is mandatory
+
+describe "libver_naming: rejection cases":
+    # @req AC-3
+    it "rejects stdlib name without required parts":
+        step("Parsing incomplete stdlib name should fail")
+        val invalid = "libsimple_std-1.0.0.a"
+        val parsed = parse_stdlib_name(invalid)
+        expect(parsed.is_none()).to_equal(true)  # oracle: triple and tier are required
+
+    it "rejects backend name without version":
+        step("Parsing backend name without abi version should fail")
+        val invalid = "backend_llvm-x86_64-unknown-linux-gnu.so"
+        val parsed = parse_backend_name(invalid)
+        expect(parsed.is_none()).to_equal(true)  # oracle: -v<abi> format is mandatory

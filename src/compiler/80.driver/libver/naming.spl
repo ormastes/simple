@@ -1,0 +1,83 @@
+# Naming patterns and parsers for versioned artifacts.
+# AC-3: File names are built and parsed exactly per plan.
+
+use std.text (text_replace, text_split, text_trim)
+
+# Build the static archive name: libsimple_std-<semver>-<triple>-<tier>.a
+fn name_stdlib(semver: text, triple: text, tier: text) -> text:
+    """Emit the static stdlib archive file name."""
+    "libsimple_std-" + semver + "-" + triple + "-" + tier + ".a"
+
+# Build the backend plugin name: backend_<name>-<triple>-v<abi>.<ext>
+fn name_backend(name: text, triple: text, abi: i64, ext: text) -> text:
+    """Emit the backend plugin file name."""
+    "backend_" + name + "-" + triple + "-v" + text::from_i64(abi) + "." + ext
+
+# Build the tier dylib name: lib<name>-<semver>-<triple>-<tier>.<ext>
+fn name_tier_dylib(name: text, semver: text, triple: text, tier: text, ext: text) -> text:
+    """Emit the CPU-tier dylib file name."""
+    "lib" + name + "-" + semver + "-" + triple + "-" + tier + "." + ext
+
+# Parse stdlib name into (semver, triple, tier).
+fn parse_stdlib_name(filename: text) -> Option<(text, text, text)>:
+    """Parse libsimple_std-<semver>-<triple>-<tier>.a"""
+    if filename.ends_with(".a"):
+        val without_ext = filename.take(filename.len() - 2)
+        if without_ext.starts_with("libsimple_std-"):
+            val parts = without_ext.drop(14).split("-")
+            if parts.len() >= 3:
+                val tier = parts[parts.len() - 1]
+                val semver = parts[0]
+                val triple_parts = parts.slice(1, parts.len() - 1)
+                val triple = text_join("-", triple_parts)
+                return Option.some((semver, triple, tier))
+    Option.none<(text, text, text)>()
+
+# Parse backend name into (name, triple, abi).
+fn parse_backend_name(filename: text) -> Option<(text, text, i64)>:
+    """Parse backend_<name>-<triple>-v<abi>.<ext>"""
+    if filename.starts_with("backend_"):
+        val without_prefix = filename.drop(8)
+        val dot_index = without_prefix.rfind(".")
+        if dot_index >= 0:
+            val without_ext = without_prefix.take(dot_index)
+            val v_index = without_ext.rfind("-v")
+            if v_index >= 0:
+                val abi_str = without_ext.drop(v_index + 2)
+                val abi_opt = text::try_parse_i64(abi_str)
+                if abi_opt.is_some():
+                    val name_triple = without_ext.take(v_index)
+                    val last_dash = name_triple.rfind("-")
+                    if last_dash >= 0:
+                        val name = name_triple.take(last_dash)
+                        val triple = name_triple.drop(last_dash + 1)
+                        return Option.some((name, triple, abi_opt.unwrap()))
+    Option.none<(text, text, i64)>()
+
+# Parse tier dylib name into (name, semver, triple, tier).
+fn parse_tier_dylib_name(filename: text) -> Option<(text, text, text, text)>:
+    """Parse lib<name>-<semver>-<triple>-<tier>.<ext>"""
+    if filename.starts_with("lib"):
+        val dot_index = filename.rfind(".")
+        if dot_index >= 0:
+            val without_prefix = filename.drop(3).take(dot_index - 3)
+            val parts = without_prefix.split("-")
+            if parts.len() >= 3:
+                val name = parts[0]
+                val semver = parts[1]
+                val tier = parts[parts.len() - 1]
+                val triple_parts = parts.slice(2, parts.len() - 1)
+                val triple = text_join("-", triple_parts)
+                return Option.some((name, semver, triple, tier))
+    Option.none<(text, text, text, text)>()
+
+# Helper to join strings with a separator
+fn text_join(sep: text, items: [text]) -> text:
+    """Join an array of strings with a separator."""
+    if items.len() == 0:
+        return ""
+
+    var result = items[0]
+    for i in 1..items.len():
+        result = result + sep + items[i]
+    result

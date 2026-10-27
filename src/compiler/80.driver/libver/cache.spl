@@ -1,0 +1,76 @@
+# Cache key and publish manifest for versioned libraries.
+# AC-9: libver_cache_component gives canonical text that changes when any field changes.
+# AC-10: libver_publish_manifest emits deterministic SDN manifest for rc pipeline.
+
+use compiler.driver.libver.identity ({LibIdentity})
+
+# Compute a canonical cache component that changes when any identity field changes.
+fn libver_cache_component(id: LibIdentity) -> text:
+    """
+    Emit a canonical text to be folded into the native build cache scope.
+
+    Any change to semver, ABI, digest, producer, triple, or tier changes the
+    component, forcing cache invalidation across artifacts. The output is
+    deterministic and canonical.
+
+    Format: libver:<name>:<semver>:<abi_major>.<abi_minor>:<digest>:<producer>:<triple>:<tier>
+    """
+    "libver:" +
+        id.name + ":" +
+        id.semver + ":" +
+        text::from_i64(id.abi_major) + "." + text::from_i64(id.abi_minor) + ":" +
+        id.iface_digest + ":" +
+        id.producer + ":" +
+        id.triple + ":" +
+        id.cpu_tier
+
+# Emit a release manifest for the rc pipeline.
+fn libver_publish_manifest(ids: [LibIdentity], naming_fn: fn (LibIdentity) -> text) -> text:
+    """
+    Emit a deterministic SDN release manifest listing each artifact.
+
+    The manifest lists file names and sha256 values, sorted by file name.
+    The naming_fn determines how each artifact is named (stdlib, backend, or tier dylib).
+
+    Output:
+    [
+        { filename = "...", sha256 = "..." },
+        ...
+    ]
+    sorted by filename.
+    """
+    var entries: [(text, text)] = []
+
+    for id in ids:
+        val filename = naming_fn(id)
+        entries.push((filename, id.sha256))
+
+    // Sort by filename
+    entries.sort(fn (a, b): a.0 < b.0)
+
+    // Emit as SDN
+    var manifest = "[\n"
+    for i in 0..entries.len():
+        if i > 0:
+            manifest = manifest + ",\n"
+        val (filename, sha256) = entries[i]
+        manifest = manifest +
+            "    { filename = \"" + sdn_escape_string(filename) +
+            "\", sha256 = \"" + sdn_escape_string(sha256) + "\" }"
+    manifest = manifest + "\n]\n"
+
+    manifest
+
+# Helper: escape special characters in SDN strings
+fn sdn_escape_string(s: text) -> text:
+    """Escape quotes and backslashes for SDN string literals."""
+    var result = ""
+    for i in 0..s.len():
+        val ch = s[i]
+        if ch == '"':
+            result = result + "\\\""
+        elif ch == '\\':
+            result = result + "\\\\"
+        else:
+            result = result + text::from_u8(ch)
+    result

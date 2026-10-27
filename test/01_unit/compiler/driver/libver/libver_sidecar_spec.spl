@@ -1,0 +1,161 @@
+"""
+## Purpose and audience
+
+Executable specification for library version sidecar SDN emit and parse (AC-2).
+Verifies that LibIdentity round-trips through sidecar SDN: emit then parse gives
+back the same fields. Written for engineers implementing versioned library
+admission and for reviewers verifying the identity serialization contract.
+
+## Operator workflow
+
+Run: bin/simple test test/01_unit/compiler/driver/libver/libver_sidecar_spec.spl
+
+Every scenario calls real functions from src/compiler/80.driver/libver/sidecar.spl.
+No scenario requires a repository checkout or network access.
+
+## Verification guidance
+
+A sidecar parse failure means the SDN format drifted or a field is missing.
+A round-trip failure means emit and parse are not inverses. Re-read the emit
+and parse functions next to the failing expect before changing either side.
+"""
+
+# @manual_section: library version sidecar
+
+use compiler.driver.libver.identity ({LibIdentity})
+use compiler.driver.libver.sidecar ({libver_emit_sidecar, libver_parse_sidecar})
+use std.spec.step
+
+describe "libver_sidecar: emit and parse round-trip":
+    # @req AC-2
+    it "emits and parses a simple stdlib identity":
+        step("Create a LibIdentity for stdlib and round-trip through sidecar SDN")
+        val id = LibIdentity(
+            name: "simple_std",
+            semver: "1.0.0",
+            abi_major: 1,
+            abi_minor: 0,
+            iface_digest: "sha256:abc123",
+            iface_parts: ["core", "math"],
+            producer: "compiler-v1.0",
+            triple: "x86_64-unknown-linux-gnu",
+            cpu_tier: "x86-64-v2",
+            sha256: "deadbeefcafe"
+        )
+
+        val emitted = libver_emit_sidecar(id)
+        step("Emit to SDN: " + emitted)
+
+        val parsed_opt = libver_parse_sidecar(emitted)
+        step("Parse back from SDN")
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val parsed = parsed_opt.unwrap()
+        expect(parsed.name).to_equal("simple_std")
+        expect(parsed.semver).to_equal("1.0.0")
+        expect(parsed.abi_major).to_equal(1)
+        expect(parsed.abi_minor).to_equal(0)
+        expect(parsed.iface_digest).to_equal("sha256:abc123")
+        expect(parsed.producer).to_equal("compiler-v1.0")
+        expect(parsed.triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(parsed.cpu_tier).to_equal("x86-64-v2")
+        expect(parsed.sha256).to_equal("deadbeefcafe")
+
+    it "preserves interface parts list order":
+        # @req AC-2
+        step("Interface parts should round-trip in the same order")
+        val id = LibIdentity(
+            name: "mylib",
+            semver: "2.0.0",
+            abi_major: 2,
+            abi_minor: 3,
+            iface_digest: "digest",
+            iface_parts: ["part1", "part2", "part3"],
+            producer: "compiler-v2",
+            triple: "aarch64-unknown-linux-gnu",
+            cpu_tier: "armv8-a",
+            sha256: "cafecafe"
+        )
+
+        val emitted = libver_emit_sidecar(id)
+        val parsed_opt = libver_parse_sidecar(emitted)
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val parsed = parsed_opt.unwrap()
+        expect(parsed.iface_parts.len()).to_equal(3)
+        expect(parsed.iface_parts[0]).to_equal("part1")
+        expect(parsed.iface_parts[1]).to_equal("part2")
+        expect(parsed.iface_parts[2]).to_equal("part3")
+
+    it "handles empty interface parts":
+        # @req AC-2
+        step("Empty interface parts list should parse as empty")
+        val id = LibIdentity(
+            name: "simple_std",
+            semver: "1.0.0",
+            abi_major: 1,
+            abi_minor: 0,
+            iface_digest: "digest123",
+            iface_parts: [],
+            producer: "compiler",
+            triple: "riscv64-unknown-linux-gnu",
+            cpu_tier: "rv64gc",
+            sha256: "feed"
+        )
+
+        val emitted = libver_emit_sidecar(id)
+        val parsed_opt = libver_parse_sidecar(emitted)
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val parsed = parsed_opt.unwrap()
+        expect(parsed.iface_parts.len()).to_equal(0)
+
+describe "libver_sidecar: parse failures":
+    # @req AC-2
+    it "fails on missing name field":
+        step("Parse sidecar without name field")
+        val malformed = "semver = \"1.0.0\"\nabi_major = 1\nabi_minor = 0\niface_digest = \"d\"\nproducer = \"c\"\ntriple = \"t\"\ncpu_tier = \"c\"\nsha256 = \"h\""
+        val parsed = libver_parse_sidecar(malformed)
+        expect(parsed.is_none()).to_equal(true)  # oracle: missing required field triggers parse failure
+
+    it "fails on missing abi_major field":
+        step("Parse sidecar without abi_major field")
+        val malformed = "name = \"lib\"\nsemver = \"1.0.0\"\nabi_minor = 0\niface_digest = \"d\"\nproducer = \"c\"\ntriple = \"t\"\ncpu_tier = \"c\"\nsha256 = \"h\""
+        val parsed = libver_parse_sidecar(malformed)
+        expect(parsed.is_none()).to_equal(true)  # oracle: missing required field triggers parse failure
+
+    it "fails on malformed SDN value":
+        step("Parse sidecar with invalid SDN syntax")
+        val malformed = "name = lib\nabi_major = 1"  // unquoted string name
+        val parsed = libver_parse_sidecar(malformed)
+        expect(parsed.is_none()).to_equal(true)  # oracle: SDN format error triggers failure
+
+    it "fails on non-integer abi_major":
+        step("Parse sidecar with non-integer abi_major")
+        val malformed = "name = \"lib\"\nsemver = \"1.0.0\"\nabi_major = \"one\"\nabi_minor = 0\niface_digest = \"d\"\nproducer = \"c\"\ntriple = \"t\"\ncpu_tier = \"c\"\nsha256 = \"h\""
+        val parsed = libver_parse_sidecar(malformed)
+        expect(parsed.is_none()).to_equal(true)  # oracle: non-integer ABI fields fail
+
+describe "libver_sidecar: escape and unescape":
+    # @req AC-2
+    it "handles quotes in field values":
+        step("Emit and parse identity with quoted strings")
+        val id = LibIdentity(
+            name: "lib\"quoted",
+            semver: "1.0.0",
+            abi_major: 1,
+            abi_minor: 0,
+            iface_digest: "digest",
+            iface_parts: [],
+            producer: "compiler",
+            triple: "x86_64-unknown-linux-gnu",
+            cpu_tier: "generic",
+            sha256: "hash"
+        )
+
+        val emitted = libver_emit_sidecar(id)
+        val parsed_opt = libver_parse_sidecar(emitted)
+
+        expect(parsed_opt.is_some()).to_equal(true)
+        val parsed = parsed_opt.unwrap()
+        expect(parsed.name).to_equal("lib\"quoted")  # oracle: quotes must round-trip

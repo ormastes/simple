@@ -1,0 +1,195 @@
+# Sidecar SDN emit and parse for LibIdentity.
+# AC-2: LibIdentity round-trips through sidecar: emit then parse gives back the same fields.
+
+use compiler.driver.libver.identity ({LibIdentity})
+
+# Emit LibIdentity to SDN text for sidecar file.
+fn libver_emit_sidecar(id: LibIdentity) -> text:
+    """
+    Serialize LibIdentity to SDN format for the .lib.sdn sidecar file.
+
+    The output is deterministic SDN that parses back to the same fields.
+    """
+    var fields: [text] = []
+
+    fields.push("name = \"" + sdn_escape_string(id.name) + "\"")
+    fields.push("semver = \"" + sdn_escape_string(id.semver) + "\"")
+    fields.push("abi_major = " + text::from_i64(id.abi_major))
+    fields.push("abi_minor = " + text::from_i64(id.abi_minor))
+    fields.push("iface_digest = \"" + sdn_escape_string(id.iface_digest) + "\"")
+
+    # iface_parts as a sorted list
+    var parts_text = "["
+    for i in 0..id.iface_parts.len():
+        if i > 0:
+            parts_text = parts_text + ", "
+        parts_text = parts_text + "\"" + sdn_escape_string(id.iface_parts[i]) + "\""
+    parts_text = parts_text + "]"
+    fields.push("iface_parts = " + parts_text)
+
+    fields.push("producer = \"" + sdn_escape_string(id.producer) + "\"")
+    fields.push("triple = \"" + sdn_escape_string(id.triple) + "\"")
+    fields.push("cpu_tier = \"" + sdn_escape_string(id.cpu_tier) + "\"")
+    fields.push("sha256 = \"" + sdn_escape_string(id.sha256) + "\"")
+
+    var result = ""
+    for i in 0..fields.len():
+        if i > 0:
+            result = result + "\n"
+        result = result + fields[i]
+    result
+
+# Parse sidecar SDN text back to LibIdentity.
+fn libver_parse_sidecar(sidecar_text: text) -> Option<LibIdentity>:
+    """
+    Deserialize sidecar SDN text back to LibIdentity.
+
+    Returns Option.none if any required field is missing or malformed.
+    Missing fields trigger SidecarMalformed refusal.
+    """
+    # Simple line-by-line parser for key=value pairs
+    val lines = sidecar_text.split("\n")
+    var fields: {text: text} = {}
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0 or trimmed.starts_with("#"):
+            continue
+
+        val eq_pos = trimmed.find("=")
+        if eq_pos < 0:
+            return Option.none
+
+        val key = trimmed.take(eq_pos).trim()
+        val value_str = trimmed.drop(eq_pos + 1).trim()
+        val value = parse_sdn_value(value_str)
+
+        if value.len() == 0:
+            return Option.none
+
+        fields[key] = value
+
+    # Extract required fields
+    val name_opt = get_field(fields, "name")
+    val semver_opt = get_field(fields, "semver")
+    val abi_major_opt = get_field_i64(fields, "abi_major")
+    val abi_minor_opt = get_field_i64(fields, "abi_minor")
+    val iface_digest_opt = get_field(fields, "iface_digest")
+    val producer_opt = get_field(fields, "producer")
+    val triple_opt = get_field(fields, "triple")
+    val cpu_tier_opt = get_field(fields, "cpu_tier")
+    val sha256_opt = get_field(fields, "sha256")
+
+    if name_opt.is_none() or semver_opt.is_none() or abi_major_opt.is_none() or
+       abi_minor_opt.is_none() or iface_digest_opt.is_none() or producer_opt.is_none() or
+       triple_opt.is_none() or cpu_tier_opt.is_none() or sha256_opt.is_none():
+        return Option.none
+
+    val iface_parts_opt = get_field_array(fields, "iface_parts")
+    val iface_parts = iface_parts_opt.unwrap_or([])
+
+    Option.some(LibIdentity(
+        name: name_opt.unwrap(),
+        semver: semver_opt.unwrap(),
+        abi_major: abi_major_opt.unwrap(),
+        abi_minor: abi_minor_opt.unwrap(),
+        iface_digest: iface_digest_opt.unwrap(),
+        iface_parts: iface_parts,
+        producer: producer_opt.unwrap(),
+        triple: triple_opt.unwrap(),
+        cpu_tier: cpu_tier_opt.unwrap(),
+        sha256: sha256_opt.unwrap()
+    ))
+
+# Helper: escape special characters in SDN strings
+fn sdn_escape_string(s: text) -> text:
+    """Escape quotes and backslashes for SDN string literals."""
+    var result = ""
+    for i in 0..s.len():
+        val ch = s[i]
+        if ch == '"':
+            result = result + "\\\""
+        elif ch == '\\':
+            result = result + "\\\\"
+        else:
+            result = result + text::from_u8(ch)
+    result
+
+# Helper: parse a simple SDN value (string, number, or array)
+fn parse_sdn_value(value_str: text) -> text:
+    """Extract the raw value from a quoted string or array literal."""
+    val trimmed = value_str.trim()
+
+    if trimmed.starts_with("\"") and trimmed.ends_with("\""):
+        # String literal
+        val without_quotes = trimmed.drop(1).take(trimmed.len() - 2)
+        return unescape_sdn_string(without_quotes)
+    elif trimmed.starts_with("[") and trimmed.ends_with("]"):
+        // Array is returned as-is for now; caller will parse it
+        return trimmed
+    else:
+        // Plain value (number)
+        return trimmed
+
+# Helper: unescape SDN strings
+fn unescape_sdn_string(s: text) -> text:
+    """Unescape quotes and backslashes in SDN strings."""
+    var result = ""
+    var i: i64 = 0
+    while i < s.len():
+        if s[i] == '\\' and i + 1 < s.len():
+            val next = s[i + 1]
+            if next == '"':
+                result = result + "\""
+                i = i + 2
+            elif next == '\\':
+                result = result + "\\"
+                i = i + 2
+            else:
+                result = result + text::from_u8(s[i])
+                i = i + 1
+        else:
+            result = result + text::from_u8(s[i])
+            i = i + 1
+    result
+
+# Helper: get a field as text
+fn get_field(fields: {text: text}, key: text) -> Option<text>:
+    """Look up a field and return its value."""
+    if fields.contains(key):
+        Option.some(fields[key])
+    else:
+        Option.none
+
+# Helper: get a field as i64
+fn get_field_i64(fields: {text: text}, key: text) -> Option<i64>:
+    """Look up a field as an integer."""
+    if not fields.contains(key):
+        return Option.none
+
+    val value_str = fields[key].trim()
+    text::try_parse_i64(value_str)
+
+# Helper: get a field as array of strings
+fn get_field_array(fields: {text: text}, key: text) -> Option<[text]>:
+    """Look up a field as an array of strings."""
+    if not fields.contains(key):
+        return Option.some([])
+
+    val value_str = fields[key].trim()
+    if not (value_str.starts_with("[") and value_str.ends_with("]")):
+        return Option.none
+
+    val without_brackets = value_str.drop(1).take(value_str.len() - 2)
+    if without_brackets.len() == 0:
+        return Option.some([])
+
+    var items: [text] = []
+    val parts = without_brackets.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed.starts_with("\"") and trimmed.ends_with("\""):
+            val item = trimmed.drop(1).take(trimmed.len() - 2)
+            items.push(unescape_sdn_string(item))
+
+    Option.some(items)
