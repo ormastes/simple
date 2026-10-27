@@ -1,0 +1,88 @@
+# Isolated actual snapshot-owner probe. Not in the fresh encrypted-read closure.
+use std.database.server.storage_snapshot.{storage_snapshot_open_read, SnapshotError}
+use std.io_runtime.{env_get, file_write, thread_sleep}
+
+fn main() -> i64:
+    val path = env_get("DEVHUB_SNAPSHOT_PATH")
+    val mode = env_get("DEVHUB_SNAPSHOT_MODE")
+    if path == "": return 2
+    val opened = storage_snapshot_open_read(path, 1048576u64)
+    match opened:
+        case Err(error):
+            match error:
+                case SnapshotError.Unavailable(_):
+                    if mode == "refuse":
+                        print "PASS typed snapshot unavailable"
+                        return 0
+                case _: pass
+            print "FAIL unexpected snapshot open rejection"
+            return 1
+        case Ok(owner):
+            if mode == "refuse":
+                val closed = owner.close()
+                print "FAIL admitted refused source"
+                return 1
+            # A pre-admission general read must not be permitted.
+            match owner.read_exact_at(4096u64, 1):
+                case Ok(_):
+                    val closed = owner.close()
+                    return 1
+                case Err(_): pass
+            val header = match owner.read_page1():
+                case Err(_):
+                    val closed = owner.close()
+                    return 1
+                case Ok(bytes): bytes
+            match owner.admit_rollback_header(header):
+                case Err(_):
+                    val closed = owner.close()
+                    if mode == "header-refuse":
+                        print "PASS rollback header refusal"
+                        return 0
+                    return 1
+                case Ok(_): pass
+            if mode == "header-refuse":
+                val closed = owner.close()
+                return 1
+            val page = match owner.read_exact_at(0u64, 4096):
+                case Err(_):
+                    val closed = owner.close()
+                    return 1
+                case Ok(bytes): bytes
+            if page.len() != 4096 or page[0] != 83u8 or page[1] != 81u8:
+                val closed = owner.close()
+                return 1
+            if mode == "hold":
+                val signal = env_get("DEVHUB_SNAPSHOT_READY")
+                if signal == "":
+                    val closed = owner.close()
+                    return 2
+                file_write(signal, "locked")
+                thread_sleep(4000)
+            # Exercise a sibling class reference: stale aliases must consult
+            # the authoritative mutable lifecycle, even after another close.
+            val alias = owner
+            match owner.close():
+                case Err(_): return 1
+                case Ok(_): pass
+            val reopened = match storage_snapshot_open_read(path, 1048576u64):
+                case Err(_): return 1
+                case Ok(next): next
+            match alias.read_exact_at(0u64, 1):
+                case Ok(_):
+                    print "FAIL stale alias read after close"
+                    return 1
+                case Err(_): pass
+            match alias.close():
+                case Err(_): return 1
+                case Ok(_): pass
+            # A stale alias close must never close a recycled native handle.
+            match reopened.read_page1():
+                case Err(_): return 1
+                case Ok(bytes):
+                    if bytes.len() != 4096: return 1
+            match reopened.close():
+                case Err(_): return 1
+                case Ok(_): pass
+            print "PASS snapshot read admission, alias close and idempotence"
+            0

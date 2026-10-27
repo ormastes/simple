@@ -1,0 +1,346 @@
+# Locked rollback-mode SQLite main-file source, currently unreferenced by production.
+# No WAL/recovery support: any initial journal/WAL/SHM entry is refused.
+# Parent directories and SQLite writers must be trusted/cooperating; no-follow
+# protects the final entry only. Local Windows VolumeGUID / Linux64 ext4,tmpfs.
+# Linux OFD locks interoperate with SQLite POSIX locks without the process-wide
+# close-any-fd hazard of F_SETLK. Unsupported capabilities fail closed.
+use std.nogc_sync_mut.database.server.storage_snapshot_abi.*
+use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_read_at}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64, volatile_write_u8, volatile_write_u16, volatile_write_u32, volatile_write_u64}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+
+val SNAPSHOT_PENDING_BYTE: i64 = 1073741824
+val SNAPSHOT_SHARED_FIRST: i64 = 1073741826
+val SNAPSHOT_SHARED_BYTES: i64 = 510
+
+enum SnapshotError:
+    Unavailable(detail: text)
+    Io(detail: text)
+    InvalidState(detail: text)
+    Range(detail: text)
+
+class StorageSnapshotV1:
+    # Sole owner, single-threaded. Consumers must not copy/reconstruct the raw
+    # RetainedFile or close it separately; opaque token admission is future work.
+    _file: RetainedFile
+    var _closed: bool
+    var _admitted: bool
+
+    fn size() -> Result<u64, SnapshotError>:
+        if self._closed: return Err(SnapshotError.InvalidState(detail: "snapshot closed"))
+        Ok(self._file.size)
+
+    fn read_page1() -> Result<[u8], SnapshotError>:
+        if self._closed: return Err(SnapshotError.InvalidState(detail: "snapshot closed"))
+        # Only bootstrap page1 is readable before authenticated header admission.
+        _snapshot_read_exact(self._file, 0u64, 4096)
+
+    me admit_rollback_header(header: [u8]) -> Result<(), SnapshotError>:
+        # Session calls this only AFTER ordinary header validation and (for an
+        # encoded source) registry page1 authentication/decryption. Raw ciphertext
+        # cannot establish SQLite journal mode. This is not a WAL overlay.
+        if self._closed: return Err(SnapshotError.InvalidState(detail: "snapshot closed"))
+        if header.len() < 100:
+            return Err(SnapshotError.Unavailable(detail: "decoded header unavailable"))
+        if header[18] != 1u8 or header[19] != 1u8:
+            return Err(SnapshotError.Unavailable(detail: "only rollback read/write versions 1/1 supported"))
+        self._admitted = true
+        Ok(())
+
+    fn read_exact_at(offset: u64, length: i64) -> Result<[u8], SnapshotError>:
+        if self._closed or not self._admitted:
+            return Err(SnapshotError.InvalidState(detail: "snapshot not admitted or closed"))
+        _snapshot_read_exact(self._file, offset, length)
+
+    me close() -> Result<(), SnapshotError>:
+        if self._closed: return Ok(())
+        # Invalidate before the one native close; never retry a reused fd.
+        self._closed = true
+        self._admitted = false
+        # Closing the sole descriptor releases all OFD/Windows byte locks.
+        if not self._file.close():
+            return Err(SnapshotError.Io(detail: "snapshot close failed"))
+        Ok(())
+
+fn _snapshot_read_exact(file: RetainedFile, offset: u64, length: i64) -> Result<[u8], SnapshotError>:
+    if length < 1 or length > 65536 or offset > file.size or length as u64 > file.size - offset:
+        return Err(SnapshotError.Range(detail: "snapshot range exceeds retained extent"))
+    match retained_file_read_at(file, offset, length):
+        case Err(_): return Err(SnapshotError.Io(detail: "retained positional read failed"))
+        case Ok(bytes):
+            if bytes.len() != length:
+                return Err(SnapshotError.Io(detail: "short snapshot read"))
+            Ok(bytes)
+
+@unsafe(reason: "allocates zeroed temporary native IO storage", capabilities: [ffi, raw_ptr])
+fn _snapshot_alloc(size: u64) -> i64:
+    @when(os="windows"):
+    HeapAlloc(GetProcessHeap(), 8u32, size)
+    @else:
+    val ptr = malloc(size)
+    if ptr != 0:
+        for index in 0..(size as i64): volatile_write_u8(ptr + index, 0)
+    ptr
+    @end
+
+@unsafe(reason: "releases exactly one owned native allocation", capabilities: [ffi, raw_ptr])
+fn _snapshot_free(ptr: i64):
+    if ptr == 0: return
+    @when(os="windows"):
+    val released = HeapFree(GetProcessHeap(), 0u32, ptr)
+    @else:
+    free(ptr)
+    @end
+
+@unsafe(reason: "encodes bounded native path without embedded NUL", capabilities: [ffi, raw_ptr])
+fn _snapshot_path(path: text) -> i64:
+    if path.len() == 0 or path.len() > 32760: return 0
+    val ptr = _snapshot_alloc(65536u64)
+    if ptr == 0: return 0
+    @when(os="windows"):
+    var consumed = 0
+    var ordinal = 0
+    var offset = 0
+    while consumed < path.len():
+        val scalar = path.char_code_at(ordinal)
+        if scalar <= 0 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
+            _snapshot_free(ptr)
+            return 0
+        if scalar < 65536:
+            volatile_write_u16(ptr + offset * 2, scalar)
+            offset = offset + 1
+        else:
+            val value = scalar - 65536
+            volatile_write_u16(ptr + offset * 2, 55296 + (value >> 10))
+            volatile_write_u16(ptr + (offset + 1) * 2, 56320 + (value & 1023))
+            offset = offset + 2
+        ordinal = ordinal + 1
+        if scalar < 128: consumed = consumed + 1
+        elif scalar < 2048: consumed = consumed + 2
+        elif scalar < 65536: consumed = consumed + 3
+        else: consumed = consumed + 4
+    @else:
+    val bytes = base_encoding_text_to_bytes(path)
+    for index in 0..bytes.len():
+        if bytes[index] == 0u8:
+            _snapshot_free(ptr)
+            return 0
+        volatile_write_u8(ptr + index, bytes[index] as i64)
+    @end
+    ptr
+
+# MIR Result<(..)> tuple slots admit only i64/bool/f64/text/tuple/record (no u64,
+# no [u8]; result_try_tuple_field_type), so the pair is a record instead.
+# @workaround bug=convnodes_retained_file_result_tuple_u64_2026_10_25 reason=see doc/08_tracking/bug/convnodes_retained_file_result_tuple_u64_2026-10-25.md
+struct SnapshotMeta:
+    size: u64
+    identity: [u8]
+
+@unsafe(reason: "observes size and identity on exact retained regular-file handle", capabilities: [ffi, raw_ptr])
+fn _snapshot_metadata(handle: i64) -> Result<SnapshotMeta, text>:
+    val ptr = _snapshot_alloc(256u64)
+    if ptr == 0: return Err("SNAPSHOT_MEMORY")
+    var size = 0u64
+    var identity: [u8] = []
+    var valid = false
+    @when(os="windows"):
+    # FileAttributeTagInfo rejects directory/reparse; FileStandardInfo size;
+    # FileIdInfo binds volume+128bit identifier; FileBasicInfo excludes atime.
+    if GetFileType(handle) == 1u32 and GetFileInformationByHandleEx(handle, 9, ptr, 8u32) != 0 and (volatile_read_u32(ptr) & 1040) == 0:
+        if GetFileInformationByHandleEx(handle, 1, ptr, 24u32) != 0 and volatile_read_u32(ptr + 16) == 1:
+            size = volatile_read_u64(ptr + 8) as u64
+            if GetFileInformationByHandleEx(handle, 18, ptr, 24u32) != 0:
+                for index in 0..24: identity.push(volatile_read_u8(ptr + index) as u8)
+                if GetFileInformationByHandleEx(handle, 0, ptr, 40u32) != 0:
+                    for index in 16..32: identity.push(volatile_read_u8(ptr + index) as u8)
+                    valid = true
+    @else:
+    @when(os="linux"):
+    # AT_EMPTY_PATH, STATX_BASIC_STATS; fixed UAPI layout independent of libc stat.
+    val empty = _snapshot_alloc(1u64)
+    if empty != 0:
+        if statx(handle as i32, empty, 4096, 2047u32, ptr) == 0 and (volatile_read_u32(ptr) & 967) == 967 and (volatile_read_u16(ptr + 28) & 61440) == 32768 and volatile_read_u32(ptr + 16) == 1:
+            size = volatile_read_u64(ptr + 40) as u64
+            for index in 32..48: identity.push(volatile_read_u8(ptr + index) as u8)
+            for index in 96..128: identity.push(volatile_read_u8(ptr + index) as u8)
+            for index in 136..144: identity.push(volatile_read_u8(ptr + index) as u8)
+            valid = true
+        _snapshot_free(empty)
+    @end
+    @end
+    _snapshot_free(ptr)
+    if not valid: return Err("SNAPSHOT_METADATA_UNSUPPORTED")
+    Ok(SnapshotMeta(size: size, identity: identity))
+
+
+@unsafe(reason: "closes unpublished native snapshot candidate exactly once", capabilities: [ffi])
+fn _snapshot_native_close(handle: i64) -> bool:
+    @when(os="windows"):
+    CloseHandle(handle) != 0
+    @else:
+    close(handle as i32) == 0
+    @end
+
+@unsafe(reason: "readonly nofollow open with separate snapshot sharing policy", capabilities: [ffi, raw_ptr])
+fn _snapshot_native_open(path: text) -> i64:
+    val ptr = _snapshot_path(path)
+    if ptr == 0: return -1
+    var handle = -1i64
+    @when(os="windows"):
+    # GENERIC_READ, SHARE_READ|WRITE, OPEN_EXISTING, OPEN_REPARSE_POINT.
+    # Denying delete sharing also keeps main-file pathname stable on Windows.
+    handle = CreateFileW(ptr, 2147483648u32, 3u32, 0, 3u32, 2097280u32, 0)
+    @else:
+    @when(os="linux"):
+    handle = open(ptr, 657408, 0u32) as i64
+    @end
+    @end
+    _snapshot_free(ptr)
+    handle
+
+@unsafe(reason: "verifies exact supported native local filesystem capability", capabilities: [ffi, raw_ptr])
+fn _snapshot_local_host(handle: i64) -> bool:
+    val ptr = _snapshot_alloc(65536u64)
+    if ptr == 0: return false
+    var valid = false
+    @when(os="windows"):
+    # VOLUME_NAME_GUID is unavailable for UNC/SMB. Never fall back to DOS/UNC.
+    val count = GetFinalPathNameByHandleW(handle, ptr, 32768u32, 1u32)
+    val prefix = base_encoding_text_to_bytes("\\\\?\\Volume{")
+    valid = count > prefix.len() and count < 32768
+    var index = 0
+    while valid and index < prefix.len():
+        if volatile_read_u16(ptr + index * 2) != prefix[index] as i64: valid = false
+        index = index + 1
+    @else:
+    @when(os="linux"):
+    # Linux64 flock/statfs layout candidate restricted to x86_64/aarch64;
+    # actual native ABI/lock contention qualification remains required.
+    if uname(ptr) == 0:
+        val x86 = base_encoding_text_to_bytes("x86_64")
+        val arm = base_encoding_text_to_bytes("aarch64")
+        var is_x86 = true
+        var is_arm = true
+        for index in 0..x86.len():
+            if volatile_read_u8(ptr + 260 + index) != x86[index] as i64: is_x86 = false
+        if volatile_read_u8(ptr + 260 + x86.len()) != 0: is_x86 = false
+        for index in 0..arm.len():
+            if volatile_read_u8(ptr + 260 + index) != arm[index] as i64: is_arm = false
+        if volatile_read_u8(ptr + 260 + arm.len()) != 0: is_arm = false
+        if is_x86 or is_arm:
+            if fstatfs(handle as i32, ptr) == 0:
+                val kind = volatile_read_u64(ptr) & 4294967295
+                # ext2/3/4 or tmpfs only; unknown/network/FUSE/overlay refused.
+                valid = kind == 61267 or kind == 16914836
+    @end
+    @end
+    _snapshot_free(ptr)
+    valid
+
+@unsafe(reason: "acquires or releases exact SQLite read-lock byte range", capabilities: [ffi, raw_ptr])
+fn _snapshot_range_lock(handle: i64, offset: i64, length: i64, unlock: bool) -> bool:
+    val ptr = _snapshot_alloc(32u64)
+    if ptr == 0: return false
+    var valid = false
+    @when(os="windows"):
+    # OVERLAPPED Win64 Offset/OffsetHigh at16/20, no event; synchronous handle.
+    volatile_write_u32(ptr + 16, offset & 4294967295)
+    volatile_write_u32(ptr + 20, offset >> 32)
+    if unlock:
+        valid = UnlockFileEx(handle, 0u32, length as u32, 0u32, ptr) != 0
+    else:
+        valid = LockFileEx(handle, 1u32, 0u32, length as u32, 0u32, ptr) != 0
+    @else:
+    @when(os="linux"):
+    # Linux64 struct flock: type0,whence2,start8,len16,pid24. F_OFD_SETLK=37.
+    # Unsupported kernels/filesystems fail; NEVER substitute unlocked/F_SETLK.
+    volatile_write_u16(ptr, if unlock: 2 else: 0)
+    volatile_write_u16(ptr + 2, 0)
+    volatile_write_u64(ptr + 8, offset)
+    volatile_write_u64(ptr + 16, length)
+    valid = fcntl(handle as i32, 37, ptr) == 0
+    @end
+    @end
+    _snapshot_free(ptr)
+    valid
+
+@unsafe(reason: "observes nofollow sidecar presence and captures absence error immediately", capabilities: [ffi, raw_ptr])
+fn _snapshot_sidecar_absent(path: text) -> bool:
+    val ptr = _snapshot_path(path)
+    if ptr == 0: return false
+    var absent = false
+    @when(os="windows"):
+    val attributes = GetFileAttributesW(ptr)
+    if attributes == 4294967295u32:
+        absent = GetLastError() == 2u32
+    @else:
+    @when(os="linux"):
+    # O_PATH|O_NOFOLLOW|O_CLOEXEC: even dangling links/FIFOs count as present.
+    val descriptor = open(ptr, 2752512, 0u32)
+    if descriptor >= 0:
+        val closed = close(descriptor) == 0
+    else:
+        val errno_ptr = path_errno_address()
+        if errno_ptr != 0: absent = volatile_read_u32(errno_ptr) == 2
+    @end
+    @end
+    _snapshot_free(ptr)
+    absent
+
+fn _snapshot_identity_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+# This is a locked candidate; only page1 bootstrap is readable until the
+# session internally admits its authenticated/validated rollback-mode header.
+fn storage_snapshot_open_read(path: text, maximum: u64) -> Result<StorageSnapshotV1, SnapshotError>:
+    if maximum < 4096u64 or maximum > 1099511627776u64:
+        return Err(SnapshotError.Range(detail: "snapshot quota outside supported extent"))
+    val handle = _snapshot_native_open(path)
+    if handle == -1:
+        return Err(SnapshotError.Unavailable(detail: "readonly nofollow source open unavailable"))
+    if not _snapshot_local_host(handle):
+        val closed = _snapshot_native_close(handle)
+        return Err(SnapshotError.Unavailable(detail: "unsupported host or local filesystem"))
+    if not _snapshot_range_lock(handle, SNAPSHOT_PENDING_BYTE, 1, false):
+        val closed = _snapshot_native_close(handle)
+        return Err(SnapshotError.Unavailable(detail: "SQLite pending read lock unavailable"))
+    if not _snapshot_range_lock(handle, SNAPSHOT_SHARED_FIRST, SNAPSHOT_SHARED_BYTES, false):
+        val closed = _snapshot_native_close(handle)
+        return Err(SnapshotError.Unavailable(detail: "SQLite shared read lock unavailable"))
+    if not _snapshot_range_lock(handle, SNAPSHOT_PENDING_BYTE, 1, true):
+        val closed = _snapshot_native_close(handle)
+        return Err(SnapshotError.Unavailable(detail: "SQLite pending read unlock unavailable"))
+    val meta = match _snapshot_metadata(handle):
+        case Err(_):
+            val closed = _snapshot_native_close(handle)
+            return Err(SnapshotError.Unavailable(detail: "regular single-link source metadata unavailable"))
+        case Ok(value): value
+    if meta.size < 4096u64 or meta.size > maximum:
+        val closed = _snapshot_native_close(handle)
+        return Err(SnapshotError.Range(detail: "snapshot source exceeds quota or is shorter than page1"))
+    # Bind the trusted pathname used for sidecars to the retained main handle.
+    # Linux OFD locks survive this second descriptor's close.
+    val current = _snapshot_native_open(path)
+    if current == -1:
+        val closed = _snapshot_native_close(handle)
+        return Err(SnapshotError.Unavailable(detail: "source pathname cannot be rebound"))
+    val same = match _snapshot_metadata(current):
+        case Err(_): false
+        case Ok(now): now.size == meta.size and _snapshot_identity_equal(now.identity, meta.identity)
+    val rebound_closed = _snapshot_native_close(current)
+    if not same or not rebound_closed:
+        val closed = _snapshot_native_close(handle)
+        return Err(SnapshotError.Unavailable(detail: "source pathname identity changed"))
+    if not _snapshot_sidecar_absent(path + "-journal") or not _snapshot_sidecar_absent(path + "-wal") or not _snapshot_sidecar_absent(path + "-shm"):
+        val closed = _snapshot_native_close(handle)
+        return Err(SnapshotError.Unavailable(detail: "journal/WAL/SHM source requires unsupported recovery or overlay"))
+    val file = RetainedFile(handle: handle, size: meta.size, identity: meta.identity,
+        writable: false, closed: false, position: 0u64, maximum: maximum)
+    Ok(StorageSnapshotV1(_file: file, _closed: false, _admitted: false))
+
+export SnapshotError, StorageSnapshotV1, storage_snapshot_open_read
