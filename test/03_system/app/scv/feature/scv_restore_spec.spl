@@ -24,6 +24,7 @@ describe "REQ-004 restore operation views":
         step("restores exact files and deletes tracked paths absent from the target tree")
         val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-restore.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'later\\n' > b.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\"\ntest ! -e b.txt\nprintf 'a=%s\\n' \"$(cat a.txt | tr '\\n' '|')\"\n"
         val out = _scv_restore_doc_script(script)
+        expect(out).to_contain("exit=0")
         expect(out).to_contain("restored 1")
         expect(out).to_contain("a=base|")
 
@@ -86,13 +87,35 @@ describe "SCV restore preflight":
         val target = scv_current_op(root)
         expect(file_write("{root}/b", "tracked before delete")).to_equal(true)
         expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val before_head = file_read("{root}/.scv/HEAD_OP")
         expect(file_write("{root}/b", "unsaved user edit")).to_equal(true)
         step("check deletion target")
         val result = scv_restore_preflight(root, target)
         step("preserve the unsaved bytes and report the exact conflict")
         expect(result).to_contain("ERROR dirty tracked path absent from target: b")
         expect(file_read("{root}/b")).to_equal("unsaved user edit")
-        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(scv_current_op(root) + "\n")
+        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(before_head)
+
+    it "should reject a changed-size tracked overwrite without replacing the file":
+        # @req REQ-004
+        step("setup a target and a later tracked version")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-dirty-overwrite.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "base")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val target = scv_current_op(root)
+        expect(file_write("{root}/a", "later tracked version")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val before_head = file_read("{root}/.scv/HEAD_OP")
+        expect(file_write("{root}/a", "unsaved edit with a different length")).to_equal(true)
+        step("check the dirty overwrite")
+        val result = scv_restore_preflight(root, target)
+        step("preserve bytes and head")
+        expect(result).to_equal("ERROR dirty tracked path: a\n")
+        expect(file_read("{root}/a")).to_equal("unsaved edit with a different length")
+        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(before_head)
 
     it "should reject an untracked destination collision without replacing the file":
         # @req REQ-004
