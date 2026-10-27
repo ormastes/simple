@@ -1,0 +1,341 @@
+# Read-only target validation for the existing SCV restore-op mutator.
+#
+# This check validates immutable target data and detects obvious local-view
+# hazards. It does not acquire a repository-wide mutation lease, stage a whole
+# view, or publish/recover a restore. It is advisory and makes no atomicity
+# claim.
+
+use app.io.mod.{file_exists, file_size}
+use std.common.io.read_only_file_view.{read_only_file_view_read_beneath_bounded_v1}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.io.path_identity.{path_entry_present}
+use std.scv.core.{scv_object_path, scv_object_ref_safe, scv_worktree_path_safe, scv_line_set_contains, scv_rel_path}
+use std.scv.store.{scv_repo_exists, scv_hash_text, scv_restore_bookmarks_error,
+    scv_restore_tree_entry_error, scv_commit_tree,
+    scv_operation_commit_error, scv_content_id_for_u8}
+
+val SCV_RESTORE_PREFLIGHT_OBJECT_MAX_V1: i64 = 16777216
+val SCV_RESTORE_PREFLIGHT_WORKTREE_MAX_V1: i64 = 16777216
+
+fn _restore_preflight_read_text_v1(root: text, path: text, subject: text) -> Result<text, text>:
+    if not file_exists(path):
+        return Err("ERROR missing {subject}\n")
+    val rel = scv_rel_path(root, path)
+    if rel == path:
+        return Err("ERROR {subject} is outside repository root\n")
+    val bytes = match read_only_file_view_read_beneath_bounded_v1(root, rel, SCV_RESTORE_PREFLIGHT_OBJECT_MAX_V1):
+        Ok(value): value
+        Err(error): return Err("ERROR cannot safely read {subject}: {error}\n")
+    if not utf8_bytes_valid(bytes):
+        return Err("ERROR {subject} is not valid UTF-8\n")
+    Ok(bytes_to_text(bytes))
+
+fn _restore_preflight_field_v1(content: text, name: text, subject: text) -> Result<text, text>:
+    var value = ""
+    var found = 0
+    for line in content.split("\n"):
+        if line.starts_with("{name}:"):
+            found = found + 1
+            value = line[name.len() + 1:].trim()
+    if found != 1:
+        return Err("ERROR {subject} requires one {name} field\n")
+    Ok(value)
+
+fn _restore_preflight_view_section_v1(content: text, start: text, stop: text) -> Result<text, text>:
+    var active = false
+    var saw_start = 0
+    var saw_stop = 0
+    var out = ""
+    for line in content.split("\n"):
+        if line == start:
+            saw_start = saw_start + 1
+            if active:
+                return Err("ERROR malformed operation view sections\n")
+            active = true
+            continue
+        if line == stop:
+            saw_stop = saw_stop + 1
+            if not active:
+                return Err("ERROR malformed operation view sections\n")
+            active = false
+            continue
+        if active:
+            out = out + line + "\n"
+    if saw_start != 1 or saw_stop != 1 or active:
+        return Err("ERROR malformed operation view sections\n")
+    Ok(out)
+
+fn _restore_preflight_operation_refs_v1(root: text, content: text, subject: text) -> text:
+    val parents = match _restore_preflight_field_v1(content, "parents", subject):
+        Ok(value): value
+        Err(error): return error
+    val metadata = match _restore_preflight_field_v1(content, "metadata", subject):
+        Ok(value): value
+        Err(error): return error
+    if metadata == "":
+        return "ERROR {subject} missing metadata\n"
+    for parent_part in parents.split(" "):
+        val parent = parent_part.trim()
+        if parent == "":
+            continue
+        if not scv_object_ref_safe(parent, "op_"):
+            return "ERROR invalid {subject} parent operation\n"
+        match _restore_preflight_read_text_v1(root, scv_object_path(root, "operations", parent), "{subject} parent operation"):
+            Ok(_): ()
+            Err(error): return error
+    ""
+
+fn _restore_preflight_pending_wal_v1(root: text) -> text:
+    val path = "{root}/.scv/journal/wal.log"
+    if not file_exists(path):
+        return ""
+    val size = file_size(path)
+    if size < 0 or size > SCV_RESTORE_PREFLIGHT_OBJECT_MAX_V1:
+        return "ERROR repository WAL unreadable or over bound\n"
+    val content = match _restore_preflight_read_text_v1(root, path, "repository WAL"):
+        Ok(value): value
+        Err(_): return "ERROR repository WAL unreadable\n"
+    var tx_id = ""
+    var open_tx = false
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("BEGIN "):
+            if open_tx:
+                return "ERROR repository WAL ambiguous\n"
+            tx_id = ""
+            for part in line.split(" "):
+                if part.starts_with("op="):
+                    tx_id = part[3:]
+            if tx_id == "":
+                return "ERROR repository WAL malformed\n"
+            open_tx = true
+        elif line.starts_with("COMMIT ") or line.starts_with("ABORT "):
+            var terminal_id = ""
+            for part in line.split(" "):
+                if part.starts_with("op="):
+                    terminal_id = part[3:]
+            if terminal_id == tx_id and tx_id != "":
+                open_tx = false
+    if open_tx:
+        "ERROR repository WAL pending: {tx_id}\n"
+    else:
+        ""
+
+fn _restore_preflight_worktree_bytes_v1(root: text, rel: text) -> Result<[u8], text>:
+    match read_only_file_view_read_beneath_bounded_v1(root, rel, SCV_RESTORE_PREFLIGHT_WORKTREE_MAX_V1):
+        Ok(bytes): Ok(bytes)
+        Err(error): Err("ERROR cannot safely inspect tracked path {rel}: {error}\n")
+
+fn _restore_preflight_path_present_v1(root: text, rel: text) -> Result<bool, text>:
+    match path_entry_present("{root}/{rel}"):
+        Ok(value): Ok(value)
+        Err(error): Err("ERROR cannot inspect worktree path {rel}: {error}\n")
+
+fn _restore_preflight_validate_tree_v1(root: text, tree_content: text) -> Result<i64, text>:
+    var seen = ""
+    var count = 0
+    for line in tree_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() != 5:
+            return Err("ERROR bad tree entry\n")
+        val size = parts[3].to_i64() ?? -1
+        if size < 0 or size > SCV_RESTORE_PREFLIGHT_WORKTREE_MAX_V1:
+            return Err("ERROR target path exceeds preflight byte bound: {parts[0]}\n")
+        val entry_error = scv_restore_tree_entry_error(root, parts)
+        if entry_error != "":
+            return Err(entry_error)
+        if scv_line_set_contains(seen, parts[0]):
+            return Err("ERROR duplicate tree path: {parts[0]}\n")
+        seen = seen + parts[0] + "\n"
+        count = count + 1
+    Ok(count)
+
+fn _restore_preflight_current_view_v1(root: text) -> Result<(text, text, text), text>:
+    val head = match _restore_preflight_read_text_v1(root, "{root}/.scv/HEAD_OP", "operation head"):
+        Ok(value): value.trim()
+        Err(error): return Err(error)
+    if not scv_object_ref_safe(head, "op_"):
+        return Err("ERROR invalid current operation head\n")
+    val op_content = match _restore_preflight_read_text_v1(root, scv_object_path(root, "operations", head), "current operation"):
+        Ok(value): value
+        Err(error): return Err(error)
+    val op_error = _restore_preflight_operation_refs_v1(root, op_content, "current operation")
+    if op_error != "":
+        return Err(op_error)
+    val view = match _restore_preflight_field_v1(op_content, "view", "current operation"):
+        Ok(value): value
+        Err(error): return Err(error)
+    if not scv_object_ref_safe(view, "view_"):
+        return Err("ERROR invalid current operation view\n")
+    val view_content = match _restore_preflight_read_text_v1(root, scv_object_path(root, "operations", view), "current operation view"):
+        Ok(value): value
+        Err(error): return Err(error)
+    if scv_hash_text("view", view_content) != view:
+        return Err("ERROR corrupt current operation view\n")
+    val view_commit = match _restore_preflight_field_v1(view_content, "default", "current operation view"):
+        Ok(value): value
+        Err(error): return Err(error)
+    val workspace = match _restore_preflight_read_text_v1(root, "{root}/.scv/meta/workspaces.sdn", "workspace view"):
+        Ok(value): value
+        Err(error): return Err(error)
+    val workspace_commit = match _restore_preflight_field_v1(workspace, "default", "workspace view"):
+        Ok(value): value
+        Err(error): return Err(error)
+    if workspace_commit != view_commit:
+        return Err("ERROR current HEAD/workspace view mismatch\n")
+    if workspace_commit != "":
+        if not scv_object_ref_safe(workspace_commit, "commit_"):
+            return Err("ERROR invalid current workspace commit\n")
+        val commit_error = scv_operation_commit_error(root, workspace_commit)
+        if commit_error != "":
+            return Err("ERROR invalid current workspace commit\n")
+    val view_bookmarks = match _restore_preflight_view_section_v1(view_content, "bookmarks:", "workspaces:"):
+        Ok(value): value
+        Err(error): return Err(error)
+    val bookmarks = match _restore_preflight_read_text_v1(root, "{root}/.scv/meta/bookmarks.sdn", "bookmark view"):
+        Ok(value): value
+        Err(error): return Err(error)
+    val bookmark_error = scv_restore_bookmarks_error(root, bookmarks)
+    if bookmark_error != "":
+        return Err(bookmark_error)
+    if bookmarks != view_bookmarks:
+        return Err("ERROR current HEAD/bookmark view mismatch\n")
+    if workspace_commit == "":
+        val index = match _restore_preflight_read_text_v1(root, "{root}/.scv/meta/status_index.sdn", "status index"):
+            Ok(value): value
+            Err(error): return Err(error)
+        if index != "":
+            return Err("ERROR current workspace/status index mismatch\n")
+        return Ok((head, workspace_commit, index))
+    val tree = scv_commit_tree(root, workspace_commit)
+    if not scv_object_ref_safe(tree, "tree_"):
+        return Err("ERROR invalid current workspace tree\n")
+    val tree_content = match _restore_preflight_read_text_v1(root, scv_object_path(root, "trees", tree), "current workspace tree"):
+        Ok(value): value
+        Err(error): return Err(error)
+    if scv_hash_text("tree", tree_content) != tree:
+        return Err("ERROR corrupt current workspace tree\n")
+    val index = match _restore_preflight_read_text_v1(root, "{root}/.scv/meta/status_index.sdn", "status index"):
+        Ok(value): value
+        Err(error): return Err(error)
+    if index != tree_content:
+        return Err("ERROR current workspace/status index mismatch\n")
+    Ok((head, workspace_commit, index))
+
+fn scv_restore_preflight(root: text, op: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    if not scv_object_ref_safe(op, "op_"):
+        return "ERROR invalid operation id\n"
+    val wal_error = _restore_preflight_pending_wal_v1(root)
+    if wal_error != "":
+        return wal_error
+    val current = match _restore_preflight_current_view_v1(root):
+        Ok(value): value
+        Err(error): return error
+    val (head, _, current_index) = current
+    val op_content = match _restore_preflight_read_text_v1(root, scv_object_path(root, "operations", op), "operation"):
+        Ok(value): value
+        Err(error): return error
+    val op_error = _restore_preflight_operation_refs_v1(root, op_content, "operation")
+    if op_error != "":
+        return op_error
+    val view = match _restore_preflight_field_v1(op_content, "view", "operation"):
+        Ok(value): value
+        Err(error): return error
+    if not scv_object_ref_safe(view, "view_"):
+        return "ERROR invalid view id\n"
+    val view_content = match _restore_preflight_read_text_v1(root, scv_object_path(root, "operations", view), "operation view"):
+        Ok(value): value
+        Err(error): return error
+    if scv_hash_text("view", view_content) != view:
+        return "ERROR corrupt operation view\n"
+    val commit = match _restore_preflight_field_v1(view_content, "default", "operation view"):
+        Ok(value): value
+        Err(error): return error
+    if not scv_object_ref_safe(commit, "commit_"):
+        return "ERROR invalid restore commit\n"
+    val commit_error = scv_operation_commit_error(root, commit)
+    if commit_error != "":
+        return commit_error
+    val commit_content = match _restore_preflight_read_text_v1(root, scv_object_path(root, "commits", commit), "target commit"):
+        Ok(value): value
+        Err(error): return error
+    val commit_tree = match _restore_preflight_field_v1(commit_content, "tree", "target commit"):
+        Ok(value): value
+        Err(error): return error
+    if not scv_object_ref_safe(commit_tree, "tree_"):
+        return "ERROR invalid target tree id\n"
+    val bookmarks = match _restore_preflight_view_section_v1(view_content, "bookmarks:", "workspaces:"):
+        Ok(value): value
+        Err(error): return error
+    val bookmark_error = scv_restore_bookmarks_error(root, bookmarks)
+    if bookmark_error != "":
+        return bookmark_error
+    val tree = scv_commit_tree(root, commit)
+    if tree != commit_tree:
+        return "ERROR inconsistent target commit tree\n"
+    val tree_content = match _restore_preflight_read_text_v1(root, scv_object_path(root, "trees", tree), "target tree"):
+        Ok(value): value
+        Err(error): return error
+    if scv_hash_text("tree", tree_content) != tree:
+        return "ERROR corrupt target tree\n"
+    val target_count = match _restore_preflight_validate_tree_v1(root, tree_content):
+        Ok(value): value
+        Err(error): return error
+    var target_paths = ""
+    for line in tree_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            target_paths = target_paths + trimmed.split("|")[0] + "\n"
+    var current_paths = ""
+    for line in current_index.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() != 5 or not scv_worktree_path_safe(parts[0]):
+            return "ERROR malformed current status index\n"
+        if scv_line_set_contains(current_paths, parts[0]):
+            return "ERROR duplicate current status path: {parts[0]}\n"
+        current_paths = current_paths + parts[0] + "\n"
+        val present = match _restore_preflight_path_present_v1(root, parts[0]):
+            Ok(value): value
+            Err(error): return error
+        if not present:
+            return "ERROR dirty tracked path missing: {parts[0]}\n"
+        val actual = match _restore_preflight_worktree_bytes_v1(root, parts[0]):
+            Ok(value): value
+            Err(error): return error
+        val expected_size = parts[3].to_i64() ?? -1
+        if expected_size < 0 or actual.len() != expected_size:
+            return "ERROR malformed current status size: {parts[0]}\n"
+        if scv_content_id_for_u8(actual) != parts[2]:
+            if not scv_line_set_contains(target_paths, parts[0]):
+                return "ERROR dirty tracked path absent from target: {parts[0]}\n"
+            return "ERROR dirty tracked path: {parts[0]}\n"
+    var deleted_count = 0
+    for line in tree_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if not scv_line_set_contains(current_paths, parts[0]):
+            val present = match _restore_preflight_path_present_v1(root, parts[0]):
+                Ok(value): value
+                Err(error): return error
+            if present:
+                return "ERROR untracked target collision: {parts[0]}\n"
+    for line in current_index.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val rel = trimmed.split("|")[0]
+        if not scv_line_set_contains(target_paths, rel):
+            deleted_count = deleted_count + 1
+    "preflight complete target={op} current={head} writes={target_count} deletes={deleted_count} operation_id_integrity=unavailable mutation=unsupported recovery=unsupported atomicity=unclaimed\n"
+
+export scv_restore_preflight
