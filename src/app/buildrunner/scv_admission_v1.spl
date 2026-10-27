@@ -1,0 +1,211 @@
+# A source-only precondition for BuildRunner's existing admission path.
+# No scheduler, filesystem reads, artifact authority or semantic manifest here.
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1,
+    BUILDER_MAX_INPUTS_V1, builder_task_identity_v1, builder_validate_task_v1,
+    builder_digest_valid_v1, builder_identity_field_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{scv_compile_snapshot_revision_id_v1}
+use std.scv.snapshot_v1_adapter.{CompileSnapshotV1Adapter}
+use std.scv.snapshot_v2.{ScvSnapshotV2, scv_snapshot_valid_v2,
+    scv_snapshot_file_index_v2, scv_snapshot_in_scope_v2, scv_snapshot_scope_complete_v2}
+use std.scv.source_witness_v1.{ScvSourceWitnessV1, VerificationReceiptV1,
+    scv_verify_source_witnesses_v1, scv_source_witness_canonical_v1}
+
+pub struct BuildRunnerScvAdmissionV1:
+    schema: i64
+    task: BuildTaskV1
+    task_identity: text
+    adapter: CompileSnapshotV1Adapter
+    requested_snapshot: ScvSnapshotV2
+    source_inputs: [BuildInputV1]
+    witnesses: [ScvSourceWitnessV1]
+    receipt: VerificationReceiptV1
+    source_only: bool
+    admission_digest: text
+
+fn build_runner_scv_required_gaps_v1() -> [text]:
+    ["editor-overlays", "generated-inputs", "external-inputs", "configuration",
+        "filesystem-event-coverage", "physical-file-modes", "physical-path-aliases"]
+
+fn build_runner_scv_adapter_error_v1(adapter: CompileSnapshotV1Adapter) -> text:
+    val legacy = adapter.legacy
+    val snapshot = adapter.snapshot
+    if not legacy.valid or legacy.reason != "ok" or legacy.source_drifted:
+        return "build SCV legacy source is invalid or drifted"
+    if snapshot.namespace != "compile-inventory-v1" or not scv_snapshot_valid_v2(snapshot):
+        return "build SCV adapter source subject differs"
+    if (snapshot.source_coverage != "complete" or snapshot.acknowledged_generation != 0 or
+            snapshot.capture_generation != adapter.source_inventory_generation):
+        return "build SCV adapter coverage or generation differs"
+    for unsupported in build_runner_scv_required_gaps_v1():
+        if not snapshot.unsupported_inputs.contains(unsupported):
+            return "build SCV adapter omits required coverage limitation: " + unsupported
+    if (not adapter.source_inventory_digest.starts_with("sha256_") or
+            not builder_digest_valid_v1(adapter.source_inventory_digest.substring(7))):
+        return "build SCV inventory identity differs"
+    if (legacy.snapshot_root == "" or
+            legacy.provenance_path != legacy.snapshot_root + "/SCV_COMPILE_SNAPSHOT" or
+            legacy.receipt_path == "" or legacy.inventory_count != snapshot.files.len()):
+        return "build SCV legacy root or inventory count differs"
+    var rows: [text] = []
+    for file in snapshot.files:
+        if not scv_snapshot_scope_complete_v2(snapshot, file.path):
+            return "build SCV adapter file is outside complete declared scope"
+        rows = rows.push("{file.path}|{file.content_id}|{file.bytes.len()}")
+    if sha256_text(rows.join("\n")) != legacy.inventory_digest:
+        return "build SCV frozen inventory binding differs"
+    if (legacy.tree_id != "scv-tree-v1-" + legacy.inventory_digest or
+            legacy.revision_id != scv_compile_snapshot_revision_id_v1(legacy.tree_id, legacy.inventory_digest) or
+            legacy.commit_id != "scv-compile-v1-" + sha256_text(
+                "simple/scv-compile-commit/v1|{legacy.tree_id}|{legacy.inventory_count}")):
+        return "build SCV legacy identity differs"
+    ""
+
+fn build_runner_scv_source_role_v1(snapshot: ScvSnapshotV2, path: text) -> bool:
+    if scv_snapshot_file_index_v2(snapshot, path) >= 0: return true
+    for scope in snapshot.complete_scopes:
+        if scv_snapshot_in_scope_v2(path, scope): return true
+    false
+
+fn build_runner_scv_overlap_v1(left: text, right: text) -> bool:
+    scv_snapshot_in_scope_v2(left, right) or scv_snapshot_in_scope_v2(right, left)
+
+fn build_runner_scv_mapping_v1(task: BuildTaskV1, adapter: CompileSnapshotV1Adapter,
+        requested: ScvSnapshotV2, witnesses: [ScvSourceWitnessV1]) -> Result<[BuildInputV1], text>:
+    if requested.namespace != adapter.snapshot.namespace or requested.path_policy != adapter.snapshot.path_policy:
+        return Err("build SCV requested source domain differs")
+    if requested.source_coverage != "complete": return Err("build SCV requested source coverage is unknown")
+    for unsupported in build_runner_scv_required_gaps_v1():
+        if not requested.unsupported_inputs.contains(unsupported):
+            return Err("build SCV requested omits required coverage limitation: " + unsupported)
+    var mapped: [BuildInputV1] = []
+    var mapped_paths: Dict<text, bool> = {}
+    for input in task.inputs:
+        if (not build_runner_scv_source_role_v1(adapter.snapshot, input.path) and
+                not build_runner_scv_source_role_v1(requested, input.path)):
+            continue
+        if (not scv_snapshot_scope_complete_v2(adapter.snapshot, input.path) or
+                not scv_snapshot_scope_complete_v2(requested, input.path)):
+            return Err("build SCV declared source coverage is unknown: " + input.path)
+        val original_index = scv_snapshot_file_index_v2(adapter.snapshot, input.path)
+        val requested_index = scv_snapshot_file_index_v2(requested, input.path)
+        if original_index < 0 or requested_index < 0:
+            return Err("build SCV declared source is unmapped: " + input.path)
+        val expected = "sha256_" + input.digest
+        if (adapter.snapshot.files[original_index].content_id != expected or
+                requested.files[requested_index].content_id != expected):
+            return Err("build SCV declared source digest differs: " + input.path)
+        mapped = mapped.push(BuildInputV1(path: input.path, digest: input.digest))
+        mapped_paths[input.path] = true
+    if mapped.len() == 0: return Err("build SCV task has no supported declared source input")
+    var positive_paths: Dict<text, bool> = {}
+    var query_keys: Dict<text, bool> = {}
+    for witness in witnesses:
+        val key = builder_identity_field_v1(witness.query_kind) + builder_identity_field_v1(witness.path)
+        if query_keys.contains_key(key): return Err("build SCV duplicate source query")
+        query_keys[key] = true
+        if witness.query_kind == "exact-file-v1" and witness.present:
+            if not mapped_paths.contains_key(witness.path):
+                return Err("build SCV positive read is not a declared source input: " + witness.path)
+            positive_paths[witness.path] = true
+        if witness.query_kind == "recursive-directory-v1":
+            # Existing transport materializes only task.inputs. A broader
+            # snapshot directory cannot stand in for its worker-visible tree.
+            for file in requested.files:
+                if file.path.starts_with(witness.path + "/") and not mapped_paths.contains_key(file.path):
+                    return Err("build SCV worker directory membership is incomplete: " + witness.path)
+        if witness.query_kind == "exact-file-v1" and not witness.present:
+            for input in task.inputs:
+                if build_runner_scv_overlap_v1(input.path, witness.path):
+                    return Err("build SCV negative query overlaps a worker input: " + witness.path)
+    for input in mapped:
+        if not positive_paths.contains_key(input.path):
+            return Err("build SCV declared source has no positive witness: " + input.path)
+    # Links and output paths can alter the staged source namespace. Preserve
+    # existing parent checks for non-source roles; refuse source-relevant ones.
+    var mutable_paths: [text] = []
+    for link in task.links: mutable_paths = mutable_paths.push(link.path)
+    for output in task.outputs: mutable_paths = mutable_paths.push(output)
+    for path in mutable_paths:
+        if (build_runner_scv_source_role_v1(adapter.snapshot, path) or
+                build_runner_scv_source_role_v1(requested, path)):
+            return Err("build SCV source namespace contains a link or output: " + path)
+        for witness in witnesses:
+            if build_runner_scv_overlap_v1(path, witness.path):
+                return Err("build SCV query overlaps a link or output: " + witness.path)
+    Ok(mapped)
+
+fn build_runner_scv_receipt_canonical_v1(receipt: VerificationReceiptV1) -> text:
+    var pieces: [text] = []
+    for field in [receipt.schema.to_text(), receipt.requested_snapshot_id,
+            receipt.action_digest, receipt.source_witness_digest, receipt.verifier,
+            receipt.receipt_id, if receipt.source_only: "source-only" else: "full-action",
+            receipt.unsupported_inputs.len().to_text()]:
+        pieces = pieces.push(builder_identity_field_v1(field))
+    for unsupported in receipt.unsupported_inputs:
+        pieces = pieces.push(builder_identity_field_v1(unsupported))
+    pieces.join("")
+
+fn build_runner_scv_digest_unchecked_v1(binding: BuildRunnerScvAdmissionV1) -> text:
+    val legacy = binding.adapter.legacy
+    var fields = ["simple/build-runner-scv-source-admission/v1", binding.schema.to_text(),
+        binding.task_identity, binding.adapter.source_inventory_digest,
+        binding.adapter.source_inventory_generation.to_text(), binding.adapter.snapshot.snapshot_id,
+        legacy.revision_id, legacy.commit_id, legacy.tree_id, legacy.inventory_digest,
+        legacy.inventory_count.to_text(), legacy.snapshot_root, legacy.provenance_path,
+        legacy.receipt_path, binding.requested_snapshot.snapshot_id,
+        binding.requested_snapshot.namespace, binding.requested_snapshot.path_policy,
+        if binding.source_only: "source-only" else: "full-action",
+        binding.source_inputs.len().to_text()]
+    for input in binding.source_inputs:
+        fields = fields.push(input.path)
+        fields = fields.push(input.digest)
+    fields = fields.push(binding.witnesses.len().to_text())
+    for witness in binding.witnesses:
+        fields = fields.push(scv_source_witness_canonical_v1(witness))
+    fields = fields.push(build_runner_scv_receipt_canonical_v1(binding.receipt))
+    var pieces: [text] = []
+    for field in fields: pieces = pieces.push(builder_identity_field_v1(field))
+    sha256_text(pieces.join(""))
+
+fn build_runner_scv_construct_v1(task: BuildTaskV1, adapter: CompileSnapshotV1Adapter,
+        requested: ScvSnapshotV2, witnesses: [ScvSourceWitnessV1]) -> Result<BuildRunnerScvAdmissionV1, text>:
+    val task_error = builder_validate_task_v1(task)
+    if task_error != "": return Err("build SCV task contract: " + task_error)
+    if witnesses.len() == 0 or witnesses.len() > BUILDER_MAX_INPUTS_V1:
+        return Err("build SCV source query count is outside the task input bound")
+    val adapter_error = build_runner_scv_adapter_error_v1(adapter)
+    if adapter_error != "": return Err(adapter_error)
+    # Verification rechecks exact requested bytes/identity before any mapping.
+    # The original adapter is immutable provenance, never current-file authority.
+    val identity = builder_task_identity_v1(task)
+    val receipt = scv_verify_source_witnesses_v1(requested, identity, witnesses)?
+    val mapped = build_runner_scv_mapping_v1(task, adapter, requested, witnesses)?
+    var retained: [ScvSourceWitnessV1] = []
+    for witness in witnesses: retained = retained.push(witness)
+    var binding = BuildRunnerScvAdmissionV1(schema: 1, task: task, task_identity: identity,
+        adapter: adapter, requested_snapshot: requested, source_inputs: mapped,
+        witnesses: retained, receipt: receipt, source_only: true, admission_digest: "")
+    binding.admission_digest = build_runner_scv_digest_unchecked_v1(binding)
+    Ok(binding)
+
+pub fn build_runner_scv_bind_v1(task: BuildTaskV1, adapter: CompileSnapshotV1Adapter,
+        witnesses: [ScvSourceWitnessV1]) -> Result<BuildRunnerScvAdmissionV1, text>:
+    build_runner_scv_construct_v1(task, adapter, adapter.snapshot, witnesses)
+
+pub fn build_runner_scv_admission_digest_v1(binding: BuildRunnerScvAdmissionV1) -> Result<text, text>:
+    if binding.schema != 1 or not binding.source_only or not binding.receipt.source_only:
+        return Err("build SCV source-only contract differs")
+    val rebuilt = build_runner_scv_construct_v1(binding.task, binding.adapter,
+        binding.requested_snapshot, binding.witnesses)?
+    if (binding.task_identity != rebuilt.task_identity or
+            build_runner_scv_receipt_canonical_v1(binding.receipt) != build_runner_scv_receipt_canonical_v1(rebuilt.receipt) or
+            binding.admission_digest != rebuilt.admission_digest or
+            build_runner_scv_digest_unchecked_v1(binding) != rebuilt.admission_digest):
+        return Err("build SCV admission subject or digest differs")
+    Ok(rebuilt.admission_digest)
+
+pub fn build_runner_scv_revalidate_v1(binding: BuildRunnerScvAdmissionV1,
+        requested_snapshot: ScvSnapshotV2) -> Result<BuildRunnerScvAdmissionV1, text>:
+    val _previous_digest = build_runner_scv_admission_digest_v1(binding)?
+    build_runner_scv_construct_v1(binding.task, binding.adapter, requested_snapshot, binding.witnesses)
