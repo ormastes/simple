@@ -535,8 +535,48 @@ pub unsafe extern "C" fn rt_file_read_text_rv(path: RuntimeValue) -> RuntimeValu
 /// (doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md).
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: RuntimeValue) -> i64 {
+    rt_file_atomic_write_impl(path, content, None)
+}
+
+/// Explicit-mode core-C twin. Windows owner-only writes use a protected
+/// DACL on the staging file before content is written.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_atomic_write_mode(path: RuntimeValue, content: RuntimeValue, mode: i32) -> i64 {
+    rt_file_atomic_write_impl(path, content, Some(mode))
+}
+
+fn atomic_write_staging_file(temp_path: &Path, content: &[u8], mode: Option<i32>) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    // A failed exclusive open never transfers ownership of an existing path.
+    let mut file = options.open(temp_path)?;
+    let write_result = (|| -> std::io::Result<()> {
+        file.write_all(content)?;
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode((mode as u32) & 0o7777))?;
+        }
+        #[cfg(windows)]
+        if let Some(mode) = mode {
+            let mut permissions = file.metadata()?.permissions();
+            permissions.set_readonly(mode & 0o200 == 0);
+            file.set_permissions(permissions)?;
+        }
+        file.sync_all()?;
+        Ok(())
+    })();
+    drop(file);
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    write_result
+}
+
+unsafe fn rt_file_atomic_write_impl(path: RuntimeValue, content: RuntimeValue, mode: Option<i32>) -> i64 {
     use crate::value::collections::{rt_string_data, rt_string_len};
-    use std::io::Write;
 
     let decode = |v: RuntimeValue| -> Option<Vec<u8>> {
         if v.is_nil() || v.0 == 0 {
@@ -579,6 +619,16 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
         }
     }
 
+    #[cfg(windows)]
+    if let Some(private_mode) = mode.filter(|value| value & 0o77 == 0) {
+        extern "C" {
+            fn rt_hosted_fs_private_atomic_write_utf8(path: *const u8, path_len: u64,
+                content: *const u8, content_len: u64, mode: i32) -> i32;
+        }
+        return i64::from(rt_hosted_fs_private_atomic_write_utf8(path_bytes.as_ptr(),
+            path_bytes.len() as u64, content_bytes.as_ptr(), content_bytes.len() as u64, private_mode) != 0);
+    }
+
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temp_path = std::path::PathBuf::from(format!(
         "{}.tmp.{}.{}",
@@ -587,22 +637,12 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
         SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
 
-    let write_result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
-        file.write_all(&content_bytes)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
+    if atomic_write_staging_file(&temp_path, &content_bytes, mode).is_err() {
         return 0;
     }
 
     #[cfg(unix)]
-    if let Some(mode) = existing_mode {
+    if let Some(mode) = existing_mode.filter(|_| mode.is_none()) {
         use std::os::unix::fs::PermissionsExt;
         if std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode)).is_err() {
             let _ = std::fs::remove_file(&temp_path);
@@ -3236,6 +3276,83 @@ sandbox_lowering:
 
     // Similar-problem test: edge semantics shared with the C definition —
     // missing parent directories are created; an empty path is rejected.
+    #[cfg(windows)]
+    fn assert_owner_only_acl(path: &std::path::Path) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Security::{GetFileSecurityW, GetSecurityDescriptorControl,
+            GetSecurityDescriptorDacl, GetAce, IsWellKnownSid, WinCreatorOwnerRightsSid,
+            WinLocalSystemSid, ACCESS_ALLOWED_ACE,
+            DACL_SECURITY_INFORMATION, INHERITED_ACE, SE_DACL_PROTECTED};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            let mut required = 0;
+            GetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, std::ptr::null_mut(), 0, &mut required);
+            assert!(required > 0);
+            let mut storage = vec![0u64; (required as usize + 7) / 8];
+            let descriptor = storage.as_mut_ptr().cast();
+            assert_ne!(GetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor,
+                required, &mut required), 0);
+            let mut control = 0;
+            let mut revision = 0;
+            assert_ne!(GetSecurityDescriptorControl(descriptor, &mut control, &mut revision), 0);
+            assert_ne!(control & SE_DACL_PROTECTED, 0);
+            let mut present = 0;
+            let mut defaulted = 0;
+            let mut acl = std::ptr::null_mut();
+            assert_ne!(GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted), 0);
+            assert!(present != 0 && !acl.is_null());
+            assert_eq!((*acl).AceCount, 2);
+            for index in 0..(*acl).AceCount {
+                let mut raw = std::ptr::null_mut();
+                assert_ne!(GetAce(acl, u32::from(index), &mut raw), 0);
+                let ace = &*raw.cast::<ACCESS_ALLOWED_ACE>();
+                // winnt.h ACCESS_ALLOWED_ACE_TYPE = 0; avoid enabling the
+                // unrelated SystemServices feature just for this constant.
+                assert_eq!(ace.Header.AceType, 0);
+                assert_eq!(u32::from(ace.Header.AceFlags) & INHERITED_ACE, 0);
+                let sid = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+                assert!(IsWellKnownSid(sid, WinLocalSystemSid) != 0 ||
+                    IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rt_file_atomic_write_mode_collision_preserves_foreign_staging() {
+        let temp_dir = TempDir::new().unwrap();
+        let staged = temp_dir.path().join("occupied.tmp");
+        fs::write(&staged, "foreign sentinel").unwrap();
+        assert!(atomic_write_staging_file(&staged, b"must not replace", Some(0o600)).is_err());
+        assert_eq!(fs::read_to_string(&staged).unwrap(), "foreign sentinel");
+    }
+
+    #[test]
+    fn test_rt_file_atomic_write_mode_private_replacement_and_failures() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("private-token.txt");
+        fs::write(&file_path, "old inherited value").unwrap();
+        let path = rv_text(file_path.to_str().unwrap());
+        unsafe {
+            assert_eq!(rt_file_atomic_write_mode(path, rv_text("first synthetic token"), 0o600), 1);
+            assert_eq!(fs::read_to_string(&file_path).unwrap(), "first synthetic token");
+            #[cfg(windows)]
+            assert_owner_only_acl(&file_path);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(fs::metadata(&file_path).unwrap().permissions().mode() & 0o7777, 0o600);
+            }
+            assert_eq!(rt_file_atomic_write_mode(path, rv_text("second synthetic token"), 0o600), 1);
+            assert_eq!(fs::read_to_string(&file_path).unwrap(), "second synthetic token");
+            #[cfg(windows)]
+            assert_owner_only_acl(&file_path);
+            assert_eq!(rt_file_atomic_write_mode(rv_text(""), rv_text("refused"), 0o600), 0);
+            assert_eq!(rt_file_atomic_write_mode(rv_text(temp_dir.path().to_str().unwrap()), rv_text("refused"), 0o600), 0);
+        }
+        assert!(fs::read_dir(temp_dir.path()).unwrap().filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp.")));
+    }
+
     #[test]
     fn test_rt_file_atomic_write_creates_parents_and_rejects_empty_path() {
         let temp_dir = TempDir::new().unwrap();

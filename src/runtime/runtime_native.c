@@ -27,6 +27,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
+#include "platform/runtime_windows_private_atomic.h"
 #include "simple_gui_html_provider_abi_v1.h"
 #include "simple_gui_event_provider_abi_v1.h"
 
@@ -16162,6 +16163,14 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
         }
     }
     free(parent);
+#if defined(_WIN32)
+    if (have_mode && (mode & 0077) == 0) {
+        int ok = rt_win_private_atomic_write(path, content_string->data,
+            (size_t)content_string->len, (int)mode);
+        free(path);
+        return ok ? 1 : 0;
+    }
+#endif
     size_t path_len = strlen(path);
     char* temp_path = (char*)rt_observed_malloc_v1(path_len + 64);
     if (!temp_path) {
@@ -16213,8 +16222,9 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
 #endif
     }
 #if defined(_WIN32)
-    /* Win32 CRT permissions express exactly one bit -- read-only -- so the
-     * POSIX mode is honoured to the only extent the platform allows: the
+    /* Owner-only modes use the protected-DACL provider above. For other
+     * modes retain the pre-existing CRT mapping: permissions express exactly
+     * one bit -- read-only -- so the POSIX mode is honoured only as follows: the
      * owner-write bit maps to _S_IWRITE, everything else (group/other,
      * setuid, sticky) has no Win32 equivalent and is silently not applied.
      * Applied to the TEMP file, before the move, for the same

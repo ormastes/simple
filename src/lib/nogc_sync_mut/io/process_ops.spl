@@ -3,6 +3,7 @@
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native}
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
     ProcessObservationProviderV1, ObservedProcessStartStatusV1,
@@ -1434,6 +1435,25 @@ pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_
     val (stdout, stderr, exit_code) = _process_run_bounded_raw(resolved_cmd, args, timeout_ms, max_output_bytes)
     proc_slot_release()
     (stdout, stderr, exit_code)
+
+pub fn process_run_bounded_native(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    """Native tuple compatibility entry with positive timeout/capture limits.
+
+    The ordinary interpreter-capable process API remains separate. Resolution,
+    command path conversion and process-governor slots keep their real owners.
+    """
+    if timeout_ms <= 0 or max_output_bytes <= 0:
+        return ("", "native bounded capture requires positive timeout and output limits", -1)
+    val resolved_command: text = _resolve_process_cmd(cmd + "")
+    val tool: (text, [text]) = _resolve_posix_tool(resolved_command, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    if native_command == "":
+        return ("", "native bounded capture command resolution returned empty text", -1)
+    proc_slot_acquire()
+    val result: (text, text, i64) = process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    result
 
 pub fn process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64):
     proc_slot_acquire()

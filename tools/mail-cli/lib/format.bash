@@ -181,13 +181,13 @@ mail_format_parse_headers() {
   headers=$(echo "$headers" | sed -E -e ':a' -e 'N' -e '$!ba' -e 's/\n[[:space:]]+/ /g')
 
   local from to subject date msg_id reply_to references
-  from=$(echo "$headers" | grep -i '^From:' | head -1 | sed 's/^[Ff]rom:[[:space:]]*//')
-  to=$(echo "$headers" | grep -i '^To:' | head -1 | sed 's/^[Tt]o:[[:space:]]*//')
-  subject=$(echo "$headers" | grep -i '^Subject:' | head -1 | sed 's/^[Ss]ubject:[[:space:]]*//')
-  date=$(echo "$headers" | grep -i '^Date:' | head -1 | sed 's/^[Dd]ate:[[:space:]]*//')
-  msg_id=$(echo "$headers" | grep -i '^Message-ID:' | head -1 | sed 's/^[Mm]essage-[Ii][Dd]:[[:space:]]*//')
-  reply_to=$(echo "$headers" | grep -i '^In-Reply-To:' | head -1 | sed 's/^[Ii]n-[Rr]eply-[Tt]o:[[:space:]]*//')
-  references=$(echo "$headers" | grep -i '^References:' | head -1 | sed 's/^[Rr]eferences:[[:space:]]*//')
+  from=$(echo "$headers" | grep -i '^From:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
+  to=$(echo "$headers" | grep -i '^To:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
+  subject=$(echo "$headers" | grep -i '^Subject:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
+  date=$(echo "$headers" | grep -i '^Date:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
+  msg_id=$(echo "$headers" | grep -i '^Message-ID:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
+  reply_to=$(echo "$headers" | grep -i '^In-Reply-To:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
+  references=$(echo "$headers" | grep -i '^References:' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
 
   jq -n \
     --arg from "$from" \
@@ -209,9 +209,10 @@ mail_format_parse_body() {
   local body
   body=$(echo "$raw" | sed '1,/^$/d')
 
-  # Check Content-Transfer-Encoding
+  # Only the header section declares transfer encoding; body text may contain
+  # a line that looks like a header and must remain plain content.
   local encoding
-  encoding=$(echo "$raw" | grep -i '^Content-Transfer-Encoding:' | head -1 | sed 's/.*:[[:space:]]*//' | tr '[:upper:]' '[:lower:]')
+  encoding=$(echo "$raw" | sed '/^$/q' | grep -i '^Content-Transfer-Encoding:' | head -1 | sed 's/.*:[[:space:]]*//' | tr '[:upper:]' '[:lower:]')
 
   case "$encoding" in
     base64)

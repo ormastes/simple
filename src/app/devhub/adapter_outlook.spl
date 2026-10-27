@@ -37,7 +37,8 @@ use std.http_client.types.{
 }
 use std.sffi.system.{sleep_secs}
 use std.oauth2.{oauth2_get_token, oauth2_parse_retry_after}
-use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_len, json_value_at, json_value_serialize}
+use app.devhub.outlook_pagination.{outlook_page_error, outlook_page_response_error}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_len, json_value_at, json_value_serialize, json_value_as_text}
 use std.common.text_advanced.{escape_json}
 
 
@@ -197,12 +198,7 @@ fn _outlook_patch(client: OutlookClient, url: text, payload: text) -> (i64, text
 # ============================================================================
 
 fn _ojson_str(obj: JsonValue, key: text) -> text:
-    if not json_value_has(obj, key):
-        return ""
-    val s = json_value_serialize(json_value_field(obj, key))
-    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
-        return s[1:s.len() - 1]
-    s
+    json_value_as_text(json_value_field(obj, key)) ?? ""
 
 
 fn _ojson_int(obj: JsonValue, key: text) -> i64:
@@ -270,7 +266,12 @@ fn outlook_list_folders(client: OutlookClient) -> (bool, [OutlookFolder], text):
     var folders: [OutlookFolder] = []
     var first_body = ""
 
+    var visited: [text] = []
     while url != "":
+        val page_error = outlook_page_error(client.base_url, url, visited)
+        if page_error != "":
+            return (false, folders, page_error)
+        visited.push(url)
         val (status, body) = _outlook_get(client, url)
         if first_body == "":
             first_body = body
@@ -280,6 +281,9 @@ fn outlook_list_folders(client: OutlookClient) -> (bool, [OutlookFolder], text):
         if parsed_opt == nil:
             return (false, folders, "invalid JSON response")
         val parsed = parsed_opt.unwrap()
+        val response_error = outlook_page_response_error(parsed)
+        if response_error != "":
+            return (false, folders, response_error)
         val arr = json_value_field(parsed, "value")
         if json_value_has(parsed, "value"):
             val n = json_value_len(arr)
@@ -288,12 +292,7 @@ fn outlook_list_folders(client: OutlookClient) -> (bool, [OutlookFolder], text):
                 folders = folders + [_parse_folder(json_value_at(arr, i))]
                 i = i + 1
         # @odata.nextLink is an absolute URL — use as-is.
-        if json_value_has(parsed, "@odata.nextLink"):
-            url = json_value_serialize(json_value_field(parsed, "@odata.nextLink"))
-            if url.starts_with("\"") and url.ends_with("\"") and url.len() >= 2:
-                url = url[1:url.len() - 1]
-        else:
-            url = ""
+        url = _ojson_str(parsed, "@odata.nextLink")
 
     (true, folders, first_body)
 
@@ -318,7 +317,12 @@ fn outlook_list_messages(client: OutlookClient, folder_id: text, filter: text, t
     var messages: [OutlookMessage] = []
     var first_body = ""
 
+    var visited: [text] = []
     while url != "":
+        val page_error = outlook_page_error(client.base_url, url, visited)
+        if page_error != "":
+            return (false, messages, page_error)
+        visited.push(url)
         val (status, body) = _outlook_get(client, url)
         if first_body == "":
             first_body = body
@@ -328,6 +332,9 @@ fn outlook_list_messages(client: OutlookClient, folder_id: text, filter: text, t
         if parsed_opt == nil:
             return (false, messages, "invalid JSON response")
         val parsed = parsed_opt.unwrap()
+        val response_error = outlook_page_response_error(parsed)
+        if response_error != "":
+            return (false, messages, response_error)
         val arr = json_value_field(parsed, "value")
         if json_value_has(parsed, "value"):
             val n = json_value_len(arr)
@@ -335,12 +342,7 @@ fn outlook_list_messages(client: OutlookClient, folder_id: text, filter: text, t
             while i < n:
                 messages = messages + [_parse_message(json_value_at(arr, i))]
                 i = i + 1
-        if json_value_has(parsed, "@odata.nextLink"):
-            url = json_value_serialize(json_value_field(parsed, "@odata.nextLink"))
-            if url.starts_with("\"") and url.ends_with("\"") and url.len() >= 2:
-                url = url[1:url.len() - 1]
-        else:
-            url = ""
+        url = _ojson_str(parsed, "@odata.nextLink")
 
     (true, messages, first_body)
 

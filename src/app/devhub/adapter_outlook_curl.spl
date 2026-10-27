@@ -6,19 +6,21 @@
 # call Microsoft Graph under /users/{shared_mailbox_upn}/...
 
 use std.io.process_ops.{process_run}
-use std.file_system.file_ops.{file_read_text, file_write_text, file_exists, file_rename, file_delete}
-use std.file_system.permissions.{file_set_mode}
+use std.common.http_curl.{curl_request_text_with_program}
+use std.common.oauth_token_cache.{oauth_token_cache_read, oauth_token_cache_write, oauth_token_cache_render, oauth_token_cache_parse}
 use std.env.{env_get}
 use std.io.time_ops.{current_time_unix}
 use std.http.url.{url_encode}
-use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_len, json_value_at, json_value_serialize}
+use app.devhub.outlook_pagination.{outlook_page_error, outlook_page_response_error}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_len, json_value_at, json_value_serialize, json_value_as_text}
 
 
 val OUTLOOK_CURL_GRAPH_BASE: text = "https://graph.microsoft.com/v1.0"
 val OUTLOOK_CURL_DEFAULT_TOP: i64 = 50
 val OUTLOOK_CURL_DEFAULT_SCOPE: text = "https://graph.microsoft.com/.default"
 val OUTLOOK_CURL_DEFAULT_SELECT_MESSAGES: text = "id,subject,from,receivedDateTime,bodyPreview,hasAttachments"
-val OUTLOOK_CURL_CACHE_FILE_MODE: i64 = 0o600
+# Decimal spelling preserves 0o600 on the pinned Phase-2 producer.
+val OUTLOOK_CURL_CACHE_FILE_MODE: i64 = 384
 val OUTLOOK_CURL_CACHE_SAFETY_MARGIN: i64 = 60
 
 
@@ -76,8 +78,8 @@ fn outlook_curl_get_token_with_secret(tenant_id: text, client_id: text, client_s
     val curl_path = "curl"
     val url = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
     val body = "grant_type=client_credentials&client_id={_url_form_encode(client_id)}&client_secret={_url_form_encode(client_secret)}&scope={_url_form_encode(OUTLOOK_CURL_DEFAULT_SCOPE)}"
-    val argv = _build_curl_argv_token(url, body)
-    val (status, resp_body, stderr) = _run_curl(curl_path, argv)
+    val (status, resp_body, stderr) = curl_request_text_with_program(curl_path, "POST", url,
+        ["Content-Type: application/x-www-form-urlencoded", "Accept: application/json"], body)
     if status != 200:
         return (false, "")
     val parsed_opt = json_value_parse_opt(resp_body)
@@ -113,7 +115,12 @@ fn outlook_curl_list_folders(client: OutlookCurlClient) -> (bool, [OutlookFolder
     var first_body = ""
     var folders: [OutlookFolder] = []
 
+    var visited: [text] = []
     while url != "":
+        val page_error = outlook_page_error(client.base_url, url, visited)
+        if page_error != "":
+            return (false, folders, page_error)
+        visited.push(url)
         val (status, body, _stderr) = _graph_get(client, url)
         if first_body == "":
             first_body = body
@@ -123,6 +130,9 @@ fn outlook_curl_list_folders(client: OutlookCurlClient) -> (bool, [OutlookFolder
         if parsed_opt == nil:
             return (false, folders, "invalid JSON response")
         val parsed = parsed_opt.unwrap()
+        val response_error = outlook_page_response_error(parsed)
+        if response_error != "":
+            return (false, folders, response_error)
         val arr = json_value_field(parsed, "value")
         if json_value_has(parsed, "value"):
             val n = json_value_len(arr)
@@ -140,7 +150,12 @@ fn outlook_curl_list_messages(client: OutlookCurlClient, folder_id: text, filter
     var first_body = ""
     var messages: [OutlookMessage] = []
 
+    var visited: [text] = []
     while url != "":
+        val page_error = outlook_page_error(client.base_url, url, visited)
+        if page_error != "":
+            return (false, messages, page_error)
+        visited.push(url)
         val (status, body, _stderr) = _graph_get(client, url)
         if first_body == "":
             first_body = body
@@ -150,6 +165,9 @@ fn outlook_curl_list_messages(client: OutlookCurlClient, folder_id: text, filter
         if parsed_opt == nil:
             return (false, messages, "invalid JSON response")
         val parsed = parsed_opt.unwrap()
+        val response_error = outlook_page_response_error(parsed)
+        if response_error != "":
+            return (false, messages, response_error)
         val arr = json_value_field(parsed, "value")
         if json_value_has(parsed, "value"):
             val n = json_value_len(arr)
@@ -182,53 +200,27 @@ fn outlook_curl_token_cache_is_fresh(expires_at: i64, now: i64) -> bool:
 
 
 fn outlook_curl_render_token_cache(token: text, expires_at: i64) -> text:
-    "# itf outlook curl token cache (auto-managed; do not edit)\n" +
-    "access_token: \"{_escape_sdn_value(token)}\"\n" +
-    "expires_at: {expires_at}\n"
+    oauth_token_cache_render(token, expires_at)
 
 
 fn outlook_curl_parse_token_cache(content: text) -> (text, i64):
-    if content == nil or content == "":
-        return ("", 0)
-    var token = ""
-    var expires_at: i64 = 0
-    val lines = content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
-            pass_dn
-        else if trimmed.starts_with("access_token:"):
-            token = _strip_sdn_value(trimmed.split(":", 2)[1])
-        else if trimmed.starts_with("expires_at:"):
-            expires_at = _parse_i64(_strip_sdn_value(trimmed.split(":", 2)[1]))
-    (token, expires_at)
+    oauth_token_cache_parse(content)
 
 
 fn outlook_curl_token_cache_load(path: text) -> (text, i64):
-    if path == "" or not file_exists(path):
-        return ("", 0)
-    val content = file_read_text(path)
-    if content == nil:
+    val content = oauth_token_cache_read(path)
+    if content == "":
         return ("", 0)
     outlook_curl_parse_token_cache(content)
 
 
 fn outlook_curl_token_cache_save(path: text, token: text, expires_at: i64) -> bool:
-    if path == "":
-        return false
-    val tmp_path = "{path}.tmp"
     val payload = outlook_curl_render_token_cache(token, expires_at)
-    if not file_write_text(tmp_path, payload):
-        return false
-    if not file_set_mode(tmp_path, OUTLOOK_CURL_CACHE_FILE_MODE):
-        file_delete(tmp_path)
-        return false
-    if not file_rename(tmp_path, path):
-        file_delete(tmp_path)
-        return false
-    true
+    oauth_token_cache_write(path, payload)
 
 
+# Legacy argv-rendering helpers retained for compatibility tests. Production
+# requests use the bounded private-file transport and never expose secrets here.
 fn _build_curl_argv_token(url: text, body: text) -> [text]:
     [
         "-s", "-S",
@@ -313,7 +305,8 @@ fn _status_message(code: i64, body: text) -> text:
 
 
 fn _graph_get(client: OutlookCurlClient, url: text) -> (i64, text, text):
-    _run_curl(client.curl_path, _build_curl_argv_get(client.access_token, url))
+    curl_request_text_with_program(client.curl_path, "GET", url,
+        ["Authorization: Bearer {client.access_token}", "Accept: application/json"], "")
 
 
 fn _outlook_user_path(client: OutlookCurlClient, suffix: text) -> text:
@@ -351,11 +344,11 @@ fn _parse_message(obj: JsonValue) -> OutlookMessage:
 
 
 fn _ostr(obj: JsonValue, key: text) -> text:
-    _json_field_text(obj, key)
+    json_value_as_text(json_value_field(obj, key)) ?? ""
 
 
 fn _oint(obj: JsonValue, key: text) -> i64:
-    _parse_i64(_json_field_text(obj, key))
+    _parse_i64(json_value_serialize(json_value_field(obj, key)))
 
 
 fn _obool(obj: JsonValue, key: text) -> bool:
@@ -365,12 +358,7 @@ fn _obool(obj: JsonValue, key: text) -> bool:
 
 
 fn _json_field_text(obj: JsonValue, key: text) -> text:
-    if not json_value_has(obj, key):
-        return ""
-    val s = json_value_serialize(json_value_field(obj, key))
-    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
-        return s[1:s.len() - 1]
-    s
+    json_value_as_text(json_value_field(obj, key)) ?? ""
 
 
 fn _parse_i64(s: text) -> i64:

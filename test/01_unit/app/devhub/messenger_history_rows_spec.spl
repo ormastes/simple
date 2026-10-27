@@ -1,0 +1,54 @@
+# @cover src/app/devhub/messenger/adapter/history_rows.spl
+use std.spec.*
+use std.spec.step
+use std.database.sql.types.{DbRow, DbValue}
+use app.devhub.messenger.adapter.history_rows.{messenger_history_rows}
+
+fn history_test_row(room: text, sequence: i64, id: text) -> DbRow:
+    DbRow(columns: ["room", "seq", "id"], values: [DbValue.Text(room), DbValue.Integer(sequence), DbValue.Text(id)])
+
+describe "Messenger history sequence ordering":
+    it "should select by sequence before applying the limit":
+        step("Read rowid order that differs from message sequence order")
+        val rows = [history_test_row("r", 30, "third"), history_test_row("r", 10, "first"), history_test_row("other", 0, "foreign"), history_test_row("r", 20, "second")]
+        match messenger_history_rows(rows, "room", "seq", "r", 2):
+            case Ok(selected):
+                expect(selected.len()).to_equal(2)
+                expect(selected[0].values[2].to_text()).to_equal("first")
+                expect(selected[1].values[2].to_text()).to_equal("second")
+            case Err(error): fail(error)
+
+    it "should keep stable order for equal sequence values":
+        step("Select duplicate sequences and an empty room")
+        val rows = [history_test_row("r", 2, "a"), history_test_row("r", 2, "b"), history_test_row("r", 1, "c")]
+        match messenger_history_rows(rows, "room", "seq", "r", 3):
+            case Ok(selected):
+                expect(selected[0].values[2].to_text()).to_equal("c")
+                expect(selected[1].values[2].to_text()).to_equal("a")
+                expect(selected[2].values[2].to_text()).to_equal("b")
+            case Err(error): fail(error)
+        match messenger_history_rows(rows, "room", "seq", "absent", 2):
+            case Ok(selected): expect(selected.len()).to_equal(0)
+            case Err(error): fail(error)
+        match messenger_history_rows(rows, "room", "seq", "r", 2):
+            case Ok(selected):
+                expect(selected[0].values[2].to_text()).to_equal("c")
+                expect(selected[1].values[2].to_text()).to_equal("a")
+            case Err(error): fail(error)
+
+    it "should reject missing or noninteger sequence values even beyond the limit":
+        step("Keep invalid sequence metadata from being hidden by truncation")
+        val invalid = DbRow(columns: ["room", "seq"], values: [DbValue.Text("r"), DbValue.Text("2")])
+        expect(messenger_history_rows([history_test_row("r", 1, "a"), invalid], "room", "seq", "r", 1).is_err()).to_equal(true)
+        val missing = DbRow(columns: ["room"], values: [DbValue.Text("r")])
+        expect(messenger_history_rows([missing], "room", "seq", "r", 2).is_err()).to_equal(true)
+        expect(messenger_history_rows([], "room", "seq", "r", 0).is_err()).to_equal(true)
+
+    it "should reject malformed rows and unavailable room identifiers":
+        step("Reject inconsistent or null metadata before selecting a history page")
+        val malformed = DbRow(columns: ["room", "seq"], values: [DbValue.Text("r")])
+        expect(messenger_history_rows([malformed], "room", "seq", "r", 2).is_err()).to_equal(true)
+        val missing = DbRow(columns: ["seq"], values: [DbValue.Integer(1)])
+        expect(messenger_history_rows([missing], "room", "seq", "r", 2).is_err()).to_equal(true)
+        val null_room = DbRow(columns: ["room", "seq"], values: [DbValue.Null, DbValue.Integer(1)])
+        expect(messenger_history_rows([null_room], "room", "seq", "NULL", 2).is_err()).to_equal(true)
