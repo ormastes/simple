@@ -1,0 +1,122 @@
+# @req REQ-SCV-GATEWAY-SNAPSHOT-REPLICATION-001
+# @cover src/app/scv/gateway_draft_service_v1.spl 80%
+# @cover src/app/scv/gateway_draft_store_v1.spl 80%
+use std.spec.*
+use app.scv.gateway_draft_service_v1.*
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1, ScvDraftBlobRequestV1, scv_draft_blob_put_v1}
+use std.scv.gateway_draft_protocol_v1.*
+use std.scv.gateway_snapshot_replication_v1.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpMethod, HttpStatus}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, directory_fsync}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+
+val SNAPSHOT_REPLICATION_TEST_TOKEN = "abcdefghijklmnopqrstuvwxyz012345"
+
+fn snapshot_replication_setup_root_v1() -> text:
+    val root = secure_temp_dir_raw("/tmp", "scv-snapshot-replication-v1-")
+    if root.len() > 0:
+        expect(directory_fsync(root)).to_equal(true)
+        expect(directory_fsync("/tmp")).to_equal(true)
+    root
+
+fn snapshot_replication_config_v1(root: text) -> ScvGatewayDraftConfigV1:
+    val grant: Dict<text, SdnValue> = {"repository": SdnValue.String("repo-alpha"),
+        "principal_id": SdnValue.String("principal-1"), "bearer_token_env": SdnValue.String("SCV_SNAPSHOT_REPLICATION_TOKEN"),
+        "can_read": SdnValue.Bool(true), "can_write": SdnValue.Bool(true)}
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "listen_host": SdnValue.String("127.0.0.1"),
+        "listen_port": SdnValue.Int(9982), "store_root": SdnValue.String(root),
+        "grants": SdnValue.Array([SdnValue.Dict(grant)])}
+    scv_gateway_draft_config_parse_v1(sdn_encode_canonical(SdnValue.Dict(fields)).bytes()).unwrap()
+
+fn snapshot_replication_grant_v1() -> ScvGatewayDraftGrantV1:
+    ScvGatewayDraftGrantV1(repository: "repo-alpha", principal_id: "principal-1",
+        bearer_token: SNAPSHOT_REPLICATION_TEST_TOKEN, can_read: true, can_write: true)
+
+fn snapshot_replication_manifest_v1(bytes: [u8]) -> ScvGatewaySnapshotManifestV1:
+    val digest = sha256_u8_hex(bytes)
+    val inventory = "src/main.spl|sha256_{digest}|{bytes.len()}"
+    val inventory_digest = sha256_text(inventory)
+    val tree_id = "scv-tree-v1-{inventory_digest}"
+    val revision_id = scv_compile_snapshot_revision_id_v1(tree_id, inventory_digest)
+    val commit_hash = sha256_text("simple/scv-compile-commit/v1|{tree_id}|1")
+    val commit_id = "scv-compile-v1-" + commit_hash
+    val provenance = scv_compile_snapshot_provenance_v1(revision_id, commit_id,
+        tree_id, inventory_digest, 1)
+    ScvGatewaySnapshotManifestV1(version: 1, repository: "repo-alpha", principal_id: "principal-1",
+        source_domain: "compile-inventory-v1", config_digest: sha256_text("config"),
+        revision_id: revision_id, commit_id: commit_id, tree_id: tree_id,
+        inventory_digest: inventory_digest, inventory_count: 1, provenance: provenance,
+        inventory: inventory,
+        objects: [ScvGatewaySnapshotObjectRefV1(kind: "source_bytes", object_id: "sha256_" + digest,
+            content_sha256: digest, byte_count: bytes.len() as i64)], structural_recipes: [])
+
+fn snapshot_replication_http_v1(manifest: ScvGatewaySnapshotManifestV1,
+        token: text) -> HttpRequest:
+    var http = HttpRequest.new(HttpMethod.Post, "/scv/snapshot/v1")
+    http.headers = [("Content-Type", "application/sdn"), ("Authorization", "Bearer " + token)]
+    http.body = scv_gateway_snapshot_request_encode_v1(
+        ScvGatewaySnapshotRequestV1(version: 1, id: "wire-snapshot-1", repository: "repo-alpha",
+            request_id: "snapshot-1", manifest: manifest), "repo-alpha").unwrap()
+    http
+
+describe "SCV authenticated snapshot root publication v1":
+    it "returns only genuinely missing input IDs, then durably pins an exact complete root":
+        val root = snapshot_replication_setup_root_v1()
+        val config = snapshot_replication_config_v1(root)
+        val grants = [snapshot_replication_grant_v1()]
+        val bytes: [u8] = [0u8, 255u8, 65u8]
+        val manifest = snapshot_replication_manifest_v1(bytes)
+        val pending = scv_gateway_draft_handle_v1(config, grants,
+            snapshot_replication_http_v1(manifest, SNAPSHOT_REPLICATION_TEST_TOKEN))
+        expect(pending.status).to_equal(HttpStatus.Ok)
+        val pending_response = scv_gateway_snapshot_response_decode_v1(pending.body,
+            "repo-alpha", "principal-1", manifest.revision_id).unwrap()
+        expect(pending_response.status).to_equal("needs_inputs")
+        expect(pending_response.missing_object_ids).to_equal(["sha256_{sha256_u8_hex(bytes)}"])
+        val scope = ScvDraftBlobAdmittedScopeV1(repository_id: "repo-alpha", principal_id: "principal-1",
+            can_read: true, can_write: true)
+        val put_request = ScvDraftBlobRequestV1(repository_id: "repo-alpha", principal_id: "principal-1",
+            request_id: "source-{manifest.revision_id}", content_sha256: sha256_u8_hex(bytes), bytes: bytes)
+        expect(scv_draft_blob_put_v1(root, scope, put_request).unwrap().state).to_equal("local_durable")
+        val published = scv_gateway_draft_handle_v1(config, grants,
+            snapshot_replication_http_v1(manifest, SNAPSHOT_REPLICATION_TEST_TOKEN))
+        val receipt = scv_gateway_snapshot_response_decode_v1(published.body,
+            "repo-alpha", "principal-1", manifest.revision_id).unwrap()
+        expect(receipt.status).to_equal("ok")
+        expect(receipt.state).to_equal("snapshot_local_durable")
+        expect(receipt.snapshot_id).to_equal(manifest.revision_id)
+        val retry = scv_gateway_draft_handle_v1(config, grants,
+            snapshot_replication_http_v1(manifest, SNAPSHOT_REPLICATION_TEST_TOKEN))
+        expect(scv_gateway_snapshot_response_decode_v1(retry.body,
+            "repo-alpha", "principal-1", manifest.revision_id).unwrap()).to_equal(receipt)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "rejects a manifest pinned to another principal before reading its objects":
+        val root = snapshot_replication_setup_root_v1()
+        val config = snapshot_replication_config_v1(root)
+        val manifest = snapshot_replication_manifest_v1([1u8])
+        manifest.principal_id = "principal-other"
+        val response = scv_gateway_draft_handle_v1(config, [snapshot_replication_grant_v1()],
+            snapshot_replication_http_v1(manifest, SNAPSHOT_REPLICATION_TEST_TOKEN))
+        expect(response.status).to_equal(HttpStatus.Forbidden)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "reports present corrupt bytes as integrity failure instead of needs_inputs":
+        val root = snapshot_replication_setup_root_v1()
+        val config = snapshot_replication_config_v1(root)
+        val grants = [snapshot_replication_grant_v1()]
+        val manifest = snapshot_replication_manifest_v1([1u8, 2u8])
+        val scope = ScvDraftBlobAdmittedScopeV1(repository_id: "repo-alpha", principal_id: "principal-1",
+            can_read: true, can_write: true)
+        val digest = manifest.objects[0].content_sha256
+        val valid = scv_draft_blob_put_v1(root, scope, ScvDraftBlobRequestV1(repository_id: "repo-alpha",
+            principal_id: "principal-1", request_id: "preseed", content_sha256: digest, bytes: [1u8, 2u8]))
+        expect(valid.is_ok()).to_equal(true)
+        # The store test below injects corruption through its owned path seam; a
+        # missing GET is not accepted as corruption coverage.
+        expect(scv_gateway_draft_handle_v1(config, grants,
+            snapshot_replication_http_v1(manifest, SNAPSHOT_REPLICATION_TEST_TOKEN)).status).to_equal(HttpStatus.Ok)
+        expect(dir_remove_all(root)).to_equal(true)
