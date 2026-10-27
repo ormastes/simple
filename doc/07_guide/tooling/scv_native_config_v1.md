@@ -1,6 +1,8 @@
 # Native SCV configuration API v1
 
-Implementation status: component source and specs authored; runtime qualification and CLI/provider activation pending. The [detail design](../../05_design/scv_config_v1.md) records exact support and restrictions.
+Implementation status: component and CLI inspection source/specs authored; runtime qualification and provider activation pending. The [detail design](../../05_design/scv_config_v1.md) records exact support and restrictions.
+
+The SCV CLI now dispatches `scv config check` and `scv config route <repository-relative-path>` to the bounded loader. These inspect the submitted configuration; they do not install an accepted policy generation. Results are native SDN, failures have exit code 1, and every result includes `publication_authorized: false`. A successful check reports schema validity, not provider availability, execution qualification, or permission to publish. The command does not rewrite invalid submitted bytes or silently select a legacy profile.
 
 Use `std.scv.scv_config_v1.scv_config_load_v1(root, limits)` to load required repository intent plus its route table. Supply `SdnStrictLimitsV1` from `std.common.sdn.strict_types_v1`. Missing files, malformed SDN, typos, unsupported versions and bounds violations return `Err`; the loader writes nothing. Existing Windows beneath-open support is unavailable and fails closed.
 
