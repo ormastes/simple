@@ -1,0 +1,316 @@
+# Authenticated, repository-scoped GitHub publication preparation.
+# V2 verifies a complete candidate against its frozen source files and exact
+# base before durably recording an export envelope. It never writes GitHub.
+use app.scv.db.git_candidate.{DbGitCandidateFile, DbGitCandidateRequest,
+    DbGitPreparedCandidate, db_git_candidate_restore, db_git_candidate_commit_bytes,
+    db_git_candidate_cleanup, db_git_candidate_validate}
+use app.scv.db.settlement_journal_codec.{db_settlement_files_bytes}
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1,
+    ScvDraftBlobRequestV1, ScvDraftBlobReceiptV1, scv_draft_blob_put_v1,
+    scv_draft_blob_get_v1}
+use app.scv.gateway_github_v1.{ScvGithubRepositoryV1, ScvGithubReadPolicyV1,
+    ScvGithubReadKindV1, ScvGithubReadRequestV1, ScvGithubReadResultV1,
+    scv_gateway_github_read_live_v1, scv_gateway_github_result_validate_v1,
+    scv_gateway_github_policy_validate_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.sha1.{sha1_u8_hex}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+pub struct ScvGatewayGithubPublishPolicyV2:
+    repository: ScvGithubRepositoryV1
+    github: ScvGithubReadPolicyV1
+    remote: text
+    source_root: text
+    scratch_parent: text
+    outbox_root: text
+    principal_id: text
+    base_ref: text
+    allow_prepare: bool
+    allow_reconcile: bool
+
+pub struct ScvGatewayGithubPublishRequestV2:
+    repository_id: text
+    request_id: text
+    base_ref: text
+    expected_base_head: text
+    candidate_oid: text
+    candidate_commit_bytes: text
+    files: [DbGitCandidateFile]
+    rebuild_message_hint: text
+
+pub struct ScvGatewayGithubPublishResultV2:
+    state: text
+    publication: text
+    repository_id: text
+    principal_id: text
+    request_id: text
+    base_ref: text
+    expected_base_head: text
+    topic_ref: text
+    candidate_oid: text
+    content_sha256: text
+
+fn _scv_gh_publish_id_v2(value: text) -> bool:
+    if value == "" or value.len() > 128 or value == "." or value == "..": return false
+    for code in value.bytes():
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or
+                (code >= 97 and code <= 122) or [45, 46, 95].contains(code.to_i64())):
+            return false
+    true
+
+fn _scv_gh_publish_sha1_v2(value: text) -> bool:
+    if value.len() != 40: return false
+    for code in value.bytes():
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+pub fn scv_gateway_github_publish_policy_validate_v2(policy: ScvGatewayGithubPublishPolicyV2) -> Result<bool, text>:
+    if policy.repository.repository_id == "" or policy.repository.host != "github.com" or
+       policy.repository.owner == "" or policy.repository.repository == "" or
+       policy.repository.github_repository_id == "": return Err("SCV_GH_PUBLISH_POLICY")
+    if policy.github.allowlist.len() != 1 or
+       policy.github.allowlist[0].repository_id != policy.repository.repository_id or
+       policy.github.allowlist[0].github_repository_id != policy.repository.github_repository_id or
+       policy.github.allowlist[0].host != policy.repository.host or
+       policy.github.allowlist[0].owner != policy.repository.owner or
+       policy.github.allowlist[0].repository != policy.repository.repository:
+        return Err("SCV_GH_PUBLISH_POLICY")
+    if not _scv_gh_publish_id_v2(policy.principal_id) or
+       not policy.base_ref.starts_with("refs/heads/") or policy.base_ref.len() > 512:
+        return Err("SCV_GH_PUBLISH_POLICY")
+    if not policy.allow_prepare and not policy.allow_reconcile: return Err("SCV_GH_PUBLISH_POLICY")
+    val canonical_remote = "https://github.com/{policy.repository.owner}/{policy.repository.repository}"
+    if policy.remote != canonical_remote and (policy.remote.starts_with("https://") or
+       policy.remote.starts_with("file://") or not policy.remote.starts_with("/")):
+        return Err("SCV_GH_PUBLISH_POLICY")
+    if policy.source_root == "" or policy.scratch_parent == "" or policy.outbox_root == "":
+        return Err("SCV_GH_PUBLISH_POLICY")
+    scv_gateway_github_policy_validate_v1(policy.github)?
+    Ok(true)
+
+fn _scv_gh_publish_topic_ref_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request_id: text) -> text:
+    val subject = "scv-gateway-github-topic-v2\n{policy.repository.repository_id.len()}:{policy.repository.repository_id}\n{scope.principal_id.len()}:{scope.principal_id}\n{request_id.len()}:{request_id}\n"
+    "refs/heads/scv/" + sha256_text(subject)[0:32]
+
+fn _scv_gh_publish_scope_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
+        write: bool) -> Result<bool, text>:
+    # Principal/capability admission happens before request identity or storage access.
+    if scope.repository_id != policy.repository.repository_id or scope.principal_id != policy.principal_id:
+        return Err("SCV_GH_PUBLISH_SCOPE")
+    if (write and not scope.can_write) or (not write and not scope.can_read):
+        return Err(if write: "SCV_GH_PUBLISH_WRITE_DENIED" else: "SCV_GH_PUBLISH_READ_DENIED")
+    if request.repository_id != scope.repository_id: return Err("SCV_GH_PUBLISH_SCOPE")
+    Ok(true)
+
+fn _scv_gh_publish_request_valid_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        request: ScvGatewayGithubPublishRequestV2) -> Result<bool, text>:
+    if not _scv_gh_publish_id_v2(request.request_id) or
+       request.base_ref != policy.base_ref or not _scv_gh_publish_sha1_v2(request.expected_base_head) or
+       not _scv_gh_publish_sha1_v2(request.candidate_oid) or request.rebuild_message_hint == "" or
+       request.rebuild_message_hint.len() > 4096 or request.rebuild_message_hint.contains("\0"):
+        return Err("SCV_GH_PUBLISH_REQUEST")
+    if request.candidate_commit_bytes.len() == 0 or request.candidate_commit_bytes.len() >= 65536 or
+       request.candidate_commit_bytes.contains("\0"):
+        return Err("SCV_GH_PUBLISH_REQUEST")
+    val candidate_request = DbGitCandidateRequest(source_root: policy.source_root,
+        remote: policy.remote, scratch_parent: policy.scratch_parent,
+        expected_head: request.expected_base_head, object_format: "sha1",
+        files: request.files, message: request.rebuild_message_hint)
+    db_git_candidate_validate(candidate_request)?
+    Ok(true)
+
+fn _scv_gh_publish_candidate_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        request: ScvGatewayGithubPublishRequestV2,
+        lease_held: fn() -> bool) -> Result<DbGitPreparedCandidate, text>:
+    val candidate_request = DbGitCandidateRequest(source_root: policy.source_root,
+        remote: policy.remote, scratch_parent: policy.scratch_parent,
+        expected_head: request.expected_base_head, object_format: "sha1",
+        files: request.files, message: request.rebuild_message_hint)
+    val candidate = db_git_candidate_restore(candidate_request,
+        request.candidate_commit_bytes, request.candidate_oid, lease_held)?
+    val restored_bytes = match db_git_candidate_commit_bytes(candidate):
+        case Ok(value): value
+        case Err(reason):
+            db_git_candidate_cleanup(candidate)?
+            return Err(reason)
+    if restored_bytes != request.candidate_commit_bytes:
+        db_git_candidate_cleanup(candidate)?
+        return Err("SCV_GH_PUBLISH_CANDIDATE_BYTES")
+    Ok(candidate)
+
+fn _scv_gh_publish_read_ref_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        selector: text, expected_oid: text,
+        read: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>) -> Result<ScvGithubReadResultV1, text>:
+    val request = ScvGithubReadRequestV1(repository_id: policy.repository.repository_id,
+        kind: ScvGithubReadKindV1.Ref, selector: selector, expected_oid: expected_oid)
+    val result = read(policy.github, request)?
+    scv_gateway_github_result_validate_v1(policy.github, request, result)?
+    Ok(result)
+
+fn _scv_gh_publish_envelope_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2) -> Result<[u8], text>:
+    val projection = db_settlement_files_bytes(request.files)?
+    val snapshot_digest = sha256_u8_hex(projection)
+    var files: [SdnValue] = []
+    for file in request.files:
+        files.push(SdnValue.Dict({"path": SdnValue.String(file.path),
+            "content": SdnValue.String(file.content)}))
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(2), "record_type": SdnValue.String("scv_github_publish_outbox"),
+        "repository_id": SdnValue.String(policy.repository.repository_id),
+        "github_host": SdnValue.String(policy.repository.host),
+        "github_owner": SdnValue.String(policy.repository.owner),
+        "github_repository": SdnValue.String(policy.repository.repository),
+        "github_repository_id": SdnValue.String(policy.repository.github_repository_id),
+        "principal_id": SdnValue.String(scope.principal_id),
+        "request_id": SdnValue.String(request.request_id),
+        "base_ref": SdnValue.String(request.base_ref),
+        "expected_base_head": SdnValue.String(request.expected_base_head),
+        "topic_ref": SdnValue.String(_scv_gh_publish_topic_ref_v2(policy, scope, request.request_id)),
+        "candidate_oid": SdnValue.String(request.candidate_oid),
+        "candidate_commit_bytes": SdnValue.String(request.candidate_commit_bytes),
+        "snapshot_sha256": SdnValue.String(snapshot_digest),
+        "rebuild_message_hint": SdnValue.String(request.rebuild_message_hint), "files": SdnValue.Array(files),
+        "state": SdnValue.String("export_prepared"),
+        "publication": SdnValue.String("not_acceptance")}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)).bytes()
+    if bytes.len() > 1048576: return Err("SCV_GH_PUBLISH_OUTBOX_QUOTA")
+    Ok(bytes)
+
+fn _scv_gh_publish_result_v2(state: text, policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
+        content_sha256: text) -> ScvGatewayGithubPublishResultV2:
+    ScvGatewayGithubPublishResultV2(state: state, publication: "not_acceptance",
+        repository_id: policy.repository.repository_id, principal_id: scope.principal_id,
+        request_id: request.request_id, base_ref: request.base_ref,
+        expected_base_head: request.expected_base_head,
+        topic_ref: _scv_gh_publish_topic_ref_v2(policy, scope, request.request_id),
+        candidate_oid: request.candidate_oid, content_sha256: content_sha256)
+
+fn _scv_gh_publish_save_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
+        envelope: [u8], digest: text) -> Result<ScvDraftBlobReceiptV1, text>:
+    val receipt = match scv_draft_blob_put_v1(policy.outbox_root, scope,
+            ScvDraftBlobRequestV1(repository_id: scope.repository_id,
+                principal_id: scope.principal_id, request_id: request.request_id,
+                content_sha256: digest, bytes: envelope)):
+        case Ok(value): value
+        case Err(reason):
+            if reason == "SCV_DRAFT_BLOB_IDEMPOTENCY_CONFLICT":
+                return Err("SCV_GH_PUBLISH_IDEMPOTENCY_CONFLICT")
+            return Err("SCV_GH_PUBLISH_DURABILITY")
+    if receipt.state != "local_durable" or receipt.content_sha256 != digest or
+       receipt.repository_id != scope.repository_id or receipt.principal_id != scope.principal_id or
+       receipt.request_id != request.request_id:
+        return Err("SCV_GH_PUBLISH_DURABILITY")
+    Ok(receipt)
+
+pub fn scv_gateway_github_publish_candidate_restore_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
+        read: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>,
+        lease_held: fn() -> bool) -> Result<DbGitPreparedCandidate, text>:
+    # Only an admitted principal can cause a base read or candidate fetch.
+    _scv_gh_publish_scope_v2(policy, scope, request, true)?
+    if not policy.allow_prepare: return Err("SCV_GH_PUBLISH_WRITE_DENIED")
+    scv_gateway_github_publish_policy_validate_v2(policy)?
+    _scv_gh_publish_request_valid_v2(policy, request)?
+    match _scv_gh_publish_read_ref_v2(policy, request.base_ref,
+            request.expected_base_head, read):
+        case Err(_): return Err("SCV_GH_PUBLISH_BASE_STALE")
+        case Ok(_): pass
+    _scv_gh_publish_candidate_v2(policy, request, lease_held)
+
+pub fn scv_gateway_github_publish_candidate_for_outbox_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
+        expected_content_sha256: text,
+        read: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>,
+        lease_held: fn() -> bool) -> Result<DbGitPreparedCandidate, text>:
+    # This is the only candidate acquisition seam for a downstream topic writer:
+    # scope, byte identity and durable readback are established before Git fetch.
+    _scv_gh_publish_scope_v2(policy, scope, request, true)?
+    if not policy.allow_prepare: return Err("SCV_GH_PUBLISH_WRITE_DENIED")
+    scv_gateway_github_publish_policy_validate_v2(policy)?
+    _scv_gh_publish_request_valid_v2(policy, request)?
+    val envelope = _scv_gh_publish_envelope_v2(policy, scope, request)?
+    val digest = sha256_u8_hex(envelope)
+    if expected_content_sha256 != digest: return Err("SCV_GH_PUBLISH_OUTBOX_IDENTITY")
+    # get verifies exact object bytes only; the returned state below is an
+    # independent remote observation, never a claim that a local receipt or
+    # upstream acceptance was recorded by this read-only reconcile path.
+    val saved = scv_draft_blob_get_v1(policy.outbox_root, scope, digest)?
+    if saved != envelope: return Err("SCV_GH_PUBLISH_OUTBOX_IDENTITY")
+    _scv_gh_publish_save_v2(policy, scope, request, envelope, digest)?
+    _scv_gh_publish_candidate_v2(policy, request, lease_held)
+
+pub fn scv_gateway_github_publish_prepare_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
+        read: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>,
+        lease_held: fn() -> bool) -> Result<ScvGatewayGithubPublishResultV2, text>:
+    # Authorization and repository scope precede any GitHub or filesystem access.
+    _scv_gh_publish_scope_v2(policy, scope, request, true)?
+    if not policy.allow_prepare: return Err("SCV_GH_PUBLISH_WRITE_DENIED")
+    scv_gateway_github_publish_policy_validate_v2(policy)?
+    _scv_gh_publish_request_valid_v2(policy, request)?
+    val envelope = _scv_gh_publish_envelope_v2(policy, scope, request)?
+    val digest = sha256_u8_hex(envelope)
+    match scv_draft_blob_get_v1(policy.outbox_root, scope, digest):
+        case Ok(saved):
+            if saved != envelope: return Err("SCV_GH_PUBLISH_OUTBOX_IDENTITY")
+            val existing = _scv_gh_publish_candidate_v2(policy, request, lease_held)?
+            val receipt = _scv_gh_publish_save_v2(policy, scope, request, envelope, digest)
+            db_git_candidate_cleanup(existing)?
+            receipt?
+            return Ok(_scv_gh_publish_result_v2("export_prepared", policy, scope, request, digest))
+        case Err(reason):
+            if reason != "SCV_DRAFT_BLOB_FILE": return Err("SCV_GH_PUBLISH_DURABILITY")
+    val candidate = scv_gateway_github_publish_candidate_restore_v2(policy,
+        scope, request, read, lease_held)?
+    val saved = _scv_gh_publish_save_v2(policy, scope, request, envelope, digest)
+    val cleaned = db_git_candidate_cleanup(candidate)
+    match saved:
+        Ok(_): ()
+        Err(reason):
+            cleaned?
+            return Err(reason)
+    cleaned?
+    Ok(_scv_gh_publish_result_v2("export_prepared", policy, scope, request, digest))
+
+pub fn scv_gateway_github_publish_reconcile_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
+        expected_content_sha256: text,
+        read: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>,
+        lease_held: fn() -> bool) -> Result<ScvGatewayGithubPublishResultV2, text>:
+    # Do not derive or inspect a store path until the host-admitted read scope passes.
+    _scv_gh_publish_scope_v2(policy, scope, request, false)?
+    if not policy.allow_reconcile: return Err("SCV_GH_PUBLISH_READ_DENIED")
+    scv_gateway_github_publish_policy_validate_v2(policy)?
+    _scv_gh_publish_request_valid_v2(policy, request)?
+    val envelope = _scv_gh_publish_envelope_v2(policy, scope, request)?
+    val digest = sha256_u8_hex(envelope)
+    if expected_content_sha256 != digest: return Err("SCV_GH_PUBLISH_OUTBOX_IDENTITY")
+    val saved = scv_draft_blob_get_v1(policy.outbox_root, scope, digest)?
+    if saved != envelope: return Err("SCV_GH_PUBLISH_OUTBOX_IDENTITY")
+    val candidate = _scv_gh_publish_candidate_v2(policy, request, lease_held)?
+    val topic_ref = _scv_gh_publish_topic_ref_v2(policy, scope, request.request_id)
+    val observed = _scv_gh_publish_read_ref_v2(policy, topic_ref, request.candidate_oid, read)
+    val cleaned = db_git_candidate_cleanup(candidate)
+    if observed.is_err():
+        cleaned?
+        return Ok(_scv_gh_publish_result_v2("upstream_unknown", policy, scope, request, digest))
+    cleaned?
+    val result = observed.unwrap()
+    if result.repository_id != policy.repository.repository_id or
+       result.github_repository_id != policy.repository.github_repository_id or
+       result.selector != topic_ref or result.oid != request.candidate_oid:
+        return Ok(_scv_gh_publish_result_v2("upstream_unknown", policy, scope, request, digest))
+    Ok(_scv_gh_publish_result_v2("topic_branch_published", policy, scope, request, digest))
+
+export ScvGatewayGithubPublishPolicyV2, ScvGatewayGithubPublishRequestV2
+export ScvGatewayGithubPublishResultV2, scv_gateway_github_publish_policy_validate_v2
+export scv_gateway_github_publish_prepare_v2, scv_gateway_github_publish_reconcile_v2
+export scv_gateway_github_publish_candidate_restore_v2
+export scv_gateway_github_publish_candidate_for_outbox_v2
