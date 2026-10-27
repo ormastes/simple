@@ -1,0 +1,44 @@
+# Return-type interfaces from admitted body-free provider declarations.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.return_type_interface_v1.{RtiCallableSignatureV1,
+    rti_row_from_signature_v1, rti_method_parts, rti_type_param_names}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1,
+    MirHirFunctionDeclarationV1, MirHirNominalDeclarationV1}
+
+fn mir_declaration_rti_owner_params_v1(module: MirHirModuleDeclarationsV1,
+        function: MirHirFunctionDeclarationV1) -> [text]:
+    var name = function.name
+    if val symbol = module.symbols.get_symbol_raw(function.symbol.id):
+        name = symbol.name
+    val parts = rti_method_parts(name)
+    if parts.len() != 2: return []
+    for raw_owner in module.structs:
+        val owner: MirHirNominalDeclarationV1 = raw_owner
+        if owner.name == parts[0]: return rti_type_param_names(owner.type_params)
+    for raw_owner in module.classes:
+        val owner: MirHirNominalDeclarationV1 = raw_owner
+        if owner.name == parts[0]: return rti_type_param_names(owner.type_params)
+    []
+
+impl MirLowering:
+    me prescan_declaration_return_types_v1(module: MirHirModuleDeclarationsV1):
+        # Imported signatures must be available before entry-module lowering.
+        # Their raw SymbolIds remain provider-local until RTI binds the stable
+        # declaration identities into the actual consumer's symbol table.
+        for raw_function in module.functions:
+            val function: MirHirFunctionDeclarationV1 = raw_function
+            match function.return_type.kind:
+                case HirTypeKind.Infer(_, _): ()
+                case _:
+                    val signature = RtiCallableSignatureV1(symbol: function.symbol,
+                        name: function.name, type_params: rti_type_param_names(function.type_params),
+                        owner_type_params: mir_declaration_rti_owner_params_v1(module, function),
+                        return_type: function.return_type, is_static: function.is_static)
+                    match rti_row_from_signature_v1(module.name, module.symbols, signature):
+                        case Ok(row):
+                            match self.rti.register_rows([row]):
+                                case Ok(_): ()
+                                case Err(error): self.error_fatal(error.message, nil)
+                        case Err(error): self.error_fatal(error.message, nil)

@@ -1,0 +1,86 @@
+"""Real compact-provider RTI prescan mechanics, not final archive admission.
+
+The native imported-record fixtures supply end-to-end red/green qualification.
+These examples call the actual compact prescan with projected declarations.
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.hir.return_type_interface_v1.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1}
+use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+fn compact_rti_hir(source: text, path: text) -> HirModule:
+    val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+    var frontend = HirLowering.with_filename(path)
+    val module = frontend.lower_module(ast)
+    expect(frontend.errors.len()).to_equal(0)
+    module
+
+fn compact_rti_declarations(module: HirModule) -> MirHirModuleDeclarationsV1:
+    # Actual encoded bytes are projected inside the real transient owner.
+    # This diagnostic identity deliberately makes no final admission claim.
+    val context = hir_owned_artifact_context_v1()
+    val body = hir_module_encode(module)
+    val body_digest = sha256_text(body)
+    val diagnostic_identity = sha256_text("compact-rti-NOT-final-admission-v1\n" + body)
+    expect(transient_scope_begin()).to_equal(true)
+    val projected = mir_hir_project_module_in_owned_scope_v1(context, module,
+        diagnostic_identity, body_digest, body_digest)
+    val paused = transient_scope_pause()
+    val promoted = if paused: transient_promote(projected) else: false
+    val ended = transient_scope_end()
+    expect(paused and promoted and ended).to_equal(true)
+    expect(projected.is_ok()).to_equal(true)
+    projected.unwrap()
+
+fn compact_rti_term(lowering: MirLowering, module_id: text, name: text) -> text:
+    val row = lowering.rti.lookup(CalleeKey(module_id: module_id, owner: nil,
+        name: name, is_static: false)).unwrap()
+    rti_term_canonical_text(lowering.rti.require_concrete(row.entry).unwrap())
+
+describe "compact declaration return-type prescan":
+    it "publishes imported Optional and Result record rows before consumer lowering":
+        val provider = compact_rti_hir("struct Payload:\n    value: i64\nfn maybe() -> Payload?:\n    Some(Payload(value: 42))\nfn result() -> Result<Payload, text>:\n    Ok(Payload(value: 42))\n", "src/compact_rti/provider.spl")
+        val summary = compact_rti_declarations(provider)
+        var lowering = MirLowering.new(provider.symbols)
+        lowering.prescan_declaration_callables_v1(summary)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(compact_rti_term(lowering, "compact_rti.provider", "maybe")).to_start_with("opt(")
+        expect(compact_rti_term(lowering, "compact_rti.provider", "result")).to_start_with("result(")
+
+    it "keeps same-named provider payloads distinct across separate symbol tables":
+        val source = "struct Payload:\n    value: i64\nfn maybe() -> Payload?:\n    Some(Payload(value: 42))\n"
+        val left = compact_rti_hir(source, "src/compact_rti/left.spl")
+        val right = compact_rti_hir(source, "src/compact_rti/right.spl")
+        var lowering = MirLowering.new(left.symbols)
+        lowering.prescan_declaration_callables_v1(compact_rti_declarations(left))
+        lowering.prescan_declaration_callables_v1(compact_rti_declarations(right))
+        expect(lowering.errors.len()).to_equal(0)
+        val left_type = compact_rti_term(lowering, "compact_rti.left", "maybe")
+        val right_type = compact_rti_term(lowering, "compact_rti.right", "maybe")
+        expect(left_type != right_type).to_equal(true)
+
+    it "publishes owner generic parameters on compact method declarations":
+        val provider = compact_rti_hir("class Box<T>:\n    value: T\n    fn maybe() -> T?:\n        Some(self.value)\n", "src/compact_rti/generic.spl")
+        var lowering = MirLowering.new(provider.symbols)
+        lowering.prescan_declaration_callables_v1(compact_rti_declarations(provider))
+        val owner = rti_type_ref("compact_rti.generic", "class", "Box")
+        val row = lowering.rti.lookup(CalleeKey(module_id: "compact_rti.generic",
+            owner: Some(owner), name: "maybe", is_static: false)).unwrap()
+        expect(lowering.errors.len()).to_equal(0)
+        expect(row.type_param_count).to_equal(1)
+        val term = lowering.rti.instantiate(row, [RtType.Builtin("i64")]).unwrap()
+        expect(rti_term_canonical_text(term)).to_equal("opt(b:i64)")

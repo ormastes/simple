@@ -292,27 +292,51 @@ fn rti_owner_type_params(module: HirModule, owner_name: text) -> [text]:
         if c.name == owner_name: return rti_type_param_names(c.type_params)
     []
 
+struct RtiCallableSignatureV1:
+    symbol: SymbolId
+    name: text
+    type_params: [text]
+    owner_type_params: [text]
+    return_type: HirType
+    is_static: bool
+
+fn rti_row_from_signature_v1(module_name: text, symbols: SymbolTable,
+        signature: RtiCallableSignatureV1) -> Result<ReturnTypeRow, RtiError>:
+    """Publish a body-free callable using its provider's symbol ownership.
+    Compact declaration consumers must publish the same interface as HIR
+    consumers before lowering an importing module."""
+    val defining_module = rti_symbol_module(symbols, signature.symbol.id)
+    val module_id = if defining_module != "": defining_module else: rti_module_id(module_name)
+    var sym_name = signature.name
+    if val sym = symbols.get_symbol_raw(signature.symbol.id):
+        sym_name = sym.name
+    val parts = rti_method_parts(sym_name)
+    var params = signature.type_params
+    var owner: DeclRef? = nil
+    var decl = rti_fn_ref(module_id, signature.name)
+    if parts.len() == 2:
+        val owner_ref = rti_owner_ref(symbols, module_id, parts[0])
+        owner = Some(owner_ref)
+        decl = rti_method_ref(owner_ref, parts[1])
+        for p in signature.owner_type_params:
+            params = params.push(p)
+    val term = rti_term_of_hir_type(signature.return_type, symbols, params)
+    match term:
+        case Ok(t):
+            val key = CalleeKey(module_id: module_id, owner: owner, name: rti_last_segment(decl.display), is_static: signature.is_static)
+            Ok(ReturnTypeRow(decl: decl, key: key, type_param_count: params.len(), entry: ReturnTypeEntry.Decided(t)))
+        case Err(e):
+            Err(rti_error(e.code, "callee '{decl.display}' of module '{module_id}': {e.message}"))
+
 fn rti_row_of_function(module: HirModule, module_id: text, f: HirFunction) -> Result<ReturnTypeRow, RtiError>:
     var sym_name = f.name
     if val sym = module.symbols.get_symbol_raw(f.symbol.id):
         sym_name = sym.name
     val parts = rti_method_parts(sym_name)
-    var params = rti_type_param_names(f.type_params)
-    var owner: DeclRef? = nil
-    var decl = rti_fn_ref(module_id, f.name)
-    if parts.len() == 2:
-        val owner_ref = rti_owner_ref(module.symbols, module_id, parts[0])
-        owner = Some(owner_ref)
-        decl = rti_method_ref(owner_ref, parts[1])
-        for p in rti_owner_type_params(module, parts[0]):
-            params = params.push(p)
-    val term = rti_term_of_hir_type(f.return_type, module.symbols, params)
-    match term:
-        case Ok(t):
-            val key = CalleeKey(module_id: module_id, owner: owner, name: rti_last_segment(decl.display), is_static: f.is_static)
-            Ok(ReturnTypeRow(decl: decl, key: key, type_param_count: params.len(), entry: ReturnTypeEntry.Decided(t)))
-        case Err(e):
-            Err(rti_error(e.code, "callee '{decl.display}' of module '{module_id}': {e.message}"))
+    val owner_params = if parts.len() == 2: rti_owner_type_params(module, parts[0]) else: []
+    rti_row_from_signature_v1(module_id, module.symbols, RtiCallableSignatureV1(
+        symbol: f.symbol, name: f.name, type_params: rti_type_param_names(f.type_params),
+        owner_type_params: owner_params, return_type: f.return_type, is_static: f.is_static))
 
 fn rti_function_is_unannotated(f: HirFunction) -> bool:
     match f.return_type.kind:

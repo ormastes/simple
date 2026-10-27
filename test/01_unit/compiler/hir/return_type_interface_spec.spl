@@ -141,6 +141,33 @@ fn mir_subject_kind(hirs: Dict<text, HirModule>, fn_name: text) -> text:
     "none"
 
 describe "return-type interface v1":
+    it "publishes body-free imported Optional record returns with the provider owner":
+        val hir = path_spelled_hir("struct Payload:\n    value: i64\nfn maybe() -> Payload?:\n    Some(Payload(value: 42))\n", "src/rti_body_free/provider.spl")
+        val function = function_named(hir, "maybe")
+        val signature = RtiCallableSignatureV1(symbol: function.symbol, name: function.name,
+            type_params: [], owner_type_params: [], return_type: function.return_type, is_static: false)
+        val compact = rti_row_from_signature_v1("unrelated.consumer", hir.symbols, signature).unwrap()
+        val full = rti_rows_from_hir_v1(hir).unwrap().rows[0]
+        expect(rti_decl_ref_same(compact.decl, full.decl)).to_equal(true)
+        expect(compact.decl.module_id).to_equal("rti_body_free.provider")
+        val table = ReturnTypeInterfaceTable.new()
+        val compact_term = table.require_concrete(compact.entry).unwrap()
+        val full_term = table.require_concrete(full.entry).unwrap()
+        expect(rti_term_canonical_text(compact_term)).to_equal(rti_term_canonical_text(full_term))
+        expect(rti_term_canonical_text(compact_term)).to_start_with("opt(")
+
+    it "retains symbolic generic parameters in body-free signatures":
+        val hir = path_spelled_hir("fn maybe<T>(value: T) -> T?:\n    Some(value)\n", "src/rti_body_free/generic.spl")
+        val function = function_named(hir, "maybe")
+        val signature = RtiCallableSignatureV1(symbol: function.symbol, name: function.name,
+            type_params: rti_type_param_names(function.type_params), owner_type_params: [],
+            return_type: function.return_type, is_static: false)
+        val row = rti_row_from_signature_v1(hir.name, hir.symbols, signature).unwrap()
+        val table = ReturnTypeInterfaceTable.new()
+        expect(row.type_param_count).to_equal(1)
+        expect(err_code(table.require_concrete(row.entry))).to_equal("E-RTI-003")
+        expect(rti_term_canonical_text(table.instantiate(row, [RtType.Builtin("i64")]).unwrap())).to_equal("opt(b:i64)")
+
     it "builds rows for a free function, an instance method and a static method":
         val hirs = fixture_hirs()
         val result = rti_rows_from_hir_v1(hirs[KINDS]).unwrap()
