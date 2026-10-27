@@ -15,6 +15,13 @@ SPEC.loader.exec_module(MATRIX)
 
 
 class LinkInputEvidence(unittest.TestCase):
+    def test_phase2_configured_interpreter_skip_does_not_hide_native_failure(self):
+        self.assertEqual(MATRIX.matrix_status(2, "PASS", "SKIPPED"), "PASS")
+        self.assertEqual(MATRIX.matrix_status(2, "PARTIAL", "SKIPPED"), "PARTIAL")
+        self.assertEqual(MATRIX.matrix_status(2, "FAIL", "SKIPPED"), "FAIL")
+        self.assertEqual(MATRIX.matrix_status(3, "PASS", "SKIPPED"), "FAIL")
+        self.assertEqual(MATRIX.matrix_status(2, "PASS", "UNRUN"), "FAIL")
+
     def test_task_caches_preserve_reserved_user_environment(self):
         matrix = object.__new__(MATRIX.Matrix)
         matrix.base = {"HOME": "/original/user", "home": "original-home", "CODEX_HOME": "/original/codex"}

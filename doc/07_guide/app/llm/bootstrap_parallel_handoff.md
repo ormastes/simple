@@ -216,8 +216,9 @@ parallel. Give each job distinct output and log paths; isolate writable caches
 only where concurrent writers would conflict. Retain the compiler and runtime
 identities, link inputs and commands, exit statuses, and each executable's
 actual output. A library or object build alone is not an executable Hello pass.
-Also run Hello through the interpreter owned by the selected compiler.
-Compiler-only phases that do not expose interpreter execution must report
-that case as unsupported; a separate CLI is not evidence for that compiler.
+Run Hello through the interpreter owned by the selected compiler where available.
+Phase 2 skips this case by configuration and reports `SKIPPED`; a separate CLI
+is not evidence for that compiler. Other phases report an unavailable interpreter
+as unsupported rather than passing it.
 For Phase 2, retain a separate four-lane result for each requested LLVM and
 Cranelift backend. These diagnostics do not replace formal admission receipts.
