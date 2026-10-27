@@ -1,6 +1,6 @@
 # SCV GitHub gateway publication preparation v2
 
-Executable scenarios: [scv_gateway_github_publish_v2_spec.spl](../../../../../../test/03_system/app/scv/feature/scv_gateway_github_publish_v2_spec.spl)
+Executable scenarios: [scv_gateway_github_publish_v2_spec.spl](../../../../../../test/03_system/app/scv/feature/scv_gateway_github_publish_v2_spec.spl) and [scv_gateway_publish_cli_v2_spec.spl](../../../../../../test/03_system/app/scv/feature/scv_gateway_publish_cli_v2_spec.spl).
 
 ## Covered behavior
 
@@ -36,6 +36,13 @@ merged PR, or imported accepted results.
 The host policy keeps `allow_prepare`, `allow_reconcile`, and
 `allow_topic_publish` separate. This slice enables only the first two; a topic
 publisher requires its own explicit host grant.
+
+The executable server entry point is `scv gateway publish-serve --config
+<native.sdn> --development-loopback --reason <audit reason>`. The v2 policy is
+strict native SDN. It references the bearer through `bearer_token_env`, pins one
+GitHub host/owner/repository/numeric ID and canonical remote, and supplies
+host-owned source, scratch, and outbox roots. The request cannot override any of
+those values.
 
 The reconciliation read path verifies the immutable object bytes but does not
 reissue or prove a local durable receipt. The preparation and retry paths do

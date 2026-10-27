@@ -1,0 +1,87 @@
+# Native SDN host policy for the additive SCV GitHub publication service.
+# Credentials are referenced by environment-variable name, never embedded.
+use app.io.mod.{file_read_regular_no_follow_bounded_bytes}
+use app.scv.gateway_config_v1.{ScvGatewayConfigV1,
+    scv_gateway_config_parse_v1}
+use app.scv.gateway_github_publish_v2.{ScvGatewayGithubPublishPolicyV2,
+    scv_gateway_github_publish_policy_validate_v2}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.scv.scv_config_fields_v1.{scv_config_dict_v1, scv_config_text_v1,
+    scv_config_int_v1, scv_config_bool_v1}
+
+pub struct ScvGatewayPublishConfigV2:
+    gateway: ScvGatewayConfigV1
+    policy: ScvGatewayGithubPublishPolicyV2
+
+fn _scv_gateway_publish_host_path_v2(value: text) -> bool:
+    if value == "" or value.len() > 4096 or not value.starts_with("/") or value.ends_with("/"):
+        return false
+    for part in value.split("/"):
+        if part == ".." or part == ".": return false
+    for code in value.bytes():
+        if code < 32 or code == 127: return false
+    true
+
+pub fn scv_gateway_publish_config_parse_v2(bytes: [u8]) -> Result<ScvGatewayPublishConfigV2, text>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 8192, max_depth: 4,
+        max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)
+    val document = sdn_parse_strict_bytes_v1(bytes, limits)?
+    val fields = scv_config_dict_v1(document.value, "gateway_publish", [
+        "version", "repository", "listen_host", "listen_port", "bearer_token_env",
+        "github_host", "github_owner", "github_repository", "github_repository_id",
+        "remote", "source_root", "scratch_parent", "outbox_root", "principal_id",
+        "base_ref", "allow_prepare", "allow_reconcile", "allow_topic_publish"])?
+    if scv_config_int_v1(fields["version"], "version", 2, 2)? != 2:
+        return Err("GatewayPublishConfigVersion")
+    val repository = scv_config_text_v1(fields["repository"], "repository")?
+    val listen_host = scv_config_text_v1(fields["listen_host"], "listen_host")?
+    val listen_port = scv_config_int_v1(fields["listen_port"], "listen_port", 1024, 65535)?
+    val token_env = scv_config_text_v1(fields["bearer_token_env"], "bearer_token_env")?
+    val github_host = scv_config_text_v1(fields["github_host"], "github_host")?
+    val github_owner = scv_config_text_v1(fields["github_owner"], "github_owner")?
+    val github_repository = scv_config_text_v1(fields["github_repository"], "github_repository")?
+    val github_repository_id = scv_config_text_v1(fields["github_repository_id"], "github_repository_id")?
+    val source_root = scv_config_text_v1(fields["source_root"], "source_root")?
+    val scratch_parent = scv_config_text_v1(fields["scratch_parent"], "scratch_parent")?
+    val outbox_root = scv_config_text_v1(fields["outbox_root"], "outbox_root")?
+    if not _scv_gateway_publish_host_path_v2(source_root) or
+       not _scv_gateway_publish_host_path_v2(scratch_parent) or
+       not _scv_gateway_publish_host_path_v2(outbox_root):
+        return Err("GatewayPublishConfigPath")
+
+    # Reuse the v1 read-gateway parser for its exact repository, listener and
+    # secret-reference checks. The publish schema remains a distinct v2 file.
+    val gateway_fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "repository": SdnValue.String(repository),
+        "listen_host": SdnValue.String(listen_host), "listen_port": SdnValue.Int(listen_port),
+        "bearer_token_env": SdnValue.String(token_env),
+        "github_host": SdnValue.String(github_host), "github_owner": SdnValue.String(github_owner),
+        "github_repository": SdnValue.String(github_repository),
+        "github_repository_id": SdnValue.String(github_repository_id)}
+    val gateway = scv_gateway_config_parse_v1(sdn_encode_canonical(SdnValue.Dict(gateway_fields)).bytes())?
+    val remote = scv_config_text_v1(fields["remote"], "remote")?
+    val principal_id = scv_config_text_v1(fields["principal_id"], "principal_id")?
+    val base_ref = scv_config_text_v1(fields["base_ref"], "base_ref")?
+    val expected_remote = "https://github.com/{github_owner}/{github_repository}"
+    if remote != expected_remote: return Err("GatewayPublishRemoteDenied")
+    val policy = ScvGatewayGithubPublishPolicyV2(
+        repository: gateway.github.allowlist[0], github: gateway.github,
+        remote: remote, source_root: source_root, scratch_parent: scratch_parent,
+        outbox_root: outbox_root, principal_id: principal_id, base_ref: base_ref,
+        allow_prepare: scv_config_bool_v1(fields["allow_prepare"], "allow_prepare")?,
+        allow_reconcile: scv_config_bool_v1(fields["allow_reconcile"], "allow_reconcile")?,
+        allow_topic_publish: scv_config_bool_v1(fields["allow_topic_publish"], "allow_topic_publish")?)
+    scv_gateway_github_publish_policy_validate_v2(policy)?
+    Ok(ScvGatewayPublishConfigV2(gateway: gateway, policy: policy))
+
+pub fn scv_gateway_publish_config_load_v2(path: text) -> Result<ScvGatewayPublishConfigV2, text>:
+    val bytes = match file_read_regular_no_follow_bounded_bytes(path, 8192):
+        case Ok(value): value
+        case Err(_): return Err("GatewayPublishConfigReadRefused")
+    scv_gateway_publish_config_parse_v2(bytes)
+
+export ScvGatewayPublishConfigV2, scv_gateway_publish_config_parse_v2
+export scv_gateway_publish_config_load_v2
