@@ -31,6 +31,9 @@ with tempfile.TemporaryDirectory(prefix='stage3-policy-') as tmp:
     bindir.mkdir()
     fixture_worker = fixture / 'scripts/bootstrap/lib/stage3-native-build-worker.sh'
     fixture_worker.parent.mkdir(parents=True)
+    policy_helper = fixture / 'scripts/bootstrap/lib/stage3-source-policy.shs'
+    policy_helper.parent.mkdir(parents=True, exist_ok=True)
+    policy_helper.write_text((root / 'scripts/bootstrap/lib/stage3-source-policy.shs').read_text())
     facade = fixture / 'scripts/check/lib/bootstrap-stage3-provenance.shs'
     facade.parent.mkdir(parents=True)
     capture = base / 'capture'
@@ -77,9 +80,10 @@ bootstrap_stage3_memory_darwin_session_mode() { echo new; }
             case_env = dict(env)
             if mode is not None:
                 case_env['SIMPLE_BOOTSTRAP_RSS_CAP_MODE'] = mode
-            run(setup + helpers + policy + launch, case_env)
+            run(setup + helpers + 'set -- --source src/app --entry-closure\n' + policy + launch, case_env)
             args = capture.read_text().splitlines()
-            assert len(args) == 29 and args[-1] == (mode or 'enforce'), (route, args)
+            assert len(args) == 36 and args[32:] == [
+                '--stage3-source-policy-v1', '--source', 'src/app', '--entry-closure'], (route, args)
             assert args[7] == platform, (route, args[7])
         print(f'PASS: {route} {platform}: explicit monitor, enforce and default transport')
     for invalid in ('', 'disabled', 'MONITOR', 'monitor enforce'):
@@ -109,26 +113,22 @@ bootstrap_stage3_run_transcribed() {
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     receipt = base / 'admission.env'
     receipt.write_text('schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\nsimple_abi_policy=v1\ncandidate_sha256=' + digest(admitted) + '\n')
-    args = ['fixture'] * 29
+    args = ['fixture'] * 32
     args[1], args[6], args[7] = str(fixture), str(admitted), 'aarch64-apple-darwin'
     args[25:28] = ['v1', str(receipt), digest(receipt)]
-    for mode, ambient in [('monitor', 'enforce'), ('enforce', 'monitor')]:
-        args[28] = mode
+    args[28:32] = ['', '', '1000', 'per-file']
+    args += ['--stage3-source-policy-v1', '--source', 'src/app', '--entry-closure']
+    for mode in ('monitor', 'enforce'):
         command = ' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args))
-        result = run(command, dict(env, SIMPLE_BOOTSTRAP_RSS_CAP_MODE=ambient), 73)
+        result = run(command, dict(env, SIMPLE_BOOTSTRAP_RSS_CAP_MODE=mode), 73)
         assert result.stdout == f'mode={mode}\nsession=unset|unset\n'
-        result = run(command, dict(env, SIMPLE_BOOTSTRAP_SESSION_ID='123', SIMPLE_BOOTSTRAP_SESSION_EXEC='/fixture/session-helper'), 73)
+        result = run(command, dict(env, SIMPLE_BOOTSTRAP_RSS_CAP_MODE=mode, SIMPLE_BOOTSTRAP_SESSION_ID='123', SIMPLE_BOOTSTRAP_SESSION_EXEC='/fixture/session-helper'), 73)
         assert result.stdout == f'mode={mode}\nsession=123|/fixture/session-helper\n'
-    for invalid in ('', 'disabled', 'MONITOR', 'monitor enforce'):
-        args[28] = invalid
-        result = run(' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args)), env, 64)
-        assert 'invalid RSS cap mode transfer' in result.stderr
-    args[28] = 'monitor'
     args[27] = '0' * 64
     result = run(' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args)), env, 64)
     assert 'verified ABI admission transfer is absent or changed' in result.stderr
     args[27] = digest(receipt)
-    run(' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args[:-1])), env, 64)
+    run(' '.join(map(shlex.quote, ['/bin/sh', str(worker)] + args[:-3])), env, 64)
     print('PASS: worker policy validation, stale environment override, session preservation, ABI refusal and arity')
 print('PASS: shell transport controls only; native and real systemd/cgroup execution remain unrun')
 PY

@@ -69,18 +69,28 @@ reject bootstrap_stage3_run_transcribed t c l h m p "$row" -- child
 awk '/^# The caller fully verified/ { exit } { print }' \
     "$root/scripts/bootstrap/lib/stage3-native-build-worker.sh" >"$scratch/worker-prefix.sh"
 printf '\nprintf "ceiling=%%s cap=%%s\\n" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB-unset}" "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB-unset}"\n' >>"$scratch/worker-prefix.sh"
-set -- x "$root"
-while [ "$#" -lt 28 ]; do set -- "$@" x; done
-accept env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@" "$row" 10000000
+worker_prefix_run() {
+  ceiling=$2 cap=$3 ambient=${4:-}
+  set -- x "$root"
+  while [ "$#" -lt 28 ]; do set -- "$@" x; done
+  set -- "$@" "$ceiling" "$cap" 1000 per-file \
+    --stage3-source-policy-v1 --source src/app --entry-closure
+  if [ -n "$ambient" ]; then
+    env -i PATH="$PATH" "$ambient" sh "$scratch/worker-prefix.sh" "$@"
+  else
+    env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@"
+  fi
+}
+accept worker_prefix_run accept "$row" 10000000
 equal "$(cat "$scratch/last.out")" 'ceiling=12582912 cap=10000000'
-accept env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@"
+accept worker_prefix_run accept '' ''
 equal "$(cat "$scratch/last.out")" 'ceiling=unset cap=unset'
-reject env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@" "$row"
-reject env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@" "$row" ''
-reject env -i PATH="$PATH" sh "$scratch/worker-prefix.sh" "$@" "$row" 13000000
-reject env -i PATH="$PATH" SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=9000000 sh "$scratch/worker-prefix.sh" "$@" "$row" 10000000
-reject env -i PATH="$PATH" SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12000000 sh "$scratch/worker-prefix.sh" "$@" "$row" 10000000
-reject env -i PATH="$PATH" SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12582912 sh "$scratch/worker-prefix.sh" "$@"
+reject worker_prefix_run reject '' 10000000
+reject worker_prefix_run reject "$row" ''
+reject worker_prefix_run reject "$row" 13000000
+reject worker_prefix_run reject "$row" 10000000 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=9000000
+reject worker_prefix_run reject "$row" 10000000 SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12000000
+reject worker_prefix_run reject '' '' SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12582912
 
 # The launcher must reject a forbidden caller mode before systemd can lose it.
 awk '/^stage3_compiler_cap=$/ { copying=1 }
@@ -138,43 +148,53 @@ prefix = scratch / "observation-worker-prefix.sh"
 prefix.write_text(worker[:worker.index("# The caller fully verified")] +
     '\nprintf "budget=%s\\n" "$SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS"\n')
 prefix.chmod(0o755)
-args = ["fixture"] * 28
+args = ["fixture"] * 32
 args[1] = str(root)
-for selected in [args, args + ["", ""], args + ["", "", "1000"], args + ["", "", "5000"], args + ["", "", "60000"]]:
-    expected = selected[30] if len(selected) == 31 else "1000"
+args[28] = ""
+args[29] = ""
+args[30] = "1000"
+args[31] = "per-file"
+policy_tail = ["--stage3-source-policy-v1", "--source", "src/app", "--entry-closure"]
+def worker_argv(budget):
+    selected = list(args)
+    selected[30] = budget
+    return selected + policy_tail
+
+for budget in ("1000", "5000", "60000"):
+    selected = worker_argv(budget)
+    expected = budget
     result = run('exec sh "$@"', [str(prefix), *selected])
     assert result.stdout == "budget=" + expected + "\n"
 for host, default in [("Linux", "1000"), ("FreeBSD", "5000"), ("Darwin", "1000")]:
     env = dict(base, OBSERVATION_TEST_HOST=host)
-    for selected in [args, args + ["", ""]]:
-        result = run('exec sh "$@"', [str(prefix), *selected], env=env)
-        assert result.stdout == "budget=" + default + "\n"
-        result = run('exec sh "$@"', [str(prefix), *selected],
-            env=dict(env, SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=default))
-        assert result.stdout == "budget=" + default + "\n"
-    result = run('exec sh "$@"', [str(prefix), *args, "", "", "1000"], env=env)
-    assert result.stdout == "budget=1000\n"
+    result = run('exec sh "$@"', [str(prefix), *worker_argv(default)], env=env)
+    assert result.stdout == "budget=" + default + "\n"
+    result = run('exec sh "$@"', [str(prefix), *worker_argv(default)],
+        env=dict(env, SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=default))
+    assert result.stdout == "budget=" + default + "\n"
 # Explicit positional authority wins over a stale service-manager environment.
-result = run('exec sh "$@"', [str(prefix), *args, "", "", "5000"],
+result = run('exec sh "$@"', [str(prefix), *worker_argv("5000")],
     env=dict(base, SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="60000"))
 assert result.stdout == "budget=5000\n"
 for bad in ("", "999", "60001", "05000", "-1", "5x", "9"*80):
-    run('exec sh "$@"', [str(prefix), *args, "", "", bad], expected=64)
-for selected in (args + [""], args + ["", "", "5000", "extra"]):
+    run('exec sh "$@"', [str(prefix), *worker_argv(bad)], expected=64)
+for selected in (args, args + ["extra", *policy_tail],
+                 args + ["--stage3-source-policy-v2", *policy_tail[1:]]):
     run('exec sh "$@"', [str(prefix), *selected], expected=64)
-run('exec sh "$@"', [str(prefix), *args],
-    env=dict(base, SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="5000"), expected=64)
 
-# All four actual launcher argv paths carry the same 31st value.
+# All four actual launcher argv paths preserve the fixed control prefix and
+# carry the versioned ordered policy after it.
 branches = re.findall(r'"\$worker" "\$stage3_transcript".*? &', launcher, re.S)
 assert len(branches) == 4
+source_policy = ["--source", "src/app", "--entry-closure"]
 for branch in branches:
     env = dict(base)
     for name in re.findall(r'\$\{?([A-Za-z_][A-Za-z_0-9]*)', branch): env[name] = "fixture"
     env.update(worker="record", stage3_observation_budget_ms="5000")
-    result = run('record() { printf "%s\\n" "$@"; };\n' + branch[:-2], env=env)
+    result = run('record() { printf "%s\\n" "$@"; };\n' + branch[:-2], source_policy, env=env)
     argv = result.stdout.splitlines()
-    assert len(argv) == 31 and argv[30] == "5000", argv
+    assert len(argv) == 36 and argv[30] == "5000", argv
+    assert argv[32] == "--stage3-source-policy-v1" and argv[33:] == source_policy, argv
 
 # Execute the actual systemd branch with a service double that clears ambient
 # variables, then the actual worker prefix. No service/compiler is launched.
@@ -188,8 +208,8 @@ service.write_text('#!/bin/sh\nset -eu\nwhile [ "$#" -gt 0 ]; do case "$1" in --
 service.chmod(0o755)
 env = dict(base, PATH=str(bin_dir) + ":/usr/bin:/bin")
 for name in re.findall(r'\$\{?([A-Za-z_][A-Za-z_0-9]*)', branch): env[name] = "fixture"
-env.update(root=str(root), worker=str(prefix), stage3_compiler_ceiling_env="", stage3_compiler_cap="", stage3_observation_budget_ms="5000")
-result = run(branch, env=env)
+env.update(root=str(root), worker=str(prefix), stage3_compiler_ceiling_env="", stage3_compiler_cap="", stage3_observation_budget_ms="5000", stage3_lowering_lane="per-file")
+result = run(branch, source_policy, env=env)
 assert result.stdout == "budget=5000\n", result.stdout
 print("PASS: observation default/range/invalid/arity and actual four-route argv + clean-service worker transfer; no compiler/watchdog workload")
 PY_OBSERVATION
