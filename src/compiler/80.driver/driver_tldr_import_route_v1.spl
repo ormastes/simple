@@ -13,6 +13,7 @@ pub use compiler.driver.driver_tldr_import_flag_v1.{tldr_imports_flag_on_v1,
 use compiler.driver.cache.tldr_summary_v1.{tldr_summary_ensure_v1, read_tldr}
 use compiler.driver.cache.tldr_summary_v1.{tldr_summary_entries_v1}
 use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_tldr_stub_source_v1}
+use compiler.driver.cache.tldr_frozen_projection_v1.{tldr_frozen_span_projection_v1}
 
 # Compile-owned projection of an already admitted inventory. No path is opened
 # here. The parser receives parse_texts, while SourceFile and surface identity
@@ -68,11 +69,25 @@ pub fn tldr_route_frozen_inputs_v1(paths: [text], modules: [text],
             # an ordinary interface header. Parse their frozen source rather
             # than allowing the interface converter to erase that payload.
             var body_contract = false
+            for line in contents[index].split("\n"):
+                # Module markers can precede imports, where the summary's
+                # declaration-attribute accumulator deliberately clears them.
+                # Retain raw frozen source until the summary owns those facts.
+                if line.trim().starts_with("@"):
+                    body_contract = true
+                if (line.starts_with(" ") or line.starts_with("\t")) and (
+                        line.trim().starts_with("fn ") or line.trim().starts_with("extern ") or
+                        line.trim().starts_with("class ") or line.trim().starts_with("struct ")):
+                    body_contract = true
             for row in rows:
                 if (row.starts_with("trait|") or row.starts_with("impl|") or row.starts_with("generic|") or
                         row.starts_with("type|") or row.starts_with("const|")):
                     body_contract = true
-            val interface_text = if body_contract: nil else: module_surface_tldr_stub_source_v1(rows)
+            val supported = if body_contract: nil else: module_surface_tldr_stub_source_v1(rows)
+            # Summary convertibility admits the interface, but its sorted
+            # source stub is not a coordinate map. Parse an exact-width frozen
+            # projection so every retained span remains in the source domain.
+            val interface_text = if supported == nil: nil else: tldr_frozen_span_projection_v1(contents[index])
             match interface_text:
                 case Some(projected):
                     texts.push(projected)

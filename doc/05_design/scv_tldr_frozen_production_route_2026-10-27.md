@@ -33,6 +33,23 @@ reconstructed from summary text. Existing summary syntax and surface schema
 are unchanged. Surface registry finalization and retention use the existing
 production owner, followed by normal HIR lowering.
 
+Summary convertibility admits an interface, but the sorted summary source is
+not its source-coordinate map. Production parses the existing source-order
+skeleton after an exact-width adapter preserves every unchanged header,
+comment and import, each original line's byte width, and LF/CRLF separators.
+Eligible erased blocks contain one inert `0` expression and same-width spaces.
+ASCII is the explicitly supported byte domain; Unicode falls back unchanged.
+
+The parser's `parse_fn_decl` records `decl_start` before consuming `fn`, calls
+`parse_block`, then records `lex_token_start_get()` as the declaration end
+(`core/_ParserDecls/fn_struct_decls.spl`). The indented block parser consumes
+DEDENT with `parser_advance()` before returning (`core/parser_stmts.spl`). Thus
+the function end belongs to the following token/EOF, whose offset is preserved
+by exact-width projection, rather than the erased body's final expression.
+The bridge copies that declaration span into function and parameter headers.
+No posthoc guessed/reordered span mapping is applied. Runtime confirmation of
+this code-level argument remains pending.
+
 Projected parses use the existing uncached selected frontend. An interface
 projection must not populate a full-source phase 2 parse artifact or an
 objectless declaration proof. A separate admitted projection-cache authority
@@ -49,7 +66,10 @@ file-worker body consumers refuse rather than consuming missing bodies.
 Coverage, MC/DC and VHDL retain explicit streaming rejection. Phase 1 entry
 closure guards and both legacy worker closure guards remain in force.
 
-Unsupported summary rows, inferred return types, and trait/impl/generic/type-alias/constant
+Any attribute, including module-wide `@no_gc(strict)` and `@layer` before
+imports, uses exact frozen-source fallback until summary authority includes
+those facts. Nested declaration forms also retain frozen source. Unsupported
+summary rows, inferred return types, and trait/impl/generic/type-alias/constant
 contracts fall back to parsing that module's frozen bytes. No fallback opens
 its path. This may parse more than the claimed files and is counted. Interface
 projection parsing also runs a parser: this slice makes no zero-parser claim.
@@ -68,6 +88,12 @@ the production `stage_parse` caller, compares a cold full-source registry with
 the routed registry, and edits every live source after phase 1 admission.
 Its oracle checks four semantic hash limbs, callable names, resolved import
 targets, canonical identity, content identity, and original source SHA.
+It compares `nogc_strict`, module layer tags/DAG facts, and every span field on
+functions, parameters and parameter/return types. Span fixtures cover leading
+comments, z-then-a declaration order, multiline bodies, trailing comments,
+CRLF and a one-byte body at EOF; Unicode must fall back byte-for-byte. The
+production fixture still requires one actual interface projection alongside
+the module-attribute fallback, so fallback cannot masquerade as route success.
 It asserts actual source/interface parse calls, the existing compiler parser
 scheduling counter, and `flat_parse_module_body_calls` deltas. Separate cases
 cover refused universes, unsupported lanes, advice, and frozen-only fallback.
