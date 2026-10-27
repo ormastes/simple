@@ -1,0 +1,59 @@
+# @cover src/compiler/80.driver/driver_hir_recovery.spl
+# Purpose: a failed HIR shard claim names its cause, and one crashed worker
+# that claimed nothing does not block the whole ledger.
+# Bug: doc/08_tracking/bug/hir_shard_claim_failure_blocks_ledger_2026-10-27.md
+
+use std.spec
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_claim_reason_v1, hir_shard_recovery_block, hir_shard_recovery_reap_blocks_ledger_v1}
+use compiler.driver.driver_hir_recovery.{HIR_SHARD_CLAIM_INVALID_ARGS_V1, HIR_SHARD_CLAIM_LOCK_TIMEOUT_V1, HIR_SHARD_CLAIM_PUBLISH_FAILED_V1, HIR_SHARD_CLAIM_INVALID_CLAIM_V1, HIR_SHARD_CLAIM_LEDGER_BLOCKED_V1}
+use std.io_runtime.{dir_create_all, dir_exists, dir_list, file_read, file_write, getpid}
+
+fn claim_reason_fixture(label: text) -> text:
+    val queue = "build/test_output/hir_claim_reason/{getpid()}-{label}"
+    expect(dir_exists(queue)).to_equal(false)
+    expect(dir_create_all(queue)).to_equal(true)
+    queue
+
+describe "HIR shard claim failure reasons":
+    it "maps every failure code to a distinct named reason":
+        expect(hir_shard_claim_reason_v1(HIR_SHARD_CLAIM_INVALID_ARGS_V1).starts_with("invalid-args")).to_equal(true)
+        expect(hir_shard_claim_reason_v1(HIR_SHARD_CLAIM_LOCK_TIMEOUT_V1).starts_with("lock-timeout")).to_equal(true)
+        expect(hir_shard_claim_reason_v1(HIR_SHARD_CLAIM_PUBLISH_FAILED_V1).starts_with("publish-failed")).to_equal(true)
+        expect(hir_shard_claim_reason_v1(HIR_SHARD_CLAIM_INVALID_CLAIM_V1).starts_with("invalid-claim")).to_equal(true)
+        expect(hir_shard_claim_reason_v1(HIR_SHARD_CLAIM_LEDGER_BLOCKED_V1).starts_with("ledger-blocked")).to_equal(true)
+        expect(hir_shard_claim_reason_v1(-99).starts_with("unknown-claim-failure")).to_equal(true)
+
+    it "reports invalid arguments":
+        val queue = claim_reason_fixture("args")
+        expect(hir_shard_recovery_claim(queue, "", "a.spl", "k")).to_equal(HIR_SHARD_CLAIM_INVALID_ARGS_V1)
+
+    it "reports a lock failure on an unlockable ledger":
+        val queue = "build/test_output/hir_claim_reason/{getpid()}-missing/none"
+        expect(hir_shard_recovery_claim(queue, "w", "a.spl", "k")).to_equal(HIR_SHARD_CLAIM_LOCK_TIMEOUT_V1)
+
+    it "reports a corrupt existing claim":
+        val queue = claim_reason_fixture("corrupt")
+        expect(hir_shard_recovery_claim(queue, "w", "a.spl", "k")).to_equal(1)
+        for name in dir_list(queue):
+            if name.ends_with(".claim"):
+                expect(file_write("{queue}/{name}", "garbage")).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, "w2", "a.spl", "k")).to_equal(HIR_SHARD_CLAIM_INVALID_CLAIM_V1)
+
+    it "keeps the first BLOCKED reason":
+        val queue = claim_reason_fixture("first-block")
+        expect(hir_shard_recovery_block(queue, "root cause")).to_equal(true)
+        expect(hir_shard_recovery_block(queue, "observer")).to_equal(true)
+        expect(file_read("{queue}/BLOCKED")).to_equal("root cause")
+
+describe "HIR shard reap ledger decision":
+    it "does not block the ledger for a crash that claimed nothing":
+        expect(hir_shard_recovery_reap_blocks_ledger_v1(-1073740791, 0, 0, false)).to_equal(false)
+    it "still blocks a clean exit that never finished":
+        expect(hir_shard_recovery_reap_blocks_ledger_v1(0, 0, 0, false)).to_equal(true)
+    it "still blocks a positive exit that claimed nothing":
+        expect(hir_shard_recovery_reap_blocks_ledger_v1(1, 0, 0, false)).to_equal(true)
+    it "still blocks an unreadable ledger":
+        expect(hir_shard_recovery_reap_blocks_ledger_v1(-1, -1, 0, false)).to_equal(true)
+        expect(hir_shard_recovery_reap_blocks_ledger_v1(-1, 0, -1, false)).to_equal(true)
+    it "does not block a crash after attributed sealed work":
+        expect(hir_shard_recovery_reap_blocks_ledger_v1(-1, 3, 2, false)).to_equal(false)
