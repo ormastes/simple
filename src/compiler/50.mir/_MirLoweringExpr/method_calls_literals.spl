@@ -2006,6 +2006,85 @@ impl MirLowering:
             end_local = b_len.emit_call_value(self.rt_array_len_operand(),
                 [mir_operand_copy(receiver_local)], MirType.i64())
             self.builder = b_len
+        self.emit_runtime_array_slice_bounds(receiver_local, start_local, end_local)
+
+    me lower_runtime_array_take(receiver_local: LocalId, args: [HirCallArg]) -> LocalId:
+        if not self.runtime_array_locals.contains(receiver_local.id):
+            return self.reject_runtime_array_slice("array take requires a proven runtime array handle", nil)
+        if args.len() != 1:
+            return self.reject_runtime_array_slice("array take requires one integer count", nil)
+        val raw_count = self.lower_expr(args[0].value)
+        if not self.array_slice_bound_is_integer(args[0].value, raw_count):
+            return self.reject_runtime_array_slice("array take count must be an integer", Some(args[0].value.span))
+
+        val count_type = self.local_mir_type_of(raw_count)
+        var is_unsigned = false
+        var has_integer_storage = false
+        if val count_mir_type = count_type:
+            match count_mir_type.kind:
+                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
+                    is_unsigned = true
+                    has_integer_storage = true
+                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64:
+                    has_integer_storage = true
+                case _: ()
+        if not has_integer_storage:
+            return self.reject_runtime_array_slice("array take count requires a concrete integer type", Some(args[0].value.span))
+
+        if is_unsigned:
+            # Widen before comparing so U8/U16/U32 stay nonnegative. The
+            # unsigned compare clamps U64_MAX against the (signed-sized) len;
+            # only the bounded result is converted to rt_slice's i64 ABI.
+            var b = self.builder
+            val array_len = b.emit_call_value(self.rt_array_len_operand(),
+                [mir_operand_copy(receiver_local)], MirType.i64())
+            val count_u64 = b.emit_cast(mir_operand_copy(raw_count), MirType(kind: MirTypeKind.U64))
+            val len_u64 = b.emit_cast(mir_operand_copy(array_len), MirType(kind: MirTypeKind.U64))
+            val too_large = b.emit_binop(MirBinOp.Gt,
+                mir_operand_copy(count_u64), mir_operand_copy(len_u64), MirType.bool())
+            val bounded = b.new_local(nil, MirType(kind: MirTypeKind.U64), LocalKind.Var)
+            val clamp_block = b.new_block(Some("array_take_unsigned_clamp"))
+            val keep_block = b.new_block(Some("array_take_unsigned_keep"))
+            val join_block = b.new_block(Some("array_take_unsigned_join"))
+            b.terminate_if(mir_operand_copy(too_large), clamp_block, keep_block)
+            b.switch_to_block(clamp_block)
+            b.emit_copy(bounded, len_u64)
+            b.terminate_goto(join_block)
+            b.switch_to_block(keep_block)
+            b.emit_copy(bounded, count_u64)
+            b.terminate_goto(join_block)
+            b.switch_to_block(join_block)
+            val end_local = b.emit_cast(mir_operand_copy(bounded), MirType.i64())
+            val zero = b.emit_const_int(0)
+            self.builder = b
+            return self.emit_runtime_array_slice_bounds(receiver_local, zero, end_local)
+        else:
+            # rt_slice gives negative end bounds from-end meaning. Match take's
+            # saturating contract by clamping signed negatives before the call.
+            var b = self.builder
+            val count_i64 = b.emit_cast(mir_operand_copy(raw_count), MirType.i64())
+            val zero = b.emit_const_int(0)
+            val negative = b.emit_binop(MirBinOp.Lt,
+                mir_operand_copy(count_i64), mir_operand_copy(zero), MirType.bool())
+            val bounded = b.new_local(nil, MirType.i64(), LocalKind.Var)
+            val clamp_block = b.new_block(Some("array_take_signed_clamp"))
+            val keep_block = b.new_block(Some("array_take_signed_keep"))
+            val join_block = b.new_block(Some("array_take_signed_join"))
+            b.terminate_if(mir_operand_copy(negative), clamp_block, keep_block)
+            b.switch_to_block(clamp_block)
+            b.emit_copy(bounded, zero)
+            b.terminate_goto(join_block)
+            b.switch_to_block(keep_block)
+            b.emit_copy(bounded, count_i64)
+            b.terminate_goto(join_block)
+            b.switch_to_block(join_block)
+            self.builder = b
+            return self.emit_runtime_array_slice_bounds(receiver_local, zero, bounded)
+
+    me emit_runtime_array_slice_bounds(receiver_local: LocalId, start_local: LocalId, end_local: LocalId) -> LocalId:
+        # Both slice and take use one fresh-storage runtime call and the same
+        # result metadata owner. rt_slice is O(k), allocates a new container,
+        # and preserves BYTES/U64_PACKED storage flags.
         var b_slice = self.builder
         val handle = b_slice.emit_cast(mir_operand_copy(receiver_local), MirType.i64())
         val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
@@ -3538,6 +3617,12 @@ impl MirLowering:
                 has_prelowered_method_receiver = true
             if self.runtime_array_locals.contains(prelowered_method_receiver.id):
                 return self.lower_runtime_array_slice(prelowered_method_receiver, args)
+        if method == "take" and resolution_is_unresolved and static_receiver_name == "":
+            if not has_prelowered_method_receiver:
+                prelowered_method_receiver = self.lower_expr(receiver)
+                has_prelowered_method_receiver = true
+            if self.runtime_array_locals.contains(prelowered_method_receiver.id):
+                return self.lower_runtime_array_take(prelowered_method_receiver, args)
         var slice_recv_is_array = false
         if method == "substring" or method == "slice":
             if val slice_recv_ty = receiver.type_:
