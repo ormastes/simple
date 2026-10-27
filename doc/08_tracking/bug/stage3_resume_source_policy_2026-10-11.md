@@ -40,14 +40,14 @@ controls.
 
 ## Coupled RSS mode transport found in review
 
-Review of the source-only fix found that systemd received the selected
-`enforce` or `monitor` mode for the outer watchdog, but the worker did not
-receive that mode for the nested `command-snapshot.shs` watchdog. The nested
-watchdog could therefore use its default when ambient state was absent or
-stale. The worker ABI now carries the already-resolved mode at field 33,
-validates the canonical values, and exports it before loading the command
-snapshot owner. All four launcher routes send the same value before the
-versioned source-policy marker.
+Review of the source-only fix found that the launcher resolved the selected
+`enforce` or `monitor` mode for its watchdog path, but the worker did not
+receive that mode for the nested `command-snapshot.shs` watchdog. After the
+service boundary, the nested watchdog could use its default when ambient state
+was absent or stale. The worker ABI now carries the already-resolved mode at
+field 33, validates the canonical values, and exports it before loading the
+command snapshot owner. All four launcher routes send the same value before
+the versioned source-policy marker.
 
 The actual-worker RSS control now sources the production authority and command
 snapshot helper and substitutes only a recording watchdog executable. It
