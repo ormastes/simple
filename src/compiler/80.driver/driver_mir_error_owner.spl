@@ -1,10 +1,49 @@
 # Preserve the module owner before shared MIR errors are collected in aggregate.
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.mir.mir_lowering_types.{MirError}
-use compiler.driver.driver_log_helpers.{log_phase}
+use compiler.driver.driver_log_helpers.{log_phase, log_error_flushed}
+use compiler.driver.driver_mir_diagnostic_preview_v1.{driver_mir_fatal_preview_v1}
+
+
+# One severity owner for immediate reporting and the existing final collector.
+fn driver_mir_legacy_message_is_fatal_v1(message: text) -> bool:
+    message.starts_with("undefined variable") or
+        message.starts_with("unresolved method call:") or
+        message.starts_with("unsupported MIR expression:") or
+        message.starts_with("match guards (case x if cond:) are not supported") or
+        message.starts_with("B5b") or
+        message.starts_with("match default binding has no resolved symbol") or
+        message.starts_with("enum match:") or
+        message.starts_with("enum construction: unregistered enum") or
+        message.starts_with("unsupported struct field initializer") or
+        message.starts_with("unsupported Result unwrap payload type") or
+        message.starts_with("for-in over non-array iterables")
+
+pub fn driver_mir_error_is_fatal_owned_v1(error: MirError) -> bool:
+    error.fatal or driver_mir_legacy_message_is_fatal_v1(error.message)
+
+pub fn driver_mir_fatal_summary_v1(module_name: text, source_path: text,
+        errors: [MirError], first_new_error: i64) -> text:
+    if first_new_error < 0 or first_new_error >= errors.len(): return ""
+    var count = 0
+    var first = ""
+    var index = first_new_error
+    while index < errors.len():
+        val error: MirError = errors[index]
+        if driver_mir_error_is_fatal_owned_v1(error):
+            if count == 0:
+                first = error.message
+            count = count + 1
+        index = index + 1
+    driver_mir_fatal_preview_v1(module_name, source_path, first, count)
 
 pub fn driver_trace_module_mir_errors(module_name: text, source_path: text,
         errors: [MirError], first_new_error: i64):
+    # Called immediately after lowering, before later modules or final collection.
+    # Do not add to CompileContext or alter errors: aggregation and policy stay put.
+    val summary = driver_mir_fatal_summary_v1(module_name, source_path, errors, first_new_error)
+    if summary != "":
+        log_error_flushed(summary)
     if (sosix_env_get_nullable("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") != "1":
         return
     if first_new_error < 0 or first_new_error >= errors.len():
