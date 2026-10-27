@@ -51,6 +51,16 @@ active lane and is not present as an accepted public API at this audit pin.
 
 ## 2. One public vocabulary, existing implementation owners
 
+Collection consumers also follow the
+[shared backend capability contract](../compiler/collection_backend_capabilities.md).
+Typed DataFrame/query plans and adaptive container profiles must request the
+same operation, equality, progress, capacity and lifetime capabilities used by
+resource registries. Workload profiling and representation switching remain
+independent of async support. No-capture/static-only/unsupported-switch states
+are explicit; neither a native map nor the existing locked capture channel can
+silently satisfy strict lockless requirements. This is a proposed integration
+contract, not qualification of a generic map, AsyncRef or resource factory.
+
 The intended shared user interface is **`std.async`**, normally composed with
 the **`async_host` hosted implementation**. **`std.embedded_async`** supplies
 the bounded embedded composition of the same interfaces. These names describe

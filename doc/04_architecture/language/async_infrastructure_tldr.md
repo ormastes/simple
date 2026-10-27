@@ -17,6 +17,9 @@ and hardens those owners; it does not add another runtime.
   payload lifetime, a sleeping executor, or the whole compiler.
 - Native and future pure-Simple backends share interfaces/conformance;
   backend addresses and native value layouts remain private.
+- [Collection capabilities](../compiler/collection_backend_capabilities.md)
+  keep DataFrame/layout/profile selection consistent with the same resource
+  contracts; static/no-capture/unsupported switching stays explicit.
 - Resident hits avoid creation/I/O/global recency work. Frozen snapshot keys,
   retained ownership and exact invalidation remain required.
 - TDD order: S1 async slots/I/O → S2 shared invoker/adapters → S3 immutable
