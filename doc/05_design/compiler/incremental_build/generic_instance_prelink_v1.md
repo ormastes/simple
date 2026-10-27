@@ -4,12 +4,12 @@ Status: plan, 2026-10-27. Owner: generic-instance lane. The per-file lane
 (PM1-PM3: HIR gate, default route, in-process invoker) is NOT changed here.
 
 ## What already exists (do not rebuild)
-- Per-module used-instance list: TLDR section `generic-spec/v1` with a
-  `complete` flag, written by `module_tldr_update_generic_spec_from_mono_v1`
+- Per-module used-instance list: TLDR companion section `generic-spec|`
+  (`GenericSpecializationListV1`, with a `complete` field), written by `module_tldr_update_generic_spec_from_mono_v1`
   (`80.driver/cache/module_artifacts_v1.spl`) after module-scoped mono.
 - Instance key: `ConcreteTldrKey` (`concrete_tldr_key_v1`,
-  `00.common/cache_contract/generic_tldr_view_v1.spl`) = owner TLDR id +
-  generic name + canonical concrete type args, stable hash.
+  `00.common/cache_contract/generic_tldr_view_v1.spl:148`) = tagged SHA-256
+  (domain `tldr-concrete/v1`) of template id, args id, constraint root, profile digest and active-guard root.
 - Body identity: `generic_instance_body_key_v1(concrete_key, body_digest)`,
   body digest = owner source digest + direct-import interface digests.
 - Planner + jobs: `generic_instance_build_plan_v1`,
@@ -21,12 +21,12 @@ Status: plan, 2026-10-27. Owner: generic-instance lane. The per-file lane
 ## The gap
 The pre-link step runs ONLY on the opt-in file-worker pool
 (`SIMPLE_FILE_WORKERS=1`). The default shard path (parse/HIR/MIR shards ->
-`run_mir_shards`) passes `file_worker_active=false` to
-`mono_module_scoped_selected_v1`, so it runs whole-program mono after all MIR:
+`run_mir_shards`) never reports itself to `mono_module_scoped_selected_v1`: the MIR pass
+passes `file_worker_active = scoped_paths.len() > 0` (`driver_hir_pipeline_passes.spl:269`), which is false on plain MIR shards, so they run whole-program mono after all MIR:
 that is the 6 fixed stages and the late first object seen in phase-3 run 6.
 
-## Instance key format
-`gi1:<owner_tldr_id>:<generic>:<canon_type_args>#<xxh3>`; cache key =
+## Instance and cache key
+Instance key = the existing `ConcreteTldrKey` (no new format). Cache key =
 `instance_key + template_body_digest + producer_identity` (producer =
 `file_worker_inc_producer_v1`, includes lane scope).
 
@@ -50,3 +50,9 @@ build `needed - present` in parallel (claimed, cached), add to link set, link.
   with `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1`.
 - PR3: per-template body digest in TLDR (DEFINES rows) so one template edit does
   not invalidate every instance of its module.
+- PR4 (final, after stage3 builds end to end on the per-file route + pre-link
+  instance step): retire the global whole-program mono pass
+  (`run_monomorphization` / `run_monomorphization_with_report` and the
+  `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM` route). Only per-module mono + pre-link
+  instance generation remain. Landed together with the per-file lead's removal
+  of the shard ledgers.
