@@ -50,6 +50,10 @@ Green after fix: all 7 new spec examples pass. Regression specs all pass:
 Spec: test/01_unit/compiler/mono/mono_return_ctx_type_arg_inference_spec.spl
 Bug id: mono_generic_return_ctx_inference_2026-10-27
 
-The tagged workaround in src/compiler/20.hir/return_type_interface_v1.spl
-remains in place pending a stage2 binary carrying this fix (a source fix
-alone does not unblock stage2 builds until the stage2 binary is redeployed).
+Workaround removal (this change): `rti_err<T>` is restored and the
+`@workaround` tag dropped (reverse of `bb8fbe29fa4`). Sequencing decided by
+the coordinator 2026-10-27: stage2 is NOT redeployed for this fix; it arrives
+through the stage3 compiler, built from source at or after `d8ead19f9ff8`
+(PR #5039). This revert lands only after such a stage3 exists and is the one
+used for the stage3 self-rebuild — merging it earlier re-breaks mono on the
+old stage2 binary (E-MONO-032 x13 on this file).
