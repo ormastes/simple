@@ -1,0 +1,53 @@
+# @cover src/compiler/80.driver/driver_hir_recovery.spl 95%
+# Purpose: specify idempotent HIR terminal record publication.
+# Requirements: doc/08_tracking/bug/hir_unit_mode_double_finish_2026-10-27.md
+
+use std.spec
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
+use std.io_runtime.{dir_create_all, dir_exists, file_read, getpid}
+use std.common.crypto.sha256.{sha256_text}
+
+fn recovery_fixture(label: text) -> text:
+    val queue = "build/tmp/hir_recovery/{getpid()}-{label}"
+    expect(dir_exists(queue)).to_equal(false)
+    expect(dir_create_all(queue)).to_equal(true)
+    queue
+
+describe "HIR shard idempotent terminal publication":
+    it "should idempotently write the same terminal state and owner":
+        step("Set up a module claim in a recovery ledger")
+        val queue = recovery_fixture("terminal-idempotent-same")
+        val path = "module.spl"
+        expect(hir_shard_recovery_inventory(queue, "closure-test", [path])).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, "worker", path, "key-test")).to_equal(1)
+
+        step("Write a PASS terminal with CACHE_STORED")
+        expect(hir_shard_recovery_terminal(queue, "worker", path, "PASS", true)).to_equal(true)
+        val terminal_path = "{queue}/{sha256_text(path)}.terminal"
+        val first_record = file_read(terminal_path)
+
+        step("Write the identical terminal again and verify idempotency")
+        expect(hir_shard_recovery_terminal(queue, "worker", path, "PASS", true)).to_equal(true)
+        expect(file_read(terminal_path)).to_equal(first_record)
+
+    it "should reject different state on an existing terminal":
+        step("Set up a module claim and write FAILED terminal")
+        val queue = recovery_fixture("terminal-idempotent-diff-state")
+        val path = "module.spl"
+        expect(hir_shard_recovery_inventory(queue, "closure-test", [path])).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, "worker", path, "key-test")).to_equal(1)
+        expect(hir_shard_recovery_terminal(queue, "worker", path, "FAILED", false)).to_equal(true)
+
+        step("Attempt to overwrite with different state and verify rejection")
+        expect(hir_shard_recovery_terminal(queue, "worker", path, "PASS", true)).to_equal(false)
+
+    it "should reject different cache_stored on an existing terminal":
+        step("Set up a module claim and write UNCACHED terminal")
+        val queue = recovery_fixture("terminal-idempotent-diff-cache")
+        val path = "module.spl"
+        expect(hir_shard_recovery_inventory(queue, "closure-test", [path])).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, "worker", path, "key-test")).to_equal(1)
+        expect(hir_shard_recovery_terminal(queue, "worker", path, "PASS", false)).to_equal(true)
+
+        step("Attempt to overwrite with different cache_stored and verify rejection")
+        expect(hir_shard_recovery_terminal(queue, "worker", path, "PASS", true)).to_equal(false)
