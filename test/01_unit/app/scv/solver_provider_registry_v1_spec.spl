@@ -4,6 +4,7 @@ use std.spec.*
 use std.scv.solver_provider_registry_v1.*
 use std.scv.solver_contract_v1.*
 use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.crypto.sha256.{sha256_u8_hex}
 
 fn registry_lock_v1(parser_digest: text, model_digest: text, solver_digest: text, policy: text) -> text:
     """Build a minimal SDN provider lock used by adversarial registry cases."""
@@ -52,6 +53,16 @@ describe "SCV provider registry artifact and policy boundary":
         val parsed = solver_provider_registry_parse_v1(registry_lock_v1("sha256:forged", "b".repeat(64), "c".repeat(64), "accepted-A").bytes(), SdnStrictLimitsV1())
         step("Check that a label is not treated as an artifact digest")
         expect(parsed.is_err()).to_equal(true)
+
+    it "binds provider artifact bytes to the locked digest without claiming execution":
+        step("Lock a small immutable artifact payload")
+        val artifact = "fixed provider bytes".bytes()
+        val digest = sha256_u8_hex(artifact)
+        val parsed = solver_provider_registry_parse_v1(registry_lock_v1(digest, "b".repeat(64), "c".repeat(64), "accepted-A").bytes(), SdnStrictLimitsV1()).unwrap()
+        step("Check the exact bytes and a substituted payload")
+        expect(solver_provider_artifact_bytes_match_v1(parsed.providers[0], artifact)).to_equal(true)
+        expect(solver_provider_artifact_bytes_match_v1(parsed.providers[0], "substituted bytes".bytes())).to_equal(false)
+        expect(solver_provider_registry_resolve_v1(parsed, parsed.lock_sha256, registry_policy_v1("accepted-A", digest, "b".repeat(64), "c".repeat(64)), "source.bytes").execution_attested).to_equal(false)
 
     it "rejects unsafe manifest and artifact paths before any ordinary file read":
         step("Parse a lock that attempts to escape the plugin root")
