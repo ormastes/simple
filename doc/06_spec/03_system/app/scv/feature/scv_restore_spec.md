@@ -21,8 +21,15 @@ concurrent snapshot safety. Successful output states
 `mutation=unsupported`, `recovery=unsupported`, and
 `atomicity=unclaimed`, plus `operation_id_integrity=unavailable` because SCV's
 current operation IDs are not hashes of their payloads. The tracked-file
-inspection limit for metadata, target files and tracked worktree files is
-16 MiB.
+inspection limit for trees, status, WAL, target files and tracked worktree
+files is 16 MiB. It also caps each target/current view at 10,000 rows and 64 MiB of raw
+bytes, direct operation/commit parents at 32, and bookmarks at 256. Small
+records are limited to 256 KiB.
+Immutable file/chunk reconstruction uses the current SCV structural storage
+owner after validating the tree's file and chunk reference prefixes. The
+preflight assumes the repository's `.scv` object-store directories are not
+replaced adversarially during inspection; the check has no cross-process
+mutation lease.
 
 The legacy `restore-op <op>` mutator remains sequential. It has no complete
 working-tree WAL or whole-view atomic publication protocol and may move HEAD to
@@ -56,6 +63,10 @@ reports advisory-only status and every captured subject is unchanged.
 target is edited after the last snapshot. The preflight reports the conflicting
 path and preserves the unsaved bytes.
 
+**Rejects overwriting a changed-size tracked file.** A tracked file still
+present in the target is edited to different bytes and length. The preflight
+reports a dirty tracked path and preserves those bytes.
+
 **Rejects an untracked destination collision.** An untracked file occupies a
 path present in the target. The preflight reports the path and leaves its bytes
 untouched.
@@ -74,6 +85,10 @@ HEAD remains unchanged.
 **Rejects a missing target chunk.** After a target chunk is removed, the
 preflight reports the missing immutable object and leaves worktree bytes and
 HEAD unchanged.
+
+**Rejects conflicting target path shapes.** The fixture constructs verified
+file objects for both `a` and `a/b`. The preflight rejects the file/descendant
+collision before reporting any restore plan.
 
 ## Running and interpreting the evidence
 

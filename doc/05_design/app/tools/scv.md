@@ -100,7 +100,16 @@ currently rejects tracked files above 16 MiB for this check. It does not invoke
 WAL recovery, and rejects target tree/metadata reads or reconstructed target
 files above the same 16 MiB preflight limit. It does not change repository
 files, authorize a later restore, or claim
-concurrency safety. Output says `mutation=unsupported` and
+concurrency safety. It validates canonical `file_` and `sha256_` prefixes
+before passing target rows to the existing structural reconstruction owner,
+and rejects target files whose paths are file ancestors of other target paths.
+The check admits at most 10,000 target/current rows, 64 MiB of raw bytes per
+target or current view, 32 direct parents per operation/commit, and 256
+bookmarks; small object records are capped at 256 KiB and tree/status/WAL text
+at 16 MiB.
+The existing structural object reader still assumes the `.scv` object-store
+directories are not replaced adversarially during inspection; the preflight
+does not acquire a cross-process mutation lease. Output says `mutation=unsupported` and
 `atomicity=unclaimed`; it also reports `operation_id_integrity=unavailable`
 because current operation IDs are not content hashes of their payloads.
 Successful validation means only that the target and checked local view passed
