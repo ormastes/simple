@@ -1,0 +1,49 @@
+# Child process for scripts/check/stress-hir-claim-ledger.shs: one real HIR
+# ledger participant. Modes:
+#   claim <queue> <owner> <paths> <offset>  claim every path, rotated by offset
+#   crash <queue> <owner>                    take the ledger lock, die holding it, 0 claims
+#   reap  <queue> <owner>                    coordinator reap of a crashed 0-claim owner
+use app.io.args_ops.{get_args}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_progress, hir_shard_recovery_reap_blocks_ledger_v1, hir_shard_recovery_block}
+use std.nogc_sync_mut.io.file_ops.{file_lock}
+
+extern fn rt_exit(code: i64)
+
+fn stress_arg(args: [text], name: text) -> text:
+    var i = 0
+    while i + 1 < args.len():
+        if args[i] == name: return args[i + 1]
+        i = i + 1
+    ""
+
+fn main() -> i64:
+    val args = get_args()
+    val mode = stress_arg(args, "--mode")
+    val queue = stress_arg(args, "--queue")
+    val owner = stress_arg(args, "--owner")
+    if mode == "crash":
+        val _fd = file_lock("{queue}/.lock", 30)
+        rt_exit(3)
+        return 3
+    if mode == "reap":
+        val progress = hir_shard_recovery_progress(queue, owner)
+        if hir_shard_recovery_reap_blocks_ledger_v1(-1, progress, 0, false):
+            val _b = hir_shard_recovery_block(queue, "stress reap blocked owner={owner} progress={progress}")
+        print "REAPED progress={progress}"
+        return 0
+    val count = stress_arg(args, "--paths").to_i64() ?? 0
+    val offset = stress_arg(args, "--offset").to_i64() ?? 0
+    var claimed = 0
+    var errors = 0
+    var k = 0
+    while k < count:
+        val index = (k + offset) % count
+        val result = hir_shard_recovery_claim(queue, owner, "mod/{index}.spl", "key-{index}")
+        if result < 0:
+            errors = errors + 1
+            print "ERR path={index} code={result}"
+        elif result == 1:
+            claimed = claimed + 1
+        k = k + 1
+    print "CLAIMED owner={owner} claimed={claimed} errors={errors}"
+    if errors > 0: 1 else: 0
