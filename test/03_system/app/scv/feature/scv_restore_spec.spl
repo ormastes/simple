@@ -5,7 +5,7 @@
 
 use std.spec.step
 
-use app.io.mod (process_run, file_write, file_read, file_delete)
+use app.io.mod (process_run, file_write, file_read, file_delete, file_exists)
 use std.scv.store.{scv_init_repo, scv_current_op, scv_read_workspace_commit, scv_commit_change, scv_hash_text, scv_write_text, scv_write_file_object_from_bytes}
 use std.scv.core.{scv_object_path, scv_state_private}
 use std.scv.restore_preflight.{scv_restore_preflight}
@@ -251,4 +251,41 @@ describe "SCV restore preflight":
         step("preflight and preserve the current operation")
         val result = scv_restore_preflight(root, operation)
         expect(result).to_equal("ERROR target path conflicts with file ancestor: a\n")
+        expect(scv_current_op(root)).to_equal(head)
+
+    it "should reject a missing target leaf beneath a symlink ancestor":
+        # @req REQ-004
+        step("setup a repository and an external directory")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-symlink-parent.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "current")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val head = scv_current_op(root)
+        val parent = scv_read_workspace_commit(root)
+        val change = scv_commit_change(root, parent)
+        val (outside_out, _, outside_code) = process_run("mktemp", ["-d", "/tmp/scv-restore-outside.XXXXXX"])
+        expect(outside_code).to_equal(0)
+        val outside = outside_out.trim()
+        val (_, _, link_code) = process_run("ln", ["-s", outside, "{root}/linked"])
+        expect(link_code).to_equal(0)
+        val (file_id, chunk) = _scv_restore_test_file_object(root, "linked/leaf", "target")
+        step("construct a valid target with an absent leaf below the symlink")
+        val tree_content = "linked/leaf|{file_id}|{chunk}|6|0\n"
+        val tree = scv_hash_text("tree", tree_content)
+        expect(scv_write_text(scv_object_path(root, "trees", tree), tree_content)).to_equal(true)
+        val commit_content = "change: {change}\nparents: {parent}\ntree: {tree}\nstate: {scv_state_private()}\n"
+        val commit = scv_hash_text("commit", commit_content)
+        expect(scv_write_text(scv_object_path(root, "commits", commit), commit_content)).to_equal(true)
+        val bookmarks = file_read("{root}/.scv/meta/bookmarks.sdn")
+        val view_content = "heads:\n{commit}\nbookmarks:\n{bookmarks}workspaces:\ndefault: {commit}\n"
+        val view = scv_hash_text("view", view_content)
+        expect(scv_write_text(scv_object_path(root, "operations", view), view_content)).to_equal(true)
+        val operation = "op_restore_symlink_parent"
+        expect(scv_write_text(scv_object_path(root, "operations", operation), "parents: {head}\nview: {view}\nmetadata: symlink-parent-test\n")).to_equal(true)
+        step("preflight without following the parent link")
+        val result = scv_restore_preflight(root, operation)
+        expect(result).to_contain("ERROR unsafe target parent: linked")
+        expect(file_exists("{outside}/leaf")).to_equal(false)
         expect(scv_current_op(root)).to_equal(head)
