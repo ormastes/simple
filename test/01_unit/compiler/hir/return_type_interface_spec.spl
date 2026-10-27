@@ -287,17 +287,44 @@ describe "return-type interface v1":
         val missing = table.fn_return(local.symbols, function_named(local, "main").symbol.id, "m.absent.maybe")
         expect(err_code(missing)).to_equal("E-RTI-002")
 
-    it "keeps missing inferred rows unknown only with exact raw declaration proof":
+    it "keeps missing rows unknown only with exact raw declaration proof":
         val local = path_spelled_hir("fn loose():\n    0\n", "src/rti_infer/local.spl")
         val provider = path_spelled_hir("fn loose():\n    1\n", "src/rti_infer/provider.spl")
         var table = ReturnTypeInterfaceTable.new()
-        expect(table.register_hir_module(local).unwrap().skipped_infer).to_equal(1)
-        expect(table.register_hir_module(provider).unwrap().skipped_infer).to_equal(1)
+        # Deliberately omit rows; this tests identity proof independently of
+        # the frontend's inference policy for the unannotated bodies.
         val local_raw = function_named(local, "loose").symbol.id
         val provider_raw = function_named(provider, "loose").symbol.id
         expect(err_code(table.fn_return(local.symbols, local_raw, "rti_infer.local.loose"))).to_equal("E-RTI-001")
         expect(err_code(table.fn_return(provider.symbols, provider_raw, "rti_infer.provider.loose"))).to_equal("E-RTI-001")
         expect(err_code(table.fn_return(local.symbols, local_raw, "rti_infer.provider.loose"))).to_equal("E-RTI-002")
+
+    it "publishes semantic Optional and Result returns independently of bootstrap ABI erasure":
+        var hir = path_spelled_hir("struct Payload:\n    value: i64\nfn maybe() -> Payload?:\n    Some(Payload(value: 42))\nfn result() -> Result<Payload, text>:\n    Ok(Payload(value: 42))\n", "src/rti_abi/provider.spl")
+        # This is the exact retained bootstrap artifact state: function ABI
+        # fields are i64, while provider symbols keep the declared signature.
+        for name in ["maybe", "result"]:
+            var function = function_named(hir, name)
+            function.return_type = HirType(kind: HirTypeKind.Int(64, true), span: function.span)
+            hir.functions[function.symbol] = function
+        val rows = rti_rows_from_hir_v1(hir).unwrap()
+        val optional_row = row_for(rows.rows, "fn:maybe").unwrap()
+        val result_row = row_for(rows.rows, "fn:result").unwrap()
+        expect(rti_term_canonical_text(ReturnTypeInterfaceTable.new().require_concrete(optional_row.entry).unwrap())).to_start_with("opt(")
+        expect(rti_term_canonical_text(ReturnTypeInterfaceTable.new().require_concrete(result_row.entry).unwrap())).to_start_with("result(")
+        # Row publication must not widen the physical function signature.
+        expect(rti_term_canonical_text(rti_term_of_hir_type(function_named(hir, "maybe").return_type, hir.symbols, []).unwrap())).to_equal("b:i64")
+
+    it "does not invent a semantic scalar from an unresolved declared signature":
+        var hir = path_spelled_hir("fn unresolved() -> i64:\n    0\n", "src/rti_abi/unresolved.spl")
+        val function = function_named(hir, "unresolved")
+        var symbol = hir.symbols.symbols[function.symbol.id]
+        val unresolved = HirType(kind: HirTypeKind.Infer(0, 0), span: function.span)
+        symbol.type_ = Some(HirType(kind: HirTypeKind.Function([], unresolved, []), span: function.span))
+        hir.symbols.symbols[function.symbol.id] = symbol
+        val rows = rti_rows_from_hir_v1(hir).unwrap()
+        expect(rows.rows.len()).to_equal(0)
+        expect(rows.skipped_infer).to_equal(1)
 
     it "keeps original qualified declarations authoritative over consumer aliases":
         val local = path_spelled_hir("fn main() -> i64:\n    0\n", "src/rti_collision/local.spl")

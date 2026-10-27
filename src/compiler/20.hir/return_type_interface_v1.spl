@@ -312,6 +312,24 @@ struct RtiCallableSignatureV1:
     return_type: HirType
     is_static: bool
 
+fn rti_semantic_callable_return_v1(symbols: SymbolTable, symbol: SymbolId,
+        name: text, signature_return: HirType) -> HirType:
+    """Prefer the provider's declared function type over its physical ABI.
+    Bootstrap may deliberately erase HirFunction.return_type to i64. That
+    calling convention must not become a semantic RTI declaration. Generic
+    signatures without a typed symbol keep their existing HIR signature;
+    an explicitly unresolved declared return stays unresolved."""
+    if val owner = symbols.get_symbol_raw(symbol.id):
+        match owner.kind:
+            case SymbolKind.Function | SymbolKind.Method:
+                if rti_symbol_module(symbols, symbol.id) != "" and rti_last_segment(owner.name) == rti_last_segment(name):
+                    if val callable = owner.type_:
+                        match callable.kind:
+                            case HirTypeKind.Function(_, declared_return, _): return declared_return
+                            case _: ()
+            case _: ()
+    signature_return
+
 fn rti_row_from_signature_v1(module_name: text, symbols: SymbolTable,
         signature: RtiCallableSignatureV1) -> Result<ReturnTypeRow, RtiError>:
     """Publish a body-free callable using its provider's symbol ownership.
@@ -332,7 +350,9 @@ fn rti_row_from_signature_v1(module_name: text, symbols: SymbolTable,
         decl = rti_method_ref(owner_ref, parts[1])
         for p in signature.owner_type_params:
             params = params.push(p)
-    val term = rti_term_of_hir_type(signature.return_type, symbols, params)
+    val semantic_return = rti_semantic_callable_return_v1(symbols,
+        signature.symbol, signature.name, signature.return_type)
+    val term = rti_term_of_hir_type(semantic_return, symbols, params)
     match term:
         case Ok(t):
             val key = CalleeKey(module_id: module_id, owner: owner, name: rti_last_segment(decl.display), is_static: signature.is_static)
@@ -350,8 +370,9 @@ fn rti_row_of_function(module: HirModule, module_id: text, f: HirFunction) -> Re
         symbol: f.symbol, name: f.name, type_params: rti_type_param_names(f.type_params),
         owner_type_params: owner_params, return_type: f.return_type, is_static: f.is_static))
 
-fn rti_function_is_unannotated(f: HirFunction) -> bool:
-    match f.return_type.kind:
+fn rti_function_is_unannotated(f: HirFunction, symbols: SymbolTable) -> bool:
+    val semantic_return = rti_semantic_callable_return_v1(symbols, f.symbol, f.name, f.return_type)
+    match semantic_return.kind:
         case HirTypeKind.Infer(_, _): true
         case _: false
 
@@ -362,7 +383,7 @@ fn rti_rows_from_hir_v1(module: HirModule) -> Result<RtiRowsV1, RtiError>:
     var rows: [ReturnTypeRow] = []
     var skipped_infer: i64 = 0
     for f in module.functions.values():
-        if rti_function_is_unannotated(f):
+        if rti_function_is_unannotated(f, module.symbols):
             skipped_infer = skipped_infer + 1
         else:
             rows = rows.push(rti_row_of_function(module, rti_function_module(module, module_id, f), f)?)
