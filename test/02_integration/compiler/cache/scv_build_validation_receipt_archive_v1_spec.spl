@@ -1,0 +1,57 @@
+# Archive tests store untrusted projection bytes. Acceptance remains parent-owned.
+use std.spec.*
+use std.concurrent.thread.{thread_spawn}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use compiler.driver.cache.gateway.scv_build_validation_receipt_v1.*
+use compiler.driver.cache.gateway.scv_build_validation_receipt_archive_v1.*
+use test.fixtures.scv.build_validation_v1_fixture.*
+
+describe "Receipt archives preserve durable exact subject bytes":
+    it "publishes once and reopens the exact accepted receipt after dropping local values":
+        val root = secure_temp_dir("/tmp", "scv-build-receipt").unwrap()
+        val expected = scv_build_validation_receipt_seal_v1(setup_scv_build_receipt_v1()).unwrap()
+        val accepted = scv_build_validation_receipt_archive_v1(root, expected).unwrap()
+        expect(accepted).to_equal(expected.receipt_id)
+        val reopened = scv_build_validation_receipt_read_v1(root, accepted, expected).unwrap()
+        expect(scv_build_validation_receipt_matches_v1(reopened, expected)).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "rejects corrupted disk records and a stale or replayed accepted root":
+        val root = secure_temp_dir("/tmp", "scv-build-receipt-reject").unwrap()
+        val expected = scv_build_validation_receipt_seal_v1(setup_scv_build_receipt_v1()).unwrap()
+        val accepted = scv_build_validation_receipt_archive_v1(root, expected).unwrap()
+        expect(scv_build_validation_receipt_read_v1(root, sha256_text("other-root"), expected).is_err()).to_equal(true)
+        var changed = setup_scv_build_receipt_v1()
+        changed.provider_lock_digest = sha256_text("provider-version-changed")
+        val stale = scv_build_validation_receipt_seal_v1(changed).unwrap()
+        expect(scv_build_validation_receipt_read_v1(root, accepted, stale).is_err()).to_equal(true)
+        expect(file_atomic_write(root + "/" + accepted + ".sdn", "corrupt")).to_equal(true)
+        expect(scv_build_validation_receipt_read_v1(root, accepted, expected).is_err()).to_equal(true)
+        expect(scv_build_validation_receipt_archive_v1(root, expected).is_err()).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "handles two simultaneous publications without replacing either immutable subject":
+        val root = secure_temp_dir("/tmp", "scv-build-receipt-race").unwrap()
+        val left = scv_build_validation_receipt_seal_v1(setup_scv_build_receipt_v1()).unwrap()
+        var input = setup_scv_build_receipt_v1()
+        input.action_digest = sha256_text("independent-action")
+        val right = scv_build_validation_receipt_seal_v1(input).unwrap()
+        val a = thread_spawn(\: scv_build_validation_receipt_archive_v1(root, left).is_ok())
+        val b = thread_spawn(\: scv_build_validation_receipt_archive_v1(root, right).is_ok())
+        expect(a.join()).to_equal(true)
+        expect(b.join()).to_equal(true)
+        expect(scv_build_validation_receipt_read_v1(root, left.receipt_id, left).is_ok()).to_equal(true)
+        expect(scv_build_validation_receipt_read_v1(root, right.receipt_id, right).is_ok()).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "admits identical concurrent publication only when both retrieve the same canonical record":
+        val root = secure_temp_dir("/tmp", "scv-build-receipt-same").unwrap()
+        val expected = scv_build_validation_receipt_seal_v1(setup_scv_build_receipt_v1()).unwrap()
+        val a = thread_spawn(\: scv_build_validation_receipt_archive_v1(root, expected).is_ok())
+        val b = thread_spawn(\: scv_build_validation_receipt_archive_v1(root, expected).is_ok())
+        expect(a.join()).to_equal(true)
+        expect(b.join()).to_equal(true)
+        expect(scv_build_validation_receipt_read_v1(root, expected.receipt_id, expected).is_ok()).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
