@@ -171,6 +171,16 @@ impl JitInterpreterBackend:
         val backend = get_effective_backend_name(self.config.backend, false)
         val target_context = backend_mir_target_context(backend)
         var lowering = MirLowering.new_for_target(module.symbols, target_context)
+        # Decl-level @cfg: a guard that is off for this target is not compiled (the interpreter owns it).
+        # Cross-kind winners, same as lower_module (a group may mix types and functions).
+        val jit_cfg_winners = lowering.cfg_group_winners(module.functions.values(), module.classes.values(), module.structs.values(), module.enums.values(), module.traits.values(), module.constants.values(), module.impls)
+        if not lowering.decl_cfg_keep(fn_.name, fn_.cfg, fn_.cfg_group, fn_.cfg_arm, jit_cfg_winners):
+            # A malformed guard is an error in every mode, never a silent interpreter fallback.
+            if lowering.errors.len() > 0:
+                return Err(BackendError.compile_error("malformed @cfg guard: {lowering.errors[0].message}", Some(fn_.span)))
+            if self.config.mode == JitMode.AlwaysJit:
+                return Err(BackendError.compile_error("@cfg-disabled function {fn_.name} for this target", Some(fn_.span)))
+            return Ok(())
         val mir_fn = lowering.lower_function(fn_)
 
         if lowering.errors.len() > 0:

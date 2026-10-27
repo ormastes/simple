@@ -59,6 +59,16 @@ hir_cfg_decl_select_design.md). Fields are optional (empty/0/-1 default),
 included in codec and hash, and passed through mono preflight. Test:
 `test/01_unit/compiler/20.hir/hir_function_cfg_guard_spec.spl`.
 
+## Declaration-level cfg guard (2026-10-27 - Step 2)
+
+cfg, cfg_group, cfg_arm now exist on HirStruct, HirClass, HirEnum, HirTrait, HirImpl and HirConst
+(HirFunction had them from step 1). Codec regenerated (v13-decl-cfg-guard); mono_preflight mirrors updated.
+Selection is `MirLowering.apply_decl_cfg_guards` (called first by `lower_module`) driven by
+`cfg_group_winners` (one `mir_cfg_select_arm` call per group, else arm = `cfg_arm == -1` last, numbered arm
+with empty cfg is fatal); group 0 uses `mir_cfg_item_enabled(cfg, target, features)`. The bootstrap flat-store
+lane (`bootstrap_globals.spl`) and `jit_interpreter.spl` apply the same winners per function.
+Specs: `test/01_unit/compiler/50.mir/mir_decl_cfg_guard_lowering_spec.spl`, `mir_cfg_item_enabled_spec.spl`.
+Follow-up: the design-required cfg fields in `hir_declaration_summary_v1` are not added yet.
 ## 2026-10-27 - cfg-select source path (SIMPLE_HIR_CFG_SELECT=1, default off)
 
 - Parser path for `HirExprKind.CfgSelect`: in flag mode `_pp_preprocess_conditionals`
