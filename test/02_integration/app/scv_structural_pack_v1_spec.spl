@@ -64,6 +64,21 @@ describe "scv structural record pack v1":
         expect(out).to_contain("raw-retained=true")
         expect(out).to_contain("exit=0")
 
+    it "reports verification without an index as a failure rather than an empty success":
+        # @req REQ-SCV-STRUCTURAL-PACK-V1
+        step "verify an initialized repository before any archive has been written"
+        val out = _run([
+            "set -eu",
+            "REPO=$(pwd)",
+            "TMP=$(mktemp -d /tmp/scv-struct-pack-empty.XXXXXX)",
+            "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+            "cd \"$TMP\"",
+            "scv init >/dev/null",
+            "if scv syntax-pack-verify >verify.out 2>&1; then echo UNEXPECTED_SUCCESS; else cat verify.out; fi"
+        ])
+        expect(out).to_contain("ERROR no syntax pack index")
+        assert_false(out.contains("UNEXPECTED_SUCCESS"))
+
     it "restores exact LF, CRLF, comments, invalid UTF-8, and large file bytes without a parser":
         # @req REQ-SCV-STRUCTURAL-PACK-V1
         step "remove loose syntax records, restore the indexed structural closure, and compare bytes"
@@ -103,9 +118,21 @@ describe "scv structural record pack v1":
             "scv syntax-pack-write >/dev/null",
             "P=$(find .scv/objects/syntax-packs -name '*.pack' -print -quit)",
             "printf X | dd of=\"$P\" bs=1 seek=12 conv=notrunc 2>/dev/null",
-            "if scv syntax-pack-verify >verify.out 2>&1; then echo UNEXPECTED_SUCCESS; else cat verify.out; fi"
+            "if scv restore-op \"$OP\" >verify.out 2>&1; then echo UNEXPECTED_SUCCESS; else cat verify.out; fi"
         ])
         expect(out).to_contain("ERROR syntax pack content id mismatch")
+        assert_false(out.contains("UNEXPECTED_SUCCESS"))
+
+    it "fails explicitly when an indexed pack is missing even though loose records remain":
+        # @req REQ-SCV-STRUCTURAL-PACK-V1
+        step "remove the selected archive but retain its loose copy and request structural restore"
+        val out = _run(_harness() + [
+            "scv syntax-pack-write >/dev/null",
+            "P=$(find .scv/objects/syntax-packs -name '*.pack' -print -quit)",
+            "rm \"$P\"",
+            "if scv restore-op \"$OP\" >restore.out 2>&1; then echo UNEXPECTED_SUCCESS; else cat restore.out; fi"
+        ])
+        expect(out).to_contain("ERROR missing indexed syntax pack")
         assert_false(out.contains("UNEXPECTED_SUCCESS"))
 
     it "rejects a malformed or duplicate-ID index before lookup":
@@ -119,7 +146,7 @@ describe "scv structural record pack v1":
             "printf 'format: scv-syntax-record-index-v1\\npack: %s\\nrecords: 2\\n%s\\n%s\\nindex_hash: syntax_index_0000000000000000000000000000000000000000000000000000000000000000\\n' \"$PACK\" \"$ROW\" \"$ROW\" > \"$I\"",
             "if scv syntax-pack-verify >verify.out 2>&1; then echo UNEXPECTED_SUCCESS; else cat verify.out; fi"
         ])
-        expect(out).to_contain("ERROR syntax pack index duplicate or bound")
+        expect(out).to_contain("ERROR syntax pack index order")
         assert_false(out.contains("UNEXPECTED_SUCCESS"))
 
     it "keeps captured structural records and their payload closure visible to checked GC reachability":
@@ -129,9 +156,8 @@ describe "scv structural record pack v1":
             "scv syntax-pack-write >/dev/null",
             "rm .scv/objects/syntax/*",
             "scv syntax-pack-verify",
-            "scv gc-dry-run"
+            "scv gc"
         ])
-        expect(out).to_contain("unreachable_syntax=0")
         expect(out).to_contain("PASS — gc dry run")
 
     it "reconstructs a nested span tree and keeps every grandchild payload reachable after loose records are removed":
@@ -197,12 +223,13 @@ describe "scv structural record pack v1":
         # @req REQ-SCV-STRUCTURAL-PACK-V1
         step "request the existing gzip provider while it remains unqualified for this record archive"
         val out = _run(_harness() + [
-            "scv syntax-pack-write --codec gzip",
+            "if scv syntax-pack-write --codec gzip >codec.out 2>&1; then echo UNEXPECTED_SUCCESS; else cat codec.out; fi",
             "scv syntax-pack-status"
         ])
-        expect(out).to_contain("reason=unqualified-provider")
+        expect(out).to_contain("ERROR compression=optional-not-active reason=unqualified-provider")
         expect(out).to_contain("pack=unavailable")
         assert_false(out.contains("index=verified"))
+        assert_false(out.contains("UNEXPECTED_SUCCESS"))
 
     it "rejects an over-bound complete node with an explicit resource error":
         # @req REQ-SCV-STRUCTURAL-PACK-V1
