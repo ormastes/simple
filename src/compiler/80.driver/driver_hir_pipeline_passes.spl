@@ -265,15 +265,18 @@ impl CompilerDriver:
         # File-worker P4/P-G3 (per-file lane + SIMPLE_MIR_SHARD_ONLY_PATHS):
         # this MIR child lowers only the admitted modules, so mono runs
         # module-scoped for exactly those instead of the global pass.
-        # PR2: also applies to shard path (SIMPLE_MIR_SHARD_QUEUE set).
+        # SIMPLE_MIR_SHARD_QUEUE alone must NOT select the scoped
+        # route. Plain MIR shards carry no admitted target paths and no per-module
+        # HIR deps ledger, so scoped mono would monomorphize zero modules (or, via
+        # the forbidden guard, break the default shard route). Scoped mono is
+        # selected by admitted paths only.
         val scoped_paths = native_file_worker_only_paths_from_env_v1()
         val whole_program = env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? ""
-        val shard_queue = (env_get("SIMPLE_MIR_SHARD_QUEUE") ?? "") != ""
-        if mono_module_scoped_selected_shard_v1(scoped_paths.len() > 0, shard_queue, whole_program):
+        if mono_module_scoped_selected_v1(whole_program, scoped_paths.len() > 0):
             return self.monomorphize_file_worker_scoped_v1(scoped_paths)
         # P-G3: the per-file lane never runs the global pass.
         val in_file_worker_lane = (env_get("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "") != ""
-        if native_file_worker_global_mono_forbidden_v1(whole_program, in_file_worker_lane or shard_queue):
+        if native_file_worker_global_mono_forbidden_v1(whole_program, in_file_worker_lane):
             self.ctx.add_error("per-file lane: global monomorphize pass is forbidden (no admitted target paths; set SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 for the whole-program lane)")
             return false
         # Cycle-121: the modules dict comes back through the module-global
