@@ -1,0 +1,37 @@
+"""Daemonless capture-to-feed publication. Authored; execution NOT_RUN pending runtime admission."""
+use std.spec.{describe, it, expect, step}
+use std.scv.build_capture_v1.{BuildInputEntryV1, BuildInputUniverseV1, ScvBuildCursorV1, scv_build_snapshot_freeze_v1, scv_build_path_policy_digest_v1}
+use std.scv.build_change_feed_v1.{scv_build_feed_new_v1, scv_build_feed_event_id_v1, scv_build_feed_publish_v1, scv_build_feed_subscribe_v1, scv_build_feed_poll_subscription_v1, scv_build_feed_acknowledge_v1, scv_build_feed_poll_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "SCV publishes complete changes to a bounded build subscriber":
+    it "retains exact frozen pairs and expires a slow reader explicitly":
+        step("setup: freeze a complete managed source universe and subscribe at its exact cursor")
+        val digest = sha256_text("system-feed-producer")
+        val universe = BuildInputUniverseV1("managed-build-inputs-v1", scv_build_path_policy_digest_v1(),
+            ["src"], digest, digest, digest, digest, digest, [])
+        val initial = scv_build_snapshot_freeze_v1(universe, [], ScvBuildCursorV1("system-feed", 0)).unwrap()
+        var feed = scv_build_feed_subscribe_v1(scv_build_feed_new_v1(initial, 1).unwrap(), "build", initial.cursor).unwrap()
+        step("publish: add a previously absent input through a validated expected-root transition")
+        val entry = BuildInputEntryV1("src/new.spl", "regular", 420, [1, 2, 3], "worktree", digest)
+        val added = scv_build_snapshot_freeze_v1(universe, [entry], ScvBuildCursorV1("system-feed", 1)).unwrap()
+        feed = scv_build_feed_publish_v1(feed, initial.snapshot_id, scv_build_feed_event_id_v1(initial, added), added).unwrap()
+        step("assert: subscriber sees the exact snapshot pair and negative membership invalidation")
+        val delta = scv_build_feed_poll_subscription_v1(feed, "build")
+        expect(delta.status).to_equal("CompleteDelta")
+        expect(delta.from_snapshot_id).to_equal(initial.snapshot_id)
+        expect(delta.to_snapshot_id).to_equal(added.snapshot_id)
+        expect(delta.membership_changed).to_equal(true)
+        expect(delta.changes[0].path).to_equal("src/new.spl")
+        expect(delta.changes[0].after!.bytes).to_equal([1, 2, 3])
+        step("publish: remove the source while the subscriber remains at its old cursor")
+        val removed = scv_build_snapshot_freeze_v1(universe, [], ScvBuildCursorV1("system-feed", 2)).unwrap()
+        feed = scv_build_feed_publish_v1(feed, added.snapshot_id, scv_build_feed_event_id_v1(added, removed), removed).unwrap()
+        step("assert: expired history refuses completeness and explicit snapshot resync restores the cursor")
+        expect(scv_build_feed_poll_subscription_v1(feed, "build").status).to_equal("StaleCursor")
+        feed = scv_build_feed_acknowledge_v1(feed, "build", removed.cursor).unwrap()
+        val current = scv_build_feed_poll_subscription_v1(feed, "build")
+        expect(current.status).to_equal("CompleteDelta")
+        expect(current.from_snapshot_id).to_equal(removed.snapshot_id)
+        expect(current.changes.len()).to_equal(0)
+        expect(scv_build_feed_poll_v1(feed, ScvBuildCursorV1("foreign", 2)).status).to_equal("UnknownCursor")

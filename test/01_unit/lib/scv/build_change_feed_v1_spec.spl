@@ -1,7 +1,7 @@
 """Tests authored before the feed implementation; execution requires an admitted runtime."""
 use std.spec.{describe, it, expect}
 use std.scv.build_capture_v1.{BuildInputEntryV1, BuildInputUniverseV1, BuildFrozenSnapshotV1, ScvBuildCursorV1, scv_build_snapshot_freeze_v1, scv_build_path_policy_digest_v1}
-use std.scv.build_change_feed_v1.{scv_build_feed_new_v1, scv_build_feed_publish_v1, scv_build_feed_poll_v1, scv_build_snapshot_diff_v1, scv_build_feed_subscribe_v1, scv_build_feed_poll_subscription_v1, scv_build_feed_acknowledge_v1, scv_build_feed_unsubscribe_v1, scv_build_delta_affects_path_v1}
+use std.scv.build_change_feed_v1.{scv_build_feed_new_v1, scv_build_feed_publish_v1, scv_build_feed_poll_v1, scv_build_snapshot_diff_v1, scv_build_feed_subscribe_v1, scv_build_feed_poll_subscription_v1, scv_build_feed_acknowledge_v1, scv_build_feed_unsubscribe_v1, scv_build_delta_affects_path_v1, scv_build_feed_event_id_v1, ScvBuildFeedEventV1}
 use std.common.crypto.sha256.{sha256_text}
 
 pub fn setup_build_feed_universe_v1() -> BuildInputUniverseV1:
@@ -18,7 +18,7 @@ describe "Bounded complete SCV change feed":
     it "records exact pair identities and verifies current-cursor empty delta":
         val first = setup_build_feed_snapshot_v1(0, [setup_build_feed_entry_v1("src/main.spl", [1])])
         val next = setup_build_feed_snapshot_v1(1, [setup_build_feed_entry_v1("src/main.spl", [2])])
-        val feed = scv_build_feed_publish_v1(scv_build_feed_new_v1(first, 2).unwrap(), first.snapshot_id, "event-1", next).unwrap()
+        val feed = scv_build_feed_publish_v1(scv_build_feed_new_v1(first, 2).unwrap(), first.snapshot_id, scv_build_feed_event_id_v1(first, next), next).unwrap()
         val delta = scv_build_feed_poll_v1(feed, first.cursor)
         expect(delta.status).to_equal("CompleteDelta")
         expect(delta.from_snapshot_id).to_equal(first.snapshot_id)
@@ -50,12 +50,13 @@ describe "Bounded complete SCV change feed":
     it "replays identical event idempotently and rejects changed payload":
         val first = setup_build_feed_snapshot_v1(0, [])
         val next = setup_build_feed_snapshot_v1(1, [setup_build_feed_entry_v1("src/a.spl", [1])])
-        val feed = scv_build_feed_publish_v1(scv_build_feed_new_v1(first, 2).unwrap(), first.snapshot_id, "event", next).unwrap()
-        val replay = scv_build_feed_publish_v1(feed, first.snapshot_id, "event", next).unwrap()
+        val event_id = scv_build_feed_event_id_v1(first, next)
+        val feed = scv_build_feed_publish_v1(scv_build_feed_new_v1(first, 2).unwrap(), first.snapshot_id, event_id, next).unwrap()
+        val replay = scv_build_feed_publish_v1(feed, first.snapshot_id, event_id, next).unwrap()
         expect(replay.events.len()).to_equal(1)
         val altered = setup_build_feed_snapshot_v1(1, [setup_build_feed_entry_v1("src/a.spl", [2])])
-        expect(scv_build_feed_publish_v1(feed, first.snapshot_id, "event", altered).is_err()).to_equal(true)
-        expect(scv_build_feed_publish_v1(feed, next.snapshot_id, "event", setup_build_feed_snapshot_v1(2, [])).is_err()).to_equal(true)
+        expect(scv_build_feed_publish_v1(feed, first.snapshot_id, event_id, altered).is_err()).to_equal(true)
+        expect(scv_build_feed_publish_v1(feed, next.snapshot_id, event_id, setup_build_feed_snapshot_v1(2, [])).is_err()).to_equal(true)
 
     it "expires history and subscriber cursors without fabricating no-change":
         val first = setup_build_feed_snapshot_v1(0, [])
@@ -63,8 +64,8 @@ describe "Bounded complete SCV change feed":
         val third = setup_build_feed_snapshot_v1(2, [])
         var feed = scv_build_feed_subscribe_v1(scv_build_feed_new_v1(first, 1, 1).unwrap(), "build", first.cursor).unwrap()
         expect(scv_build_feed_subscribe_v1(feed, "other", first.cursor).is_err()).to_equal(true)
-        feed = scv_build_feed_publish_v1(feed, first.snapshot_id, "one", second).unwrap()
-        feed = scv_build_feed_publish_v1(feed, second.snapshot_id, "two", third).unwrap()
+        feed = scv_build_feed_publish_v1(feed, first.snapshot_id, scv_build_feed_event_id_v1(first, second), second).unwrap()
+        feed = scv_build_feed_publish_v1(feed, second.snapshot_id, scv_build_feed_event_id_v1(second, third), third).unwrap()
         expect(feed.events.len()).to_equal(1)
         expect(scv_build_feed_poll_v1(feed, first.cursor).status).to_equal("StaleCursor")
         expect(scv_build_feed_poll_subscription_v1(feed, "build").status).to_equal("StaleCursor")
@@ -75,7 +76,7 @@ describe "Bounded complete SCV change feed":
         feed = scv_build_feed_unsubscribe_v1(feed, "build").unwrap()
         expect(feed.subscriptions.len()).to_equal(0)
 
-    it "detects byte mode kind origin producer and symlink-target changes exactly":
+    it "detects byte mode origin and producer changes exactly":
         val original = setup_build_feed_entry_v1("src/a.spl", [1])
         val first = setup_build_feed_snapshot_v1(0, [original])
         for replacement in [setup_build_feed_entry_v1("src/a.spl", [2]), setup_build_feed_entry_v1("src/a.spl", [1], "regular", 493)]:
@@ -86,6 +87,35 @@ describe "Bounded complete SCV change feed":
         generated.origin = "generated"
         generated.producer_digest = sha256_text("producer")
         expect(scv_build_snapshot_diff_v1(first, setup_build_feed_snapshot_v1(1, [generated])).unwrap().changes.len()).to_equal(1)
+
+    it "compares symlink target bytes directory roots and kind transitions":
+        val link = setup_build_feed_entry_v1("src/link", [97], "symlink", 511)
+        val first = setup_build_feed_snapshot_v1(0, [link])
+        val target = setup_build_feed_snapshot_v1(1, [setup_build_feed_entry_v1("src/link", [98], "symlink", 511)])
+        val target_delta = scv_build_snapshot_diff_v1(first, target).unwrap()
+        expect(target_delta.changes[0].after!.bytes).to_equal([98])
+        val directory = setup_build_feed_entry_v1("src/link", [], "directory", 493)
+        val kind_delta = scv_build_snapshot_diff_v1(first, setup_build_feed_snapshot_v1(1, [directory])).unwrap()
+        expect(kind_delta.membership_changed).to_equal(true)
+        expect(kind_delta.changes[0].after!.kind).to_equal("directory")
+        expect(scv_build_delta_affects_path_v1(kind_delta, "src/link/missing.spl")).to_equal(true)
+
+    it "rejects disconnected or corrupt retained history with explicit gap":
+        val first = setup_build_feed_snapshot_v1(0, [])
+        val next = setup_build_feed_snapshot_v1(1, [])
+        val later = setup_build_feed_snapshot_v1(2, [])
+        var feed = scv_build_feed_publish_v1(scv_build_feed_new_v1(first, 2).unwrap(), first.snapshot_id, scv_build_feed_event_id_v1(first, next), next).unwrap()
+        feed.events = [ScvBuildFeedEventV1(scv_build_feed_event_id_v1(first, later), first, later)]
+        expect(scv_build_feed_poll_v1(feed, first.cursor).status).to_equal("Gap")
+        expect(scv_build_feed_poll_v1(feed, next.cursor).status).to_equal("Gap")
+
+    it "compares reordered caller arrays through canonical capture copies":
+        val first = setup_build_feed_snapshot_v1(0, [setup_build_feed_entry_v1("src/a.spl", [1]), setup_build_feed_entry_v1("src/b.spl", [2])])
+        var reordered = first
+        reordered.entries = [first.entries[1], first.entries[0]]
+        val delta = scv_build_snapshot_diff_v1(reordered, first).unwrap()
+        expect(delta.changes.len()).to_equal(0)
+        expect(delta.from_snapshot_id).to_equal(first.snapshot_id)
 
     it "uses add-delete for equal-content moves and invalidates negative queries":
         val first = setup_build_feed_snapshot_v1(0, [setup_build_feed_entry_v1("src/old.spl", [1])])
