@@ -101,6 +101,43 @@ describe "SCV compile snapshot replication manifest v1":
         expect(scv_gateway_snapshot_manifest_validate_v1(manifest,
             "repo-alpha", "principal-other").is_err()).to_equal(true)
 
+    it "encodes a maximum-size publishable manifest in the bounded read envelope with maximum correlation IDs":
+        val empty_bytes: [u8] = []
+        val source_digest = sha256_u8_hex(empty_bytes)
+        val path = "a".repeat(500000)
+        val inventory = "{path}|sha256_{source_digest}|0"
+        val inventory_digest = sha256_text(inventory)
+        val tree_id = "scv-tree-v1-{inventory_digest}"
+        val revision_id = scv_compile_snapshot_revision_id_v1(tree_id, inventory_digest)
+        val commit_id = "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|{tree_id}|1")
+        val provenance = scv_compile_snapshot_provenance_v1(revision_id, commit_id,
+            tree_id, inventory_digest, 1)
+        val manifest = ScvGatewaySnapshotManifestV1(version: 1, repository: "repo-alpha",
+            principal_id: "principal-1", source_domain: "compile-inventory-v1",
+            config_digest: sha256_text("config"), revision_id: revision_id, commit_id: commit_id,
+            tree_id: tree_id, inventory_digest: inventory_digest, inventory_count: 1,
+            provenance: provenance, inventory: inventory,
+            objects: [ScvGatewaySnapshotObjectRefV1(kind: "source_bytes",
+                object_id: "sha256_{source_digest}", content_sha256: source_digest, byte_count: 0)],
+            structural_recipes: [])
+        val manifest_wire = scv_gateway_snapshot_manifest_encode_v1(manifest,
+            "repo-alpha", "principal-1").unwrap()
+        expect(manifest_wire.len() <= SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1).to_equal(true)
+        val correlation = "c".repeat(128)
+        val read_request = ScvGatewaySnapshotReadRequestV1(version: 1, id: correlation,
+            repository: "repo-alpha", request_id: correlation,
+            snapshot_id: scv_gateway_snapshot_pin_id_v1(manifest, "repo-alpha", "principal-1").unwrap())
+        val checked = scv_gateway_snapshot_manifest_validate_v1(manifest,
+            "repo-alpha", "principal-1").unwrap()
+        val response = ScvGatewaySnapshotReadResponseV1(version: 1, id: correlation,
+            repository: "repo-alpha", principal_id: "principal-1", request_id: correlation,
+            snapshot_id: read_request.snapshot_id, manifest_sha256: checked.manifest_sha256,
+            status: "ok", state: "snapshot_local_readback", manifest_wire: manifest_wire, error: "")
+        val response_wire = scv_gateway_snapshot_read_response_encode_v1(response,
+            read_request, "principal-1")
+        expect(response_wire.is_ok()).to_equal(true)
+        expect(response_wire.unwrap().len() <= SCV_GATEWAY_SNAPSHOT_MAX_WIRE_BYTES_V1).to_equal(true)
+
     it "requires each optional structural recipe to reconstruct its linked source bytes":
         var manifest = snapshot_replication_fixture_v1()
         manifest.structural_recipes = [ScvGatewayStructuralRecipeV1(path: "src/main.spl",
