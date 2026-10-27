@@ -15,6 +15,15 @@ SPEC.loader.exec_module(MATRIX)
 
 
 class LinkInputEvidence(unittest.TestCase):
+    def test_phase_capabilities_and_seed_interpreter_selection(self):
+        self.assertEqual(MATRIX.phase_capabilities(1), (True, False))
+        self.assertEqual(MATRIX.phase_capabilities(2), (False, True))
+        self.assertEqual(MATRIX.phase_capabilities(3), (True, True))
+        argv, env = MATRIX.interpreter_invocation(1, Path("/phase1"))
+        self.assertEqual(argv, [Path("/phase1"), "run", str(MATRIX.FIXTURES / "single.spl")])
+        self.assertEqual(env["SIMPLE_EXECUTION_MODE"], "interpret")
+        self.assertIn("--interpret", MATRIX.interpreter_invocation(3, Path("/phase3"))[0])
+
     def test_phase2_configured_interpreter_skip_does_not_hide_native_failure(self):
         self.assertEqual(MATRIX.matrix_status(2, "PASS", "SKIPPED"), "PASS")
         self.assertEqual(MATRIX.matrix_status(2, "PARTIAL", "SKIPPED"), "PARTIAL")
