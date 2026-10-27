@@ -1,0 +1,61 @@
+#!/bin/sh
+# Build the prebuilt stdlib static archive (opt-in build group `stdlib_static`,
+# config/build/stdlib_static.sdn). Never part of a default build or bootstrap.
+#
+#   sh scripts/build/build-stdlib-static.shs --triple <triple> [--tier x86-64|x86-64-v2..v4|default] [--semver <v>]
+#
+# Output (same name on Windows/Linux/macOS/FreeBSD/SimpleOS):
+#   build/std_archive/<triple>/<tier>/libsimple_std-<semver>-<triple>-<tier>.a
+#   ...a.lib.sdn sidecar (name, semver, abi, iface_digest, producer, triple, cpu_tier, sha256)
+# SIMPLE_STDLIB_ARCHIVE_DIR overrides build/std_archive. Archiver: llvm-ar via
+# native-build --emit-archive (clang + lld toolchain; never gcc/MSVC).
+# A cached archive whose sidecar still admits is reused (no rebuild).
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE=${SIMPLE_BIN:-"$ROOT/bin/simple"}
+TRIPLE=""
+TIER="x86-64"
+SEMVER="1.0.0"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --triple) [ $# -ge 2 ] || { echo "build-stdlib-static: --triple needs a value" >&2; exit 2; }; TRIPLE=$2; shift 2 ;;
+        --tier) [ $# -ge 2 ] || { echo "build-stdlib-static: --tier needs a value" >&2; exit 2; }; TIER=$2; shift 2 ;;
+        --semver) [ $# -ge 2 ] || { echo "build-stdlib-static: --semver needs a value" >&2; exit 2; }; SEMVER=$2; shift 2 ;;
+        *) echo "build-stdlib-static: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+[ -n "$TRIPLE" ] || { echo "build-stdlib-static: --triple is required" >&2; exit 2; }
+
+# Tier ids follow config/build/cpu_tiers.sdn; map them to native-build --cpu
+# (default|native|x86-64-v1..v4). Anything else is refused, never passed raw.
+case "$TIER" in
+    x86-64) CPU="x86-64-v1" ;;
+    x86-64-v2|x86-64-v3|x86-64-v4) CPU="$TIER" ;;
+    default) CPU="default" ;;
+    *) echo "build-stdlib-static: unknown tier '$TIER' (x86-64, x86-64-v2..v4, default)" >&2; exit 2 ;;
+esac
+
+BASE=${SIMPLE_STDLIB_ARCHIVE_DIR:-"$ROOT/build/std_archive"}
+DIR="$BASE/$TRIPLE/$TIER"
+ARCHIVE="$DIR/libsimple_std-$SEMVER-$TRIPLE-$TIER.a"
+mkdir -p "$DIR"
+
+SIDECAR_MAIN="$ROOT/src/app/build/std_archive/sidecar_main.spl"
+if [ -f "$ARCHIVE" ] && [ -f "$ARCHIVE.lib.sdn" ]; then
+    # Reuse only when the existing sidecar still admits; never re-stamp it,
+    # so a tampered cached archive is rebuilt rather than blessed.
+    if "$SIMPLE" run "$SIDECAR_MAIN" -- --check "$ARCHIVE" "$TRIPLE" "$TIER"; then
+        exit 0
+    fi
+    echo "build-stdlib-static: cached archive refused; rebuilding" >&2
+fi
+if ! "$SIMPLE" native-build "$ROOT/src/lib/std_archive_root.spl" --emit-archive \
+        --target "$TRIPLE" --cpu "$CPU" -o "$ARCHIVE"; then
+    echo "build-stdlib-static: native-build failed" >&2
+    exit 1
+fi
+
+PRODUCER=$("$SIMPLE" --version 2>/dev/null | head -1 | tr -d '\r')
+"$SIMPLE" run "$ROOT/src/app/build/std_archive/sidecar_main.spl" -- \
+    "$ARCHIVE" "$SEMVER" "$TRIPLE" "$TIER" "${PRODUCER:-unknown}"
