@@ -1,5 +1,29 @@
 # bootstrap Layer Expert
 
+## Phase 1 whole-test callback evidence (2026-10-27)
+
+For the configured Phase 1 whole-test callback, use
+[`bootstrap_phase1_whole_tests.md`](../../../07_guide/tooling/bootstrap_phase1_whole_tests.md)
+as the operator contract. Current callback candidate output is bounded human
+text (`--format=text`); an earlier `--json` attempt failed before tests because
+that option is retired. The callback remains diagnostic: two distinct public
+SDN gates remain open, current providers do not implement the required
+`ProcessObservationV4` process-group retirement contract, and aggregate output
+is capped at 1 MiB. Do not bypass either guard or claim complete inventory
+coverage from result counters. Retain per-file verdicts, dropped counts, all
+three test categories, and discovered/excluded/aborted accounting; overall
+coverage is NOT PROVEN absent independent reconciliation.
+
+Observed 2026-10-27: five parser checks passed; parser review remains open.
+Directory calibration failed before assertions because the old seed lacks
+`rt_io_file_open_read` and the structured BDD guard rejects the fixture. A fresh seed route must use the reviewed
+`--full-bootstrap --stop-after-seed` command and qualify the complete new
+Phase 1 tuple before any build/test PASS claim. The 7200-second canonical
+resource guard is this campaign's bound. The nested 20-GiB preflight applies to
+the full-bootstrap refresh, not the standalone callback. Do not alter `HOME`
+or reintroduce `SIMPLE_TEST_RUNNER_RUST`. Phase 2 starts after Phase 1 cleanup
+under this campaign's already-recorded direction.
+
 ## Bootstrap failure collection
 
 During diagnosis, a usable phase artifact plus minimum sanity permits the next diagnostic phase without waiting for formal admission or the full suite. Continue independent tool builds and test shards after errors; preserve lineage and strict promotion gates. Follow the

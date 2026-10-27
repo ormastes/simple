@@ -8,26 +8,33 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
 
-MAX_SUMMARY_BYTES = 32 * 1024 * 1024
+MAX_REPORT_BYTES = 32 * 1024 * 1024
+MAX_LINE_BYTES = 1024 * 1024
+ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+SPEC = re.compile(r'^SPEC FILE VERDICT: (.+?) outcome=(OK|ERROR|NOT_RUN) declared>=(\d+) executed=(\d+) passed=(\d+) failed=(\d+)(?: skipped=(\d+))?(?: in_development=(\d+))? dropped=(\d+)(.*)$')
+FILES = re.compile(r'^Files:\s+(\d+) discovered, (\d+) executed$')
+RESULTS = re.compile(r'^Results: (\d+) total, (\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) pending)?(.*)$')
+SPL_DOC = re.compile(r'^SPL Doctest: (\d+) passed, (\d+) failed, (\d+) skipped$')
+SDOC = re.compile(r'^SDoctest Results(?: \(fail-as-success\))?: (\d+) total, (\d+) passed, (\d+) failed(?:, (\d+) accepted)?, (\d+) skipped, (\d+) errors$')
 
 
-def read_summary_lines(path, limit=MAX_SUMMARY_BYTES):
-    """Bound each allocation even if a compiler emits a giant unterminated line."""
+def read_report(path, limit=MAX_REPORT_BYTES):
+    """Read bounded human report bytes; retain every original line in the receipt."""
+    if Path(path).stat().st_size > limit:
+        raise ValueError('stdout report exceeds bounded report size')
     with Path(path).open('rb') as stream:
-        while True:
-            line = stream.readline(limit + 1)
-            if not line:
-                return
-            if len(line) > limit:
-                raise ValueError('stdout line exceeds bounded summary size')
-            # Canonical formatter prints one compact JSON object per line:
-            # test_runner_output.spl:238; test_runner_main.spl:1353.
-            if line.lstrip().startswith(b'{'):
-                yield line.decode('utf-8', errors='strict')
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('stdout report exceeds bounded report size')
+    text = data.decode('utf-8', errors='strict')
+    if any(len(line.encode('utf-8')) > MAX_LINE_BYTES for line in text.splitlines()):
+        raise ValueError('stdout report line exceeds bounded line size')
+    return text
 
 
 def digest(path):
@@ -36,67 +43,69 @@ def digest(path):
 
 
 def classify(exit_code, output):
-    summaries = []
-    for line in output.splitlines() if isinstance(output, str) else output:
-        try:
-            value = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if isinstance(value, dict) and all(k in value for k in ('success', 'spec', 'spl_doctest', 'sdoctest')):
-            summaries.append(value)
-    if len(summaries) != 1:
-        return 'INFRASTRUCTURE_FAILED', None, 'expected one combined runner summary'
-    summary = summaries[0]
-    if any(not isinstance(summary[k], dict) for k in ('spec', 'spl_doctest', 'sdoctest')):
-        return 'INFRASTRUCTURE_FAILED', summary, 'whole run omitted a required test category'
-    # Never turn a crash/nonzero process into PASS using partial stdout.
+    """Parse observed text summaries without collapsing category or per-file evidence."""
+    lines = [ANSI.sub('', line).strip() for line in output.splitlines()]
+    files = [FILES.fullmatch(line) for line in lines if line.startswith('Files:')]
+    specs = [SPEC.fullmatch(line) for line in lines if line.startswith('SPEC FILE VERDICT:')]
+    results = [RESULTS.fullmatch(line) for line in lines if line.startswith('Results:')]
+    spldocs = [SPL_DOC.fullmatch(line) for line in lines if line.startswith('SPL Doctest:')]
+    sdocs = [SDOC.fullmatch(line) for line in lines if line.startswith('SDoctest Results')]
+    report = dict(format='text-diagnostic', lines=lines, file_summary=None, spec_files=[], categories={})
+    if any(len(found) != 1 or found[0] is None for found in (files, results, spldocs, sdocs)) or any(m is None for m in specs):
+        return 'INFRASTRUCTURE_FAILED', report, 'missing, duplicate, or unrecognized category summary'
+    fm, rm, sm, dm = files[0], results[0], spldocs[0], sdocs[0]
+    if len(specs) != int(fm.group(1)) or int(fm.group(2)) != int(fm.group(1)):
+        return 'INFRASTRUCTURE_FAILED', report, 'per-file verdict count disagrees with discovery summary'
+    report['file_summary'] = dict(discovered=int(fm.group(1)), executed=int(fm.group(2)))
+    paths = set()
+    for match in specs:
+        path, outcome, declared, executed, passed, failed, skipped, dev, dropped, suffix = match.groups()
+        if path in paths:
+            return 'INFRASTRUCTURE_FAILED', report, 'duplicate per-file identity'
+        paths.add(path)
+        row = dict(path=path, outcome=outcome, declared_at_least=int(declared), executed=int(executed),
+                   passed=int(passed), failed=int(failed), skipped=int(skipped or 0),
+                   in_development=int(dev or 0), dropped=int(dropped), degraded=('degraded=' in suffix), details=suffix.strip())
+        report['spec_files'].append(row)
+        if re.search(r'(?:^|\s)process_error=1(?:\s|$)', suffix):
+            return 'INFRASTRUCTURE_FAILED', report, 'spec child process failed after authenticated execution'
+        if outcome == 'NOT_RUN' or row['dropped'] or 'timeout=' in suffix or 'inconclusive=' in suffix:
+            return 'INFRASTRUCTURE_FAILED', report, 'spec file has unverified, dropped, timed-out, or not-run work'
+        if row['declared_at_least'] > row['executed']:
+            return 'INFRASTRUCTURE_FAILED', report, 'declared spec work exceeds executed work'
+        if row['executed'] != row['passed'] + row['failed'] + row['in_development']:
+            return 'INFRASTRUCTURE_FAILED', report, 'spec verdict does not partition executed work'
+        if outcome == 'OK' and row['failed'] > 0:
+            return 'INFRASTRUCTURE_FAILED', report, 'successful spec verdict contains failed examples'
+        if outcome == 'ERROR' and row['failed'] == 0:
+            return 'INFRASTRUCTURE_FAILED', report, 'spec file error lacks corresponding failed work'
+        if row['executed'] < row['passed'] + row['failed']:
+            return 'INFRASTRUCTURE_FAILED', report, 'spec file executed count is below pass/fail outcomes'
+    result_suffix = rm.group(6).strip()
+    if re.search(r'\b(crashed|terminated|timed out|not run)\b', result_suffix):
+        return 'INFRASTRUCTURE_FAILED', report, 'summary reports crashed, terminated, timed-out, or unrun work'
+    report['categories'] = dict(spec=dict(total=int(rm.group(1)), passed=int(rm.group(2)), failed=int(rm.group(3)), skipped=int(rm.group(4) or 0), pending=int(rm.group(5) or 0), summary_suffix=result_suffix),
+                                spl_doctest=dict(passed=int(sm.group(1)), failed=int(sm.group(2)), skipped=int(sm.group(3))),
+                                sdoctest=dict(total=int(dm.group(1)), passed=int(dm.group(2)), failed=int(dm.group(3)), accepted=int(dm.group(4) or 0), skipped=int(dm.group(5)), errors=int(dm.group(6))))
+    category = report['categories']
+    if category['spec']['total'] != category['spec']['passed'] + category['spec']['failed']:
+        return 'INFRASTRUCTURE_FAILED', report, 'spec result total does not equal passed plus failed'
+    if sum(r['passed'] for r in report['spec_files']) != category['spec']['passed'] or sum(r['failed'] for r in report['spec_files']) != category['spec']['failed']:
+        return 'INFRASTRUCTURE_FAILED', report, 'per-file and aggregate spec counters disagree'
+    if category['sdoctest']['total'] != category['sdoctest']['passed'] + category['sdoctest']['failed'] + category['sdoctest']['skipped'] + category['sdoctest']['errors']:
+        return 'INFRASTRUCTURE_FAILED', report, 'sdoctest total does not partition into terminal outcomes'
     if exit_code not in (0, 1):
-        return 'INFRASTRUCTURE_FAILED', summary, 'runner process did not complete normally'
-    spec = summary['spec']
-    for category, names in ((spec, ('total_passed', 'total_failed', 'total_skipped', 'total_pending')),
-                            (summary['spl_doctest'], ('passed', 'failed', 'skipped', 'errors')),
-                            (summary['sdoctest'], ('passed', 'failed', 'skipped', 'errors'))):
-        if any(type(category.get(name)) is not int or category[name] < 0 for name in names):
-            return 'INFRASTRUCTURE_FAILED', summary, 'missing or invalid result counters'
-    tested = spec.get('total_passed', 0) + spec.get('total_failed', 0)
-    tested += sum(summary[k].get('passed', 0) + summary[k].get('failed', 0)
-                  for k in ('spl_doctest', 'sdoctest'))
-    if tested == 0:
-        return 'INFRASTRUCTURE_FAILED', summary, 'no assertions executed'
-    failures = spec['total_failed'] + sum(summary[k]['failed'] + summary[k]['errors']
-                                        for k in ('spl_doctest', 'sdoctest'))
-    if exit_code == 0 and summary['success'] is True and failures == 0 and spec.get('success') is True:
-        return 'PASS', summary, ''
-    return 'FAIL', summary, 'runner reported failures; skips remain separate'
-
-
-def validate_partitions(summary):
-    if summary is None:
-        return ''
-    for key in ('spec', 'spl_doctest', 'sdoctest'):
-        category = summary.get(key)
-        if not isinstance(category, dict):
-            return 'required category absent'
-        files = category.get('files')
-        if not isinstance(files, list):
-            return 'per-file result inventory absent'
-        counters = ('passed', 'failed', 'skipped', 'pending') if key == 'spec' else ('passed', 'failed', 'skipped', 'errors')
-        prefix = 'total_' if key == 'spec' else ''
-        paths = set()
-        for row in files:
-            if not isinstance(row, dict) or not isinstance(row.get('path'), str) or row['path'] in paths:
-                return 'invalid or duplicate per-file result identity'
-            paths.add(row['path'])
-            if any(type(row.get(n)) is not int or row[n] < 0 for n in counters):
-                return 'invalid per-file counters'
-        for name in counters:
-            if sum(row[name] for row in files) != category.get(prefix+name):
-                return 'per-file and aggregate counts disagree'
-        if key == 'spec' and any(row.get('error') for row in files) and summary.get('success') is True:
-            return 'success summary contains aborted or errored file'
-        if key != 'spec' and category.get('total') != sum(category[n] for n in counters):
-            return 'doctest total does not partition into outcomes'
-    return ''
+        return 'INFRASTRUCTURE_FAILED', report, 'runner process did not complete normally'
+    executed = sum(category[k].get('passed', 0) + category[k].get('failed', 0) for k in ('spec', 'spl_doctest', 'sdoctest'))
+    failures = category['spec']['failed'] + category['spl_doctest']['failed'] + category['sdoctest']['failed'] + category['sdoctest']['errors']
+    accepted = category['sdoctest']['accepted']
+    if executed == 0:
+        return 'INFRASTRUCTURE_FAILED', report, 'no assertions or examples executed'
+    if exit_code == 0 and failures == 0 and accepted == 0:
+        return 'PASS', report, ''
+    if exit_code == 1 and failures > 0:
+        return 'FAIL', report, 'runner reported test failures; skips and pending remain separate'
+    return 'INFRASTRUCTURE_FAILED', report, 'process status conflicts with reported outcomes'
 
 
 def main():
@@ -107,6 +116,7 @@ def main():
     parser.add_argument('--output-root', required=True, type=Path)
     parser.add_argument('--jobs', type=int, default=20)
     parser.add_argument('--worker-memory-mb', type=int, default=0)
+    parser.add_argument('--timeout-seconds', type=int, default=7200)
     operation = parser.add_mutually_exclusive_group()
     operation.add_argument('--prepare-only', action='store_true')
     operation.add_argument('--resume-prepared', action='store_true')
@@ -121,6 +131,12 @@ def main():
     inputs = ['config/simple.test.sdn', 'config/sdoctest.sdn',
               'src/app/test_runner_new/main.spl',
               'src/app/test_runner_new/test_runner_main.spl',
+              'src/app/test_daemon/light_protocol.spl',
+              'src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl',
+              'src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl',
+              'src/lib/nogc_sync_mut/spec.spl',
+              'src/lib/nogc_sync_mut/test_runner/test_runner_output.spl',
+              'src/lib/nogc_sync_mut/test_runner/sdoctest/runner.spl',
               'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl',
               'src/lib/nogc_sync_mut/test_runner/test_runner_args.spl',
               'src/lib/nogc_sync_mut/test_runner/test_runner_types.spl',
@@ -132,8 +148,10 @@ def main():
         output.mkdir(parents=True, exist_ok=False)
     elif not output.is_dir() or output.is_symlink():
         parser.error('prepared physical output root unavailable')
+    if not 1 <= args.timeout_seconds <= 86400:
+        parser.error('timeout-seconds must be 1..86400')
     command = [str(seed), 'test', '--whole', '--parallel', f'--max-workers={args.jobs}',
-               '--unstable', '--mode=interpreter', '--json']
+               '--unstable', '--mode=interpreter', '--format=text']
     if args.worker_memory_mb:
         command.append(f'--worker-memory-mb={args.worker_memory_mb}')
     environment = os.environ.copy()
@@ -144,7 +162,8 @@ def main():
     request = dict(schema='simple-phase1-whole-tests-v1', seed=str(seed),
                    seed_sha256=args.seed_sha256, source_root=str(source),
                    input_hashes=pins, command=command, jobs=args.jobs,
-                   worker_memory_mb=args.worker_memory_mb,
+                   worker_memory_mb=args.worker_memory_mb, timeout_seconds=args.timeout_seconds,
+                   report_format='text-diagnostic',
                    cache_policy='runner-owned compatible cache; no clean/force-rebuild',
                    admission='caller-owned; this callback creates no background owners')
     request_path = output / 'request.json'
@@ -163,10 +182,7 @@ def main():
     with (output / 'stdout.log').open('wb') as stdout, (output / 'stderr.log').open('wb') as stderr:
         child = subprocess.run(command, cwd=source, env=environment, stdout=stdout, stderr=stderr)
     try:
-        status, summary, reason = classify(child.returncode, read_summary_lines(output / 'stdout.log'))
-        partition_error = validate_partitions(summary)
-        if partition_error:
-            status, reason = 'INFRASTRUCTURE_FAILED', partition_error
+        status, summary, reason = classify(child.returncode, read_report(output / 'stdout.log'))
     except (ValueError, UnicodeError) as error:
         status, summary, reason = 'INFRASTRUCTURE_FAILED', None, str(error)
     unchanged = digest(seed) == args.seed_sha256 and all(digest(source / name) == sha for name, sha in pins.items())
@@ -176,7 +192,7 @@ def main():
                   process_exit=child.returncode, elapsed_seconds=time.monotonic()-started,
                   runner_summary=summary, reason=reason, request_sha256=digest(output / 'request.json'),
                   stdout_sha256=digest(output / 'stdout.log'), stderr_sha256=digest(output / 'stderr.log'),
-                  coverage_status='NOT_PROVEN: runner JSON has no discovered/excluded/aborted inventory totals',
+                  coverage_status='NOT_PROVEN: human text summary does not reconcile complete discovered, excluded, or aborted inventory',
                   phase='phase1', qualification='seed-only; not pure-Simple Phase2/product qualification')
     temporary = output / 'result.json.tmp'
     temporary.write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
