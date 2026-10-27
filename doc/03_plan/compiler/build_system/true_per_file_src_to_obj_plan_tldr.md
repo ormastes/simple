@@ -23,8 +23,19 @@ PRs, in order (consider landing 3 before 2c to avoid a rebase):
 3. Land #4962 (B1-B4 resolved per Fable re-review) + owner-pid lease for
    orphan picks + real per-file lane run. Several refs are branch-only
    (`work/per-file-single-process-pipeline`).
-4. Leaf-first scheduling, `[first-object] ms=` metric, <= 10 s gate.
-5. Invoker trait: process + fiber invokers, async node tasks (after #4910).
+4. G1: summary emits local concrete `need` rows + template `edge` rows
+   (`A<T> -> B<T>`); inference-dependent needs come from the module's own
+   post-mono `generic-spec` rows (`driver_hir_pipeline_passes.spl:428`). `.rr` =
+   reverse projection of that forward section.
+5. G2: fixpoint over edges seeded by needs; owners via P-G5b; COMDAT fallback
+   kept, incomplete plan logged+counted; `E-MONO-040 instance-not-in-tldr-plan`
+   (E-MONO-043 = open owner decision). G2b deletes the fallback only after a
+   stage3 run shows 0 fallbacks and 0 missing instances.
+6. G3: build instances before link once by owner in the per-file pool, reusing
+   P-G6 (`native_build_main.spl:1533`); link-time discovery is an error. Measure
+   instance count, duplicate builds = 0, time to first object.
+7. Leaf-first scheduling, `[first-object] ms=` metric, <= 10 s gate.
+8. Invoker trait: process + fiber invokers, async node tasks (after #4910).
 
 Every PR: spec red->green (plus `test/unit/` mirror where the divergence guard
 needs it), time-to-first-object, total, peak RSS under external harness
