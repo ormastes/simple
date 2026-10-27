@@ -16,12 +16,14 @@ The source repair extracts only ordered `--source` pairs and optional
 `--entry-closure` from the authenticated in-memory Stage2 argv. The same
 vector enters the Stage3 digest, all four worker launches, and the actual
 compiler command. Missing explicit roots, malformed options and invalid
-trailing worker policy refuse rather than discover defaults. The existing
-29 typed fields, RSS and ABI checks, and source-before/source-after guards
+trailing worker policy refuse rather than discover defaults. The worker keeps
+its 32-field control prefix, then validates a typed RSS mode and versioned
+source-policy tail. RSS and ABI checks, and source-before/source-after guards
 remain in place. No ambient manifest selects replacement roots.
 
 Six source-only controls in
-`scripts/bootstrap/tests/stage3-source-policy-test.py` passed once: exact
+`scripts/bootstrap/tests/stage3-source-policy-test.py` passed after the final
+worker ABI update: exact
 order/optional closure, malformed refusal, production reconstruction,
 production digest/worker argv equality, all four launch branches, and
 worker prefix policy/RSS validation. Shell syntax checks also passed.
@@ -34,7 +36,28 @@ prerequisites. The inherited HIR extractor defect is repaired and tracked
 separately in #3116; its negative real-engine boundary mutation refuses.
 The ABI fixture validates the transcript owner's single positive reserved
 budget row before comparing the original env/argv vector, with four refusal
-controls. Six original policy controls were not rerun.
+controls.
+
+## Coupled RSS mode transport found in review
+
+Review of the source-only fix found that the launcher resolved the selected
+`enforce` or `monitor` mode for its watchdog path, but the worker did not
+receive that mode for the nested `command-snapshot.shs` watchdog. After the
+service boundary, the nested watchdog could use its default when ambient state
+was absent or stale. The worker ABI now carries the already-resolved mode at
+field 33, validates the canonical values, and exports it before loading the
+command snapshot owner. All four launcher routes send the same value before
+the versioned source-policy marker.
+
+The actual-worker RSS control now sources the production authority and command
+snapshot helper and substitutes only a recording watchdog executable. It
+checks monitor with stale enforce ambient state, enforce with stale monitor,
+and enforce with no ambient value; it verifies the requested watchdog flag,
+unchanged cap arguments, monitor/enforce shard-budget behavior, session
+transport, and absence of a compiler environment assignment for the reserved
+mode. Launcher controls cover default, enforce, and monitor on every route.
+The compiler-ceiling/observation, RSS, HIR-cache and ABI-forwarding fixtures
+were migrated and passed. No compiler or Stage3 build ran.
 
 Independent source review remains required. Native/build/runtime
 qualification is UNEXECUTED; no Stage3 admission or release PASS is claimed.

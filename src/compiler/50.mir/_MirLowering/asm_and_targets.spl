@@ -19,7 +19,7 @@ use compiler.mir._MirLowering.function_lowering.*
 # - mir_lowering_ml.spl: ML blocks, async/await, custom blocks
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_cfg_select.{mir_cfg_select_arm}
+use compiler.mir.mir_cfg_select.{mir_cfg_select_arm, mir_cfg_item_enabled}
 use compiler.core.cfg_platform.{cfg_enabled_features}
 use compiler.mir.mir_verify_levels.{mir_verify_levels_from_env}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
@@ -133,6 +133,240 @@ impl MirLowering:
         if has_else:
             return self.lower_block(else_!) ?? self.builder.new_temp(MirType.unit())
         self.builder.new_temp(MirType.unit())
+
+    me decl_cfg_keep(name: text, cfg: [text], group: i64, arm: i64, winners: Dict<i64, i64>) -> bool:
+        """Decl-level @cfg gate: true = lower the item for THIS target.
+
+        group 0: a standalone guard, evaluated alone (fast path when unguarded).
+        group != 0: the item survives iff its arm is the group winning arm
+        (see cfg_group_winners). A malformed guard is a hard error.
+        """
+        if group != 0:
+            val won = winners.get(group) ?? -99
+            return won == arm
+        if cfg.len() == 0:
+            return true
+        val verdict = mir_cfg_item_enabled(cfg, self.target_context, cfg_enabled_features())
+        if verdict == -2:
+            self.error_fatal("malformed @cfg guard on {name}", nil)
+            return false
+        verdict == 1
+
+    me cfg_rec_cond(group: i64, arm: i64, cfg: [text]) -> text:
+        """Condition text of one grouped arm: cfg joined with " and ", "" for the else arm (cfg_arm == -1).
+
+        A numbered arm without a condition (or an arm index below -1) is malformed.
+        """
+        if arm == -1: return ""
+        if arm < -1 or cfg.len() == 0:
+            self.error_fatal("malformed @cfg guard in group {group}: arm {arm} has no condition", nil)
+            return "false"
+        cfg.join(" and ")
+
+    me cfg_group_winners(fn_values: [HirFunction], class_values: [HirClass], struct_values: [HirStruct],
+            enum_values: [HirEnum], trait_values: [HirTrait], const_values: [HirConst],
+            impls: [HirImpl]) -> Dict<i64, i64>:
+        """Winning arm per @cfg group (-99 = no arm survives), each group evaluated once.
+
+        Arms are ordered by cfg_arm with the else arm (cfg_arm == -1, per
+        hir_cfg_decl_select_design.md) last. mir_cfg_select_arm then gives
+        first-match-wins, else, or -1 (drop the group); -2 is malformed.
+        """
+        var rec_group: [i64] = []
+        var rec_arm: [i64] = []
+        var rec_cond: [text] = []
+        for f in fn_values:
+            if f.cfg_group != 0:
+                rec_group.push(f.cfg_group)
+                rec_arm.push(f.cfg_arm)
+                rec_cond.push(self.cfg_rec_cond(f.cfg_group, f.cfg_arm, f.cfg))
+        for c in class_values:
+            if c.cfg_group != 0:
+                rec_group.push(c.cfg_group)
+                rec_arm.push(c.cfg_arm)
+                rec_cond.push(self.cfg_rec_cond(c.cfg_group, c.cfg_arm, c.cfg))
+        for s in struct_values:
+            if s.cfg_group != 0:
+                rec_group.push(s.cfg_group)
+                rec_arm.push(s.cfg_arm)
+                rec_cond.push(self.cfg_rec_cond(s.cfg_group, s.cfg_arm, s.cfg))
+        for e in enum_values:
+            if e.cfg_group != 0:
+                rec_group.push(e.cfg_group)
+                rec_arm.push(e.cfg_arm)
+                rec_cond.push(self.cfg_rec_cond(e.cfg_group, e.cfg_arm, e.cfg))
+        for t in trait_values:
+            if t.cfg_group != 0:
+                rec_group.push(t.cfg_group)
+                rec_arm.push(t.cfg_arm)
+                rec_cond.push(self.cfg_rec_cond(t.cfg_group, t.cfg_arm, t.cfg))
+        for k in const_values:
+            if k.cfg_group != 0:
+                rec_group.push(k.cfg_group)
+                rec_arm.push(k.cfg_arm)
+                rec_cond.push(self.cfg_rec_cond(k.cfg_group, k.cfg_arm, k.cfg))
+        for im in impls:
+            if im.cfg_group != 0:
+                rec_group.push(im.cfg_group)
+                rec_arm.push(im.cfg_arm)
+                rec_cond.push(self.cfg_rec_cond(im.cfg_group, im.cfg_arm, im.cfg))
+        var winners: Dict<i64, i64> = {}
+        var ri = 0
+        while ri < rec_group.len():
+            val g = rec_group[ri]
+            ri = ri + 1
+            if winners.has(g):
+                continue
+            # Distinct arms of group g, sorted (else = -1 sorts last).
+            var arms: [i64] = []
+            var conds: [text] = []
+            var rj = 0
+            while rj < rec_group.len():
+                if rec_group[rj] == g and not arms.contains(rec_arm[rj]):
+                    var pos = 0
+                    while pos < arms.len() and cfg_arm_sort_key(arms[pos]) < cfg_arm_sort_key(rec_arm[rj]):
+                        pos = pos + 1
+                    arms.insert(pos, rec_arm[rj])
+                    conds.insert(pos, rec_cond[rj])
+                rj = rj + 1
+            val idx = mir_cfg_select_arm(conds, self.target_context, cfg_enabled_features())
+            if idx == -2:
+                self.error_fatal("malformed @cfg guard in group {g}", nil)
+                winners[g] = -99
+            elif idx < 0:
+                winners[g] = -99
+            else:
+                winners[g] = arms[idx]
+        winners
+
+    me apply_decl_cfg_guards(module: HirModule) -> HirModule:
+        """Drop decls whose @cfg guard is off for this MirTargetContext.
+
+        HIR is target-neutral and keeps every guarded variant; selection happens
+        here. A disabled impl/class also drops its methods (they live in
+        module.functions). Returns `module` untouched, with no allocation beyond
+        one .values() per kind, when no decl carries a guard.
+        """
+        val fn_values: [HirFunction] = module.functions.values()
+        val class_values: [HirClass] = module.classes.values()
+        val struct_values: [HirStruct] = module.structs.values()
+        val enum_values: [HirEnum] = module.enums.values()
+        val trait_values: [HirTrait] = module.traits.values()
+        val const_values: [HirConst] = module.constants.values()
+        var guarded = false
+        for f in fn_values:
+            if f.cfg_group != 0 or f.cfg.len() > 0: guarded = true
+        for c in class_values:
+            if c.cfg_group != 0 or c.cfg.len() > 0: guarded = true
+        for s in struct_values:
+            if s.cfg_group != 0 or s.cfg.len() > 0: guarded = true
+        for e in enum_values:
+            if e.cfg_group != 0 or e.cfg.len() > 0: guarded = true
+        for t in trait_values:
+            if t.cfg_group != 0 or t.cfg.len() > 0: guarded = true
+        for k in const_values:
+            if k.cfg_group != 0 or k.cfg.len() > 0: guarded = true
+        for im in module.impls:
+            if im.cfg_group != 0 or im.cfg.len() > 0: guarded = true
+        if not guarded:
+            return module
+        val winners = self.cfg_group_winners(fn_values, class_values, struct_values, enum_values,
+            trait_values, const_values, module.impls)
+        var dropped_fns: Dict<i64, bool> = {}
+        var dropped_types: Dict<i64, bool> = {}
+        var any_dropped = false
+        var fi = 0
+        while fi < fn_values.len():
+            val f: HirFunction = fn_values[fi]
+            if not self.decl_cfg_keep(f.name, f.cfg, f.cfg_group, f.cfg_arm, winners):
+                dropped_fns[self.symbol_id_value(f.symbol)] = true
+                any_dropped = true
+            fi = fi + 1
+        var kept_classes: Dict<SymbolId, HirClass> = {}
+        var ci = 0
+        while ci < class_values.len():
+            val c: HirClass = class_values[ci]
+            if self.decl_cfg_keep(c.name, c.cfg, c.cfg_group, c.cfg_arm, winners):
+                kept_classes[c.symbol] = c
+            else:
+                dropped_types[self.symbol_id_value(c.symbol)] = true
+                any_dropped = true
+                for mname, msym in c.methods:
+                    dropped_fns[self.symbol_id_value(msym)] = true
+            ci = ci + 1
+        var kept_structs: Dict<SymbolId, HirStruct> = {}
+        var si = 0
+        while si < struct_values.len():
+            val s: HirStruct = struct_values[si]
+            if self.decl_cfg_keep(s.name, s.cfg, s.cfg_group, s.cfg_arm, winners):
+                kept_structs[s.symbol] = s
+            else:
+                dropped_types[self.symbol_id_value(s.symbol)] = true
+                any_dropped = true
+            si = si + 1
+        var kept_enums: Dict<SymbolId, HirEnum> = {}
+        var ei = 0
+        while ei < enum_values.len():
+            val e: HirEnum = enum_values[ei]
+            if self.decl_cfg_keep(e.name, e.cfg, e.cfg_group, e.cfg_arm, winners):
+                kept_enums[e.symbol] = e
+            else:
+                dropped_types[self.symbol_id_value(e.symbol)] = true
+                any_dropped = true
+            ei = ei + 1
+        var kept_traits: Dict<SymbolId, HirTrait> = {}
+        var ti = 0
+        while ti < trait_values.len():
+            val t: HirTrait = trait_values[ti]
+            if self.decl_cfg_keep(t.name, t.cfg, t.cfg_group, t.cfg_arm, winners):
+                kept_traits[t.symbol] = t
+            else:
+                any_dropped = true
+            ti = ti + 1
+        var kept_consts: Dict<SymbolId, HirConst> = {}
+        var ki = 0
+        while ki < const_values.len():
+            val k: HirConst = const_values[ki]
+            if self.decl_cfg_keep(k.name, k.cfg, k.cfg_group, k.cfg_arm, winners):
+                kept_consts[k.symbol] = k
+            else:
+                any_dropped = true
+            ki = ki + 1
+        var kept_impls: [HirImpl] = []
+        var ii = 0
+        while ii < module.impls.len():
+            val im: HirImpl = module.impls[ii]
+            # An impl of a dropped class/struct/enum goes with its type.
+            var impl_type_dropped = false
+            match im.type_.kind:
+                case Named(impl_type_sym, _):
+                    impl_type_dropped = dropped_types.has(self.symbol_id_value(impl_type_sym))
+                case _: ()
+            if not impl_type_dropped and self.decl_cfg_keep("impl", im.cfg, im.cfg_group, im.cfg_arm, winners):
+                kept_impls.push(im)
+            else:
+                any_dropped = true
+                for mname, msym in im.methods:
+                    dropped_fns[self.symbol_id_value(msym)] = true
+            ii = ii + 1
+        if not any_dropped:
+            return module
+        var kept_fns: Dict<SymbolId, HirFunction> = {}
+        var gi = 0
+        while gi < fn_values.len():
+            val g: HirFunction = fn_values[gi]
+            if not dropped_fns.has(self.symbol_id_value(g.symbol)):
+                kept_fns[g.symbol] = g
+            gi = gi + 1
+        var out = module
+        out.functions = kept_fns
+        out.classes = kept_classes
+        out.structs = kept_structs
+        out.enums = kept_enums
+        out.traits = kept_traits
+        out.constants = kept_consts
+        out.impls = kept_impls
+        out
 
     me lower_inline_asm_match(arms: [HirAsmMatchArm]) -> LocalId?:
         """Lower target-qualified asm match by resolving against current target.
@@ -350,3 +584,7 @@ impl MirLowering:
 # ============================================================================
 # Exports
 # ============================================================================
+
+fn cfg_arm_sort_key(arm: i64) -> i64:
+    # else arm (cfg_arm == -1) sorts after every numbered arm.
+    if arm < 0: 1000000000 else: arm

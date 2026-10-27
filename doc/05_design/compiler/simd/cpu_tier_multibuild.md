@@ -135,6 +135,27 @@ reason; (b) **fallback path** — no dylib / corrupt descriptor ⇒ baseline run
 and baseline give byte-identical output (extends `check-vector-provider-levels.shs` parity lane and
 `check-vector-bitmap-x86-avx512.shs`); (d) cache-key equality for `x86-64-v3+avx2` vs `x86-64-v3`.
 
+### 7a. Rules added 2026-10-27 (user directives)
+
+- **Build vs run.** Every tier must COMPILE and LINK on any host, even one whose CPU lacks the tier
+  (e.g. no AVX-512 on the Broadwell dev host). Only RUN rows depend on the CPU: when cpuid/hwcap
+  reports the feature missing, the row is reported *blocked* with the reason via `planned(...)`,
+  never a build failure and never a silent `skip()`. Evidence on such hosts is static:
+  `llvm-objdump -d` shows tier instructions (zmm/EVEX for x86-64-v4) and the IR/object carries the
+  `target-cpu` attribute. The dispatcher test must prove that on the host it selects <= the host
+  tier (<= v3 on Broadwell) and falls back cleanly to the baseline.
+- **Five hosts.** The probe and tier builds cover Windows, Linux, macOS, FreeBSD and SimpleOS:
+  cpuid/xgetbv on x86, `getauxval` (Linux), `elf_aux_info` (FreeBSD), `sysctlbyname` (macOS) and
+  the SimpleOS kernel cpuid path. Each host has a modern SSpec row; an unreachable host stays a
+  visible blocked row.
+- **Static first, dylib second.** Per-tier static archives that link into per-tier binaries land
+  first (PR5a). The tier dylib and loader (PR7) follow.
+- **Default CPU.** The base x86_64 build is always `x86-64` (v1). There is no host-CPUID widening;
+  v2-v4 come only from tier artifacts (landed in PR2).
+- **`--cpu` flag bug.** `native-build --cpu=<lvl>` is silently ignored, and `--cpu <lvl>` fails
+  admission (BUG-XC-CPU-FLAG-IGNORED, `doc/08_tracking/bug/bug_xc_cpu_flag_ignored_2026-10-27.md`).
+  PR4 fixes it alongside `--cpu-tier`; acceptance is `x86_64_v4_cross_spec.spl`.
+
 ## 8. PR breakdown (small, Haiku-sized)
 
 1. **Tier model + canonicalizer** — `src/lib/common/cpu_tier/tier_id.spl` (parse, alias, implied
@@ -146,7 +167,7 @@ and baseline give byte-identical output (extends `check-vector-provider-levels.s
    `decl_attrs`); witness field. Spec: `test/01_unit/compiler/mir_opt/tier_unit_kind_spec.spl`.
 4. **Multi-compile schedule + `--cpu-tier`** — `native_build_main.spl` flag, `environment_variant_policy_sources_v1.spl`,
    per-tier job expansion. Spec: `test/02_integration/build/cpu_tier_multicompile_spec.spl`.
-5. **Multi-link + targets group** — `target_executor.spl` tier outputs, `build_targets.spl`
+5. **Multi-link + targets group** (split: **5a** per-tier static archives + per-tier binaries, lands before PR7; **5b** `include: config/build/cpu_tiers.sdn` + `group cpu_tiers` default false on #5064 syntax) — `target_executor.spl` tier outputs, `build_targets.spl`
    `include:`, `//tiers:*`, `scripts/build/build-cpu-tiers.shs`. Spec: `test/02_integration/build/cpu_tier_targets_group_spec.spl`.
 6. **Runtime probe → feature bitmap + selector twin** — `vector_level_dispatch.c` (bitmap probe,
    `simple_tier_select`), `src/lib/common/cpu_tier/tier_select.spl` twin, dual-run check hook.
