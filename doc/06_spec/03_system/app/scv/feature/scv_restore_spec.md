@@ -1,110 +1,99 @@
-# Scv Restore Specification
+# SCV Restore Specification
 
-> Tests covering REQ-004 restore operation views.
+This manual describes the executable scenarios in
+`test/03_system/app/scv/feature/scv_restore_spec.spl`.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+**Status:** authored; runtime execution and canonical doc generation are
+**NOT_RUN** because this worktree has no `bin/simple` or release runtime.
 
-<details>
-<summary>Full Scenario Manual</summary>
+## Purpose and scope
 
-# Scv Restore Specification
+The scenarios cover operation-view restore behavior and the read-only
+`restore-op --check <op>` preflight. The preflight validates a selected
+operation's view, commit, tree rows, reconstructed raw file bytes and bookmark
+rows. It checks for a pending snapshot WAL, confirms that current HEAD,
+workspace, bookmarks and status index agree, and refuses dirty tracked files
+and collisions with untracked target paths.
+
+The check makes no changes and does not repair or replay WAL state. It is an
+advisory inspection only: it does not authorize a later mutation or claim
+concurrent snapshot safety. Successful output states
+`mutation=unsupported`, `recovery=unsupported`, and
+`atomicity=unclaimed`, plus `operation_id_integrity=unavailable` because SCV's
+current operation IDs are not hashes of their payloads. The tracked-file
+inspection limit for trees, status, WAL, target files and tracked worktree
+files is 16 MiB. It also caps each target/current view at 10,000 rows and 64 MiB of raw
+bytes, direct operation/commit parents at 32, and bookmarks at 256. Small
+records are limited to 256 KiB.
+Immutable file/chunk reconstruction uses the current SCV structural storage
+owner after validating the tree's file and chunk reference prefixes. The
+preflight assumes the repository's `.scv` object-store directories are not
+replaced adversarially during inspection; the check has no cross-process
+mutation lease.
+
+The legacy `restore-op <op>` mutator remains sequential. It has no complete
+working-tree WAL or whole-view atomic publication protocol and may move HEAD to
+a historical operation. These scenarios do not claim to close those gaps.
+
+## Preconditions
+
+- Each fixture creates its own temporary repository and immutable SCV objects.
+- Worktree inspection uses the bounded no-follow read owner; unsupported host
+  containment or oversized tracked files fail closed.
+- A pending WAL is left untouched for normal recovery tooling or an operator
+  to resolve.
 
 ## Scenarios
 
-### REQ-004 restore operation views
+### REQ-004: legacy operation-view restore
 
-#### restores exact files and deletes tracked paths absent from the target tree
+**Restores exact files and deletes tracked paths absent from the target tree.**
+The fixture snapshots a base file, adds and snapshots a second file, then
+restores the first operation. It checks that the later tracked file is removed
+and the base bytes are present.
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+### REQ-004: read-only restore preflight
 
+**Validates a complete target without changing repository or worktree bytes.**
+The fixture saves a target and a later view, captures HEAD, workspace,
+bookmarks, status index, and worktree bytes, then verifies that the preflight
+reports advisory-only status and every captured subject is unchanged.
 
-<details>
-<summary>Executable SSpec</summary>
+**Rejects deleting a dirty tracked file.** A tracked file absent from the
+target is edited after the last snapshot. The preflight reports the conflicting
+path and preserves the unsaved bytes.
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+**Rejects overwriting a changed-size tracked file.** A tracked file still
+present in the target is edited to different bytes and length. The preflight
+reports a dirty tracked path and preserves those bytes.
 
-```simple
-# @req REQ-SSPEC-SYSTEM
-# @req REQ-004
-```
+**Rejects an untracked destination collision.** An untracked file occupies a
+path present in the target. The preflight reports the path and leaves its bytes
+untouched.
 
-</details>
+**Refuses unresolved WAL without replay.** The fixture creates an incomplete
+snapshot WAL record. The preflight reports pending recovery and leaves HEAD,
+workspace, and WAL bytes unchanged.
 
-## At a Glance
+**Rejects current HEAD/workspace drift.** The fixture alters workspace metadata
+without changing HEAD. The preflight reports the mismatch and does not repair
+either value.
 
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/03_system/app/scv/feature/scv_restore_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
+**Rejects a missing operation.** An absent operation ID returns an error while
+HEAD remains unchanged.
 
-## Overview
+**Rejects a missing target chunk.** After a target chunk is removed, the
+preflight reports the missing immutable object and leaves worktree bytes and
+HEAD unchanged.
 
-Tests covering REQ-004 restore operation views.
-- REQ-004 restore operation views
+**Rejects conflicting target path shapes.** The fixture constructs verified
+file objects for both `a` and `a/b`. The preflight rejects the file/descendant
+collision before reporting any restore plan.
 
-## Scenario Summary
+## Running and interpreting the evidence
 
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-004`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `dbfdb7d502b0489221a5cd3f03c93f5ce43d37b43f5cb150e8cd5a19533fce90`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `dbfdb7d502b0489221a5cd3f03c93f5ce43d37b43f5cb150e8cd5a19533fce90`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `dbfdb7d502b0489221a5cd3f03c93f5ce43d37b43f5cb150e8cd5a19533fce90`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/03_system/app/scv/feature/scv_restore_spec.spl
-mirror: doc/06_spec/03_system/app/scv/feature/scv_restore_spec.md (current)
-findings: 4 blockers: 1
-  narrative=100 structure=90 oracle=50
-  traceability=100 evidence=100 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=85; blocker cap makes effective=49
-doc/06_spec/03_system/app/scv/feature/scv_restore_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/scv/feature/scv_restore_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/scv/feature/scv_restore_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/03_system/app/scv/feature/scv_restore_spec.spl:35:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'restores exact files and deletes tracked paths absent from the target tree' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-<!-- sspec-maintain:scorecard:end -->
+Run the system spec with the admitted pure-Simple runtime and regenerate this
+manual through SPipe docgen before claiming executable PASS or generated-manual
+quality. A source-level assertion is not a runtime result. Errors from the
+preflight mean no mutation was attempted; users must separately decide how to
+resolve dirty data, collisions, or pending WAL state.
