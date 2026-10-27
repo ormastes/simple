@@ -25,6 +25,9 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 use std.io_runtime.{file_rename}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.path.{dirname}
 extern fn rt_file_create_excl(path: text, content: text) -> bool
 extern fn rt_file_sync(path: text) -> bool
 extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
@@ -253,6 +256,35 @@ fn atomic_write_exclusive(path: text, content: text) -> bool:
     rt_file_delete(staged_path)
     rt_dir_remove(stage_dir, false)
     status == 1
+
+# Byte-exact replacement for arbitrary user destinations. The secure-temp
+# owner exclusively creates a private directory on the destination filesystem;
+# only our exclusively-created payload is written, synced, renamed or removed.
+# Never borrow destination.tmp or destination.lock: those may be user files.
+# Whole-payload replacement needs no shared read/modify lock. Concurrent writers
+# retain ordinary atomic-replace semantics. This does not claim directory fsync.
+fn atomic_write_bytes(path: text, content: [u8]) -> bool:
+    val parent = dirname(path)
+    val staging = match secure_temp_dir(parent, ".simple-atomic-bytes-"):
+        Ok(directory): directory
+        Err(error): return false
+    val temp_path = "{staging}/payload"
+    if not rt_file_create_excl(temp_path, ""):
+        dir_remove(staging, false)
+        return false
+    if not file_write_bytes(temp_path, content):
+        file_delete(temp_path)
+        dir_remove(staging, false)
+        return false
+    if not rt_file_sync(temp_path):
+        file_delete(temp_path)
+        dir_remove(staging, false)
+        return false
+    val success = file_rename(temp_path, path)
+    if not success:
+        file_delete(temp_path)
+    dir_remove(staging, false)
+    success
 
 # Write multiple files atomically: acquire all locks, write via temp, rename all, release all.
 # Locks are acquired in sorted path order to prevent deadlocks.

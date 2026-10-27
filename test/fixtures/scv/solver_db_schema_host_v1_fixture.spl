@@ -1,0 +1,51 @@
+use std.spec.*
+use std.scv.solver_contract_v1.*
+use std.scv.solver_host_v1.{solver_host_result_v1}
+use std.scv.solver_db_adapters_v1.*
+use std.scv.db_schema_identity_v2.*
+use std.scv.db_schema_codec_v2.*
+use std.scv.db_schema_merge_v2.*
+use test.fixtures.scv.db_schema_v2_fixture.{setup_scv_schema_uid, exercise_scv_schema_add}
+
+fn setup_scv_fixture() -> DbSchemaV2:
+    val empty = db_schema_create_v2(setup_scv_schema_uid("table", 1u64, false), "tasks").unwrap()
+    exercise_scv_schema_add(empty, 1u64, "title", false, DbDefaultRuleV2.NoDefault)
+
+fn freeze_scv_candidate(base: DbSchemaV2, left: DbSchemaV2, right: DbSchemaV2) -> SolveRequestV1:
+    val binding = SolveBindingV1(repository: "fixture-repository", namespace: base.table_uid.database_namespace, domain: "db.schema", base_revision: base.revision, left_revision: left.revision, right_revision: right.revision, base_model_id: solver_db_schema_model_id_v1(base).unwrap(), left_model_id: solver_db_schema_model_id_v1(left).unwrap(), right_model_id: solver_db_schema_model_id_v1(right).unwrap(), expected_root: solver_db_schema_model_id_v1(base).unwrap(), schema_revision: base.revision, policy_revision: "previous-accepted-db-policy", routing_revision: "previous-accepted-db-route", identity_map_revision: "frozen-db-identity-map", parser_lock_digest: "accepted-schema-parser-pin", solver_lock_digest: "accepted-schema-solver-pin", profile_digest: "schema-v2-profile", configuration_digest: "accepted-db-config", operation_bundle_digest: "schema-applied-operation-receipts-v2", authorization_scope: "draft-db-schema")
+    SolveRequestV1(request_id: "schema-host-request", binding: binding, logical_work_budget: 10000000, memory_budget: 10000000, cancelled: false)
+
+fn exercise_scv_operation(request: SolveRequestV1, policy: SolverHostPolicyV1, base: DbSchemaV2, left: DbSchemaV2, right: DbSchemaV2) -> DbSchemaSolveV1:
+    solve_db_schema_v1(request, policy, base, left, right).unwrap()
+
+fn collect_scv_evidence(solved: DbSchemaSolveV1) -> SolveResultV1:
+    expect(solved.result.validation_status).to_equal("external-validation-required")
+    expect(solved.result.required_checks.len()).to_equal(8)
+    solved.result
+
+fn check_exact_subject(result: SolveResultV1, candidate: DbSchemaV2):
+    val digest = solver_db_schema_model_id_v1(candidate).unwrap()
+    expect(result.candidate_root.unwrap()).to_equal(digest)
+    for check in result.required_checks: expect(check.subject_digest).to_equal(digest)
+
+fn check_byte_preservation(solved: DbSchemaSolveV1, base: DbSchemaV2, left: DbSchemaV2, right: DbSchemaV2):
+    expect(db_schema_bytes_v2(solved.base).unwrap()).to_equal(db_schema_bytes_v2(base).unwrap())
+    expect(db_schema_bytes_v2(solved.left).unwrap()).to_equal(db_schema_bytes_v2(left).unwrap())
+    expect(db_schema_bytes_v2(solved.right).unwrap()).to_equal(db_schema_bytes_v2(right).unwrap())
+
+fn check_expected_conflicts(result: SolveResultV1, expected: [text]):
+    var codes: [text] = []
+    for conflict in result.conflicts: codes.push(conflict.code)
+    expect(codes).to_equal(expected)
+    if expected.len() > 0:
+        expect(result.status).to_equal("needs_inputs")
+        expect(result.candidate_root).to_be_nil()
+
+fn check_cold_warm_equivalence(request: SolveRequestV1, policy: SolverHostPolicyV1, base: DbSchemaV2, left: DbSchemaV2, right: DbSchemaV2):
+    val cold = solve_db_schema_v1(request, policy, base, left, right).unwrap()
+    val warm = solve_db_schema_v1(request, policy, base, left, right).unwrap()
+    expect(cold.result.input_binding_key).to_equal(warm.result.input_binding_key)
+    expect(db_schema_bytes_v2(cold.proposal.unwrap().candidate.unwrap()).unwrap()).to_equal(db_schema_bytes_v2(warm.proposal.unwrap().candidate.unwrap()).unwrap())
+
+export setup_scv_fixture, freeze_scv_candidate, exercise_scv_operation, collect_scv_evidence
+export check_exact_subject, check_byte_preservation, check_expected_conflicts, check_cold_warm_equivalence

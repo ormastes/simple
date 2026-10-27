@@ -1,16 +1,106 @@
 # TLDR import route (true_per_file_src_to_obj_plan.md PR2c), behind
 # SIMPLE_TLDR_IMPORTS=1 (default off: the closure route is unchanged).
 #
-# With the flag on a file worker parses ONLY its claimed files. Every import
-# resolves through the imported module's TLDR summary (tldr_summary_ensure_v1,
-# produced on demand by a line scan, never a parse). Imported decls are lazy
-# (module_id, stable_symbol_id) handles filled through read_tldr; a generic
-# body is sliced lazily from its one defining module. A module whose summary
-# carries fallback rows loads its own source only (counted, `[tldr-fallback]`).
-# A closure walk with the flag on is a hard error (tldr_closure_walk_check_v1).
+# Production phase 2 uses tldr_route_frozen_inputs_v1 over its admitted source
+# owners. Claimed modules parse their source; unclaimed interfaces also run
+# the existing selected parser, with frozen-only fallback for body contracts.
+# The older filesystem helpers below remain compatibility/test APIs. They do
+# not authorize production source reads. Closure walks remain hard errors.
 use std.io_runtime.{file_exists, file_read}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+pub use compiler.driver.driver_tldr_import_flag_v1.{tldr_imports_flag_on_v1,
+    tldr_imports_memo_reset_v1, tldr_imports_enabled_v1}
 use compiler.driver.cache.tldr_summary_v1.{tldr_summary_ensure_v1, read_tldr}
+use compiler.driver.cache.tldr_summary_v1.{tldr_summary_entries_v1}
+use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_tldr_stub_source_v1}
+use compiler.driver.cache.tldr_frozen_projection_v1.{tldr_frozen_span_projection_v1}
+
+# Compile-owned projection of an already admitted inventory. No path is opened
+# here. The parser receives parse_texts, while SourceFile and surface identity
+# continue to receive the original frozen bytes, never this projection.
+struct TldrFrozenRoutePlanV1:
+    parse_texts: [text]
+    source_parses: i64
+    interface_parses: i64
+    fallbacks: i64
+
+pub fn tldr_route_frozen_inputs_v1(paths: [text], modules: [text],
+        contents: [text], claimed: [bool]) -> Result<TldrFrozenRoutePlanV1, text>:
+    if paths.len() != modules.len() or paths.len() != contents.len() or paths.len() != claimed.len():
+        return Err("TLDR-IMPORTS-E-FROZEN-INVENTORY: unaligned source owners")
+    var universe: Dict<text, i64> = {}
+    var source_paths: Dict<text, bool> = {}
+    var index = 0
+    for name in modules:
+        if name == "" or universe.contains_key(name):
+            return Err("TLDR-IMPORTS-E-FROZEN-INVENTORY: empty or duplicate module {name}")
+        if paths[index] == "" or source_paths.contains_key(paths[index]):
+            return Err("TLDR-IMPORTS-E-FROZEN-INVENTORY: empty or duplicate path")
+        source_paths[paths[index]] = true
+        universe[name] = index
+        index = index + 1
+    # Validate every declared module once, rather than discovering a closure
+    # through the worktree resolver. Relative/legacy imports need a witnessed
+    # resolver adapter and are deliberately refused by this first caller.
+    for content in contents:
+        if content.contains("pc{"):
+            return Err("TLDR-IMPORTS-E-GLOBAL-FACET: advice requires admitted candidate scope")
+        for line in content.split("\n"):
+            if line.trim().starts_with("import "):
+                return Err("TLDR-IMPORTS-E-UNSUPPORTED-IMPORT: legacy import syntax")
+            if line.starts_with("macro ") or line.starts_with("pub macro "):
+                return Err("TLDR-IMPORTS-E-GLOBAL-FACET: macro scope is not admitted")
+        for spec in tldr_route_import_specs_v1(content):
+            val (owner, names) = spec
+            if not universe.contains_key(owner):
+                return Err("TLDR-IMPORTS-E-DECLARED-UNIVERSE: {owner}")
+    var texts: [text] = []
+    var source_parses: i64 = 0
+    var interface_parses: i64 = 0
+    var fallbacks: i64 = 0
+    index = 0
+    while index < paths.len():
+        if claimed[index]:
+            texts.push(contents[index])
+            source_parses = source_parses + 1
+        else:
+            val rows = tldr_summary_entries_v1(modules[index], contents[index])
+            # Trait defaults/impl/generic bodies carry semantic payload beyond
+            # an ordinary interface header. Parse their frozen source rather
+            # than allowing the interface converter to erase that payload.
+            var body_contract = false
+            for line in contents[index].split("\n"):
+                # Module markers can precede imports, where the summary's
+                # declaration-attribute accumulator deliberately clears them.
+                # Retain raw frozen source until the summary owns those facts.
+                if line.trim().starts_with("@"):
+                    body_contract = true
+                if (line.starts_with(" ") or line.starts_with("\t")) and (
+                        line.trim().starts_with("fn ") or line.trim().starts_with("extern ") or
+                        line.trim().starts_with("class ") or line.trim().starts_with("struct ")):
+                    body_contract = true
+            for row in rows:
+                if (row.starts_with("trait|") or row.starts_with("impl|") or row.starts_with("generic|") or
+                        row.starts_with("type|") or row.starts_with("const|")):
+                    body_contract = true
+            val supported = if body_contract: nil else: module_surface_tldr_stub_source_v1(rows)
+            # Summary convertibility admits the interface, but its sorted
+            # source stub is not a coordinate map. Parse an exact-width frozen
+            # projection so every retained span remains in the source domain.
+            val interface_text = if supported == nil: nil else: tldr_frozen_span_projection_v1(contents[index])
+            match interface_text:
+                case Some(projected):
+                    texts.push(projected)
+                    interface_parses = interface_parses + 1
+                case nil:
+                    # Conservative fallback parses this module's frozen bytes.
+                    # It cannot resolve imports or open a live source path.
+                    texts.push(contents[index])
+                    source_parses = source_parses + 1
+                    fallbacks = fallbacks + 1
+        index = index + 1
+    Ok(TldrFrozenRoutePlanV1(parse_texts: texts, source_parses: source_parses,
+        interface_parses: interface_parses, fallbacks: fallbacks))
 
 struct TldrImportHandleV1:
     module_id: text
@@ -25,24 +115,6 @@ struct TldrRouteResultV1:
     fallback_modules: [text]
     handles: [TldrImportHandleV1]
     missing: [text]
-
-pub fn tldr_imports_flag_on_v1(value: text) -> bool:
-    value == "1"
-
-# Read once per process (-1 unread, 0 off, 1 on); reset only by tests.
-var tldr_imports_memo_v1: i64 = -1
-
-pub fn tldr_imports_memo_reset_v1():
-    tldr_imports_memo_v1 = -1
-
-pub fn tldr_imports_enabled_v1() -> bool:
-    if tldr_imports_memo_v1 < 0:
-        var on = false
-        match env_get_nullable("SIMPLE_TLDR_IMPORTS"):
-            case Some(v): on = tldr_imports_flag_on_v1(v)
-            case nil: on = false
-        tldr_imports_memo_v1 = if on: 1 else: 0
-    tldr_imports_memo_v1 == 1
 
 # PM3: per-file unit lane switch SIMPLE_UNIT_TLDR_IMPORTS. Unset -> on exactly when
 # the unit lane is active; "0" -> off (old import-HIR path); anything else -> on.
@@ -156,6 +228,8 @@ fn _tr_handles_for_v1(module_id: text, rows: [text], names: [text]) -> ([TldrImp
             missing.push(module_id + "." + name)
     (handles, missing)
 
+# Filesystem compatibility helper; production compilation uses
+# tldr_route_frozen_inputs_v1 and never calls this live-file adapter.
 # Route one worker batch. `claimed` are the source paths this worker owns (the
 # only files the caller parses); `module_paths` maps an imported module id to
 # its source path (the frozen inventory). Imported sources are read as text for
@@ -231,6 +305,7 @@ pub fn tldr_import_generic_body_v1(handle: TldrImportHandleV1, source_path: text
     nil
 
 export TldrImportHandleV1, TldrRouteResultV1
+export TldrFrozenRoutePlanV1, tldr_route_frozen_inputs_v1
 export tldr_imports_flag_on_v1, tldr_imports_enabled_v1, tldr_closure_walk_check_v1
 export NATIVE_UNIT_TLDR_IMPORTS_ENV_V1, unit_tldr_imports_flag_v1, unit_tldr_imports_memo_reset_v1
 export unit_tldr_imports_enabled_v1, tldr_guards_active_v1

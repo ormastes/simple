@@ -37,7 +37,10 @@ fn scv_checkpoint(root: text) -> text:
     var row_list: [text] = []
     for rel in rels:
         val src = "{scv_repo_dir(root)}/{rel}"
-        row_list.push("{scv_content_id_for_file(src)} {rel}\n")
+        val source_id = match scv_content_id_for_file(src):
+            Ok(id): id
+            Err(error): return error
+        row_list.push("{source_id} {rel}\n")
     val rows = row_list.join("")
     val manifest = "format: 1\nhead_op: {scv_current_op(root)}\ncommit: {scv_read_workspace_commit(root)}\nfiles: {rels.len()}\n--\n{rows}"
     val id = scv_hash_text("checkpoint", manifest)
@@ -51,7 +54,8 @@ fn scv_checkpoint(root: text) -> text:
         scv_create_parent_dir(dst)
         if not file_copy("{scv_repo_dir(root)}/{rel}", dst):
             return "ERROR checkpoint copy failed: {rel}\n"
-    scv_write_text("{stage}/manifest.sdn", manifest)
+    if not scv_write_text("{stage}/manifest.sdn", manifest):
+        return "ERROR checkpoint manifest write failed\n"
     if not file_rename(stage, final_dir):
         return "ERROR checkpoint publish failed: {id}\n"
     scv_journal_record_event(root, scv_current_op(root), "checkpoint", id, id)
@@ -88,7 +92,7 @@ fn scv_checkpoint_verify(root: text, id: text) -> text:
         val data = "{dir}/data/{rel}"
         if not file_exists(data):
             errors = errors + "missing checkpoint file: {rel}\n"
-        elif scv_content_id_for_file(data) != sha:
+        elif scv_content_id_for_file(data) != Ok(sha):
             errors = errors + "checkpoint file hash mismatch: {rel}\n"
         checked = checked + 1
     if checked == 0 and errors == "":

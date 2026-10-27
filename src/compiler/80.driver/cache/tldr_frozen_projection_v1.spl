@@ -1,0 +1,46 @@
+# Source-coordinate-preserving interface projection for frozen TLDR admission.
+# The existing skeleton owns function/string/indentation classification. This
+# adapter preserves every byte position and newline, rather than attaching the
+# sorted summary stub's offsets to the original source identity.
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+
+pub fn tldr_frozen_span_projection_v1(source: text) -> text?:
+    # This first adapter has an explicit ASCII byte policy. Do not infer byte
+    # offsets from Unicode character widths; callers fall back to frozen bytes.
+    for offset in 0..source.len():
+        if source.byte_at(offset) >= 128: return nil
+    val originals = source.split("\n")
+    val skeletons = module_surface_skeleton_v1(source).split("\n")
+    if originals.len() != skeletons.len(): return nil
+    var out: [text] = []
+    var index = 0
+    while index < originals.len():
+        val original = originals[index]
+        val cr = original.ends_with("\r")
+        val body = if cr: original.substring(0, original.len() - 1) else: original
+        val skeleton = skeletons[index]
+        if body == skeleton:
+            out.push(original)
+        else:
+            var replacement = ""
+            if skeleton.trim() == "pass_do_nothing":
+                var indent = 0
+                while indent < body.len() and (body[indent:indent + 1] == " " or body[indent:indent + 1] == "\t"):
+                    indent = indent + 1
+                if indent >= body.len(): return nil
+                # One inert expression is enough for an interface-only block.
+                # Headers, params, module markers and following tokens stay at
+                # their original offsets; this AST never supplies a HIR body.
+                replacement = body.substring(0, indent) + "0"
+            elif skeleton != "":
+                return nil
+            replacement = replacement + " ".repeat(body.len() - replacement.len())
+            if replacement.len() != body.len(): return nil
+            val ending = if cr: "\r" else: ""
+            out.push(replacement + ending)
+        index = index + 1
+    val projected = out.join("\n")
+    if projected.len() != source.len(): return nil
+    Some(projected)
+
+export tldr_frozen_span_projection_v1

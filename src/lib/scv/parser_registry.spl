@@ -1,9 +1,11 @@
 # SCV parser registry, language map, and locked WASM artifacts.
 
 use app.io.mod (file_exists, file_read, dir_create)
-use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
 use std.scv.core.{scv_parsers_dir, scv_parser_lock_path, scv_langmap_path, scv_line_set_contains, scv_object_ref_safe}
 use std.scv.store.{scv_repo_exists, scv_content_id_for_file, scv_write_text, scv_i64_bytes_to_u8}
+use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_content_id}
+use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 
 fn scv_path_extension(path: text) -> text:
     val parts = path.split(".")
@@ -97,7 +99,9 @@ fn scv_locked_parser_error(root: text, language: text, grammar: text, version: t
             val raw = file_read_bytes(artifact_path) ?? []
             if not scv_wasm_magic_ok(raw):
                 return "ERROR parser artifact is not wasm: {parts[1]} {parts[2]}"
-            val actual = scv_content_id_for_file(artifact_path)
+            val actual = match scv_content_id_for_file(artifact_path):
+                Ok(id): id
+                Err(error): return error
             if actual != parts[6]:
                 return "ERROR parser artifact hash mismatch: {parts[1]} {parts[2]}"
             return ""
@@ -180,7 +184,8 @@ fn scv_parser_lock_replace(root: text, language: text, grammar: text, line: text
             next = next + trimmed + "\n"
     if not replaced:
         next = next + line
-    scv_write_text(lock_path, next)
+    if not scv_write_text(lock_path, next):
+        return "ERROR cannot publish parser lock\n"
     next
 
 fn scv_parser_install(root: text, language: text, grammar: text, version: text, wasm_path: text, abi: text) -> text:
@@ -190,16 +195,22 @@ fn scv_parser_install(root: text, language: text, grammar: text, version: text, 
         return "ERROR unsafe parser metadata\n"
     if not file_exists(wasm_path):
         return "ERROR missing parser artifact\n"
-    val raw = file_read_bytes(wasm_path) ?? []
+    val buffer = scv_file_buffer_read(wasm_path)
+    val hash = match scv_file_buffer_content_id(buffer):
+        Ok(id): id
+        Err(error): return error
+    val raw = buffer.bytes
     if not scv_wasm_magic_ok(raw):
         return "ERROR parser artifact is not wasm\n"
-    val hash = scv_content_id_for_file(wasm_path)
     val parser_dir = scv_parsers_dir(root)
     dir_create(parser_dir, true)
     val dest = scv_parser_artifact_expected_path(root, hash)
-    file_write_bytes(dest, raw)
+    if not atomic_write_bytes(dest, raw):
+        return "ERROR cannot publish parser artifact\n"
     val line = "parser|{language}|{grammar}|{version}|wasm|{abi}|{hash}|{dest}\n"
-    scv_parser_lock_replace(root, language, grammar, line)
+    val locked = scv_parser_lock_replace(root, language, grammar, line)
+    if locked.starts_with("ERROR"):
+        return locked
     "parser-install {language} {grammar} {version} runtime=wasm abi={abi} hash={hash}\n"
 
 fn scv_parser_verify(root: text) -> text:
@@ -237,7 +248,9 @@ fn scv_parser_verify(root: text) -> text:
         val raw = file_read_bytes(artifact_path) ?? []
         if not scv_wasm_magic_ok(raw):
             return "ERROR parser artifact is not wasm: {parts[1]} {parts[2]}\n"
-        val actual = scv_content_id_for_file(artifact_path)
+        val actual = match scv_content_id_for_file(artifact_path):
+            Ok(id): id
+            Err(error): return error
         if actual != parts[6]:
             return "ERROR parser artifact hash mismatch: {parts[1]} {parts[2]}\n"
         checked = checked + 1

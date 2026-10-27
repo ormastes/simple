@@ -1,0 +1,109 @@
+"""Accepted-route matching: all overlaps conflict; candidate rules never decide.
+
+Glob matching is bounded dynamic programming, not recursive backtracking. `*`
+stays within a path component; `**` spans components; `**/` also matches none.
+"""
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.scv.scv_config_fields_v1.*
+use std.scv.scv_config_types_v1.{ScvRouteV1, ScvConfigV1}
+
+pub fn scv_config_routes_parse_v1(bytes: [u8], limits: SdnStrictLimitsV1) -> Result<[ScvRouteV1], text>:
+    var value = SdnValue.Null
+    match sdn_parse_strict_bytes_v1(bytes, limits):
+        case Ok(document): value = document.value
+        case Err(issue): return Err(issue.code + ": routes line " + issue.line.to_text() + ": " + issue.message)
+    val root = scv_config_dict_v1(value, "routes", ["schema_version", "routes"])?
+    scv_config_int_v1(root["schema_version"], "routes.schema_version", 1, 1)?
+    var routes: [ScvRouteV1] = []
+    match root["routes"]:
+        case Table(headers, rows):
+            if headers != ["id", "domain", "path", "profile"]: return Err("table_headers: routes require id,domain,path,profile")
+            if rows.len() == 0 or rows.len() > 256: return Err("route_limit: require 1..256 routes")
+            var ids: [text] = []
+            var patterns: [text] = []
+            for row in rows:
+                if row.len() != 4: return Err("row_width: routes")
+                val id = scv_config_text_v1(row[0], "routes.id")?
+                val domain = scv_config_enum_v1(row[1], "routes.domain", ["configuration_policy", "configuration", "database_schema", "database_data", "source", "document", "opaque"])?
+                val path = scv_config_text_v1(row[2], "routes.path")?
+                val profile = scv_config_text_v1(row[3], "routes.profile")?
+                if id.len() > 128 or profile.len() > 128: return Err("text_limit: routes id/profile")
+                if not scv_config_relative_path_v1(path, true): return Err("unsafe_path: routes.path")
+                if ids.contains(id): return Err("duplicate_route_id: " + id)
+                # Prove disjointness before accepting route declarations.
+                if patterns.contains(path): return Err("ambiguous_route: " + path)
+                ids.push(id)
+                patterns.push(path)
+                val proposed = ScvRouteV1(id: id, domain: domain, path: path, profile: profile)
+                for previous in routes:
+                    if scv_config_routes_may_overlap_v1(previous.path, path): return Err("ambiguous_route: " + previous.id + "/" + id)
+                routes.push(proposed)
+        case _: return Err("wrong_type: routes requires named table")
+    Ok(routes)
+
+pub fn scv_config_glob_matches_v1(pattern: text, path: text) -> bool:
+    if not scv_config_relative_path_v1(pattern, true) or not scv_config_relative_path_v1(path, false): return false
+    var state: [bool] = []
+    for position in 0..path.len() + 1: state.push(position == 0)
+    var offset = 0
+    while offset < pattern.len():
+        val token = pattern.byte_at(offset)
+        val recursive = token == 42 and offset + 1 < pattern.len() and pattern.byte_at(offset + 1) == 42
+        val directories = recursive and offset + 2 < pattern.len() and pattern.byte_at(offset + 2) == 47
+        var next: [bool] = []
+        var seen = false
+        for position in 0..path.len() + 1:
+            var matched = false
+            if directories:
+                matched = state[position] or (position > 0 and path.byte_at(position - 1) == 47 and seen)
+                seen = seen or state[position]
+            elif token == 42:
+                matched = state[position]
+                if position > 0 and (recursive or path.byte_at(position - 1) != 47):
+                    matched = matched or next[position - 1]
+            elif position > 0:
+                matched = state[position - 1] and token == path.byte_at(position - 1)
+            next.push(matched)
+        state = next
+        offset = offset + (if directories: 3 else: if recursive: 2 else: 1)
+    state[path.len()]
+
+# Conservative declaration admission: exact subjects are matched precisely;
+# wildcard pairs must prove disjoint literal prefixes or suffixes. More complex
+# overlap policies are unsupported and explicitly rejected, not guessed.
+pub fn scv_config_routes_may_overlap_v1(left: text, right: text) -> bool:
+    if not left.contains("*"): return scv_config_glob_matches_v1(right, left)
+    if not right.contains("*"): return scv_config_glob_matches_v1(left, right)
+    val left_parts = left.split("*")
+    val right_parts = right.split("*")
+    val left_prefix = left_parts[0]
+    val left_suffix = left_parts[left_parts.len() - 1]
+    val right_prefix = right_parts[0]
+    val right_suffix = right_parts[right_parts.len() - 1]
+    if not left_prefix.starts_with(right_prefix) and not right_prefix.starts_with(left_prefix): return false
+    if not left_suffix.ends_with(right_suffix) and not right_suffix.ends_with(left_suffix): return false
+    true
+
+pub fn scv_config_route_v1(accepted: ScvConfigV1, path: text) -> Result<ScvRouteV1, text>:
+    if not accepted.validated or accepted.routes_sha256 == "": return Err("unvalidated_routes: explicit accepted routes required")
+    if not scv_config_relative_path_v1(path, false): return Err("unsafe_path: route subject")
+    var matches: [ScvRouteV1] = []
+    for route in accepted.routes:
+        if scv_config_glob_matches_v1(route.path, path): matches.push(route)
+    if matches.len() > 1: return Err("ambiguous_route: " + path)
+    if matches.len() == 0: return Err("unknown_domain: " + path + "; opaque_conflict required")
+    Ok(matches[0])
+
+pub fn scv_config_route_transition_v1(accepted: ScvConfigV1, old_path: text, new_path: text, bound_old_domain: text) -> Result<ScvRouteV1, text>:
+    val old_route = scv_config_route_v1(accepted, old_path)?
+    if old_route.domain != bound_old_domain: return Err("old_role_mismatch: accepted metadata disagrees with accepted route")
+    # Resolve BOTH names with old accepted routes. An edited routes file is
+    # never consulted to judge its own weakening or a protected-file rename.
+    val new_route = scv_config_route_v1(accepted, new_path)?
+    if old_route.domain != new_route.domain or old_route.profile != new_route.profile:
+        return Err("role_transition_requires_old_policy: " + old_route.domain + " -> " + new_route.domain)
+    Ok(new_route)
+
+export scv_config_routes_parse_v1, scv_config_glob_matches_v1, scv_config_routes_may_overlap_v1, scv_config_route_v1, scv_config_route_transition_v1

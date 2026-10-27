@@ -1,0 +1,48 @@
+# Native configuration inspection. Schema validity is not publication authority.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.scv.scv_config_v1.{scv_config_load_v1}
+use std.scv.scv_config_routes_v1.{scv_config_route_v1}
+
+struct ScvConfigCommandResultV1:
+    exit_code: i64
+    output: text
+
+fn scv_config_command_result_v1(code: i64, status: text, detail: text,
+        source_digest: text = "", routes_digest: text = "") -> ScvConfigCommandResultV1:
+    val fields: Dict<text, SdnValue> = {
+        "schema_version": SdnValue.Int(1),
+        "command": SdnValue.String("scv.config"),
+        "status": SdnValue.String(status),
+        "detail": SdnValue.String(detail),
+        "source_sha256": SdnValue.String(source_digest),
+        "routes_sha256": SdnValue.String(routes_digest),
+        "publication_authorized": SdnValue.Bool(false)
+    }
+    ScvConfigCommandResultV1(exit_code: code,
+        output: sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn scv_config_command_v1(root: text, args: [text]) -> ScvConfigCommandResultV1:
+    if args.len() == 0:
+        return scv_config_command_result_v1(1, "invalid_request", "Use scv config check or scv config route <repository-relative-path>")
+    val is_check = args[0] == "check" and args.len() == 1
+    val is_route = args[0] == "route" and args.len() == 2
+    if not is_check and not is_route:
+        return scv_config_command_result_v1(1, "invalid_request", "Unsupported configuration command or argument count")
+    val loaded = scv_config_load_v1(root, sdn_strict_limits_v1())
+    match loaded:
+        case Err(reason):
+            scv_config_command_result_v1(1, "configuration_unavailable", reason)
+        case Ok(config):
+            if not config.validated:
+                return scv_config_command_result_v1(1, "configuration_unavailable", "A legacy profile is not a schema-validated configuration")
+            if is_check:
+                return scv_config_command_result_v1(0, "schema_valid", "Native SDN configuration and route schemas validated; acceptance policy was not evaluated", config.source_sha256, config.routes_sha256)
+            match scv_config_route_v1(config, args[1]):
+                case Err(reason):
+                    scv_config_command_result_v1(1, "route_unavailable", reason, config.source_sha256, config.routes_sha256)
+                case Ok(route):
+                    scv_config_command_result_v1(0, "route_selected", route.id + ":" + route.domain + ":" + route.profile, config.source_sha256, config.routes_sha256)
+
+export ScvConfigCommandResultV1, scv_config_command_result_v1, scv_config_command_v1

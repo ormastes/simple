@@ -1,0 +1,35 @@
+# Real pure production schema fixtures shared with provider-host scenarios.
+use std.scv.db_schema_identity_v2.*
+use std.scv.db_schema_codec_v2.*
+use std.scv.db_schema_merge_v2.*
+use std.scv.distributed_identity.*
+use std.scv.db_patch.*
+
+fn setup_scv_schema_uid(kind: text, counter: u64, offline_b: bool) -> EntityUid:
+    val actor_hex = if offline_b: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" else: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    EntityUid(database_namespace: "11111111111111111111111111111111", entity_kind: kind, actor: ActorIncarnation(hex: actor_hex), counter: counter)
+
+fn setup_scv_schema_column(base: DbSchemaV2, counter: u64, name: text, offline_b: bool, rule: DbDefaultRuleV2) -> DbColumnDefinitionV2:
+    DbColumnDefinitionV2(column_uid: setup_scv_schema_uid("column", counter, offline_b), name: name, logical_type: "text", nullable: true, default_rule: rule, introduction_default: rule, introduction_revision: base.revision, introduction_migration: setup_scv_schema_uid("migration", counter, offline_b), constraints: [], merge_policy: "scalar-conflict-v1", visibility: "private", presentation_order: counter, tombstone: false)
+
+fn exercise_scv_schema_add(base: DbSchemaV2, counter: u64, name: text, offline_b: bool, rule: DbDefaultRuleV2) -> DbSchemaV2:
+    val column = setup_scv_schema_column(base, counter, name, offline_b, rule)
+    val operation = DbSchemaOperationV2(operation_uid: column.introduction_migration, base_revision: base.revision, expected_definition: "", dependencies: [], change: DbSchemaChangeV2.AddColumn(column))
+    db_schema_apply_v2(base, operation).unwrap()
+
+fn setup_scv_fixture() -> DbSchemaV2:
+    val empty = db_schema_create_v2(setup_scv_schema_uid("table", 1u64, false), "tasks").unwrap()
+    exercise_scv_schema_add(empty, 1u64, "title", false, DbDefaultRuleV2.NoDefault)
+
+fn exercise_scv_schema_change(base: DbSchemaV2, column_uid: EntityUid, counter: u64, change: DbSchemaChangeV2) -> DbSchemaOperationV2:
+    val index = db_schema_column_index_v2(base, column_uid)
+    DbSchemaOperationV2(operation_uid: setup_scv_schema_uid("migration", counter, false), base_revision: base.revision, expected_definition: db_schema_column_digest_v2(base.columns[index]).unwrap(), dependencies: [], change: change)
+
+fn setup_scv_legacy_patch(schema_revision: text) -> DbPatch:
+    val row = entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false))
+    val edit = FieldEdit(field: "title", before: DbValue.Text("draft"), after: DbValue.Text("edited offline"))
+    val condition = RowPrecondition(base_row: "row-base", expected_revision: "row-v1", expected_fields: [DbField(name: "title", value: edit.before)])
+    db_patch_seal(DbPatch(batch_id: "", repository: "fixture-repository", namespace: "11111111111111111111111111111111", epoch: 1u64, actor: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor_counter: 99u64, base_revision: "row-base", causal_dependencies: [], schema_revision: schema_revision, reducer_revision: "scalar-conflict-v1", operations: [DbOperation.UpdateFields(row, [edit], condition)], payload_digest: "", digest_algorithm: "sha256", digest_version: 1u64, signer: "fixture", signature_algorithm: "ed25519", signature_version: 1u64, signature: [7u8, 8u8], provenance: "unsigned local adapter fixture; host authentication remains required")).unwrap()
+
+export setup_scv_schema_uid, setup_scv_schema_column, exercise_scv_schema_add
+export setup_scv_fixture, exercise_scv_schema_change, setup_scv_legacy_patch

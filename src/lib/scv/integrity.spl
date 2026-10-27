@@ -7,6 +7,8 @@ use std.scv.core.{scv_objects_dir, scv_object_path, scv_chunk_path, scv_head_pat
 use std.scv.core.{scv_format_path, scv_repo_dir}
 use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_commit_tree, scv_object_field, scv_content_id_for_file, scv_hash_text, scv_repo_format_version}
 
+use std.scv.integrity_checkpoint.{scv_validate_checkpoint_manifest, scv_validate_checkpoints}
+
 fn scv_current_tree_content(root: text) -> text:
     val commit = scv_read_workspace_commit(root)
     if commit == "":
@@ -47,7 +49,7 @@ fn scv_validate_file_chunk_parts(root: text, file_id: text) -> text:
         val chunk_path = scv_chunk_path(root, chunk)
         if not file_exists(chunk_path):
             errors.push("missing chunk part: {chunk}\n")
-        elif scv_content_id_for_file(chunk_path) != chunk:
+        elif scv_content_id_for_file(chunk_path) != Ok(chunk):
             errors.push("corrupt chunk part: {chunk}\n")
     errors.join("")
 
@@ -185,7 +187,11 @@ fn scv_validate_parser_lockfile(root: text) -> text:
         if not scv_parser_wasm_magic_ok(raw):
             errors.push("parser artifact is not wasm: {parts[1]} {parts[2]}\n")
             continue
-        val actual = scv_content_id_for_file(artifact_path)
+        val actual = match scv_content_id_for_file(artifact_path):
+            Ok(id): id
+            Err(error):
+                errors.push(error)
+                continue
         if actual != parts[6]:
             errors.push("parser artifact hash mismatch: {parts[1]} {parts[2]}\n")
     errors.join("")
@@ -600,7 +606,7 @@ fn scv_validate_tree_object_rows(root: text, tree_id: text, content: text) -> te
             errors.push("bad tree size: {tree_id} {parts[0]}\n")
         elif file_size(chunk_path) != size:
             errors.push("chunk size mismatch: {tree_id} {chunk}\n")
-        elif scv_content_id_for_file(chunk_path) != chunk:
+        elif scv_content_id_for_file(chunk_path) != Ok(chunk):
             errors.push("corrupt chunk: {tree_id} {chunk}\n")
     errors.join("")
 
@@ -683,50 +689,7 @@ fn scv_validate_commit_change_refs(root: text) -> text:
             errors.push("missing commit change object: {commit_id} {change}\n")
     errors.join("")
 
-# Full checkpoint verification (MIG-09): recompute each checkpoint's manifest
-# hash and every payload file hash. Mirrors stabilize.scv_checkpoint_verify
-# without importing stabilize (which imports this module).
-fn scv_validate_checkpoint_manifest(root: text, id: text, dir: text, manifest: text) -> text:
-    var errors: [text] = []
-    if scv_hash_text("checkpoint", manifest) != id:
-        errors.push("checkpoint manifest hash mismatch: {id}\n")
-    var in_rows = false
-    for line in manifest.split("\n"):
-        if not in_rows:
-            if line == "--":
-                in_rows = true
-            continue
-        val trimmed = line.trim()
-        if trimmed == "":
-            continue
-        val sep = trimmed.index_of(" ")
-        if sep <= 0:
-            errors.push("bad checkpoint manifest row: {id} {trimmed}\n")
-            continue
-        val sha = trimmed[:sep]
-        val rel = trimmed[sep + 1:]
-        val data = "{dir}/data/{rel}"
-        if not file_exists(data):
-            errors.push("missing checkpoint file: {id} {rel}\n")
-        elif scv_content_id_for_file(data) != sha:
-            errors.push("checkpoint file hash mismatch: {id} {rel}\n")
-    errors.join("")
-
-fn scv_validate_checkpoints(root: text) -> text:
-    val dir = "{scv_repo_dir(root)}/checkpoints"
-    if not file_exists(dir):
-        return ""
-    var errors: [text] = []
-    for path in dir_walk(dir):
-        if not path.ends_with("/manifest.sdn"):
-            continue
-        val checkpoint_dir = path[0:path.len() - "/manifest.sdn".len()]
-        val segments = checkpoint_dir.split("/")
-        val id = segments[segments.len() - 1]
-        if id.starts_with("."):
-            continue
-        errors.push(scv_validate_checkpoint_manifest(root, id, checkpoint_dir, file_read(path)))
-    errors.join("")
+export scv_validate_checkpoint_manifest, scv_validate_checkpoints
 
 # Repo format marker (MIG-12): absent = v1; a present marker must carry a
 # known version. Unknown/newer versions fail closed.
@@ -775,7 +738,7 @@ fn scv_fsck(root: text) -> text:
             errors.push("bad tree size: {parts[0]}\n")
         elif file_size(chunk_path) != size:
             errors.push("chunk size mismatch: {chunk}\n")
-        elif scv_content_id_for_file(chunk_path) != chunk:
+        elif scv_content_id_for_file(chunk_path) != Ok(chunk):
             errors.push("corrupt chunk: {chunk}\n")
         errors.push(scv_validate_tree_file_link(root, parts[0], file_id, chunk, size_text))
         errors.push(scv_validate_file_chunk_parts(root, file_id))

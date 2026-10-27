@@ -1,0 +1,59 @@
+# Production command-handler scenarios. Native CLI execution remains a separate gate.
+use std.spec.{describe, it, expect, step}
+use app.scv.config_commands.{scv_config_command_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_write_bytes, file_read_regular_no_follow_bounded_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove_all}
+use test.fixtures.scv.scv_config_fixture_v1.{scv_config_fixture_source_v1, scv_config_fixture_routes_v1}
+
+fn setup_scv_fixture() -> text:
+    val root = secure_temp_dir_raw("/tmp", "scv-config-command-")
+    expect(root.len()).to_be_greater_than(0)
+    expect(dir_create(root + "/config", false)).to_equal(true)
+    expect(file_write_bytes(root + "/config/scv.sdn", scv_config_fixture_source_v1().bytes())).to_equal(true)
+    expect(file_write_bytes(root + "/config/scv-routes.sdn", scv_config_fixture_routes_v1().bytes())).to_equal(true)
+    root
+
+describe "REQ-001 native configuration command handler":
+    it "reports schema validity without accepting policy or rewriting source":
+        step("setup")
+        val root = setup_scv_fixture()
+        step("capture")
+        val before = file_read_regular_no_follow_bounded_bytes(root + "/config/scv.sdn", 1048576).unwrap()
+        step("exercise")
+        val result = scv_config_command_v1(root, ["check"])
+        step("evidence")
+        val after = file_read_regular_no_follow_bounded_bytes(root + "/config/scv.sdn", 1048576).unwrap()
+        step("assert")
+        expect(result.exit_code).to_equal(0)
+        expect(result.output).to_contain("schema_valid")
+        expect(result.output).to_contain("publication_authorized: false")
+        expect(after).to_equal(before)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "dispatches a database SDN file by semantic role":
+        step("setup")
+        val root = setup_scv_fixture()
+        step("exercise")
+        val result = scv_config_command_v1(root, ["route", "data/tasks.sdn"])
+        step("assert")
+        expect(result.exit_code).to_equal(0)
+        expect(result.output).to_contain("route_selected")
+        expect(result.output).to_contain("database_data")
+        expect(result.output).to_contain("sdn_rows")
+        expect(result.output).to_contain("publication_authorized: false")
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "returns failure and preserves an invalid submitted configuration":
+        step("setup")
+        val root = setup_scv_fixture()
+        val invalid = "schema_version: 999\nprivate_draft: keep_me\n".bytes()
+        expect(file_write_bytes(root + "/config/scv.sdn", invalid)).to_equal(true)
+        step("exercise")
+        val result = scv_config_command_v1(root, ["check"])
+        step("evidence")
+        val after = file_read_regular_no_follow_bounded_bytes(root + "/config/scv.sdn", 1048576).unwrap()
+        step("assert")
+        expect(result.exit_code).to_equal(1)
+        expect(result.output).to_contain("configuration_unavailable")
+        expect(after).to_equal(invalid)
+        expect(dir_remove_all(root)).to_equal(true)

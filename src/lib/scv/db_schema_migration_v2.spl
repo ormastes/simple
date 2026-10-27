@@ -1,0 +1,195 @@
+# Explicit old-schema mapping. No positional alignment or inferred coercion.
+use std.scv.db_schema_identity_v2.*
+use std.scv.db_schema_codec_v2.*
+use std.scv.distributed_identity.*
+use std.scv.db_patch.{DbValue, DbPatch, DbOperation, FieldEdit, db_value_bytes, db_patch_validate}
+use std.scv.db_canonical.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbV1SchemaBindingV2:
+    v1_schema_revision: text
+    original_schema_revision: text
+    binding_digest: text
+
+struct DbCellEditV2:
+    address: DbCellAddressV2
+    authored_schema_revision: text
+    target_schema_revision: text
+    before: DbCellStateV2
+    after: DbCellStateV2
+
+struct DbColumnMappingV2:
+    source_column_uid: EntityUid
+    target_column_uid: EntityUid
+    source_type: text
+    target_type: text
+
+struct DbReviewedMigrationV2:
+    migration_uid: EntityUid
+    source_revision: text
+    target_revision: text
+    mappings: [DbColumnMappingV2]
+    review_digest: text
+
+fn db_schema_mapping_context_v2(original: DbSchemaV2, current: DbSchemaV2, original_revision: text) -> Result<bool, text>:
+    val original_checked = db_schema_check_revision_v2(original)?
+    val current_checked = db_schema_check_revision_v2(current)?
+    if original_revision != original.revision: return Err("SCVDB_SCHEMA_ORIGINAL_REVISION_REQUIRED")
+    if not db_schema_uid_equal_v2(original.table_uid, current.table_uid): return Err("SCVDB_SCHEMA_TABLE_MISMATCH")
+    if original.tombstone or current.tombstone: return Err("SCVDB_SCHEMA_TABLE_TOMBSTONED")
+    Ok(true)
+
+fn db_schema_adapt_v1_field_v2(original: DbSchemaV2, current: DbSchemaV2, original_revision: text, row: EntityRef, name: text) -> Result<DbCellAddressV2, text>:
+    """Caller supplies the exact pinned V1 schema catalog, expressed as V2 identities."""
+    val checked = db_schema_mapping_context_v2(original, current, original_revision)?
+    var found = -1
+    val canonical_name = db_canonical_text(name)?
+    var index = 0
+    while index < original.columns.len():
+        val column = original.columns[index]
+        if not column.tombstone and db_canonical_text(column.name)? == canonical_name:
+            if found >= 0: return Err("SCVDB_SCHEMA_AMBIGUOUS_V1_NAME")
+            found = index
+        index = index + 1
+    if found < 0: return Err("SCVDB_SCHEMA_V1_NAME_UNMAPPED")
+    db_schema_adapt_uid_v2(original, current, original_revision, row, original.columns[found].column_uid)
+
+fn db_schema_v1_binding_digest_v2(v1_schema_revision: text, original: DbSchemaV2) -> Result<text, text>:
+    val checked = db_schema_check_revision_v2(original)?
+    if v1_schema_revision == "": return Err("SCVDB_SCHEMA_V1_REVISION_REQUIRED")
+    Ok(sha256_u8_hex(db_domain_bytes("schema-v1-binding-v2", db_canonical_text(v1_schema_revision)? + db_schema_bytes_v2(original)?)?))
+
+fn db_schema_adapt_v1_patch_field_v2(binding: DbV1SchemaBindingV2, original: DbSchemaV2, current: DbSchemaV2, patch: DbPatch, row: EntityRef, name: text) -> Result<DbCellAddressV2, text>:
+    """Binding must come from the host's admitted historical catalog, never guessed."""
+    val patch_checked = db_patch_validate(patch)?
+    if patch.schema_revision != binding.v1_schema_revision: return Err("SCVDB_SCHEMA_V1_REVISION_REQUIRED")
+    if original.revision != binding.original_schema_revision: return Err("SCVDB_SCHEMA_ORIGINAL_REVISION_REQUIRED")
+    if patch.namespace != original.table_uid.database_namespace: return Err("SCVDB_SCHEMA_UID_NAMESPACE")
+    if binding.binding_digest != db_schema_v1_binding_digest_v2(binding.v1_schema_revision, original)?: return Err("SCVDB_SCHEMA_V1_BINDING_DIGEST")
+    db_schema_adapt_v1_field_v2(original, current, binding.original_schema_revision, row, name)
+
+fn db_schema_v1_state_v2(value: DbValue) -> DbCellStateV2:
+    match value:
+        Absent: DbCellStateV2.Absent
+        _: DbCellStateV2.Value(value)
+
+fn db_schema_adapt_v1_edit_v2(binding: DbV1SchemaBindingV2, original: DbSchemaV2, current: DbSchemaV2, patch: DbPatch, row: EntityRef, edit: FieldEdit) -> Result<DbCellEditV2, text>:
+    val address = db_schema_adapt_v1_patch_field_v2(binding, original, current, patch, row, edit.field)?
+    var present = false
+    for operation in patch.operations:
+        match operation:
+            UpdateFields(entity, edits, _):
+                if entity_ref_canonical(entity) == entity_ref_canonical(row):
+                    for authored in edits:
+                        if authored.field == edit.field and db_value_bytes(authored.before)? == db_value_bytes(edit.before)? and db_value_bytes(authored.after)? == db_value_bytes(edit.after)?: present = true
+            _: ()
+    if not present: return Err("SCVDB_SCHEMA_EDIT_NOT_IN_PATCH")
+    val index = db_schema_column_index_v2(current, address.column_uid)
+    val before = db_schema_v1_state_v2(edit.before)
+    val after = db_schema_v1_state_v2(edit.after)
+    val before_checked = db_schema_cell_type_v2(current.columns[index], before)?
+    val after_checked = db_schema_cell_type_v2(current.columns[index], after)?
+    Ok(DbCellEditV2(address: address, authored_schema_revision: patch.schema_revision, target_schema_revision: current.revision, before: before, after: after))
+
+fn db_schema_adapt_uid_v2(original: DbSchemaV2, current: DbSchemaV2, original_revision: text, row: EntityRef, column_uid: EntityUid) -> Result<DbCellAddressV2, text>:
+    val checked = db_schema_mapping_context_v2(original, current, original_revision)?
+    val source_index = db_schema_column_index_v2(original, column_uid)
+    val target_index = db_schema_column_index_v2(current, column_uid)
+    if source_index < 0 or target_index < 0: return Err("SCVDB_SCHEMA_COLUMN_UNMAPPED")
+    val source = original.columns[source_index]
+    val target = current.columns[target_index]
+    if source.tombstone or target.tombstone: return Err("SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
+    if source.logical_type != target.logical_type: return Err("SCVDB_SCHEMA_MIGRATION_REQUIRED")
+    if source.merge_policy != target.merge_policy: return Err("SCVDB_SCHEMA_POLICY_MIGRATION_REQUIRED")
+    if source.nullable and not target.nullable: return Err("SCVDB_SCHEMA_NULLABILITY_REVIEW_REQUIRED")
+    val address = DbCellAddressV2(table_uid: current.table_uid, column_uid: target.column_uid, row: row)
+    val address_checked = db_cell_address_validate_v2(address)?
+    Ok(address)
+
+fn db_schema_migration_bytes_v2(plan: DbReviewedMigrationV2) -> Result<[u8], text>:
+    val namespace = plan.migration_uid.database_namespace
+    val checked = db_schema_uid_validate_v2(plan.migration_uid, "migration", namespace)?
+    if plan.source_revision == "" or plan.target_revision == "" or plan.review_digest == "": return Err("SCVDB_SCHEMA_MIGRATION_REVIEW_REQUIRED")
+    if not db_schema_digest_valid_v2(plan.review_digest): return Err("SCVDB_SCHEMA_MIGRATION_REVIEW_DIGEST")
+    var mappings: [DbCanonicalEntry] = []
+    var targets: [[u8]] = []
+    for mapping in plan.mappings:
+        val source_checked = db_schema_uid_validate_v2(mapping.source_column_uid, "column", namespace)?
+        val target_checked = db_schema_uid_validate_v2(mapping.target_column_uid, "column", namespace)?
+        if mapping.source_type == "" or mapping.target_type == "": return Err("SCVDB_SCHEMA_MIGRATION_TYPE")
+        val target_bytes = db_schema_uid_bytes_v2(mapping.target_column_uid)?
+        if targets.contains(target_bytes): return Err("SCVDB_SCHEMA_MIGRATION_AMBIGUOUS")
+        targets.push(target_bytes)
+        mappings.push(DbCanonicalEntry(key: db_schema_uid_bytes_v2(mapping.source_column_uid)?, value: db_frame(14u8, target_bytes + db_canonical_text(mapping.source_type)? + db_canonical_text(mapping.target_type)?)))
+    db_domain_bytes("schema-migration-v2", db_schema_uid_bytes_v2(plan.migration_uid)? + db_canonical_text(plan.source_revision)? + db_canonical_text(plan.target_revision)? + db_canonical_map(mappings)? + db_canonical_text(plan.review_digest)?)
+
+fn db_schema_adapt_reviewed_v2(original: DbSchemaV2, current: DbSchemaV2, plan: DbReviewedMigrationV2, row: EntityRef, column_uid: EntityUid) -> Result<DbCellAddressV2, text>:
+    """Review digest is evidence input, not authentication or authority approval."""
+    val checked = db_schema_mapping_context_v2(original, current, plan.source_revision)?
+    val plan_bytes = db_schema_migration_bytes_v2(plan)?
+    if plan.target_revision != current.revision: return Err("SCVDB_SCHEMA_MIGRATION_TARGET")
+    if plan.migration_uid.database_namespace != current.table_uid.database_namespace: return Err("SCVDB_SCHEMA_UID_NAMESPACE")
+    val source_index = db_schema_column_index_v2(original, column_uid)
+    if source_index < 0: return Err("SCVDB_SCHEMA_COLUMN_UNMAPPED")
+    val source = original.columns[source_index]
+    if source.tombstone: return Err("SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
+    for mapping in plan.mappings:
+        if db_schema_uid_equal_v2(mapping.source_column_uid, column_uid):
+            val target_index = db_schema_column_index_v2(current, mapping.target_column_uid)
+            if target_index < 0: return Err("SCVDB_SCHEMA_COLUMN_UNMAPPED")
+            val target = current.columns[target_index]
+            if target.tombstone: return Err("SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
+            if mapping.source_type != source.logical_type or mapping.target_type != target.logical_type: return Err("SCVDB_SCHEMA_MIGRATION_TYPE")
+            if source.logical_type != target.logical_type: return Err("SCVDB_SCHEMA_MIGRATION_EXECUTION_REQUIRED")
+            if not db_schema_uid_equal_v2(source.column_uid, target.column_uid): return Err("SCVDB_SCHEMA_IDENTITY_MIGRATION_EXECUTION_REQUIRED")
+            return db_schema_adapt_uid_v2(original, current, plan.source_revision, row, column_uid)
+    Err("SCVDB_SCHEMA_COLUMN_UNMAPPED")
+
+fn db_schema_lazy_cell_v2(row_schema: DbSchemaV2, current: DbSchemaV2, column_uid: EntityUid, stored: DbCellStateV2) -> Result<DbCellStateV2, text>:
+    """Only a column absent from the exact row schema gains its introduction default."""
+    val checked = db_schema_mapping_context_v2(row_schema, current, row_schema.revision)?
+    val current_index = db_schema_column_index_v2(current, column_uid)
+    if current_index < 0: return Err("SCVDB_SCHEMA_COLUMN_UNMAPPED")
+    val column = current.columns[current_index]
+    if column.tombstone: return Err("SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
+    val original_index = db_schema_column_index_v2(row_schema, column_uid)
+    if original_index >= 0:
+        if row_schema.columns[original_index].tombstone: return Err("SCVDB_SCHEMA_DROP_EDIT_CONFLICT")
+        if row_schema.columns[original_index].logical_type != column.logical_type: return Err("SCVDB_SCHEMA_MIGRATION_REQUIRED")
+        val state_checked = db_schema_cell_type_v2(column, stored)?
+        return Ok(stored)
+    match stored:
+        Absent:
+            match column.introduction_default:
+                NoDefault: Ok(DbCellStateV2.Absent)
+                Constant(value): Ok(DbCellStateV2.Defaulted(value, column.introduction_migration, column.introduction_revision))
+        _: Err("SCVDB_SCHEMA_ROW_SCHEMA_MISMATCH")
+
+fn db_schema_cell_type_v2(column: DbColumnDefinitionV2, state: DbCellStateV2) -> Result<bool, text>:
+    val column_checked = db_schema_column_validate_v2(column, column.column_uid.database_namespace)?
+    val encoded = db_cell_state_bytes_v2(state)?
+    match state:
+        Absent:
+            if not column.nullable: return Err("SCVDB_SCHEMA_MISSING_REQUIRED_VALUE")
+            Ok(true)
+        Null:
+            if not column.nullable: return Err("SCVDB_SCHEMA_NULL_NOT_ALLOWED")
+            Ok(true)
+        Tombstoned: Ok(true)
+        Value(value):
+            if not db_schema_value_type_v2(value, column.logical_type)?: return Err("SCVDB_SCHEMA_CELL_TYPE")
+            Ok(true)
+        Defaulted(value, migration_uid, introduction_revision):
+            if not db_schema_uid_equal_v2(migration_uid, column.introduction_migration) or introduction_revision != column.introduction_revision: return Err("SCVDB_SCHEMA_DEFAULT_STAMP")
+            match column.introduction_default:
+                NoDefault: return Err("SCVDB_SCHEMA_DEFAULT_STAMP")
+                Constant(expected):
+                    if db_value_bytes(value)? != db_value_bytes(expected)?: return Err("SCVDB_SCHEMA_DEFAULT_STAMP")
+            if not db_schema_value_type_v2(value, column.logical_type)?: return Err("SCVDB_SCHEMA_CELL_TYPE")
+            Ok(true)
+
+export DbColumnMappingV2, DbReviewedMigrationV2
+export DbV1SchemaBindingV2, DbCellEditV2, db_schema_v1_binding_digest_v2
+export db_schema_adapt_v1_patch_field_v2, db_schema_adapt_v1_edit_v2, db_schema_cell_type_v2
+export db_schema_adapt_v1_field_v2, db_schema_adapt_uid_v2
+export db_schema_migration_bytes_v2, db_schema_adapt_reviewed_v2, db_schema_lazy_cell_v2
