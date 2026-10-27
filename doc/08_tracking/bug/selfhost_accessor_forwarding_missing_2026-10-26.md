@@ -43,3 +43,6 @@ ordinary calls). Plus spec wiring.
 - Undefined-field error: opt-in `SIMPLE_STRICT_FIELD_FORWARDING=1`, read once (cached); default off keeps old behaviour.
 - Spec `test/01_unit/compiler/hir/accessor_getter_forwarding_spec.spl` (REQ-SELFHOST-ACCESSOR-001): red 2/6 (reads not forwarded, strict flag no-op), green 6/6.
 - Gaps: bootstrap flat path (module_declarations_bootstrap.spl:561) not mirrored; forwarded call is untyped (no return type); census of strict-mode hits in src/compiler not run; setter/alias PR2-4 untouched.
+
+## PR1 update (review of #4997)
+Forwarding happens only when the owner field table lacks the name; a real field whose type fails to lower stays a field read. `_` names are skipped. Only instance methods (SymbolKind.Method) are used, and the return type is carried. accessor_getter_forwarding_spec is 9/9; with the guard disabled it drops to 8/9, which shows the guard is the cause. Residual risk: 3 fields have a same-name twin type that lacks the field, so they could be hijacked if the canonical key misses. Mixin fields are not in the prescan table.
