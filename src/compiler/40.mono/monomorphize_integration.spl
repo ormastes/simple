@@ -3739,8 +3739,79 @@ impl MonomorphizationPass:
                 val context: HirType? = if expected != nil: expected else: (if expr.has_type_: expr.type_ else: nil)
                 out.kind = self.rewrite_call(ct, at, type_args, context, expr.span)
                 out
+            case HirExprKind.If(cond, then_, else_):
+                self.rewrite_if_with_context(expr, cond, then_, else_, expected)
+            case HirExprKind.IfChain(arms, else_):
+                self.rewrite_if_chain_with_context(expr, arms, else_, expected)
+            case HirExprKind.MatchCase(scrutinee, arms):
+                self.rewrite_match_with_context(expr, scrutinee, arms, expected)
+            case HirExprKind.Block(block):
+                self.rewrite_block_expr_with_context(expr, block, expected)
+            case HirExprKind.CfgSelect(conds, arms, else_):
+                self.rewrite_cfg_select_with_context(expr, conds, arms, else_, expected)
             case _:
                 self.rewrite_expr(expr)
+
+    me rewrite_if_with_context(expr: HirExpr, cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected: HirType?) -> HirExpr:
+        val cd: HirExpr = cond
+        val th: HirBlock = then_
+        var out = expr
+        out.kind = HirExprKind.If(self.rewrite_expr(cd), self.rewrite_block(th, expected), self.rewrite_block_opt_with_context(else_, expected))
+        out
+
+    me rewrite_if_chain_with_context(expr: HirExpr, arms: [HirIfArm], else_: HirBlock?, expected: HirType?) -> HirExpr:
+        var new_arms: [HirIfArm] = []
+        for arm in arms:
+            val at2: HirIfArm = arm
+            var na = at2
+            na.cond = self.rewrite_expr(at2.cond)
+            na.then_ = self.rewrite_block(at2.then_, expected)
+            if self.invocation_failed_v1(): return expr
+            new_arms = new_arms.push(na)
+        var out = expr
+        out.kind = HirExprKind.IfChain(new_arms, self.rewrite_block_opt_with_context(else_, expected))
+        out
+
+    me rewrite_match_with_context(expr: HirExpr, scrutinee: HirExpr, arms: [HirMatchArm], expected: HirType?) -> HirExpr:
+        val sc: HirExpr = scrutinee
+        var marms: [HirMatchArm] = []
+        for arm in arms:
+            val mt: HirMatchArm = arm
+            var nm = mt
+            if mt.has_guard:
+                nm.guard = self.rewrite_expr(mt.guard)
+            nm.body = self.rewrite_block(mt.body, expected)
+            if self.invocation_failed_v1(): return expr
+            marms = marms.push(nm)
+        var out = expr
+        out.kind = HirExprKind.MatchCase(self.rewrite_expr(sc), marms)
+        out
+
+    me rewrite_block_expr_with_context(expr: HirExpr, block: HirBlock, expected: HirType?) -> HirExpr:
+        var out = expr
+        out.kind = HirExprKind.Block(self.rewrite_block(block, expected))
+        out
+
+    me rewrite_cfg_select_with_context(expr: HirExpr, conds: [HirExpr], arms: [HirBlock], else_: HirBlock?, expected: HirType?) -> HirExpr:
+        # Conditions are compile-time cfg terms and pass through untouched,
+        # exactly as in rewrite_expr's CfgSelect arm; only the arm blocks
+        # receive the expected result type.
+        var new_arms: [HirBlock] = []
+        for arm in arms:
+            val arm_block: HirBlock = arm
+            new_arms = new_arms.push(self.rewrite_block(arm_block, expected))
+            if self.invocation_failed_v1(): return expr
+        var out = expr
+        out.kind = HirExprKind.CfgSelect(conds, new_arms, self.rewrite_block_opt_with_context(else_, expected))
+        out
+
+    me rewrite_block_opt_with_context(block: HirBlock?, expected: HirType?) -> HirBlock?:
+        match block:
+            Some(b):
+                val bt: HirBlock = b
+                self.rewrite_block(bt, expected)
+            None:
+                nil
 
     me rewrite_expr(expr: HirExpr) -> HirExpr:
         if not self.invocation_enter_v1(): return expr

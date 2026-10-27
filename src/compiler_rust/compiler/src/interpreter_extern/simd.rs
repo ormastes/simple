@@ -1198,7 +1198,8 @@ pub fn rt_simd_hmin_f32x4(args: &[Value]) -> Result<Value, CompileError> {
 // Vec16u8 is a Simple record `struct Vec16u8 { u0..u7, u8_, u9..u15: u8 }`.
 // Field name `u8_` (not `u8`) avoids the `u8` type-keyword clash. In
 // interpreter mode the value arrives as `Value::Object { class, fields }`
-// with each lane stored as `Value::Int` in 0..=255.
+// with each lane stored as an integer in 0..=255. Unsigned u8 fields retain
+// their width in `Value::UInt { width: 8, .. }`.
 // ============================================================================
 
 fn require_u8_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<u8, CompileError> {
@@ -1212,8 +1213,13 @@ fn require_u8_field(name: &str, fields: &HashMap<String, Value>, field: &str) ->
                 )))
             }
         }
+        Some(Value::UInt { value, width: 8 }) => u8::try_from(*value).map_err(|_| {
+            CompileError::runtime(format!(
+                "{name}: field {field} must be in 0..=255, got {value}"
+            ))
+        }),
         Some(other) => Err(CompileError::runtime(format!(
-            "{name}: field {field} must be an integer, got {:?}",
+            "{name}: field {field} must be an integer in 0..=255, got {:?}",
             other
         ))),
         None => Err(CompileError::runtime(format!("{name}: missing field {field}"))),
@@ -3138,4 +3144,128 @@ pub fn rt_engine2d_blend_mask_span_u32(args: &[Value]) -> Result<Value, CompileE
     }
     blend_mask_span_dispatch(&mut span, &mask_all[m0..m0 + count], color);
     Ok(pack_u32_array(span))
+}
+
+#[cfg(test)]
+mod vec16u8_tests {
+    use super::*;
+
+    fn vec16(fields: impl Fn(usize) -> Value) -> Value {
+        let mut object_fields = HashMap::with_capacity(VEC16U8_FIELDS.len());
+        for (i, field) in VEC16U8_FIELDS.iter().enumerate() {
+            object_fields.insert((*field).to_string(), fields(i));
+        }
+        Value::Object {
+            class: "Vec16u8".to_string(),
+            fields: Arc::new(object_fields),
+        }
+    }
+
+    fn result_lanes(value: Value) -> [i64; 16] {
+        let Value::Object { class, fields } = value else {
+            panic!("expected Vec16u8 result, got {value:?}");
+        };
+        assert_eq!(class, "Vec16u8");
+        std::array::from_fn(|i| match fields.get(VEC16U8_FIELDS[i]) {
+            Some(Value::Int(n)) => *n,
+            other => panic!("unexpected result lane {:?}: {other:?}", VEC16U8_FIELDS[i]),
+        })
+    }
+
+    fn assert_add_rejects(field: &str, value: Value, expected_error: &str) {
+        let lhs = vec16(|_| Value::UInt { value: 0, width: 8 });
+        let mut fields = match lhs {
+            Value::Object { fields, .. } => (*fields).clone(),
+            _ => unreachable!(),
+        };
+        fields.insert(field.to_string(), value);
+        let lhs = Value::Object {
+            class: "Vec16u8".to_string(),
+            fields: Arc::new(fields),
+        };
+        let rhs = vec16(|_| Value::Int(0));
+        let error = rt_simd_add_u8x16(&[lhs, rhs]).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains(expected_error), "unexpected error: {message}");
+    }
+
+    #[test]
+    fn add_accepts_unsigned_u8_fields_across_all_lanes() {
+        let lhs = vec16(|i| Value::UInt {
+            value: if i == 8 { 255 } else { i as u64 },
+            width: 8,
+        });
+        let rhs = vec16(|_| Value::UInt { value: 0, width: 8 });
+
+        let result = rt_simd_add_u8x16(&[lhs, rhs]).unwrap();
+
+        let mut expected = std::array::from_fn(|i| i as i64);
+        expected[8] = 255;
+        assert_eq!(result_lanes(result), expected);
+    }
+
+    #[test]
+    fn add_accepts_mixed_signed_and_unsigned_u8_fields() {
+        let lhs = vec16(|i| {
+            if i % 2 == 0 {
+                Value::Int(i as i64)
+            } else {
+                Value::UInt {
+                    value: i as u64,
+                    width: 8,
+                }
+            }
+        });
+        let rhs = vec16(|_| Value::Int(1));
+
+        assert_eq!(
+            result_lanes(rt_simd_add_u8x16(&[lhs, rhs]).unwrap()),
+            std::array::from_fn(|i| i as i64 + 1)
+        );
+    }
+
+    #[test]
+    fn add_rejects_out_of_range_int_and_unsigned_fields() {
+        assert_add_rejects("u0", Value::Int(-1), "field u0 must be in 0..=255");
+        assert_add_rejects("u0", Value::Int(256), "field u0 must be in 0..=255");
+        assert_add_rejects(
+            "u0",
+            Value::UInt { value: 256, width: 8 },
+            "field u0 must be in 0..=255",
+        );
+        assert_add_rejects(
+            "u0",
+            Value::UInt {
+                value: u64::MAX,
+                width: 8,
+            },
+            "field u0 must be in 0..=255",
+        );
+    }
+
+    #[test]
+    fn add_rejects_non_u8_uint_widths_and_non_integer_fields() {
+        assert_add_rejects(
+            "u0",
+            Value::UInt { value: 1, width: 16 },
+            "field u0 must be an integer",
+        );
+        assert_add_rejects("u0", Value::Bool(true), "field u0 must be an integer");
+    }
+
+    #[test]
+    fn add_rejects_missing_field() {
+        let mut fields = match vec16(|_| Value::Int(0)) {
+            Value::Object { fields, .. } => (*fields).clone(),
+            _ => unreachable!(),
+        };
+        fields.remove("u8_");
+        let lhs = Value::Object {
+            class: "Vec16u8".to_string(),
+            fields: Arc::new(fields),
+        };
+        let rhs = vec16(|_| Value::Int(0));
+        let error = rt_simd_add_u8x16(&[lhs, rhs]).unwrap_err();
+        assert!(format!("{error}").contains("missing field u8_"));
+    }
 }

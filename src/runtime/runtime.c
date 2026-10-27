@@ -72,6 +72,7 @@ int64_t rt_simple_abi_version_deferred(void) {
  * fsync, publish) reuses the same include. This file used to carry its own
  * byte-identical copy defined further down. */
 #include "platform/runtime_win_long_path.h"
+#include "platform/runtime_win_excl_file.h"
 #endif
 
 #include <stdio.h>
@@ -2233,7 +2234,13 @@ static char* rt_m3_owned_path(const char* path, int64_t path_len) {
 SPL_RUNTIME_NATIVE_TWIN int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+#if defined(_WIN32)
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    int ok = src && dst && rt_win_file_copy_create_excl_no_follow(src, dst);
+    free(src); free(dst);
+    return ok;
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -2283,7 +2290,13 @@ SPL_RUNTIME_NATIVE_TWIN int rt_file_copy_create_excl_no_follow(
 SPL_RUNTIME_NATIVE_TWIN int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+#if defined(_WIN32)
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    int ok = src && dst && rt_win_file_link_create_excl_no_follow(src, dst);
+    free(src); free(dst);
+    return ok;
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else

@@ -5,6 +5,11 @@
 
 
 use std.spec.step
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.frontend.parser_types_expr.{AsmTargetSpec, AsmVersionConstraint}
+use compiler.common.diagnostics.span.{Span}
 
 use std.io_runtime.{file_read}
 
@@ -77,3 +82,29 @@ describe "MIR target context wiring":
         expect(asm_targets).to_contain("if ver_ops.len() > 0 and target_backend_version < 0")
         expect(asm_targets).to_contain("return \"unknown_version\"")
         expect(asm_targets).to_contain("cannot evaluate asm target backend version")
+
+    it "marks asm assert mismatch and unavailable version as fatal MIR errors":
+        # @req REQ-SSPEC-UNIT
+        step("lower an asm assert for a target architecture that cannot match")
+        var mismatch_lowering = MirLowering.new(SymbolTable.new())
+        mismatch_lowering.lower_asm_assert(
+            AsmTargetSpec(
+                archs: ["riscv64"], has_os: false, os: "", has_abi: false, abi: "",
+                has_backend: false, backend: "", version_constraints: [], span: Span.empty()),
+            nil)
+        expect(mismatch_lowering.errors.len()).to_equal(1)
+        expect(mismatch_lowering.errors[0].message).to_contain("asm assert failed")
+        expect(mismatch_lowering.errors[0].fatal).to_equal(true)
+
+        step("lower a version-constrained asm assert with no known backend version")
+        var version_lowering = MirLowering.new(SymbolTable.new())
+        version_lowering.lower_asm_assert(
+            AsmTargetSpec(
+                archs: [], has_os: false, os: "", has_abi: false, abi: "",
+                has_backend: true, backend: "llvm",
+                version_constraints: [AsmVersionConstraint(op: ">=", version: 15)],
+                span: Span.empty()),
+            nil)
+        expect(version_lowering.errors.len()).to_equal(1)
+        expect(version_lowering.errors[0].message).to_contain("version is unavailable")
+        expect(version_lowering.errors[0].fatal).to_equal(true)
