@@ -31,7 +31,7 @@ Shell-out wrappers (not counted) = `mold.spl:15-16,73-78`, `msvc.spl`,
 | ELF | `.a` writer | missing | missing | missing | missing | missing | missing |
 | ELF | baremetal (script, MEMORY, LMA, PT_LOAD) | done | missing | done | partial | missing | missing |
 | ELF | flat `.bin` + entry/vector placement | missing | missing | missing | done (flat) | missing | missing |
-| Mach-O | exe | missing? | n/a | partial | n/a | n/a | n/a |
+| Mach-O | exe | missing (no `X86_64_RELOC_*`, `macho/relocations.spl` ARM64 only) | n/a | partial | n/a | n/a | n/a |
 | Mach-O | dylib output | missing | n/a | missing | n/a | n/a | n/a |
 | Mach-O | static archive | (shared ar writer) | n/a | (shared) | n/a | n/a | n/a |
 
@@ -164,7 +164,29 @@ where meaningful; (c) run where runnable. A row that cannot run is reported
 - **AC-MACHO-DYLIB-{A64,X64}**: MH_DYLIB, LC_ID_DYLIB, export trie, install name.
 - **AC-MACHO-AR**: static lib via AC-AR-3.
 
+- **AC-ELF-BOOT-I686**: ELFCLASS32 `EM_386` boot image (multiboot-style header in
+  `.text.boot`), R_386_{32,PC32}; validity + lld equivalence; QEMU run row BLOCKED
+  (other-host lane).
+- AC-ELF-BIN is **per arch** (AC-ELF-BIN-{RV32,RV64,A64,ARM32,X64,I686}), one
+  fixture each; each must assert the vector section's address equals the script's
+  `.vectors` placement (or reset vector) and the entry symbol's file offset.
+
+Validator/equivalence definitions (apply to every "validity + equivalence" row):
+validity = `llvm-readobj --file-headers --sections --symbols --relocs` (+
+`--coff-exports --coff-imports` for PE, `--dyn-syms --dynamic-table` for ELF,
+`--macho-*` for Mach-O) exits 0 with no `warning:`; equivalence = same section
+name/flags/size set, same defined-symbol set with equal section-relative offsets,
+and identical relocated bytes of `.text`/`.data` vs the lld image (addresses
+normalised by section base). AC-AR-4 passes only with **0** llvm-ar/`ar`
+invocations in the default build lane (grep census of `src/compiler_rust`,
+`scripts/`, `src/app/build/` recorded in the PR).
+
 ### Cross-cutting
+- **AC-RECEIPT**: every link emits `LinkReceiptV1` (design §6, `src/lib/common/linker/`)
+  with per-stage receipts (read/resolve/merge/scan/layout/write) and `max_workers`.
+- Layer ↔ design stage map: R=L0/L1, S=L3/L4/L5, M=L6 (GC, ICF), Y=L7 synth +
+  L8-scan (GOT/PLT/TLS decisions), P=L7 layout, X=L8 apply, W=L9/L11/L12.
+  AC-PAR-6: L8-scan parallel per input section, byte-identical to N=1.
 - **AC-PAR-1..5** (§3).
 - **AC-GATE**: `mold_is_pure_simple_linker_complete()` (design D7) reflects this
   matrix; each done cell flips one `mold_compatibility_features` row.
@@ -184,9 +206,9 @@ where meaningful; (c) run where runnable. A row that cannot run is reported
 | P9 i686/arm32 ELF encoders | remaining ELF cells | P7 | P10 |
 | P10 archive switch in build | AC-AR-4 | P1 | P9 |
 | P11 Mach-O x64 relocs + dylib | wave 3 | P1 (AC-AR-3) | — |
-| P12 parallel stages | AC-PAR-1..4 | P7 | — |
+| P12 parallel stages | AC-PAR-1..4 | P0 | — |
 | P13 ELF ICF | AC-PAR-5 | P12 | — |
-| P14 specs-owed for done cells | AC-COFF-EXE-X64/A64, ELF x64/a64 exe+boot | — | any |
+| P0 (first) specs-owed for done cells — regression baselines | AC-COFF-EXE-X64/A64, ELF x64/a64 exe+boot | — | P1 |
 
 Each PR: Haiku worker implements in its own worktree; Opus reviews and
 completes; Fable reviews before landing; land via `work/*` PR per `.claude/rules/vcs.md`.
@@ -199,4 +221,9 @@ completes; Fable reviews before landing; land via `work/*` PR per `.claude/rules
   Windows host is postponed by user directive (removed; disk full). Validity and
   lld-equivalence rows still run here; hosted-exe run rows for rv/i686-Linux/arm32
   are likewise BLOCKED on this host.
+- Board-runnable (`.claude/rules/board-runnable.md`): each boot AC's PR must name
+  the physical-board build + boot path (riscv: OpenSBI → U-Boot/payload on a
+  VisionFive2/HiFive-class board; aarch64: EDK2 → `BOOTAA64.EFI`; arm32: vendor
+  ROM → flat `.bin`) and file a `doc/08_tracking/bug/` record for the blocked board
+  run (missing hardware). QEMU-only is never reported as done.
 - No macOS / arm64-Windows / physical board host: run rows BLOCKED with reason.
