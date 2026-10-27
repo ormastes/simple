@@ -92,8 +92,8 @@ collision before reporting any restore plan.
 
 **Rejects a missing target below a symlink parent.** The fixture places a
 symlinked directory in the repository and creates a target path beneath it.
-The preflight rejects the noncanonical parent without creating the external
-leaf.
+The preflight resolves the existing ancestor, rejects its noncanonical
+in-root spelling, and neither reads nor creates the external leaf.
 
 ## Running and interpreting the evidence
 
