@@ -66,3 +66,11 @@ mir_lowering / compiler layer-expert notes.
   scope (needs a module-level node). The interpreter shares the preprocessor: do not set the flag
   for interpreted runs. Spec: `test/01_unit/compiler/20.hir/hir_cfg_select_source_spec.spl`.
 - Marker mode is statement-only: a chain whose arm declares a `val`/`var`/`let` at the chain indent, has `{`/`}` in a condition, or has an empty/comment-only arm keeps flat-strip semantics (binding-declaring chains keep flat-strip semantics until a non-scoping CfgSelect design lands). Marker lowering is also gated on the flag and requires every arm to be a string-literal marker.
+- HIR cache key is target-neutral per file (flag on): the preprocessor logs every arm it keeps or
+  strips by target evaluation (`@when`/`@elif`/`@else` non-marker, `@cfg`) unconditionally; zero
+  decisions == neutral. Each closure surface contributes `N` / `D:<sha of ordered decisions>` / `U`
+  (unknown, never neutral) to `hir_cache_closure_digest`; a neutral source with an all-neutral
+  closure keys as `hir-target-neutral-v1`, anything else keeps the target fold (`WA(hir-target-neutral)`)
+  plus its strip-decision digest. Flag off is unchanged. Spec: `hir_cache_key_neutral_spec.spl`.
+  The strip-decision memo is keyed (content, cfg identity, native target, mode); neutral is read
+  only from a marker-mode entry while the driver declared marker mode, else fail closed (`U`).
