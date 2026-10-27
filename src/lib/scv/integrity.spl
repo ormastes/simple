@@ -5,6 +5,7 @@ use std.nogc_sync_mut.database.core.{SdnDatabase, SdnTable, SdnRow}
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
 use std.scv.core.{scv_objects_dir, scv_object_path, scv_chunk_path, scv_head_path, scv_parser_index_path, scv_parser_lock_path, scv_parsers_dir, scv_langmap_path, scv_object_index_path, scv_bookmarks_path, scv_workspace_path, scv_line_set_contains, scv_metadata_path_safe, scv_object_ref_safe, scv_worktree_path_safe}
 use std.scv.structural_store_v1.{scv_structural_restore_file_v1}
+use std.scv.structural_pack_v1.{scv_syntax_record_read_v1}
 use std.scv.core.{scv_format_path, scv_repo_dir}
 use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_commit_tree, scv_object_field, scv_content_id_for_file, scv_hash_text, scv_repo_format_version}
 
@@ -93,10 +94,9 @@ fn scv_validate_syntax_node(root: text, node_id: text, visited: text) -> (text, 
         return ("", visited)
     if not scv_object_ref_safe(node_id, "syntax_node_"):
         return ("bad syntax node id: {node_id}\n", visited + node_id + "\n")
-    val path = scv_object_path(root, "syntax", node_id)
-    if not file_exists(path):
-        return ("missing syntax node: {node_id}\n", visited + node_id + "\n")
-    val content = file_read(path)
+    val content = match scv_syntax_record_read_v1(root, node_id):
+        Ok(value): value
+        Err(error): return (error, visited + node_id + "\n")
     var errors: [text] = []
     val grammar = scv_object_field(content, "grammar")
     val execution = scv_object_field(content, "execution")
@@ -228,10 +228,9 @@ fn scv_validate_langmap(root: text) -> text:
     errors.join("")
 
 fn scv_validate_parser_root_identity(root: text, node_id: text) -> text:
-    val path = scv_object_path(root, "syntax", node_id)
-    if not file_exists(path):
-        return ""
-    val content = file_read(path)
+    val content = match scv_syntax_record_read_v1(root, node_id):
+        Ok(value): value
+        Err(error): return error
     val grammar = scv_object_field(content, "grammar")
     if grammar == "" or grammar.starts_with("fallback-"):
         return ""
@@ -248,13 +247,12 @@ fn scv_validate_parser_root_identity(root: text, node_id: text) -> text:
     ""
 
 fn scv_validate_parser_index_root_fields(root: text, row: text, node_id: text) -> text:
-    val path = scv_object_path(root, "syntax", node_id)
-    if not file_exists(path):
-        return ""
     val parts = row.split("|")
     if parts.len() < 7:
         return "bad parser index entry: {row}\n"
-    val content = file_read(path)
+    val content = match scv_syntax_record_read_v1(root, node_id):
+        Ok(value): value
+        Err(error): return error
     var errors: [text] = []
     val indexed_path = scv_object_field(content, "path")
     val language = scv_object_field(content, "language")

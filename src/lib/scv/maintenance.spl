@@ -10,6 +10,7 @@ use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_workspace_par
 use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_content_id}
 use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 use std.scv.integrity.{scv_current_tree_content}
+use std.scv.structural_pack_v1.{scv_syntax_pack_closure_v1}
 use std.nogc_sync_mut.io.file_ops.{file_rename, file_modified_time}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
@@ -377,6 +378,9 @@ fn scv_reachable_object_ids(root: text) -> text:
                     out = scv_add_reachable_from_view_content(root, file_read(view_path), out)
     scv_add_reachable_from_parser_index(root, out)
 
+fn scv_reachable_object_ids_checked(root: text) -> Result<text, text>:
+    scv_syntax_pack_closure_v1(root, scv_reachable_object_ids(root))
+
 fn scv_count_unreachable_kind(root: text, kind: text, reachable: text) -> i64:
     val dir = "{scv_objects_dir(root)}/{kind}"
     if not file_exists(dir):
@@ -402,7 +406,9 @@ fn scv_prune_unreachable_kind(root: text, kind: text, reachable: text) -> i64:
 fn scv_gc_dry_run(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR repository not initialized\n"
-    val reachable = scv_reachable_object_ids(root)
+    val reachable = match scv_reachable_object_ids_checked(root):
+        Ok(value): value
+        Err(error): return error
     var out = ""
     out = out + "unreachable_chunks={scv_count_unreachable_kind(root, \"chunks\", reachable)}\n"
     out = out + "unreachable_files={scv_count_unreachable_kind(root, \"files\", reachable)}\n"
@@ -413,7 +419,9 @@ fn scv_gc_dry_run(root: text) -> text:
 fn scv_gc_prune(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR repository not initialized\n"
-    val reachable = scv_reachable_object_ids(root)
+    val reachable = match scv_reachable_object_ids_checked(root):
+        Ok(value): value
+        Err(error): return error
     var out = ""
     out = out + "pruned_chunks={scv_prune_unreachable_kind(root, \"chunks\", reachable)}\n"
     out = out + "pruned_files={scv_prune_unreachable_kind(root, \"files\", reachable)}\n"
@@ -576,7 +584,7 @@ fn scv_gc_add_root_line(root: text, reachable: text, id: text) -> text:
         out = out + id + "\n"
     out
 
-fn scv_gc_roots_reachable(root: text) -> text:
+fn scv_gc_roots_reachable_checked(root: text) -> Result<text, text>:
     var reachable = scv_reachable_object_ids(root)
     # pack delta base ids stay pinned
     for bid in scv_pack_reachable_base_ids(root).split("\n"):
@@ -631,7 +639,7 @@ fn scv_gc_roots_reachable(root: text) -> text:
                     val p = part.trim()
                     if p.starts_with("commit_"):
                         reachable = scv_gc_add_root_line(root, reachable, p)
-    reachable
+    scv_syntax_pack_closure_v1(root, reachable)
 
 fn scv_gc_kinds() -> [text]:
     ["chunks", "files", "trees", "commits", "syntax"]
@@ -680,11 +688,12 @@ fn scv_gc_quarantine_move(root: text, qdir: text, kind: text, path: text) -> boo
 
 # Move unreachable loose objects past the retention age into quarantine.
 # Returns (moved, kept_young, quarantine_dir).
-fn scv_gc_quarantine(root: text, reachable: text, min_age_days: i64, now_ms: i64) -> (i64, i64, text):
+fn scv_gc_quarantine(root: text, reachable: text, min_age_days: i64, now_ms: i64) -> Result<(i64, i64, text), text>:
+    val checked = scv_syntax_pack_closure_v1(root, reachable)?
     val qdir = "{scv_quarantine_dir(root)}/{scv_gc_civil_date(now_ms)}"
     var moved = 0
     var young = 0
-    for row in scv_gc_unreachable_rows(root, reachable):
+    for row in scv_gc_unreachable_rows(root, checked):
         val parts = row.split("|")
         val kind = parts[0]
         val path = parts[1]
@@ -699,7 +708,7 @@ fn scv_gc_quarantine(root: text, reachable: text, min_age_days: i64, now_ms: i64
         for path in dir_walk(pack_dir):
             if not path.ends_with(".pack.gz"):
                 continue
-            if scv_gc_pack_any_reachable(path, reachable):
+            if scv_gc_pack_any_reachable(path, checked):
                 continue
             if scv_gc_object_age_days(path, now_ms) > min_age_days:
                 val pack_id = scv_pack_id_from_path_m(path)
@@ -710,7 +719,7 @@ fn scv_gc_quarantine(root: text, reachable: text, min_age_days: i64, now_ms: i64
                     scv_gc_quarantine_move(root, qdir, "packs", manifest_path)
             else:
                 young = young + 1
-    (moved, young, qdir)
+    Ok((moved, young, qdir))
 
 # True when any entry (full or delta, incl. delta base) in the pack is reachable.
 fn scv_gc_pack_any_reachable(path: text, reachable: text) -> bool:
@@ -756,7 +765,9 @@ fn scv_gc(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR repository not initialized\n"
     # Build reachable set including pack base ids
-    var reachable = scv_reachable_object_ids(root)
+    var reachable = match scv_gc_roots_reachable_checked(root):
+        Ok(value): value
+        Err(error): return error
     # Add base ids from packs to pin them
     val base_ids = scv_pack_reachable_base_ids(root)
     for bid in base_ids.split("\n"):

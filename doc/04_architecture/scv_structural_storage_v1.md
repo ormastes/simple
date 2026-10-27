@@ -51,7 +51,15 @@ execution label, parser pin, language, grammar, version, fallback reason and
 child root. Its ID is separate from raw content identity. Existing-hit writes
 compare canonical record/payload bytes, beyond checking a secure digest.
 Physical codec compression and structural deltas are absent; delta depth is
-zero. Raw reclamation is disabled by retention, not inferred from deduplication.
+zero. The additive v1 archive packs complete canonical byte-DAG records in
+identity framing under a content-addressed archive and sealed index. It never
+cuts source at parser spans. Parser records whose IDs hash semantic inputs stay
+loose and retain their prior identity contract. The archive is bounded to 64
+MiB, records to 8 MiB, and the index to 16 MiB; reads verify the selected pack
+and index in full (O(pack bytes)). A real compression provider is reported
+optional and inactive until qualified. Loose records and raw chunks remain
+retained. Raw reclamation is disabled by retention, not inferred from
+deduplication.
 
 ## Restoration, retention and bounds
 
@@ -70,9 +78,11 @@ A missing/corrupt linked structure is an error rather than a silent raw fallback
 This preserves the shadow-comparison gate before structural data can become the
 only representation. Legacy raw-only records remain supported.
 
-GC follows file `structure:`, ordered node `children:` and leaf `payload:` edges.
-File/tree integrity validation invokes independent reconstruction. Existing pack
-and deterministic syntax-object hash rules continue to accept these ASCII SDN
+GC follows file `structure:`, ordered node `children:` and leaf `payload:` edges
+through the same bounded record resolver. Checked destructive GC paths stop on a
+missing or corrupt indexed archive before pruning or quarantine. File/tree
+integrity validation invokes independent reconstruction. Existing pack and
+deterministic syntax-object hash rules continue to accept these ASCII SDN
 records. Backup/crash/GC execution gates remain pending.
 
 ## Validation and remaining work
@@ -89,6 +99,8 @@ as feature-test evidence. SSpec execution, SPipe docgen/maintain, required core,
 MCP/LSP and native smoke gates are **NOT_RUN**, not PASS. Coverage is unmeasured.
 
 Loose publication still performs per-node/per-payload atomic writes. Batching
-complete records, actual codec packing, scheduler budgets, parser session reuse,
-provider ABI/provenance qualification, benchmarked coexistence accounting,
-crash/backup tests and raw reclamation gates remain explicit follow-up work.
+the complete record files into the optional archive does not remove loose
+publication or raw retention. Actual codec packing, scheduler budgets, parser
+session reuse, provider ABI/provenance qualification, benchmarked coexistence
+accounting, crash/backup tests and raw reclamation gates remain explicit
+follow-up work.
