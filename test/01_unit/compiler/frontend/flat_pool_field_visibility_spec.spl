@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+Purpose: Prove that struct/class field visibility (`pub`, `pub(up)`,
+`pub(package)`, `pub(friend)`, plain) survives parse -> flat pool -> bridge.
+Before this plumbing the parser parsed the `pub` prefix on a field and dropped
+it, so every ParserField was Private. Audience: frontend and visibility
+enforcement maintainers.
+
+## Operator workflow
+Run with the test runner; each scenario names the stage that regressed
+(parse pool, codec round-trip, bridge ParserField, codec version).
+
+## Compatibility and limitations
+Plumbing only. HIR enforcement is separate and stays off by default.
+`pub(friend)` is stored as the text code "internal".
+"""
+# @req REQ-PARSER-FIELD-VIS-001
+# Lifecycle: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
+
+use std.spec.*
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_field_visibility, flat_decl_pools_dump, flat_decl_pools_restore}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+
+val FIELD_VIS_SRC = "struct S:\n    pub a: i64\n    pub(up) b: i64\n    pub(package) c: i64\n    pub(friend) d: i64\n    e: i64\n\nclass C:\n    pub val a: i64\n    pub(up) var b: i64\n    pub(package) c: i64\n    pub(friend) d: i64\n    e: i64\n"
+val EXPECTED_CODES = ["public", "up", "package", "internal", "private"]
+
+fn parse_pools():
+    ast_reset()
+    parser_init_with_path(FIELD_VIS_SRC, "field_vis_probe.spl")
+    parse_module_body()
+
+fn vis_code(v: Visibility) -> text:
+    match v:
+        case Visibility.Public: "public"
+        case Visibility.Peer: "peer"
+        case Visibility.Up: "up"
+        case Visibility.Internal: "internal"
+        case Visibility.Package: "package"
+        case Visibility.Private: "private"
+
+describe "struct and class field visibility plumbing":
+    # @req REQ-PARSER-FIELD-VIS-001
+
+    it "records per-field visibility codes for a struct and a class after parse":
+        step("Parse a struct and a class with every pub form and a plain field")
+        parse_pools()
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(2)
+        step("Assert the per-field visibility pool for both declarations")
+        expect(decl_get_field_visibility(decls[0])).to_equal(EXPECTED_CODES)
+        expect(decl_get_field_visibility(decls[1])).to_equal(EXPECTED_CODES)
+
+    it "preserves field visibility across a flat pool encode, reset, decode":
+        step("Parse then encode the decl pools")
+        parse_pools()
+        val decls = module_get_decls()
+        val blob = flat_decl_pools_dump()
+        step("Reset the arena and decode the blob")
+        ast_reset()
+        expect(decl_get_field_visibility(decls[0])).to_equal([])
+        expect(flat_decl_pools_restore(FlatPoolReader.new(blob))).to_equal(true)
+        step("Assert visibility codes are identical after decode")
+        expect(decl_get_field_visibility(decls[0])).to_equal(EXPECTED_CODES)
+        expect(decl_get_field_visibility(decls[1])).to_equal(EXPECTED_CODES)
+
+    it "carries field visibility onto the bridge's ParserField":
+        step("Build the ParserModule through the flat AST bridge")
+        val m = parse_and_build_module(FIELD_VIS_SRC, "field_vis_probe.spl")
+        val s = m.structs["S"] ?? panic("missing struct S")
+        val c = m.classes["C"] ?? panic("missing class C")
+        step("Assert ParserField.visibility and is_public per field")
+        var codes: [text] = []
+        var pubs: [bool] = []
+        for f in s.fields:
+            codes.push(vis_code(f.visibility))
+            pubs.push(f.is_public)
+        expect(codes).to_equal(EXPECTED_CODES)
+        expect(pubs).to_equal([true, false, false, false, false])
+        var ccodes: [text] = []
+        for f in c.fields:
+            ccodes.push(vis_code(f.visibility))
+        expect(ccodes).to_equal(EXPECTED_CODES)
+
+    it "pins the codec version that invalidates pre-visibility caches":
+        step("Read the codec version constant")
+        expect(FLAT_POOL_CODEC_VERSION).to_equal("spl-flatpool-v12-field-visibility")

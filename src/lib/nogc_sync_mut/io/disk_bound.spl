@@ -6,14 +6,37 @@ artifacts, runtime objects): measure a directory and sweep its oldest files
 indexes) and `*.tmp` (in-flight publishes) are never counted or removed.
 """
 
-use std.nogc_sync_mut.io_runtime.{dir_walk, dir_exists, file_size_signed, file_delete, env_get_opt}
+use std.nogc_sync_mut.io_runtime.{dir_walk, dir_exists, file_size_signed, file_delete, env_get_opt,
+    file_exists, file_write, dir_create, dir_list, dir_remove}
+use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
 use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+
+fn _disk_bound_basename(path: text) -> text:
+    val canonical = path.replace("\\", "/")
+    canonical.substring(canonical.last_index_of("/") + 1)
+
+fn _disk_bound_used_path(dir: text, path: text) -> text:
+    "{dir}/.used/" + _disk_bound_basename(path)
+
+# Records a cache hit on `path`, an entry directly in dir (markers are keyed
+# by basename, so bounded dirs must be flat), so the sweep treats it as
+# recently used. The marker is an empty file whose mtime is the last use;
+# it is removed together with its entry.
+pub fn disk_bound_mark_used(dir: text, path: text):
+    if not dir_exists(dir + "/.used"):
+        val _made = dir_create(dir + "/.used", true)
+    val _written = file_write(_disk_bound_used_path(dir, path), "")
+
+# Drops the hit marker of an entry the caller deleted itself.
+pub fn disk_bound_forget(dir: text, path: text):
+    val _removed = file_delete(_disk_bound_used_path(dir, path))
 
 fn _disk_bound_is_entry(path: text) -> bool:
     val canonical = path.replace("\\", "/")
     val name = canonical.substring(canonical.last_index_of("/") + 1)
     # candidate-* receipts are another build's in-flight publish.
-    not canonical.contains("/.by-source/") and not canonical.ends_with(".tmp") and
+    not canonical.contains("/.by-source/") and not canonical.contains("/.used/") and
+        not canonical.ends_with(".tmp") and
         not name.starts_with("candidate-")
 
 pub fn disk_bound_dir_bytes(dir: text) -> i64:
@@ -39,11 +62,16 @@ pub fn disk_bound_sweep(dir: text, target_bytes: i64) -> i64:
         if _disk_bound_is_entry(path) and not dir_exists(path):
             val size = file_size_signed(path)
             if size >= 0:
-                # mtime 0 = unreadable: order it last, never first.
-                val mtime = file_modified_time(path)
-                val stamp = if mtime > 0: "{mtime}" else: "999999999999"
-                val zeros = "000000000000"
-                val pad = zeros.substring(0, 12 - stamp.len())
+                # Last use = max(entry mtime, hit marker mtime); within one
+                # second a used entry outranks an unused one. mtime 0 means
+                # unreadable: order it last, never first.
+                val used_path = _disk_bound_used_path(dir, path)
+                val used = if file_exists(used_path): file_modified_time(used_path) else: 0
+                val written = file_modified_time(path)
+                val last = if used > written: used else: written
+                val stamp = if written <= 0: "9999999999999" else: "{last * 2 + (if used > 0: 1 else: 0)}"
+                val zeros = "0000000000000"
+                val pad = zeros.substring(0, 13 - stamp.len())
                 rows.push(pad + stamp + "|{size}|" + path)
                 total = total + size
     val ordered = rows.sort()
@@ -55,9 +83,17 @@ pub fn disk_bound_sweep(dir: text, target_bytes: i64) -> i64:
         if parts.len() < 3:
             continue
         val size = parts[1].to_i64() ?? 0
-        if file_delete(parts[2:].join("|")):
+        val victim = parts[2:].join("|")
+        if file_delete(victim):
+            val _marker = file_delete(_disk_bound_used_path(dir, victim))
             total = total - size
             removed = removed + 1
+    # Markers whose entry was deleted outside the sweep.
+    if dir_exists(dir + "/.used"):
+        for marker in dir_list(dir + "/.used"):
+            val name = _disk_bound_basename(marker)
+            if not file_exists(dir + "/" + name):
+                val _orphan = file_delete(dir + "/.used/" + name)
     removed
 
 # Cap from env_name (bytes) or fallback.
@@ -72,3 +108,48 @@ pub fn disk_bound_enforce(dir: text, cap: i64) -> i64:
     if cap <= 0 or disk_bound_dir_bytes(dir) <= cap:
         return 0
     disk_bound_sweep(dir, cap * 3 / 4)
+
+# Keyed-directory retention (one dir per compiler/producer identity): under
+# parent, children named <prefix> + <name_len - prefix.len()> chars are
+# ranked by their .last-use marker (dir mtime when absent). `current` gets a
+# fresh marker and is kept; beyond `keep` total, the least recently used are
+# removed, except any used within min_age_s (another lane may be using it).
+pub fn disk_bound_keep_newest_dirs(parent: text, current: text, prefix: text,
+        name_len: i64, keep: i64, min_age_s: i64) -> i64:
+    if keep <= 0 or not dir_exists(parent):
+        return 0
+    if current != "" and dir_exists(parent + "/" + current):
+        val _marked = file_write(parent + "/" + current + "/.last-use", "")
+    val young_after = time_now_seconds() - min_age_s
+    var rows: [text] = []
+    for entry in dir_list(parent):
+        val name = _disk_bound_basename(entry)
+        if name == current or not name.starts_with(prefix) or name.len() != name_len:
+            continue
+        val child = parent + "/" + name
+        if not dir_exists(child):
+            continue
+        # Last use = newest of the marker, the dir, and its direct children
+        # (an older compiler never writes the marker; its objects land in a
+        # subdirectory whose mtime moves on every publish).
+        var used = file_modified_time(child)
+        for sub in dir_list(child):
+            val sub_time = file_modified_time(child + "/" + _disk_bound_basename(sub))
+            if sub_time > used:
+                used = sub_time
+        val stamp = "{if used > 0: used else: 0}"
+        rows.push("0000000000000".substring(0, 13 - stamp.len()) + stamp + "|" + name)
+    val ordered = rows.sort()
+    var excess = ordered.len() + 1 - keep
+    var removed = 0
+    var index = 0
+    while excess > 0 and index < ordered.len():
+        val parts = ordered[index].split("|")
+        index = index + 1
+        val used = parts[0].to_i64() ?? 0
+        excess = excess - 1
+        if min_age_s > 0 and used > young_after:
+            continue
+        if dir_remove(parent + "/" + parts[1], true):
+            removed = removed + 1
+    removed

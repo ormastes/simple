@@ -520,3 +520,37 @@ pub fn native_file_worker_mir_done_read_v1(queue: text, owner: text) -> i64:
     if not file_exists(path):
         return -1
     file_read(path).trim().to_i64() ?? -1
+
+# Shared by the streaming and legacy HIR paths so the deps/hirkey records
+# cannot drift apart again. "" = published; otherwise the fail-closed reason.
+pub fn native_file_worker_hir_records_publish_v1(queue: text, path: text, key: text, deps: [text]) -> text:
+    if not native_file_worker_deps_publish_v1(queue, path, deps):
+        return "HIR shard deps record publication failed"
+    if not native_file_worker_hirkey_publish_v1(queue, path, key):
+        return "HIR shard hirkey record publication failed"
+    ""
+
+# First failure reason of one worker, written beside the MIR ledger so the
+# coordinator's summary can name it. The first reason wins.
+pub fn native_file_worker_error_reason_path_v1(queue: text, owner: text) -> text:
+    "{queue}/error.{sha256_text(owner)}.reason"
+
+pub fn native_file_worker_error_reason_publish_v1(queue: text, owner: text, reason: text) -> bool:
+    if queue == "" or owner == "" or reason == "":
+        return false
+    val target = native_file_worker_error_reason_path_v1(queue, owner)
+    if file_exists(target):
+        return true
+    val temporary = "{target}.{getpid()}.tmp"
+    file_write(temporary, reason.replace("\n", " ")) and file_rename(temporary, target)
+
+pub fn native_file_worker_error_reason_read_v1(queue: text, owner: text) -> text:
+    val target = native_file_worker_error_reason_path_v1(queue, owner)
+    if queue == "" or not file_exists(target):
+        return ""
+    file_read(target)
+
+pub fn native_file_worker_first_error_line_v1(label: text, owner: text, reason: text) -> text:
+    if reason == "":
+        return ""
+    "[{label}] first-error owner={owner} {reason}"

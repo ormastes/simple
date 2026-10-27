@@ -2558,6 +2558,17 @@ impl MirTextCodegen for MirToLlvm:
         # of the same name (wasm `rt_process_run(cmd) -> i64`) keeps its callee.
         var call_func_name = if bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args": "@rt_get_args" elif bare_name_for_call == "env_get": "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif bare_name_for_call == "eprint": "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_run" and args.len() == 3: "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded" and args.len() == 5: "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_bounded_bytes" and args.len() == 5: "@rt_process_run_bounded_bytes_tuple" elif bare_name_for_call == "rt_cpuid_tuple" and args.len() == 2: "@rt_cpuid_tuple_block" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_name_for_call == "rt_process_run_timeout" and args.len() == 4: "@rt_process_run_timeout_tuple" elif bare_name_for_call == "rt_process_run_owned_observed_bounded_value" and args.len() == 5: "@rt_process_run_owned_observed_bounded_text" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
         call_func_name = self.normalize_call_callee(call_func_name)
+        # Inline typed-bytes LE loads (no per-call registry lock). Only when
+        # the destination is a plain i64; anything else keeps the runtime call.
+        val inline_tb_width = self.inline_typed_bytes_le_supported(call_func_name, args.len())
+        if inline_tb_width > 0 and has_dest and self.valid_llvm_type(self.get_local_type(dest_id)) == "i64":
+            val tb_arr = self.value_as_type(self.translate_operand_at(args, 0), self.get_operand_type_at(args, 0), "i64")
+            val tb_idx = self.value_as_type_signed(self.translate_operand_at(args, 1), self.get_operand_type_at(args, 1), "i64", self.get_operand_unsigned_at(args, 1))
+            self.emit_inline_typed_bytes_le(dest_name, tb_arr, tb_idx, inline_tb_width)
+            self.value_types[dest_name] = "i64"
+            self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
+            self.defined_locals[dest_id] = true
+            return
         var arg_parts: [text] = []
         var arg_tys: [text] = []
         var arg_i = 0

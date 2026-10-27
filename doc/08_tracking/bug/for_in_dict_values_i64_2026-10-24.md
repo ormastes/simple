@@ -1,5 +1,7 @@
 # for-in over `Dict.values()` lowers with collection MIR type I64 (2026-10-24)
 
+**Status:** open
+
 Symptom (run-12, plugins.backend_vhdl.vhdl.vhdl_call_lowering):
 `for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while (collection mir type: I64)`.
 

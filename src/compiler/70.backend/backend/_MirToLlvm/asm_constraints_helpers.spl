@@ -464,6 +464,117 @@ impl MirToLlvm:
             self.string_globals = self.string_globals.push(decl)
         global_name
 
+    me inline_typed_bytes_le_supported(callee: text, nargs: i64) -> i64:
+        """Width in bytes (4 or 8) when `callee` is a typed-bytes LE load this
+        backend lowers inline on this target, else 0.
+
+        Only hosted little-endian targets: the packed arm uses a host-endian
+        unaligned load and the header layout is the hosted RtCoreArray
+        (kind@0, flags@1, len@8, data@24); freestanding/FAM targets keep the
+        runtime call."""
+        var width: i64 = 0
+        val os_ok = self.target_os == "linux" or self.target_os == "windows" or self.target_os == "macos" or self.target_os == "freebsd"
+        val arch_ok = self.target_arch == "x86_64" or self.target_arch == "aarch64"
+        if nargs == 2 and os_ok and arch_ok:
+            if callee == "@rt_typed_bytes_u64_le_at" or callee == "@rt_bytes_u64_le_at":
+                width = 8
+            elif callee == "@rt_typed_bytes_u32_le_at" or callee == "@rt_bytes_u32_le_at":
+                width = 4
+        return width
+
+    me inline_bytes_zero_global() -> text:
+        """Name of the shared all-zero 128-byte global used as the safe
+        stand-in address for invalid arrays (emitted once per module)."""
+        if not self.inline_bytes_zero_global_emitted:
+            self.inline_bytes_zero_global_emitted = true
+            val decl = "@.simple_inline_bytes_zero = private constant [16 x i64] zeroinitializer, align 8"
+            if self.bootstrap_string_globals_active:
+                llvm_bootstrap_string_globals_add(decl)
+            else:
+                self.string_globals = self.string_globals.push(decl)
+        "@.simple_inline_bytes_zero"
+
+    me emit_inline_typed_bytes_le(dest_name: text, arr_i64: text, idx_i64: text, width: i64):
+        """Inline `rt_bytes_u{32,64}_le_at(arr, idx)` as straight-line IR.
+
+        Semantics identical to runtime_native.c rt_bytes_u64_le_at: negative
+        idx counts from the end; non-array / out-of-range -> 0; byte-packed
+        arrays (gc_flags bit 3) read raw bytes, slot arrays decode each
+        tagged 8-byte slot. Kept per call: tag==1, raw>=4096, kind==array,
+        bounds. Dropped: the registry lock + probe (rt_core_is_registered_
+        immortal_ptr) and the len<=cap/capacity re-validation -- the same
+        trust the Rust seed's inline lowering applies.
+
+        No new basic block is created (successor phis name %bbN of the
+        current block): invalid inputs are redirected to a zero global with
+        `select` and the result is `select`ed to 0."""
+        val p = dest_name + ".tb"
+        val zero = self.inline_bytes_zero_global()
+        self.builder.emit("  {p}tag = and i64 {arr_i64}, 7")
+        self.builder.emit("  {p}istag = icmp eq i64 {p}tag, 1")
+        self.builder.emit("  {p}big = icmp uge i64 {arr_i64}, 4096")
+        self.builder.emit("  {p}ok1 = and i1 {p}istag, {p}big")
+        self.builder.emit("  {p}raw = and i64 {arr_i64}, -8")
+        self.builder.emit("  {p}rawp = inttoptr i64 {p}raw to ptr")
+        self.builder.emit("  {p}hp = select i1 {p}ok1, ptr {p}rawp, ptr {zero}")
+        self.builder.emit("  {p}kind = load i8, ptr {p}hp, align 1")
+        self.builder.emit("  {p}isarr = icmp eq i8 {p}kind, 2")
+        self.builder.emit("  {p}lenp = getelementptr i8, ptr {p}hp, i64 8")
+        self.builder.emit("  {p}len = load i64, ptr {p}lenp, align 8")
+        self.builder.emit("  {p}neg = icmp slt i64 {idx_i64}, 0")
+        self.builder.emit("  {p}nidx0 = add i64 {p}len, {idx_i64}")
+        self.builder.emit("  {p}nidx = select i1 {p}neg, i64 {p}nidx0, i64 {idx_i64}")
+        self.builder.emit("  {p}lim = sub i64 {p}len, {width}")
+        self.builder.emit("  {p}ge = icmp sge i64 {p}nidx, 0")
+        self.builder.emit("  {p}le = icmp sle i64 {p}nidx, {p}lim")
+        self.builder.emit("  {p}inb = and i1 {p}ge, {p}le")
+        self.builder.emit("  {p}ok = and i1 {p}inb, {p}isarr")
+        self.builder.emit("  {p}flp = getelementptr i8, ptr {p}hp, i64 1")
+        self.builder.emit("  {p}fl = load i8, ptr {p}flp, align 1")
+        self.builder.emit("  {p}fb = and i8 {p}fl, 8")
+        self.builder.emit("  {p}packed = icmp ne i8 {p}fb, 0")
+        self.builder.emit("  {p}okp = and i1 {p}ok, {p}packed")
+        self.builder.emit("  {p}nop = xor i1 {p}packed, true")
+        self.builder.emit("  {p}oks = and i1 {p}ok, {p}nop")
+        self.builder.emit("  {p}dpp = getelementptr i8, ptr {p}hp, i64 24")
+        self.builder.emit("  {p}dp = load ptr, ptr {p}dpp, align 8")
+        self.builder.emit("  {p}pka = getelementptr i8, ptr {p}dp, i64 {p}nidx")
+        self.builder.emit("  {p}pkas = select i1 {p}okp, ptr {p}pka, ptr {zero}")
+        val pk_ty = if width == 8: "i64" else: "i32"
+        self.builder.emit("  {p}pkv = load {pk_ty}, ptr {p}pkas, align 1")
+        var packed_val = "{p}pkv"
+        if width == 4:
+            self.builder.emit("  {p}pkz = zext i32 {p}pkv to i64")
+            packed_val = "{p}pkz"
+        self.builder.emit("  {p}soff = shl i64 {p}nidx, 3")
+        var acc = ""
+        var i = 0
+        while i < width:
+            val q = "{p}s{i}"
+            val boff = i * 8
+            self.builder.emit("  {q}o = add i64 {p}soff, {boff}")
+            self.builder.emit("  {q}a = getelementptr i8, ptr {p}dp, i64 {q}o")
+            self.builder.emit("  {q}as = select i1 {p}oks, ptr {q}a, ptr {zero}")
+            self.builder.emit("  {q}v = load i64, ptr {q}as, align 8")
+            self.builder.emit("  {q}t = and i64 {q}v, 7")
+            self.builder.emit("  {q}isint = icmp eq i64 {q}t, 0")
+            self.builder.emit("  {q}sh = ashr i64 {q}v, 3")
+            self.builder.emit("  {q}ia = and i64 {q}sh, 255")
+            self.builder.emit("  {q}ib = and i64 {q}v, 255")
+            self.builder.emit("  {q}byte = select i1 {q}isint, i64 {q}ia, i64 {q}ib")
+            var piece = "{q}byte"
+            if i > 0:
+                self.builder.emit("  {q}pc = shl i64 {q}byte, {boff}")
+                piece = "{q}pc"
+            if i == 0:
+                acc = piece
+            else:
+                self.builder.emit("  {q}acc = or i64 {acc}, {piece}")
+                acc = "{q}acc"
+            i = i + 1
+        self.builder.emit("  {p}sel = select i1 {p}packed, i64 {packed_val}, i64 {acc}")
+        self.builder.emit("  {dest_name} = select i1 {p}ok, i64 {p}sel, i64 0")
+
     me emit_unsupported_panic(message: text):
         """FAIL THE BUILD on a MIR construct the LLVM backend cannot lower.
 

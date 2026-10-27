@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification of LSP hover/definition on forwarded members, for the LSP/tooling team.
+# @req REQ-LSP-FORWARD-001
+"""
+Same-file, textual resolution (receiver type from a val/var/param declaration);
+LSP hover/definition on forwarded members resolve to the forwarding
+target, driven through the real `handle_tool_call` path:
+- `t.celsius` -> get_celsius, `t.hot` -> is_hot, `t.celsius = 40` -> set_celsius,
+- a real field wins over any accessor,
+- `h.greet(..)` through `alias Greeter = inner` -> the inner type's `greet`,
+- an explicit method on the outer type wins over the alias.
+
+Run: `bin/simple test test/01_unit/app/simple_lsp_mcp/lsp_forwarding_resolution_spec.spl`
+"""
+
+use std.spec
+use std.spec.step
+use app.simple_lsp_mcp.tools.{handle_tool_call}
+use app.simple_lsp_mcp.session_state.{lsp_reset_location}
+
+val PROBE_ALIAS = "test/01_unit/language/accessor_forwarding/probe_alias.spl"
+val PROBE_SETTER = "test/01_unit/language/accessor_forwarding/probe_setter.spl"
+
+fn call(id: text, name: text, file: text, line0: i64, ch: i64) -> text:
+    lsp_reset_location()
+    handle_tool_call(id, "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":{\"file\":\"" + file + "\",\"line\":" + str(line0) + ",\"character\":" + str(ch) + "}}}")
+
+describe "lsp forwarding resolution":
+    it "hover on a getter-forwarded read names get_celsius":
+        step("lsp_hover on t.celsius (probe_setter line 28)")
+        val r = call("1", "lsp_hover", PROBE_SETTER, 27, 30)
+        expect(r).to_contain("get_celsius")
+
+    it "definition on a getter-forwarded read points at get_celsius":
+        step("lsp_definition on t.celsius")
+        val r = call("2", "lsp_definition", PROBE_SETTER, 27, 30)
+        expect(r).to_contain(PROBE_SETTER + ":6: [method] Temp.get_celsius")
+        expect(r).to_contain("get_celsius")
+
+    it "hover and definition on an is_-forwarded read resolve to is_hot":
+        step("lsp_hover / lsp_definition on t.hot")
+        val h = call("3", "lsp_hover", PROBE_SETTER, 28, 36)
+        expect(h).to_contain("is_hot")
+        val d = call("4", "lsp_definition", PROBE_SETTER, 28, 36)
+        expect(d).to_contain(PROBE_SETTER + ":10: [method] Temp.is_hot")
+
+    it "hover and definition on an assignment resolve to set_celsius":
+        step("lsp_hover / lsp_definition on t.celsius = 40")
+        val h = call("5", "lsp_hover", PROBE_SETTER, 29, 7)
+        expect(h).to_contain("set_celsius")
+        val d = call("6", "lsp_definition", PROBE_SETTER, 29, 7)
+        expect(d).to_contain(PROBE_SETTER + ":8: [method] Temp.set_celsius")
+
+    it "a plain field access resolves to the field, not a setter":
+        step("lsp_definition on b.level = 5 names the Both.level field declaration")
+        # REQ-LSP-MEMBER-001: plain members now resolve through the receiver type
+        # (the bare-name engine path would pick the first `level` anywhere).
+        val d = call("7", "lsp_definition", PROBE_SETTER, 36, 7)
+        expect(d).to_contain(PROBE_SETTER + ":21: [field] Both.level")
+        expect(d.contains("forwarded")).to_equal(false)
+        expect(d.contains("set_level")).to_equal(false)
+
+    it "alias-forwarded call resolves to the inner type's method":
+        step("lsp_hover / lsp_definition on h.greet (probe_alias line 30)")
+        val h = call("8", "lsp_hover", PROBE_ALIAS, 29, 30)
+        expect(h).to_contain("greet")
+        expect(h).to_contain("English")
+        val d = call("9", "lsp_definition", PROBE_ALIAS, 29, 30)
+        expect(d).to_contain(PROBE_ALIAS + ":11: [method] English.greet")
+
+    it "an explicit outer method is not forwarded to the alias target":
+        step("lsp_definition on l.greet (probe_alias line 32) names LoudHost.greet")
+        # REQ-LSP-MEMBER-001: the receiver's own method, not the engine's first `greet`.
+        val d = call("10", "lsp_definition", PROBE_ALIAS, 31, 34)
+        expect(d).to_contain(PROBE_ALIAS + ":25: [method] LoudHost.greet")
+        expect(d.contains("forwarded")).to_equal(false)
+        expect(d.contains("English.greet")).to_equal(false)

@@ -70,8 +70,7 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pau
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_complete, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_inventory_mismatch_v1}
-use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_deps_publish_v1,
-    native_file_worker_hirkey_publish_v1, mono_module_scoped_selected_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_hir_records_publish_v1, mono_module_scoped_selected_v1}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
@@ -156,7 +155,7 @@ fn _hir_cache_env_switches() -> text:
     # deciding WHAT to lower (bootstrap constants recovery, flat rows, stub
     # HIR). Folding them keeps one directory safe across modes.
     var out = ""
-    for name in ["SIMPLE_BOOTSTRAP", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STUB_HIR", "SIMPLE_STAGE3_STREAMING_SURFACES"]:
+    for name in ["SIMPLE_BOOTSTRAP", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STUB_HIR", "SIMPLE_STAGE3_STREAMING_SURFACES", "SIMPLE_HIR_CFG_SELECT"]:
         out = out + name + "=" + (sosix_env_get_nullable(name) ?? "") + "\n"
     out
 
@@ -601,10 +600,10 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     val final_path = hir_cache_path(key, parser_classification != "")
     val tmp = final_path + ".{rt_getpid()}.tmp"
     val header = if parser_classification != "": "spl-hircache-v4-parser " + hir_cache_header(library_mode) else: hir_cache_header(library_mode)
-    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=name_dead_store_content_limb
     # The store write fails (rt_core_string_bytes NULL -> -1) when any limb
     # of the concatenated content is a dead transient handle. Bind each part
     # with wellformed checks so the env-gated trace names the dead limb.
+    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=name_dead_store_content_limb
     val body_text: text = hir_cache_entry_encode_body(warnings, blob, parser_classification)
     val content_text: text = header + "\n" + body_text
     if (sosix_env_get_nullable("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1":
@@ -1040,13 +1039,24 @@ fn hir_shard_deps_wanted_v1() -> bool:
         mono_module_scoped_selected_v1(sosix_env_get_nullable("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
             (sosix_env_get_nullable("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "") != "")
 
-fn hir_shard_publish_deps_v1(path: text, deps: [text]) -> bool:
-    native_file_worker_deps_publish_v1(_hir_shard_queue_dir(), path, deps)
+# Publishes the module's deps record (own path first) and its HIR cache key
+# (P-G5b: lets a MIR child load the body by content identity). "" = ok,
+# otherwise the fail-closed reason. Shared by the streaming and legacy paths.
+fn hir_shard_publish_records_v1(path: text, key: text, dep_paths: [text]) -> text:
+    native_file_worker_hir_records_publish_v1(_hir_shard_queue_dir(), path, key, dep_paths)
 
-# P-G5b: the module's HIR cache key, so a MIR child can load this module's
-# body by content identity (template-body seam).
-fn hir_shard_publish_hirkey_v1(path: text, key: text) -> bool:
-    native_file_worker_hirkey_publish_v1(_hir_shard_queue_dir(), path, key)
+# Direct import edges of a surface as in-range SOURCE indices (frozen surface
+# import_target_indices -> target surface's source_index). Shared by both paths.
+fn hir_shard_dep_source_indices_v1(surfaces: ModuleSurfacesByName, surface_index: i64, sources_len: i64) -> [i64]:
+    var out: [i64] = []
+    if surface_index < 0 or surface_index >= surfaces.surfaces.len():
+        return out
+    for dep_surface_index in surfaces.surfaces[surface_index].import_target_indices:
+        if dep_surface_index >= 0 and dep_surface_index < surfaces.surfaces.len():
+            val dep_source_index = surfaces.surfaces[dep_surface_index].source_index
+            if dep_source_index >= 0 and dep_source_index < sources_len:
+                out = out.push(dep_source_index)
+    out
 
 fn hir_shard_complete() -> bool:
     if _hir_shard_queue_dir() == "": return true
@@ -1233,7 +1243,7 @@ export hir_cache_selfchecked, hir_cache_selfcheck_failed, HIR_CACHE_SELFCHECK_SA
 export hir_cache_load_reencodes_v1, hir_cache_adoption_receipt_v1
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
-export hir_shard_deps_wanted_v1, hir_shard_publish_deps_v1, hir_shard_publish_hirkey_v1
+export hir_shard_deps_wanted_v1, hir_shard_publish_records_v1, hir_shard_dep_source_indices_v1
 export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block
 export hir_shard_inventory
 

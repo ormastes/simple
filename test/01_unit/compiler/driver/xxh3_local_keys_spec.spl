@@ -9,7 +9,8 @@ use compiler.common.cache_contract.aspect_match_shard_v1.{
     JoinPointFactV1, DirectoryJoinPointFactsV1, PointcutSelectorV1,
     directory_join_point_facts_v1, pointcut_selector_parse_v1,
     pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1, pointcut_match_key_v1,
-    pointcut_match_identity_v1, aspect_match_forward_reads_v1, PointcutMatchCacheV1}
+    pointcut_match_identity_v1, aspect_match_forward_reads_v1, PointcutMatchCacheV1,
+    pointcut_local_key_from_hex_v1}
 use compiler.driver.cache.daemon.cache_single_flight_v1.{cache_single_flight_key_v1}
 
 extern fn rt_time_now_unix_micros() -> i64
@@ -82,6 +83,21 @@ describe "pointcut_match_key_v1 (LOCAL in-memory shard/single-flight key)":
         val r = pointcut_match_cache_acquire_v1(poisoned, sel, f)
         expect(r.hit).to_equal(false)
         expect(r.shard.selector_digest).to_equal(sel.selector_digest)
+
+describe "xxh3_128_hex zero-value guard (WA xxh3-hex-zero)":
+    it "returns empty digest when hex is empty (source fixed by #4974)":
+        expect(pointcut_local_key_from_hex_v1("")).to_equal("")
+
+    it "rejects invalid hex via digest_v1_new (short/malformed strings return empty)":
+        # digest_v1_new rejects wrong length and invalid characters, returning None -> ""
+        expect(pointcut_local_key_from_hex_v1("abcd1234")).to_equal("")
+        expect(pointcut_local_key_from_hex_v1("")).to_equal("")
+        expect(pointcut_local_key_from_hex_v1("gggggggggggggggggggggggggggggggg")).to_equal("")
+
+    it "accepts valid 32-character hex and wraps in xxh3-128: tag":
+        val valid_hex = "0123456789abcdef0123456789abcdef"
+        val result = pointcut_local_key_from_hex_v1(valid_hex)
+        expect(result.starts_with("xxh3-128:")).to_equal(true)
 
 describe "key cost, 10k computations (old sha256 vs new xxh3-128)":
     it "reports timings":

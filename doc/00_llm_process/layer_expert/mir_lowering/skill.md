@@ -543,3 +543,26 @@ programs never change layout. Rules to keep when editing:
   scope (needs a module-level node). The interpreter shares the preprocessor: do not set the flag
   for interpreted runs. Spec: `test/01_unit/compiler/20.hir/hir_cfg_select_source_spec.spl`.
 - Marker mode is statement-only: a chain whose arm declares a `val`/`var`/`let` at the chain indent, has `{`/`}` in a condition, or has an empty/comment-only arm keeps flat-strip semantics (binding-declaring chains keep flat-strip semantics until a non-scoping CfgSelect design lands). Marker lowering is also gated on the flag and requires every arm to be a string-literal marker.
+
+## 2026-10-27 - @cfg build-profile and ARM sub-arch atoms (plan step 5)
+- `MirTargetContext` gained `build_profile` ("debug"/"release", default "debug"; the driver sets it
+  from `CompileOptions.release` in `driver_mir_target.spl`) and `subarch` (first triple component when
+  it starts with `armv`/`thumbv`, else ""; set by `mir_target_context_from`).
+- `mir_cfg_select.spl`: `debug`/`release` evaluate from the context and never return -2. `thumb` matches
+  `thumbv*`; `armv7`/`armv6` match by subarch prefix (empty subarch falls back to arch `arm` for
+  hand-built contexts); `subarch = "thumbv7em"` is an exact match; `arm` still matches all 32-bit ARM.
+- WA: the parser preprocessor `_pp_eval_atom` still hardcodes debug=true / release=false, so the two
+  lanes differ for release builds until the parser reads the profile.
+- `target_presets.spl` names these triples `thumbv7em`/`thumbv8m.main`/`thumbv6m` (arch field).
+  Spec: `test/01_unit/compiler/50.mir/mir_cfg_select_cross_target_spec.spl` (10 examples).
+- **Imported trait method returns:** a consumer's table holds an imported
+  trait SYMBOL but no method symbols, so `lookup_trait_method` misses and a
+  bare `Ok`/`Err` arm on `recv.method()` was "ambiguous" (stage3
+  `SIMPLE_BOOTSTRAP=1`, e.g. `self.codegen.compile_module(...)`). Both
+  prescans (`prescan_declaration_callables_v1`, `prescan_module_functions_v1`)
+  now register each trait method signature in the name-keyed
+  `bootstrap_fn_ret_hir_type_*` registry under
+  `mir_trait_method_ret_key_v1` = `trait-ret:{canonical module}.{Trait}::{method}`;
+  `enum_match_expr_type` falls back to it. Symbol-free returns only (the
+  registry rejects `Named` payloads, which are table-local ids).
+  Spec: `test/01_unit/compiler/mir/imported_trait_method_declared_return_spec.spl`.

@@ -1,7 +1,7 @@
 """Flat cache directories are swept oldest-first past their byte cap."""
 
 use std.spec.*
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes, disk_bound_mark_used, disk_bound_sweep, disk_bound_keep_newest_dirs}
 use std.io_runtime.{dir_remove_all, getpid, time_now_unix_micros, file_write, file_exists, dir_create}
 
 fn bound_fixture(label: text) -> text:
@@ -41,3 +41,36 @@ describe "disk bound":
         disk_bound_enforce(dir, 5)
         expect(file_exists(dir + "/objects/candidate-123.receipt")).to_equal(true)
         dir_remove_all(dir)
+
+    it "keeps a recently used entry and evicts colder ones first":
+        val dir = bound_fixture("lru")
+        # "a" sorts oldest by path on a same-second publish; a hit makes it hot.
+        disk_bound_mark_used(dir + "/objects", dir + "/objects/a")
+        expect(disk_bound_dir_bytes(dir)).to_equal(30)
+        expect(disk_bound_enforce(dir + "/objects", 20)).to_equal(2)
+        expect(file_exists(dir + "/objects/a")).to_equal(true)
+        expect(file_exists(dir + "/objects/b")).to_equal(false)
+        expect(file_exists(dir + "/objects/c")).to_equal(false)
+        dir_remove_all(dir)
+
+    it "drops hit markers whose entry was deleted elsewhere":
+        val dir = bound_fixture("orphan")
+        disk_bound_mark_used(dir + "/objects", dir + "/objects/gone")
+        disk_bound_sweep(dir + "/objects", 1000)
+        expect(file_exists(dir + "/objects/.used/gone")).to_equal(false)
+        dir_remove_all(dir)
+
+    it "keeps the current scope dir plus the newest others and ignores foreign dirs":
+        val root = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_scopes"
+        for name in ["s0001", "s0002", "s0003", "s0004", "hir", "s01"]:
+            dir_create(root + "/" + name + "/obj", true)
+            file_write(root + "/" + name + "/obj/x.o", "0123456789")
+        expect(disk_bound_keep_newest_dirs(root, "s0001", "s", 5, 2, 0)).to_equal(2)
+        expect(file_exists(root + "/s0001/obj/x.o")).to_equal(true)
+        expect(file_exists(root + "/s0004/obj/x.o")).to_equal(true)
+        expect(file_exists(root + "/s0002/obj/x.o")).to_equal(false)
+        expect(file_exists(root + "/s0003/obj/x.o")).to_equal(false)
+        expect(file_exists(root + "/hir/obj/x.o")).to_equal(true)
+        expect(file_exists(root + "/s01/obj/x.o")).to_equal(true)
+        expect(disk_bound_keep_newest_dirs(root, "s0001", "s", 5, 1, 3600)).to_equal(0)
+        dir_remove_all(root)

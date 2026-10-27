@@ -7,7 +7,8 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal, hir_shard_reco
 use compiler.driver.driver_worker_surface_closure_v1.{worker_unit_drained_path_v1, worker_unit_pick_seal_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{NativeFileUnitInvokerV1, NativeFileWorkerReceiptV1,
     native_file_worker_mir_done_read_v1, native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1,
-    native_file_worker_mono_pending_path_v1, native_file_worker_receipt_publish_v1, native_file_worker_object_path_v1}
+    native_file_worker_mono_pending_path_v1, native_file_worker_receipt_publish_v1, native_file_worker_object_path_v1,
+    native_file_worker_error_reason_publish_v1}
 
 # P4/P-G3 worker loop (default in the per-file lane): one compile unit per
 # round (parse -> HIR -> MIR -> object for <= batch modules, one process), no
@@ -57,11 +58,14 @@ pub fn native_file_unit_worker_loop_v1(invoker: NativeFileUnitInvokerV1, owner: 
                 mir_done_ms: mir_done, obj_done_ms: obj_done,
                 status: if passed: "PASS" else: "FAILED", object: if passed: object_path else: ""))
         if code != 0 or mono_pending or hir_sealed < 0 or mir_sealed < 0 or orphan_picks != 0:
-            eprint "[file-worker] owner={owner} unit exit={code} hir_claimed={hir_claimed.len()} mir_claimed={mir_claimed.len()} mono_pending={mono_pending} orphan_picks={orphan_picks}"
+            val reason = "unit exit={code} hir_claimed={hir_claimed.len()} mir_claimed={mir_claimed.len()} mono_pending={mono_pending} orphan_picks={orphan_picks}"
+            eprint "[file-worker] owner={owner} {reason}"
+            val _recorded = native_file_worker_error_reason_publish_v1(mir_queue, owner, reason)
             return 1
         if hir_claimed.len() == 0:
             if not file_exists(worker_unit_drained_path_v1(hir_queue, hir_owner)):
                 eprint "[file-worker] owner={owner} unit exited 0 with no claim and no drained proof"
+                val _recorded = native_file_worker_error_reason_publish_v1(mir_queue, owner, "unit exited 0 with no claim and no drained proof")
                 return 1
             break
         units = units + 1

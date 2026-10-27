@@ -86,25 +86,31 @@ var _fe_cache_stores: i64 = 0
 
 pub fn frontend_parse_cache_scope() -> text:
     if _fe_cache_scope_memo != "@@unset@@":
-        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=memo_dies_unpromoted
         # The memo text is born in whatever scope first called this fn; an
         # owner that skips frontend_parse_cache_promote_transient_owner leaves
         # it dead at scope end (observed as the hir-cache store header's dead
         # limb -> universal io-write). Recompute instead of returning a corpse.
+        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=memo_dies_unpromoted
         if rt_heap_ref_wellformed(_fe_cache_scope_memo): return _fe_cache_scope_memo
         _fe_cache_scope_memo = "@@unset@@"
     if (env_get_opt("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
         _fe_cache_scope_memo = ""
         return ""
     val published = env_get_opt("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+    # Fold environment switches that affect parse output into the scope.
+    # SIMPLE_HIR_CFG_SELECT changes @when/@cfg preprocessing.
+    val cfg_select_flag = env_get_opt("SIMPLE_HIR_CFG_SELECT") ?? ""
+    # Fold only into a published scope: an empty scope means "no cache" and
+    # must stay empty.
+    val scoped = if published != "" and cfg_select_flag != "": published + ";hir-cfg-select=" + cfg_select_flag else: published
     # Only a NON-EMPTY scope is memoized. Memoizing "" latched the cache off
     # for the whole process on any path that parsed before the driver
     # published the scope (phase-1 bootstrap-defaults builds), which is
     # doc/08_tracking/bug/frontend_parse_cache_scope_memo_latches_off_2026-08-23.md.
-    if published != "":
-        _fe_cache_scope_memo = published
+    if scoped != "":
+        _fe_cache_scope_memo = scoped
         _fe_cache_scope_needs_promotion = true
-    published
+    scoped
 
 pub fn frontend_parse_cache_enabled() -> bool:
     if frontend_parse_cache_scope() == "": return false

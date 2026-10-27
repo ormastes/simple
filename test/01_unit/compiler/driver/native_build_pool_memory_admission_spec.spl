@@ -1,5 +1,5 @@
 use std.spec
-use app.cli.shard_mem_clamp.{shard_threads_cap_for, SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1}
+use app.cli.shard_mem_clamp.{shard_threads_cap_for, SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1, shard_worker_estimate_kib_v1, shard_effective_tree_budget_kb_v1, shard_pool_workers_v1}
 
 # Phase-4 problem 1: per-file worker pool memory admission defaults.
 # Old budgets (HIR 6700000 kB, MIR 16000000 kB) refused the pool unless >~54 GB
@@ -31,3 +31,45 @@ describe "native-build per-file pool memory admission":
 
     it "refuses with unknown host memory":
         expect(shard_threads_cap_for(2, SHARD_MIR_WORKER_KB_V1, 0)).to_equal(1)
+
+# Phase-4 admission (stage2 e4746b05): worker estimate from WORKER peaks, tree
+# budget clamped to cap_or_free - 24 GB.
+describe "native-build pool admission: worker estimate and tree clamp":
+    val gb = 1048576
+    val default_kb = 9000000
+
+    it "ignores a 1.36 GB parent peak: estimate covers 3.4 GB worker peaks":
+        val est = shard_worker_estimate_kib_v1(default_kb, [3565158, 3565158], 0)
+        expect(est >= 3565158 and est >= default_kb).to_be_true()
+
+    it "uses the MAX recorded worker peak, not the mean":
+        expect(shard_worker_estimate_kib_v1(5000000, [3565158, 5872026], 0)).to_equal(5872026)
+
+    it "uses the default with no recorded peaks":
+        expect(shard_worker_estimate_kib_v1(default_kb, [], 0)).to_equal(default_kb)
+
+    it "a light-lane record never lowers the default (fail-closed)":
+        expect(shard_worker_estimate_kib_v1(default_kb, [3565158], 0)).to_equal(default_kb)
+
+    it "a 12 GB recorded peak raises the estimate":
+        expect(shard_worker_estimate_kib_v1(default_kb, [3565158, 12582912], 0)).to_equal(12582912)
+
+    it "a deliberate override wins":
+        expect(shard_worker_estimate_kib_v1(default_kb, [3565158], 1234)).to_equal(1234)
+
+    it "declared 90 GB with a 64 GB cap gives 40 GB":
+        val eff = shard_effective_tree_budget_kb_v1(90 * gb, 64 * gb, 0)
+        expect(eff).to_equal(40 * gb)
+        val est = 3565158
+        expect(shard_pool_workers_v1(eff, est)).to_equal((40 * gb) / est)
+
+    it "falls back to free commit when no cap is set":
+        expect(shard_effective_tree_budget_kb_v1(90 * gb, 0, 50 * gb)).to_equal(26 * gb)
+
+    it "a declared budget below the clamp is kept":
+        expect(shard_effective_tree_budget_kb_v1(30 * gb, 64 * gb, 0)).to_equal(30 * gb)
+
+    it "a cap of 24 GB or less refuses":
+        expect(shard_effective_tree_budget_kb_v1(90 * gb, 24 * gb, 0)).to_equal(0)
+        expect(shard_effective_tree_budget_kb_v1(90 * gb, 10 * gb, 0)).to_equal(0)
+        expect(shard_pool_workers_v1(0, 3565158) < 2).to_be_true()

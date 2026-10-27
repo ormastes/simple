@@ -1,5 +1,7 @@
 # Nested if-expression text result erased to i64 (runtime_compiler rt_dir) (2026-10-25)
 
+**Status:** open
+
 ## Symptom
 Phase 3 Stage 3 hello world (bypass route) after codegen: `Hosted native linking
 failed: Runtime compilation failed: Required runtime source not found:

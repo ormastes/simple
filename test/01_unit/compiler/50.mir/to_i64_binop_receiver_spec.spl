@@ -1,0 +1,84 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: `.to_i64()` on a proven-integer receiver is a Cast, not a text parse
+
+Bug: doc/08_tracking/bug/native_to_i64_on_binop_receiver_miscompile_2026-10-27.md.
+`(v & 15u64).to_i64()` was admitted by the erased-receiver text-builtin arm
+(receiver.type_ nil, I64/U64 MIR local not "proven numeric") and lowered as TEXT to_i64:
+rt_string_to_int_lenient(raw word) -> 0 for small values, a crash for large ones.
+A receiver proven integer from its own expression (binop, cast, suffix literal),
+or a recorded `val v = 5u64` local, must be widened with a plain Cast; an erased Any receiver
+keeps the text parse.
+"""
+
+# @tag: unit, compiler, mir, builtins
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn callees_of(src: text) -> [text]:
+    val file = "testdata/fixture_to_i64_binop.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_to_i64_binop", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    callees
+
+fn has_text_parse(callees: [text]) -> bool:
+    for c in callees:
+        if c == "rt_string_to_int_lenient":
+            return true
+    false
+
+fn has_dynamic_int_parse(callees: [text]) -> bool:
+    for c in callees:
+        if c == "rt_to_int_dynamic":
+            return true
+    false
+
+describe "to_i64 on integer receivers":
+    it "bitand binop receiver is a cast":
+        val callees = callees_of("fn f(v: u64) -> i64:\n    (v & 15u64).to_i64()\n")
+        expect(has_text_parse(callees)).to_equal(false)
+        expect(has_dynamic_int_parse(callees)).to_equal(false)
+
+    it "shift binop receiver is a cast":
+        val callees = callees_of("fn f(v: u64) -> i64:\n    (v >> 4u64).to_i64()\n")
+        expect(has_text_parse(callees)).to_equal(false)
+        expect(has_dynamic_int_parse(callees)).to_equal(false)
+
+    it "add and mul binop receivers are casts":
+        val callees = callees_of("fn f(v: u64) -> i64:\n    (v + 1u64).to_i64() + (v * 3u64).to_i64()\n")
+        expect(has_text_parse(callees)).to_equal(false)
+        expect(has_dynamic_int_parse(callees)).to_equal(false)
+
+    it "i64 bitand binop receiver is a cast":
+        val callees = callees_of("fn f(v: i64) -> i64:\n    (v & 15).to_i64()\n")
+        expect(has_text_parse(callees)).to_equal(false)
+        expect(has_dynamic_int_parse(callees)).to_equal(false)
+
+    it "u64 literal local receiver is a cast":
+        val callees = callees_of("fn f() -> i64:\n    val v = 0x28241db6188879c2u64\n    v.to_i64()\n")
+        expect(has_text_parse(callees)).to_equal(false)
+        expect(has_dynamic_int_parse(callees)).to_equal(false)
+
+    it "erased Any receiver keeps the text parse":
+        expect(has_text_parse(callees_of("fn f(v: Any) -> i64:\n    v.to_i64()\n"))).to_equal(true)

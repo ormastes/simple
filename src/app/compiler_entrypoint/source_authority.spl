@@ -198,10 +198,36 @@ fn compiler_source_authority_acquire_v1(
     if not snapshot.valid:
         inventory_trace_cost_emit_v1(trace_token, cost)
         return compiler_source_authority_invalid_v1(snapshot.reason)
+    # Fail closed here, naming the root, instead of letting every child worker
+    # later die with SOURCE_ROOT_MAPPING_MISSING on a snapshot that never
+    # received the root's files. One stat per root; no inventory re-read.
+    val uncovered = compiler_source_authority_uncovered_root_v1(
+        root, source_roots, snapshot.snapshot_root)
+    if uncovered != "":
+        inventory_trace_cost_emit_v1(trace_token, cost)
+        return compiler_source_authority_invalid_v1(
+            "source-inventory-root-empty: requested --source root '" + uncovered +
+            "' has no .spl/simple.sdn rows in the frozen snapshot (root has no " +
+            "compilable files, or the inventory listing was truncated/stale; for " +
+            "the latter delete build/scv/source-inventory and build/scv/snapshots and rerun)")
     val result = compiler_source_authority_validate_v1(root, cache_root, snapshot,
         refresh.inventory_digest, refresh.inventory_generation, false)
     inventory_trace_cost_emit_v1(trace_token, cost)
     result
+
+pub fn compiler_source_authority_uncovered_root_v1(
+    root: text, source_roots: [text], snapshot_root: text
+) -> text:
+    # First requested checkout-relative root absent from the frozen snapshot
+    # (the snapshot materializes only inventory rows), else "". Derived
+    # (build/...) selectors are checked by their own owner.
+    for source_root in source_roots:
+        val relative = compiler_source_selector_relative_v1(root, source_root)
+        if relative == "" or relative.starts_with("build/"): continue
+        val mapped = snapshot_root + "/" + relative
+        if not dir_is_real_no_follow(mapped) and not file_is_regular_no_follow(mapped):
+            return relative
+    ""
 
 fn compiler_source_authority_inventory_roots_v1(root: text, source_roots: [text]) -> [text]:
     # The event protocol admits only the closed canonical families. Snapshot roots are
