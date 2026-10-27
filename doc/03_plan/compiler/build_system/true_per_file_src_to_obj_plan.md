@@ -283,3 +283,14 @@ instances (`A<T>` calls `B<T>`; `A<i64>` is created in a third module). So:
   `test/unit/`. Both invokers produce the same objects, and a child failure is an
   error in both.
 - Measure: wall time and RSS for the fiber invoker vs the process invoker on the probe.
+
+### PR 9 - delete the whole-program route (final step)
+
+Gate: stage3 has built end to end on the per-file unit lane (`SIMPLE_FILE_WORKERS=1`, PM2 default flip landed) with the generic-instance pre-link step (generic-instance lane plan #5056). Until that gate passes, the whole-program route stays as a fallback only.
+
+Delete, landing together with the generic-instance lane's PR4 (global mono removal, owner `abe15091455222b01`):
+- the HIR/MIR shard ledgers and claim paths that only the whole-program and legacy two-child lanes use (`native_build_focused_capsule_shards_v1`, `run_ledger_shards`, the legacy two-child lane in `run_native_file_worker_v1`);
+- the global mono pass (`run_monomorphization` / `_with_report`; owned by the generic-instance lane);
+- the `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM` plumbing and its route selection in `bootstrap_main.spl`.
+
+Spec: a route-selection spec asserting that no env combination reaches a whole-program path, plus the stage3 self-build as the end-to-end proof. Measure: stage3 time to first object, total time, peak RSS before and after.
