@@ -6,6 +6,7 @@ use std.scv.compile_snapshot.{scv_compile_snapshot_provenance_v1,
     scv_compile_snapshot_receipt_v1, scv_compile_snapshot_gc_v1}
 use app.io.mod.{dir_create, dir_exists, file_exists}
 use std.nogc_sync_mut.io_runtime.{file_write}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 
 extern fn rt_getpid() -> i64
 
@@ -54,18 +55,29 @@ describe "Build retention checked store callback":
     it "fails closed on lock contention and on corrupted durable authority":
         step("An occupied transaction lock blocks admission; invalid SDN blocks loading")
         val root = retention_store_fixture("lock")
-        expect(dir_create(root + "/.build-retention-v1.lock", false)).to_equal(true)
+        val held = file_lock(root + "/.build-retention-v1.lock", 1)
+        expect(held >= 0).to_equal(true)
         expect(build_retention_store_commit_v1(root, 0, "", retention_store_initial(), retention_store_limits()).is_err()).to_equal(true)
+        expect(file_unlock(held)).to_equal(true)
         expect(file_write(root + "/.build-retention-v1.sdn", "generation: garbage\n")).to_equal(true)
         expect(build_retention_store_load_v1(root).is_err()).to_equal(true)
         expect(scv_compile_snapshot_gc_v1(root, [], 1)).to_equal(0)
+
+    it "reuses the stable lock inode after its former owner has gone":
+        step("An abandoned file is harmless because ownership belongs to the OS lock")
+        val root = retention_store_fixture("recovery")
+        expect(file_write(root + "/.build-retention-v1.lock", "old owner\n")).to_equal(true)
+        expect(build_retention_store_commit_v1(root, 0, "", retention_store_initial(), retention_store_limits()).is_ok()).to_equal(true)
+        expect(file_exists(root + "/.build-retention-v1.lock")).to_equal(true)
 
     it "rejects tampered same-generation plans and history-dropping replacement roots":
         step("Canonical root identity prevents replay against a different graph")
         val root = retention_store_fixture("tamper")
         var state = retention_store_initial()
-        state.nodes[0].authoritative = true
-        state.nodes[0].rebuildable = false
+        var node = state.nodes[0]
+        node.authoritative = true
+        node.rebuildable = false
+        state.nodes = [node]
         build_retention_store_commit_v1(root, 0, "", state, retention_store_limits()).unwrap()
         var plan = build_retention_plan_v1(state, retention_store_limits(), 10).unwrap()
         plan.deletions = ["snapshot/old"]
