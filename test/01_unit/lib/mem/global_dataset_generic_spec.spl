@@ -1,0 +1,107 @@
+# GlobalDataset<T> generic instantiation - two independent typed instances (PR-C)
+#
+# Verifies that GlobalDataset<T> can be instantiated with different concrete types
+# and that each instance maintains independent state and type safety.
+
+use std.spec
+use std.mem.global_dataset.{GlobalDataset, GlobalDatasetLimits, RcPort,
+    global_dataset_with_port, global_dataset_limits_load}
+
+var _rc_text: Dict<text, i64> = {}
+var _rc_i64_array: Dict<[i64], i64> = {}
+
+fn _reset_text():
+    _rc_text = {}
+
+fn _reset_i64_array():
+    _rc_i64_array = {}
+
+fn _share_text(v: text) -> bool:
+    _rc_text[v] = 1
+    true
+
+fn _retain_text(v: text) -> bool:
+    _rc_text[v] = (_rc_text.get(v) ?? 0) + 1
+    true
+
+fn _release_text(v: text) -> bool:
+    _rc_text[v] = (_rc_text.get(v) ?? 0) - 1
+    true
+
+fn _count_text(v: text) -> i64:
+    _rc_text.get(v) ?? 0
+
+fn _bytes_text(v: text) -> i64:
+    v.len()
+
+fn _share_i64_array(v: [i64]) -> bool:
+    _rc_i64_array[v] = 1
+    true
+
+fn _retain_i64_array(v: [i64]) -> bool:
+    _rc_i64_array[v] = (_rc_i64_array.get(v) ?? 0) + 1
+    true
+
+fn _release_i64_array(v: [i64]) -> bool:
+    _rc_i64_array[v] = (_rc_i64_array.get(v) ?? 0) - 1
+    true
+
+fn _count_i64_array(v: [i64]) -> i64:
+    _rc_i64_array.get(v) ?? 0
+
+fn _bytes_i64_array(v: [i64]) -> i64:
+    (v.len() as i64) * 8i64
+
+describe "GlobalDataset<T> generic instantiation":
+    it "creates two independent typed datasets with different type instances":
+        step("Create text dataset")
+        _reset_text()
+        val port_text = RcPort<text>(
+            share: _share_text,
+            retain: _retain_text,
+            release: _release_text,
+            count: _count_text,
+            graph_bytes: _bytes_text
+        )
+        var ds_text = global_dataset_with_port(port_text, GlobalDatasetLimits(max_entries: 10, max_bytes: 1000))
+
+        step("Create [i64] dataset")
+        _reset_i64_array()
+        val port_i64_array = RcPort<[i64]>(
+            share: _share_i64_array,
+            retain: _retain_i64_array,
+            release: _release_i64_array,
+            count: _count_i64_array,
+            graph_bytes: _bytes_i64_array
+        )
+        var ds_i64 = global_dataset_with_port(port_i64_array, GlobalDatasetLimits(max_entries: 10, max_bytes: 10000))
+
+        step("Put and acquire in text dataset")
+        expect(ds_text.put("key1", "value1").unwrap()).to_equal(true)
+        var got_text = ds_text.acquire("key1")
+        match got_text:
+            case Some(v):
+                expect(v).to_equal("value1")
+                ds_text.release("key1")
+            case _:
+                assert_false(true)
+        expect(ds_text.stats().entries).to_equal(1)
+
+        step("Put and acquire in [i64] dataset")
+        val arr = [1i64, 2i64, 3i64]
+        expect(ds_i64.put("arr1", arr).unwrap()).to_equal(true)
+        var got_arr = ds_i64.acquire("arr1")
+        match got_arr:
+            case Some(v):
+                expect(v.len()).to_equal(3)
+                expect(v[0]).to_equal(1i64)
+                ds_i64.release("arr1")
+            case _:
+                assert_false(true)
+        expect(ds_i64.stats().entries).to_equal(1)
+
+        step("Verify independent counts")
+        expect(ds_text.stats().entries).to_equal(1)
+        expect(ds_i64.stats().entries).to_equal(1)
+        expect(ds_text.stats().total_bytes).to_equal(6)  # "value1"
+        expect(ds_i64.stats().total_bytes).to_equal(24)  # [1, 2, 3] = 3 * 8 bytes
