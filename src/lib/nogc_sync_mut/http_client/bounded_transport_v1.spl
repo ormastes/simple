@@ -1,0 +1,90 @@
+# One synchronous, bounded POST over existing TCP/TLS owners. No redirects,
+# subprocesses, raw externs or fallback from TLS to plaintext.
+use std.nogc_sync_mut.http_client.bounded_endpoint_v1.{BoundedHttpTargetV1,
+    bounded_http_target_validate_v1, bounded_http_bearer_valid_v1}
+use std.nogc_sync_mut.http_client.bounded_response_v1.{BoundedHttpReadV1,
+    BOUNDED_HTTP_BODY_LIMIT_V1}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.io.browser_net_runtime.{browser_monotonic_ms,
+    browser_tls_connect_address, browser_tls_write_timeout,
+    browser_tls_read_bytes_timeout, browser_tls_close}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+
+fn bounded_http_remaining_v1(deadline: i64) -> Result<i64, text>:
+    val now = browser_monotonic_ms()
+    if now < 0 or now >= deadline: return Err("http_deadline")
+    Ok(deadline - now)
+
+fn bounded_tcp_write_v1(stream: TcpStream, data: text, ms: i64) -> Result<i64, text>:
+    if stream.set_write_timeout(Some(ms)).is_err(): return Err("http_timeout_failed")
+    match stream.write(base_encoding_text_to_bytes(data)):
+        case Ok(value): Ok(value)
+        case Err(_): Err("http_write_failed")
+
+fn bounded_tcp_read_v1(stream: TcpStream, count: i64, ms: i64) -> Result<[u8], text>:
+    if stream.set_read_timeout(Some(ms)).is_err(): return Err("http_timeout_failed")
+    match stream.read(count):
+        case Ok(value): Ok(value)
+        case Err(_): Err("http_read_failed")
+
+fn bounded_http_exchange_v1(request: text, max_body: i64, deadline: i64,
+        write: fn(text, i64) -> Result<i64, text>,
+        read: fn(i64, i64) -> Result<[u8], text>) -> Result<text, text>:
+    var offset = 0
+    while offset < request.len():
+        val remaining = bounded_http_remaining_v1(deadline)?
+        val written = write(request.substring(offset), remaining)?
+        if written <= 0 or written > request.len() - offset: return Err("http_write_failed")
+        offset = offset + written
+    val response = BoundedHttpReadV1.create(max_body)
+    while true:
+        val remaining = bounded_http_remaining_v1(deadline)?
+        val count = response.read_limit()
+        if count <= 0: return Err("http_wire_limit")
+        val chunk = read(count, remaining)?
+        if chunk.len() > count: return Err("http_read_contract")
+        if chunk.len() == 0: return response.finish()
+        response.feed(chunk)?
+
+pub fn bounded_http_post_v1(target: BoundedHttpTargetV1, bearer: text,
+        body: text, timeout_ms: i64, max_body: i64) -> Result<text, text>:
+    bounded_http_target_validate_v1(target)?
+    if not bounded_http_bearer_valid_v1(bearer): return Err("http_credentials_invalid")
+    if body.len() > 4096 or max_body < 0 or max_body > BOUNDED_HTTP_BODY_LIMIT_V1:
+        return Err("http_body_limit")
+    if timeout_ms < 1 or timeout_ms > 60000: return Err("http_timeout_invalid")
+    val now = browser_monotonic_ms()
+    if now < 0 or now > 9223372036854775807 - timeout_ms: return Err("http_clock_invalid")
+    val deadline = now + timeout_ms
+    val head = "POST {target.path} HTTP/1.1\r\nHost: {target.host}:{target.port}\r\n"
+    val auth = "Authorization: Bearer " + bearer + "\r\nContent-Type: application/sdn\r\n"
+    val framing = "Accept: application/sdn\r\nConnection: close\r\nContent-Length: {body.len()}\r\n\r\n"
+    val request = head + auth + framing + body
+    if target.tls:
+        val handle = match browser_tls_connect_address(target.address, target.port,
+                target.host, bounded_http_remaining_v1(deadline)?):
+            case Ok(value): value
+            case Err(_): return Err("http_tls_connect_failed")
+        val outcome = bounded_http_exchange_v1(request, max_body, deadline,
+            \data, ms: browser_tls_write_timeout(handle, data, ms),
+            \count, ms: browser_tls_read_bytes_timeout(handle, count, ms))
+        val closed = browser_tls_close(handle)
+        if closed.is_err(): return Err("http_close_failed")
+        match outcome:
+            case Ok(value): Ok(value)
+            case Err(_): Err("http_exchange_failed")
+    else:
+        var stream = match TcpStream.connect_timeout("{target.address}:{target.port}",
+                bounded_http_remaining_v1(deadline)?):
+            case Ok(value): value
+            case Err(_): return Err("http_connect_failed")
+        val outcome = bounded_http_exchange_v1(request, max_body, deadline,
+            \data, ms: bounded_tcp_write_v1(stream, data, ms),
+            \count, ms: bounded_tcp_read_v1(stream, count, ms))
+        val closed = stream.close()
+        if closed.is_err(): return Err("http_close_failed")
+        match outcome:
+            case Ok(value): Ok(value)
+            case Err(_): Err("http_exchange_failed")
+
+export bounded_http_post_v1
