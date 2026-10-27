@@ -6,6 +6,64 @@ was checked against. The true per-file worker pipeline is off when
 `SIMPLE_FILE_WORKERS` is unset; `SIMPLE_FILE_WORKERS=1` explicitly opts in.
 This source default update is being landed without new runtime verification.
 
+## Direct compiler or BuildRunner selection
+
+`simple native-build ...` already compiles directly without BuildRunner. The
+full CLI's ordinary `simple build ...` forwards to the same pipeline, except
+named targets and special subcommands have their own dispatch. Prefer
+`native-build` when supplying a compiler target triple: `build --target` selects
+a named project target. A minimal bootstrap compiler need not provide `build`
+or `test`.
+
+Build scripts can select either existing owner explicitly:
+
+```sh
+# Run from the frozen source root. Use absolute, pinned program/runtime paths.
+sh scripts/build/run-build.shs --executor=direct --program="$compiler" -- \
+  --target aarch64-unknown-linux-gnu --backend cranelift \
+  --runtime-bundle core-c-bootstrap --runtime-path "$runtime" \
+  --source src/compiler --source src/app --source src/lib --source src/plugins \
+  --entry-closure --entry src/app/cli/bootstrap_main.spl \
+  --threads 2 --cache-dir "$private_cache" --mode dynload --output "$candidate"
+
+# The existing BuildRunner owns manifest validation, admission and execution.
+sh scripts/build/run-build.shs --executor=buildrunner --program="$buildrunner" -- \
+  --manifest "$manifest" --state "$state" \
+  --source-root "$frozen_source" --output-root "$output_root"
+```
+
+Select the actual host/target and source composition for the intended artifact;
+the example target is AArch64 Linux, not a portable default. Required composition
+roots and runtime providers remain the caller's recorded source policy. For a
+test-runner binary, select its real entry (`src/app/test_runner_new/main.spl`)
+and complete source/provider closure instead. TestRunner executes tests after a
+build; it is not an alternative compiler backend.
+
+`SIMPLE_BUILD_EXECUTOR=direct|buildrunner` configures a script default; explicit
+`--executor=` wins. Unset defaults to `direct`; invalid or empty selectors fail.
+`--program=` must name an absolute executable path. The selector forwards every
+argument after `--` unchanged, prefixes `native-build` or `run`, preserves the
+working directory and exit status, and `exec`s the selected owner. It adds no
+scheduler, timeout, resource budget, retry, cleanup, receipt or automatic
+fallback. Use the existing bounded process owner around it. A nonzero owner
+result remains nonzero. `--help` does not require a compiler.
+
+For provisional bootstrap, retain immutable source, producer, runtime and tool
+identities; private compatible caches; process-tree supervision; exact output
+validation; and the new compiler's own compile/run Hello gate. Direct execution
+does not mint a Phase2 admission receipt or qualify BuildRunner/TestRunner. The
+high-level `bootstrap-from-scratch.sh` managed phase pipeline is unchanged;
+`resume-stage3-from-admitted.sh` still requires genuine admission. A diagnostic
+direct candidate remains unadmitted until its required gates pass. Do not put
+it in `bin/release` or substitute it for an admitted producer.
+
+Selector process contracts: `python3 scripts/build/tests/run-build-test.py`.
+These tests use an argv-reporting process to check routing, precedence, exact
+arguments, PID ownership, failures and rejection. They do not qualify native
+BuildRunner execution. A real direct Cranelift Hello compile/run was also
+checked with a pinned Phase2 compiler; this is selector integration evidence,
+not completion of the bootstrap or map/AsyncRef qualification matrix.
+
 ## Essential applications after Stage 4
 
 Every completed Stage 4 bootstrap must build and check DevHub, the Caret suite,
