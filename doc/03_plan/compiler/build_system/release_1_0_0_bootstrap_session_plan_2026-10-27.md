@@ -86,3 +86,18 @@ Go to end, use cache, tagged workarounds, manual compile when <30 failed files.
 - Pseudo-immutable cache / async build: `doc/05_design/compiler/cache/pseudo_immutable_cache_async_build_design.md`
 - Pure-Simple linker: `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md` (plan to be redone)
 - Bugs filed this session: `doc/08_tracking/bug/*2026-10-27*.md`
+
+## TODO (workaround kept, real fix deferred)
+- TODO(mono-fn-value): generic fn passed as a fn value (E-MONO-032). Workaround #5067
+  (`@workaround bug=mono_generic_fn_value_arg_2026-10-27`) stays. Real fix on branch-less
+  worktree commit `314ab79d6cd` passes 3/4; case (b) non-generic callee open.
+- TODO(geninst-pr3): per-generic body digest is unsound (impl-method / helper edits leave stale
+  instances). Not landed; uncommitted partial fix in `C:/dev/wt-geninst-digest`
+  (hash template block + module non-generic source). Until fixed, instance cache keys stay
+  module-wide (current, safe behaviour).
+- TODO(shard-scoped-mono): shards publish module paths + dependency ledger, then enable
+  per-module mono behind `SIMPLE_SHARD_SCOPED_MONO=1`.
+- TODO(seed-redeploy): deployed seed (Oct 22) cannot parse block-form `@when`; rebuild seed
+  from current source so specs can run (#5094 spec unexecuted for this reason).
+- Landed after this plan: #5091 (pure-Simple ar archive writer, unwired), #5094 (Windows link
+  default llvm-mingw GNU; DLL via lld).
