@@ -109,10 +109,27 @@ spec: `test/01_unit/compiler/50.mir/inline_typed_bytes_load_spec.spl`
 - Throughput: xxh3_64 216 MiB/s (64KB) / 217 (16MB), up from 170, i.e. 1.27x. xxh3_128 202 / 205, flat.
 - `rt_value_int_wide` x8 and `rt_array_push` x8 run only at function exit (building the returned `[u64]`), not per stripe.
   `_acc512` additionally calls `rt_array_get` / `rt_array_len` / `rt_value_as_int_wide` x8 each.
-- **Native runtime XXH3 is unavailable.** `xxh3_128_text_runtime_only` returns `""` in a native build, so every native
-  `xxh3_128_text` caller takes the pure-Simple fallback. There is still no native pure/runtime ratio.
+- ~~Native runtime XXH3 is unavailable.~~ **WRONG, retracted** (see the backing matrix below): a direct native probe shows `rt_xxh3_128_text` and `xxh3_128_text_runtime_only` return the correct digest natively. The `""` seen in the bench came from the bench harness (its text input or sink), not from the runtime, so
+  native `xxh3_128_text` callers do use the runtime. A fair native pure/runtime ratio still needs a corrected bench.
 
 ### Next fix
 Make the self-hosted backend inline small leaf helpers: check why `is_small` is false for a 1-call wrapper once
 the typed-bytes inline sequence is emitted, or emit `alwaysinline` for 1-statement fns. Expected: the remaining
-~89% call cost goes away (about 5-10x). Also find out why `rt_xxh3_128_text` is not linked or backed in native builds.
+~89% call cost goes away (about 5-10x). (The earlier "runtime XXH3 not linked natively" item is retracted; it is backed.)
+
+## Native backing matrix of hash externs (stage2 824ab2671ba)
+
+Rust runtime column: paths under `src/compiler_rust/runtime/src/`.
+
+Probe: one native exe built with `C:/dev/p3new/stage2.824ab2671ba.exe native-build` (SIMPLE_SCV_INVENTORY_COLD_INIT=1, SIMPLE_SCV_FREEZE_FALLBACK=1, clang64 + MSVC 14.44.35207 link), input "abc" (text, bytes, and a 3-byte file). Expected sha256 `ba7816bf...0015ad`, xxh3_128 `06b05ab6733a618578af5f94892f3950`. Interpreter column: `bin/simple.exe run` of the same file from the repo root.
+
+| extern | facade | C def (src/runtime/runtime_native.c) | Rust runtime def | native result | interpreter result | verdict |
+|---|---|---|---|---|---|---|
+| rt_xxh3_128_text | `xxh3_128_text_runtime_only` (returns "" on failure; `xxh3_128_text` falls back to pure Simple) | :17888 | value/sffi/hash/xxhash.rs:96 | 06b05ab6...3950 (correct) | same | BACKED |
+| rt_tls13_sha256 | `sha256_u8_native_hex_or_empty`, `sha256_text_native_or_empty` ("" unless 32 bytes) | :9825 | hash/sha256.rs:154 | correct sha256 (bytes and text) | same | BACKED |
+| rt_file_hash_sha256 | direct extern (nil on failure) | :17679 | sffi/file_io/file_ops.rs:1029 | correct sha256 of file | same | BACKED |
+| rt_file_hash | direct extern | :17700 (wrapper over rt_file_hash_sha256) | cli_sffi.rs:838 | correct sha256 of file | same | BACKED |
+| rt_hash_text | direct extern (i64 FNV-1a) | :11964 | collections.rs:6229 | -1792535898324117685 | identical | BACKED |
+| rt_xxhash_new/write/finish/... | none (no `extern fn` in src/lib; only src/compiler_rust/lib/std/src/infra/hash.spl:49-53 declares them; xxh3_dual.spl mentions them in comments only) | none | value/sffi/hash/xxhash.rs:20-77 (listed "rust-only" in rt_dual_implementation_baseline.txt) | not probeable | not probeable | UNBACKED natively (Rust-only; no C twin) |
+
+No candidate with a facade is unbacked in this stage2 native build: every sha256 and xxh3_128 extern linked and returned the correct value. Native and interpreter results match for all five probed. The only UNBACKED family is `rt_xxhash_*` (streaming hasher): it is defined only in the Rust runtime (no C twin, a recorded rust-only dual-implementation gap) and no `src/lib` code declares it, so the C-runtime native build has nothing to link; there is therefore no runtime xxh3_64 and the native xxh3_64 path is the (slow) pure-Simple kernel measured above. Step 4 (why-empty analysis) does not apply: no extern with a C def returned empty.
