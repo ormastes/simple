@@ -63,3 +63,13 @@ Run each applicable exact-subject scenario once. A failure repair invalidates on
 - Working/staged direct-env guards, executable-spec layout, whitespace and exact-head higher-model review before landing.
 
 No npm/package publication path is changed by this first wave. Add the isolated package/native-server build gates if that scope changes. All 65 master tasks and all 115 selected acceptance scenarios remain in scope for the full goal; the list above is only this wave's changed-file inventory.
+
+## User-selected Phase 2 landing milestone
+
+The current-source bootstrap entry closure compiled and linked successfully at `8dcbbbf949ccc913cc69e5badee3c26ee94a3d4a`: 393 compiled, 1198 reused, zero failed. Evidence is retained in `/tmp/scv-phase2-current-retry1-20261027`; artifact SHA-256 is `ad0bc9a2ed1c019796aabd89c956bebdde510d076f2f245fe8255da4856ef0e4`. This used the bootstrap-only Rust seed to produce a Phase 2 compiler; it is not execution of the feature scenarios or qualification of an entire toolset. The seed emitted one binary because its dynload mode is unsupported. Feature modules outside that entry closure remain uncompiled by this evidence.
+
+The user explicitly requested landing after Phase 2 compilation and preparing acceptance for Phase 3. All native scenario execution, common checks, generated-manual review and coverage above remain NOT RUN. They are retained qualification requirements, rather than implied passes or blockers silently waived by the implementation.
+
+- `test/01_unit/compiler/driver/source_parse_public_boundary_spec.spl` — NOT RUN; explicit cross-owner wrappers added after the first Phase 2 link failure.
+
+The final post-compile change only restores one owner-local assertion; compiled production source is unchanged. The first failed compile and the unrelated baseline full-CLI memory-cap failure are preserved separately.
