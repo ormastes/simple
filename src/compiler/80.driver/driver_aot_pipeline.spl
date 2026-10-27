@@ -113,6 +113,15 @@ impl CompilerDriver:
         if native_mir_shard_link_ledger_v1() != "":
             return self.aot_link_mir_shards_v1()
 
+        match self.stage_lower_mir():
+            case Some(stop): return stop
+            case None: pass
+        self.stage_emit_object()
+
+    # PR2a stage: lower monomorphized HIR to MIR. The target is chosen here
+    # (driver_mir_target_context from options); HIR stays target-neutral.
+    # Some(result) stops the compilation, None continues to stage_emit_object.
+    me stage_lower_mir() -> Option<CompileResult>:
         # Step 4->5 receipts. `log_phase` is env-gated and off by default, so
         # the whole post-MIR pass chain (borrow_check / process_async /
         # optimize_mir / weave_aop) was invisible in `[build]` receipts -- the
@@ -122,8 +131,8 @@ impl CompilerDriver:
         log_phase("aot:lower_to_mir:start")
         val staged_batch = native_staged_codegen_batch_size_v1()
         if staged_batch < 0:
-            return CompileResult.CodegenError(
-                "{NATIVE_STAGED_CODEGEN_BATCH_ENV_V1} must be a non-negative decimal module count (0 disables staged native codegen)")
+            return Some(CompileResult.CodegenError(
+                "{NATIVE_STAGED_CODEGEN_BATCH_ENV_V1} must be a non-negative decimal module count (0 disables staged native codegen)"))
         # A requested batch that this lane refuses used to fall back silently
         # to whole-program MIR; name the reason so a bootstrap default that
         # did not take effect is visible in the stage log.
@@ -141,7 +150,7 @@ impl CompilerDriver:
             # A staged batch ran the borrow checker before the tail finished
             # lowering; report it as the unstaged lane would.
             if self.native_staged_codegen.borrow_failed:
-                return CompileResult.BorrowError(self.ctx.errors)
+                return Some(CompileResult.BorrowError(self.ctx.errors))
             # Bug (2026-08-06): builtin `Array.first()` has no MIR method
             # symbol under native codegen (same gap class as `push`/`map`/
             # `filter`/`fold` -- see Bug #149's comment a few files over in
@@ -170,14 +179,18 @@ impl CompilerDriver:
                 # Could not continue past MIR (early stop, verify failure, or
                 # nothing lowered): still name every failure, never link.
                 self.go_to_end_absorb_errors_v1("mir")
-                return self.go_to_end_finish_v1(0, [])
-            return CompileResult.CodegenError(msg)
+                return Some(self.go_to_end_finish_v1(0, []))
+            return Some(CompileResult.CodegenError(msg))
         log_phase("aot:lower_to_mir:done")
         # The flat HIR store is scoped to MIR lowering: its only readers are done here.
         bootstrap_hir_modules_reset()
         log_build_progress("mir", "modules", self.ctx.mir_modules.len(),
             self.ctx.mir_modules.len(), "lower_to_mir", 4, 6, 0, 0, "running")
 
+        None
+
+    # PR2a stage: run the post-MIR passes and emit objects / link the output.
+    me stage_emit_object() -> CompileResult:
         # HIR is dead after MIR lowering for every AOT backend except vhdl and the
         # SIMPLE_BOOTSTRAP_DIRECT_IR dispatch (bootstrap_compile_to_native_local
         # re-reads ctx.hir_modules). Retaining it held the whole-closure HIR
