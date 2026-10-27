@@ -1,6 +1,6 @@
 # Native `.to_i64()` on a binop / suffix-literal receiver lowered as a TEXT parse (2026-10-27)
 
-**Status:** FIXED in source (MIR lowering); native proof awaits a compiler redeploy
+**Status:** FIXED
 **Severity:** P1 (silent wrong value, or crash). Root cause of the workaround in
 `doc/08_tracking/bug/xxh3_128_hex_all_zeros_native_2026-10-27.md`.
 
@@ -48,7 +48,7 @@ cases emitted `rt_string_new, rt_string_len, rt_string_to_int_lenient`; after, n
 (`Result.ok() over a struct payload`) identical with and without this change.
 
 ## Native proof
-NOT done: `C:/dev/p3new/stage2.exe` is a pre-built compiler binary and does not read
+Superseded by the native proof below. Originally: `C:/dev/p3new/stage2.exe` is a pre-built compiler binary and does not read
 `src/compiler` at `native-build` time, so the fix only takes effect after the compiler is rebuilt
 and redeployed. The `as i64` / `as u8` workaround in `src/lib/common/crypto/xxh3.spl` is left in
 place; removing it waits on that redeploy plus a native re-check of `xxh3_128_hex`.
@@ -56,3 +56,13 @@ place; removing it waits on that redeploy plus a native re-check of `xxh3_128_he
 ## Interpolation crash
 Same cause (`val v = 0x..u64` has no HIR type, so `v.to_i64()` became a text parse of the raw
 word). Fixed by the same change at the lowering level; the native re-check is pending the redeploy.
+
+## Native proof (2026-10-27)
+Stage 2 C:/dev/p3new/stage2.824ab2671ba.exe (sha256 6b0ba5f3…) produces correct native code:
+- `(v & 15u64).to_i64()` = 2 ✓
+- `(v >> 60u64).to_i64()` = 2 ✓
+- `(w & 15).to_i64()` = 7 ✓
+- `"{0x10u64.to_i64()}"` = "16" ✓
+
+No crashes. With the `as i64` / `as u8` workaround in `src/lib/common/crypto/xxh3.spl` temporarily reverted to `.to_i64()` / `.to_u8()`, the native build gave the correct
+xxh3_128_hex for "abc" and empty input, and a seeded 300-byte xxh3_64_seeded matched the interpreter. The `as` form is kept (equivalent; no change needed).

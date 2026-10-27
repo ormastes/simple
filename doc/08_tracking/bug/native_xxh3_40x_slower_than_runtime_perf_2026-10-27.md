@@ -97,3 +97,22 @@ packed-byte ideal), to be measured. Native proof comes
 with the next stage2/stage3 rebuild (no compiler was rebuilt for this change);
 spec: `test/01_unit/compiler/50.mir/inline_typed_bytes_load_spec.spl`
 (IR-level). The Cranelift adapter path is not changed.
+
+## Native measurement after #4990 (2026-10-27, stage2 `stage2.824ab2671ba.exe`, sha 6b0ba5f3…)
+- The inline typed-bytes load works: no `rt_typed_bytes_u64_le_at` / `rt_bytes_u64_le_at` call remains. It is
+  inlined into the **wrapper** function.
+- The wrapper is **not** inlined into the stripe loop. That held for both the cross-module
+  `std.common.crypto.xxhash._xxh64_load_u64_le` and a same-module 1-line helper (`_xxh3_ld64`, tried
+  and reverted). `_hash_long_acc` still makes 24 calls per stripe to a function with an 8-register prologue. The
+  backend's small-fn `alwaysinline` (`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl` ~937, `is_small`)
+  does not fire for it, and cross-module inlining is impossible without LTO.
+- Throughput: xxh3_64 216 MiB/s (64KB) / 217 (16MB), up from 170, i.e. 1.27x. xxh3_128 202 / 205, flat.
+- `rt_value_int_wide` x8 and `rt_array_push` x8 run only at function exit (building the returned `[u64]`), not per stripe.
+  `_acc512` additionally calls `rt_array_get` / `rt_array_len` / `rt_value_as_int_wide` x8 each.
+- **Native runtime XXH3 is unavailable.** `xxh3_128_text_runtime_only` returns `""` in a native build, so every native
+  `xxh3_128_text` caller takes the pure-Simple fallback. There is still no native pure/runtime ratio.
+
+### Next fix
+Make the self-hosted backend inline small leaf helpers: check why `is_small` is false for a 1-call wrapper once
+the typed-bytes inline sequence is emitted, or emit `alwaysinline` for 1-statement fns. Expected: the remaining
+~89% call cost goes away (about 5-10x). Also find out why `rt_xxh3_128_text` is not linked or backed in native builds.
