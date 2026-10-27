@@ -184,8 +184,9 @@ landing this before PR2c. This PR lands that work and adds the following
 
 ### Generic instances from TLDR (PR 4-6, after PR 3)
 State on release/1.0.0 (f8d318f9e8b):
-- `generic-spec` (the `.rr` usage-ref input, #4383 reverse_reference_projection_v2
-  via `generic_spec_rr_producer_v1.spl:35-86`) is emitted only AFTER mono, by
+- `generic-spec` is the FORWARD per-module section; `.rr` is its reverse
+  projection (#4383 reverse_reference_projection_v2, produced by
+  `generic_spec_rr_producer_v1.spl:35-86`). The section is emitted only AFTER mono, by
   `driver_publish_generic_spec_from_mono_v1` (`driver_hir_pipeline_passes.spl:428`)
   from `mono_scoped_generic_uses_v1` / `mono_scoped_generic_fn_instances_v1`
   (`monomorphize_integration.spl:5203-5212`). The source TLDR summary
@@ -206,37 +207,60 @@ State on release/1.0.0 (f8d318f9e8b):
   keys the missing instance). Discovery is per using module during mono, not link.
 - Hard-coded instance needs: no literal table was found (grep for instance-need /
   builtin / prelude instance tables). The implicit need list is the per-module
-  COMDAT fallback; G2 deletes that fallback path once the TLDR set is complete.
+  COMDAT fallback; it is deleted only in G2b, behind a measured gate.
 
-#### PR 4 (G1) - TLDR producers emit generic usage
-- Files: `tldr_summary_v1.spl` (`tldr_summary_entries_v1` :96 adds
-  `use|<callee module_id> <stable_symbol_id> args=<k1 US k2>` rows, in the
-  `.rr` usage-ref key shape of `reverse_reference_key.spl`);
-  `generic_spec_rr_producer_v1.spl` (`generic_spec_list_of_module_v1` reads the
-  summary rows, not only the post-mono section); `driver_hir_pipeline_passes.spl:428`
-  keeps writing the post-mono list and must agree with the summary.
+#### PR 4 (G1) - TLDR producers emit generic usage (two producers, per module)
+A single-module line scanner cannot know inferred type args or transitive
+instances (`A<T>` calls `B<T>`; `A<i64>` is created in a third module). So:
+- Summary producer (`tldr_summary_v1.spl`, `tldr_summary_entries_v1` :96) emits
+  (a) `need|<callee module_id> <stable_symbol_id> args=<k1 US k2>` for explicit
+  concrete needs visible locally, and (b) `edge|<A id> -> <B id> args=<T-substituted
+  args>` template-to-template edges, where args may reference the caller's type
+  params (`A<T> -> B<T>`, `A<T> -> C<Vec<T>>`).
+- Inference-dependent needs: the module's OWN worker, after its HIR/mono,
+  publishes post-mono `generic-spec` rows into that module's TLDR
+  (`driver_publish_generic_spec_from_mono_v1`, `driver_hir_pipeline_passes.spl:428`).
+  Per-module only; no closure load.
+- `generic_spec_rr_producer_v1.spl` (`generic_spec_list_of_module_v1`) merges
+  summary `need` rows and post-mono rows into the forward section; `.rr` stays
+  its reverse projection.
 - Spec red->green: `test/01_unit/compiler/driver/tldr_generic_usage_spec.spl`:
-  explicit and inferred type args, imported generic fn and type, nested
-  instance, cfg variants all kept; a module that uses a generic but emits no row
-  is red. Mirror in `test/unit/`.
-- Measure: instance rows per module on the probe and stage3 batch; rows equal the
-  post-mono `generic-spec` set (0 missing, 0 extra).
+  explicit local need -> `need` row; `A<T>` calling `B<T>` -> `edge` row with
+  T-substitution; an inferred-only use emits NO summary row but appears in the
+  post-mono rows; cfg variants all kept. Mirror in `test/unit/`.
+- Measure: `need` + `edge` rows per module; post-mono rows not covered by
+  summary needs or edge closure (reported, the G2 fixpoint input).
 
-#### PR 5 (G2) - instance set = union of TLDR needs, owners via P-G5b
+#### PR 5 (G2) - instance set = fixpoint over TLDR edges, owners via P-G5b
 - Files: `generic_instance_build_plan_v1.spl` (`generic_instance_needed_v1` :59
-  unions summary rows, dedup by ConcreteTldrKey); `generic_instance_object_producer_v1.spl`
-  (`generic_instance_lists_with_body_v1` :137 assigns the owner from the P-G5b HIR
-  key); delete the per-module COMDAT fallback needs. An instance reached in mono
-  but absent from every TLDR fails closed with E-MONO-040 (:3511).
-- Spec: `test/01_unit/compiler/driver/generic_instance_union_spec.spl` (dedup,
-  owner = defining module, missing-from-TLDR -> E-MONO-040). Mirror in `test/unit/`.
-- Measure: instance count, duplicate keys after union = 0.
+  seeds with concrete `need` + post-mono rows, then applies `edge` rows with
+  T-substitution to a fixpoint, dedup by ConcreteTldrKey);
+  `generic_instance_object_producer_v1.spl` (`generic_instance_lists_with_body_v1`
+  :137 assigns the owner from the P-G5b HIR key).
+- The COMDAT fallback is NOT deleted here. An incomplete plan is logged
+  (`[instance-plan] incomplete key=... reason=...`) and counted.
+- A mono-observed instance absent from the plan reports
+  `E-MONO-040 instance-not-in-tldr-plan` (distinct reason tag, separable from
+  the visibility cause at :3511). Open owner decision: Fable suggests a
+  separate code E-MONO-043 instead.
+- Spec: `test/01_unit/compiler/driver/generic_instance_fixpoint_spec.spl`
+  (transitive `A<i64>` -> `B<i64>` from a third module; dedup; owner = defining
+  module; missing -> `E-MONO-040 instance-not-in-tldr-plan`; incomplete plan
+  counted, fallback kept). Mirror in `test/unit/`.
+- Measure: instance count, duplicate keys = 0, incomplete-plan count, fallback count.
+
+#### PR 5b (G2b) - delete the COMDAT fallback (gated)
+- Lands only after a stage3 run shows the plan complete: 0 fallbacks and 0
+  mono-observed instances missing from the plan. Then delete the per-module
+  COMDAT fallback needs; an incomplete plan becomes a hard error.
+- Spec: `test/01_unit/compiler/driver/generic_instance_no_fallback_spec.spl`.
+  Mirror in `test/unit/`.
 
 #### PR 6 (G3) - build instance objects before link, once, in the per-file pool
 - Files: `native_build_main.spl` (`run_file_worker_instances_v1` :1533 moves
   ahead of the MIR drain wait, jobs run in the per-file pool);
   `native_file_worker_instances_v1.spl` (`file_worker_instances_run_v1` :100,
-  claim by owner only). `file_worker_instances_link_v1` (:1585) errors on any
+  claim by owner only). `file_worker_instances_link_v1` (`native_build_main.spl:1585`) errors on any
   instance not in the plan.
 - Spec: `test/01_unit/compiler/driver/generic_instance_prelink_spec.spl`:
   each key built exactly once by its owner; link-time discovery of a missing
