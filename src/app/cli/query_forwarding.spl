@@ -6,6 +6,7 @@
 #   assign  `recv.x = v`  -> field x, else set_x
 #   call    `recv.m(..)`  -> method m, else the method m of the type named by
 #                            the field behind `alias Trait = field`
+# Plain members and `self.x` / `a.b.c` receivers: see _fw_resolve_at.
 # The receiver type comes from `val|var recv = Type(..)` or `recv: Type` in the
 # same file. No compiler imports; mirrors the compiler's forwarding order.
 
@@ -66,18 +67,20 @@ fn _fw_receiver_type(lines: [text], recv: text, from: i64) -> text:
             val p = t.index_of(recv + ": ")
             if p > 0 and not _fw_word_char(_fw_ch(t, p - 1)):
                 return _fw_word_from(t, p + recv.len() + 2)
-            if _fw_indent(lines[i]) == 0:
-                return ""
+            # Enclosing fn/method header reached: never scan into sibling bodies.
+            return ""
+        if t != "" and _fw_indent(lines[i]) == 0:
+            return ""
         i = i - 1
     ""
 
 # (first line index, end line index exclusive) of `class|struct|trait <ty>`; (-1, -1) if absent.
-fn _fw_type_block(lines: [text], ty: text) -> (i64, i64):
-    var i = 0
+fn _fw_type_block_from(lines: [text], ty: text, start: i64) -> (i64, i64):
+    var i = start
     while i < lines.len():
         val t = _fw_strip_modifiers(lines[i].trim())
         var hit = false
-        for kw in ["class ", "struct ", "trait "]:
+        for kw in ["class ", "struct ", "trait ", "enum ", "impl "]:
             if t.starts_with(kw + ty):
                 val nxt = _fw_ch(t, kw.len() + ty.len())
                 if not _fw_word_char(nxt):
@@ -89,6 +92,58 @@ fn _fw_type_block(lines: [text], ty: text) -> (i64, i64):
             return (i, j)
         i = i + 1
     (-1, -1)
+
+fn _fw_type_block(lines: [text], ty: text) -> (i64, i64):
+    _fw_type_block_from(lines, ty, 0)
+
+# Member `name` across every class/struct/enum/impl/trait block of `ty`; -1 if absent.
+fn _fw_find_in_blocks(lines: [text], ty: text, name: text, want_field: bool) -> i64:
+    var b = _fw_type_block_from(lines, ty, 0)
+    while b.0 >= 0:
+        val m = _fw_find_member(lines, b, name, want_field)
+        if m >= 0:
+            return m
+        b = _fw_type_block_from(lines, ty, b.1)
+    -1
+
+# Declared type of field `name` in `ty` ("" when unknown or not a plain type name).
+fn _fw_field_type(lines: [text], ty: text, name: text) -> text:
+    val fl = _fw_find_in_blocks(lines, ty, name, true)
+    if fl < 0:
+        return ""
+    val t = _fw_strip_modifiers(lines[fl].trim())
+    _fw_word_from(t.substring(name.len() + 1).trim(), 0)
+
+# Type that encloses line index `from` (nearest top-level class/struct/enum/impl/trait).
+fn _fw_self_type(lines: [text], from: i64) -> text:
+    var i = from
+    while i >= 0:
+        val t = _fw_strip_modifiers(lines[i].trim())
+        if t != "" and _fw_indent(lines[i]) == 0:
+            for kw in ["class ", "struct ", "enum ", "trait "]:
+                if t.starts_with(kw):
+                    return _fw_word_from(t.substring(kw.len()), 0)
+            if t.starts_with("impl "):
+                val p = t.index_of(" for ")
+                if p > 0:
+                    return _fw_word_from(t.substring(p + 5).trim(), 0)
+                return _fw_word_from(t.substring(5), 0)
+            return ""
+        i = i - 1
+    ""
+
+# Type of `chain[0]` (self -> enclosing type) followed through each field.
+fn _fw_chain_type(lines: [text], chain: [text], from: i64) -> text:
+    var ty = ""
+    if chain[0] == "self":
+        ty = _fw_self_type(lines, from)
+    else:
+        ty = _fw_receiver_type(lines, chain[0], from)
+    var i = 1
+    while i < chain.len() and ty != "":
+        ty = _fw_field_type(lines, ty, chain[i])
+        i = i + 1
+    ty
 
 # 0-based line of a member `name` of the given kind in a block; -1 if absent.
 fn _fw_find_member(lines: [text], block: (i64, i64), name: text, want_field: bool) -> i64:
@@ -115,7 +170,7 @@ fn _fw_resolve_member(lines: [text], ty: text, member: text, assign: bool, depth
     val block = _fw_type_block(lines, ty)
     if block.0 < 0:
         return none
-    val f = _fw_find_member(lines, block, member, true)
+    val f = _fw_find_in_blocks(lines, ty, member, true)
     if f >= 0:
         return _fw_hit(lines, f, "field", ty, member, "")
     var cands: [text] = []
@@ -124,7 +179,7 @@ fn _fw_resolve_member(lines: [text], ty: text, member: text, assign: bool, depth
     else:
         cands = ["get_" + member, "is_" + member, member]
     for c in cands:
-        val m = _fw_find_member(lines, block, c, false)
+        val m = _fw_find_in_blocks(lines, ty, c, false)
         if m >= 0:
             var via = ""
             if c != member:
@@ -150,7 +205,7 @@ fn _fw_resolve_member(lines: [text], ty: text, member: text, assign: bool, depth
                     if tb.0 >= 0 and _fw_find_member(lines, tb, member, false) < 0:
                         i = i + 1
                         continue
-                    val fty = _fw_word_from(lines[fl].trim().substring(field.len() + 1).trim(), 0)
+                    val fty = _fw_field_type(lines, ty, field)
                     val inner = _fw_resolve_member(lines, fty, member, assign, depth + 1)
                     if inner.name != "":
                         return ForwardHit(line: inner.line, kind: inner.kind, owner: inner.owner, name: inner.name, decl: inner.decl, via: "alias " + trait_name + " = " + field)
@@ -188,11 +243,12 @@ fn _fw_in_string_or_comment(cc: [text], k: i64) -> bool:
     in_str
 
 # Member reference at a 1-based position (`col` counts characters, like
-# extract_symbol_at). Returns a hit ONLY when forwarding applies (via != ""):
-# accessor forwarding or alias forwarding. Plain fields/methods return a
-# no-hit so the caller keeps the existing engine path. Tab-indented files are
+# extract_symbol_at). `plain == false` returns a hit ONLY when forwarding
+# applies (via != ""); `plain == true` also returns ordinary fields/methods.
+# Receivers may be `name`, `self`, or a chain `a.b.c` (at most 4 segments, each
+# hop resolved through the field's declared type). Tab-indented files are
 # skipped, and `_`-prefixed members never forward (same as the seed).
-fn forwarding_resolve_at(file: text, line_num: i64, col: i64) -> ForwardHit:
+fn _fw_resolve_at(file: text, line_num: i64, col: i64, plain: bool) -> ForwardHit:
     val none = ForwardHit(line: 0, kind: "", owner: "", name: "", decl: "", via: "")
     val content = file_read_text(file) ?? ""
     if content == "" or content.contains("\t"):
@@ -210,25 +266,49 @@ fn forwarding_resolve_at(file: text, line_num: i64, col: i64) -> ForwardHit:
     while e < cc.len() and _fw_word_char(cc[e]):
         e = e + 1
     val member = _fw_join(cc, s, e)
-    if member.starts_with("_") or s < 2 or cc[s - 1] != ".":
+    if (member.starts_with("_") and not plain) or s < 2 or cc[s - 1] != ".":
         return none
+    # Walk left over `seg(.seg)*` collecting receiver segments (nearest last).
+    var chain: [text] = []
     var rs = s - 1
-    while rs > 0 and _fw_word_char(cc[rs - 1]):
-        rs = rs - 1
-    val recv = _fw_join(cc, rs, s - 1)
-    if recv == "":
+    var more = true
+    while more:
+        var ws = rs
+        while ws > 0 and _fw_word_char(cc[ws - 1]):
+            ws = ws - 1
+        val seg = _fw_join(cc, ws, rs)
+        if seg == "":
+            return none
+        chain = [seg] + chain
+        if ws >= 2 and cc[ws - 1] == "." and chain.len() < 5:
+            rs = ws - 1
+        else:
+            if ws >= 1 and cc[ws - 1] == ".":
+                return none
+            more = false
+    if chain.len() > 4:
         return none
     var k = e
     while k < cc.len() and cc[k] == " ":
         k = k + 1
     val next_ch = if k + 1 < cc.len(): cc[k + 1] else: ""
     val assign = k < cc.len() and cc[k] == "=" and next_ch != "=" and not _fw_in_string_or_comment(cc, k)
-    val ty = _fw_receiver_type(lines, recv, line_num - 1)
+    val ty = _fw_chain_type(lines, chain, line_num - 1)
     if ty == "":
         return none
     val hit = _fw_resolve_member(lines, ty, member, assign, 0)
-    if hit.name == "" or hit.via == "":
+    if hit.name == "" or (hit.via == "" and not plain):
         return none
-    ForwardHit(line: hit.line, kind: hit.kind, owner: hit.owner, name: hit.name, decl: hit.decl, via: hit.via + " (" + recv + "." + member + ")")
+    var via = hit.via
+    if via != "":
+        via = via + " (" + chain.join(".") + "." + member + ")"
+    ForwardHit(line: hit.line, kind: hit.kind, owner: hit.owner, name: hit.name, decl: hit.decl, via: via)
 
-export ForwardHit, forwarding_resolve_at
+fn forwarding_resolve_at(file: text, line_num: i64, col: i64) -> ForwardHit:
+    _fw_resolve_at(file, line_num, col, false)
+
+# Definition target of `recv.member`, including plain fields and methods.
+fn member_resolve_at(file: text, line_num: i64, col: i64) -> ForwardHit:
+    _fw_resolve_at(file, line_num, col, true)
+
+export ForwardHit, forwarding_resolve_at, member_resolve_at
