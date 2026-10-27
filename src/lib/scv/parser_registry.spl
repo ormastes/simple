@@ -4,7 +4,7 @@ use app.io.mod (file_exists, file_read, dir_create)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
 use std.scv.core.{scv_parsers_dir, scv_parser_lock_path, scv_langmap_path, scv_line_set_contains, scv_object_ref_safe}
 use std.scv.store.{scv_repo_exists, scv_content_id_for_file, scv_write_text, scv_i64_bytes_to_u8}
-use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_content_id}
+use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_read_bounded, scv_file_buffer_content_id}
 use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 
 fn scv_path_extension(path: text) -> text:
@@ -96,10 +96,12 @@ fn scv_locked_parser_error(root: text, language: text, grammar: text, version: t
                 return "ERROR unsafe parser artifact path: {parts[1]} {parts[2]}"
             if not file_exists(artifact_path):
                 return "ERROR missing parser artifact: {parts[1]} {parts[2]}"
-            val raw = file_read_bytes(artifact_path) ?? []
+            val artifact = scv_file_buffer_read_bounded(artifact_path, 67108864)
+            if artifact.error != "": return artifact.error
+            val raw = artifact.bytes
             if not scv_wasm_magic_ok(raw):
                 return "ERROR parser artifact is not wasm: {parts[1]} {parts[2]}"
-            val actual = match scv_content_id_for_file(artifact_path):
+            val actual = match scv_file_buffer_content_id(artifact):
                 Ok(id): id
                 Err(error): return error
             if actual != parts[6]:

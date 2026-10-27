@@ -3,7 +3,7 @@
 use app.io.mod (file_exists, file_read, file_copy, file_delete, file_size, file_modified_time, dir_create, process_run)
 use std.common.crypto.sha256.{sha256_u8_fast_hex}
 use std.nogc_sync_mut.database.atomic.{atomic_write, atomic_write_bytes}
-use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_content_id}
+use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_read_bounded, scv_file_buffer_content_id}
 use std.scv.alloc_bounds.{scv_bound_object_bytes}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.scv.core.{scv_repo_dir, scv_meta_dir, scv_objects_dir, scv_parsers_dir, scv_head_path, scv_status_index_path, scv_workspace_path, scv_bookmarks_path, scv_parser_lock_path, scv_langmap_path, scv_parser_index_path, scv_object_index_path, scv_object_path, scv_chunk_path, scv_line_set_contains, scv_metadata_path_safe, scv_object_ref_safe, scv_worktree_path_safe}
@@ -14,6 +14,7 @@ use app.io.cli_ops.{exit}
 # default). Deliberate module cycle store->shadow_write->store; verified to
 # resolve (same pattern as other std.scv cross-imports).
 use std.scv.shadow_write.{scv_shadow_write_on_operation}
+use std.scv.structural_store_v1.{scv_structural_capture_v1, scv_structural_restore_entry_v1}
 
 export scv_object_path
 
@@ -223,13 +224,21 @@ fn scv_write_file_object(root: text, rel: text, chunk: text, size: i64, mtime: i
 
 fn scv_write_file_object_from_bytes(root: text, rel: text, bytes: [u8], mtime: i64) -> Result<(text, text), text>:
     val chunk = scv_write_chunk_u8(root, bytes)?
-    val chunk_payload = scv_chunk_payload_from_u8(root, bytes)?
-    val payload = "path: {rel}\nchunk: {chunk}\nsize: {bytes.len()}\nmtime: {mtime}\n{chunk_payload}"
+    # New writes use complete host syntax spans or one explicitly opaque unit.
+    # Legacy CDC readers/helpers remain available, but never select boundaries
+    # for this parsed-source writer. The full raw chunk remains retained.
+    val structure = scv_structural_capture_v1(root, rel, bytes, chunk)?
+    val payload = "path: {rel}\nchunk: {chunk}\nsize: {bytes.len()}\nmtime: {mtime}\nstructure: {structure}\n"
     val id = scv_hash_text("file", payload)
     val path = scv_object_path(root, "files", id)
     if not file_exists(path):
         if not scv_write_text(path, payload):
             return Err("ERROR cannot publish file object: {id}\n")
+    else:
+        val existing = scv_file_buffer_read_bounded(path, payload.bytes().len())
+        if existing.error != "": return Err(existing.error)
+        if existing.bytes != payload.bytes():
+            return Err("ERROR corrupt existing file object: {id}\n")
     Ok((id, chunk))
 
 fn scv_write_tree_object(root: text, lines: [text]) -> text:
@@ -618,6 +627,10 @@ fn scv_restore_tree_entry_error(root: text, parts: [text]) -> text:
         return "ERROR chunk size mismatch: {chunk}\n"
     if scv_content_id_for_file(chunk_path) != Ok(chunk):
         return "ERROR corrupt chunk: {chunk}\n"
+    # Validate every reconstruction before removing any tracked destination.
+    match scv_structural_restore_entry_v1(root, parts):
+        Ok(bytes): ()
+        Err(error): return error
     ""
 
 fn scv_restore_commit(root: text, commit: text) -> text:
@@ -651,13 +664,11 @@ fn scv_restore_commit(root: text, commit: text) -> text:
         val chunk = parts[2]
         val dst = "{root}/{rel}"
         scv_create_parent_dir(dst)
-        val buffer = scv_file_buffer_read(scv_chunk_path(root, chunk))
-        val actual = match scv_file_buffer_content_id(buffer):
-            Ok(id): id
+        # Revalidate just before publication: objects may change after preflight.
+        val bytes = match scv_structural_restore_entry_v1(root, parts):
+            Ok(value): value
             Err(error): return error
-        if actual != chunk:
-            return "ERROR corrupt chunk before restore: {chunk}\n"
-        if not atomic_write_bytes(dst, buffer.bytes):
+        if not atomic_write_bytes(dst, bytes):
             return "ERROR cannot restore file: {rel}\n"
         restored = restored + 1
     if not scv_write_text(scv_status_index_path(root), tree_content):

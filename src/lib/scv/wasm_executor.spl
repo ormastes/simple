@@ -1,8 +1,9 @@
 # SCV WASM executor — tree-sitter WASM grammar loading and parse execution.
-# Implements PROD-001: Tree-sitter WASM execution with graceful fallback.
+# Implements strict Tree-sitter WASM execution admission.
 #
 # When libwasmtime and libscv_wasm are absent (or SCV_FORCE_FALLBACK=1),
-# all entry points route to the existing fallback-line path.
+# strict entrypoints return an explicit unavailable error. Callers select an
+# honestly labeled line index or opaque byte representation as appropriate.
 # No extern fn declarations for wasmtime symbols — wasmtime is probed at
 # runtime via DynLib.  The shim (src/runtime/scv_wasm_shim.c) is loaded
 # dynamically; it exposes:
@@ -14,7 +15,10 @@
 
 use app.io.mod (file_exists)
 use std.nogc_sync_mut.sffi.dynamic.{DynLib, sffi_lib_path}
-use std.scv.store.{scv_write_text, scv_hash_text}
+use std.scv.store.{scv_write_text, scv_hash_text, scv_content_id_for_u8}
+use std.scv.file_buffer.{scv_file_buffer_read_bounded}
+use std.scv.parser_registry.{scv_locked_parser_hash, scv_locked_parser_error, scv_wasm_magic_ok}
+use std.scv.structural_span_v1.{scv_structural_spans_v1}
 use std.scv.core.{scv_object_path}
 use std.io_runtime.{env_get}
 use std.scv.wasm_shim_contract.{scv_wasm_input_within_bounds, scv_wasm_blob_validate}
@@ -25,7 +29,7 @@ use std.scv.wasm_shim_contract.{scv_wasm_input_within_bounds, scv_wasm_blob_vali
 
 # Returns true when BOTH the wasmtime dynamic library AND the scv_wasm shim
 # are loadable on this machine, AND SCV_FORCE_FALLBACK is not "1".
-# When false, all parse paths fall through to line-walk simulation.
+# When false, strict parse reports unavailable and never simulates success.
 fn scv_wasm_executor_available() -> bool:
     val force_fallback = env_get("SCV_FORCE_FALLBACK")
     if force_fallback == "1":
@@ -66,8 +70,8 @@ fn scv_ts_node_structural_id(kind: text, field: text, source_slice: text, child_
 # Node writers for tree-sitter-wasm execution path
 # ---------------------------------------------------------------------------
 
-# Write a simulated leaf node from a text source slice.
-fn scv_wasm_sim_leaf(root: text, kind: text, field: text, byte_start: i64,
+# Write a derived leaf from an admitted provider blob.
+fn _scv_wasm_leaf(root: text, kind: text, field: text, byte_start: i64,
                      byte_end: i64, source_slice: text, language: text,
                      grammar: text, version: text, parser_hash: text) -> text:
     val node_id = scv_ts_node_structural_id(kind, field, source_slice, [])
@@ -88,30 +92,6 @@ fn scv_wasm_inner_node(root: text, kind: text, field: text, byte_start: i64,
     if not file_exists(path):
         scv_write_text(path, payload)
     node_id
-
-# ---------------------------------------------------------------------------
-# Line-walk simulation (used when wasmtime shim is absent)
-# ---------------------------------------------------------------------------
-
-# Walk source text line-by-line producing one tree-sitter-wasm tagged leaf per line.
-fn scv_wasm_simulate_line_walk(root: text, source: text, language: text,
-                                grammar: text, version: text, parser_hash: text) -> (text, text):
-    var children: [text] = []
-    var byte_start = 0
-    for line in source.split("\n"):
-        val byte_end = byte_start + line.len()
-        val child_id = scv_wasm_sim_leaf(root, "line", "", byte_start, byte_end,
-                                         line, language, grammar, version, parser_hash)
-        children.push(child_id)
-        byte_start = byte_end + 1
-    if children.len() == 0:
-        val child_id = scv_wasm_sim_leaf(root, "line", "", 0, 0, "",
-                                         language, grammar, version, parser_hash)
-        children.push(child_id)
-    val source_len = if byte_start > 0: byte_start - 1 else: 0
-    val root_id = scv_wasm_inner_node(root, "file", "root", 0, source_len,
-                                      children, language, grammar, version, parser_hash)
-    (root_id, "")
 
 # ---------------------------------------------------------------------------
 # Real WASM parse via shim extern fns
@@ -178,7 +158,7 @@ fn _scv_parse_node_blob(root: text, blob: text, source: text, language: text,
                             source.slice(nstart, nend)
                         else:
                             ""
-            val child_id = scv_wasm_sim_leaf(root, nkind, nfield, nstart, nend,
+            val child_id = _scv_wasm_leaf(root, nkind, nfield, nstart, nend,
                                              slice, language, grammar, version, parser_hash)
             if stack_kinds.len() > 0:
                 val top = stack_kinds.len() - 1
@@ -226,11 +206,11 @@ fn _scv_parse_node_blob(root: text, blob: text, source: text, language: text,
 # When the scv_wasm shim is compiled and linked (i.e., the runtime is built
 # with wasmtime support), these extern declarations are resolved and the real
 # path is used.  When the shim is absent, scv_wasm_executor_available()
-# returns false and the call never reaches these externs — fallback-line runs
-# instead.
+# returns false and the call never reaches these externs. Fallback is selected
+# by callers and cannot acquire a successful WASM execution label.
 #
 # In interpreter mode or when only DynLib probing is available (no compiled
-# shim), the availability check gates everything and we stay on fallback-line.
+# shim), the availability check gates everything and reports unavailable.
 @unsafe(reason: "wasm shim handle from foreign loader; availability-gated before use", capabilities: [ffi])
 extern fn wasm_rt_load(path: text) -> i64
 @unsafe(reason: "frees a foreign wasm shim handle; caller owns handle lifetime", capabilities: [ffi])
@@ -251,25 +231,48 @@ fn _scv_wasm_parse_blob(grammar_path: text, source: text, source_len: i64) -> te
 
 fn scv_wasm_parse(root: text, language: text, grammar: text, version: text,
                   parser_hash: text, source: text) -> (text, text):
-    if not scv_wasm_executor_available():
-        return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
-    # Hardened shim contract (SCV-IMPL-P-02): refuse oversized inputs.
-    if not scv_wasm_input_within_bounds(source.len()):
-        return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
-    # Build grammar artifact path: .scv/parsers/<parser_hash>.wasm
-    val grammar_path = "{root}/.scv/parsers/{parser_hash}.wasm"
-    if not file_exists(grammar_path):
-        return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
-    # Load grammar + parse via the ffi-unsafe boundary wrapper
-    val blob = _scv_wasm_parse_blob(grammar_path, source, source.len())
-    if blob == "":
-        return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
-    # Hardened shim contract (SCV-IMPL-P-02): a malformed blob is rejected
-    # wholesale — never turned into a half-built tree.
-    if scv_wasm_blob_validate(blob, source.len()) != "":
-        return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
-    # Walk the blob and write tree-sitter-wasm nodes
+    val blob = match scv_wasm_verified_blob(root, language, grammar, version, parser_hash, source):
+        Ok(value): value
+        Err(error): return ("", error)
     val root_id = _scv_parse_node_blob(root, blob, source, language, grammar, version, parser_hash)
     if root_id == "":
-        return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
+        return ("", "ERROR WASM provider produced no tree\n")
     (root_id, "")
+
+# The only successful producer of real-provider blobs. A fixture blob is never
+# sufficient execution evidence. Verify the exact lock, artifact and source byte
+# length before invoking the shim; reject missing/recovered/overlapping trees.
+fn scv_wasm_verified_blob(root: text, language: text, grammar: text, version: text,
+                           parser_hash: text, source: text) -> Result<text, text>:
+    if grammar != "tree-sitter-wasm":
+        return Err("ERROR unsupported WASM provider\n")
+    val locked = scv_locked_parser_hash(root, language, grammar, version)
+    if locked != parser_hash:
+        return Err("ERROR WASM parser lock mismatch\n")
+    val lock_error = scv_locked_parser_error(root, language, grammar, version)
+    if lock_error != "": return Err(lock_error)
+    if not scv_wasm_executor_available():
+        return Err("ERROR WASM provider unavailable\n")
+    val source_len = source.bytes().len()
+    # Hardened shim contract (SCV-IMPL-P-02): refuse oversized inputs.
+    if not scv_wasm_input_within_bounds(source_len):
+        return Err("ERROR WASM input bound\n")
+    # Build grammar artifact path: .scv/parsers/<parser_hash>.wasm
+    val grammar_path = "{root}/.scv/parsers/{parser_hash}.wasm"
+    val artifact = scv_file_buffer_read_bounded(grammar_path, 67108864)
+    if artifact.error != "": return Err(artifact.error)
+    if scv_content_id_for_u8(artifact.bytes) != parser_hash or not scv_wasm_magic_ok(artifact.bytes):
+        return Err("ERROR WASM artifact identity\n")
+    # Load grammar + parse via the ffi-unsafe boundary wrapper
+    val blob = _scv_wasm_parse_blob(grammar_path, source, source_len)
+    if blob == "":
+        return Err("ERROR WASM provider returned no parse\n")
+    val after = scv_file_buffer_read_bounded(grammar_path, 67108864)
+    if after.error != "": return Err(after.error)
+    if after.bytes != artifact.bytes:
+        return Err("ERROR WASM artifact changed during execution\n")
+    # Hardened shim contract (SCV-IMPL-P-02): a malformed blob is rejected
+    # wholesale — never turned into a half-built tree.
+    match scv_structural_spans_v1(blob, source_len):
+        Ok(spans): Ok(blob)
+        Err(error): Err(error)

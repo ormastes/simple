@@ -1,0 +1,259 @@
+# Lossless, parser-independent byte DAG. Raw representations remain retained.
+# SHA-256 is the existing approved durable identity; this is not BLAKE3.
+# Fixed-order SDN records and hex metadata make framing unambiguous. Positions
+# belong only to the current provider walk, never to shared durable byte nodes.
+use app.io.mod (file_exists)
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.scv.core.{scv_object_path, scv_chunk_path}
+use std.scv.file_buffer.{scv_file_buffer_read_bounded}
+use std.scv.store.{scv_content_id_for_u8, scv_hash_text, scv_write_text, scv_write_chunk_u8, scv_object_field}
+use std.scv.structural_span_v1.{ScvStructuralSpanV1, scv_structural_spans_v1, scv_structural_number_v1}
+use std.scv.parser_registry.{scv_language_for_path, scv_parser_for_path, scv_locked_parser_hash}
+use std.scv.wasm_executor.{scv_wasm_verified_blob}
+use std.scv.alloc_bounds.{SCV_MAX_OBJECT_BYTES}
+
+val SCV_STRUCTURAL_RECORD_BOUND_V1: i64 = 8388608
+val SCV_STRUCTURAL_VISIT_BOUND_V1: i64 = 200000
+
+fn scv_structural_ref_v1(id: text, prefix: text) -> bool:
+    if not id.starts_with(prefix) or id.len() != prefix.len() + 64: return false
+    val hex = "0123456789abcdef"
+    for ch in id[prefix.len():]:
+        if not hex.contains(ch): return false
+    true
+
+fn scv_structural_hex_v1(value: text) -> text:
+    val digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+    var result: [text] = []
+    for byte in value.bytes():
+        result.push(digits[(byte >> 4) as i64] + digits[(byte & 15u8) as i64])
+    result.join("")
+
+fn scv_structural_label_ok_v1(value: text) -> bool:
+    if value.len() > 2048 or value.len() % 2 != 0: return false
+    for ch in value:
+        if not "0123456789abcdef".contains(ch): return false
+    true
+
+fn scv_structural_read_record_v1(root: text, id: text) -> Result<text, text>:
+    if not scv_structural_ref_v1(id, "syntax_node_"):
+        return Err("ERROR invalid structural reference\n")
+    val buffer = scv_file_buffer_read_bounded(scv_object_path(root, "syntax", id), SCV_STRUCTURAL_RECORD_BOUND_V1)
+    if buffer.error != "": return Err(buffer.error)
+    val content = validated_utf8_bytes_to_text_linear(buffer.bytes)?
+    if scv_hash_text("syntax_node", content) != id:
+        return Err("ERROR corrupt structural record\n")
+    Ok(content)
+
+fn scv_structural_publish_v1(root: text, record: text) -> Result<text, text>:
+    if record.bytes().len() > SCV_STRUCTURAL_RECORD_BOUND_V1:
+        return Err("ERROR structural record bound\n")
+    val id = scv_hash_text("syntax_node", record)
+    val path = scv_object_path(root, "syntax", id)
+    if file_exists(path):
+        # A hash hit never substitutes for comparing the admitted bytes.
+        if scv_structural_read_record_v1(root, id)? != record:
+            return Err("ERROR structural record collision\n")
+    elif not scv_write_text(path, record):
+        return Err("ERROR cannot publish structural record\n")
+    Ok(id)
+
+fn scv_structural_node_v1(root: text, role: text, kind: text, field: text,
+                           size: i64, payload: text, children: [text]) -> Result<text, text>:
+    val kind_hex = scv_structural_hex_v1(kind)
+    val field_hex = scv_structural_hex_v1(field)
+    val refs = children.join(",")
+    scv_structural_publish_v1(root, "format: scv-byte-node-v1\nrole: {role}\nkind_hex: {kind_hex}\nfield_hex: {field_hex}\nlength: {size}\npayload: {payload}\nchildren: {refs}\n")
+
+fn scv_structural_leaf_v1(root: text, bytes: [u8], role: text,
+                           kind: text, field: text) -> Result<text, text>:
+    val payload = scv_write_chunk_u8(root, bytes)?
+    val buffer = scv_file_buffer_read_bounded(scv_chunk_path(root, payload), bytes.len())
+    if buffer.error != "": return Err(buffer.error)
+    if buffer.bytes != bytes:
+        return Err("ERROR structural payload collision\n")
+    scv_structural_node_v1(root, role, kind, field, bytes.len(), payload, [])
+
+fn scv_structural_build_span_v1(root: text, bytes: [u8], spans: [ScvStructuralSpanV1],
+                                 index: i64) -> Result<(text, i64), text>:
+    val span = spans[index]
+    if span.leaf:
+        val id = scv_structural_leaf_v1(root, bytes[span.start:span.end], "leaf", span.kind, span.field)?
+        return Ok((id, index + 1))
+    var cursor = span.start
+    var next = index + 1
+    var children: [text] = []
+    while next < spans.len() and spans[next].depth > span.depth:
+        val child = spans[next]
+        if cursor < child.start:
+            children.push(scv_structural_leaf_v1(root, bytes[cursor:child.start], "gap", "trivia", "")?)
+        val (id, after) = scv_structural_build_span_v1(root, bytes, spans, next)?
+        children.push(id)
+        cursor = child.end
+        next = after
+    if cursor < span.end:
+        children.push(scv_structural_leaf_v1(root, bytes[cursor:span.end], "gap", "trivia", "")?)
+    val id = scv_structural_node_v1(root, "branch", span.kind, span.field, span.end - span.start, "", children)?
+    Ok((id, next))
+
+fn scv_structural_build_v1(root: text, bytes: [u8], blob: text) -> Result<text, text>:
+    """Build exact byte nodes from validated fixture/provider spans; no execution claim."""
+    if bytes.len() > SCV_MAX_OBJECT_BYTES: return Err("ERROR structural source bound\n")
+    val spans = scv_structural_spans_v1(blob, bytes.len())?
+    val first = spans[0]
+    val (id, next) = scv_structural_build_span_v1(root, bytes, spans, 0)?
+    if next != spans.len(): return Err("ERROR multiple structural roots\n")
+    if first.start == 0 and first.end == bytes.len(): return Ok(id)
+    var children: [text] = []
+    if first.start > 0:
+        children.push(scv_structural_leaf_v1(root, bytes[0:first.start], "gap", "trivia", "")?)
+    children.push(id)
+    if first.end < bytes.len():
+        children.push(scv_structural_leaf_v1(root, bytes[first.end:bytes.len()], "gap", "trivia", "")?)
+    scv_structural_node_v1(root, "branch", "host-file", "", bytes.len(), "", children)
+
+struct ScvStructuralDecodeFrameV1:
+    id: text
+    depth: i64
+    end: i64
+
+fn scv_structural_decode_v1(root: text, id: text, max_bytes: i64) -> Result<[u8], text>:
+    """Reconstruct bytes without loading a grammar; bound length, depth and visits."""
+    if max_bytes < 0 or max_bytes > SCV_MAX_OBJECT_BYTES:
+        return Err("ERROR structural output bound\n")
+    # One output buffer, one current leaf, bounded metadata frames. Closing
+    # frames validate each branch length without materializing intermediate
+    # subtree byte arrays (which would multiply memory by parser depth).
+    var pending = [ScvStructuralDecodeFrameV1(id: id, depth: 0, end: max_bytes)]
+    var output: [u8] = []
+    var visits = 0
+    while pending.len() > 0:
+        val frame = pending[pending.len() - 1]
+        pending.pop()
+        if frame.id == "":
+            if output.len() != frame.end: return Err("ERROR structural child length mismatch\n")
+            continue
+        visits = visits + 1
+        if frame.depth > 514 or visits > SCV_STRUCTURAL_VISIT_BOUND_V1:
+            return Err("ERROR structural decode budget\n")
+        val record = scv_structural_read_record_v1(root, frame.id)?
+        val lines = record.split("\n")
+        if lines.len() != 8 or lines[0] != "format: scv-byte-node-v1" or lines[7] != "":
+            return Err("ERROR structural node schema\n")
+        val keys = ["role: ", "kind_hex: ", "field_hex: ", "length: ", "payload: ", "children: "]
+        var i = 0
+        while i < keys.len():
+            if not lines[i + 1].starts_with(keys[i]): return Err("ERROR structural node fields\n")
+            i = i + 1
+        val size = scv_structural_number_v1(lines[4][8:])?
+        if size > frame.end - output.len(): return Err("ERROR structural output bound\n")
+        if not scv_structural_label_ok_v1(lines[2][10:]) or not scv_structural_label_ok_v1(lines[3][11:]):
+            return Err("ERROR structural label encoding\n")
+        val role = lines[1][6:]
+        val payload = lines[5][9:]
+        val refs = lines[6][10:]
+        if role == "leaf" or role == "gap" or role == "opaque":
+            if refs != "" or not scv_structural_ref_v1(payload, "sha256_"):
+                return Err("ERROR structural leaf schema\n")
+            val buffer = scv_file_buffer_read_bounded(scv_chunk_path(root, payload), size)
+            if buffer.error != "": return Err(buffer.error)
+            if buffer.bytes.len() != size or scv_content_id_for_u8(buffer.bytes) != payload:
+                return Err("ERROR corrupt structural payload\n")
+            for byte in buffer.bytes: output.push(byte)
+            continue
+        if role != "branch" or payload != "": return Err("ERROR structural branch schema\n")
+        val end = output.len() + size
+        pending.push(ScvStructuralDecodeFrameV1(id: "", depth: frame.depth, end: end))
+        if refs != "":
+            val children = refs.split(",")
+            if children.len() + pending.len() + visits > SCV_STRUCTURAL_VISIT_BOUND_V1:
+                return Err("ERROR structural pending budget\n")
+            var child_index = children.len()
+            while child_index > 0:
+                child_index = child_index - 1
+                if not scv_structural_ref_v1(children[child_index], "syntax_node_"):
+                    return Err("ERROR structural child reference\n")
+                pending.push(ScvStructuralDecodeFrameV1(id: children[child_index], depth: frame.depth + 1, end: end))
+    Ok(output)
+
+fn scv_structural_capture_v1(root: text, rel: text, bytes: [u8], raw: text) -> Result<text, text>:
+    # Registry configuration selects a provider; it never proves execution.
+    val language = scv_language_for_path(root, rel)
+    val (grammar, version) = scv_parser_for_path(root, rel, language)
+    val parser = scv_locked_parser_hash(root, language, grammar, version)
+    var execution = "opaque"
+    var reason = "unsupported-provider"
+    var child = ""
+    if grammar == "tree-sitter-wasm":
+        match validated_utf8_bytes_to_text_linear(bytes):
+            Ok(source):
+                match scv_wasm_verified_blob(root, language, grammar, version, parser, source):
+                    Ok(blob):
+                        # Only successful strict provider execution reaches this
+                        # branch; invalid spans are opaque, never guessed cuts.
+                        match scv_structural_spans_v1(blob, bytes.len()):
+                            Ok(spans):
+                                child = scv_structural_build_v1(root, bytes, blob)?
+                                execution = "wasm-tree-sitter"
+                                reason = ""
+                            Err(error): reason = error
+                    Err(error): reason = error
+            Err(error): reason = "invalid-utf8"
+    if child == "":
+        child = scv_structural_leaf_v1(root, bytes, "opaque", "opaque", "")?
+    val reason_hex = scv_structural_hex_v1(reason)
+    val language_hex = scv_structural_hex_v1(language)
+    val grammar_hex = scv_structural_hex_v1(grammar)
+    val version_hex = scv_structural_hex_v1(version)
+    scv_structural_publish_v1(root, "format: scv-byte-root-v1\nprofile: host-spans-v1\nraw: {raw}\nlength: {bytes.len()}\nexecution: {execution}\nprovider: {parser}\nreason_hex: {reason_hex}\nlanguage_hex: {language_hex}\ngrammar_hex: {grammar_hex}\nversion_hex: {version_hex}\nchildren: {child}\n")
+
+fn scv_structural_restore_file_v1(root: text, file_record: text, raw: text,
+                                   size: i64) -> Result<[u8], text>:
+    """Restore a linked structural representation and compare retained raw bytes."""
+    if size < 0 or size > SCV_MAX_OBJECT_BYTES:
+        return Err("ERROR structural restore bound\n")
+    if not scv_structural_ref_v1(raw, "sha256_"):
+        return Err("ERROR structural raw identity\n")
+    val retained = scv_file_buffer_read_bounded(scv_chunk_path(root, raw), size)
+    if retained.error != "": return Err(retained.error)
+    if retained.bytes.len() != size or scv_content_id_for_u8(retained.bytes) != raw:
+        return Err("ERROR corrupt retained raw bytes\n")
+    val structure = scv_object_field(file_record, "structure")
+    if structure == "": return Ok(retained.bytes)
+    val record = scv_structural_read_record_v1(root, structure)?
+    val lines = record.split("\n")
+    if lines.len() != 12 or lines[0] != "format: scv-byte-root-v1" or lines[1] != "profile: host-spans-v1" or lines[11] != "":
+        return Err("ERROR structural root schema\n")
+    val keys = ["raw: ", "length: ", "execution: ", "provider: ", "reason_hex: ", "language_hex: ", "grammar_hex: ", "version_hex: ", "children: "]
+    var i = 0
+    while i < keys.len():
+        if not lines[i + 2].starts_with(keys[i]): return Err("ERROR structural root fields\n")
+        i = i + 1
+    if lines[2] != "raw: {raw}" or lines[3] != "length: {size}":
+        return Err("ERROR structural source binding\n")
+    val execution = lines[4][11:]
+    if execution != "opaque" and execution != "wasm-tree-sitter":
+        return Err("ERROR structural execution label\n")
+    if execution == "wasm-tree-sitter" and not scv_structural_ref_v1(lines[5][10:], "sha256_"):
+        return Err("ERROR structural provider identity\n")
+    val bytes = scv_structural_decode_v1(root, lines[10][10:], size)?
+    if bytes != retained.bytes or scv_content_id_for_u8(bytes) != raw:
+        return Err("ERROR structural shadow mismatch\n")
+    Ok(bytes)
+
+fn scv_structural_restore_entry_v1(root: text, parts: [text]) -> Result<[u8], text>:
+    if parts.len() != 5 or not scv_structural_ref_v1(parts[1], "file_"):
+        return Err("ERROR structural restore file reference\n")
+    val buffer = scv_file_buffer_read_bounded(scv_object_path(root, "files", parts[1]), SCV_STRUCTURAL_RECORD_BOUND_V1)
+    if buffer.error != "": return Err(buffer.error)
+    val record = validated_utf8_bytes_to_text_linear(buffer.bytes)?
+    if scv_hash_text("file", record) != parts[1]:
+        return Err("ERROR corrupt restore file object\n")
+    val size = scv_structural_number_v1(parts[3])?
+    if scv_object_field(record, "path") != parts[0] or scv_object_field(record, "chunk") != parts[2] or scv_object_field(record, "size") != parts[3]:
+        return Err("ERROR structural restore file binding\n")
+    scv_structural_restore_file_v1(root, record, parts[2], size)
+
+export scv_structural_build_v1, scv_structural_decode_v1, scv_structural_capture_v1
+export scv_structural_restore_file_v1, scv_structural_ref_v1
+export scv_structural_restore_entry_v1
