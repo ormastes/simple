@@ -73,11 +73,6 @@ static inline int rt_win_file_copy_create_excl_no_follow(
         if (!ok) DeleteFileW(wdst);
     }
 done:
-    if (out != INVALID_HANDLE_VALUE) {
-        CloseHandle(out);
-        DeleteFileW(wdst);
-        ok = 0;
-    }
     if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
     free(wsrc);
     free(wdst);
