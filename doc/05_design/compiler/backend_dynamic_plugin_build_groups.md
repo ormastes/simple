@@ -43,10 +43,13 @@ no slowdown, no effect on a running phase-3/stage3. Toolchain clang+lld only
 
 ### 2.2 Build groups via Simple's build config (targets.sdn)
 - Add two parser directives to `build_targets.spl` (fail-closed, new error codes
-  `include-missing`, `include-cycle`, `unknown-group-target`):
-  `include config/build/<file>.sdn` (relative to repo root, depth ≤ 2) and
-  `group <name>: default: <bool>; targets: <labels>`. `load_targets_file` recurses; labels stay
-  one flat namespace so `depends:` keeps working. `targets_cli.spl` gains `target-group <name>`.
+  `include-missing`, `include-cycle`, `unknown-group-member`, `duplicate-group`) — **as landed in PR1**:
+  `include: <path>` (relative to the *including file*, `\` normalised to `/`, `.`/`..` collapsed,
+  include-once so a diamond is read once, cycles refused by name) and
+  `group <name>:` with `default: true|false` and `members: <labels>` (use the inline list form:
+  child-line form cannot hold `//pkg:name` labels yet). Labels stay one flat namespace so
+  `depends:` keeps working. `default_group_targets` / `group_targets` select; a file with no group
+  keeps the old "all targets" meaning. `targets_cli.spl` `target-group <name>` is a follow-up.
 - Root `targets.sdn` only *references* sub-configs and declares `group host: default: true` =
   `//compiler:*` (today's binaries). Nothing in `host` depends on a plugin target, so a default
   build/bootstrap never parses a provider's entry closure or links a provider.

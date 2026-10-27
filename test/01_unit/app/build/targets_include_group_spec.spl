@@ -54,7 +54,13 @@ fn _setup() -> bool:
     val f = _write("cycle_b.sdn", "include: cycle_a.sdn\n")
     val g = _write("missing.sdn", "include: config/build/nope.sdn\n")
     val h = _write("backslash.sdn", "include: config\\build\\plugins.sdn\n")
-    a and b and c and d and e and f and g and h
+    dir_create_all(ROOT + "/sub")
+    val i2 = _write("sub/up.sdn", "include: ../dotdot.sdn\n")
+    val j2 = _write("dotdot.sdn", "include: ./sub/../sub/up.sdn\n")
+    val k2 = _write("diamond.sdn", "include: d_left.sdn\ninclude: d_right.sdn\n")
+    val l2 = _write("d_left.sdn", "include: config/build/plugins.sdn\n")
+    val m2 = _write("d_right.sdn", "include: config/build/plugins.sdn\n")
+    a and b and c and d and e and f and g and h and i2 and j2 and k2 and l2 and m2
 
 fn _has(xs: [text], needle: text) -> bool:
     var i = 0
@@ -143,3 +149,21 @@ describe "build config: include and group directives":
         val ts = parse_targets_text("group g:\n    default: true\n    members: ghost\n")
         step("Then validation names the unknown member")
         expect(_has(validate_targets(ts, ROOT), "target-error: unknown-group-member: g -> ghost")).to_equal(true)
+
+    it "stops on a cycle spelled with .. instead of looping":
+        # @req REQ-BUILD-GROUP-003
+        step("Given two files that include each other through ./ and ../ spellings")
+        expect(_setup()).to_equal(true)
+        step("When I load one of them")
+        val ts = load_targets_file(ROOT + "/dotdot.sdn", ROOT)
+        step("Then loading terminates with an include-cycle error")
+        expect(_has(ts.errors, "target-error: include-cycle:")).to_equal(true)
+
+    it "reads a sub-config reached by two paths only once":
+        # @req REQ-BUILD-GROUP-001
+        step("Given a root that includes two files which both include the plugins sub-config")
+        expect(_setup()).to_equal(true)
+        val ts = load_targets_file(ROOT + "/diamond.sdn", ROOT)
+        step("Then the plugin target is declared once and nothing is reported as a duplicate")
+        expect(ts.targets.len()).to_equal(1)
+        expect(validate_targets(ts, ROOT).len()).to_equal(0)

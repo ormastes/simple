@@ -424,11 +424,35 @@ fn _dir_of(path: text) -> text:
         i = i - 1
     "."
 
+fn _canonical_path(p: text) -> text:
+    """Collapse `.` and `..` segments so one file always has one spelling."""
+    val n = normalize_include_path(p)
+    val absolute = n.starts_with("/")
+    val parts = n.split("/")
+    var out: [text] = []
+    var i = 0
+    while i < parts.len():
+        val s = parts[i]
+        if s == "" or s == ".":
+            i = i + 1
+            continue
+        if s == ".." and out.len() > 0 and out[out.len() - 1] != "..":
+            out.pop()
+        else:
+            out.push(s)
+        i = i + 1
+    var r = ""
+    var j = 0
+    while j < out.len():
+        r = if j == 0: out[j] else: r + "/" + out[j]
+        j = j + 1
+    if absolute: "/" + r else: r
+
 fn _resolve_include(including: text, inc: text) -> text:
     val n = normalize_include_path(inc)
     if n.starts_with("/") or (n.len() > 1 and n[1:2] == ":"):
-        return n
-    _dir_of(including) + "/" + n
+        return _canonical_path(n)
+    _canonical_path(_dir_of(including) + "/" + n)
 
 fn load_targets_file(path: text, repo_root: text) -> TargetSet:
     """Read and parse a targets file, following `include:` directives.
@@ -448,13 +472,18 @@ fn load_targets_file(path: text, repo_root: text) -> TargetSet:
     # Each stack entry carries its include chain for cycle reporting.
     var stack_path: [text] = []
     var stack_chain: [text] = []
-    stack_path.push(normalize_include_path(path))
+    # Include-once: a file reached twice by a diamond is parsed once.
+    var visited: [text] = []
+    stack_path.push(_canonical_path(path))
     stack_chain.push("")
     while stack_path.len() > 0:
         val cur = stack_path[stack_path.len() - 1]
         val chain = stack_chain[stack_chain.len() - 1]
         stack_path.pop()
         stack_chain.pop()
+        if visited.contains(cur):
+            continue
+        visited.push(cur)
         val ts = parse_targets_text(file_read(cur))
         var k = 0
         while k < ts.targets.len():
@@ -472,8 +501,11 @@ fn load_targets_file(path: text, repo_root: text) -> TargetSet:
         k = 0
         while k < ts.includes.len():
             val child = _resolve_include(cur, ts.includes[k])
-            if here == child or here.starts_with(child + " -> ") or here.contains(" -> " + child + " -> ") or here.ends_with(" -> " + child):
+            if here.split(" -> ").contains(child):
                 errors.push("target-error: include-cycle: " + here + " -> " + child)
+            elif visited.contains(child):
+                k = k + 1
+                continue
             elif not file_exists(child):
                 errors.push("target-error: include-missing: " + cur + ": " + ts.includes[k])
             else:
