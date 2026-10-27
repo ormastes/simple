@@ -1,0 +1,90 @@
+use std.spec
+use std.io_runtime.{file_write, file_read, file_exists, getpid}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.driver.cache.tldr_summary_v1.{tldr_summary_fallback_count_v1, tldr_summary_path_v1,
+    tldr_summary_entries_v1, tldr_summary_produce_v1, tldr_summary_digest_v1, tldr_summary_parse_v1,
+    read_tldr, tldr_lease_acquire_v1, tldr_lease_release_v1, tldr_lease_record_v1,
+    tldr_summary_publish_v1, tldr_summary_ensure_v1}
+
+val SRC: text = "use std.x\n\npub struct Point:\n    x: i64\n    y: i64\n\n@when(os: \"linux\")\npub fn open_fd(p: text) -> i64:\n    1\n\n@when(os: \"windows\")\npub fn open_fd(p: text) -> i64:\n    2\n\nfn hidden() -> i64:\n    0\n\nexport helper\n"
+
+fn root_of(tag: text) -> text:
+    val r = "build/tmp/tldr_summary_spec_{getpid()}_{tag}"
+    val _d = dir_create_all(r)
+    r
+
+fn count_prefix(entries: [text], prefix: text) -> i64:
+    var n = 0
+    for e in entries:
+        if e.starts_with(prefix): n = n + 1
+    n
+
+describe "TLDR interface summary":
+    it "round-trips produce, publish and read_tldr":
+        val root = root_of("rt")
+        val got = tldr_summary_ensure_v1(root, "pkg.geo", SRC)
+        expect(got != nil).to_equal(true)
+        val read = read_tldr(root, "pkg.geo")
+        expect(read != nil).to_equal(true)
+        expect(read.unwrap().len()).to_equal(got.unwrap().len())
+        expect(read.unwrap().contains("layout|pub struct Point:\n    x: i64\n    y: i64")).to_equal(true)
+        expect(tldr_summary_digest_v1(file_read(tldr_summary_path_v1(root, "pkg.geo"))).starts_with("sha256:")).to_equal(true)
+
+    it "lists exported names for glob and bare imports":
+        val e = tldr_summary_entries_v1("pkg.geo", SRC)
+        expect(e.contains("export|Point")).to_equal(true)
+        expect(e.contains("export|open_fd")).to_equal(true)
+        expect(e.contains("export|helper")).to_equal(true)
+        expect(e.contains("export|hidden")).to_equal(false)
+
+    it "keeps every cfg variant":
+        val e = tldr_summary_entries_v1("pkg.geo", SRC)
+        var linux = false
+        var windows = false
+        for x in e:
+            if x.starts_with("decl|fn open_fd ") and x.contains("os: \"linux\""): linux = true
+            if x.starts_with("decl|fn open_fd ") and x.contains("os: \"windows\""): windows = true
+        expect(linux).to_equal(true)
+        expect(windows).to_equal(true)
+
+    it "flips the digest on a content change and on a field retype":
+        val base = tldr_summary_digest_v1(tldr_summary_produce_v1("pkg.geo", SRC))
+        val added = tldr_summary_digest_v1(tldr_summary_produce_v1("pkg.geo", SRC + "pub fn more() -> i64:\n    3\n"))
+        val retyped = tldr_summary_digest_v1(tldr_summary_produce_v1("pkg.geo", SRC.replace("    y: i64", "    y: f64")))
+        val body_only = tldr_summary_digest_v1(tldr_summary_produce_v1("pkg.geo", SRC.replace("    0\n", "    7\n")))
+        expect(added != base).to_equal(true)
+        expect(retyped != base).to_equal(true)
+        expect(body_only).to_equal(base)
+
+    it "rejects a summary whose digest does not verify":
+        val good = tldr_summary_produce_v1("pkg.geo", SRC)
+        expect(tldr_summary_parse_v1(good) != nil).to_equal(true)
+        expect(tldr_summary_parse_v1(good.replace("x: i64", "x: i32")) == nil).to_equal(true)
+
+    it "reclaims a dead-pid lease and keeps a live one":
+        val root = root_of("lease")
+        val lease = root + "/m.tldrs.lease"
+        # A previous incarnation of this pid (same pid, other start time) is dead.
+        val _w = file_write(lease, "{getpid()} 1")
+        expect(tldr_lease_acquire_v1(lease)).to_equal(true)
+        expect(file_read(lease).trim()).to_equal(tldr_lease_record_v1())
+        expect(tldr_lease_acquire_v1(lease)).to_equal(false)
+        tldr_lease_release_v1(lease)
+        expect(file_exists(lease)).to_equal(false)
+
+    it "serves the last complete summary while a publish is in flight":
+        val root = root_of("pub")
+        val path = tldr_summary_path_v1(root, "pkg.geo")
+        expect(tldr_summary_publish_v1(path, tldr_summary_produce_v1("pkg.geo", SRC))).to_equal(true)
+        val before = read_tldr(root, "pkg.geo").unwrap()
+        val torn = tldr_summary_produce_v1("pkg.geo", SRC + "pub fn more() -> i64:\n    3\n")
+        val _t = file_write(path + ".999.partial.tmp", torn.substring(0, torn.len() / 2))
+        expect(read_tldr(root, "pkg.geo").unwrap().len()).to_equal(before.len())
+        expect(tldr_summary_publish_v1(path, torn)).to_equal(true)
+        expect(read_tldr(root, "pkg.geo").unwrap().contains("export|more")).to_equal(true)
+
+    it "counts and records unsupported constructs":
+        val start = tldr_summary_fallback_count_v1()
+        val e = tldr_summary_entries_v1("pkg.mac", "macro twice(x):\n    x + x\n\nexport use pkg.geo.*\n")
+        expect(tldr_summary_fallback_count_v1() - start).to_equal(2)
+        expect(count_prefix(e, "fallback|")).to_equal(2)
