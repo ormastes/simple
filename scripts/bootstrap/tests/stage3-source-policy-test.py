@@ -92,6 +92,18 @@ class SourcePolicy(unittest.TestCase):
     def test_all_four_launches_transfer_typed_prefix_and_policy(self):
         branches = re.findall(r'"\$worker" "\$stage3_transcript".*? &', RESUME, re.S)
         self.assertEqual(len(branches), 4)
+        expected_prefix = [
+            'stage3_transcript', 'root', 'stage3_log', 'home', 'tmp', 'path',
+            'admitted', 'platform', 'stage2_backend', 'stage3_threads',
+            'stage3_timeout_seconds', 'stage3_cache', 'runtime', 'candidate',
+            'progress', 'phase_profile', 'memory_snapshot', 'evidence_run_id',
+            'stage3_requested_route', 'stage3_fallback_route',
+            'stage3_process_max_kib', 'stage3_mc_env', 'stage3_cold_init_env',
+            'stage3_diagnostic_env', 'SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB',
+            'resume_abi_policy', 'stage2_admission', 'resume_abi_receipt_sha',
+            'stage3_compiler_ceiling_env', 'stage3_compiler_cap',
+            'stage3_observation_budget_ms', 'stage3_lowering_lane',
+        ]
         for branch in branches:
             env = os.environ.copy()
             for name in re.findall(r'\$([A-Za-z_][A-Za-z_0-9]*)', branch):
@@ -100,21 +112,32 @@ class SourcePolicy(unittest.TestCase):
             result = shell('record() { printf "%s\\0" "$@"; };\n' + branch[:-2], POLICY, env)
             self.assertEqual(result.returncode, 0, result.stderr)
             args = result.stdout.split(b'\0')[:-1]
-            self.assertEqual(args[28], b'stage3_rss_cap_mode')
-            self.assertEqual(args[29:], [p.encode() for p in POLICY])
+            self.assertEqual(args[:32], [p.encode() for p in expected_prefix])
+            self.assertEqual(args[31], b'stage3_lowering_lane')
+            self.assertEqual(args[32], b'--stage3-source-policy-v1')
+            self.assertEqual(args[33:], [p.encode() for p in POLICY])
 
-    def test_worker_prefix_rejects_missing_policy_and_invalid_rss(self):
+    def test_worker_prefix_requires_versioned_valid_policy(self):
         prefix = WORKER[:WORKER.index('BOOTSTRAP_STAGE3_FACADE_PATH=')]
-        for mode in ('enforce', 'monitor', 'invalid'):
-            args = ['fixture'] * 29
-            args[1] = str(ROOT)
-            args[28] = mode
-            result = shell(prefix + '\nprintf "%s\\0" "$@"', args + POLICY)
-            self.assertEqual(result.returncode, 0 if mode != 'invalid' else 64, result.stderr)
-            if mode != 'invalid':
-                self.assertEqual(result.stdout.split(b'\0')[:-1], [p.encode() for p in POLICY])
-        self.assertEqual(shell(prefix, args).returncode, 64)
-        self.assertEqual(shell(prefix, args + ['--source', '']).returncode, 64)
+        typed_prefix = ['fixture'] * 32
+        typed_prefix[1] = str(ROOT)
+        typed_prefix[25] = 'v1'
+        typed_prefix[26] = str(ROOT / 'admission')
+        typed_prefix[27] = 'a' * 64
+        typed_prefix[28] = ''
+        typed_prefix[29] = ''
+        typed_prefix[30] = '1000'
+        typed_prefix[31] = 'per-file'
+        args = typed_prefix + ['--stage3-source-policy-v1', *POLICY]
+        result = shell(prefix + '\nprintf "%s\\0" "$@"', args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(b'\0')[:-1], [p.encode() for p in POLICY])
+        self.assertEqual(shell(prefix, typed_prefix).returncode, 64)
+        self.assertEqual(shell(prefix, typed_prefix + ['--stage3-source-policy-v1', '--source', '']).returncode, 64)
+        for suffix in (['--stage3-source-policy-v2', *POLICY],
+                       ['--stage3-source-policy-v1', '--entry-closure'],
+                       ['--stage3-source-policy-v1', '--source', 'src/app', '--entry-closure', '--entry-closure']):
+            self.assertEqual(shell(prefix, typed_prefix + suffix).returncode, 64, suffix)
 
 
 if __name__ == '__main__':
