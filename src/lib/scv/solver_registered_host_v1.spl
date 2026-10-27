@@ -1,0 +1,129 @@
+"""Host-side provider gate; policy and lock pin must come from old accepted authority.
+
+Candidate configuration is never passed here. Exact artifact bytes and metadata
+permit built-in proposal code to run, but no runtime owner attests the current
+process binary, so all outcomes remain explicitly unqualified.
+"""
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.scv.solver_contract_v1.*
+use std.scv.solver_provider_registry_v1.*
+use std.scv.solver_host_v1.{solver_host_result_v1, solver_host_preflight_v1, SourceSolveV1, solve_source_v1}
+use std.scv.solver_budget_v1.{solver_budget_host_v1}
+use std.scv.solver_source_v1.{SourceMergeInputV1}
+use std.scv.solver_simple_v1.{SourceSimpleMergeInputV1}
+use std.scv.solver_simple_host_v1.{SimpleSourceSolveV1, solve_simple_source_v1}
+use std.scv.solver_db_adapters_v1.{DbSchemaSolveV1, DbRowsSolveV1, solve_db_schema_v1, solve_db_rows_v1}
+use std.scv.solver_db_rows_schema_v1.{DbRowsSchemaInputV1, DbRowsSchemaSolveV1, solve_db_rows_schema_v1}
+use std.scv.db_schema_identity_v2.{DbSchemaV2}
+use std.scv.db_reducer.{MaterializedState}
+use std.scv.db_patch.{DbPatch}
+use std.scv.db_policy_codec.{DbPolicyConfig}
+
+pub fn solver_registered_provider_preflight_v1(root: text, accepted_lock_sha256: text,
+        accepted_policy: SolverHostPolicyV1, domain: text, limits: SdnStrictLimitsV1) -> SolverProviderResolutionV1:
+    val registry = match solver_provider_registry_load_v1(root, accepted_lock_sha256, limits):
+        case Ok(value): value
+        case Err(reason):
+            var status = "needs_inputs"
+            if reason.starts_with("resource_limited:"): status = "resource_limited"
+            return SolverProviderResolutionV1(status: status, diagnostic: reason,
+                execution_status: "unqualified-builtin-execution", execution_attested: false,
+                provider_ids: [], lock_sha256: "", charged_work: 0)
+    solver_provider_registry_resolve_v1(registry, accepted_lock_sha256, accepted_policy, domain)
+
+fn registered_request_resolution_v1(root: text, accepted_lock_sha256: text, request: SolveRequestV1,
+        accepted_policy: SolverHostPolicyV1, domain: text, limits: SdnStrictLimitsV1) -> SolverProviderResolutionV1:
+    if request.cancelled:
+        return SolverProviderResolutionV1(status: "cancelled", diagnostic: "request_cancelled",
+            execution_status: "unqualified-builtin-execution", execution_attested: false,
+            provider_ids: [], lock_sha256: "", charged_work: 0)
+    if request.logical_work_budget <= 0 or request.memory_budget <= 0:
+        return SolverProviderResolutionV1(status: "resource_limited", diagnostic: "provider_registry_budget",
+            execution_status: "unqualified-builtin-execution", execution_attested: false,
+            provider_ids: [], lock_sha256: "", charged_work: 0)
+    # Bound host-owned request metadata before serializing binding fields or
+    # touching registry, manifest, or artifact files.
+    val budget = solver_budget_host_v1(request, accepted_policy)
+    if budget.limited:
+        return SolverProviderResolutionV1(status: "resource_limited", diagnostic: "provider_registry_request_metadata",
+            execution_status: "unqualified-builtin-execution", execution_attested: false,
+            provider_ids: [], lock_sha256: "", charged_work: 0)
+    val refusal = solver_host_preflight_v1(request, accepted_policy, domain, budget.spent, budget.spent)
+    if refusal != "":
+        return SolverProviderResolutionV1(status: refusal, diagnostic: "provider_host_preflight:" + refusal,
+            execution_status: "unqualified-builtin-execution", execution_attested: false,
+            provider_ids: [], lock_sha256: "", charged_work: 0)
+    val remaining = budget.limit - budget.spent
+    val registry = match solver_provider_registry_load_budgeted_v1(root, accepted_lock_sha256, limits, remaining, remaining):
+        case Ok(value): value
+        case Err(reason):
+            var status = "needs_inputs"
+            if reason.starts_with("resource_limited:"): status = "resource_limited"
+            return SolverProviderResolutionV1(status: status, diagnostic: reason,
+                execution_status: "unqualified-builtin-execution", execution_attested: false,
+                provider_ids: [], lock_sha256: "", charged_work: 0)
+    solver_provider_registry_resolve_v1(registry, accepted_lock_sha256, accepted_policy, domain)
+
+pub fn solve_registered_source_v1(root: text, accepted_lock_sha256: text, request: SolveRequestV1,
+        accepted_policy: SolverHostPolicyV1, input: SourceMergeInputV1, limits: SdnStrictLimitsV1) -> SourceSolveV1:
+    val resolution = registered_request_resolution_v1(root, accepted_lock_sha256, request, accepted_policy, "source.bytes", limits)
+    if resolution.status == "resolved-unqualified" and not resolution.execution_attested:
+        var charged_request = request
+        charged_request.logical_work_budget = request.logical_work_budget - resolution.charged_work
+        var solved = solve_source_v1(charged_request, accepted_policy, input)
+        solved.result.logical_work = solved.result.logical_work + resolution.charged_work
+        return solved
+    SourceSolveV1(result: solver_host_result_v1(request, accepted_policy, resolution.status, nil, [], resolution.charged_work, 0), inputs: input, candidate: nil)
+
+pub fn solve_registered_simple_source_v1(root: text, accepted_lock_sha256: text, request: SolveRequestV1,
+        accepted_policy: SolverHostPolicyV1, input: SourceSimpleMergeInputV1, limits: SdnStrictLimitsV1) -> SimpleSourceSolveV1:
+    val resolution = registered_request_resolution_v1(root, accepted_lock_sha256, request, accepted_policy, "source.simple", limits)
+    if resolution.status == "resolved-unqualified" and not resolution.execution_attested:
+        var charged_request = request
+        charged_request.logical_work_budget = request.logical_work_budget - resolution.charged_work
+        var solved = solve_simple_source_v1(charged_request, accepted_policy, input)
+        solved.result.logical_work = solved.result.logical_work + resolution.charged_work
+        return solved
+    SimpleSourceSolveV1(result: solver_host_result_v1(request, accepted_policy, resolution.status, nil, [], resolution.charged_work, 0), inputs: input, candidate: nil)
+
+pub fn solve_registered_db_schema_v1(root: text, accepted_lock_sha256: text, request: SolveRequestV1,
+        accepted_policy: SolverHostPolicyV1, base: DbSchemaV2, left: DbSchemaV2, right: DbSchemaV2,
+        limits: SdnStrictLimitsV1) -> Result<DbSchemaSolveV1, text>:
+    val resolution = registered_request_resolution_v1(root, accepted_lock_sha256, request, accepted_policy, "db.schema", limits)
+    if resolution.status == "resolved-unqualified" and not resolution.execution_attested:
+        var charged_request = request
+        charged_request.logical_work_budget = request.logical_work_budget - resolution.charged_work
+        var solved = solve_db_schema_v1(charged_request, accepted_policy, base, left, right)?
+        solved.result.logical_work = solved.result.logical_work + resolution.charged_work
+        return Ok(solved)
+    Ok(DbSchemaSolveV1(result: solver_host_result_v1(request, accepted_policy, resolution.status, nil, [], resolution.charged_work, 0),
+        base: base, left: left, right: right, proposal: nil))
+
+pub fn solve_registered_db_rows_v1(root: text, accepted_lock_sha256: text, request: SolveRequestV1,
+        accepted_policy: SolverHostPolicyV1, state: MaterializedState, patch: DbPatch,
+        accepted_config: DbPolicyConfig, limits: SdnStrictLimitsV1) -> Result<DbRowsSolveV1, text>:
+    val resolution = registered_request_resolution_v1(root, accepted_lock_sha256, request, accepted_policy, "db.rows", limits)
+    if resolution.status == "resolved-unqualified" and not resolution.execution_attested:
+        var charged_request = request
+        charged_request.logical_work_budget = request.logical_work_budget - resolution.charged_work
+        var solved = solve_db_rows_v1(charged_request, accepted_policy, state, patch, accepted_config)?
+        solved.result.logical_work = solved.result.logical_work + resolution.charged_work
+        return Ok(solved)
+    Ok(DbRowsSolveV1(result: solver_host_result_v1(request, accepted_policy, resolution.status, nil, [], resolution.charged_work, 0),
+        state: state, patch: patch, preview: nil))
+
+pub fn solve_registered_db_rows_schema_v1(root: text, accepted_lock_sha256: text, request: SolveRequestV1,
+        accepted_policy: SolverHostPolicyV1, input: DbRowsSchemaInputV1, limits: SdnStrictLimitsV1) -> DbRowsSchemaSolveV1:
+    val resolution = registered_request_resolution_v1(root, accepted_lock_sha256, request, accepted_policy, "db.rows", limits)
+    if resolution.status == "resolved-unqualified" and not resolution.execution_attested:
+        var charged_request = request
+        charged_request.logical_work_budget = request.logical_work_budget - resolution.charged_work
+        var solved = solve_db_rows_schema_v1(charged_request, accepted_policy, input)
+        solved.result.logical_work = solved.result.logical_work + resolution.charged_work
+        return solved
+    DbRowsSchemaSolveV1(result: solver_host_result_v1(request, accepted_policy, resolution.status, nil, [], resolution.charged_work, 0),
+        inputs: input, uid_edits: [], preview: nil)
+
+export solver_registered_provider_preflight_v1
+export solve_registered_source_v1, solve_registered_simple_source_v1
+export solve_registered_db_schema_v1, solve_registered_db_rows_v1, solve_registered_db_rows_schema_v1
