@@ -8,6 +8,9 @@
 # only), never the Rust seed. SIMPLE_RC_EXTRA_ASSETS (space-separated paths)
 # attaches extra files, e.g. the runtime DLL bundle + its .sha256. Tag = rc-1.0.0-rc.<highest existing + 1>.
 set -u
+# windows-gnu + llvm-mingw only; never MSVC. These make the link pick the gnu flavor.
+export SIMPLE_NATIVE_BUILD_TARGET=x86_64-pc-windows-gnu SIMPLE_LINKER_FLAVOR=gnu SIMPLE_WINDOWS_ABI=gnu
+unset LIB INCLUDE LIBPATH
 exe=${1:?stage exe path}; stage=${2:?stage2|stage3}; commit=${3:?source commit}; mode=${4:-}
 case "$stage" in stage2|stage3) ;; *) echo "FAIL — stage must be stage2 or stage3"; exit 2 ;; esac
 [ -f "$exe" ] || { echo "ERROR — nothing was checked: $exe missing"; exit 2; }
@@ -19,7 +22,7 @@ trap 'rm -rf "$work"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 printf 'fn main():\n    print "hello world"\n' > "$work/hello.spl"
-"$exe" native-build "$work/hello.spl" --emit-object -o "$work/hello.o" > "$work/gate.log" 2>&1
+"$exe" native-build "$work/hello.spl" --target x86_64-pc-windows-gnu --emit-object -o "$work/hello.o" > "$work/gate.log" 2>&1
 rc=$?
 size=0; [ -f "$work/hello.o" ] && size=$(wc -c < "$work/hello.o" | tr -d ' ')
 cat "$work/gate.log"
@@ -27,7 +30,7 @@ if [ "$rc" -ne 0 ] || [ "$size" -le 0 ]; then
   echo "FAIL — hello-world object gate: rc=$rc obj_bytes=$size"; exit 1
 fi
 gate="native-build --emit-object hello.spl: rc=0, hello.o $size bytes"
-"$exe" native-build "$work/hello.spl" -o "$work/hello.exe" > "$work/link.log" 2>&1
+"$exe" native-build "$work/hello.spl" --target x86_64-pc-windows-gnu -o "$work/hello.exe" > "$work/link.log" 2>&1
 lrc=$?
 if [ "$lrc" -eq 0 ] && [ -f "$work/hello.exe" ]; then
   out=$("$work/hello.exe" 2>&1); orc=$?
@@ -48,15 +51,18 @@ hash=$(sha256sum "$asset" | cut -d' ' -f1)
 cat > "$work/notes.md" <<EOF
 Windows x86_64 $stage bootstrap compiler (bootstrap CLI: compile/native-build only; NOT the full CLI).
 
+Target: x86_64-pc-windows-gnu. Toolchain: llvm-mingw UCRT only (mingw clang, lld, compiler-rt, libunwind, libc++). No MSVC, no MSVC LIB, no Windows SDK, no GCC. The binary imports only KERNEL32 and UCRT.
+
 - source commit: $commit
 - built path: $exe
 - sha256: $hash
 - gate: $gate
-- runtime dependency: libLLVM-23.dll (MSYS2 clang64 build, e.g. C:/msys64/clang64/bin) must be on PATH; the llvm-mingw libLLVM-23.dll fails with 0xC0000139. Linking an exe additionally needs LIB = MSVC 14.44 lib/x64 + Windows Kits 10.0.26100.0 ucrt/x64 and um/x64, plus SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_SCV_FREEZE_FALLBACK=1, run from a release/1.0.0 checkout (runtime C is compiled from the checkout at link time).
+- runtime dependency: libLLVM-23.dll (MSYS2 clang64 build, e.g. C:/msys64/clang64/bin) must be first on PATH; the llvm-mingw libLLVM-23.dll fails with 0xC0000139. The bundled llvm-runtime-dlls archive carries the clang64 DLLs. Linking an exe uses target x86_64-pc-windows-gnu with llvm-mingw (CC and SIMPLE_LLVM_MINGW_ROOT=~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64); do NOT set LIB/INCLUDE. Also set SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_SCV_FREEZE_FALLBACK=1, and run from a checkout of the source commit (runtime C is compiled from the checkout at link time). The link env is SIMPLE_NATIVE_BUILD_TARGET=x86_64-pc-windows-gnu SIMPLE_LINKER_FLAVOR=gnu SIMPLE_WINDOWS_ABI=gnu.
 EOF
 echo "tag=$tag asset=$(basename "$asset") sha256=$hash"
 [ "$mode" = "--dry-run" ] && { echo "PASS — dry run, not published"; exit 0; }
-gh release create "$tag" --prerelease --target "$commit" \
+full=$(git rev-parse "$commit" 2>/dev/null || echo "$commit")  # API rejects abbreviated shas
+gh release create "$tag" --prerelease --target "$full" \
   --title "$tag (win $stage)" --notes-file "$work/notes.md" \
   "$asset" "$asset.sha256" ${SIMPLE_RC_EXTRA_ASSETS:-}
 crc=$?
