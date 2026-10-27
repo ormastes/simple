@@ -43,3 +43,25 @@ Later correction files supersede the archived row for the named `bug_id` while l
 V1 files, their manifest, and the append-only V1 correction register remain historical records. V2 is the later full-ID classification snapshot: for current classification lookup, use the V2 row for each ID, including the corrected Vulkan mapper row. The V2 review target remains the frozen `c0b3ad911f4cb00c0f3550b05baa8d06347d17d0`; merged post-freeze fixes do not change the assessment SHA or confer runtime qualification.
 
 This remains partial progress toward the full user goal. Canonical bug database writes and runtime-qualified build evidence remain held pending the user's build-exception decision. No bug DB, CRC, or status files were changed, and no compiler or SSpec was run for this documentation snapshot. No full-audit PASS is claimed.
+
+
+## V3 scoped aggregate checkpoint
+
+V3 is a scoped derived snapshot of the original frozen audit (`d805f566f89b9e830c292d5cc0a1e0f5f6449c37`) assessed at `c0b3ad911f4cb00c0f3550b05baa8d06347d17d0`. See [V3 categories](reviewed_categories_v3.sdn), [residual IDs](residual_ids_v3.sdn), [manifest and captured input hashes](manifest_v3.sdn), [accepted evidence by lane](evidence_v3/), and the mandatory [reproduction scope table](reproduction_scope_v3.sdn). V1 and V2 artifacts and correction records remain unchanged historical snapshots.
+
+- The final partition has 1,097 accepted classifications, 505 not admitted and still needing evidence, and no missing IDs. The 505 residual records are not all unreviewed: their report/source inspection may be recorded, but their reproducibility remains untested and no runtime attempt is admitted for them.
+- Count provenance: the V2 baseline is 600 accepted (including merged lane 04); V3 then applies 16 adjudication queues covering 512 rows (497 accepted, 15 needing more evidence), yielding 1,097 accepted and 505 residual. [V2 manifest](manifest_v2.sdn) and merged lane 04 hash are explicitly bound in [V3 manifest](manifest_v3.sdn); the ten primary CSVs alone do not explain the baseline count.
+- Exactly one of the 1,602 rows is reproducible, and only in mandatory `HOST_PROTOCOL` scope: `BUG-STAGE3-RESUME-SOURCE-POLICY-20261011`. The portable [reproduction evidence](evidence_v3/stage3_host_protocol_reproduction.md) records the retained command, exits, receipt IDs, report-paraphrased red excerpt, and the 14 dependency blobs identical between executed baseline `b0d3cf73dc19e75640952c220bf0e069230b5eda` and assessed `c0`. This demonstrates a shell argument-builder mismatch for that protocol case; it does not show an actual compiler build reproduced.
+- The other 1,601 rows remain `untested`. No compiled Simple runtime is qualified; full Phase 3, compiler build, and normal CLI qualification remain `UNRUN`.
+- The Bungee font registry record is the only eligible invalid candidate; no closure was applied. The cross-engine invalid proposal was rejected, leaving that row valid and keep-open.
+- Six related code PRs were already included in frozen `c0`: [#5034](https://github.com/ormastes/simple/pull/5034), [#5035](https://github.com/ormastes/simple/pull/5035), [#5036](https://github.com/ormastes/simple/pull/5036), [#5041](https://github.com/ormastes/simple/pull/5041), [#5042](https://github.com/ormastes/simple/pull/5042), and [#5043](https://github.com/ormastes/simple/pull/5043). Four related code PRs merged after the freeze: [#5048](https://github.com/ormastes/simple/pull/5048), [#5049](https://github.com/ormastes/simple/pull/5049), [#5054](https://github.com/ormastes/simple/pull/5054), and [#5073](https://github.com/ormastes/simple/pull/5073). Post-freeze changes do not retroactively alter c0 classifications. Documentation/checkpoint PRs #5053, #5057, and #5061 are not code fixes.
+
+### HOST_PROTOCOL scope limits
+
+The red receipt (`exec-f1426a88-b544-492a-9bb1-3e213ab7524f`, exit 1) ran the six-test host protocol suite at baseline `b0d3cf73dc19e75640952c220bf0e069230b5eda`; the source-bound 14 dependency blobs match frozen `c0`. Only the digest/worker argument vector mismatch is admitted. The green receipt (`exec-12af553a-00fe-44f9-b64c-a872d0e83352`, exit 0) was recorded after remedy edits but before creation of `28493de7580915b9fc0fd104cd55cea9bb07edc5`; that commit records the matching code state. It is post-target host protocol evidence, not proof of a current compiler build or full Phase 3.
+
+### Precedence and remaining work
+
+Use V3 as the latest derived classification snapshot, with its single scoped HOST_PROTOCOL exception. V1 and V2 categories, manifests, correction rows, and counts remain historical and byte-preserved. The assessment SHA remains `c0`; later implementation fixes and protocol-only green receipts do not qualify a compiled Simple runtime.
+
+Canonical bug database application and runtime-qualified build evidence remain held pending the user's exception. No bug status or closure was applied; no bug database was modified; and no compiler, system test, or live database was run for this documentation correction. This remains partial progress, not a full 1,602-report audit PASS.
