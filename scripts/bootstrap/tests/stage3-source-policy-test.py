@@ -114,8 +114,9 @@ class SourcePolicy(unittest.TestCase):
             args = result.stdout.split(b'\0')[:-1]
             self.assertEqual(args[:32], [p.encode() for p in expected_prefix])
             self.assertEqual(args[31], b'stage3_lowering_lane')
-            self.assertEqual(args[32], b'--stage3-source-policy-v1')
-            self.assertEqual(args[33:], [p.encode() for p in POLICY])
+            self.assertEqual(args[32], b'stage3_rss_cap_mode')
+            self.assertEqual(args[33], b'--stage3-source-policy-v1')
+            self.assertEqual(args[34:], [p.encode() for p in POLICY])
 
     def test_worker_prefix_requires_versioned_valid_policy(self):
         prefix = WORKER[:WORKER.index('BOOTSTRAP_STAGE3_FACADE_PATH=')]
@@ -128,15 +129,22 @@ class SourcePolicy(unittest.TestCase):
         typed_prefix[29] = ''
         typed_prefix[30] = '1000'
         typed_prefix[31] = 'per-file'
-        args = typed_prefix + ['--stage3-source-policy-v1', *POLICY]
-        result = shell(prefix + '\nprintf "%s\\0" "$@"', args)
+        args = typed_prefix + ['monitor', '--stage3-source-policy-v1', *POLICY]
+        code = prefix + '\nprintf "%s\\0" "$SIMPLE_BOOTSTRAP_RSS_CAP_MODE" "$@"'
+        result = shell(code, args, dict(os.environ, SIMPLE_BOOTSTRAP_RSS_CAP_MODE='enforce'))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.split(b'\0')[:-1], [p.encode() for p in POLICY])
+        self.assertEqual(result.stdout.split(b'\0')[:-1], [b'monitor', *[p.encode() for p in POLICY]])
         self.assertEqual(shell(prefix, typed_prefix).returncode, 64)
-        self.assertEqual(shell(prefix, typed_prefix + ['--stage3-source-policy-v1', '--source', '']).returncode, 64)
-        for suffix in (['--stage3-source-policy-v2', *POLICY],
-                       ['--stage3-source-policy-v1', '--entry-closure'],
-                       ['--stage3-source-policy-v1', '--source', 'src/app', '--entry-closure', '--entry-closure']):
+        self.assertEqual(shell(prefix, typed_prefix + ['--stage3-source-policy-v1', *POLICY]).returncode, 64)
+        self.assertEqual(shell(prefix, typed_prefix + ['invalid', '--stage3-source-policy-v1', *POLICY]).returncode, 64)
+        for suffix in (['monitor', '--stage3-source-policy-v2', *POLICY],
+                       ['', '--stage3-source-policy-v1', *POLICY],
+                       ['disabled', '--stage3-source-policy-v1', *POLICY],
+                       ['MONITOR', '--stage3-source-policy-v1', *POLICY],
+                       ['monitor enforce', '--stage3-source-policy-v1', *POLICY],
+                       ['monitor', '--stage3-source-policy-v1', '--entry-closure'],
+                       ['monitor', '--stage3-source-policy-v1', '--source', 'src/app', '--entry-closure', '--entry-closure'],
+                       ['monitor', '--stage3-source-policy-v1', '--source', '']):
             self.assertEqual(shell(prefix, typed_prefix + suffix).returncode, 64, suffix)
 
 

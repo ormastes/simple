@@ -4,10 +4,10 @@ set -eu
 # Internal worker for resume-stage3-from-admitted.sh.  The launcher runs this
 # file in a dedicated systemd user-service cgroup so every descendant remains
 # kernel-owned even after double-fork/reparenting.
-# The private ABI is a fixed 32-field control prefix followed by its versioned
-# source-policy marker and a non-empty source-policy tail.
+# The private ABI is a fixed 32-field control prefix followed by its resolved
+# RSS mode, versioned source-policy marker and non-empty source-policy tail.
 worker_arg_count=$#
-[ "$#" -ge 34 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
+[ "$#" -ge 36 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
 transcript=$1 root=$2 log=$3 worker_home=$4 worker_tmp=$5 worker_path=$6
 admitted=$7 platform=$8 backend=$9
 shift 9
@@ -49,13 +49,21 @@ if [ "$worker_arg_count" -ge 34 ]; then
     *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
   esac
 fi
+# The service manager may supply stale ambient mode state. The parent has
+# already resolved and validated this control value; transport it explicitly
+# so the nested command-snapshot watchdog sees the same mode as the outer one.
+case "${15-}" in
+  enforce|monitor) SIMPLE_BOOTSTRAP_RSS_CAP_MODE=${15} ;;
+  *) echo 'stage3 worker: invalid typed RSS cap mode' >&2; exit 64 ;;
+esac
+export SIMPLE_BOOTSTRAP_RSS_CAP_MODE
 # Stage 3 recovery has authenticated the source policy before reaching this
 # private worker. Keep the policy as argv throughout transport; validate it
 # with the shared parser and reject legacy calls without the versioned tail.
-[ "${15-}" = --stage3-source-policy-v1 ] || {
+[ "${16-}" = --stage3-source-policy-v1 ] || {
   echo 'stage3 worker: missing versioned source policy' >&2; exit 64;
 }
-shift 15
+shift 16
 . "$root/scripts/bootstrap/lib/stage3-source-policy.shs"
 bootstrap_stage3_source_policy transfer "$@" >/dev/null || {
   echo 'stage3 worker: invalid versioned source policy' >&2; exit 64;

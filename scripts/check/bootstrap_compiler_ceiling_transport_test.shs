@@ -74,7 +74,7 @@ worker_prefix_run() {
   set -- x "$root"
   while [ "$#" -lt 28 ]; do set -- "$@" x; done
   set -- "$@" "$ceiling" "$cap" 1000 per-file \
-    --stage3-source-policy-v1 --source src/app --entry-closure
+    enforce --stage3-source-policy-v1 --source src/app --entry-closure
   if [ -n "$ambient" ]; then
     env -i PATH="$PATH" "$ambient" sh "$scratch/worker-prefix.sh" "$@"
   else
@@ -154,7 +154,7 @@ args[28] = ""
 args[29] = ""
 args[30] = "1000"
 args[31] = "per-file"
-policy_tail = ["--stage3-source-policy-v1", "--source", "src/app", "--entry-closure"]
+policy_tail = ["monitor", "--stage3-source-policy-v1", "--source", "src/app", "--entry-closure"]
 def worker_argv(budget):
     selected = list(args)
     selected[30] = budget
@@ -179,7 +179,7 @@ assert result.stdout == "budget=5000\n"
 for bad in ("", "999", "60001", "05000", "-1", "5x", "9"*80):
     run('exec sh "$@"', [str(prefix), *worker_argv(bad)], expected=64)
 for selected in (args, args + ["extra", *policy_tail],
-                 args + ["--stage3-source-policy-v2", *policy_tail[1:]]):
+                 args + ["monitor", "--stage3-source-policy-v2", *policy_tail[2:]]):
     run('exec sh "$@"', [str(prefix), *selected], expected=64)
 
 # All four actual launcher argv paths preserve the fixed control prefix and
@@ -190,11 +190,13 @@ source_policy = ["--source", "src/app", "--entry-closure"]
 for branch in branches:
     env = dict(base)
     for name in re.findall(r'\$\{?([A-Za-z_][A-Za-z_0-9]*)', branch): env[name] = "fixture"
-    env.update(worker="record", stage3_observation_budget_ms="5000")
+    env.update(worker="record", stage3_observation_budget_ms="5000",
+               stage3_lowering_lane="per-file", stage3_rss_cap_mode="monitor")
     result = run('record() { printf "%s\\n" "$@"; };\n' + branch[:-2], source_policy, env=env)
     argv = result.stdout.splitlines()
-    assert len(argv) == 36 and argv[30] == "5000", argv
-    assert argv[32] == "--stage3-source-policy-v1" and argv[33:] == source_policy, argv
+    assert len(argv) == 37 and argv[30] == "5000", argv
+    assert argv[32] == "monitor" and argv[33] == "--stage3-source-policy-v1", argv
+    assert argv[34:] == source_policy, argv
 
 # Execute the actual systemd branch with a service double that clears ambient
 # variables, then the actual worker prefix. No service/compiler is launched.
@@ -208,7 +210,7 @@ service.write_text('#!/bin/sh\nset -eu\nwhile [ "$#" -gt 0 ]; do case "$1" in --
 service.chmod(0o755)
 env = dict(base, PATH=str(bin_dir) + ":/usr/bin:/bin")
 for name in re.findall(r'\$\{?([A-Za-z_][A-Za-z_0-9]*)', branch): env[name] = "fixture"
-env.update(root=str(root), worker=str(prefix), stage3_compiler_ceiling_env="", stage3_compiler_cap="", stage3_observation_budget_ms="5000", stage3_lowering_lane="per-file")
+env.update(root=str(root), worker=str(prefix), stage3_compiler_ceiling_env="", stage3_compiler_cap="", stage3_observation_budget_ms="5000", stage3_lowering_lane="per-file", stage3_rss_cap_mode="monitor")
 result = run(branch, source_policy, env=env)
 assert result.stdout == "budget=5000\n", result.stdout
 print("PASS: observation default/range/invalid/arity and actual four-route argv + clean-service worker transfer; no compiler/watchdog workload")

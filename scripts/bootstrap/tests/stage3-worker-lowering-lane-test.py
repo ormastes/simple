@@ -35,7 +35,7 @@ def worker_args(lane="per-file"):
             "/fixture/progress", "/fixture/phase", "/fixture/memory", "fixture-id",
             "native", "none", "4194304", "", "", "", "4096", "v1",
             "/fixture/admission", "a" * 64]
-    args += ["", "", "1000", lane, "--stage3-source-policy-v1", *POLICY]
+    args += ["", "", "1000", lane, "enforce", "--stage3-source-policy-v1", *POLICY]
     return args
 
 
