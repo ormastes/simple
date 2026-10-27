@@ -1,0 +1,75 @@
+"""Guarded store GC and CAS admission; execution requires an admitted runtime."""
+use std.spec.{describe, it, expect, step}
+use std.scv.build_retention_v1.*
+use std.scv.build_retention_store_v1.*
+use std.scv.compile_snapshot.{scv_compile_snapshot_provenance_v1,
+    scv_compile_snapshot_receipt_v1, scv_compile_snapshot_gc_v1}
+use app.io.mod.{dir_create, dir_exists, file_exists}
+use std.nogc_sync_mut.io_runtime.{file_write}
+
+extern fn rt_getpid() -> i64
+
+fn retention_store_limits() -> BuildRetentionLimitsV1:
+    BuildRetentionLimitsV1(max_nodes: 64, max_edges: 128, max_work: 4096,
+        max_bytes: 0, max_retained: 0, max_remove: 64)
+
+fn retention_store_fixture(label: text) -> text:
+    val root = "build/test-artifacts/retention-authority-{rt_getpid()}-{label}"
+    expect(dir_create(root + "/snapshots/old", true)).to_equal(true)
+    expect(dir_create(root + "/receipts", true)).to_equal(true)
+    val provenance = scv_compile_snapshot_provenance_v1("old", "commit", "tree", "digest", 1)
+    expect(file_write(root + "/snapshots/old/SCV_COMPILE_SNAPSHOT", provenance)).to_equal(true)
+    expect(file_write(root + "/receipts/old.receipt", scv_compile_snapshot_receipt_v1(provenance, "old"))).to_equal(true)
+    root
+
+fn retention_store_initial() -> BuildRetentionStateV1:
+    BuildRetentionStateV1(generation: 1, nodes: [BuildRetentionNodeV1(
+        namespace: "snapshot", id: "old", dependencies: [], authoritative: false,
+        rebuildable: true, bytes: 8, last_used: 1)], pins: [], leases: [])
+
+describe "Build retention checked store callback":
+    it "removes a planned snapshot through its existing provenance and receipt checker":
+        step("Publish authority, derive a plan, and execute the store callback")
+        val root = retention_store_fixture("delete")
+        val state = retention_store_initial()
+        expect(build_retention_store_commit_v1(root, 0, "", state, retention_store_limits()).is_ok()).to_equal(true)
+        val plan = build_retention_plan_v1(state, retention_store_limits(), 10).unwrap()
+        expect(build_retention_store_execute_v1(root, plan, retention_store_limits(), 10).unwrap()).to_equal(1)
+        expect(dir_exists(root + "/snapshots/old")).to_equal(false)
+        expect(file_exists(root + "/receipts/old.receipt")).to_equal(false)
+        expect(build_retention_store_load_v1(root).unwrap().nodes.len()).to_equal(0)
+
+    it "rejects stale plans after a pin and blocks the legacy collector for managed stores":
+        step("A newly pinned old snapshot invalidates the earlier deletion generation")
+        val root = retention_store_fixture("pin")
+        val state = retention_store_initial()
+        build_retention_store_commit_v1(root, 0, "", state, retention_store_limits()).unwrap()
+        val plan = build_retention_plan_v1(state, retention_store_limits(), 10).unwrap()
+        val pinned = build_retention_pin_v1(state, 1, "branches/main", "snapshot/old").unwrap()
+        build_retention_store_commit_v1(root, 1, build_retention_root_v1(state), pinned, retention_store_limits()).unwrap()
+        expect(build_retention_store_execute_v1(root, plan, retention_store_limits(), 10).is_err()).to_equal(true)
+        expect(scv_compile_snapshot_gc_v1(root, [], 1)).to_equal(0)
+        expect(dir_exists(root + "/snapshots/old")).to_equal(true)
+
+    it "fails closed on lock contention and on corrupted durable authority":
+        step("An occupied transaction lock blocks admission; invalid SDN blocks loading")
+        val root = retention_store_fixture("lock")
+        expect(dir_create(root + "/.build-retention-v1.lock", false)).to_equal(true)
+        expect(build_retention_store_commit_v1(root, 0, "", retention_store_initial(), retention_store_limits()).is_err()).to_equal(true)
+        expect(file_write(root + "/.build-retention-v1.sdn", "generation: garbage\n")).to_equal(true)
+        expect(build_retention_store_load_v1(root).is_err()).to_equal(true)
+        expect(scv_compile_snapshot_gc_v1(root, [], 1)).to_equal(0)
+
+    it "rejects tampered same-generation plans and history-dropping replacement roots":
+        step("Canonical root identity prevents replay against a different graph")
+        val root = retention_store_fixture("tamper")
+        var state = retention_store_initial()
+        state.nodes[0].authoritative = true
+        state.nodes[0].rebuildable = false
+        build_retention_store_commit_v1(root, 0, "", state, retention_store_limits()).unwrap()
+        var plan = build_retention_plan_v1(state, retention_store_limits(), 10).unwrap()
+        plan.deletions = ["snapshot/old"]
+        expect(build_retention_store_execute_v1(root, plan, retention_store_limits(), 10).is_err()).to_equal(true)
+        val dropped = BuildRetentionStateV1(generation: 2, nodes: [], pins: [], leases: [])
+        expect(build_retention_store_commit_v1(root, 1, build_retention_root_v1(state), dropped, retention_store_limits()).is_err()).to_equal(true)
+        expect(dir_exists(root + "/snapshots/old")).to_equal(true)
