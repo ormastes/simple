@@ -1,8 +1,8 @@
 # SCV event journal durability fix
 
-Date: 2026-10-27  
+Date: 2026-10-27
 Source: `src/lib/scv/journal.spl`, `src/lib/scv/sj_capsule.spl`,
-`src/lib/scv/stabilize.spl`, and `src/app/scv/main.spl`  
+`src/lib/scv/stabilize.spl`, and `src/app/scv/main.spl`
 Tests-first commits: `e7e74fdf4e4`, `d2d9c193c00`, `e5e90ab0696`,
 `35e7aa1fbfe`, `eda8decf9c2`, `439a69bf4b5`, `5a405f9beba`,
 `840ac5bdd19`, `40001a42f36`
