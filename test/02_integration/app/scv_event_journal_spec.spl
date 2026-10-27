@@ -32,6 +32,16 @@ fn _events_lines(root: text) -> i64:
             count = count + 1
     count
 
+fn _fault_cli(root: text, fault: text, command: text, batch_id: text) -> i64:
+    val script = [
+        "set -eu",
+        "REPO=$(pwd)",
+        "cd \"{root}\"",
+        "SIMPLE_LIB=\"$REPO/src\" SCV_FAULT_AFTER={fault} \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" {command} {batch_id}"
+    ].join("\n") + "\n"
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    code
+
 describe "scv event journal integration (E-03)":
     it "records events into a pending, uncommitted batch":
         step("Record two events; pending file exists, batch not committed")
@@ -69,6 +79,98 @@ describe "scv event journal integration (E-03)":
         expect(scv_event_batch_replay(root)).to_equal(0)
         expect(_events_lines(root)).to_equal(lines)
         expect(scv_event_log(root)).to_contain("op=b2 kind=fsevent")
+        dir_remove_all(root)
+
+    it "does not acknowledge an event-log write failure or discard pending events":
+        step("Make events.log unwriteable as a file and attempt commit")
+        val root = _repo("event-write-failure")
+        expect(scv_event_batch_record(root, "b1", "created", "a.txt", "")).to_equal(true)
+        dir_create(scv_journal_events_path(root), true)
+        expect(scv_event_batch_commit(root, "b1")).to_equal(false)
+        expect(file_exists(scv_event_batch_pending_path(root, "b1"))).to_equal(true)
+        expect(scv_event_batch_is_committed(root, "b1")).to_equal(false)
+        dir_remove_all(root)
+
+    it "keeps a sealed batch retryable after event publication but before its terminal marker":
+        step("Fail marker publication after the event row is durable")
+        val root = _repo("marker-write-failure")
+        expect(scv_event_batch_record(root, "b1", "created", "a.txt", "")).to_equal(true)
+        dir_create("{root}/.scv/journal/event_batches/b1.committed", true)
+        expect(scv_event_batch_commit(root, "b1")).to_equal(false)
+        expect(_events_lines(root)).to_equal(1)
+        expect(file_exists(scv_event_batch_pending_path(root, "b1"))).to_equal(true)
+        expect(scv_event_batch_is_committed(root, "b1")).to_equal(false)
+        expect(scv_event_batch_record(root, "b1", "modified", "a.txt", "")).to_equal(false)
+        dir_remove_all("{root}/.scv/journal/event_batches/b1.committed")
+        expect(scv_event_batch_replay(root)).to_equal(1)
+        expect(_events_lines(root)).to_equal(1)
+        expect(scv_event_batch_is_committed(root, "b1")).to_equal(true)
+        dir_remove_all(root)
+
+    it "refuses to reuse a committed batch identity for different payload":
+        step("Commit one payload, then try to record a different event under its ID")
+        val root = _repo("batch-id-reuse")
+        expect(scv_event_batch_record(root, "same-id", "created", "a.txt", "")).to_equal(true)
+        expect(scv_event_batch_commit(root, "same-id")).to_equal(true)
+        expect(scv_event_batch_record(root, "same-id", "deleted", "b.txt", "")).to_equal(false)
+        expect(file_exists(scv_event_batch_pending_path(root, "same-id"))).to_equal(false)
+        expect(_events_lines(root)).to_equal(1)
+        dir_remove_all(root)
+
+    it "recovers crashes at each durable event-batch boundary without duplicate rows":
+        step("Crash after pending, seal, event-row, and terminal-marker publication")
+        val pending_root = _repo("crash-pending")
+        expect(_fault_cli(pending_root, "event_batch_pending", "event-record", "p1 created a.txt")).to_equal(3)
+        expect(file_exists(scv_event_batch_pending_path(pending_root, "p1"))).to_equal(true)
+        expect(scv_event_batch_replay(pending_root)).to_equal(1)
+        expect(_events_lines(pending_root)).to_equal(1)
+
+        val seal_root = _repo("crash-seal")
+        expect(scv_event_batch_record(seal_root, "s1", "created", "a.txt", "")).to_equal(true)
+        expect(_fault_cli(seal_root, "event_batch_sealed", "event-commit", "s1")).to_equal(3)
+        expect(scv_event_batch_replay(seal_root)).to_equal(1)
+        expect(_events_lines(seal_root)).to_equal(1)
+
+        val row_root = _repo("crash-row")
+        expect(scv_event_batch_record(row_root, "r1", "created", "a.txt", "")).to_equal(true)
+        expect(scv_event_batch_record(row_root, "r1", "modified", "a.txt", "")).to_equal(true)
+        expect(_fault_cli(row_root, "event_batch_event", "event-commit", "r1")).to_equal(3)
+        expect(_events_lines(row_root)).to_equal(1)
+        expect(scv_event_batch_replay(row_root)).to_equal(1)
+        expect(_events_lines(row_root)).to_equal(2)
+
+        val marker_root = _repo("crash-marker")
+        expect(scv_event_batch_record(marker_root, "m1", "created", "a.txt", "")).to_equal(true)
+        expect(_fault_cli(marker_root, "event_batch_marker", "event-commit", "m1")).to_equal(3)
+        expect(file_exists(scv_event_batch_pending_path(marker_root, "m1"))).to_equal(true)
+        expect(scv_event_batch_replay(marker_root)).to_equal(0)
+        expect(_events_lines(marker_root)).to_equal(1)
+        dir_remove_all(pending_root)
+        dir_remove_all(seal_root)
+        dir_remove_all(row_root)
+        dir_remove_all(marker_root)
+
+    it "serializes cooperating event writers through the shared journal lock":
+        step("Record two batches concurrently, commit both, and verify neither row was lost")
+        val root = _repo("concurrent")
+        val script = [
+            "set -eu",
+            "REPO=$(pwd)",
+            "cd \"{root}\"",
+            "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+            "scv event-record c1 created a.txt &",
+            "scv event-record c2 created b.txt &",
+            "wait",
+            "scv event-commit c1",
+            "scv event-commit c2",
+            "printf 'writers=done\\n'"
+        ].join("\n") + "\n"
+        val (out, err, code) = process_run("/bin/sh", ["-c", script])
+        expect(code).to_equal(0)
+        expect("{out}{err}").to_contain("writers=done")
+        expect(_events_lines(root)).to_equal(2)
+        expect(scv_event_batch_is_committed(root, "c1")).to_equal(true)
+        expect(scv_event_batch_is_committed(root, "c2")).to_equal(true)
         dir_remove_all(root)
 
     it "drives the same lifecycle through the scv CLI dispatch":
