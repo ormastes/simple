@@ -1,0 +1,155 @@
+"""Native loader→schema→role routing→authority component scenarios.
+
+These call the actual file loader and pure owner APIs. CLI/provider activation,
+provider-lock resolution, full AT-C01–AT-C05 and runtime/manual qualification
+remain separate gates; no acceptance or publication receipt is manufactured.
+"""
+use std.spec.{describe, it, expect, step}
+use std.scv.scv_config_v1.*
+use std.scv.scv_config_routes_v1.*
+use std.scv.scv_config_effective_v1.{scv_config_effective_v1}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_write_bytes, file_read_regular_no_follow_bounded_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove_all}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+use test.fixtures.scv.scv_config_fixture_v1.*
+
+fn setup_scv_config_file_fixture() -> text:
+    val root = secure_temp_dir_raw("/tmp", "scv-config-v1-")
+    expect(root.len()).to_be_greater_than(0)
+    expect(dir_create(root + "/config", false)).to_equal(true)
+    expect(file_write_bytes(root + "/config/scv.sdn", scv_config_fixture_source_v1().bytes())).to_equal(true)
+    expect(file_write_bytes(root + "/config/scv-routes.sdn", scv_config_fixture_routes_v1().bytes())).to_equal(true)
+    root
+
+fn check_exact_subject(config: ScvConfigV1):
+    expect(config.source_sha256).to_equal(sha256_u8_hex(scv_config_fixture_source_v1().bytes()))
+    expect(config.routes_sha256).to_equal(sha256_u8_hex(scv_config_fixture_routes_v1().bytes()))
+
+fn check_scv_load_rejected(root: text):
+    var refused = false
+    match scv_config_load_v1(root, sdn_strict_limits_v1()):
+        case Ok(_): ()
+        case Err(_): refused = true
+    expect(refused).to_equal(true)
+
+describe "SCVN-C01 native SDN file-loader boundary":
+    it "loads the exact nested configuration and named route table":
+        # @req SCVN-C01
+        # @ac AT-C01
+        step("setup: create an isolated repository with native SDN examples")
+        val root = setup_scv_config_file_fixture()
+        step("capture: preserve the exact configuration and route bytes")
+        val before = file_read_regular_no_follow_bounded_bytes(root + "/config/scv.sdn", 1048576).unwrap()
+        step("exercise: invoke the real bounded loader and semantic route owner")
+        val config = scv_config_load_v1(root, sdn_strict_limits_v1()).unwrap()
+        val route = scv_config_route_v1(config, "data/nested/issues.sdn").unwrap()
+        step("evidence: bind results to exact raw input digests")
+        check_exact_subject(config)
+        step("assert: select the database-data role without changing inputs")
+        expect(route.domain).to_equal("database_data")
+        expect(route.profile).to_equal("sdn_rows")
+        expect(file_read_regular_no_follow_bounded_bytes(root + "/config/scv.sdn", 1048576).unwrap()).to_equal(before)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "fails missing required input without substituting a validated default":
+        # @req SCVN-C01
+        # @ac AT-C02
+        step("setup: create a private repository directory without config")
+        val root = secure_temp_dir_raw("/tmp", "scv-missing-config-v1-")
+        expect(root.len()).to_be_greater_than(0)
+        step("exercise: request the required native configuration")
+        check_scv_load_rejected(root)
+        step("assert: only an explicit legacy selection reports legacy status")
+        expect(scv_config_legacy_v1().validated).to_equal(false)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "rejects an intermediate config-directory symlink":
+        # @req SCVN-C01
+        # @ac AT-C02
+        step("setup: retain real configuration bytes under a separate owned directory")
+        val root = setup_scv_config_file_fixture()
+        expect(dir_create(root + "/real", false)).to_equal(true)
+        expect(file_write_bytes(root + "/real/scv.sdn", scv_config_fixture_source_v1().bytes())).to_equal(true)
+        expect(file_write_bytes(root + "/real/scv-routes.sdn", scv_config_fixture_routes_v1().bytes())).to_equal(true)
+        expect(dir_remove_all(root + "/config")).to_equal(true)
+        step("capture: point the config directory entry at the real directory")
+        expect(snapshot_symlink_create_nofollow_v1(root, root + "/config", "real", 2)).to_equal(true)
+        step("exercise: open beneath the admitted root through the real loader")
+        val result = scv_config_load_v1(root, sdn_strict_limits_v1())
+        step("assert: refuse the intermediate link before reading configuration")
+        expect(result).to_equal(Err("file_view_symlink_or_non_regular"))
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "retains the previous parsed generation when a replacement is invalid":
+        # @req SCVN-C01
+        # @ac AT-C02
+        step("setup: load a valid configuration generation")
+        val root = setup_scv_config_file_fixture()
+        val accepted = scv_config_load_v1(root, sdn_strict_limits_v1()).unwrap()
+        step("capture: retain an invalid proposed edit as private bytes")
+        val invalid = scv_config_fixture_source_v1().replace("routes_file", "route_file")
+        expect(file_write_bytes(root + "/config/scv.sdn", invalid.bytes())).to_equal(true)
+        step("exercise: reject the typo through the same loader")
+        check_scv_load_rejected(root)
+        step("assert: previous immutable values still route and draft bytes remain")
+        expect(scv_config_route_v1(accepted, "config/scv.sdn").unwrap().domain).to_equal("configuration")
+        check_exact_subject(accepted)
+        expect(file_read_regular_no_follow_bounded_bytes(root + "/config/scv.sdn", 1048576).unwrap()).to_equal(invalid.bytes())
+        expect(dir_remove_all(root)).to_equal(true)
+
+describe "SCVN-C02/C03 accepted routing and intersected constraints":
+    it "uses the old accepted role while a proposed route attempts a downgrade":
+        # @req SCVN-C02
+        # @req SCVN-C03
+        # @ac AT-C03
+        # @ac AT-C04
+        step("setup: load the old role bindings through the real native loader")
+        val root = setup_scv_config_file_fixture()
+        val accepted = scv_config_load_v1(root, sdn_strict_limits_v1()).unwrap()
+        step("capture: preserve a proposed route generation that weakens a policy role")
+        val proposed_routes = scv_config_fixture_routes_v1().replace("\"configuration_policy\"", "\"opaque\"")
+        val proposed = scv_config_attach_routes_v1(accepted, proposed_routes.bytes(), sdn_strict_limits_v1()).unwrap()
+        step("exercise: resolve the protected rename using only old accepted routes")
+        val transition = scv_config_route_transition_v1(accepted, "config/scv-policy.sdn", "assets/policy.sdn", "configuration_policy")
+        step("assert: reject the downgrade although the proposed rules parse")
+        expect(proposed.validated).to_equal(true)
+        expect(scv_config_route_v1(proposed, "config/scv-policy.sdn").unwrap().domain).to_equal("opaque")
+        var refused = false
+        match transition:
+            case Ok(_): ()
+            case Err(issue):
+                refused = true
+                expect(issue).to_contain("role_transition_requires_old_policy")
+        expect(refused).to_equal(true)
+        expect(scv_config_route_v1(accepted, "config/scv-policy.sdn").unwrap().domain).to_equal("configuration_policy")
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "cannot override old capability denials with local or CLI preferences":
+        # @req SCVN-C03
+        # @ac AT-C04
+        step("setup: load schema-validated intent and a separately supplied old policy")
+        val root = setup_scv_config_file_fixture()
+        val config = scv_config_load_v1(root, sdn_strict_limits_v1()).unwrap()
+        val host = scv_config_fixture_constraints_v1("host-1")
+        var old_policy = scv_config_fixture_constraints_v1("accepted-1")
+        old_policy.max_worker_memory_bytes = 8192
+        step("capture: request capabilities and larger limits from local and CLI layers")
+        var request = scv_config_fixture_constraints_v1("request-1")
+        request.network = true
+        request.executable_providers = true
+        request.llm_proposals = true
+        request.provider_ids = ["builtin_simple", "unapproved"]
+        step("exercise: compute the intersection with the old accepted constraints")
+        val effective = scv_config_effective_v1(config, host, old_policy, request, request).unwrap()
+        step("evidence: expose exact policy and effective-configuration identities")
+        expect(effective.policy_generation).to_equal("accepted-1")
+        expect(effective.canonical_sha256.len()).to_equal(64)
+        step("assert: preserve denials and the smallest bounded worker allowance")
+        expect(effective.network).to_equal(false)
+        expect(effective.executable_providers).to_equal(false)
+        expect(effective.llm_proposals).to_equal(false)
+        expect(effective.provider_ids).to_equal(["builtin_simple"])
+        expect(effective.max_worker_memory_bytes).to_equal(8192)
+        expect(dir_remove_all(root)).to_equal(true)

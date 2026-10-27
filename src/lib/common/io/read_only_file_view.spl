@@ -230,6 +230,44 @@ fn read_only_file_view_prefetch_async_v1(
     val future: Future<Result[(), ReadOnlyFileViewErrorV1]> = Future<Result[(), ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
     future
 
+# Mutable source-byte admission without a snapshot/content-authority claim.
+# The native owner retains the opened root while traversing each relative
+# component with openat+NOFOLLOW, then owns one exact regular-file descriptor.
+# This operation does not make a multi-file generation atomic or immutable.
+pub fn read_only_file_view_read_beneath_bounded_v1(root: text, path: text, max_bytes: i64) -> Result<[u8], text>:
+    if max_bytes < 0 or max_bytes > 16777216: return Err("file_view_invalid_limit")
+    @when(os="windows"):
+    # Existing Windows rt_file_view owner has no secure beneath-open support.
+    # Never substitute an ordinary path read or an ancestor preflight.
+    return Err("file_view_containment_unsupported")
+    @else:
+    var descriptor: i64 = -1
+    unsafe(capabilities: [ffi]):
+        descriptor = rt_file_view_open_beneath_no_follow_v1(root, path)
+    if descriptor == -2: return Err("file_view_path_outside_root")
+    if descriptor == -3: return Err("file_view_symlink_or_non_regular")
+    if descriptor < 0: return Err("file_view_open_failed_or_unsupported")
+    # Empty snapshot identity explicitly means no snapshot binding. Descriptor
+    # metadata is used only to detect replaced/truncated reads, not acceptance.
+    val identity = file_view_descriptor_identity_v1(descriptor, "")
+    if identity == nil:
+        read_only_file_view_close_descriptor_v1(descriptor)
+        return Err("file_view_identity_unavailable")
+    if identity!.size > (max_bytes as u64):
+        read_only_file_view_close_descriptor_v1(descriptor)
+        return Err("file_view_source_limit")
+    val result = file_view_buffered_read_uncancellable_v1(descriptor, identity!, 0u64, identity!.size)
+    var closed = false
+    unsafe(capabilities: [ffi]):
+        closed = rt_file_view_close_v1(descriptor)
+    if not closed: return Err("file_view_close_failed")
+    match result:
+        case Ok(bytes):
+            if bytes.len() > max_bytes: return Err("file_view_source_limit")
+            Ok(bytes)
+        case Err(_): Err("file_view_read_failed_or_identity_changed")
+    @end
+
 fn read_only_file_view_close_v1(
     view: ReadOnlyFileViewV1
 ) -> Result[(), ReadOnlyFileViewErrorV1]:
@@ -266,3 +304,5 @@ export read_only_file_view_open_v1, read_only_file_view_adopt_descriptor_v1
 export read_only_file_view_read_async_v1
 export read_only_file_view_read_v1, read_only_file_view_prefetch_async_v1
 export read_only_file_view_close_v1
+
+export read_only_file_view_read_beneath_bounded_v1
