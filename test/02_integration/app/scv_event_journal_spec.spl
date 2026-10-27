@@ -13,7 +13,7 @@ Audience: Maintainers of the SCV storage/event layers.
 use std.spec.{describe, it, expect, step}
 use app.io.mod (file_exists, file_read, file_write, file_delete, dir_create, dir_remove_all, process_run)
 use std.scv.store.{scv_init_repo}
-use std.scv.journal.{scv_event_batch_record, scv_event_batch_commit, scv_event_batch_replay, scv_event_batch_is_committed, scv_event_batch_pending_path, scv_journal_events_path, scv_event_log}
+use std.scv.journal.{scv_event_batch_record, scv_event_batch_commit, scv_event_batch_replay, scv_event_batch_is_committed, scv_event_batch_pending_path, scv_journal_events_path, scv_event_log, scv_journal_record_event}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 fn _repo(tag: text) -> text:
@@ -116,6 +116,16 @@ describe "scv event journal integration (E-03)":
         step("Read the event view before the first event log exists")
         val root = _repo("empty-events")
         expect(scv_event_log(root)).to_equal("no events\n")
+        dir_remove_all(root)
+
+    it "gives direct journal records stable transaction and event identities":
+        step("Retry one operation record and verify it is durable exactly once")
+        val root = _repo("direct-record-id")
+        expect(scv_journal_record_event(root, "op-1", "snapshot", "commit-1", "tree-1")).to_equal(true)
+        expect(scv_journal_record_event(root, "op-1", "snapshot", "commit-1", "tree-1")).to_equal(true)
+        expect(_events_lines(root)).to_equal(1)
+        val journal = file_read(scv_journal_events_path(root))
+        expect(journal).to_contain("tx=op-1 event_id=direct-")
         dir_remove_all(root)
 
     it "keeps a sealed batch retryable after event publication but before its terminal marker":
