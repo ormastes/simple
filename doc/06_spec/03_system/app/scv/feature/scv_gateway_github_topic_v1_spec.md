@@ -17,8 +17,8 @@ candidate owner’s create-only ref guard for one `refs/heads/scv/<hash>` ref.
 6. Report `topic_branch_published` with `publication: not_acceptance`.
 
 The Git transport scenarios use a temporary bare repository. The authenticated
-GitHub read port is injected for deterministic host tests. No credentials or
-live service are used.
+GitHub port injects raw JSON responses into the same strict decoder used by
+the live provider. No credentials or live service are used.
 
 ## Failure and retry flow
 
@@ -31,6 +31,38 @@ live service are used.
 - Missing durable state, missing host topic capability, or missing bearer
   authentication fail before Git write.
 - Unreadable or mismatched readback returns `upstream_unknown`.
+
+## Landing observation
+
+1. Send `landing-reconcile` through the authenticated service with the exact
+   prepared envelope.
+2. The gateway reopens and validates the durable candidate before querying
+   the configured numeric GitHub repository for its generated head and
+   configured protected base.
+3. The provider verifies the numeric repository identity before and after,
+   follows at most eight pages, fetches unique PR detail, and reads the current
+   protected ref.
+4. A complete empty result is `landing_not_found`; one open PR is
+   `review_pending`; a closed unmerged PR is `closed_unmerged`; several matches
+   are `landing_ambiguous`.
+5. An exact merged PR is durably recorded as
+   `observed_merged_needs_validation` with the actual merge SHA and protected
+   ref SHA. This is an observation only, with `publication: not_acceptance`.
+   GitHub may return a tentative PR `merge_commit_sha` before merge; that value
+   is stored as `observed_pr_merge_sha`, while the result `merge_commit_sha`
+   remains empty until the PR is closed and merged.
+6. An identical retry reuses its digest-derived observation ID. A changed
+   authority snapshot receives a distinct ID.
+
+Fork heads, changed head OIDs, a different base, malformed merge fields,
+transport failure, changed repository identity, or incomplete pagination stay
+`upstream_unknown`. Required checks, protected-ref ancestry, actual merged tree
+verification, and native history import have no admitted owner yet; consequently
+`upstream_accepted` and `accepted_result_imported` are not emitted.
+The dedicated `landing_request_budget` defaults to 12 for backward-compatible
+v2 config parsing, is constrained to 4–12 calls, and must be at least 5 when
+landing capabilities are enabled. The scan remains unknown when its configured
+budget cannot complete the required readback.
 
 **Generated-manual check:** NOT_RUN because no admitted Simple runtime is
 available. The executable spec remains the source of test behavior.

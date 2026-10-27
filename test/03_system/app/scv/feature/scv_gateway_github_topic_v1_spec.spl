@@ -1,7 +1,7 @@
 # GitHub topic publication uses a scoped empty-expected lease update. These
 # local bare-repository scenarios test the Git transport without live writes.
 use std.spec.{describe, it, expect, step}
-use app.io.mod.{cwd, dir_create, dir_remove_all, file_write, process_run_bounded}
+use app.io.mod.{cwd, dir_create, dir_remove_all, file_write, file_delete, file_exists, process_run_bounded}
 use app.io.file_ops.{secure_temp_dir_raw, directory_fsync}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use std.common.crypto.sha256.{sha256_text}
@@ -16,9 +16,11 @@ use app.scv.gateway_github_publish_v2.{ScvGatewayGithubPublishPolicyV2,
     ScvGatewayGithubPublishRequestV2, scv_gateway_github_publish_prepare_v2}
 use app.scv.gateway_github_topic_v1.{ScvGithubTopicRefObservationV1,
     ScvGatewayGithubTopicPortV1, scv_gateway_github_topic_publish_v1}
+use app.scv.gateway_github_landing_v1.{ScvGatewayGithubLandingPortV1,
+    scv_gateway_github_landing_reconcile_v1}
 use app.scv.gateway_config_v1.{ScvGatewayConfigV1}
 use app.scv.gateway_publish_service_v2.{scv_gateway_publish_request_encode_v2,
-    scv_gateway_publish_handle_v2}
+    scv_gateway_publish_handle_v2, scv_gateway_publish_handle_with_landing_port_v2}
 use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpMethod, HttpStatus}
 
 struct TopicTransportFixtureV1:
@@ -39,6 +41,73 @@ var _topic_test_base_v1 = ""
 var _topic_test_read_calls_v1 = 0
 var _topic_test_push_calls_v1 = 0
 var _topic_test_mode_v1 = "normal"
+var _landing_test_mode_v1 = "open"
+var _landing_test_calls_v1 = 0
+var _landing_candidate_oid_v1 = ""
+var _landing_topic_ref_v1 = ""
+var _landing_repo_reads_v1 = 0
+
+fn _landing_repository_v1(policy: ScvGithubReadPolicyV1,
+        lease_held: fn() -> bool) -> Result<text, text>:
+    if lease_held(): return Err("test_lease_held")
+    _landing_test_calls_v1 = _landing_test_calls_v1 + 1
+    _landing_repo_reads_v1 = _landing_repo_reads_v1 + 1
+    val id = if _landing_test_mode_v1 == "repo_changed" and _landing_repo_reads_v1 > 1: 4243 else: 4242
+    Ok("{\"id\":" + id.to_text() + ",\"name\":\"simple-repo\",\"full_name\":\"simple-org/simple-repo\",\"owner\":{\"login\":\"simple-org\"}}")
+
+fn _landing_pull_item_v1(topic_ref: text, number: i64) -> text:
+    val head_repo_id = if _landing_test_mode_v1 == "fork": "9999" else: "4242"
+    val head_sha = if _landing_test_mode_v1 == "changed_head": "0000000000000000000000000000000000000000" else: _landing_candidate_oid_v1
+    val base_ref = if _landing_test_mode_v1 == "base_mismatch": "other" else: "main"
+    "{\"number\":" + number.to_text() + ",\"head\":{\"ref\":\"" + topic_ref[11:] +
+        "\",\"sha\":\"" + head_sha + "\",\"repo\":{\"id\":" + head_repo_id + "}}," +
+        "\"base\":{\"ref\":\"" + base_ref + "\",\"repo\":{\"id\":4242}}}"
+
+fn _landing_page_v1(policy: ScvGithubReadPolicyV1, topic_ref: text,
+        base_ref: text, page: i64, lease_held: fn() -> bool) -> Result<text, text>:
+    if lease_held(): return Err("test_lease_held")
+    _landing_test_calls_v1 = _landing_test_calls_v1 + 1
+    _landing_topic_ref_v1 = topic_ref
+    if _landing_test_mode_v1 == "transport_error": return Err("test_timeout")
+    if _landing_test_mode_v1 == "not_found": return Ok("[]")
+    if _landing_test_mode_v1 == "incomplete":
+        var items: [text] = []
+        var index = 1
+        while index <= 100:
+            items.push(_landing_pull_item_v1(topic_ref, index))
+            index = index + 1
+        return Ok("[" + items.join(",") + "]")
+    if _landing_test_mode_v1 == "ambiguous":
+        return Ok("[" + _landing_pull_item_v1(topic_ref, 7) + "," +
+            _landing_pull_item_v1(topic_ref, 8) + "]")
+    Ok("[" + _landing_pull_item_v1(topic_ref, 7) + "]")
+
+fn _landing_detail_v1(policy: ScvGithubReadPolicyV1, number: u64,
+        lease_held: fn() -> bool) -> Result<text, text>:
+    if lease_held(): return Err("test_lease_held")
+    _landing_test_calls_v1 = _landing_test_calls_v1 + 1
+    val state = if _landing_test_mode_v1 == "open": "open" else: "closed"
+    val merged = if ["merged", "missing_merge_sha"].contains(_landing_test_mode_v1): "true" else:
+        if _landing_test_mode_v1 == "malformed_merged": "\"true\"" else: "false"
+    val merge_sha = if ["merged", "open", "closed_unmerged"].contains(_landing_test_mode_v1):
+        "\"abcdef0123456789abcdef0123456789abcdef01\"" else: "null"
+    val merged_field = if _landing_test_mode_v1 == "missing_merged": "" else: "\"merged\":" + merged + ","
+    val checked_merge_sha = if _landing_test_mode_v1 == "missing_merge_sha": "null" else: merge_sha
+    Ok("{\"number\":" + number.to_text() + ",\"state\":\"" + state +
+        "\"," + merged_field + "\"merge_commit_sha\":" + checked_merge_sha +
+        ",\"head\":{\"ref\":\"" + _landing_topic_ref_v1[11:] + "\",\"sha\":\"" +
+        _landing_candidate_oid_v1 + "\",\"repo\":{\"id\":4242}},\"base\":{\"ref\":\"main\",\"repo\":{\"id\":4242}}}")
+
+fn _landing_ref_v1(policy: ScvGithubReadPolicyV1, selector: text,
+        lease_held: fn() -> bool) -> Result<text, text>:
+    if lease_held(): return Err("test_lease_held")
+    _landing_test_calls_v1 = _landing_test_calls_v1 + 1
+    Ok("{\"ref\":\"{selector}\",\"object\":{\"type\":\"commit\",\"sha\":\"{_topic_test_base_v1}\"}}")
+
+fn _landing_port_v1() -> ScvGatewayGithubLandingPortV1:
+    ScvGatewayGithubLandingPortV1(read_repository: _landing_repository_v1,
+        read_pull_page: _landing_page_v1, read_pull_detail: _landing_detail_v1,
+        read_protected_ref: _landing_ref_v1)
 
 fn _topic_derived_ref_v1(fixture: TopicTransportFixtureV1) -> text:
     val subject = "scv-gateway-github-topic-v2\n{fixture.policy.repository.repository_id.len()}:{fixture.policy.repository.repository_id}\n{fixture.scope.principal_id.len()}:{fixture.scope.principal_id}\n{fixture.request.request_id.len()}:{fixture.request.request_id}\n"
@@ -130,7 +199,8 @@ fn _topic_fixture_v1() -> TopicTransportFixtureV1:
     val policy = ScvGatewayGithubPublishPolicyV2(repository: repository, github: github,
         remote: remote, source_root: source, scratch_parent: scratch, outbox_root: store,
         principal_id: "scv-service", base_ref: "refs/heads/main", allow_prepare: true,
-        allow_reconcile: true, allow_topic_publish: true)
+        allow_reconcile: true, allow_topic_publish: true, allow_landing_reconcile: true,
+        allow_landing_observation_write: true, landing_request_budget: 12u64)
     val scope = ScvDraftBlobAdmittedScopeV1(repository_id: "repo-42",
         principal_id: "scv-service", can_read: true, can_write: true)
     val files = [DbGitCandidateFile(path: "state/topic.sdn",
@@ -142,6 +212,8 @@ fn _topic_fixture_v1() -> TopicTransportFixtureV1:
         rebuild_message_hint: "SCV topic")
     _topic_test_remote_v1 = remote
     _topic_test_base_v1 = base
+    _landing_candidate_oid_v1 = candidate.candidate_oid
+    _landing_repo_reads_v1 = 0
     _topic_test_read_calls_v1 = 0
     _topic_test_push_calls_v1 = 0
     _topic_test_mode_v1 = "normal"
@@ -161,6 +233,12 @@ fn _topic_ref_oid_v1(fixture: TopicTransportFixtureV1, topic_ref: text) -> text:
         ["--no-replace-objects", "-C", fixture.remote, "rev-parse", "--verify", topic_ref],
         30000, 65536)
     if code != 0: "" else: stdout.trim()
+
+fn _topic_outbox_receipt_path_v1(fixture: TopicTransportFixtureV1) -> text:
+    val repo = sha256_text("scv-gateway-draft-repository-v1\n{fixture.scope.repository_id.len()}:{fixture.scope.repository_id}\n")
+    val principal = sha256_text("scv-gateway-draft-principal-v1\n{fixture.scope.principal_id.len()}:{fixture.scope.principal_id}\n")
+    val request_key = sha256_text("scv-gateway-draft-request-key-v1\n{fixture.scope.repository_id.len()}:{fixture.scope.repository_id}\n{fixture.scope.principal_id.len()}:{fixture.scope.principal_id}\n{fixture.request.request_id.len()}:{fixture.request.request_id}\n")
+    "{fixture.store}/repositories/{repo}/principals/{principal}/requests/{request_key}.receipt.sdn"
 
 describe "SCV GitHub topic create transport v1":
     it "creates exactly one generated topic ref when absent":
@@ -323,4 +401,205 @@ describe "SCV GitHub topic create transport v1":
         expect(response.status).to_equal(HttpStatus.Forbidden)
         expect(_topic_test_read_calls_v1).to_equal(0)
         expect(_topic_test_push_calls_v1).to_equal(0)
+        _topic_cleanup_v1(fixture)
+
+describe "SCV GitHub landing readback v1":
+    it "moves an exactly matched open pull request from topic publication to review pending":
+        step("setup: prepare the durable candidate and an authenticated exact-head open PR observation")
+        val fixture = _topic_fixture_v1()
+        _landing_test_mode_v1 = "open"
+        _landing_test_calls_v1 = 0
+        step("exercise: reconcile the generated topic against only the configured protected ref")
+        val result = scv_gateway_github_landing_reconcile_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _landing_port_v1(), \: false).unwrap()
+        step("assert: report review pending without claiming accepted publication")
+        expect(result.state).to_equal("review_pending")
+        expect(result.publication).to_equal("not_acceptance")
+        expect(result.topic_ref).to_equal(_topic_derived_ref_v1(fixture))
+        expect(result.merge_commit_sha).to_equal("")
+        expect(result.observed_pr_merge_sha).to_equal("abcdef0123456789abcdef0123456789abcdef01")
+        expect(result.provider_requests).to_equal(5u64)
+        expect(result.provider_requests_known).to_equal(true)
+        _topic_cleanup_v1(fixture)
+
+    it "records a merged PR only as needing validation when accepted result owners are absent":
+        step("setup: prepare an exact candidate and a closed merged PR with a distinct merge commit")
+        val fixture = _topic_fixture_v1()
+        _landing_test_mode_v1 = "merged"
+        step("exercise: reconcile the merged PR and persist the authenticated observation")
+        val result = scv_gateway_github_landing_reconcile_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _landing_port_v1(), \: false).unwrap()
+        step("assert: preserve the actual merge OID without calling it accepted or imported")
+        expect(result.state).to_equal("observed_merged_needs_validation")
+        expect(result.publication).to_equal("not_acceptance")
+        expect(result.merge_commit_sha).to_equal("abcdef0123456789abcdef0123456789abcdef01")
+        expect(result.merge_commit_sha == fixture.request.candidate_oid).to_equal(false)
+        _topic_cleanup_v1(fixture)
+
+    it "does not claim a unique PR when paginated discovery is incomplete or ambiguous":
+        step("setup: prepare a candidate and report an incomplete PR page")
+        val fixture = _topic_fixture_v1()
+        _landing_test_mode_v1 = "incomplete"
+        step("exercise: reconcile when the provider cannot prove its PR result set is complete")
+        val incomplete = scv_gateway_github_landing_reconcile_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _landing_port_v1(), \: false).unwrap()
+        step("assert: preserve uncertainty instead of selecting the first match")
+        expect(incomplete.state).to_equal("upstream_unknown")
+        expect(incomplete.provider_requests).to_equal(11u64)
+        expect(incomplete.provider_requests_known).to_equal(true)
+        _landing_test_mode_v1 = "ambiguous"
+        val ambiguous = scv_gateway_github_landing_reconcile_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _landing_port_v1(), \: false).unwrap()
+        expect(ambiguous.state).to_equal("landing_ambiguous")
+        _topic_cleanup_v1(fixture)
+
+    it "rejects a same-spelling fork head, changed head SHA, and a different base ref":
+        step("setup: prepare one durable candidate and vary raw PR identity fields")
+        val fixture = _topic_fixture_v1()
+        for mode in ["fork", "changed_head", "base_mismatch"]:
+            _landing_test_mode_v1 = mode
+            val result = scv_gateway_github_landing_reconcile_v1(fixture.policy,
+                fixture.scope, fixture.request, fixture.content_sha256,
+                _landing_port_v1(), \: false).unwrap()
+            step("assert: {mode} identity never becomes a matching PR result")
+            expect(result.state).to_equal("upstream_unknown")
+        _topic_cleanup_v1(fixture)
+
+    it "keeps missing or malformed merged metadata and provider failures unknown":
+        step("setup: prepare a candidate and return invalid authority fields from the raw provider")
+        val fixture = _topic_fixture_v1()
+        for mode in ["malformed_merged", "missing_merged", "missing_merge_sha", "repo_changed", "transport_error"]:
+            _landing_test_mode_v1 = mode
+            _landing_repo_reads_v1 = 0
+            val result = scv_gateway_github_landing_reconcile_v1(fixture.policy,
+                fixture.scope, fixture.request, fixture.content_sha256,
+                _landing_port_v1(), \: false).unwrap()
+            step("assert: {mode} has no positive acceptance interpretation")
+            expect(result.state).to_equal("upstream_unknown")
+            if mode == "transport_error":
+                expect(result.provider_requests_known).to_equal(false)
+        _topic_cleanup_v1(fixture)
+
+    it "records open to merged transitions as separate durable observations and replays idempotently":
+        step("setup: prepare one exact request and read an open PR observation")
+        val fixture = _topic_fixture_v1()
+        _landing_test_mode_v1 = "open"
+        val opened = scv_gateway_github_landing_reconcile_v1(fixture.policy,
+            fixture.scope, fixture.request, fixture.content_sha256,
+            _landing_port_v1(), \: false).unwrap()
+        step("exercise: observe the same PR merged after the protected ref advances")
+        _landing_test_mode_v1 = "merged"
+        _topic_test_base_v1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val merged = scv_gateway_github_landing_reconcile_v1(fixture.policy,
+            fixture.scope, fixture.request, fixture.content_sha256,
+            _landing_port_v1(), \: false).unwrap()
+        val replay = scv_gateway_github_landing_reconcile_v1(fixture.policy,
+            fixture.scope, fixture.request, fixture.content_sha256,
+            _landing_port_v1(), \: false).unwrap()
+        step("assert: each authority snapshot is durable, while a lost-ack retry reuses its observation key")
+        expect(opened.state).to_equal("review_pending")
+        expect(merged.state).to_equal("observed_merged_needs_validation")
+        expect(merged.protected_ref_oid).to_equal(_topic_test_base_v1)
+        expect(merged.publication).to_equal("not_acceptance")
+        expect(merged.observation_id == opened.observation_id).to_equal(false)
+        expect(replay.observation_id).to_equal(merged.observation_id)
+        _topic_cleanup_v1(fixture)
+
+    it "rejects a request whose candidate bytes changed after durable preparation":
+        step("setup: alter the frozen candidate while retaining the earlier outbox digest")
+        val fixture = _topic_fixture_v1()
+        var changed_request = fixture.request
+        changed_request.files = [DbGitCandidateFile(path: "state/topic.sdn",
+            content: "version: 1\nvalue: changed\n")]
+        _landing_test_calls_v1 = 0
+        step("exercise: attempt landing readback with the changed candidate payload")
+        val result = scv_gateway_github_landing_reconcile_v1(fixture.policy,
+            fixture.scope, changed_request, fixture.content_sha256,
+            _landing_port_v1(), \: false)
+        step("assert: fail before the authenticated provider can observe the request")
+        expect(result.is_err()).to_equal(true)
+        expect(_landing_test_calls_v1).to_equal(0)
+        _topic_cleanup_v1(fixture)
+
+    it "reestablishes the durable preparation receipt before reading upstream authority":
+        step("setup: prepare a valid envelope and remove only its draft-owner receipt")
+        val fixture = _topic_fixture_v1()
+        val receipt = _topic_outbox_receipt_path_v1(fixture)
+        expect(file_exists(receipt)).to_equal(true)
+        expect(file_delete(receipt)).to_equal(true)
+        _landing_test_mode_v1 = "open"
+        step("exercise: reconcile so the candidate owner must reissue the durable put")
+        val result = scv_gateway_github_landing_reconcile_v1(fixture.policy,
+            fixture.scope, fixture.request, fixture.content_sha256,
+            _landing_port_v1(), \: false).unwrap()
+        step("assert: the receipt is durable again before the successful observation returns")
+        expect(result.state).to_equal("review_pending")
+        expect(file_exists(receipt)).to_equal(true)
+        expect(result.provider_requests).to_equal(5u64)
+        expect(result.provider_requests_known).to_equal(true)
+        _topic_cleanup_v1(fixture)
+
+    it "applies the explicit landing request budget and returns unknown before exceeding it":
+        step("setup: prepare a host policy with less than the minimum unique-PR request budget")
+        val fixture = _topic_fixture_v1()
+        var denied_policy = fixture.policy
+        denied_policy.landing_request_budget = 4u64
+        _landing_test_calls_v1 = 0
+        step("exercise: attempt a landing read that cannot fit identity, detail, and protected-ref checks")
+        val result = scv_gateway_github_landing_reconcile_v1(denied_policy,
+            fixture.scope, fixture.request, fixture.content_sha256,
+            _landing_port_v1(), \: false)
+        step("assert: reject before provider calls rather than exceed the configured bound")
+        expect(result.is_err()).to_equal(true)
+        expect(_landing_test_calls_v1).to_equal(0)
+        _topic_cleanup_v1(fixture)
+
+    it "distinguishes no matching PR and rejects landing readback without its dedicated host capability":
+        step("setup: prepare a candidate with no matching PR and a separate policy without landing read permission")
+        val fixture = _topic_fixture_v1()
+        _landing_test_mode_v1 = "not_found"
+        val absent = scv_gateway_github_landing_reconcile_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _landing_port_v1(), \: false).unwrap()
+        expect(absent.state).to_equal("landing_not_found")
+        _landing_test_mode_v1 = "closed_unmerged"
+        val closed = scv_gateway_github_landing_reconcile_v1(fixture.policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _landing_port_v1(), \: false).unwrap()
+        expect(closed.state).to_equal("closed_unmerged")
+        var denied_policy = fixture.policy
+        denied_policy.allow_landing_reconcile = false
+        _landing_test_calls_v1 = 0
+        step("exercise: retry with landing readback disabled by host policy")
+        val denied = scv_gateway_github_landing_reconcile_v1(denied_policy, fixture.scope,
+            fixture.request, fixture.content_sha256, _landing_port_v1(), \: false)
+        step("assert: deny before provider access")
+        expect(denied.is_err()).to_equal(true)
+        expect(_landing_test_calls_v1).to_equal(0)
+        denied_policy = fixture.policy
+        denied_policy.allow_landing_observation_write = false
+        _landing_test_calls_v1 = 0
+        val write_denied = scv_gateway_github_landing_reconcile_v1(denied_policy,
+            fixture.scope, fixture.request, fixture.content_sha256, _landing_port_v1(), \: false)
+        expect(write_denied.is_err()).to_equal(true)
+        expect(_landing_test_calls_v1).to_equal(0)
+        _topic_cleanup_v1(fixture)
+
+    it "serves landing reconciliation through the authenticated gateway endpoint":
+        step("setup: prepare an authenticated landing request and raw strict-decoder fixture")
+        val fixture = _topic_fixture_v1()
+        _landing_test_mode_v1 = "open"
+        val gateway = ScvGatewayConfigV1(repository: "repo-42", listen_host: "127.0.0.1",
+            listen_port: 24321, bearer_token_env: "SCV_TEST_TOKEN", github: fixture.policy.github)
+        val token = "abcdefghijklmnopqrstuvwxyz012345"
+        val body = scv_gateway_publish_request_encode_v2("landing-reconcile",
+            fixture.request, fixture.content_sha256).unwrap()
+        val http = HttpRequest(method: HttpMethod.Post, path: "/scv/v2/publish", query: "",
+            headers: [("Authorization", "Bearer " + token),
+                ("Content-Type", "application/sdn")], body: body)
+        step("exercise: dispatch through the authenticated server owner with fake raw GitHub responses")
+        val response = scv_gateway_publish_handle_with_landing_port_v2(gateway, fixture.policy,
+            token, http, _topic_candidate_read_v1, _landing_port_v1(), \: false)
+        step("assert: the server returns the readback state and never claims acceptance")
+        expect(response.status).to_equal(HttpStatus.Ok)
+        expect(response.body.contains("review_pending")).to_equal(true)
+        expect(response.body.contains("not_acceptance")).to_equal(true)
         _topic_cleanup_v1(fixture)

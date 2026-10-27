@@ -40,6 +40,21 @@ The injected I/O port exists for isolated BDD fixtures. Production dispatch
 constructs the port from the authenticated GitHub reader and the candidate
 owner helper; no port, authority flag, URL, or command comes from the request.
 
+The additive `landing-reconcile` method is separately gated by
+`allow_landing_reconcile` and `allow_landing_observation_write`. Its reader uses
+only the configured numeric repository, the deterministic topic head, and the
+configured protected base. It validates raw bounded GitHub responses, pages
+through the complete PR result set, checks repository identity before and
+after, and persists each exact observation under a digest-derived immutable
+outbox key. An open PR is `review_pending`; a closed unmerged PR is
+`closed_unmerged`; missing, ambiguous, incomplete, or inconsistent evidence
+stays explicit.
+
+A merged PR is currently only `observed_merged_needs_validation`. The gateway
+does not yet own required-check verification, protected-ref ancestry proof, or
+an admitted native history importer, so it cannot emit
+`upstream_accepted`/`accepted_result_imported` or claim an accepted result.
+
 ## Concurrency and limits
 
 The topic creation is an atomic absent-ref condition at the Git server. The
@@ -54,6 +69,14 @@ identity, ref lookup, and repository identity again. A publish attempt may
 perform up to three observations. Process invocation and response limits come
 from the fixed read policy. Live GitHub credentials remain gateway-host-owned;
 no credential is accepted or returned in the protocol.
+
+Landing reconciliation separately bounds discovery to eight pages of 100 PRs,
+fetches strict detail only for a unique match, reads the configured protected
+ref, and rechecks numeric repository identity. Exhausting the page bound is
+`upstream_unknown`; an empty result is `landing_not_found` only after a complete
+scan and successful identity/ref readback. A separate configured request
+budget permits 4–12 authenticated API calls, preserving the existing three-call
+read contract. The scan remains unknown if it cannot complete within budget.
 
 ## Qualification
 
