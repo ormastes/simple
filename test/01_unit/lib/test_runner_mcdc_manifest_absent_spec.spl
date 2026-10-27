@@ -20,10 +20,24 @@ use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.env_ops.{env_set}
 
 val COMPILES_FIXTURE = "test/fixtures/test_runner_mcdc/compiles_fixture.spl"
+val FAILS_FIXTURE = "test/fixtures/test_runner_mcdc/fails_fixture.spl"
+val EMPTY_FIXTURE = "test/fixtures/test_runner_mcdc/empty_fixture.spl"
+val PROCESS_FAILURE_FIXTURE = "test/fixtures/test_runner_mcdc/process_failure_fixture.spl"
 val BEGIN = "__SIMPLE_MCDC_OBLIGATION_MANIFEST_BEGIN__"
 val END = "__SIMPLE_MCDC_OBLIGATION_MANIFEST_END__"
 
-fn run_dir_lane(fixture: text, absent_policy: text) -> text:
+# A seed may fail the standalone compile before the manifest-absence gate. Such
+# a run still checks fallback result transport, but cannot qualify the
+# successful-compile/absent-manifest branch. Validate the reason actually
+# printed by the run so those two branches are never conflated.
+fn fallback_reason_matches_verdict(output: text, verdict: text) -> bool:
+    if output.contains("MC/DC instrumentation skipped (explicit SIMPLE_MCDC_MANIFEST_ABSENT=degrade opt-in)"):
+        return verdict.contains("degraded=mcdc-obligation-manifest-absent")
+    if output.contains("[mcdc-fallback]"):
+        return verdict.contains("degraded=smf-compile-error")
+    true
+
+fn run_dir_lane(fixture: text, absent_policy: text) -> (text, i32):
     expect(env_set("SIMPLE_MCDC_MANIFEST_ABSENT", absent_policy)).to_equal(true)
     val dir = "build/test_runner_mcdc_manifest_{time_now_unix_micros()}"
     val (_o1, _e1, mk) = process_run_timeout("/bin/mkdir", ["-p", dir], 10000)
@@ -34,9 +48,9 @@ fn run_dir_lane(fixture: text, absent_policy: text) -> text:
     # returns empty text under the seed interpreter, see
     # doc/08_tracking/bug/seed_interpreter_text_codec_file_io_empty_2026-10-19.md
     val lane = run_scoped_child(ExecutionResourceClass.Unit, find_simple_binary(),
-        ["test", dir, "--timeout", "120", "--no-db", "--no-cache"], 300000, 0, 0, 0, 0, false)
+        ["test", dir, "--timeout", "120", "--no-db", "--no-cache", "--assert-ran"], 300000, 0, 0, 0, 0, false)
     process_run_timeout("/bin/rm", ["-rf", dir], 10000)
-    lane.result.stdout + "\n" + lane.result.stderr
+    (lane.result.stdout + "\n" + lane.result.stderr, lane.result.exit_code)
 
 fn verdict_line(output: text) -> text:
     for line in output.split("\n"):
@@ -48,19 +62,62 @@ describe "MC/DC obligation manifest absent from a successful compile":
     it "with the explicit degrade opt-in, runs the spec and reports its real result":
         # @req REQ-SSPEC-UNIT
         step("drive the directory lane over a spec that compiles standalone, opted in")
-        val output = run_dir_lane(COMPILES_FIXTURE, "degrade")
+        val (output, exit_code) = run_dir_lane(COMPILES_FIXTURE, "degrade")
         expect(output.contains("missing or malformed MC/DC obligation manifest")).to_equal(false)
         expect(output.contains("missing MC/DC obligation manifest")).to_equal(false)
         val verdict = verdict_line(output)
         expect(verdict).to_contain("outcome=OK")
         expect(verdict).to_contain("passed=1")
-        if output.contains("[mcdc-fallback]"):
-            expect(verdict).to_contain("degraded=mcdc-obligation-manifest-absent")
+        expect(verdict).to_contain("failed=0")
+        expect(verdict).to_contain("executed=1")
+        expect(exit_code).to_equal(0)
+        expect(output.contains("structured BDD evidence is unavailable")).to_equal(false)
+        expect(fallback_reason_matches_verdict(output, verdict)).to_equal(true)
+
+    it "authenticates an actual failing expectation on the opted-in fallback":
+        # @req REQ-SSPEC-UNIT
+        step("run a red BDD fixture through the same asserted directory lane")
+        val (output, exit_code) = run_dir_lane(FAILS_FIXTURE, "degrade")
+        val verdict = verdict_line(output)
+        expect(output.contains("structured BDD evidence is unavailable")).to_equal(false)
+        expect(verdict).to_contain("outcome=ERROR")
+        expect(verdict).to_contain("executed=1")
+        expect(verdict).to_contain("failed=1")
+        expect(exit_code == 0).to_equal(false)
+        expect(output).to_contain("expected 2 to equal 3")
+        expect(output).to_contain("process exit 1")
+        expect(fallback_reason_matches_verdict(output, verdict)).to_equal(true)
+
+    it "does not fabricate execution when the fallback has no BDD evidence":
+        # @req REQ-SSPEC-UNIT
+        step("run a fixture with no examples and require the evidence gate")
+        val (output, exit_code) = run_dir_lane(EMPTY_FIXTURE, "degrade")
+        val verdict = verdict_line(output)
+        expect(verdict).to_contain("outcome=ERROR")
+        expect(verdict).to_contain("executed=0")
+        expect(verdict).to_contain("dropped=1")
+        expect(verdict).to_contain("reason=bdd-evidence-unavailable")
+        expect(exit_code == 0).to_equal(false)
+        expect(output).to_contain("structured BDD evidence unavailable")
+
+    it "preserves passing counts when the child process fails after a BDD pass":
+        # @req REQ-SSPEC-UNIT
+        step("run a green example followed by a process panic")
+        val (output, exit_code) = run_dir_lane(PROCESS_FAILURE_FIXTURE, "degrade")
+        val verdict = verdict_line(output)
+        expect(verdict).to_contain("outcome=ERROR")
+        expect(verdict).to_contain("executed=1")
+        expect(verdict).to_contain("passed=1")
+        expect(verdict).to_contain("failed=0")
+        expect(verdict).to_contain("dropped=0")
+        expect(verdict).to_contain("process_error=1")
+        expect(exit_code == 0).to_equal(false)
+        expect(output).to_contain("BDD process failure after authenticated pass")
 
     it "without the opt-in, never degrades: an absent manifest fails closed":
         # @req REQ-SSPEC-UNIT
         step("drive the same lane with the policy unset")
-        val output = run_dir_lane(COMPILES_FIXTURE, "")
+        val (output, _exit_code) = run_dir_lane(COMPILES_FIXTURE, "")
         val verdict = verdict_line(output)
         expect(verdict.contains("degraded=mcdc-obligation-manifest-absent")).to_equal(false)
         if output.contains("missing MC/DC obligation manifest"):

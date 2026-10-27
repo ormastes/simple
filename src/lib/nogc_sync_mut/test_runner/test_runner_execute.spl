@@ -168,6 +168,39 @@ fn remove_structured_evidence(evidence_path: text):
     if file_exists(evidence_path + ".expectations"):
         file_delete(evidence_path + ".expectations")
 
+fn finish_interpreter_child_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
+    val result = make_result_from_structured_evidence(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs, evidence_path)
+    remove_structured_evidence(evidence_path)
+    result
+
+# Shared child transport for the daemon interpreter and explicit MC/DC
+# degradation. `make_result_from_structured_evidence` remains the sole
+# authenticated BDD result consumer; callers own output-specific processing
+# (for example coverage manifests), while the finish helper parses and cleans
+# the evidence pair.
+fn run_interpreter_child_with_evidence(file_path: text, binary: text, args: [text], options: TestOptions, timeout_ms: i64) -> Result<(ScopedChildRun, text), text>:
+    var child_args = args
+    var evidence_path = ""
+    var previous_evidence_path = ""
+    if options.assert_ran:
+        val temp_root = _tp_get_temp_dir()
+        val temp_sep = if temp_root.ends_with("/") or temp_root.ends_with("\\"): "" else: "/"
+        evidence_path = "{temp_root}{temp_sep}simple_bdd_result_{getpid()}_{time_now_unix_micros()}.txt"
+        remove_structured_evidence(evidence_path)
+        if file_exists(evidence_path) or file_exists(evidence_path + ".expectations"):
+            return Err("test-runner: cannot prepare structured result evidence")
+        previous_evidence_path = env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
+        if not env_set("SIMPLE_TEST_RESULT_FILE", evidence_path):
+            return Err("test-runner: cannot configure structured result environment")
+        child_args = child_args.push("--test-result-file={evidence_path}")
+    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, child_args,
+        timeout_ms, test_child_memory_bytes(options), 0, 0,
+        if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    if evidence_path != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
+        remove_structured_evidence(evidence_path)
+        return Err("test-runner: cannot restore structured result environment")
+    Ok((scoped_child, evidence_path))
+
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
     # Coverage probes are MIR-owned. The HIR tree interpreter never executes
     # them, so route coverage runs through the real LLVM native path.
@@ -219,32 +252,6 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     # zero-executed specs without it. See
     # doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md.
     var child_args = build_child_args(wrapped_path, options)
-    var evidence_path = ""
-    var previous_evidence_path = ""
-    if options.assert_ran:
-        val temp_root = _tp_get_temp_dir()
-        val temp_sep = if temp_root.ends_with("/") or temp_root.ends_with("\\"): "" else: "/"
-        evidence_path = "{temp_root}{temp_sep}simple_bdd_result_{getpid()}_{time_now_unix_micros()}.txt"
-        if file_exists(evidence_path):
-            file_delete(evidence_path)
-        if file_exists(evidence_path):
-            if cleanup_path != "" and not options.keep_artifacts and file_exists(cleanup_path):
-                file_delete(cleanup_path)
-            if infix_path != file_path and not options.keep_artifacts and file_exists(infix_path):
-                file_delete(infix_path)
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: 0, setup_ms: 0, error: "test-runner: cannot prepare structured result evidence", timed_out: false, cached: false)
-        previous_evidence_path = env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
-        if not env_set("SIMPLE_TEST_RESULT_FILE", evidence_path):
-            if cleanup_path != "" and not options.keep_artifacts:
-                if file_exists(cleanup_path):
-                    file_delete(cleanup_path)
-            if infix_path != file_path and not options.keep_artifacts:
-                if file_exists(infix_path):
-                    file_delete(infix_path)
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: 0, setup_ms: 0, error: "test-runner: cannot configure structured result environment", timed_out: false, cached: false)
-        child_args = child_args.push("--test-result-file={evidence_path}")
     val timeout_ms = options.timeout * 1000
     val setup_end = time_now_unix_micros()
     val setup_ms = (setup_end - setup_start) / 1000
@@ -256,9 +263,14 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     var exit_code = 0
     var observed_usage: ResourceUsage? = nil
     var budget_status = "incomplete"
-    val memory_bytes = test_child_memory_bytes(options)
-    val max_pids = if options.no_limits: 0 else: options.max_procs
-    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, child_args, timeout_ms, memory_bytes, 0, 0, max_pids, not options.no_limits)
+    val invocation = run_interpreter_child_with_evidence(file_path, binary, child_args, options, timeout_ms)
+    val (scoped_child, evidence_path) = match invocation:
+        case Ok(value): value
+        case Err(transport_error):
+            if cleanup_path != "" and not options.keep_artifacts and file_exists(cleanup_path): file_delete(cleanup_path)
+            if infix_path != file_path and not options.keep_artifacts and file_exists(infix_path): file_delete(infix_path)
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: setup_ms, error: transport_error, timed_out: false, cached: false)
     stdout = scoped_child.result.stdout
     stderr = scoped_child.result.stderr
     exit_code = scoped_child.result.exit_code
@@ -274,9 +286,6 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         if infix_path != file_path and not options.keep_artifacts:
             if file_exists(infix_path):
                 file_delete(infix_path)
-        if evidence_path != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: dur, setup_ms: setup_ms, error: "test-runner: cannot restore structured result environment", timed_out: false, cached: false)
         remove_structured_evidence(evidence_path)
         return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
             duration_ms: dur, setup_ms: setup_ms, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false,
@@ -305,13 +314,6 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     if infix_path != file_path and not options.keep_artifacts:
         if file_exists(infix_path):
             file_delete(infix_path)
-    if evidence_path != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
-        return TestFileResult(
-            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: duration_ms, setup_ms: setup_ms,
-            error: "test-runner: cannot restore structured result environment", timed_out: false, cached: false
-        )
-
     if compiler_manifest_error != "":
         remove_structured_evidence(evidence_path)
         return TestFileResult(
@@ -320,8 +322,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
             error: compiler_manifest_error, timed_out: false, cached: false
         )
 
-    val result = make_result_from_structured_evidence(file_path, stdout, stderr, exit_code, duration_ms, options.timeout, evidence_path)
-    remove_structured_evidence(evidence_path)
+    val result = finish_interpreter_child_evidence(file_path, stdout, stderr, exit_code, duration_ms, options.timeout, evidence_path)
     TestFileResult(
         path: result.path, passed: result.passed, failed: result.failed,
         skipped: result.skipped, pending: result.pending,
@@ -719,14 +720,20 @@ fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_pat
 # instrumentation was skipped for this spec, per-spec, rather than implying it
 # was collected.
 fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions, start: i64, fallback_tag: text, reason: text, degrade_token: text = "") -> TestFileResult:
-    val binary = find_simple_binary()
     val timeout_ms = options.timeout * 1000
     var run_args: [text] = ["run", file_path]
     if options.gc_log:
         run_args.push("--gc-log")
     if options.gc_off:
         run_args.push("--gc=off")
-    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, run_args, timeout_ms, test_child_memory_bytes(options), 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    val invocation = run_interpreter_child_with_evidence(file_path, find_simple_binary(), run_args, options, timeout_ms)
+    val (scoped_child, evidence_path) = match invocation:
+        case Ok(value): value
+        case Err(transport_error):
+            val duration_ms = (time_now_unix_micros() - start) / 1000
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: duration_ms, setup_ms: 0, error: transport_error,
+                timed_out: false, cached: false, mcdc_skip_reason: reason, degraded_reason: degrade_token)
     val stdout = scoped_child.result.stdout
     val stderr = scoped_child.result.stderr
     val exit_code = scoped_child.result.exit_code
@@ -736,8 +743,9 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
     # A budget kill arrives as a bare signal exit (143) with no TIMEOUT marker,
     # so make_result_from_output would call it an unexplained signal death.
     if scoped_child.result.limit_exceeded:
+        remove_structured_evidence(evidence_path)
         return scoped_limit_exceeded_result(file_path, scoped_child, options, duration_ms, reason, degrade_token)
-    val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    val base_result = finish_interpreter_child_evidence(file_path, stdout, stderr, exit_code, duration_ms, options.timeout, evidence_path)
     val evidenced = _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
     TestFileResult(
         path: evidenced.path, passed: evidenced.passed, failed: evidenced.failed,
@@ -745,12 +753,15 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
         duration_ms: evidenced.duration_ms, setup_ms: evidenced.setup_ms,
         error: evidenced.error, timed_out: evidenced.timed_out, cached: evidenced.cached,
         in_development: evidenced.in_development, mcdc_evidence_v1: "",
+        feature_gated: evidenced.feature_gated,
         blocked: evidenced.blocked, unsupported: evidenced.unsupported,
         omission_evidence: evidenced.omission_evidence,
         compile_ms: 0, execution_ms: duration_ms,
         resource_usage: evidenced.resource_usage, resource_class: evidenced.resource_class,
         cohort_id: evidenced.cohort_id, budget_status: evidenced.budget_status,
         anomaly_status: evidenced.anomaly_status,
+        process_completion: evidenced.process_completion,
+        trace_case_events_sdn: evidenced.trace_case_events_sdn,
         mcdc_skip_reason: reason,
         degraded_reason: degrade_token
     )
