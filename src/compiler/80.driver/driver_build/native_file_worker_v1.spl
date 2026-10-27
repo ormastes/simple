@@ -1,15 +1,18 @@
 # Per-file worker role (--file-worker=i/n, selected by SIMPLE_FILE_WORKERS).
 #
 # Design: doc/05_design/compiler/incremental_build/true_per_file_pipeline_v1.md
-# (work package P3). One long-lived worker process claims ONE module at a time
-# and drives it through the existing roles instead of the coordinator running
-# a whole HIR shard pass and then a whole MIR shard pass:
+# (work package P3). One long-lived worker process schedules compile units
+# instead of the coordinator running a whole HIR shard pass and then a whole
+# MIR shard pass. In the default (module-scoped) lane each round is ONE unit
+# process, like cc1 per translation unit (NATIVE_FILE_WORKER_UNIT_ENV_V1):
 #
-#   round k:  HIR child  (--hir-shard, SIMPLE_HIR_SHARD_CLAIM_LIMIT=batch)
-#             -> lowers <= batch claimed modules into the HIR cache, exits
-#   then:     MIR child  (--mir-shard, claim cap = batch)
-#             -> lowers + emits the object of <= batch claimed modules into
-#                the MIR ledger (same .object sidecar the link worker admits)
+#   round k:  unit child (--hir-shard + MIR shard role, SIMPLE_FILE_WORKER_UNIT=1)
+#             -> picks <= batch modules deps-first, lowers their HIR into the
+#                HIR cache, then lowers + emits their objects into the MIR
+#                ledger (same .object sidecar the link worker admits)
+#
+# The whole-program opt-out (SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1) keeps the
+# two-child round: a HIR child, then a MIR child after the global mono gate.
 #
 # The HIR ledger, the MIR ledger, claim/terminal/seal records and the
 # link-only final worker (SIMPLE_MIR_SHARD_LINK) are reused unchanged.
@@ -270,8 +273,8 @@ pub fn native_file_worker_hir_ledger_state_v1(queue: text) -> i64:
 # ===== P4 wiring: module-scoped mono in the file-worker lane =====
 #
 # In the per-file lane (P-G3: always, no opt-in) a worker no longer waits for the whole HIR
-# ledger. MIR(F) is admitted as soon as HIR(F) and the HIR of F's DIRECT
-# imports are PASS (native_file_worker_deps_ready_v1). Direct, not transitive:
+# ledger. MIR(F) runs in the same unit as HIR(F), over F's imports' HIR
+# loaded from the cache (or lowered in-process when not cached yet). Direct, not transitive:
 # module-scoped mono collects templates from the modules F imports; a template
 # reached only through a re-export chain shows up as E-MONO-040, and then the
 # MIR child widens ONCE to the transitive import closure (whose HIR is already
@@ -279,11 +282,32 @@ pub fn native_file_worker_hir_ledger_state_v1(queue: text) -> i64:
 #
 # The HIR child records F's direct import source paths (from the frozen
 # ModuleSurface.import_target_indices) in <hir_queue>/<sha(path)>.deps before
-# publishing F's PASS terminal. The worker hands the ready paths to its MIR
-# child through SIMPLE_MIR_SHARD_ONLY_PATHS; that child claims only those
-# modules and runs module-scoped mono only for them.
+# publishing F's PASS terminal (read by the coordinator's generic-instance
+# step). The unit hands its picked paths to its own MIR phase through
+# SIMPLE_MIR_SHARD_ONLY_PATHS; it claims only those modules and runs
+# module-scoped mono only for them.
 pub const NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1: text = "SIMPLE_MIR_SHARD_ONLY_PATHS"
 pub const NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1: text = "SIMPLE_BOOTSTRAP_WHOLE_PROGRAM"
+
+# Per-file unit (default per-file lane): ONE compile unit runs parse -> HIR ->
+# MIR -> object for its picked batch, like a cc1 per translation unit. The
+# unit picks its batch deps-first (driver_worker_surface_closure_v1
+# worker_unit_pick_v1), HIR-claims and lowers exactly those modules, loads
+# their imports' HIR from the cache (lowering a not-yet-cached import
+# in-process, never waiting on another unit), then lowers + emits their
+# objects through the module-scoped MIR shard path.
+pub const NATIVE_FILE_WORKER_UNIT_ENV_V1: text = "SIMPLE_FILE_WORKER_UNIT"
+
+pub fn native_file_worker_unit_active_v1() -> bool:
+    (env_get_nullable(NATIVE_FILE_WORKER_UNIT_ENV_V1) ?? "") == "1"
+
+# Runs one compile unit for `hir_owner` (HIR ledger claims) / `mir_owner` (MIR
+# ledger claims) and returns its normalized exit code (< 0 = crash/no
+# process). The worker loop is written once against this; the invoker decides
+# where the unit runs (child process today; an in-process fiber once the
+# parser state is per-context).
+pub trait NativeFileUnitInvokerV1:
+    fn run_unit(hir_owner: text, mir_owner: text) -> i64
 
 # Pure gate (P-G3): in the per-file lane (an active file worker) mono is ALWAYS
 # module-scoped -- no global monomorphize pass, no cross-shard mono
@@ -350,21 +374,6 @@ pub fn native_file_worker_deps_read_v1(queue: text, path: text) -> Result<[text]
     if not file_exists(record):
         return Err("no deps record for {path}")
     native_file_worker_deps_parse_v1(path, file_read(record))
-
-# Readiness of MIR(module) over HIR terminal states (key -> "PASS" | other |
-# absent): 1 = module and every direct import PASS, 0 = some still running,
-# -1 = module or an import has a non-PASS terminal (MIR can never start).
-pub fn native_file_worker_deps_ready_v1(module: text, deps: [text], states: Dict<text, text>) -> i64:
-    var keys: [text] = [module]
-    for dep in deps:
-        keys = keys.push(dep)
-    var ready: i64 = 1
-    for key in keys:
-        if not states.contains_key(key) or states[key] == "":
-            ready = 0
-        elif states[key] != "PASS":
-            return -1
-    ready
 
 # Transitive import closure (excluding `start` itself) over an edge table.
 pub fn native_file_worker_transitive_deps_v1(start: text, edges: Dict<text, [text]>) -> [text]:

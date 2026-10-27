@@ -42,8 +42,9 @@ use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_sel
     worker_surface_restrict_claims_v1, worker_surface_text_v1, worker_surface_counters_v1,
     worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
     worker_hir_restrict_loads_v1, source_path_by_canonical_map_v1,
-    worker_source_may_declare_advice_v1}
-use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mono_pending_publish_v1}
+    worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mono_pending_publish_v1,
+    native_file_worker_unit_active_v1, native_file_worker_batch_v1, NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
@@ -745,12 +746,34 @@ impl CompilerDriver:
         val worker_flag = _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? ""
         # P-A: a module-scoped MIR child (file-worker lane) seeds from its
         # admitted targets and later loads HIR only for their import closure.
-        val mir_targets = if worker_spec == "":
+        # Per-file unit child (native_file_worker_v1.spl): picks its batch here,
+        # deps first, and runs HIR + MIR + object for exactly those modules.
+        val worker_unit = worker_spec != "" and native_file_worker_unit_active_v1()
+        if worker_unit:
+            val pick_result = worker_unit_pick_v1(_sffi_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? "",
+                _sffi_env_get("SIMPLE_HIR_SHARD_OWNER") ?? "", source_paths,
+                worker_unit_pick_order_v1(source_paths, canonical_paths, source_contents),
+                native_file_worker_batch_v1(_sffi_env_get("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? ""))
+            if pick_result.is_err():
+                self.ctx.add_error("file-worker unit pick failed: {pick_result.unwrap_err()}")
+                return false
+            val picked = pick_result.unwrap()
+            print "[file-worker] unit picked={picked.len()}"
+            if picked.len() == 0:
+                _sffi_stdout_flush()
+                _sffi_exit(0)
+            if not _sffi_env_set(NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1, picked.join("\n")):
+                self.ctx.add_error("file-worker unit target environment could not be installed")
+                return false
+        val mir_targets = if worker_spec == "" or worker_unit:
             worker_mir_scoped_targets_v1(_sffi_env_get("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
                 _sffi_env_get("SIMPLE_MIR_SHARD_ONLY_PATHS") ?? "", worker_flag)
         else:
             []
         val mir_scoped = mir_targets.len() > 0
+        if worker_unit and not mir_scoped:
+            self.ctx.add_error("file-worker unit requires module-scoped MIR targets (SIMPLE_HIR_WORKER_SKELETON=0 or SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 is not a unit lane)")
+            return false
         val worker_closure = not parse_shard and (mir_scoped or
             worker_surface_closure_selected_v1(worker_spec, worker_flag))
         var worker_needed: [bool] = []
@@ -986,6 +1009,8 @@ impl CompilerDriver:
                         load_paths.push(surface_source[ci])
                     ci = ci + 1
                 worker_hir_restrict_loads_v1(load_paths)
+                # A unit child HIR-claims only its picked targets.
+                if worker_unit: worker_surface_restrict_claims_v1(mir_targets)
                 print "[file-worker] mir-child hir closure modules={load_paths.len()} of={frozen_source_count} advice_modules={mir_advice_paths.len()}"
             else:
                 worker_surface_restrict_claims_v1(allowed_paths)
