@@ -261,29 +261,34 @@ class BugDatabase:
             return false
 
         var next_line: i64 = 0
+        var numbering_exhausted = false
         var already_recorded = false
         var seen: [i64] = []
         for row in table.rows:
             if (row.get("bug_id") ?? "") != id:
                 continue
             val parsed = try_parse_int(row.get("line_num") ?? "")
-            if not parsed.?:
+            if parsed == nil:
                 return false
             val line_num: i64 = parsed ?? -1
-            # Match the portable integer parser ceiling; next_line must also
-            # be parseable after save/reload. Existing rows remain untouched.
-            if line_num < 0 or line_num >= 1152921504606846975:
+            if line_num < 0:
                 return false
             if seen.contains(line_num):
                 return false
             seen.push(line_num)
-            if line_num >= next_line:
+            # Never compute an unrepresentable successor. Exhaustion blocks
+            # new content, but an identical existing note remains retryable.
+            if line_num == 1152921504606846975:
+                numbering_exhausted = true
+            elif line_num >= next_line:
                 next_line = line_num + 1
             if (row.get("content") ?? "") == content:
                 already_recorded = true
 
         if already_recorded:
             return true
+        if numbering_exhausted:
+            return false
         val row = SdnRow.empty()
         row.set("bug_id", id)
         row.set("line_num", "{next_line}")

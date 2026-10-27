@@ -61,6 +61,39 @@ describe "Canonical investigation note append":
         val bug = after.get_bug("alpha").unwrap()
         expect(bug.investigation_log).to_equal(["Earlier note", "Old imported note", "New note"])
 
+    it "appends after an existing zero line and retries without duplication":
+        # @req REQ-BUG-NOTE-001
+        # @req REQ-BUG-NOTE-002
+        step("Treat parsed zero as a valid line number")
+        var db = fixture(LOG_HEADER + "    alpha, 0, Original zero line\n")
+        expect(db.add_investigation_log("alpha", "Following line")).to_equal(true)
+        val expected = LOG_HEADER + "    alpha, 0, Original zero line\n    alpha, 1, Following line\n"
+        expect(table_text(db, "bug_investigation_logs")).to_equal(expected)
+        expect(db.add_investigation_log("alpha", "Following line")).to_equal(true)
+        expect(db.save()).to_equal(true)
+        var after = load_bug_database(PATH).unwrap()
+        expect(after.add_investigation_log("alpha", "Following line")).to_equal(true)
+        expect(table_text(after, "bug_investigation_logs")).to_equal(expected)
+        expect(after.db.modified).to_equal(false)
+
+    it "retries the final representable line but rejects new content after exhaustion":
+        # @req REQ-BUG-NOTE-002
+        # @req REQ-BUG-NOTE-003
+        step("Keep the final successful append idempotent across reload")
+        var db = fixture(LOG_HEADER + "    alpha, 1152921504606846974, Penultimate line\n")
+        expect(db.add_investigation_log("alpha", "Final line")).to_equal(true)
+        val expected = LOG_HEADER + "    alpha, 1152921504606846974, Penultimate line\n    alpha, 1152921504606846975, Final line\n"
+        expect(table_text(db, "bug_investigation_logs")).to_equal(expected)
+        expect(db.add_investigation_log("alpha", "Final line")).to_equal(true)
+        expect(db.add_investigation_log("alpha", "Beyond maximum")).to_equal(false)
+        expect(db.save()).to_equal(true)
+        var after = load_bug_database(PATH).unwrap()
+        expect(after.add_investigation_log("alpha", "Final line")).to_equal(true)
+        expect(after.add_investigation_log("alpha", "Beyond maximum")).to_equal(false)
+        expect(table_text(after, "bug_investigation_logs")).to_equal(expected)
+        expect(after.db.modified).to_equal(false)
+
+
     it "does not duplicate a note on retry before or after reload":
         # @req REQ-BUG-NOTE-002
         step("Apply an identical audit note repeatedly")
