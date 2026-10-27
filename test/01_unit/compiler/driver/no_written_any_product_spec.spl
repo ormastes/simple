@@ -1,0 +1,52 @@
+# No written-Any in product code (PR-C zero-count guard)
+#
+# Verifies that post-migration product files have zero W-ANY-COMPILE-001 diagnostics.
+# This guard spec asserts the migration status at the point each file is supposed to be
+# generic and free of written-Any.
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn count_written_any_warnings_src(src: text, file_path: text) -> i64:
+    """Count W-ANY-COMPILE-001 warnings in source text via HIR lowering."""
+    val ast = parse_full_frontend(src, file_path, file_path, Logger(level: 0))
+    var lowering = HirLowering.with_filename(file_path)
+    lowering.forbid_written_any = false
+    val _hir = lowering.lower_module(ast)
+    var count = 0i64
+    var idx = 0
+    while idx < lowering.lowering_error_count():
+        val message = lowering.lowering_error_message_at(idx, file_path)
+        if message.contains("[W-ANY-COMPILE-001]"):
+            count = count + 1
+        idx = idx + 1
+    count
+
+describe "Product files: zero written-Any":
+    it "global_dataset.spl has no written-Any after migration to generics":
+        val file = "src/lib/nogc_sync_mut/mem/global_dataset.spl"
+        val count = count_written_any_warnings(file)
+        step("Check {file}")
+        expect(count).to_equal(0i64)
+
+    it "build_session.spl has no written-Any after SessionKept migration":
+        val file = "src/compiler/80.driver/session/build_session.spl"
+        val count = count_written_any_warnings(file)
+        step("Check {file}")
+        expect(count).to_equal(0i64)
+
+fn count_written_any_warnings(file_path: text) -> i64:
+    val src = file_read(file_path)
+    # Non-vacuity: an unreadable/empty file must not pass as "0 warnings".
+    expect(src.len() > 0).to_equal(true)
+    count_written_any_warnings_src(src, file_path)
+
+describe "written-Any counter (positive control)":
+    it "counts a written Any outside unsafe":
+        step("a param typed Any outside unsafe: must produce W-ANY-COMPILE-001")
+        val src = "fn f(x: Any) -> i64:\n    0\n"
+        expect(count_written_any_warnings_src(src, "control.spl") > 0i64).to_equal(true)
