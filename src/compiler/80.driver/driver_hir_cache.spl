@@ -63,7 +63,8 @@ use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write, file_crea
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
-use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_admit_v1, disk_cache_source_record_v1}
+use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_admit_v1, disk_cache_source_record_v1,
+    disk_cache_source_touch_v1}
 use compiler.driver.cache.metadata.cache_limits.{cache_retention_limits_load_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_claim_allowed_v1, worker_surface_counters_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
@@ -324,6 +325,14 @@ fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "", 
     val ended = transient_scope_end()
     if not paused or not promoted or not ended:
         panic("HIR cache decode scope ownership failed")
+    if decoded != nil and source_path != "":
+        # LRU within the source's entries (after scope end: nothing here is
+        # scratch-owned).
+        val tag = sha256_text(module_source_relative_path(source_path)).substring(0, 16)
+        val dir = hir_cache_dir()
+        for parser_selected in [false, true]:
+            val path = hir_cache_path(key, parser_selected)
+            val _moved = disk_cache_source_touch_v1(dir, tag, path.substring(dir.len() + 1))
     decoded
 
 # HIR shard transactions already own the decode's scratch lifetime. They retain

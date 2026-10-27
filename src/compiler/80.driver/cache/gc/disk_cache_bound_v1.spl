@@ -2,7 +2,9 @@
 # are written outside the CAS store and so were never counted by
 # admission.spl. Two limits from cache_limits.spl's CacheRetentionLimitsV1:
 #
-# - per source: at most `versions_per_source` entries and
+# - per source: at most `per_source_max_disk_entries` entries (default 64:
+#   one source legitimately has an entry per target x flag variant, so the
+#   3-version cap evicted a target's entry as soon as 3 others built) and
 #   `per_source_max_disk_bytes` per source tag; oldest recorded first out.
 #   The tag→entries index lives in {dir}/.by-source/<tag>.idx, one basename
 #   per line in publish order.
@@ -65,7 +67,7 @@ fn disk_cache_source_record_v1(dir: text, tag: text, entry: text,
     var removed = 0
     var start = 0
     while start < entries.len() - 1 and
-            (entries.len() - start > limits.versions_per_source or
+            (entries.len() - start > limits.per_source_max_disk_entries or
              bytes > limits.per_source_max_disk_bytes):
         val victim = "{dir}/{entries[start]}"
         val size = file_size_signed(victim)
@@ -109,7 +111,36 @@ fn disk_cache_admit_v1(dir: text, write_bytes: i64, known_total: i64,
         return DiskCacheAdmitV1(admitted: false, evicted: evicted, total: total, reason: "over_hard_limit")
     DiskCacheAdmitV1(admitted: true, evicted: evicted, total: total + write_bytes, reason: "ok")
 
+# Cache hit on `entry`: move it to the newest end of its source index so the
+# per-source cap evicts least recently used, not least recently written.
+fn disk_cache_source_touch_v1(dir: text, tag: text, entry: text) -> bool:
+    if tag == "" or entry == "":
+        return false
+    val index_path = _dcb_index_path(dir, tag)
+    val existing = file_read_nullable(index_path) ?? ""
+    var kept: [text] = []
+    var found = false
+    for line in existing.split("\n"):
+        val name = line.trim()
+        if name == "":
+            continue
+        if name == entry:
+            found = true
+        else:
+            kept.push(name)
+    if not found:
+        return false
+    kept.push(entry)
+    val tmp = index_path + ".{rt_getpid()}.tmp"
+    if not rt_file_write_text(tmp, kept.join("\n") + "\n"):
+        return false
+    if rt_file_move(tmp, index_path):
+        return true
+    file_delete(tmp)
+    false
+
 export DiskCacheAdmitV1
+export disk_cache_source_touch_v1
 export disk_cache_dir_bytes_v1
 export disk_cache_sweep_v1
 export disk_cache_source_record_v1

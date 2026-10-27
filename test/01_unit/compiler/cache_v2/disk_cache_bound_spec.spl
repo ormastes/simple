@@ -2,14 +2,16 @@
 
 use std.spec.*
 use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_source_record_v1,
-    disk_cache_sweep_v1, disk_cache_admit_v1, disk_cache_dir_bytes_v1}
+    disk_cache_sweep_v1, disk_cache_admit_v1, disk_cache_dir_bytes_v1,
+    disk_cache_source_touch_v1}
 use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1}
 use std.io_runtime.{dir_remove_all, getpid, time_now_unix_micros, file_write, file_exists, dir_create}
 
 fn bound_limits(versions: i64, per_source_bytes: i64, storage: i64) -> CacheRetentionLimitsV1:
     CacheRetentionLimitsV1(memory_max_bytes: 1024, storage_max_bytes: storage,
         max_branches: 4, kept_branches: ["main"], versions_per_source: versions,
-        per_source_max_disk_bytes: per_source_bytes, per_source_max_memory_bytes: 1024)
+        per_source_max_disk_bytes: per_source_bytes, per_source_max_memory_bytes: 1024,
+        per_source_max_disk_entries: versions)
 
 fn bound_dir(label: text) -> text:
     val dir = "build/disk_cache_bound_{getpid()}_{time_now_unix_micros()}_{label}"
@@ -17,7 +19,7 @@ fn bound_dir(label: text) -> text:
     dir
 
 describe "disk cache bounds":
-    it "keeps at most versions_per_source entries per source, oldest out":
+    it "keeps at most per_source_max_disk_entries entries per source, oldest out":
         val dir = bound_dir("count")
         val limits = bound_limits(2, 1000000, 1000000)
         for name in ["a1.hir", "a2.hir", "a3.hir"]:
@@ -57,4 +59,30 @@ describe "disk cache bounds":
         val refused = disk_cache_admit_v1(dir, 1000, 60, limits)
         expect(refused.admitted).to_equal(false)
         expect(refused.reason).to_equal("over_hard_limit")
+        dir_remove_all(dir)
+
+    it "keeps every target variant of one source under the default limits":
+        val dir = bound_dir("variants")
+        val limits = bound_limits(3, 1000000, 1000000)
+        val defaults = CacheRetentionLimitsV1(memory_max_bytes: 1024, storage_max_bytes: 1000000,
+            max_branches: 4, kept_branches: ["main"], versions_per_source: 3,
+            per_source_max_disk_bytes: 1000000, per_source_max_memory_bytes: 1024)
+        for name in ["t1.hir", "t2.hir", "t3.hir", "t4.hir", "t5.hir", "t6.hir", "t7.hir", "t8.hir", "t9.hir"]:
+            file_write(dir + "/" + name, "xxxx")
+            disk_cache_source_record_v1(dir, "hello", name, defaults)
+        expect(file_exists(dir + "/t1.hir")).to_equal(true)
+        expect(file_exists(dir + "/t9.hir")).to_equal(true)
+        dir_remove_all(dir)
+
+    it "evicts least recently hit, not least recently written":
+        val dir = bound_dir("lru")
+        val limits = bound_limits(2, 1000000, 1000000)
+        for name in ["a1.hir", "a2.hir"]:
+            file_write(dir + "/" + name, "xxxx")
+            disk_cache_source_record_v1(dir, "src-a", name, limits)
+        expect(disk_cache_source_touch_v1(dir, "src-a", "a1.hir")).to_equal(true)
+        file_write(dir + "/a3.hir", "xxxx")
+        disk_cache_source_record_v1(dir, "src-a", "a3.hir", limits)
+        expect(file_exists(dir + "/a1.hir")).to_equal(true)
+        expect(file_exists(dir + "/a2.hir")).to_equal(false)
         dir_remove_all(dir)
