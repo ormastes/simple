@@ -1,0 +1,131 @@
+# Build a ModuleSurface from TLDR summary rows (PR2d).
+#
+# TLDR rows produced by tldr_summary_v1.spl:
+#   export|<name>                       exported names
+#   decl|<kind> <name> id=<stable> cfg=<attrs> sig=<header>   declarations
+#   fallback|<reason>                   unsupported constructs
+# Plus existing companion sections (layout, trait, type, const, impl, generic).
+#
+# Returns nil (fail closed) if ANY fallback| row exists, or if a function
+# sig= has no return type (parse error). Otherwise builds the ModuleSurface
+# with retained declarations for import resolution.
+
+use compiler.frontend.parser_types.{ParserImport, ParserModule, ParserTypeParam, Export}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceCompositeIndex, ModuleSurfaceConst, ModuleSurfaceDeclarationAuthorityIndex, ModuleSurfaceEnum, ModuleSurfaceExportOriginIndex, ModuleSurfaceField, ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, module_surface_declaration_authority_index_empty, module_surface_export_origin_index_empty, module_surface_export_origin_index_put}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types_expr.{Type}
+use compiler.common.diagnostics.span.{Span}
+
+extern fn rt_hash_text(content: text) -> i64
+
+# Build ModuleSurface from TLDR entries.
+pub fn module_surface_from_tldr_v1(module_id: text, rows: [text]) -> ModuleSurface? :
+    # Check for fallback rows first (fail closed)
+    for row in rows:
+        if row.starts_with("fallback|"):
+            return nil
+
+    # Collect exports and declarations
+    var exported: [text] = []
+    var callable_names: [text] = []
+    var type_names: [text] = []
+
+    # Parse decl rows
+    for row in rows:
+        if row.starts_with("decl|"):
+            # Format: decl|<kind> <name> id=<stable> cfg=<attrs> sig=<header>
+            val body = row.substring(5)
+            val space_pos = body.index_of(" ")
+            if space_pos < 0:
+                return nil
+            val kind = body.substring(0, space_pos)
+            val rest = body.substring(space_pos + 1)
+
+            # Extract name (first word after kind)
+            val name_end = rest.index_of(" ")
+            val name = if name_end > 0: rest.substring(0, name_end) else: rest
+
+            # Check if function has return type
+            if kind == "fn":
+                val sig_pos = row.index_of("sig=")
+                if sig_pos < 0:
+                    return nil
+                val sig = row.substring(sig_pos + 4)
+                # Function must have -> return type annotation
+                if not sig.contains("->"):
+                    return nil
+                callable_names.push(name)
+            elif kind == "type":
+                type_names.push(name)
+        elif row.starts_with("export|"):
+            val name = row.substring(7)
+            if not exported.contains(name):
+                exported.push(name)
+
+    # Build minimal ModuleSurface structure for import resolution
+    val logical_name = module_surface_logical_name_from_path(module_id.replace(".", "/") + ".spl")
+    val canonical_name = module_surface_fold_std_alias(logical_name)
+
+    Some(ModuleSurface(
+        physical_index: 0,
+        generation: 0,
+        frozen: false,
+        source_index: 0,
+        canonical_path: module_surface_canonical_path(module_id.replace(".", "/") + ".spl"),
+        module_name: module_id,
+        logical_name: logical_name,
+        canonical_name: canonical_name,
+        package_name: module_surface_package_name_from_name(canonical_name),
+        preferred_registry_name: "",
+        content_length: 0,
+        content_hash: 0,
+        semantic_hash0: 0,
+        semantic_hash1: 0,
+        semantic_hash2: 0,
+        semantic_hash3: 0,
+        semantic_cacheable: false,
+        nogc_strict: false,
+        imports: [],
+        exports: [],
+        friends: [],
+        internal_exports: [],
+        import_target_indices: [],
+        import_target_names: [],
+        import_resolution_traces: [],
+        import_item_offsets: [0],
+        import_item_names: [],
+        import_item_aliases: [],
+        import_item_has_alias: [],
+        export_route_sources: [],
+        export_route_locals: [],
+        export_route_target_indices: [],
+        export_route_target_names: [],
+        export_route_is_glob: [],
+        composite_names: type_names,
+        composite_index: ModuleSurfaceCompositeIndex.empty(),
+        enum_names: [],
+        trait_names: [],
+        callable_names: callable_names,
+        type_alias_names: [],
+        constant_names: [],
+        callable_values: [],
+        composite_values: [],
+        enum_values: [],
+        trait_values: [],
+        type_alias_values: [],
+        constant_values: [],
+        callables: {},
+        composites: {},
+        enums: {},
+        traits: {},
+        impls: [],
+        type_aliases: {},
+        constants: {},
+        export_origins: [],
+        export_origin_index: module_surface_export_origin_index_empty(),
+        declaration_authority_index: module_surface_declaration_authority_index_empty()
+    ))
+
+export module_surface_from_tldr_v1
