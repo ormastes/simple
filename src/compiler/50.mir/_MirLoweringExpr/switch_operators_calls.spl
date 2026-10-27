@@ -20,6 +20,7 @@ use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_types.{SymbolKind}
 use compiler.hir.hir_kind_carrier.{hir_type_kind_discriminant}
+use compiler.hir.return_type_interface_v1.*
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: switch/if-chain dispatch, binary/unary operators, call lowering
 use compiler.mir._MirLoweringExpr.result_tuple_payload.*
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
@@ -2618,6 +2619,10 @@ impl MirLowering:
                             case HirTypeKind.Error: ()
                             case _: return Some(found_type)
             case Call(callee, _, _):
+                # Try RTI first
+                val (rti_answered, rti_type) = self.rti_enum_match_subject_type(expr, nil)
+                if rti_answered:
+                    return rti_type
                 val callee_type = self.enum_match_expr_type(callee)
                 if callee_type != nil:
                     val found_callee_type = callee_type ?? HirType(kind: HirTypeKind.Error, span: callee.span)
@@ -2638,6 +2643,11 @@ impl MirLowering:
                                 case _: return Some(declared_ret)
                     case _: ()
             case MethodCall(receiver, method, method_args, resolution):
+                # Try RTI first (with declared receiver type if available)
+                val receiver_type_for_rti = self.receiver_declared_type(receiver)
+                val (rti_answered, rti_type) = self.rti_enum_match_subject_type(expr, receiver_type_for_rti)
+                if rti_answered:
+                    return rti_type
                 # ROOT-FIX (native_try_op_on_option_silent_wrong_2026-07-14):
                 # the `resolution.get_symbol_id()` arm below was landed by
                 # 8b332df02b9 ("reject resolved Option method try") but was
@@ -2795,6 +2805,45 @@ impl MirLowering:
             return enum_match_unwrap_inner_type(declared_type)
         nil
 
+    me rti_enum_match_subject_type(expr: HirExpr, receiver_type: HirType?) -> (bool, HirType?):
+        """Try to recover a match scrutinee type via RTI. Returns (answered, type):
+        - (true, Some(type)): RTI answered with a concrete type
+        - (true, nil): RTI answered but type is not concrete (should not occur after require_concrete)
+        - (false, nil): RTI could not answer (E-RTI-001, fall through to existing logic unless SIMPLE_RTI_STRICT=1)
+        On other errors, calls error_fatal and returns (true, nil) as a bailout."""
+        match self.rti.callee_return(expr, self.symbols, receiver_type):
+            case Ok(entry):
+                match self.rti.resolve(entry):
+                    case Ok(resolved):
+                        match self.rti.require_concrete(resolved):
+                            case Ok(term):
+                                match self.rti.bind(term, self.symbols):
+                                    case Ok(hir_type):
+                                        self.rti_last_error = ""
+                                        return (true, Some(hir_type))
+                                    case Err(err):
+                                        self.rti_last_error = err.message
+                                        self.error_fatal(err.message, Some(expr.span))
+                                        return (true, nil)
+                            case Err(err):
+                                self.rti_last_error = err.message
+                                self.error_fatal(err.message, Some(expr.span))
+                                return (true, nil)
+                    case Err(err):
+                        self.rti_last_error = err.message
+                        self.error_fatal(err.message, Some(expr.span))
+                        return (true, nil)
+            case Err(err):
+                if err.code == "E-RTI-001":
+                    self.rti_last_error = err.message
+                    if (_sffi_env_get("SIMPLE_RTI_STRICT") ?? "") == "1":
+                        self.error_fatal(err.message, Some(expr.span))
+                        return (true, nil)
+                    return (false, nil)
+                self.rti_last_error = err.message
+                self.error_fatal(err.message, Some(expr.span))
+                return (true, nil)
+
     me receiver_declared_type(receiver: HirExpr) -> HirType?:
         """Declared receiver type for enum_match_expr_type's MethodCall arm.
         Recover typed bindings and declared field chains without lowering or
@@ -2906,7 +2955,10 @@ impl MirLowering:
                 expression_hint = "method call {receiver_hint}.{method}()"
             case Call(_, _, _): expression_hint = "call expression"
             case _: ()
-        "subject {expression_hint} at {scrutinee.span.file}:{scrutinee.span.line}:{scrutinee.span.col} has type {type_hint}"
+        var hint = "subject {expression_hint} at {scrutinee.span.file}:{scrutinee.span.line}:{scrutinee.span.col} has type {type_hint}"
+        if self.rti_last_error != "":
+            hint = hint + " ; rti: " + self.rti_last_error
+        hint
 
     me enum_match_subject_type(scrutinee: HirExpr, lowered_local_id: i64) -> HirType?:
         """Retain a declared Result/Optional on an already evaluated subject.
