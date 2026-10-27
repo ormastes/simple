@@ -16,6 +16,7 @@
 
 use nogc_async_mut.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
 use nogc_async_mut.database.query
+use std.convert (try_parse_int)
 use nogc_async_mut.database.checker.{DbIssue, check_duplicate_ids, check_valid_column,
     check_empty_required, check_file_refs, check_enum_values, check_orphan_refs}
 # Removed 'use app.io' - it shadows core.spl's local function declarations
@@ -236,6 +237,61 @@ class BugDatabase:
 
         # Put table back into database
         self.db.set_table(table_name, table)
+
+
+    # Append one durable investigation line without rewriting the bug row.
+    # Identical content for this bug is a successful no-op (safe retry).
+    # The line-oriented SDN codec cannot preserve quotes, line breaks or
+    # surrounding whitespace; reject those inputs instead of losing content.
+    # Call save() explicitly after successful appends.
+    me add_investigation_log(id: text, content: text) -> bool:
+        if self.find_bug_table_name(id) == "":
+            return false
+        if content == "" or content.trim() != content:
+            return false
+        if content.contains("\n") or content.contains("\r") or content.contains('"'):
+            return false
+
+        val table_name = "bug_investigation_logs"
+        var table: SdnTable = SdnTable.new(table_name, ["bug_id", "line_num", "content"])
+        match self.db.get_table(table_name):
+            case Some(existing): table = existing
+            case None: pass
+        if table.columns != ["bug_id", "line_num", "content"]:
+            return false
+
+        var next_line: i64 = 0
+        var already_recorded = false
+        var seen: [i64] = []
+        for row in table.rows:
+            if (row.get("bug_id") ?? "") != id:
+                continue
+            val parsed = try_parse_int(row.get("line_num") ?? "")
+            if not parsed.?:
+                return false
+            val line_num: i64 = parsed ?? -1
+            # Match the portable integer parser ceiling; next_line must also
+            # be parseable after save/reload. Existing rows remain untouched.
+            if line_num < 0 or line_num >= 1152921504606846975:
+                return false
+            if seen.contains(line_num):
+                return false
+            seen.push(line_num)
+            if line_num >= next_line:
+                next_line = line_num + 1
+            if (row.get("content") ?? "") == content:
+                already_recorded = true
+
+        if already_recorded:
+            return true
+        val row = SdnRow.empty()
+        row.set("bug_id", id)
+        row.set("line_num", "{next_line}")
+        row.set("content", content)
+        if not table.add_row(row):
+            return false
+        self.db.set_table(table_name, table)
+        true
 
     # Get bug by ID
     fn get_bug(id: text) -> Bug?:

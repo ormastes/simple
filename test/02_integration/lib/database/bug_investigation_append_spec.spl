@@ -1,0 +1,124 @@
+"""
+Purpose: verify durable, idempotent investigation notes through the real bug
+database owner. These scratch fixtures never touch the repository bug DB.
+Run with a qualified self-hosted runtime in interpreter mode.
+"""
+use std.spec.{describe, it, expect}
+use std.spec.step
+use nogc_sync_mut.database.bug.{BugDatabase, load_bug_database}
+use nogc_sync_mut.database.core.{SdnTable}
+use std.io_runtime.{file_write, file_read, file_delete}
+
+val PATH = "/tmp/simple_bug_investigation_append_sync.sdn"
+val MAIN = "bugs_active |id, severity, status, title, custom|\n    alpha, P2, investigating, Alpha bug, preserve-active\n\nbugs |id, severity, status, title, custom|\n    beta, P3, closed, Beta bug, preserve-closed\n\n"
+val EXTRAS = "bug_descriptions |bug_id, line_num, content|\n    alpha, 0, Existing description\n\nbug_fix_strategies |bug_id, line_num, content|\n    alpha, 0, Existing strategy\n\nopaque_evidence |key, value|\n    receipt, retained\n\n"
+val LOG_HEADER = "bug_investigation_logs |bug_id, line_num, content|\n"
+
+fn fixture(logs: text) -> BugDatabase:
+    file_delete(PATH)
+    file_delete(PATH + ".wal")
+    expect(file_write(PATH, MAIN + EXTRAS + logs + "\n\n")).to_equal(true)
+    load_bug_database(PATH).unwrap()
+
+fn table_text(db: BugDatabase, name: text) -> text:
+    val table: SdnTable = db.db.get_table(name).unwrap()
+    table.to_sdn()
+
+fn check_unchanged(before: BugDatabase, after: BugDatabase):
+    expect(after.db.tables.len()).to_equal(before.db.tables.len())
+    for (name, table) in before.db.tables:
+        if name != "bug_investigation_logs":
+            expect(table_text(after, name)).to_equal(table.to_sdn())
+
+describe "Canonical investigation note append":
+    it "creates the first line without changing a bug or dropping an unknown table":
+        # @req REQ-BUG-NOTE-001
+        step("Append a note through the owner and reload every original table")
+        var db = fixture(LOG_HEADER)
+        val before = fixture(LOG_HEADER)
+        expect(db.add_investigation_log("alpha", "audit: reproducibility=untested, solution=unknown — retained")).to_equal(true)
+        expect(db.save()).to_equal(true)
+        val after = load_bug_database(PATH).unwrap()
+        check_unchanged(before, after)
+        val logs: SdnTable = after.db.get_table("bug_investigation_logs").unwrap()
+        expect(logs.rows.len()).to_equal(1)
+        expect(logs.rows[0].get("line_num").unwrap()).to_equal("0")
+        expect(logs.rows[0].get("content").unwrap()).to_equal("audit: reproducibility=untested, solution=unknown — retained")
+        val saved = file_read(PATH)
+        expect(saved).to_start_with("#sdn-crc32:")
+        expect(saved.split("#sdn-crc32:").len()).to_equal(2)
+
+    it "appends after the maximum line and preserves existing rows in physical order":
+        # @req REQ-BUG-NOTE-001
+        step("Retain interleaved sparse logs and allocate one new per-bug line")
+        val initial = LOG_HEADER + "    alpha, 7, Earlier note\n    beta, 99, Other bug\n    alpha, 2, Old imported note\n"
+        var db = fixture(initial)
+        val before = table_text(db, "bug_investigation_logs")
+        expect(db.add_investigation_log("alpha", "New note")).to_equal(true)
+        expect(db.save()).to_equal(true)
+        val after = load_bug_database(PATH).unwrap()
+        expect(table_text(after, "bug_investigation_logs")).to_equal(before + "    alpha, 8, New note\n")
+        val bug = after.get_bug("alpha").unwrap()
+        expect(bug.investigation_log).to_equal(["Earlier note", "Old imported note", "New note"])
+
+    it "does not duplicate a note on retry before or after reload":
+        # @req REQ-BUG-NOTE-002
+        step("Apply an identical audit note repeatedly")
+        var db = fixture(LOG_HEADER)
+        expect(db.add_investigation_log("alpha", "Stable audit receipt")).to_equal(true)
+        val expected = table_text(db, "bug_investigation_logs")
+        expect(db.add_investigation_log("alpha", "Stable audit receipt")).to_equal(true)
+        expect(table_text(db, "bug_investigation_logs")).to_equal(expected)
+        expect(db.save()).to_equal(true)
+        var after = load_bug_database(PATH).unwrap()
+        expect(after.add_investigation_log("alpha", "Stable audit receipt")).to_equal(true)
+        expect(table_text(after, "bug_investigation_logs")).to_equal(expected)
+        expect(after.db.modified).to_equal(false)
+        expect(after.add_investigation_log("beta", "Stable audit receipt")).to_equal(true)
+        val logs: SdnTable = after.db.get_table("bug_investigation_logs").unwrap()
+        expect(logs.rows.len()).to_equal(2)
+        expect(logs.rows[1].get("bug_id").unwrap()).to_equal("beta")
+        expect(logs.rows[1].get("line_num").unwrap()).to_equal("0")
+
+    it "creates a missing legacy log table only for a known bug":
+        # @req REQ-BUG-NOTE-001
+        step("Add the canonical auxiliary table to a legacy database")
+        var db = fixture("")
+        val count_before = db.db.tables.len()
+        expect(db.add_investigation_log("missing", "Orphan note")).to_equal(false)
+        expect(db.db.tables.len()).to_equal(count_before)
+        expect(db.add_investigation_log("alpha", "Legacy note")).to_equal(true)
+        expect(db.db.tables.len()).to_equal(count_before + 1)
+        expect(db.save()).to_equal(true)
+        val after = load_bug_database(PATH).unwrap()
+        expect(after.get_bug("alpha").unwrap().investigation_log).to_equal(["Legacy note"])
+
+    it "rejects input the line-oriented SDN codec cannot preserve":
+        # @req REQ-BUG-NOTE-003
+        step("Reject unsafe text before any row or modified flag changes")
+        var db = fixture(LOG_HEADER)
+        val before = table_text(db, "bug_investigation_logs")
+        for content in ["", " leading", "trailing ", "two\nlines", "two\rlines", "a \"quote\""]:
+            expect(db.add_investigation_log("alpha", content)).to_equal(false)
+        expect(db.add_investigation_log("missing", "Valid text")).to_equal(false)
+        expect(table_text(db, "bug_investigation_logs")).to_equal(before)
+        expect(db.db.modified).to_equal(false)
+
+    it "rejects malformed or duplicate target line numbers without dropping rows":
+        # @req REQ-BUG-NOTE-003
+        step("Refuse malformed existing target logs without changing their table")
+        for number in ["bad", "-1", "1152921504606846975", "1152921504606846976", "0"]:
+            var db = fixture(LOG_HEADER + "    alpha, 0, Existing\n    alpha, " + number + ", Keep this row\n")
+            val before = table_text(db, "bug_investigation_logs")
+            expect(db.add_investigation_log("alpha", "New note")).to_equal(false)
+            expect(table_text(db, "bug_investigation_logs")).to_equal(before)
+            expect(db.db.modified).to_equal(false)
+
+    it "rejects incompatible log columns without silently discarding them":
+        # @req REQ-BUG-NOTE-003
+        step("Preserve extra log columns on an unsupported schema")
+        var db = fixture("bug_investigation_logs |bug_id, line_num, content, evidence|\n    alpha, 0, Existing, keep\n")
+        val before = table_text(db, "bug_investigation_logs")
+        expect(db.add_investigation_log("alpha", "New note")).to_equal(false)
+        expect(table_text(db, "bug_investigation_logs")).to_equal(before)
+        expect(db.db.modified).to_equal(false)
