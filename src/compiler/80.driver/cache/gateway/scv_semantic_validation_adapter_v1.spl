@@ -1,0 +1,204 @@
+# Production adapter over retained semantic-owner handles and pinned CAS reads.
+# It neither creates scopes/grants nor schedules compiler work.
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.snapshot_v2.{scv_snapshot_file_index_v2}
+use compiler.common.cache_contract.scv_semantic_validation_v1.*
+use compiler.common.cache_contract.cache_gateway_v1.{CacheGatewayV1, CacheLimitsV1}
+use compiler.common.cache_contract.direct_read_pin_v1.{DirectReadPinV1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryReadManifestV1, semantic_query_key_equal_v1,
+    semantic_query_read_manifest_valid_v1, semantic_query_read_manifest_encode_v1,
+    semantic_query_read_manifest_decode_bounded_v1}
+use compiler.common.cache_contract.generation_manifest_v1.{generation_manifest_decode_v1}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_compile_snapshot_decode_bounded_v1, canonical_compile_snapshot_digest_v1,
+    canonical_source_blob_decode_bounded_v1}
+use compiler.driver.cache.gateway.cache_gateway_adapter.{CacheGatewayAdapterV1}
+use compiler.driver.cache.gateway.semantic_scope_live_owner_v2.{
+    SemanticScopeLiveOwnerV2, LiveSemanticCompletenessV2,
+    VerifiedThreePayloadWorkerResultV2}
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.{
+    SemanticScopeWriterBindingV1, SemanticScopeConsumptionBindingV1}
+
+# These existing handles must originate from the actual retained owner. Public
+# context copying cannot construct a missing opaque grant/result row.
+pub struct ScvSemanticOwnerContextV1:
+    writer_binding: SemanticScopeWriterBindingV1
+    consumption: SemanticScopeConsumptionBindingV1
+    grant: LiveSemanticCompletenessV2
+    worker_result: VerifiedThreePayloadWorkerResultV2
+    pin: DirectReadPinV1
+
+pub class ScvSemanticValidationAdapterV1:
+    owner: SemanticScopeLiveOwnerV2
+    gateway: CacheGatewayAdapterV1?
+    context: ScvSemanticOwnerContextV1?
+
+# Diagnostic equality only. It grants no owner authority or cache admission.
+pub fn scv_semantic_readset_equal_v1(old: SemanticQueryReadManifestV1,
+        current: SemanticQueryReadManifestV1) -> bool:
+    if (not semantic_query_read_manifest_valid_v1(current) or
+            not semantic_query_key_equal_v1(old.consumer, current.consumer) or
+            old.ordered_reads.len() != current.ordered_reads.len()): return false
+    for index in 0..old.ordered_reads.len():
+        val left = old.ordered_reads[index]
+        val right = current.ordered_reads[index]
+        if (left.completeness != SemanticCoverageV1.Complete or right.completeness != SemanticCoverageV1.Complete or
+                not semantic_query_key_equal_v1(left.producer, right.producer) or
+                not semantic_query_key_equal_v1(left.consumer, right.consumer) or
+                left.facet != right.facet or left.ordinal != right.ordinal or
+                left.consumed_fingerprint != right.consumed_fingerprint or
+                left.witness_digest != right.witness_digest or left.partition_id != right.partition_id): return false
+    true
+
+impl ScvSemanticValidationProviderV1 for ScvSemanticValidationAdapterV1:
+    me validate_recorded_reads(request: ScvSemanticValidationRequestV1) -> ScvSemanticValidationResultV1:
+        # Recheck even for direct calls that bypass the common facade.
+        val invalid = scv_semantic_request_reason_v1(request)
+        if invalid != "": return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, invalid, 0)
+        if self.context == nil:
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-owner-context-unavailable", 0)
+        if self.gateway == nil:
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-cache-gateway-unavailable", 0)
+        val context = self.context.unwrap()
+        val gateway = self.gateway.unwrap()
+        val writer = context.writer_binding
+        val expected = context.consumption
+        # Different source and semantic snapshot domains are never translated by
+        # hashing their names. Only existing canonical typed objects link them.
+        if (writer.module_id != request.source_path or
+                request.recorded_manifest.consumer.stable_entity_id != writer.module_id or
+                writer.source_content_digest != request.source_content_digest or
+                writer.semantic_rules_digest != request.semantic_profile_digest or
+                expected.semantic_rules_digest != request.semantic_profile_digest or
+                writer.root.manifest_digest != request.semantic_generation_digest or
+                expected.manifest_digest != request.semantic_generation_digest or
+                context.pin.pinned_manifest_digest != request.semantic_generation_digest):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-source-generation-profile-unbound", 0)
+        # This first profile supports one exact module identity and partition.
+        # Cross-module or arbitrary producer scopes need their own live owners.
+        for read in request.recorded_manifest.ordered_reads:
+            if read.partition_id != writer.module_id or read.producer.stable_entity_id != writer.module_id:
+                return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-producer-scope-unsupported", 0)
+        val granted = self.owner.validate_scope_v2(context.grant, expected)
+        if granted.is_err():
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-live-grant-unavailable", 0)
+        val projected = self.owner.three_payload_worker_result_projection_v2(context.worker_result)
+        if projected.is_err():
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-live-result-unavailable", 0)
+        val current_result = projected.unwrap()
+        if (current_result.input_identity.source_digest != writer.source_content_digest or
+                current_result.input_identity.seal_digest != writer.attempt_seal_digest):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-live-result-subject-mismatch", 0)
+        var current_request = request
+        current_request.recorded_manifest = current_result.query_reads
+        if not scv_semantic_request_bounded_v1(current_request):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-current-readset-bounds", 0)
+        # Continue the request's aggregate allowance instead of granting every
+        # object/read stage a fresh budget.
+        var remaining = scv_semantic_request_remaining_bytes_v1(request)
+        if remaining <= 0: return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-cas-budget", 0)
+        val old_lookup = gateway.get_verified("forward_manifest", request.recorded_manifest_digest,
+            CacheLimitsV1(max_bytes: remaining, max_entries: 1), context.pin)
+        if old_lookup.is_err(): return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-recorded-cas-unavailable", 0)
+        val old_object = old_lookup.unwrap()
+        if not old_object.present or old_object.canonical_bytes.len() > remaining:
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-recorded-cas-missing-or-bounds", 0)
+        remaining = remaining - old_object.canonical_bytes.len()
+        val decoded = semantic_query_read_manifest_decode_bounded_v1(old_object.canonical_bytes, request.max_reads)
+        if (not decoded.ok or old_object.canonical_bytes != semantic_query_read_manifest_encode_v1(request.recorded_manifest)):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-recorded-cas-mismatch", 0)
+        if remaining <= 0: return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-cas-budget", 0)
+        val generation_lookup = gateway.get_verified("generation_manifest", request.semantic_generation_digest,
+            CacheLimitsV1(max_bytes: remaining, max_entries: 1), context.pin)
+        if generation_lookup.is_err(): return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-generation-cas-unavailable", 0)
+        val generation_object = generation_lookup.unwrap()
+        if not generation_object.present or generation_object.canonical_bytes.len() > remaining:
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-generation-cas-missing-or-bounds", 0)
+        remaining = remaining - generation_object.canonical_bytes.len()
+        val generation_decode = generation_manifest_decode_v1(generation_object.canonical_bytes)
+        if not generation_decode.ok: return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-generation-invalid", 0)
+        val generation = generation_decode.value.unwrap()
+        val current_manifest = current_result.query_reads
+        val current_bytes = semantic_query_read_manifest_encode_v1(current_manifest)
+        if current_bytes.len() == 0 or current_bytes.len() > remaining:
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-current-readset-bounds", 0)
+        remaining = remaining - current_bytes.len()
+        val current_digest = sha256_u8_hex(current_bytes)
+        if (generation.snapshot_digest != writer.snapshot_cas_object_digest or
+                not generation.forward_manifest_refs.contains(current_digest)):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-current-readset-generation-unbound", 0)
+        if remaining <= 0: return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-cas-budget", 0)
+        val snapshot_lookup = gateway.get_verified("compile_snapshot", writer.snapshot_cas_object_digest,
+            CacheLimitsV1(max_bytes: remaining, max_entries: 1), context.pin)
+        if snapshot_lookup.is_err(): return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-snapshot-cas-unavailable", 0)
+        val snapshot_object = snapshot_lookup.unwrap()
+        if not snapshot_object.present or snapshot_object.canonical_bytes.len() > remaining:
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-snapshot-cas-missing-or-bounds", 0)
+        remaining = remaining - snapshot_object.canonical_bytes.len()
+        val snapshot_decode = canonical_compile_snapshot_decode_bounded_v1(snapshot_object.canonical_bytes,
+            request.max_bytes, request.max_reads, 4096)
+        if not snapshot_decode.ok: return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-snapshot-invalid", 0)
+        val snapshot = snapshot_decode.value.unwrap()
+        if (canonical_compile_snapshot_digest_v1(snapshot) != writer.snapshot_semantic_digest or
+                snapshot.compiler_owner_digest != writer.compiler_owner_digest or
+                snapshot.source_entries.len() != request.requested_snapshot.files.len()):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-snapshot-source-relation-unbound", 0)
+        # Resolution, generated inputs and external provider universes require
+        # their actual frozen authority; equal source bytes do not prove them.
+        if (snapshot.resolution_witnesses.len() > 0 or snapshot.negative_candidates.len() > 0 or
+                snapshot.directory_generations.len() > 0 or snapshot.generated_inputs.len() > 0 or
+                snapshot.provider_manifests.len() > 0 or snapshot.toolchain_component_digests.len() > 0):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-snapshot-input-profile-unsupported", 0)
+        var seen_source_indexes: [i64] = []
+        for entry in snapshot.source_entries:
+            val index = scv_snapshot_file_index_v2(request.requested_snapshot, entry.logical_path.module_relative_utf8)
+            if index < 0 or remaining <= 0 or seen_source_indexes.contains(index):
+                return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-frozen-source-unmapped-or-bounds", 0)
+            seen_source_indexes.push(index)
+            val source_lookup = gateway.get_verified("source_blob", entry.source_blob_digest,
+                CacheLimitsV1(max_bytes: remaining, max_entries: 1), context.pin)
+            if source_lookup.is_err(): return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-source-cas-unavailable", 0)
+            val source_object = source_lookup.unwrap()
+            if not source_object.present or source_object.canonical_bytes.len() > remaining:
+                return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-source-cas-missing-or-bounds", 0)
+            remaining = remaining - source_object.canonical_bytes.len()
+            val source_decode = canonical_source_blob_decode_bounded_v1(source_object.canonical_bytes,
+                request.max_bytes, request.max_reads, 4096)
+            if not source_decode.ok: return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-source-object-invalid", 0)
+            val source = source_decode.value.unwrap()
+            if (source.logical_path.module_relative_utf8 != entry.logical_path.module_relative_utf8 or
+                    source.logical_path.repository_namespace_digest != entry.logical_path.repository_namespace_digest or
+                    source.logical_path.path_semantics != entry.logical_path.path_semantics or source.generated_provenance != nil or
+                    source.source_bytes != request.requested_snapshot.files[index].bytes):
+                return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-source-object-mismatch", 0)
+        if not semantic_query_read_manifest_valid_v1(current_manifest):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-current-readset-invalid", 0)
+        for read in current_manifest.ordered_reads:
+            if (read.completeness != SemanticCoverageV1.Complete or
+                    read.partition_id != writer.module_id or read.producer.stable_entity_id != writer.module_id):
+                return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-current-scope-incomplete-or-unsupported", 0)
+        if not scv_semantic_readset_equal_v1(request.recorded_manifest, current_manifest):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Changed, "semantic-recorded-readset-changed", request.recorded_manifest.ordered_reads.len())
+        # Inspect the existing rebuildable catalog without its unbounded-body
+        # convenience lookup. All consumed bytes were independently pinned and
+        # verified above; this row supplies action association only.
+        val action_lookup = gateway.catalog.lookup(request.action_digest)
+        if action_lookup.is_err():
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-action-binding-unavailable", 0)
+        val action = action_lookup.unwrap()
+        if (not action.present or action.quarantined or action.object_kind != "forward_manifest" or
+                action.object_digest != current_digest or action.generation != context.pin.journal_superblock_generation or
+                action.manifest_digest != context.pin.pinned_manifest_digest):
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-action-forward-manifest-unbound", 0)
+        # Revalidate lifecycle after all CAS reads, so expiry/cancel/issuer drift
+        # during the transaction cannot be hidden by an earlier projection.
+        if self.owner.validate_scope_v2(context.grant, expected).is_err() or self.owner.three_payload_worker_result_projection_v2(context.worker_result).is_err():
+            return scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable, "semantic-owner-changed-during-validation", 0)
+        # Source correspondence is necessary but does not relate the requested
+        # SCV namespace/path policy/configuration/target/runtime to the compiler
+        # snapshot's corresponding domains. No actual owner provides that final
+        # authority relation yet; copied labels cannot fill the gap. Retain the
+        # real owner/CAS diagnostics above and refuse semantic Verified.
+        scv_semantic_outcome_v1(request, ScvSemanticValidationStatusV1.Unavailable,
+            "semantic-nonsource-authority-relation-unavailable", request.recorded_manifest.ordered_reads.len())
