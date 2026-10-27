@@ -1,0 +1,319 @@
+@no_gc
+
+# ============================================================================
+# Archive Writer - Unix ar (.a) file format writer
+# ============================================================================
+# Writes Unix archive files (used for static libraries) from object members.
+# Supports GNU/System V extended name tables and symbol index.
+#
+# Format:
+#   - Magic: "!<arch>\n" (8 bytes)
+#   - Optional symbol index "/" with big-endian count and offsets
+#   - Optional extended name table "//" for long filenames
+#   - Members: 60-byte header followed by data, padded to 2-byte alignment
+#
+# All archives are deterministic: mtime=0, uid=0, gid=0, mode=644.
+# ============================================================================
+
+use std.common.text_bytes.{text_to_bytes}
+
+# Archive magic bytes: "!<arch>\n"
+val AR_MAGIC_0: i64 = 0x21  # '!'
+val AR_MAGIC_1: i64 = 0x3C  # '<'
+val AR_MAGIC_2: i64 = 0x61  # 'a'
+val AR_MAGIC_3: i64 = 0x72  # 'r'
+val AR_MAGIC_4: i64 = 0x63  # 'c'
+val AR_MAGIC_5: i64 = 0x68  # 'h'
+val AR_MAGIC_6: i64 = 0x3E  # '>'
+val AR_MAGIC_7: i64 = 0x0A  # '\n'
+
+val AR_HEADER_SIZE: i64 = 60
+val AR_NAME_SIZE: i64 = 16
+val AR_DATE_SIZE: i64 = 12
+val AR_UID_SIZE: i64 = 6
+val AR_GID_SIZE: i64 = 6
+val AR_MODE_SIZE: i64 = 8
+val AR_SIZE_SIZE: i64 = 10
+val AR_FMAG_OFFSET: i64 = 58
+val AR_FMAG_0: i64 = 0x60  # '`'
+val AR_FMAG_1: i64 = 0x0A  # '\n'
+
+# ============================================================================
+# Structures
+# ============================================================================
+
+"""Input for a single member to write to an archive."""
+pub struct ArchiveMemberInput:
+    name: text
+    data: [u8]
+    defined_symbols: [text]  # symbol names defined in this object (for symbol index)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+"""Convert a non-negative i64 to decimal ASCII bytes, left-padded with spaces to fill width."""
+fn pad_decimal(n: i64, width: i64) -> [u8]:
+    # Convert n to decimal string
+    var digits: [i64] = []
+    if n == 0:
+        digits.push(0x30)  # '0'
+    else:
+        var remaining = n
+        while remaining > 0:
+            val digit = remaining - (remaining / 10) * 10
+            digits.push(0x30 as i64 + digit)
+            remaining = remaining / 10
+
+    # Reverse the digits
+    var reversed: [i64] = []
+    var i = digits.len() - 1
+    while i >= 0:
+        reversed.push(digits[i])
+        i = i - 1
+
+    # Left-pad with spaces
+    var result: [u8] = []
+    val padding = width - reversed.len()
+    var pi = 0
+    while pi < padding:
+        result.push(0x20 as u8)  # space
+        pi = pi + 1
+
+    for d in reversed:
+        result.push(d as u8)
+
+    result
+
+"""Convert text to ASCII bytes, left-padded with spaces to fill width."""
+fn pad_text(s: text, width: i64) -> [u8]:
+    val slen = s.len()
+    var result: [u8] = []
+
+    # Left-pad with spaces
+    val padding = width - slen
+    var pi = 0
+    while pi < padding:
+        result.push(0x20 as u8)
+        pi = pi + 1
+
+    # Add the text
+    for i in 0..slen:
+        val ch = s[i:i + 1]
+        if ch == " ": result.push(0x20 as u8)
+        elif ch == "/": result.push(0x2F as u8)
+        elif ch == ".": result.push(0x2E as u8)
+        elif ch == "_": result.push(0x5F as u8)
+        elif ch == "-": result.push(0x2D as u8)
+        else:
+            # For other chars, use their ASCII code if single printable ASCII
+            val bytes = text_to_bytes(ch)
+            if bytes.len() > 0:
+                result.push(bytes[0])
+            else:
+                result.push(0x3F as u8)  # '?'
+
+    result
+
+"""Convert a 32-bit unsigned integer to big-endian bytes."""
+fn u32_to_be(val: i64) -> [u8]:
+    var result: [u8] = []
+    result.push(((val / 16777216) % 256) as u8)
+    result.push(((val / 65536) % 256) as u8)
+    result.push(((val / 256) % 256) as u8)
+    result.push((val % 256) as u8)
+    result
+
+"""Build a 60-byte member header."""
+fn build_member_header(name: text, size: i64) -> [u8]:
+    var hdr: [u8] = []
+
+    # ar_name: 16 bytes, space-padded (offset 0)
+    hdr = hdr + pad_text(name + "/", AR_NAME_SIZE)
+
+    # ar_date: 12 bytes (mtime), "0           " for deterministic output (offset 16)
+    hdr = hdr + pad_decimal(0, AR_DATE_SIZE)
+
+    # ar_uid: 6 bytes, "0     " (offset 28)
+    hdr = hdr + pad_decimal(0, AR_UID_SIZE)
+
+    # ar_gid: 6 bytes, "0     " (offset 34)
+    hdr = hdr + pad_decimal(0, AR_GID_SIZE)
+
+    # ar_mode: 8 bytes, "100644  " (rw-r--r--) (offset 40)
+    hdr = hdr + pad_decimal(0o100644, AR_MODE_SIZE)
+
+    # ar_size: 10 bytes, size in decimal (offset 48)
+    hdr = hdr + pad_decimal(size, AR_SIZE_SIZE)
+
+    # ar_fmag: 2 bytes "`\n" (offset 58)
+    hdr.push(AR_FMAG_0 as u8)
+    hdr.push(AR_FMAG_1 as u8)
+
+    hdr
+
+# ============================================================================
+# Extended name table
+# ============================================================================
+
+"""Build the extended name table for names longer than 15 characters (minus '/')."""
+fn build_extended_name_table(members: [ArchiveMemberInput]) -> text:
+    var table = ""
+    for m in members:
+        if m.name.len() >= 15:
+            table = table + m.name + "/\n"
+
+    table
+
+"""Map member names to their reference format (short name or /offset)."""
+fn map_member_names(members: [ArchiveMemberInput], ext_table: text) -> [text]:
+    var names: [text] = []
+    var ext_offset = 0
+
+    for m in members:
+        if m.name.len() < 15:
+            # Short name
+            names.push(m.name)
+        else:
+            # Long name: use "/offset" reference
+            names.push("/" + (ext_offset as text))
+            # Find the length of this entry in the table
+            var entry_len = m.name.len() + 2  # +2 for "/\n"
+            ext_offset = ext_offset + entry_len
+
+    names
+
+# ============================================================================
+# Symbol index
+# ============================================================================
+
+"""Build a GNU symbol index from all defined symbols."""
+fn build_symbol_index(member_offsets: [i64], members: [ArchiveMemberInput]) -> <[u8], bool>:
+    # Collect all symbols with their member offsets
+    var symbols: [[text, i64]] = []
+
+    var mi = 0
+    for m in members:
+        for sym in m.defined_symbols:
+            symbols.push([sym, member_offsets[mi]])
+        mi = mi + 1
+
+    if symbols.len() == 0:
+        return [[], false]
+
+    var index: [u8] = []
+
+    # Count: big-endian u32
+    index = index + u32_to_be(symbols.len() as i64)
+
+    # Member offsets: count × big-endian u32
+    for sym_pair in symbols:
+        index = index + u32_to_be(sym_pair[1])
+
+    # Symbol names: NUL-terminated strings
+    for sym_pair in symbols:
+        val sym = sym_pair[0]
+        for i in 0..sym.len():
+            val ch = sym[i:i + 1]
+            if ch == " ": index.push(0x20 as u8)
+            elif ch == "/": index.push(0x2F as u8)
+            elif ch == ".": index.push(0x2E as u8)
+            elif ch == "_": index.push(0x5F as u8)
+            elif ch == "-": index.push(0x2D as u8)
+            else:
+                val bytes = text_to_bytes(ch)
+                if bytes.len() > 0:
+                    index.push(bytes[0])
+                else:
+                    index.push(0x3F as u8)
+        index.push(0x00 as u8)  # NUL terminator
+
+    [index, true]
+
+# ============================================================================
+# Main archive writer
+# ============================================================================
+
+"""
+Write an ar archive containing the given members.
+Returns the complete archive as a byte array.
+"""
+pub fn archive_write(members: [ArchiveMemberInput]) -> [u8]:
+    var archive: [u8] = []
+
+    # Write magic
+    archive.push(AR_MAGIC_0 as u8)
+    archive.push(AR_MAGIC_1 as u8)
+    archive.push(AR_MAGIC_2 as u8)
+    archive.push(AR_MAGIC_3 as u8)
+    archive.push(AR_MAGIC_4 as u8)
+    archive.push(AR_MAGIC_5 as u8)
+    archive.push(AR_MAGIC_6 as u8)
+    archive.push(AR_MAGIC_7 as u8)
+
+    # Build extended name table
+    val ext_table = build_extended_name_table(members)
+    val mapped_names = map_member_names(members, ext_table)
+
+    # Determine member offsets (for symbol index)
+    var member_offsets: [i64] = []
+    var current_offset = 8  # After magic
+
+    # Account for symbol index space (if any symbols exist)
+    var has_symbols = false
+    var i = 0
+    for m in members:
+        if m.defined_symbols.len() > 0:
+            has_symbols = true
+        i = i + 1
+
+    if has_symbols:
+        current_offset = current_offset + AR_HEADER_SIZE
+        var sym_data = build_symbol_index([0], members)
+        current_offset = current_offset + sym_data[0].len()
+        if sym_data[0].len() % 2 != 0:
+            current_offset = current_offset + 1
+
+    # Account for extended name table
+    if ext_table.len() > 0:
+        current_offset = current_offset + AR_HEADER_SIZE
+        current_offset = current_offset + ext_table.len()
+        if ext_table.len() % 2 != 0:
+            current_offset = current_offset + 1
+
+    # Calculate member offsets
+    for m in members:
+        member_offsets.push(current_offset)
+        current_offset = current_offset + AR_HEADER_SIZE
+        current_offset = current_offset + m.data.len()
+        if m.data.len() % 2 != 0:
+            current_offset = current_offset + 1
+
+    # Write symbol index if present
+    if has_symbols:
+        val sym_result = build_symbol_index(member_offsets, members)
+        val sym_data = sym_result[0]
+
+        archive = archive + build_member_header("/", sym_data.len())
+        archive = archive + sym_data
+        if sym_data.len() % 2 != 0:
+            archive.push(0x00 as u8)
+
+    # Write extended name table if present
+    if ext_table.len() > 0:
+        archive = archive + build_member_header("//", ext_table.len())
+        val ext_bytes = text_to_bytes(ext_table)
+        archive = archive + ext_bytes
+        if ext_table.len() % 2 != 0:
+            archive.push(0x00 as u8)
+
+    # Write members
+    var mi = 0
+    for m in members:
+        archive = archive + build_member_header(mapped_names[mi], m.data.len())
+        archive = archive + m.data
+        if m.data.len() % 2 != 0:
+            archive.push(0x00 as u8)
+        mi = mi + 1
+
+    archive
