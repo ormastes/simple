@@ -33,6 +33,10 @@ means readback did not establish that exact state. Every response carries
 `publication: not_acceptance`. No state here means upstream acceptance, a
 merged PR, or imported accepted results.
 
+The host policy keeps `allow_prepare`, `allow_reconcile`, and
+`allow_topic_publish` separate. This slice enables only the first two; a topic
+publisher requires its own explicit host grant.
+
 The reconciliation read path verifies the immutable object bytes but does not
 reissue or prove a local durable receipt. The preparation and retry paths do
 reissue the draft store `put` and verify the returned durable receipt before
