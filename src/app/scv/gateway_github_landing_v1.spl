@@ -31,6 +31,7 @@ pub struct ScvGithubLandingReadbackV1:
     complete: bool
     protected_ref_oid: text
     pulls: [ScvGithubLandingPullV1]
+    requests: u64
 
 pub struct ScvGatewayGithubLandingPortV1:
     # Tests inject raw JSON responses into the same strict decoder used by the
@@ -53,7 +54,9 @@ pub struct ScvGatewayGithubLandingResultV1:
     content_sha256: text
     pull_request_number: u64
     merge_commit_sha: text
+    observed_pr_merge_sha: text
     observation_id: text
+    provider_requests: u64
 
 fn _scv_gh_landing_sha1_v1(value: text) -> bool:
     if value.len() != 40: return false
@@ -154,8 +157,10 @@ fn _scv_gh_landing_pull_identity_v1(policy: ScvGithubReadPolicyV1,
     val base = _scv_gh_landing_json_field_v1(value, "base")?
     val head_repo = _scv_gh_landing_json_field_v1(head, "repo")?
     val base_repo = _scv_gh_landing_json_field_v1(base, "repo")?
-    val head_repo_id = _scv_gh_landing_json_number_v1(head_repo, "id")?.to_text()
-    val base_repo_id = _scv_gh_landing_json_number_v1(base_repo, "id")?.to_text()
+    val head_repo_number = _scv_gh_landing_json_number_v1(head_repo, "id")?
+    val base_repo_number = _scv_gh_landing_json_number_v1(base_repo, "id")?
+    val head_repo_id = head_repo_number.to_text()
+    val base_repo_id = base_repo_number.to_text()
     val head_ref = _scv_gh_landing_json_text_v1(head, "ref")?
     val head_sha = _scv_gh_landing_json_text_v1(head, "sha")?
     val base_name = _scv_gh_landing_json_text_v1(base, "ref")?
@@ -231,7 +236,7 @@ fn _scv_gh_landing_live_page_v1(policy: ScvGithubReadPolicyV1,
     val base = base_ref[11:]
     if not topic.starts_with("scv/") or topic.len() != 36 or base == "":
         return Err("SCV_GH_LANDING_REF_SCOPE")
-    val endpoint = "repositories/{repo.github_repository_id}/pulls?state=all&head={repo.owner}:{topic}&base={base}&per_page=100&page={page}"
+    val endpoint = "repos/{repo.owner}/{repo.repository}/pulls?state=all&head={repo.owner}:{topic}&base={base}&per_page=100&page={page}"
     _scv_gh_landing_raw_http_v1(policy, endpoint, lease_held)
 
 fn _scv_gh_landing_live_pull_detail_v1(policy: ScvGithubReadPolicyV1,
@@ -254,7 +259,7 @@ fn _scv_gh_landing_live_detail_v1(policy: ScvGithubReadPolicyV1,
     if policy.allowlist.len() != 1 or number == 0u64: return Err("SCV_GH_LANDING_PULL_NUMBER")
     val repo = policy.allowlist[0]
     _scv_gh_landing_raw_http_v1(policy,
-        "repositories/{repo.github_repository_id}/pulls/{number}", lease_held)
+        "repos/{repo.owner}/{repo.repository}/pulls/{number}", lease_held)
 
 fn _scv_gh_landing_live_ref_v1(policy: ScvGithubReadPolicyV1,
         selector: text, lease_held: fn() -> bool) -> Result<text, text>:
@@ -262,7 +267,7 @@ fn _scv_gh_landing_live_ref_v1(policy: ScvGithubReadPolicyV1,
         return Err("SCV_GH_LANDING_REF_SCOPE")
     val repo = policy.allowlist[0]
     _scv_gh_landing_raw_http_v1(policy,
-        "repositories/{repo.github_repository_id}/git/ref/{selector[5:]}", lease_held)
+        "repos/{repo.owner}/{repo.repository}/git/ref/{selector[5:]}", lease_held)
 
 fn _scv_gh_landing_decode_ref_v1(policy: ScvGithubReadPolicyV1,
         source: text, selector: text) -> Result<text, text>:
@@ -288,17 +293,23 @@ fn _scv_gh_landing_raw_page_v1(policy: ScvGithubReadPolicyV1,
     Ok(pulls)
 
 fn _scv_gh_landing_readback_v1(policy: ScvGithubReadPolicyV1,
-        topic_ref: text, base_ref: text, candidate_oid: text,
+        request_budget: u64, topic_ref: text, base_ref: text, candidate_oid: text,
         port: ScvGatewayGithubLandingPortV1,
         lease_held: fn() -> bool) -> Result<ScvGithubLandingReadbackV1, text>:
     if policy.allowlist.len() != 1: return Err("SCV_GH_LANDING_POLICY")
     val repository = policy.allowlist[0]
+    val budget = request_budget as i64
+    if budget < 4 or budget > 12: return Err("SCV_GH_LANDING_REQUEST_BUDGET")
+    var requests = 0u64
+    requests = requests + 1u64
     val repository_source = port.read_repository(policy, lease_held)?
     _scv_gh_landing_repo_valid_v1(policy, repository_source)?
     var pulls: [ScvGithubLandingPullV1] = []
     var complete = false
     var page = 1
     while page <= 8:
+        if requests + 3u64 > request_budget: break
+        requests = requests + 1u64
         val source = port.read_pull_page(policy, topic_ref, base_ref, page, lease_held)?
         val parsed_page = _scv_gh_landing_raw_page_v1(policy, source, topic_ref, base_ref)?
         for pull in parsed_page: pulls.push(pull)
@@ -308,17 +319,24 @@ fn _scv_gh_landing_readback_v1(policy: ScvGithubReadPolicyV1,
         page = page + 1
     var detail_pulls: [ScvGithubLandingPullV1] = []
     if complete and pulls.len() == 1:
+        if requests + 3u64 > request_budget:
+            return Err("SCV_GH_LANDING_REQUEST_BUDGET")
+        requests = requests + 1u64
         val detail_source = port.read_pull_detail(policy, pulls[0].number, lease_held)?
         detail_pulls.push(_scv_gh_landing_pull_detail_v1(policy, detail_source, pulls[0])?)
     elif complete and pulls.len() > 1:
         detail_pulls = pulls
+    if requests + 2u64 > request_budget:
+        return Err("SCV_GH_LANDING_REQUEST_BUDGET")
+    requests = requests + 1u64
     val protected_source = port.read_protected_ref(policy, base_ref, lease_held)?
     val protected_oid = _scv_gh_landing_decode_ref_v1(policy, protected_source, base_ref)?
+    requests = requests + 1u64
     _scv_gh_landing_repo_valid_v1(policy, port.read_repository(policy, lease_held)?)?
     if candidate_oid == "": return Err("SCV_GH_LANDING_CANDIDATE")
     Ok(ScvGithubLandingReadbackV1(repository_id: repository.repository_id,
         github_repository_id: repository.github_repository_id, complete: complete,
-        protected_ref_oid: protected_oid, pulls: detail_pulls))
+        protected_ref_oid: protected_oid, pulls: detail_pulls, requests: requests))
 
 fn _scv_gh_landing_topic_ref_v1(policy: ScvGatewayGithubPublishPolicyV2,
         scope: ScvDraftBlobAdmittedScopeV1,
@@ -344,7 +362,8 @@ fn _scv_gh_landing_result_v1(state: text,
         policy: ScvGatewayGithubPublishPolicyV2, scope: ScvDraftBlobAdmittedScopeV1,
         request: ScvGatewayGithubPublishRequestV2, content_sha256: text,
         protected_ref_oid: text, pull_request_number: u64,
-        merge_commit_sha: text) -> ScvGatewayGithubLandingResultV1:
+        merge_commit_sha: text, observed_pr_merge_sha: text,
+        provider_requests: u64) -> ScvGatewayGithubLandingResultV1:
     ScvGatewayGithubLandingResultV1(state: state, publication: "not_acceptance",
         repository_id: policy.repository.repository_id, principal_id: scope.principal_id,
         request_id: request.request_id, base_ref: request.base_ref,
@@ -352,7 +371,8 @@ fn _scv_gh_landing_result_v1(state: text,
         topic_ref: _scv_gh_landing_topic_ref_v1(policy, scope, request),
         candidate_oid: request.candidate_oid, content_sha256: content_sha256,
         pull_request_number: pull_request_number, merge_commit_sha: merge_commit_sha,
-        observation_id: "")
+        observed_pr_merge_sha: observed_pr_merge_sha,
+        observation_id: "", provider_requests: provider_requests)
 
 fn _scv_gh_landing_state_bytes_v1(result: ScvGatewayGithubLandingResultV1,
         readback_complete: bool) -> [u8]:
@@ -369,6 +389,8 @@ fn _scv_gh_landing_state_bytes_v1(result: ScvGatewayGithubLandingResultV1,
         "prepared_content_sha256": SdnValue.String(result.content_sha256),
         "pull_request_number": SdnValue.Int(result.pull_request_number as i64),
         "merge_commit_sha": SdnValue.String(result.merge_commit_sha),
+        "observed_pr_merge_sha": SdnValue.String(result.observed_pr_merge_sha),
+        "provider_requests": SdnValue.Int(result.provider_requests as i64),
         "readback_complete": SdnValue.Bool(readback_complete),
         "required_validation": SdnValue.String(if result.state == "observed_merged_needs_validation": "not_available" else: "not_required_yet"),
         "required_checks": SdnValue.String("not_verified"),
@@ -380,32 +402,33 @@ fn _scv_gh_landing_observation_id_v1(bytes: [u8]) -> text:
 
 fn _scv_gh_landing_observation_validate_v1(policy: ScvGatewayGithubPublishPolicyV2,
         request: ScvGatewayGithubPublishRequestV2, topic_ref: text,
-        observation: ScvGithubLandingReadbackV1) -> Result<(text, u64, text), text>:
+        observation: ScvGithubLandingReadbackV1) -> Result<(text, u64, text, text), text>:
     if observation.repository_id != policy.repository.repository_id or
        observation.github_repository_id != policy.repository.github_repository_id:
         return Err("SCV_GH_LANDING_READBACK_IDENTITY")
-    if not observation.complete: return Ok(("upstream_unknown", 0u64, ""))
+    if not observation.complete: return Ok(("upstream_unknown", 0u64, "", ""))
     if not _scv_gh_landing_sha1_v1(observation.protected_ref_oid):
         return Err("SCV_GH_LANDING_PROTECTED_REF")
     if observation.pulls.len() > 800: return Err("SCV_GH_LANDING_PULL_BOUND")
-    if observation.pulls.len() == 0: return Ok(("landing_not_found", 0u64, ""))
-    if observation.pulls.len() != 1: return Ok(("landing_ambiguous", 0u64, ""))
+    if observation.pulls.len() == 0: return Ok(("landing_not_found", 0u64, "", ""))
+    if observation.pulls.len() != 1: return Ok(("landing_ambiguous", 0u64, "", ""))
     val pull = observation.pulls[0]
     val topic_name = topic_ref[11:]
     if pull.number == 0u64 or pull.head_ref != topic_name or
        pull.head_repository_id != policy.repository.github_repository_id or
        pull.head_sha != request.candidate_oid or pull.base_ref != request.base_ref[11:] or
        pull.base_repository_id != policy.repository.github_repository_id:
-        return Ok(("upstream_unknown", pull.number, ""))
-    if pull.state == "open" and not pull.merged:
-        if pull.merge_commit_sha != "": return Ok(("upstream_unknown", pull.number, ""))
-        return Ok(("review_pending", pull.number, ""))
-    if pull.state == "closed" and not pull.merged:
-        if pull.merge_commit_sha != "": return Ok(("upstream_unknown", pull.number, ""))
-        return Ok(("closed_unmerged", pull.number, ""))
+        return Ok(("upstream_unknown", pull.number, "", ""))
+    if (pull.state == "open" or pull.state == "closed") and not pull.merged:
+        if pull.merge_commit_sha != "" and not _scv_gh_landing_sha1_v1(pull.merge_commit_sha):
+            return Ok(("upstream_unknown", pull.number, "", pull.merge_commit_sha))
+        if pull.state == "open":
+            return Ok(("review_pending", pull.number, "", pull.merge_commit_sha))
+        return Ok(("closed_unmerged", pull.number, "", pull.merge_commit_sha))
     if pull.state == "closed" and pull.merged and _scv_gh_landing_sha1_v1(pull.merge_commit_sha):
-        return Ok(("observed_merged_needs_validation", pull.number, pull.merge_commit_sha))
-    Ok(("upstream_unknown", pull.number, ""))
+        return Ok(("observed_merged_needs_validation", pull.number, pull.merge_commit_sha,
+            pull.merge_commit_sha))
+    Ok(("upstream_unknown", pull.number, "", pull.merge_commit_sha))
 
 pub fn scv_gateway_github_landing_reconcile_v1(policy: ScvGatewayGithubPublishPolicyV2,
         scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
@@ -427,23 +450,29 @@ pub fn scv_gateway_github_landing_reconcile_v1(policy: ScvGatewayGithubPublishPo
     var protected_ref_oid = ""
     var pull_request_number = 0u64
     var merge_commit_sha = ""
+    var observed_pr_merge_sha = ""
     var complete = false
+    var provider_requests = 0u64
     if not lease_held():
-        match _scv_gh_landing_readback_v1(policy.github, topic_ref, request.base_ref,
+        match _scv_gh_landing_readback_v1(policy.github, policy.landing_request_budget,
+                topic_ref, request.base_ref,
                 request.candidate_oid, port, lease_held):
             case Ok(observation):
                 complete = observation.complete
+                provider_requests = observation.requests
                 protected_ref_oid = observation.protected_ref_oid
                 match _scv_gh_landing_observation_validate_v1(policy, request, topic_ref, observation):
                     case Ok(value):
                         state = value.0
                         pull_request_number = value.1
                         merge_commit_sha = value.2
+                        observed_pr_merge_sha = value.3
                     case Err(_): state = "upstream_unknown"
             case Err(_): state = "upstream_unknown"
     db_git_candidate_cleanup(candidate)?
     var result = _scv_gh_landing_result_v1(state, policy, scope, request,
-        expected_content_sha256, protected_ref_oid, pull_request_number, merge_commit_sha)
+        expected_content_sha256, protected_ref_oid, pull_request_number, merge_commit_sha,
+        observed_pr_merge_sha, provider_requests)
     val bytes = _scv_gh_landing_state_bytes_v1(result, complete)
     val observation_id = _scv_gh_landing_observation_id_v1(bytes)
     val stored = _scv_gh_landing_store_v1(policy, scope, observation_id, bytes)?

@@ -74,7 +74,9 @@ Landing reconciliation separately bounds discovery to eight pages of 100 PRs,
 fetches strict detail only for a unique match, reads the configured protected
 ref, and rechecks numeric repository identity. Exhausting the page bound is
 `upstream_unknown`; an empty result is `landing_not_found` only after a complete
-scan and successful identity/ref readback.
+scan and successful identity/ref readback. A separate configured request
+budget permits 4–12 authenticated API calls, preserving the existing three-call
+read contract. The scan remains unknown if it cannot complete within budget.
 
 ## Qualification
 

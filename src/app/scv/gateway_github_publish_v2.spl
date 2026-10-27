@@ -32,6 +32,7 @@ pub struct ScvGatewayGithubPublishPolicyV2:
     allow_topic_publish: bool
     allow_landing_reconcile: bool
     allow_landing_observation_write: bool
+    landing_request_budget: u64
 
 pub struct ScvGatewayGithubPublishRequestV2:
     repository_id: text
@@ -86,6 +87,10 @@ pub fn scv_gateway_github_publish_policy_validate_v2(policy: ScvGatewayGithubPub
     if not policy.allow_prepare and not policy.allow_reconcile and not policy.allow_topic_publish and
        not policy.allow_landing_reconcile and not policy.allow_landing_observation_write:
         return Err("SCV_GH_PUBLISH_POLICY")
+    if policy.landing_request_budget < 4u64 or policy.landing_request_budget > 12u64 or
+       ((policy.allow_landing_reconcile or policy.allow_landing_observation_write) and
+        policy.landing_request_budget < 5u64):
+        return Err("SCV_GH_PUBLISH_LANDING_BUDGET")
     val canonical_remote = "https://github.com/{policy.repository.owner}/{policy.repository.repository}"
     if policy.remote != canonical_remote and (policy.remote.starts_with("https://") or
        policy.remote.starts_with("file://") or not policy.remote.starts_with("/")):
@@ -265,6 +270,9 @@ pub fn scv_gateway_github_publish_landing_candidate_v2(policy: ScvGatewayGithubP
     if expected_content_sha256 != digest: return Err("SCV_GH_PUBLISH_OUTBOX_IDENTITY")
     val saved = scv_draft_blob_get_v1(policy.outbox_root, scope, digest)?
     if saved != envelope: return Err("SCV_GH_PUBLISH_OUTBOX_IDENTITY")
+    # Reissue the immutable put so a retried/lost acknowledgement observes the
+    # draft owner's durability receipt and directory barriers before readback.
+    _scv_gh_publish_save_v2(policy, scope, request, envelope, digest)?
     _scv_gh_publish_candidate_v2(policy, request, lease_held)
 
 pub fn scv_gateway_github_publish_prepare_v2(policy: ScvGatewayGithubPublishPolicyV2,

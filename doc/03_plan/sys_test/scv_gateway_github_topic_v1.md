@@ -16,10 +16,14 @@ JSON passed through the strict decoder; no live GitHub write is part of testing.
 | LANDING-001: read only configured repository/head/base authority | Raw provider checks numeric repository identity before/after, exact generated head/base, current protected ref, and complete bounded pagination. |
 | LANDING-002: distinguish PR lifecycle without false acceptance | Open, closed-unmerged, merged-needs-validation, absent, ambiguous, and unknown responses are asserted; merged observations remain `not_acceptance`. |
 | LANDING-003: durable retry and scope | Digest-derived immutable observations distinguish open-to-merged changes and replay identical results; read and observation-write capabilities deny before provider access. |
+| LANDING-004: bound GitHub read cost | A distinct 4–12 request budget counts repository, page, detail, and protected-ref reads; budget exhaustion cannot report a complete scan. |
 
 Required check verification, merge-commit tree authentication, protected-ref
 ancestry proof, and native accepted-result import remain out of scope until
 their owning interfaces are admitted. No test may claim these as verified.
+The raw JSON seam exercises strict response decoding, not `gh` HTTP header
+framing, redirects, live authentication, or network behavior; those remain
+**NOT_RUN**.
 
 ## Run evidence
 

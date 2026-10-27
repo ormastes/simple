@@ -58,8 +58,11 @@ The live provider queries PR pages for the configured owner and generated
 topic branch, follows explicit page numbers up to eight 100-row pages, and
 fetches detail only for one unique match. It reads the current protected ref
 and verifies numeric repository identity both before and after the observation.
-Raw response size and nesting are bounded. Tests inject raw JSON responses into
-the same strict decoder.
+Raw response size and nesting are bounded. A distinct host-owned
+`landing_request_budget` limits the whole readback to 4–12 API calls without
+changing the existing three-call GitHub read contract. If the budget cannot
+complete discovery and identity/ref checks, the state stays unknown. Tests
+inject raw JSON responses into the same strict decoder.
 
 Complete empty discovery is `landing_not_found`; an open PR is
 `review_pending`; closed unmerged is `closed_unmerged`; multiple matches are

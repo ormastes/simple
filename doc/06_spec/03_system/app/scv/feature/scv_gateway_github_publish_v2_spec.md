@@ -36,7 +36,11 @@ merged PR, or imported accepted results.
 The host policy keeps `allow_prepare`, `allow_reconcile`, and
 `allow_topic_publish` separate. Landing readback additionally requires both
 `allow_landing_reconcile` and `allow_landing_observation_write`; neither implies
-topic write permission.
+topic write permission. These fields default to false when omitted from an
+existing v2 policy. `landing_request_budget` defaults to 12 and bounds the
+landing provider to 4–12 authenticated API calls; it must allow at least five
+when landing is enabled. This does not change the existing three-call GitHub
+read API contract.
 
 The executable server entry point is `scv gateway publish-serve --config
 <native.sdn> --development-loopback --reason <audit reason>`. The v2 policy is

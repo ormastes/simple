@@ -48,6 +48,9 @@ the live provider. No credentials or live service are used.
 5. An exact merged PR is durably recorded as
    `observed_merged_needs_validation` with the actual merge SHA and protected
    ref SHA. This is an observation only, with `publication: not_acceptance`.
+   GitHub may return a tentative PR `merge_commit_sha` before merge; that value
+   is stored as `observed_pr_merge_sha`, while the result `merge_commit_sha`
+   remains empty until the PR is closed and merged.
 6. An identical retry reuses its digest-derived observation ID. A changed
    authority snapshot receives a distinct ID.
 
@@ -56,6 +59,10 @@ transport failure, changed repository identity, or incomplete pagination stay
 `upstream_unknown`. Required checks, protected-ref ancestry, actual merged tree
 verification, and native history import have no admitted owner yet; consequently
 `upstream_accepted` and `accepted_result_imported` are not emitted.
+The dedicated `landing_request_budget` defaults to 12 for backward-compatible
+v2 config parsing, is constrained to 4–12 calls, and must be at least 5 when
+landing capabilities are enabled. The scan remains unknown when its configured
+budget cannot complete the required readback.
 
 **Generated-manual check:** NOT_RUN because no admitted Simple runtime is
 available. The executable spec remains the source of test behavior.
