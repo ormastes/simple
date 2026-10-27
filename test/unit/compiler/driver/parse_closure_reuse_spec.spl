@@ -3,7 +3,11 @@
 use std.spec
 use std.spec.step
 use app.cli.native_build_parse_closure_owner.{native_build_parse_closure_reuse_decision_v1}
-use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_request_identity_matches_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_request_identity_matches_v1,
+    NativeEntryClosureRequestV1, native_entry_closure_request_publish_v1}
+use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use std.io_runtime.{dir_create_all, file_read, getpid}
 
 fn admit_error_for(roots: [text]) -> text:
     if native_entry_closure_request_identity_matches_v1("/owner", "src/main.spl", roots, "producer",
@@ -41,20 +45,42 @@ describe "parse closure publish-once reuse":
         expect(decision.is_ok()).to_equal(true)
         expect(decision.unwrap()).to_equal(false)
 
-    it "replays entry-closure-publication-conflict: a child never re-publishes":
-        step("phase-3 log: shards raced the coordinator to publish; children must only consume")
-        # Every child outcome under an expected publication is reuse or error,
-        # never Ok(false) (which would make the child a second publisher).
-        val reused = native_build_parse_closure_reuse_decision_v1(true, true, "/c/r/request.v1", "d", "")
-        val missing = native_build_parse_closure_reuse_decision_v1(true, true, "", "", "")
-        val conflicted = native_build_parse_closure_reuse_decision_v1(true, true, "/c/r/request.v1", "d",
-            "closure request rejected: entry-closure-publication-conflict")
-        expect(reused.unwrap()).to_equal(true)
-        expect(missing.is_err()).to_equal(true)
-        expect(conflicted.is_err()).to_equal(true)
-        expect(conflicted.unwrap_err().contains("entry-closure-publication-conflict")).to_equal(true)
-
     it "leaves non-closure builds alone (no publication expected)":
         step("child without --entry-closure keeps its legacy path")
         val decision = native_build_parse_closure_reuse_decision_v1(true, false, "", "", "")
         expect(decision.unwrap()).to_equal(false)
+
+    it "replays entry-closure-publication-conflict: a second publication is rejected, the first is reused":
+        step("publish the same request twice; exclusive create refuses the second writer")
+        val dir = "build/parse_closure_reuse_spec_{getpid()}"
+        expect(dir_create_all(dir)).to_equal(true)
+        val snapshot = ScvCompileSnapshotV1(true, "", "rev", "commit", "tree", "inv", 1,
+            "/frozen", "/frozen/prov", "/frozen/receipt", false)
+        val binding = NativeEntryClosureBindingV1("rev", "commit", "tree", "inv", "src/main.spl",
+            ["src/app"], "policy", "producer")
+        val request = NativeEntryClosureRequestV1("/owner", snapshot, "srcdigest", 1, binding,
+            dir + "/selection.v1", "receiptdigest")
+        val path = dir + "/request.v1"
+        val first = native_entry_closure_request_publish_v1(path, request)
+        val second = native_entry_closure_request_publish_v1(path, request)
+        expect(first.is_ok()).to_equal(true)
+        expect(second.is_err()).to_equal(true)
+        expect(second.unwrap_err()).to_equal("entry-closure-request-publication-failed")
+        # The racing process must consume the first publication, never walk.
+        val reuse = native_build_parse_closure_reuse_decision_v1(true, true, path, first.unwrap(), "")
+        expect(reuse.unwrap()).to_equal(true)
+
+    it "publishes before the coordinator prepass and reuses in the in-process worker":
+        step("bootstrap_main: authority -> prepublish -> prepass; worker goes through publish-once")
+        val boot = file_read("src/app/cli/bootstrap_main.spl")
+        val authority_at = boot.index_of("if not bootstrap_coordinator_publish_authority_v1(worker_args):") ?? -1
+        val publish_at = boot.index_of("if not native_build_coordinator_prepublish_closure_v1(worker_args):") ?? -1
+        val prepass_at = boot.index_of("if not bootstrap_capsule_shard_prepass_routed(args, true, true):") ?? -1
+        expect(authority_at > 0).to_equal(true)
+        expect(publish_at > authority_at).to_equal(true)
+        expect(prepass_at > publish_at).to_equal(true)
+        val main = file_read("src/app/cli/native_build_main.spl")
+        expect(main.contains("val _closure_reused = match native_build_closure_publish_once_v1(")).to_equal(true)
+        # The coordinator's own later call sees its consumer marker and reuses.
+        val again = native_build_parse_closure_reuse_decision_v1(true, true, "/c/r/request.v1", "d", "")
+        expect(again.unwrap()).to_equal(true)
