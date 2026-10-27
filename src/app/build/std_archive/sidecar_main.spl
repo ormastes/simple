@@ -1,0 +1,44 @@
+# Write the <archive>.lib.sdn sidecar for a freshly built std archive.
+# Usage: bin/simple run src/app/build/std_archive/sidecar_main.spl -- \
+#            <archive> <semver> <triple> <cpu_tier> <producer>
+#        bin/simple run src/app/build/std_archive/sidecar_main.spl -- \
+#            --check <archive> <triple> <cpu_tier>     (admit only, never rewrite)
+# Called by scripts/build/build-stdlib-static.shs after llvm-ar wrote <archive>.
+
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.io_runtime.{file_write, file_hash_sha256_or_empty}
+use app.build.std_archive.std_archive.{StdArchiveSidecar, std_archive_render_sidecar,
+    std_archive_sidecar_path, std_archive_admit}
+
+fn main() -> i64:
+    val raw = get_cli_args()
+    # `bin/simple run <file> -- a b` passes the `--` through; drop it.
+    val args = if raw.len() > 0 and raw[0] == "--": raw[1:] else: raw
+    if args.len() == 4 and args[0] == "--check":
+        val c = std_archive_admit(args[1], args[2], args[3])
+        if not c.ok:
+            print(c.refusal)
+            return 1
+        print("std-archive: cached " + args[1])
+        return 0
+    if args.len() < 5:
+        print("usage: sidecar_main <archive> <semver> <triple> <cpu_tier> <producer>")
+        return 2
+    val archive = args[0]
+    val sha = file_hash_sha256_or_empty(archive)
+    if sha.len() == 0:
+        print("std-archive: cannot hash " + archive)
+        return 2
+    var none: [text] = []
+    # TODO(libver): replace "unknown" with interface_digest_of over the std units.
+    val s = StdArchiveSidecar("libsimple_std", args[1], "1", "0", "unknown",
+        args[4], args[2], args[3], sha, none)
+    if not file_write(std_archive_sidecar_path(archive), std_archive_render_sidecar(s)):
+        print("std-archive: cannot write sidecar for " + archive)
+        return 2
+    val v = std_archive_admit(archive, args[2], args[3])
+    if not v.ok:
+        print(v.refusal)
+        return 1
+    print("std-archive: ready " + archive)
+    0

@@ -1,0 +1,196 @@
+"""
+## Purpose and audience
+I build apps with `native-build`, and I do not want every app build to
+recompile the standard library. The stdlib is prebuilt once per target and CPU
+tier into `libsimple_std-<semver>-<triple>-<tier>.a` by its own opt-in build
+group, with a `.lib.sdn` sidecar that says exactly what it is. This spec is for
+the engineers who own that archive and for the lanes that link against it.
+
+## Operator workflow
+Run: `bin/simple test test/02_integration/stdlib_archive/stdlib_static_archive_spec.spl`.
+Build the archive: `sh scripts/build/build-stdlib-static.shs --triple <triple> [--tier <tier>]`.
+Fixtures live under `build/test_fixtures/stdlib_static_archive/`.
+
+## Compatibility and limitations
+The archive name and sidecar are identical on Windows (llvm-mingw), Linux,
+macOS, FreeBSD and SimpleOS; only the archive's object format follows the
+triple. Link consumption (`native-build --std-archive`) and the live
+build-and-run rows are blocked until the phase-3 compiler links (no heavy
+native builds before then); they stay visible as pending rows with an owner
+and a resume command.
+
+## Verification guidance and troubleshooting
+Every refusal reads `std-archive-refused: <code>: ...`. A `sha256-mismatch`
+means the archive changed after its sidecar was written: rebuild it with the
+script, never edit the sidecar by hand.
+"""
+# @manual_section: stdlib static archive
+# @req REQ-STD-ARCHIVE-001 one host-neutral archive name per (semver, triple, tier)
+# @req REQ-STD-ARCHIVE-002 sidecar carries name, semver, abi, iface_digest, producer, triple, cpu_tier, sha256
+# @req REQ-STD-ARCHIVE-003 link admission refuses a tampered, mismatched or incomplete archive by name
+# @req REQ-STD-ARCHIVE-004 the archive is its own opt-in build group, never in a default build
+# @req REQ-STD-ARCHIVE-005 an app links the prebuilt archive, runs, and a rebuild recompiles 0 std units
+
+use app.build.std_archive.std_archive.{StdArchiveSidecar, std_archive_file_name,
+    std_archive_sidecar_path, std_archive_render_sidecar, std_archive_parse_sidecar,
+    std_archive_admit, std_archive_auto_path}
+use app.build.targets.build_targets.{load_targets_file, validate_targets,
+    default_group_targets, group_targets}
+use std.nogc_sync_mut.io_runtime.{file_write, file_hash_sha256_or_empty}
+use std.io_runtime.{dir_create_all}
+use std.spec.step
+
+val DIR = "build/test_fixtures/stdlib_static_archive"
+val TRIPLE = "x86_64-pc-windows-gnu"
+val TIER = "baseline"
+
+fn _fixture(triple: text, tier: text, body: text) -> text:
+    """Write a stand-in archive plus a sidecar that truthfully describes it."""
+    dir_create_all(DIR)
+    val path = DIR + "/" + std_archive_file_name("1.0.0", triple, tier)
+    val _w = file_write(path, body)
+    var none: [text] = []
+    val s = StdArchiveSidecar("libsimple_std", "1.0.0", "1", "0", "unknown",
+        "spec-producer", triple, tier, file_hash_sha256_or_empty(path), none)
+    val _s = file_write(std_archive_sidecar_path(path), std_archive_render_sidecar(s))
+    path
+
+describe "stdlib static archive: one name on every host":
+    """
+    As a lane that links std, I can compute the archive name for any host
+    without asking which OS I am on.
+    """
+
+    it "names the Windows llvm-mingw archive with a plain .a":
+        # @req REQ-STD-ARCHIVE-001
+        step("Given the Windows llvm-mingw triple and the baseline tier")
+        step("Then the archive is libsimple_std-1.0.0-x86_64-pc-windows-gnu-baseline.a")
+        expect(std_archive_file_name("1.0.0", "x86_64-pc-windows-gnu", "baseline")).to_equal("libsimple_std-1.0.0-x86_64-pc-windows-gnu-baseline.a")
+
+    it "names the Linux, macOS, FreeBSD and SimpleOS archives the same way":
+        # @req REQ-STD-ARCHIVE-001
+        step("Given one triple per remaining host")
+        step("Then each name differs only by its triple")
+        expect(std_archive_file_name("1.0.0", "x86_64-unknown-linux-gnu", "v3")).to_equal("libsimple_std-1.0.0-x86_64-unknown-linux-gnu-v3.a")
+        expect(std_archive_file_name("1.0.0", "aarch64-apple-darwin", "baseline")).to_equal("libsimple_std-1.0.0-aarch64-apple-darwin-baseline.a")
+        expect(std_archive_file_name("1.0.0", "x86_64-unknown-freebsd", "baseline")).to_equal("libsimple_std-1.0.0-x86_64-unknown-freebsd-baseline.a")
+        expect(std_archive_file_name("1.0.0", "riscv64-unknown-simpleos", "baseline")).to_equal("libsimple_std-1.0.0-riscv64-unknown-simpleos-baseline.a")
+
+    it "keeps one cache directory per target and CPU tier":
+        # @req REQ-STD-ARCHIVE-001
+        step("When I ask where --std-archive auto looks for the v3 Linux archive")
+        val p = std_archive_auto_path("R", "1.0.0", "x86_64-unknown-linux-gnu", "v3")
+        step("Then the path is keyed by triple, then tier")
+        expect(p.ends_with("/x86_64-unknown-linux-gnu/v3/libsimple_std-1.0.0-x86_64-unknown-linux-gnu-v3.a")).to_equal(true)
+
+describe "stdlib static archive: the sidecar says what the archive is":
+    it "round-trips every required field":
+        # @req REQ-STD-ARCHIVE-002
+        step("Given a sidecar rendered from known values")
+        var none: [text] = []
+        val s = StdArchiveSidecar("libsimple_std", "1.0.0", "1", "0", "d1", "p1", TRIPLE, TIER, "abc", none)
+        step("When I parse it back")
+        val r = std_archive_parse_sidecar(std_archive_render_sidecar(s))
+        step("Then nothing is missing and the identity fields survive")
+        expect(r.missing.len()).to_equal(0)
+        expect(r.triple).to_equal(TRIPLE)
+        expect(r.cpu_tier).to_equal(TIER)
+        expect(r.iface_digest).to_equal("d1")
+
+    it "lists a missing field instead of guessing it":
+        # @req REQ-STD-ARCHIVE-002
+        step("Given a sidecar without a sha256 line")
+        val r = std_archive_parse_sidecar("name: libsimple_std\nsemver: 1.0.0\n")
+        step("Then sha256 is reported missing")
+        expect(r.missing.contains("sha256")).to_equal(true)
+
+describe "stdlib static archive: link admission":
+    """
+    As the link step, I only link an archive whose sidecar matches it byte for
+    byte and matches the target I am building for.
+    """
+
+    it "admits an archive that matches its sidecar and my target":
+        # @req REQ-STD-ARCHIVE-003
+        step("Given an archive with a truthful sidecar for the Windows triple")
+        val path = _fixture(TRIPLE, TIER, "!<arch>\nfixture-ok\n")
+        step("Then admission succeeds")
+        val v = std_archive_admit(path, TRIPLE, TIER)
+        expect(v.refusal).to_equal("")
+        expect(v.ok).to_equal(true)
+
+    it "refuses an archive changed after its sidecar was written":
+        # @req REQ-STD-ARCHIVE-003
+        step("Given an admitted archive")
+        val path = _fixture(TRIPLE, TIER, "!<arch>\nfixture-ok\n")
+        step("When its bytes change but the sidecar does not")
+        val _t = file_write(path, "!<arch>\ntampered\n")
+        step("Then admission refuses it with sha256-mismatch")
+        expect(std_archive_admit(path, TRIPLE, TIER).refusal.starts_with("std-archive-refused: sha256-mismatch:")).to_equal(true)
+
+    it "refuses an archive built for another triple":
+        # @req REQ-STD-ARCHIVE-003
+        step("Given an archive built for Linux")
+        val path = _fixture("x86_64-unknown-linux-gnu", TIER, "!<arch>\nlinux\n")
+        step("When I link for Windows")
+        step("Then admission refuses it with triple-mismatch")
+        expect(std_archive_admit(path, TRIPLE, TIER).refusal.starts_with("std-archive-refused: triple-mismatch:")).to_equal(true)
+
+    it "refuses an archive built for another CPU tier":
+        # @req REQ-STD-ARCHIVE-003
+        step("Given a v3-tier archive")
+        val path = _fixture(TRIPLE, "v3", "!<arch>\nv3\n")
+        step("When I link for the baseline tier")
+        step("Then admission refuses it with tier-mismatch")
+        expect(std_archive_admit(path, TRIPLE, TIER).refusal.starts_with("std-archive-refused: tier-mismatch:")).to_equal(true)
+
+    it "refuses an archive with no sidecar":
+        # @req REQ-STD-ARCHIVE-003
+        step("Given an archive file with no .lib.sdn next to it")
+        dir_create_all(DIR)
+        val path = DIR + "/" + std_archive_file_name("9.9.9", TRIPLE, TIER)
+        val _w = file_write(path, "!<arch>\n")
+        step("Then admission refuses it with missing-sidecar")
+        expect(std_archive_admit(path, TRIPLE, TIER).refusal.starts_with("std-archive-refused: missing-sidecar:")).to_equal(true)
+
+describe "stdlib static archive: its own build group":
+    it "is declared in the stdlib_static group and left out of a default build":
+        # @req REQ-STD-ARCHIVE-004
+        step("Given the repository's root targets.sdn, which includes config/build/stdlib_static.sdn")
+        val ts = load_targets_file("targets.sdn", ".")
+        step("Then the configuration validates")
+        expect(validate_targets(ts, ".").len()).to_equal(0)
+        step("And the stdlib_static group holds exactly the archive target")
+        expect(group_targets(ts, "stdlib_static")).to_equal(["//std:libsimple_std"])
+        step("And a default build does not select it")
+        expect(default_group_targets(ts).contains("//std:libsimple_std")).to_equal(false)
+
+describe "stdlib static archive: apps link it instead of recompiling std":
+    """
+    Per-host rows. Blocked rows stay visible with their owner and the command
+    that resumes them.
+    """
+
+    it "links an app against the prebuilt archive and runs it on Windows":
+        # @req REQ-STD-ARCHIVE-005
+        pending("blocked: needs native-build --std-archive link consumption and a native build, held until phase-3 links (memory budget). owner: backend-dylib lane. resume: sh scripts/build/build-stdlib-static.shs --triple x86_64-pc-windows-gnu && bin/simple test test/02_integration/stdlib_archive/stdlib_static_archive_spec.spl")
+
+    it "rebuilds the app with 0 std recompiles on Windows":
+        # @req REQ-STD-ARCHIVE-005
+        pending("blocked: same as the Windows link row; asserts the std-unit compile count is 0 on the second build. owner: backend-dylib lane. resume: rerun this spec after the --std-archive PR lands")
+
+    it "links and runs on Linux":
+        # @req REQ-STD-ARCHIVE-005
+        pending("blocked: host not reachable from this Windows lane. owner: backend-dylib lane. resume: on a Linux host, sh scripts/build/build-stdlib-static.shs --triple x86_64-unknown-linux-gnu && bin/simple test test/02_integration/stdlib_archive/stdlib_static_archive_spec.spl")
+
+    it "links and runs on macOS":
+        # @req REQ-STD-ARCHIVE-005
+        pending("blocked: host not reachable from this Windows lane. owner: backend-dylib lane. resume: on a macOS host, sh scripts/build/build-stdlib-static.shs --triple aarch64-apple-darwin && bin/simple test test/02_integration/stdlib_archive/stdlib_static_archive_spec.spl")
+
+    it "links and runs on FreeBSD":
+        # @req REQ-STD-ARCHIVE-005
+        pending("blocked: host not reachable from this Windows lane. owner: backend-dylib lane. resume: sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke, then in the guest sh scripts/build/build-stdlib-static.shs --triple x86_64-unknown-freebsd")
+
+    it "links and runs on SimpleOS":
+        # @req REQ-STD-ARCHIVE-005
+        pending("blocked: host not reachable from this Windows lane; SimpleOS needs only the static path. owner: backend-dylib lane. resume: sh scripts/build/build-stdlib-static.shs --triple riscv64-unknown-simpleos, then boot via the riscv64 QEMU lane")
