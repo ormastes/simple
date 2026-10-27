@@ -1,0 +1,90 @@
+# CPU Tier Selection
+# Selects the best-ranked tier among candidates that are admitted by the host,
+# breaking ties by feature count and then lexicographically by tier text.
+# Use: at runtime, pick which tier dylib to load based on host capabilities.
+
+use std.common.cpu_tier.tier_id.{TierId, tier_admits, tier_rank, tier_text, tier_alias}
+
+# Select the best tier among candidates that a host can support.
+# Admission: same architecture, artifact base rank <= host base rank,
+# all artifact features available on host (explicit or implied).
+# Tiebreak: highest feature count, then lexicographic tier_text.
+# Returns None if no candidate is admitted.
+fn tier_select(host: TierId, candidates: [TierId]) -> Option<TierId>:
+    var best: Option<TierId> = None
+    var best_rank: i64 = -1i64
+    var best_feature_count: i64 = -1i64
+    var best_text: text = ""
+
+    var i: i64 = 0i64
+    while i < candidates.len():
+        val candidate = candidates[i]
+        if tier_admits(candidate, host):
+            val cand_rank = tier_rank(candidate.arch, candidate.base)
+            val cand_feature_count = candidate.features.len()
+            val cand_text = tier_text(candidate)
+
+            var is_better = false
+            if best.is_none():
+                is_better = true
+            else:
+                # Compare by rank first: higher rank is better.
+                if cand_rank > best_rank:
+                    is_better = true
+                else if cand_rank == best_rank:
+                    # Same rank: compare by feature count: more features is better.
+                    if cand_feature_count > best_feature_count:
+                        is_better = true
+                    else if cand_feature_count == best_feature_count:
+                        # Same rank and feature count: lexicographic tiebreak.
+                        if cand_text < best_text:
+                            is_better = true
+
+            if is_better:
+                best = Some(candidate)
+                best_rank = cand_rank
+                best_feature_count = cand_feature_count
+                best_text = cand_text
+
+        i = i + 1i64
+
+    best
+
+# Map a numeric probe level index to the architecture-specific LLVM tier base name.
+# Dual-run twin of probe_level() in vector_level_dispatch.c:45-99.
+#   x86_64: 0->x86-64 (no cpuid), 1->x86-64 (SSE2), 2->x86-64-v2, 3->x86-64-v3 (+OS YMM),
+#           4->x86-64-v4 (+OS ZMM)
+#           3->x86-64-v4 (AVX-512)
+#   aarch64: 0->armv8-a (no NEON), 1->armv8-a (NEON), 2->armv9-a (SVE), 3->armv9-a (SVE2)
+#   riscv64: 0->rv64gc (no RVV), 1->rv64gcv (RVV enabled)
+fn tier_level_name(arch: text, level_index: i64) -> text:
+    match arch:
+        case "x86_64":
+            match level_index:
+                case 0i64: "x86-64"
+                case 1i64: "x86-64"
+                case 2i64: "x86-64-v2"
+                case 3i64: "x86-64-v3"
+                case 4i64: "x86-64-v4"
+                case _: "x86-64"  # Fallback to baseline
+        case "aarch64":
+            match level_index:
+                case 0i64: "armv8-a"
+                case 1i64: "armv8-a"
+                case 2i64: "armv9-a"
+                case 3i64: "armv9-a"
+                case _: "armv8-a"  # Fallback to baseline
+        case "riscv64":
+            match level_index:
+                case 0i64: "rv64gc"
+                case 1i64: "rv64gcv"
+                case _: "rv64gc"  # Fallback to baseline
+        case _:
+            ""  # Unknown architecture
+
+# Build a host TierId from probed level name (canonical after alias resolution) and feature set.
+# The level parameter should be the LLVM base tier name (e.g., from tier_level_name).
+# Features are raw host-detected strings; canonicalization is caller's responsibility.
+fn tier_host_from_probe(arch: text, level: text, features: [text]) -> TierId:
+    val resolved_level = tier_alias(arch, level)
+    TierId(arch: arch, base: resolved_level, features: features)
