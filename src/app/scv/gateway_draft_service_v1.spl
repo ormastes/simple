@@ -8,12 +8,12 @@ use std.scv.gateway_draft_protocol_v1.{ScvGatewayDraftRequestV1, ScvGatewayDraft
     SCV_GATEWAY_DRAFT_MAX_REQUEST_BYTES_V1, SCV_GATEWAY_DRAFT_MAX_RESPONSE_BYTES_V1,
     scv_gateway_draft_request_decode_v1, scv_gateway_draft_response_encode_v1}
 use std.scv.gateway_snapshot_replication_v1.{ScvGatewaySnapshotManifestV1, ScvGatewaySnapshotRequestV1,
-    ScvGatewaySnapshotResponseV1, ScvGatewaySnapshotObjectRefV1,
+    ScvGatewaySnapshotResponseV1,
     ScvGatewaySnapshotReadRequestV1, ScvGatewaySnapshotReadResponseV1,
     SCV_GATEWAY_SNAPSHOT_MAX_MISSING_V1, SCV_GATEWAY_SNAPSHOT_MAX_TOTAL_BYTES_V1,
     scv_gateway_snapshot_request_decode_v1,
     scv_gateway_snapshot_manifest_encode_v1, scv_gateway_snapshot_manifest_validate_v1,
-    scv_gateway_snapshot_response_encode_v1}
+    scv_gateway_snapshot_response_encode_v1, scv_gateway_snapshot_closure_verify_v1}
 use std.scv.gateway_snapshot_replication_v1.{scv_gateway_snapshot_read_request_decode_v1,
     scv_gateway_snapshot_read_response_encode_v1, scv_gateway_snapshot_manifest_decode_v1}
 use std.common.crypto.sha256.{sha256_u8_hex, sha256_u8_fast_hex}
@@ -208,174 +208,6 @@ fn _snapshot_response_v1(request: ScvGatewaySnapshotRequestV1, grant: ScvGateway
             headers: [("Content-Type", "application/sdn"), ("Cache-Control", "no-store")])
         case Err(_): _draft_http_unbound_v1(HttpStatus.InternalError, "snapshot_response_rejected")
 
-fn _snapshot_object_ref_v1(manifest: ScvGatewaySnapshotManifestV1, object_id: text) -> ScvGatewaySnapshotObjectRefV1:
-    for object in manifest.objects:
-        if object.object_id == object_id: return object
-    ScvGatewaySnapshotObjectRefV1(kind: "", object_id: "", content_sha256: "", byte_count: -1)
-
-fn _snapshot_record_field_v1(line: text, prefix: text) -> Result<text, text>:
-    if not line.starts_with(prefix): return Err("snapshot_structural_record_field")
-    Ok(line[prefix.len():])
-
-fn _snapshot_number_v1(value: text) -> Result<i64, text>:
-    val number = value.to_i64() ?? -1
-    if number < 0 or "{number}" != value: return Err("snapshot_structural_record_number")
-    Ok(number)
-
-struct _ScvGatewayStructuralDecodedV1:
-    bytes: [u8]
-    object_ids: [text]
-    visits: i64
-
-struct _ScvGatewayStructuralFrameV1:
-    id: text
-    depth: i64
-    marker: bool
-    start: i64
-    end: i64
-    raw_id: text
-    exit_id: text
-
-fn _snapshot_hex_text_v1(value: text) -> bool:
-    if value.len() % 2 != 0: return false
-    for byte in value.bytes():
-        val ch = byte.to_i64()
-        if not ((ch >= 48 and ch <= 57) or (ch >= 97 and ch <= 102)): return false
-    true
-
-fn _snapshot_unique_ids_v1(values: [text]) -> [text]:
-    var result: [text] = []
-    for value in values:
-        if not result.contains(value): result.push(value)
-    result.sort()
-    result
-
-fn _snapshot_structural_decode_v1(root_id: text, objects: Dict<text, [u8]>) -> Result<_ScvGatewayStructuralDecodedV1, text>:
-    var pending = [_ScvGatewayStructuralFrameV1(id: root_id, depth: 0, marker: false,
-        start: 0, end: 0, raw_id: "", exit_id: "")]
-    var active: [text] = []
-    var refs: [text] = []
-    var output: [u8] = []
-    var visits = 0
-    while pending.len() > 0:
-        val frame = pending[pending.len() - 1]
-        pending.pop()
-        if frame.marker:
-            if output.len() as i64 != frame.end: return Err("snapshot_structural_length")
-            if frame.raw_id != "":
-                if not objects.contains_key(frame.raw_id) or
-                    objects[frame.raw_id] != output[frame.start:frame.end]:
-                    return Err("snapshot_structural_raw_mismatch")
-            if active.len() == 0 or active[active.len() - 1] != frame.exit_id:
-                return Err("snapshot_structural_stack")
-            active.pop()
-            continue
-        if frame.depth > 514 or visits >= 100000 or active.contains(frame.id):
-            return Err("snapshot_structural_budget")
-        if not objects.contains_key(frame.id): return Err("snapshot_structural_object_missing")
-        val bytes = objects[frame.id]
-        if not frame.id.starts_with("syntax_node_") or frame.id.len() != 76 or
-            "syntax_node_{sha256_u8_fast_hex(bytes)}" != frame.id: return Err("snapshot_structural_node_hash")
-        visits = visits + 1
-        if not refs.contains(frame.id): refs.push(frame.id)
-        val record = match validated_utf8_bytes_to_text_linear(bytes):
-            case Ok(value): value
-            case Err(_): return Err("snapshot_structural_record_utf8")
-        val lines = record.split("\n")
-        var children: [text] = []
-        var payload_id = ""
-        var expected_length = -1
-        var root_raw = ""
-        if lines.len() == 12 and lines[0] == "format: scv-byte-root-v1" and lines[11] == "":
-            val profile = _snapshot_record_field_v1(lines[1], "profile: ")?
-            root_raw = _snapshot_record_field_v1(lines[2], "raw: ")?
-            expected_length = _snapshot_number_v1(_snapshot_record_field_v1(lines[3], "length: ")?)?
-            val execution = _snapshot_record_field_v1(lines[4], "execution: ")?
-            val provider = _snapshot_record_field_v1(lines[5], "provider: ")?
-            val reason = _snapshot_record_field_v1(lines[6], "reason_hex: ")?
-            val language = _snapshot_record_field_v1(lines[7], "language_hex: ")?
-            val grammar = _snapshot_record_field_v1(lines[8], "grammar_hex: ")?
-            val version = _snapshot_record_field_v1(lines[9], "version_hex: ")?
-            val child_line = _snapshot_record_field_v1(lines[10], "children: ")?
-            if profile != "host-spans-v1" or (execution != "opaque" and execution != "wasm-tree-sitter") or
-                provider.len() > 128 or not _snapshot_hex_text_v1(reason) or
-                not _snapshot_hex_text_v1(language) or not _snapshot_hex_text_v1(grammar) or
-                not _snapshot_hex_text_v1(version) or not root_raw.starts_with("sha256_") or
-                root_raw.len() != 71 or child_line == "": return Err("snapshot_structural_root_schema")
-            children = child_line.split(",")
-            if children.len() != 1: return Err("snapshot_structural_root_child")
-            if not refs.contains(root_raw): refs.push(root_raw)
-        elif lines.len() == 8 and lines[0] == "format: scv-byte-node-v1" and lines[7] == "":
-            val role = _snapshot_record_field_v1(lines[1], "role: ")?
-            val kind_hex = _snapshot_record_field_v1(lines[2], "kind_hex: ")?
-            val field_hex = _snapshot_record_field_v1(lines[3], "field_hex: ")?
-            expected_length = _snapshot_number_v1(_snapshot_record_field_v1(lines[4], "length: ")?)?
-            payload_id = _snapshot_record_field_v1(lines[5], "payload: ")?
-            val child_line = _snapshot_record_field_v1(lines[6], "children: ")?
-            if not _snapshot_hex_text_v1(kind_hex) or not _snapshot_hex_text_v1(field_hex):
-                return Err("snapshot_structural_label")
-            if role == "branch":
-                if payload_id != "" or child_line == "": return Err("snapshot_structural_branch_schema")
-                children = child_line.split(",")
-            elif role == "leaf" or role == "gap" or role == "opaque":
-                if child_line != "" or not payload_id.starts_with("sha256_") or payload_id.len() != 71:
-                    return Err("snapshot_structural_leaf_schema")
-            else: return Err("snapshot_structural_role")
-        else: return Err("snapshot_structural_record_schema")
-        if expected_length < 0 or expected_length > 67108864 or expected_length > 67108864 - (output.len() as i64):
-            return Err("snapshot_structural_length_limit")
-        if root_raw != "":
-            val start = output.len()
-            if not objects.contains_key(root_raw): return Err("snapshot_structural_raw_missing")
-            pending.push(_ScvGatewayStructuralFrameV1(id: "", depth: frame.depth, marker: true,
-                start: start, end: start + expected_length, raw_id: root_raw, exit_id: frame.id))
-            active.push(frame.id)
-            pending.push(_ScvGatewayStructuralFrameV1(id: children[0], depth: frame.depth + 1,
-                marker: false, start: 0, end: 0, raw_id: "", exit_id: ""))
-        elif payload_id != "":
-            if not objects.contains_key(payload_id): return Err("snapshot_structural_payload_missing")
-            val payload = objects[payload_id]
-            if payload.len() as i64 != expected_length or sha256_u8_hex(payload) != payload_id[7:]:
-                return Err("snapshot_structural_payload_hash")
-            if not refs.contains(payload_id): refs.push(payload_id)
-            output = output + payload
-        else:
-            val start = output.len()
-            pending.push(_ScvGatewayStructuralFrameV1(id: "", depth: frame.depth, marker: true,
-                start: start, end: start + expected_length, raw_id: "", exit_id: frame.id))
-            active.push(frame.id)
-            var child_index = children.len()
-            while child_index > 0:
-                child_index = child_index - 1
-                if not children[child_index].starts_with("syntax_node_") or children[child_index].len() != 76:
-                    return Err("snapshot_structural_child_id")
-                pending.push(_ScvGatewayStructuralFrameV1(id: children[child_index], depth: frame.depth + 1,
-                    marker: false, start: 0, end: 0, raw_id: "", exit_id: ""))
-    if active.len() != 0: return Err("snapshot_structural_stack")
-    Ok(_ScvGatewayStructuralDecodedV1(bytes: output,
-        object_ids: _snapshot_unique_ids_v1(refs), visits: visits))
-
-fn _snapshot_structural_recipes_verify_v1(manifest: ScvGatewaySnapshotManifestV1,
-        objects: Dict<text, [u8]>, mut traversed: [text]) -> Result<(), text>:
-    for recipe in manifest.structural_recipes:
-        val raw = _snapshot_object_ref_v1(manifest, recipe.raw_content_id)
-        if raw.kind != "source_bytes" or not objects.contains_key(recipe.raw_content_id):
-            return Err("snapshot_structural_raw_missing")
-        val decoded = _snapshot_structural_decode_v1(recipe.root_id, objects)?
-        if decoded.bytes != objects[recipe.raw_content_id]: return Err("snapshot_structural_raw_mismatch")
-        val derived_refs = decoded.object_ids
-        if derived_refs != recipe.object_ids: return Err("snapshot_structural_closure_mismatch")
-        for object_id in derived_refs:
-            val descriptor = _snapshot_object_ref_v1(manifest, object_id)
-            if not objects.contains_key(object_id): return Err("snapshot_structural_object_missing")
-            if object_id.starts_with("syntax_node_") and descriptor.kind != "syntax_node":
-                return Err("snapshot_structural_kind_mismatch")
-            if object_id.starts_with("sha256_") and descriptor.kind != "structural_payload" and
-                descriptor.kind != "source_bytes":
-                return Err("snapshot_structural_kind_mismatch")
-            if not traversed.contains(object_id): traversed.push(object_id)
-    Ok(())
-
 fn _snapshot_handle_v1(config: ScvGatewayDraftConfigV1, grant: ScvGatewayDraftGrantV1,
         http: HttpRequest) -> HttpResponse:
     if not grant.can_write: return _draft_http_unbound_v1(HttpStatus.Forbidden, "snapshot_write_denied")
@@ -418,17 +250,13 @@ fn _snapshot_handle_v1(config: ScvGatewayDraftConfigV1, grant: ScvGatewayDraftGr
                     return _snapshot_response_v1(request, grant, "error", "", [], "snapshot_object_integrity")
     if missing.len() > 0:
         return _snapshot_response_v1(request, grant, "needs_inputs", "", missing, "")
-    var traversed: [text] = []
-    match _snapshot_structural_recipes_verify_v1(request.manifest, object_bytes, traversed):
+    val traversed = match scv_gateway_snapshot_closure_verify_v1(request.manifest, object_bytes):
+        case Ok(value): value
         case Err(_): return _snapshot_response_v1(request, grant, "error", "", [], "snapshot_structural_invalid")
-        case Ok(_): ()
     for recipe in request.manifest.structural_recipes:
         for object_id in recipe.object_ids:
             if not traversed.contains(object_id):
                 return _snapshot_response_v1(request, grant, "error", "", [], "snapshot_structural_closure_incomplete")
-    for object in request.manifest.objects:
-        if object.kind != "source_bytes" and not traversed.contains(object.object_id):
-            return _snapshot_response_v1(request, grant, "error", "", [], "snapshot_object_unreachable")
     val manifest_wire = match scv_gateway_snapshot_manifest_encode_v1(request.manifest,
             grant.repository, grant.principal_id):
         case Ok(value): value
@@ -501,17 +329,13 @@ fn _snapshot_read_handle_v1(config: ScvGatewayDraftConfigV1, grant: ScvGatewayDr
         object_bytes[object.object_id] = bytes
     if total_bytes != root_read.receipt.byte_count:
         return _snapshot_read_response_v1(request, grant, "error", "", "", "", "snapshot_root_integrity")
-    var traversed: [text] = []
-    match _snapshot_structural_recipes_verify_v1(manifest, object_bytes, traversed):
+    val traversed = match scv_gateway_snapshot_closure_verify_v1(manifest, object_bytes):
+        case Ok(value): value
         case Err(_): return _snapshot_read_response_v1(request, grant, "error", "", "", "", "snapshot_root_integrity")
-        case Ok(_): ()
     for recipe in manifest.structural_recipes:
         for object_id in recipe.object_ids:
             if not traversed.contains(object_id):
                 return _snapshot_read_response_v1(request, grant, "error", "", "", "", "snapshot_root_incomplete")
-    for object in manifest.objects:
-        if object.kind != "source_bytes" and not traversed.contains(object.object_id):
-            return _snapshot_read_response_v1(request, grant, "error", "", "", "", "snapshot_root_incomplete")
     _snapshot_read_response_v1(request, grant, "ok", "snapshot_local_readback",
         checked.manifest_sha256, manifest_wire, "")
 

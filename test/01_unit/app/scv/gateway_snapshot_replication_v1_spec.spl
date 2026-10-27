@@ -7,7 +7,7 @@ use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1, ScvDraftBlobReq
     scv_draft_blob_put_v1, scv_snapshot_offline_pin_import_v1}
 use std.scv.gateway_draft_protocol_v1.*
 use std.scv.gateway_snapshot_replication_v1.*
-use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex, sha256_u8_fast_hex}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpMethod, HttpStatus}
@@ -71,6 +71,57 @@ fn snapshot_replication_read_http_v1(snapshot_id: text, token: text) -> HttpRequ
             request_id: "read-1", snapshot_id: snapshot_id), "repo-alpha").unwrap()
     http
 
+fn snapshot_replication_structural_manifest_v1(payload_text: text) -> (ScvGatewaySnapshotManifestV1, Dict<text, [u8]>, text):
+    val raw: [u8] = "abc".bytes()
+    val payload: [u8] = payload_text.bytes()
+    val raw_id = "sha256_{sha256_u8_hex(raw)}"
+    val payload_id = "sha256_{sha256_u8_hex(payload)}"
+    val leaf_record = "format: scv-byte-node-v1\nrole: leaf\nkind_hex: 69\nfield_hex: \nlength: 3\npayload: {payload_id}\nchildren: \n"
+    val leaf_id = "syntax_node_{sha256_u8_fast_hex(leaf_record.bytes())}"
+    val root_record = "format: scv-byte-root-v1\nprofile: host-spans-v1\nraw: {raw_id}\nlength: 3\nexecution: opaque\nprovider: test\nreason_hex: 00\nlanguage_hex: 00\ngrammar_hex: 00\nversion_hex: 00\nchildren: {leaf_id}\n"
+    val root_id = "syntax_node_{sha256_u8_fast_hex(root_record.bytes())}"
+    val inventory = "src/main.spl|{raw_id}|3"
+    val inventory_digest = sha256_text(inventory)
+    val tree_id = "scv-tree-v1-{inventory_digest}"
+    val revision_id = scv_compile_snapshot_revision_id_v1(tree_id, inventory_digest)
+    val commit_id = "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|{tree_id}|1")
+    val provenance = scv_compile_snapshot_provenance_v1(revision_id, commit_id,
+        tree_id, inventory_digest, 1)
+    var objects: [ScvGatewaySnapshotObjectRefV1] = [
+        ScvGatewaySnapshotObjectRefV1(kind: "source_bytes", object_id: raw_id,
+            content_sha256: sha256_u8_hex(raw), byte_count: 3),
+        ScvGatewaySnapshotObjectRefV1(kind: "structural_payload", object_id: payload_id,
+            content_sha256: sha256_u8_hex(payload), byte_count: 3),
+        ScvGatewaySnapshotObjectRefV1(kind: "syntax_node", object_id: leaf_id,
+            content_sha256: sha256_u8_hex(leaf_record.bytes()), byte_count: leaf_record.bytes().len() as i64),
+        ScvGatewaySnapshotObjectRefV1(kind: "syntax_node", object_id: root_id,
+            content_sha256: sha256_u8_hex(root_record.bytes()), byte_count: root_record.bytes().len() as i64)]
+    var object_index = 1
+    while object_index < objects.len():
+        var prior = object_index
+        while prior > 0 and objects[prior].object_id < objects[prior - 1].object_id:
+            val saved = objects[prior - 1]
+            objects[prior - 1] = objects[prior]
+            objects[prior] = saved
+            prior = prior - 1
+        object_index = object_index + 1
+    var recipe_ids = [payload_id, raw_id, leaf_id, root_id]
+    recipe_ids.sort()
+    var object_bytes: Dict<text, [u8]> = {}
+    object_bytes[raw_id] = raw
+    object_bytes[payload_id] = payload
+    object_bytes[leaf_id] = leaf_record.bytes()
+    object_bytes[root_id] = root_record.bytes()
+    val manifest = ScvGatewaySnapshotManifestV1(version: 1, repository: "repo-alpha",
+        principal_id: "principal-1", source_domain: "compile-inventory-v1",
+        config_digest: sha256_text("config"), revision_id: revision_id, commit_id: commit_id,
+        tree_id: tree_id, inventory_digest: inventory_digest, inventory_count: 1,
+        provenance: provenance, inventory: inventory, objects: objects,
+        structural_recipes: [ScvGatewayStructuralRecipeV1(path: "src/main.spl",
+            raw_content_id: raw_id, root_id: root_id,
+            object_ids: recipe_ids)])
+    (manifest, object_bytes, raw_id)
+
 describe "SCV authenticated snapshot root publication v1":
     it "returns only genuinely missing input IDs, then durably pins an exact complete root":
         val root = snapshot_replication_setup_root_v1()
@@ -131,6 +182,73 @@ describe "SCV authenticated snapshot root publication v1":
             changed_request, "repo-alpha", "principal-1").unwrap()
         expect(changed_receipt.status).to_equal("error")
         expect(changed_receipt.error).to_equal("snapshot_root_publish_failed")
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "refuses an offline pin when a valid structural child reconstructs bytes different from the linked raw source":
+        val root = snapshot_replication_setup_root_v1()
+        val (manifest, object_bytes, _) = snapshot_replication_structural_manifest_v1("xyz")
+        val manifest_wire = scv_gateway_snapshot_manifest_encode_v1(manifest,
+            "repo-alpha", "principal-1").unwrap()
+        expect(scv_snapshot_offline_pin_import_v1(root, manifest, manifest_wire,
+            object_bytes).is_err()).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "accepts a hash-valid structural root that reconstructs its raw source and refuses missing or extra closure refs":
+        val root = snapshot_replication_setup_root_v1()
+        val (valid_manifest, valid_objects, _) = snapshot_replication_structural_manifest_v1("abc")
+        val valid_wire = scv_gateway_snapshot_manifest_encode_v1(valid_manifest,
+            "repo-alpha", "principal-1").unwrap()
+        val config = snapshot_replication_config_v1(root)
+        val grant = snapshot_replication_grant_v1()
+        val scope = ScvDraftBlobAdmittedScopeV1(repository_id: "repo-alpha",
+            principal_id: "principal-1", can_read: true, can_write: true)
+        for object in valid_manifest.objects:
+            val uploaded = scv_draft_blob_put_v1(root, scope,
+                ScvDraftBlobRequestV1(repository_id: "repo-alpha", principal_id: "principal-1",
+                    request_id: "struct-{object.object_id}", content_sha256: object.content_sha256,
+                    bytes: valid_objects[object.object_id]))
+            expect(uploaded.is_ok()).to_equal(true)
+        val service_response = scv_gateway_draft_handle_v1(config, [grant],
+            snapshot_replication_http_v1(valid_manifest, SNAPSHOT_REPLICATION_TEST_TOKEN))
+        val service_request = ScvGatewaySnapshotRequestV1(version: 1, id: "wire-snapshot-1",
+            repository: "repo-alpha", request_id: "snapshot-1", manifest: valid_manifest)
+        val service_receipt = scv_gateway_snapshot_response_decode_v1(service_response.body,
+            service_request, "repo-alpha", "principal-1").unwrap()
+        expect(service_receipt.status).to_equal("ok")
+        val valid_pin = scv_snapshot_offline_pin_import_v1(root, valid_manifest,
+            valid_wire, valid_objects)
+        expect(valid_pin.is_ok()).to_equal(true)
+        val (missing_manifest, missing_objects, _) = snapshot_replication_structural_manifest_v1("abc")
+        var missing_child = ""
+        for object in missing_manifest.objects:
+            if object.kind == "syntax_node" and object.object_id != missing_manifest.structural_recipes[0].root_id:
+                missing_child = object.object_id
+        expect(missing_child != "").to_equal(true)
+        missing_objects.remove(missing_child)
+        val missing_wire = scv_gateway_snapshot_manifest_encode_v1(missing_manifest,
+            "repo-alpha", "principal-1").unwrap()
+        expect(scv_snapshot_offline_pin_import_v1(root, missing_manifest,
+            missing_wire, missing_objects).is_err()).to_equal(true)
+        var extra_manifest = valid_manifest
+        var extra_objects = valid_objects
+        val extra_bytes: [u8] = [88u8]
+        val extra_digest = sha256_u8_hex(extra_bytes)
+        val extra_id = "sha256_{extra_digest}"
+        extra_manifest.objects.push(ScvGatewaySnapshotObjectRefV1(kind: "structural_payload",
+            object_id: extra_id, content_sha256: extra_digest, byte_count: 1))
+        var insert_at = extra_manifest.objects.len() - 1
+        while insert_at > 0 and extra_manifest.objects[insert_at].object_id < extra_manifest.objects[insert_at - 1].object_id:
+            val saved = extra_manifest.objects[insert_at - 1]
+            extra_manifest.objects[insert_at - 1] = extra_manifest.objects[insert_at]
+            extra_manifest.objects[insert_at] = saved
+            insert_at = insert_at - 1
+        extra_manifest.structural_recipes[0].object_ids.push(extra_id)
+        extra_manifest.structural_recipes[0].object_ids.sort()
+        extra_objects[extra_id] = extra_bytes
+        val extra_wire = scv_gateway_snapshot_manifest_encode_v1(extra_manifest,
+            "repo-alpha", "principal-1").unwrap()
+        expect(scv_snapshot_offline_pin_import_v1(root, extra_manifest,
+            extra_wire, extra_objects).is_err()).to_equal(true)
         expect(dir_remove_all(root)).to_equal(true)
 
     it "rejects a manifest pinned to another principal before reading its objects":
