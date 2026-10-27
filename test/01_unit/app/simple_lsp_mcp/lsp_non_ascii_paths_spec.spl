@@ -1,0 +1,71 @@
+# Purpose and audience: executable evidence that simple-lsp-mcp handles non-ASCII
+# paths and JSON argument values (byte vs char index consistency) for the LSP team.
+# @req REQ-LSP-UTF8-001
+# bug: doc/08_tracking/bug/lsp_mcp_hover_definition_hang_windows_2026-10-27.md
+"""
+simple-lsp-mcp must keep one index unit per scanner:
+- JSON extraction returns exact non-ASCII values (and values after them),
+- handle_tool_call for lsp_visibility / lsp_hover / lsp_definition echoes the
+  exact non-ASCII path.
+
+Run: `bin/simple test test/01_unit/app/simple_lsp_mcp/lsp_non_ascii_paths_spec.spl`
+"""
+
+use std.spec
+use std.spec.step
+use app.simple_lsp_mcp.tools.{handle_tool_call, arg_field, arg_int_field}
+use app.simple_lsp_mcp.session_state.{lsp_reset_location}
+use app.simple_lsp_mcp.json_helpers.{extract_field, extract_id}
+
+val FIXTURE = "test/fixtures/lsp_utf8/données/módulo.spl"
+
+fn call(id: text, name: text, args: text) -> text:
+    handle_tool_call(id, "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + args + "}}")
+
+describe "JSON extraction with non-ASCII values":
+    it "extract_field returns the exact non-ASCII string and the field after it":
+        step("given json with multibyte values")
+        val j = "{\"a\":\"données-é\",\"b\":\"módulo\",\"n\":42}"
+        step("then each value is exact")
+        expect(extract_field(j, "a")).to_equal("données-é")
+        expect(extract_field(j, "b")).to_equal("módulo")
+        expect(extract_field(j, "n")).to_equal("42")
+
+    it "extract_field returns nested objects and arrays after multibyte text":
+        step("given nested json after a multibyte string")
+        val j = "{\"p\":\"é€\",\"o\":{\"k\":\"ü\"},\"l\":[\"é\",1]}"
+        expect(extract_field(j, "o")).to_equal("{\"k\":\"ü\"}")
+        expect(extract_field(j, "l")).to_equal("[\"é\",1]")
+
+    it "extract_id handles a non-ASCII string id":
+        step("given a string id with multibyte chars")
+        expect(extract_id("{\"id\":\"idé\",\"x\":1}")).to_equal("\"idé\"")
+
+    it "arg_field and arg_int_field work after multibyte values":
+        step("given tool args with non-ASCII path before the numbers")
+        val a = "{\"file\":\"" + FIXTURE + "\",\"line\":3,\"character\":12}"
+        expect(arg_field(a, "file")).to_equal(FIXTURE)
+        expect(arg_int_field(a, "line")).to_equal(3)
+        expect(arg_int_field(a, "character")).to_equal(12)
+
+describe "tool calls with a non-ASCII path":
+    it "lsp_visibility names the exact path":
+        step("lsp_visibility with non-ASCII file")
+        lsp_reset_location()
+        val r = call("11", "lsp_visibility", "{\"file\":\"" + FIXTURE + "\",\"requester\":\"" + FIXTURE + ":3\"}")
+        expect(r).to_contain("\"id\":11")
+        expect(r).to_contain(FIXTURE)
+
+    it "lsp_hover reads the non-ASCII-path file":
+        step("lsp_hover with non-ASCII file")
+        lsp_reset_location()
+        val r = call("12", "lsp_hover", "{\"file\":\"" + FIXTURE + "\",\"line\":2,\"character\":8}")
+        expect(r).to_contain("\"id\":12")
+        expect(r).to_contain("bonjour")
+
+    it "lsp_definition reads the non-ASCII-path file":
+        step("lsp_definition with non-ASCII file")
+        lsp_reset_location()
+        val r = call("13", "lsp_definition", "{\"file\":\"" + FIXTURE + "\",\"line\":5,\"character\":12}")
+        expect(r).to_contain("\"id\":13")
+        expect(r).to_contain(FIXTURE)
