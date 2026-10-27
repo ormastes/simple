@@ -1,0 +1,40 @@
+"""Pure DTO fixtures; no claim of filesystem capture or native execution."""
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, BuildRunV1, BuildHostV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.snapshot_v1_adapter.{CompileSnapshotV1Adapter}
+use std.scv.snapshot_v2.{scv_snapshot_file_v2, scv_snapshot_freeze_v2}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_revision_id_v1}
+
+pub fn setup_scv_cli_task_v1() -> BuildTaskV1:
+    val digest = sha256_text("fixture")
+    BuildTaskV1(id: "compile", attempt: 1, phase: "module", producer_digest: digest,
+        source_digest: digest, toolchain_digest: digest, dependencies: [], program: "tools/compiler",
+        args: ["native-build", "--source", "src", "--entry", "src/main.spl", "--backend", "llvm", "--output", "out/main.o", "--entry-closure", "--strip"],
+        inputs: [BuildInputV1(path: "src/main.spl", digest: sha256_text("fn main(): 1\n")),
+            BuildInputV1(path: "task-context/compile.sdn", digest: digest)],
+        outputs: ["out/main.o"], cache_key: digest, timeout_ms: 1000, memory_limit_bytes: 1048576, links: [])
+
+pub fn setup_scv_cli_run_v1() -> BuildRunV1:
+    val digest = sha256_text("fixture")
+    BuildRunV1(tasks: [setup_scv_cli_task_v1()], hosts: [BuildHostV1(id: "local", transport: "local",
+        endpoint: "", workspace: "/tmp/fixture", worker_program: "/tmp/fixture/worker", worker_digest: digest, slots: 1)],
+        keep_going: true, max_attempts: 2)
+
+pub fn setup_scv_cli_plan_v1() -> text:
+    "schema_version: 1\nsource_scopes = [\"src\"]\ncold_init: false\ninputs |task, path, role|\n    compile, src/main.spl, source\n    compile, task-context/compile.sdn, ordinary\n"
+
+pub fn setup_scv_cli_adapter_metadata_v1() -> CompileSnapshotV1Adapter:
+    val file = scv_snapshot_file_v2("src/main.spl", "fn main(): 1\n".bytes())
+    val logical = scv_snapshot_freeze_v2("compile-inventory-v1", [file], ["src"], 3, 0, "complete",
+        ["editor-overlays", "generated-inputs", "external-inputs", "configuration", "filesystem-event-coverage", "physical-file-modes", "physical-path-aliases"]).unwrap()
+    val inventory = "src/main.spl|" + file.content_id + "|" + str(file.bytes.len())
+    val digest = sha256_text(inventory)
+    val tree = "scv-tree-v1-" + digest
+    val root = "/fixture/build/scv/snapshots/metadata-only"
+    val legacy = ScvCompileSnapshotV1(valid: true, reason: "ok", revision_id: scv_compile_snapshot_revision_id_v1(tree, digest),
+        commit_id: "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|" + tree + "|1"), tree_id: tree,
+        inventory_digest: digest, inventory_count: 1, snapshot_root: root,
+        provenance_path: root + "/SCV_COMPILE_SNAPSHOT", receipt_path: root + "/receipt.sdn", source_drifted: false)
+    CompileSnapshotV1Adapter(legacy: legacy, snapshot: logical, source_inventory_digest: "sha256_" + sha256_text("inventory-metadata-only"), source_inventory_generation: 3)
+
+export setup_scv_cli_task_v1, setup_scv_cli_run_v1, setup_scv_cli_plan_v1, setup_scv_cli_adapter_metadata_v1
