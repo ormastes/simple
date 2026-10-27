@@ -113,36 +113,38 @@ class BuildSession:
             rt_session_alloc_end()
 
     me end(kept: [Any]) -> bool:
-        if not self.active():
-            return true
-        if not build_session_end_enabled_by_env():
-            if not _build_session_end_disabled_logged:
-                eprint("build-session: end disabled (opt-in)")
-                _build_session_end_disabled_logged = true
-            return true
-        val ended = self.end_with(kept, session_end_port_runtime())
-        if ended:
-            build_session_end_reset_globals_v1()
-        ended
+        unsafe(capabilities: [type_erasure]):
+            if not self.active():
+                return true
+            if not build_session_end_enabled_by_env():
+                if not _build_session_end_disabled_logged:
+                    eprint("build-session: end disabled (opt-in)")
+                    _build_session_end_disabled_logged = true
+                return true
+            val ended = self.end_with(kept, session_end_port_runtime())
+            if ended:
+                build_session_end_reset_globals_v1()
+            ended
 
     # Shares every kept value, then ends the heap. No share failure may end
     # the session; heap 0 afterwards makes a repeat call a no-op (idempotent).
     me end_with(kept: [Any], port: SessionEndPort) -> bool:
-        if not self.active():
-            return true
-        val id = self.heap
-        var shared = 0
-        for value in kept:
-            if not port.share(value):
-                eprint("build-session: end skipped reason=share-failed index={shared} id={id}")
+        unsafe(capabilities: [type_erasure]):
+            if not self.active():
+                return true
+            val id = self.heap
+            var shared = 0
+            for value in kept:
+                if not port.share(value):
+                    eprint("build-session: end skipped reason=share-failed index={shared} id={id}")
+                    return false
+                shared = shared + 1
+            if not port.heap_end(id):
+                eprint("build-session: end skipped reason=heap-end-refused id={id}")
                 return false
-            shared = shared + 1
-        if not port.heap_end(id):
-            eprint("build-session: end skipped reason=heap-end-refused id={id}")
-            return false
-        self.heap = 0u32
-        eprint("build-session: end id={id} shared={shared}")
-        true
+            self.heap = 0u32
+            eprint("build-session: end id={id} shared={shared}")
+            true
 
 
 fn build_session_inactive() -> BuildSession:

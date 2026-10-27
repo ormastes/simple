@@ -109,8 +109,9 @@ class GlobalDataset:
         self.clock
 
     fn _count(v: Any) -> i64:
-        val f = self.port.count
-        f(v)
+        unsafe(capabilities: [type_erasure]):
+            val f = self.port.count
+            f(v)
 
     me _drop_slot(slot: i64):
         val f = self.port.release
@@ -146,40 +147,42 @@ class GlobalDataset:
         true
 
     me put(key: text, value: Any) -> Result<bool, text>:
-        val gb = self.port.graph_bytes
-        val bytes = gb(value)
-        if bytes < 0 or (self.limits.max_bytes > 0 and bytes > self.limits.max_bytes):
-            self.refused_puts = self.refused_puts + 1
-            return Ok(false)
-        if self.index.contains_key(key):
-            self._drop_slot(self.index[key])
-        while self._over(extra_entries: 1, extra_bytes: bytes):
-            if not self._evict_one():
+        unsafe(capabilities: [type_erasure]):
+            val gb = self.port.graph_bytes
+            val bytes = gb(value)
+            if bytes < 0 or (self.limits.max_bytes > 0 and bytes > self.limits.max_bytes):
                 self.refused_puts = self.refused_puts + 1
                 return Ok(false)
-        val sh = self.port.share
-        if not sh(value):
-            return Err("global_dataset: rc_share refused value for key '{key}'")
-        self.keys.push(key)
-        self.values.push(value)
-        self.sizes.push(bytes)
-        self.stamps.push(self._tick())
-        self.live.push(true)
-        self.index[key] = self.keys.len() - 1
-        self.total_bytes = self.total_bytes + bytes
-        Ok(true)
+            if self.index.contains_key(key):
+                self._drop_slot(self.index[key])
+            while self._over(extra_entries: 1, extra_bytes: bytes):
+                if not self._evict_one():
+                    self.refused_puts = self.refused_puts + 1
+                    return Ok(false)
+            val sh = self.port.share
+            if not sh(value):
+                return Err("global_dataset: rc_share refused value for key '{key}'")
+            self.keys.push(key)
+            self.values.push(value)
+            self.sizes.push(bytes)
+            self.stamps.push(self._tick())
+            self.live.push(true)
+            self.index[key] = self.keys.len() - 1
+            self.total_bytes = self.total_bytes + bytes
+            Ok(true)
 
     # Returns the value with one count owned by the caller (hand back via release).
     me acquire(key: text) -> Any?:
-        if not self.index.contains_key(key):
-            self.misses = self.misses + 1
-            return None
-        val slot = self.index[key]
-        self.stamps[slot] = self._tick()
-        self.hits = self.hits + 1
-        val f = self.port.retain
-        f(self.values[slot])
-        Some(self.values[slot])
+        unsafe(capabilities: [type_erasure]):
+            if not self.index.contains_key(key):
+                self.misses = self.misses + 1
+                return None
+            val slot = self.index[key]
+            self.stamps[slot] = self._tick()
+            self.hits = self.hits + 1
+            val f = self.port.retain
+            f(self.values[slot])
+            Some(self.values[slot])
 
     me release(key: text) -> bool:
         if not self.index.contains_key(key):
