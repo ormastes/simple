@@ -44,7 +44,9 @@ use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_sel
     worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
     worker_hir_restrict_loads_v1, source_path_by_canonical_map_v1,
     worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_v1}
-use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1, unit_tldr_imports_enabled_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{UnitTldrPlanV1, unit_tldr_plan_v1, unit_tldr_empty_plan_v1,
+    unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1, unit_tldr_log_line_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mono_pending_publish_v1,
     native_file_worker_unit_active_v1, native_file_worker_batch_v1, NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
@@ -780,6 +782,12 @@ impl CompilerDriver:
             return false
         val worker_closure = not parse_shard and (mir_scoped or
             worker_surface_closure_selected_v1(worker_spec, worker_flag))
+        # PM3: a unit child parses only its picked files; imports resolve
+        # through TLDR summary surfaces (driver_unit_tldr_imports_v1.spl).
+        val unit_tldr_root = (_sffi_env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? "")
+        val unit_tldr_on = worker_unit and worker_closure and unit_tldr_root != "" and
+            unit_tldr_imports_enabled_v1(true)
+        var unit_tldr_plan: UnitTldrPlanV1 = unit_tldr_empty_plan_v1()
         var worker_needed: [bool] = []
         var worker_built: [bool] = []
         var mir_advice_paths: [text] = []
@@ -796,11 +804,21 @@ impl CompilerDriver:
                     seeds.push(mir_targets.contains(seed_path) or is_advice)
                 else: seeds.push(worker_surface_seed_v1(worker_spec, seed_path))
                 seed_index = seed_index + 1
-            if tldr_imports_enabled_v1():
-                match tldr_closure_walk_check_v1(true, "parse_all_streaming_surfaces_in_place_impl"):
-                    case Err(msg): panic(msg)
-                    case Ok(_): pass
-            worker_needed = worker_surface_closure_v1(source_paths, canonical_paths, source_contents, seeds)
+            if unit_tldr_on:
+                unit_tldr_plan = unit_tldr_plan_v1(_sffi_env_get("SIMPLE_HIR_SHARD_OWNER") ?? "",
+                    unit_tldr_root + "/tldr", mir_targets,
+                    unit_tldr_module_paths_v1(source_module_names, source_paths))
+                worker_needed = unit_tldr_needed_flags_v1(unit_tldr_plan, source_paths, mir_advice_paths)
+                # Imports lower no HIR here: loads are restricted to targets,
+                # advice and fallback modules below.
+                print unit_tldr_log_line_v1(unit_tldr_plan.unit_id, unit_tldr_plan.parsed,
+                    unit_tldr_plan.summaries, unit_tldr_plan.fallbacks, 0)
+            else:
+                if tldr_imports_enabled_v1():
+                    match tldr_closure_walk_check_v1(true, "parse_all_streaming_surfaces_in_place_impl"):
+                        case Err(msg): panic(msg)
+                        case Ok(_): pass
+                worker_needed = worker_surface_closure_v1(source_paths, canonical_paths, source_contents, seeds)
             for _p in source_paths:
                 worker_built.push(false)
         while source_index < frozen_source_count:
@@ -822,6 +840,17 @@ impl CompilerDriver:
                     self.ctx.add_error(
                         "Module surface extraction error: {alias_result.unwrap_err()} source='{source_paths[source_index]}' module='{source_module_names[source_index]}' index={source_index}")
                     return false
+            elif unit_tldr_on and not worker_needed[source_index] and
+                    unit_tldr_surface_for_v1(unit_tldr_plan, source_module_names[source_index]) != nil:
+                # PM3: an import not parsed here gets its summary-built surface.
+                val tldr_surface = unit_tldr_surface_for_v1(unit_tldr_plan, source_module_names[source_index]).unwrap()
+                val tldr_added = builder.add_surface_canonical_identity(tldr_surface,
+                    source_module_names[source_index], canonical_path)
+                if tldr_added.is_err():
+                    self.ctx.add_error(
+                        "Module surface extraction error: {tldr_added.unwrap_err()} source='{source_paths[source_index]}'")
+                    return false
+                worker_built[source_index] = true
             else:
                 val parsed_result = self.add_streaming_module_surface(
                     builder,
@@ -1009,17 +1038,26 @@ impl CompilerDriver:
                         val _pending = native_file_worker_mono_pending_publish_v1(mir_queue_dir, target, pending_reason)
                     self.ctx.add_error("MONO-PENDING: {pending_reason}")
                     return false
-                if tldr_imports_enabled_v1():
-                    match tldr_closure_walk_check_v1(true, "worker_surface_import_closure_v1"):
-                        case Err(msg): panic(msg)
-                        case Ok(_): pass
-                val closure = worker_surface_import_closure_v1(root_indices, surface_edges)
                 var load_paths: [text] = []
-                var ci = 0
-                while ci < closure.len():
-                    if closure[ci] and surface_source[ci] != "":
-                        load_paths.push(surface_source[ci])
-                    ci = ci + 1
+                if unit_tldr_on:
+                    # PM3: no closure walk; only targets, advice and fallback modules load HIR.
+                    for tp in mir_targets:
+                        if not load_paths.contains(tp): load_paths.push(tp)
+                    for ap in mir_advice_paths:
+                        if not load_paths.contains(ap): load_paths.push(ap)
+                    for fp in unit_tldr_plan.parse_paths:
+                        if not load_paths.contains(fp): load_paths.push(fp)
+                else:
+                    if tldr_imports_enabled_v1():
+                        match tldr_closure_walk_check_v1(true, "worker_surface_import_closure_v1"):
+                            case Err(msg): panic(msg)
+                            case Ok(_): pass
+                    val closure = worker_surface_import_closure_v1(root_indices, surface_edges)
+                    var ci = 0
+                    while ci < closure.len():
+                        if closure[ci] and surface_source[ci] != "":
+                            load_paths.push(surface_source[ci])
+                        ci = ci + 1
                 worker_hir_restrict_loads_v1(load_paths)
                 # A unit child HIR-claims only its picked targets.
                 if worker_unit: worker_surface_restrict_claims_v1(mir_targets)
