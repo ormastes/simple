@@ -357,6 +357,34 @@ pub extern "C" fn rt_par_launch(kernel_ptr: u64, gx: i64, gy: i64, gz: i64, lx: 
 // Atomic Operations (same interface as GPU backend)
 // =============================================================================
 
+/// Reports whether a live raw i64 atomic cell uses the supported lock-free ABI.
+///
+/// The input must name caller-owned atomic storage. A null or misaligned
+/// address, or a layout that cannot fit the map's 8-byte cells, returns 0.
+/// Rust exposes `AtomicI64` only on targets with 64-bit atomic support; Rust
+/// atomic types are lock-free when available, but this says nothing about
+/// wait-freedom of an operation or the progress of a whole data structure.
+#[no_mangle]
+pub unsafe extern "C" fn rt_par_atomic_i64_is_lock_free(ptr: *mut i64) -> i64 {
+    use std::mem::{align_of, size_of};
+
+    if ptr.is_null() || (ptr as usize) % align_of::<AtomicI64>() != 0 {
+        return 0;
+    }
+    if size_of::<AtomicI64>() != 8 || align_of::<AtomicI64>() > 8 {
+        return 0;
+    }
+
+    #[cfg(target_has_atomic = "64")]
+    {
+        1
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    {
+        0
+    }
+}
+
 /// Atomic add for i64.
 #[no_mangle]
 pub unsafe extern "C" fn rt_par_atomic_add_i64(ptr: *mut i64, value: i64) -> i64 {
@@ -486,5 +514,39 @@ mod tests {
             assert_eq!(old, 10);
             assert_eq!(value, 15);
         }
+    }
+
+    #[test]
+    fn test_atomic_i64_lock_free_capability_abi() {
+        use std::mem::{align_of, size_of};
+
+        assert_eq!(unsafe { rt_par_atomic_i64_is_lock_free(std::ptr::null_mut()) }, 0);
+
+        let mut storage = [0u8; 16];
+        let base = storage.as_mut_ptr() as usize;
+        let alignment = align_of::<AtomicI64>();
+        if alignment > 1 {
+            let mut misaligned = base + 1;
+            while misaligned % alignment == 0 {
+                misaligned += 1;
+            }
+            assert_eq!(unsafe { rt_par_atomic_i64_is_lock_free(misaligned as *mut i64) }, 0);
+        }
+
+        let value = AtomicI64::new(7);
+        let ptr = &value as *const AtomicI64 as *mut i64;
+        let expected = if size_of::<AtomicI64>() == 8 && alignment <= 8 {
+            #[cfg(target_has_atomic = "64")]
+            {
+                1
+            }
+            #[cfg(not(target_has_atomic = "64"))]
+            {
+                0
+            }
+        } else {
+            0
+        };
+        assert_eq!(unsafe { rt_par_atomic_i64_is_lock_free(ptr) }, expected);
     }
 }
