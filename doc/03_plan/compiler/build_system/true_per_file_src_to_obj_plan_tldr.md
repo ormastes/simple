@@ -40,3 +40,4 @@ PRs, in order (consider landing 3 before 2c to avoid a rebase):
 Every PR: spec red->green (plus `test/unit/` mirror where the divergence guard
 needs it), time-to-first-object, total, peak RSS under external harness
 capwatch.ps1 (not repo code) 8 GB on a small probe. Stage3 self-build proves the batch.
+- PR 9 (final): after stage3 builds end to end on the per-file route plus generic-instance pre-link, delete the whole-program route: whole-program shard dispatch, legacy two-child lane, global mono, and SIMPLE_BOOTSTRAP_WHOLE_PROGRAM. Keep run_ledger_shards and the HIR-ledger claims the unit lane uses. Lands together with the generic-instance lane PR4.
