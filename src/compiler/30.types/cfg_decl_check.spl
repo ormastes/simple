@@ -1,0 +1,347 @@
+# Declaration-level @cfg checker (step 3 of hir_cfg_decl_select_design.md).
+#
+# HIR keeps every guarded declaration (cfg / cfg_group / cfg_arm). This pass
+# proves, over the finite os x arch matrix (feature atoms are free booleans),
+# that same-named guarded items cannot be active together (E-CFG-OVERLAP),
+# that a guarded fn is defined everywhere an unguarded caller can reach it
+# (E-CFG-NONEXHAUSTIVE), that its variants agree on signature
+# (E-CFG-SIG-DIVERGE), and that trait impls stay coherent (E-CFG-IMPL-OVERLAP).
+# Two UNGUARDED same-named items are not this checker's business.
+
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.*
+use compiler.hir.generated.hir_children.{HirNode, hir_children_of, hir_children_of_block}
+use compiler.mir.mir_cfg_select.{mir_cfg_eval_for_target}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.core.cfg_platform.{cfg_strip_quotes}
+use compiler.core.parser_preprocessor.{_pp_tokenize_condition}
+
+struct CfgArmDef:
+    arm: i64
+    cfg: [text]
+
+struct CfgItem:
+    kind: text
+    name: text
+    group: i64
+    arm: i64
+    cfg: [text]
+    sig: text
+
+struct CfgPoint:
+    ctx: MirTargetContext
+    features: [text]
+
+fn _cfg_is_guarded(group: i64, cfg: [text]) -> bool:
+    group != 0 or cfg.len() > 0
+
+# ---------------------------------------------------------------- type keys
+
+fn _cfg_type_key(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Int(bits, signed): "i{bits}{signed}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Unit: "()"
+        case HirTypeKind.Tuple(elements): "(" + _cfg_type_keys(elements) + ")"
+        case HirTypeKind.Array(element, _): "[" + _cfg_type_key(element) + "]"
+        case HirTypeKind.Slice(element): "[" + _cfg_type_key(element) + "]"
+        case HirTypeKind.Dict(key, value): "{" + _cfg_type_key(key) + ":" + _cfg_type_key(value) + "}"
+        case HirTypeKind.Ref(inner, m): "&{m}" + _cfg_type_key(inner)
+        case HirTypeKind.Ptr(inner, m): "*{m}" + _cfg_type_key(inner)
+        case HirTypeKind.Optional(inner): _cfg_type_key(inner) + "?"
+        case HirTypeKind.Result(ok, err): "R<" + _cfg_type_key(ok) + "," + _cfg_type_key(err) + ">"
+        case HirTypeKind.Named(symbol, args): "N{symbol.id}<" + _cfg_type_keys(args) + ">"
+        case HirTypeKind.TypeParam(name, _): "T:" + name
+        case HirTypeKind.Union(members): "U<" + _cfg_type_keys(members) + ">"
+        case _: "?"
+
+fn _cfg_type_keys(types: [HirType]) -> text:
+    var out = ""
+    for t in types:
+        out = out + _cfg_type_key(t) + ","
+    out
+
+fn _cfg_fn_sig(f: HirFunction) -> text:
+    var out = "("
+    for p in f.params:
+        out = out + _cfg_type_key(p.type_) + ","
+    out + ")->" + _cfg_type_key(f.return_type)
+
+# ------------------------------------------------------- guard evaluation
+
+fn _cfg_conj(cfg: [text], ctx: MirTargetContext, features: [text]) -> bool:
+    for c in cfg:
+        val r = mir_cfg_eval_for_target(c, ctx, features)
+        # Malformed guard: possibly active everywhere so it cannot hide an overlap (E-CFG-MALFORMED reports it).
+        if not r.ok: return true
+        if not r.value: return false
+    true
+
+fn _cfg_feature_names(conds: [text]) -> [text]:
+    var names: [text] = []
+    for c in conds:
+        val toks = _pp_tokenize_condition(c)
+        var i = 0
+        while i + 2 < toks.len():
+            val key = cfg_strip_quotes(toks[i]).trim()
+            val is_eq = toks[i + 1] == "=" or toks[i + 1] == "=="
+            if is_eq and (key == "feature" or key == "target_feature"):
+                val v = cfg_strip_quotes(toks[i + 2]).trim().lower()
+                if not names.contains(v): names = names.push(v)
+            i = i + 1
+    names
+
+fn _cfg_points(conds: [text]) -> [CfgPoint]:
+    val oses = ["windows", "linux", "macos", "freebsd", "simpleos"]
+    val archs = ["x86_64", "x86", "aarch64", "arm", "riscv64", "riscv32"]
+    val names = _cfg_feature_names(conds)
+    var subsets: [[text]] = [[]]
+    for n in names:
+        var grown: [[text]] = []
+        for s in subsets:
+            grown = grown.push(s)
+            grown = grown.push(s.push(n))
+        subsets = grown
+    var points: [CfgPoint] = []
+    for os in oses:
+        for arch in archs:
+            val ctx = MirTargetContext(arch: arch, os: os, abi: "gnu", backend: "llvm", version: 1)
+            for s in subsets:
+                points = points.push(CfgPoint(ctx: ctx, features: s))
+    points
+
+# Effective guard: own condition AND NOT every lower-indexed sibling of the
+# same group; the else arm (-1) is active iff no numbered arm is.
+fn _cfg_active(groups: Dict<i64, [CfgArmDef]>, it: CfgItem, p: CfgPoint) -> bool:
+    if it.arm >= 0 or it.group == 0:
+        if not _cfg_conj(it.cfg, p.ctx, p.features): return false
+    if it.group == 0: return true
+    if not groups.contains_key(it.group): return true
+    for a in groups[it.group]:
+        if a.arm < 0: continue
+        if it.arm >= 0 and a.arm >= it.arm: continue
+        if _cfg_conj(a.cfg, p.ctx, p.features): return false
+    true
+
+fn _cfg_group_conds(groups: Dict<i64, [CfgArmDef]>, it: CfgItem) -> [text]:
+    var out: [text] = it.cfg
+    if it.group != 0 and groups.contains_key(it.group):
+        for a in groups[it.group]:
+            for c in a.cfg:
+                out = out.push(c)
+    out
+
+# 1 = never both active, 0 = can overlap, -1 = cannot prove (too many feature atoms: fail closed).
+fn _cfg_exclusive(groups: Dict<i64, [CfgArmDef]>, a: CfgItem, b: CfgItem) -> i64:
+    if a.group != 0 and a.group == b.group and a.arm != b.arm: return 1
+    var conds = _cfg_group_conds(groups, a)
+    for c in _cfg_group_conds(groups, b):
+        conds = conds.push(c)
+    if _cfg_feature_names(conds).len() > 6: return -1
+    for p in _cfg_points(conds):
+        if _cfg_active(groups, a, p) and _cfg_active(groups, b, p): return 0
+    1
+
+fn _cfg_describe(it: CfgItem) -> text:
+    "group {it.group} arm {it.arm} [{it.cfg.join(\" and \")}]"
+
+# ------------------------------------------------------------- collection
+
+fn _cfg_collect_groups(items: [CfgItem]) -> Dict<i64, [CfgArmDef]>:
+    var groups: Dict<i64, [CfgArmDef]> = {}
+    for it in items:
+        if it.group == 0: continue
+        var arms: [CfgArmDef] = []
+        if groups.contains_key(it.group): arms = groups[it.group]
+        var seen = false
+        for a in arms:
+            if a.arm == it.arm: seen = true
+        if not seen:
+            arms = arms.push(CfgArmDef(arm: it.arm, cfg: it.cfg))
+            groups[it.group] = arms
+    groups
+
+fn _cfg_type_name_key(t: HirType, has_trait: bool, tr: HirType) -> text:
+    var out = _cfg_type_key(t)
+    if has_trait: out = out + " for " + _cfg_type_key(tr)
+    out
+
+fn _cfg_collect_items(module: HirModule) -> [CfgItem]:
+    var items: [CfgItem] = []
+    for f in module.functions.values():
+        items = items.push(CfgItem(kind: "fn", name: f.name, group: f.cfg_group, arm: f.cfg_arm, cfg: f.cfg, sig: _cfg_fn_sig(f)))
+    for s in module.structs.values():
+        items = items.push(CfgItem(kind: "struct", name: s.name, group: s.cfg_group, arm: s.cfg_arm, cfg: s.cfg, sig: ""))
+    for c in module.classes.values():
+        items = items.push(CfgItem(kind: "class", name: c.name, group: c.cfg_group, arm: c.cfg_arm, cfg: c.cfg, sig: ""))
+    for e in module.enums.values():
+        items = items.push(CfgItem(kind: "enum", name: e.name, group: e.cfg_group, arm: e.cfg_arm, cfg: e.cfg, sig: ""))
+    for t in module.traits.values():
+        items = items.push(CfgItem(kind: "trait", name: t.name, group: t.cfg_group, arm: t.cfg_arm, cfg: t.cfg, sig: ""))
+    for k in module.constants.values():
+        items = items.push(CfgItem(kind: "const", name: k.name, group: k.cfg_group, arm: k.cfg_arm, cfg: k.cfg, sig: ""))
+    items
+
+fn _cfg_collect_impls(module: HirModule) -> [CfgItem]:
+    var impls: [CfgItem] = []
+    for im in module.impls:
+        if not im.has_trait_: continue
+        impls = impls.push(CfgItem(kind: "impl", name: _cfg_type_name_key(im.type_, im.has_trait_, im.trait_), group: im.cfg_group, arm: im.cfg_arm, cfg: im.cfg, sig: ""))
+    impls
+
+fn _cfg_module_has_guards(module: HirModule) -> bool:
+    for f in module.functions.values():
+        if _cfg_is_guarded(f.cfg_group, f.cfg): return true
+    for s in module.structs.values():
+        if _cfg_is_guarded(s.cfg_group, s.cfg): return true
+    for c in module.classes.values():
+        if _cfg_is_guarded(c.cfg_group, c.cfg): return true
+    for e in module.enums.values():
+        if _cfg_is_guarded(e.cfg_group, e.cfg): return true
+    for t in module.traits.values():
+        if _cfg_is_guarded(t.cfg_group, t.cfg): return true
+    for k in module.constants.values():
+        if _cfg_is_guarded(k.cfg_group, k.cfg): return true
+    for im in module.impls:
+        if _cfg_is_guarded(im.cfg_group, im.cfg): return true
+    false
+
+# ----------------------------------------------------------- call walking
+
+# Qualified and bare spellings (`m.f`, `m::f`, `f`) name the same callee.
+fn _cfg_last_segment(name: text) -> text:
+    val parts = name.replace("::", ".").split(".")
+    if parts.len() == 0: return name
+    parts[parts.len() - 1]
+
+# Map: callee name (last path segment) -> name of the first unguarded function that calls it.
+fn _cfg_unguarded_callers(module: HirModule) -> Dict<text, text>:
+    var callers: Dict<text, text> = {}
+    for f in module.functions.values():
+        if _cfg_is_guarded(f.cfg_group, f.cfg): continue
+        var pending: [HirNode] = []
+        for n in hir_children_of_block(f.body):
+            pending = pending.push(n)
+        var index = 0
+        while index < pending.len():
+            val node: HirNode = pending[index]
+            index = index + 1
+            match node:
+                case HirNode.Expr(expression):
+                    if expression == nil: continue
+                    match expression.kind:
+                        case HirExprKind.Call(callee, _, _):
+                            val cname = _cfg_last_segment(_cfg_callee_name(module, callee))
+                            if cname != "" and not callers.contains_key(cname):
+                                callers[cname] = f.name
+                        case _: ()
+                case _: ()
+            for child in hir_children_of(node):
+                pending = pending.push(child)
+    callers
+
+fn _cfg_callee_name(module: HirModule, callee: HirExpr) -> text:
+    if callee == nil: return ""
+    match callee.kind:
+        case HirExprKind.NamedVar(symbol, name):
+            if module.functions.contains_key(symbol): module.functions[symbol].name else: name
+        case HirExprKind.Var(symbol):
+            if module.functions.contains_key(symbol): module.functions[symbol].name else: ""
+        case _: ""
+
+# ------------------------------------------------------------------ entry
+
+# A guard that fails to parse or evaluate is an error; elsewhere it counts as
+# possibly active so it cannot hide an overlap.
+fn _cfg_check_malformed(items: [CfgItem], errors: [text]) -> [text]:
+    var out = errors
+    val probe = MirTargetContext(arch: "x86_64", os: "linux", abi: "gnu", backend: "llvm", version: 1)
+    for it in items:
+        for c in it.cfg:
+            if not mir_cfg_eval_for_target(c, probe, []).ok:
+                out = out.push("E-CFG-MALFORMED: {it.name} guard {c}")
+    out
+
+fn _cfg_check_overlap(groups: Dict<i64, [CfgArmDef]>, items: [CfgItem], code: text, errors: [text]) -> [text]:
+    var out = errors
+    var i = 0
+    while i < items.len():
+        var j = i + 1
+        while j < items.len():
+            val a = items[i]
+            val b = items[j]
+            j = j + 1
+            if a.kind != b.kind or a.name != b.name: continue
+            if not _cfg_is_guarded(a.group, a.cfg) and not _cfg_is_guarded(b.group, b.cfg): continue
+            val ex = _cfg_exclusive(groups, a, b)
+            if ex == 1: continue
+            if ex < 0:
+                out = out.push("{code}: {a.kind} '{a.name}' cannot prove exclusive (too many feature atoms)")
+                continue
+            out = out.push("{code}: {a.kind} '{a.name}' has variants that can both be active: ({_cfg_describe(a)}) and ({_cfg_describe(b)})")
+        i = i + 1
+    out
+
+fn _cfg_check_fn_calls(module: HirModule, groups: Dict<i64, [CfgArmDef]>, items: [CfgItem], errors: [text]) -> [text]:
+    var out = errors
+    # Names with at least one guarded fn variant and no unguarded definition.
+    var names: [text] = []
+    for it in items:
+        if it.kind != "fn" or not _cfg_is_guarded(it.group, it.cfg): continue
+        val seg = _cfg_last_segment(it.name)
+        if not names.contains(seg): names = names.push(seg)
+    if names.len() == 0: return out
+    val callers = _cfg_unguarded_callers(module)
+    for name in names:
+        if not callers.contains_key(name): continue
+        var variants: [CfgItem] = []
+        var has_unguarded = false
+        for it in items:
+            if it.kind != "fn" or _cfg_last_segment(it.name) != name: continue
+            if _cfg_is_guarded(it.group, it.cfg): variants = variants.push(it) else: has_unguarded = true
+        if has_unguarded: continue
+        val caller = callers[name]
+        # (d) divergent signatures
+        var diverge = false
+        var k = 1
+        while k < variants.len() and not diverge:
+            if variants[k].sig != variants[0].sig:
+                diverge = true
+                out = out.push("E-CFG-SIG-DIVERGE: fn '{name}' variants ({_cfg_describe(variants[0])}) and ({_cfg_describe(variants[k])}) differ in signature but unguarded fn '{caller}' calls it")
+            k = k + 1
+        # (c) exhaustiveness over the matrix
+        var conds: [text] = []
+        for v in variants:
+            for c in _cfg_group_conds(groups, v):
+                conds = conds.push(c)
+        var uncovered = ""
+        if _cfg_feature_names(conds).len() > 6:
+            out = out.push("E-CFG-NONEXHAUSTIVE: fn '{name}' cannot prove exhaustive (too many feature atoms) but unguarded fn '{caller}' calls it")
+            continue
+        for p in _cfg_points(conds):
+            if uncovered != "": break
+            var covered = false
+            for v in variants:
+                if _cfg_active(groups, v, p): covered = true
+            if not covered: uncovered = "{p.ctx.os}/{p.ctx.arch}"
+        if uncovered != "":
+            out = out.push("E-CFG-NONEXHAUSTIVE: fn '{name}' has no active variant on {uncovered} but unguarded fn '{caller}' calls it")
+    out
+
+pub fn cfg_decl_check_module(module: HirModule) -> [text]:
+    if not _cfg_module_has_guards(module): return []
+    val items = _cfg_collect_items(module)
+    val impls = _cfg_collect_impls(module)
+    var all_for_groups = items
+    for im in impls:
+        all_for_groups = all_for_groups.push(im)
+    val groups = _cfg_collect_groups(all_for_groups)
+    var errors: [text] = []
+    errors = _cfg_check_malformed(all_for_groups, errors)
+    errors = _cfg_check_overlap(groups, items, "E-CFG-OVERLAP", errors)
+    errors = _cfg_check_fn_calls(module, groups, items, errors)
+    errors = _cfg_check_overlap(groups, impls, "E-CFG-IMPL-OVERLAP", errors)
+    errors
