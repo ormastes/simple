@@ -327,7 +327,7 @@ sub resolve_observation_budget_ms {
 my $observation_budget_ms = resolve_observation_budget_ms(
     $^O, $ENV{SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS});
 my ($sample_duration_max_ms, $sample_overruns, $sample_budget_exceeded) = (0, 0, 0);
-my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha);
+my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha, $observer_policy_sha);
 my ($observer_read, $observer_write, $observer_pid);
 my $observer_buffer = '';
 my ($observer_starts, $observer_errors, $observer_last_pid) = (0, 0, 0);
@@ -510,6 +510,9 @@ sub install_observer {
     my $source = abs_path($watchdog_source_dir . '/macos-process-observer.c');
     open(my $fh, '<', $source) or die "cannot read process observer source";
     $observer_source_sha = hash_handle($fh);
+    my $policy = abs_path($watchdog_source_dir . '/macos-observer-denial-policy.h');
+    open(my $policy_fh, '<', $policy) or die "cannot read process observer denial policy";
+    $observer_policy_sha = hash_handle($policy_fh);
     $observer_path = dirname($session_helper) . '/macos-process-observer';
     my $compiler = $ENV{CC} || 'cc';
     my $builder = fork();
@@ -529,7 +532,10 @@ sub install_observer {
         sleep 0.02;
     }
     hash_handle($fh) eq $observer_source_sha or die "process observer source changed during compilation";
+    hash_handle($policy_fh) eq $observer_policy_sha
+        or die "process observer denial policy changed during compilation";
     close($fh);
+    close($policy_fh);
     chmod(0500, $observer_path) == 1 or die "cannot protect process observer";
     sysopen($observer_fd, $observer_path, O_RDONLY | O_NOFOLLOW) or die "cannot pin process observer";
     -f $observer_fd or die "process observer is not a regular file";
@@ -1579,6 +1585,7 @@ sub receipt {
         "observer_backend=$observer_backend\nobserver_path=" . ($observer_path // '') . "\n" .
         "observer_sha256=" . ($observer_sha // '') . "\n" .
         "observer_source_sha256=" . ($observer_source_sha // '') . "\n" .
+        "observer_policy_header_sha256=" . ($observer_policy_sha // '') . "\n" .
         "observer_starts=$observer_starts\nobserver_errors=$observer_errors\n" .
         "observer_restarts=" . ($observer_starts ? $observer_starts - 1 : 0) . "\n" .
         "observer_last_pid=$observer_last_pid\n" .
