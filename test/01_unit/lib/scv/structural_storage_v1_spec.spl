@@ -3,9 +3,11 @@ Lossless SCV span storage. Provider blobs here are explicit test fixtures;
 these tests do not claim a Tree-sitter runtime executed.
 """
 use std.spec.{describe, it, expect}
-use app.io.mod (process_run, file_read, file_write, file_exists)
-use std.scv.store.{scv_init_repo, scv_write_file_object_from_bytes, scv_object_field}
+use app.io.mod (process_run, file_read, file_write, file_exists, file_delete)
+use std.scv.store.{scv_init_repo, scv_write_file_object_from_bytes, scv_object_field, scv_write_tree_object, scv_write_commit, scv_restore_commit, scv_hash_text, scv_write_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
 use std.scv.core.{scv_object_path}
+use std.scv.maintenance.{scv_add_reachable_from_file_object, scv_add_reachable_syntax_node}
 use std.scv.structural_span_v1.{scv_structural_spans_v1}
 use std.scv.structural_store_v1.{scv_structural_build_v1, scv_structural_decode_v1, scv_structural_restore_file_v1}
 use std.scv.wasm_executor.{scv_wasm_parse}
@@ -40,6 +42,8 @@ describe "SCV structural byte spans v1":
         val root = structural_fixture_v1()
         val one = scv_structural_build_v1(root, "x".bytes(), "identifier||0|1|1|0\n").unwrap()
         val two = scv_structural_build_v1(root, "xx".bytes(), "file||0|2|0|0\nidentifier||0|1|1|1\nidentifier||1|2|1|1\n").unwrap()
+        val record = file_read(scv_object_path(root, "syntax", two))
+        expect(scv_object_field(record, "children")).to_equal("{one},{one}")
         expect(scv_structural_decode_v1(root, one, 1).unwrap()).to_equal("x".bytes())
         expect(scv_structural_decode_v1(root, two, 2).unwrap()).to_equal("xx".bytes())
 
@@ -58,6 +62,32 @@ describe "SCV structural byte spans v1":
         expect(file_write(scv_object_path(root, "syntax", node), "forged")).to_equal(true)
         expect(scv_structural_decode_v1(root, node, 3).is_err()).to_equal(true)
 
+    it "rejects correctly hashed records with ambiguous child framing or wrong aggregate lengths":
+        val root = structural_fixture_v1()
+        val leaf = scv_structural_build_v1(root, "abc".bytes(), "identifier||0|3|1|0\n").unwrap()
+        for children in ["{leaf},", ",{leaf}", "{leaf},,{leaf}"]:
+            val record = "format: scv-byte-node-v1\nrole: branch\nkind_hex: 66696c65\nfield_hex: \nlength: 3\npayload: \nchildren: {children}\n"
+            val id = scv_hash_text("syntax_node", record)
+            expect(scv_write_text(scv_object_path(root, "syntax", id), record)).to_equal(true)
+            expect(scv_structural_decode_v1(root, id, 3).is_err()).to_equal(true)
+        val wrong = "format: scv-byte-node-v1\nrole: branch\nkind_hex: 66696c65\nfield_hex: \nlength: 4\npayload: \nchildren: {leaf}\n"
+        val id = scv_hash_text("syntax_node", wrong)
+        expect(scv_write_text(scv_object_path(root, "syntax", id), wrong)).to_equal(true)
+        expect(scv_structural_decode_v1(root, id, 4).is_err()).to_equal(true)
+
+    it "retains parsed child payloads independently of the full-file raw root":
+        val root = structural_fixture_v1()
+        val node = scv_structural_build_v1(root, "a b".bytes(), "file||0|3|0|0\nidentifier||0|1|1|1\nidentifier||2|3|1|1\n").unwrap()
+        val reachable = scv_add_reachable_syntax_node(root, node, "")
+        val children = scv_object_field(file_read(scv_object_path(root, "syntax", node)), "children").split(",")
+        expect(children.len()).to_equal(3)
+        for child in children:
+            val payload = scv_object_field(file_read(scv_object_path(root, "syntax", child)), "payload")
+            expect(reachable).to_contain("{payload}\n")
+        val payload = scv_object_field(file_read(scv_object_path(root, "syntax", children[0])), "payload")
+        expect(file_delete("{root}/.scv/objects/chunks/{payload}.blob")).to_equal(true)
+        expect(scv_structural_decode_v1(root, node, 3).is_err()).to_equal(true)
+
     it "normal writes retain raw data and integrate declared opaque reconstruction without CDC":
         val root = structural_fixture_v1()
         val bytes = "raw\r\n".repeat(2000).bytes()
@@ -67,8 +97,39 @@ describe "SCV structural byte spans v1":
         expect(record.contains("chunks:\n")).to_equal(false)
         expect(file_exists("{root}/.scv/objects/chunks/{raw}.blob")).to_equal(true)
         val structure = scv_object_field(record, "structure")
-        expect(file_read(scv_object_path(root, "syntax", structure))).to_contain("execution: opaque\n")
+        val root_record = file_read(scv_object_path(root, "syntax", structure))
+        expect(root_record).to_contain("execution: opaque\n")
+        val leaf = scv_object_field(root_record, "children")
+        val reachable = scv_add_reachable_from_file_object(root, file_id, "")
+        expect(reachable).to_contain("{structure}\n")
+        expect(reachable).to_contain("{leaf}\n")
+        expect(reachable).to_contain("{raw}\n")
         expect(scv_structural_restore_file_v1(root, record, raw, bytes.len()).unwrap()).to_equal(bytes)
+        expect(file_delete(scv_object_path(root, "syntax", leaf))).to_equal(true)
+        expect(scv_structural_restore_file_v1(root, record, raw, bytes.len()).is_err()).to_equal(true)
+
+    it "restores old raw-only records and empty opaque units without migration":
+        val root = structural_fixture_v1()
+        val (file_id, raw) = scv_write_file_object_from_bytes(root, "empty.bin", [], 0).unwrap()
+        val legacy = "path: empty.bin\nchunk: {raw}\nsize: 0\nmtime: 0\n"
+        expect(scv_structural_restore_file_v1(root, legacy, raw, 0).unwrap()).to_equal([])
+        val record = file_read(scv_object_path(root, "files", file_id))
+        expect(scv_structural_restore_file_v1(root, record, raw, 0).unwrap()).to_equal([])
+
+    it "normal restore publishes exact bytes and preserves the destination on missing structure":
+        val root = structural_fixture_v1()
+        val bytes: [u8] = [0u8, 255u8, 13u8, 10u8]
+        val (file_id, raw) = scv_write_file_object_from_bytes(root, "data.bin", bytes, 0).unwrap()
+        val tree = scv_write_tree_object(root, ["data.bin|{file_id}|{raw}|4|0"])
+        val commit = scv_write_commit(root, "", tree, "private_dirty")
+        expect(scv_restore_commit(root, commit)).to_equal("restored 1\n")
+        expect(file_read_bytes("{root}/data.bin").unwrap()).to_equal(bytes)
+        val record = file_read(scv_object_path(root, "files", file_id))
+        val structure = scv_object_field(record, "structure")
+        expect(file_delete(scv_object_path(root, "syntax", structure))).to_equal(true)
+        expect(file_write("{root}/data.bin", "preserve local bytes")).to_equal(true)
+        expect(scv_restore_commit(root, commit)).to_contain("ERROR")
+        expect(file_read("{root}/data.bin")).to_equal("preserve local bytes")
 
     it "never reports missing artifact simulation as successful WASM execution":
         val root = structural_fixture_v1()
