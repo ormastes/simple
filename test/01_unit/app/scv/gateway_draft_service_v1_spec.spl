@@ -1,0 +1,97 @@
+# @cover src/app/scv/gateway_draft_service_v1.spl 80%
+use std.spec.*
+use app.scv.gateway_draft_service_v1.*
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1, scv_draft_blob_get_v1}
+use std.scv.gateway_draft_protocol_v1.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpMethod, HttpStatus}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, directory_fsync}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+
+val DRAFT_TEST_TOKEN = "abcdefghijklmnopqrstuvwxyz012345"
+
+fn setup_draft_root_v1() -> text:
+    val root = secure_temp_dir_raw("/tmp", "scv-draft-service-v1-")
+    if root.len() > 0:
+        expect(directory_fsync(root)).to_equal(true)
+        expect(directory_fsync("/tmp")).to_equal(true)
+    root
+
+fn setup_draft_config_v1(root: text) -> ScvGatewayDraftConfigV1:
+    val grant: Dict<text, SdnValue> = {"repository": SdnValue.String("repo-alpha"),
+        "principal_id": SdnValue.String("principal-1"), "bearer_token_env": SdnValue.String("SCV_DRAFT_TEST_TOKEN"),
+        "can_read": SdnValue.Bool(true), "can_write": SdnValue.Bool(true)}
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "listen_host": SdnValue.String("127.0.0.1"),
+        "listen_port": SdnValue.Int(9981), "store_root": SdnValue.String(root),
+        "grants": SdnValue.Array([SdnValue.Dict(grant)])}
+    scv_gateway_draft_config_parse_v1(sdn_encode_canonical(SdnValue.Dict(fields)).bytes()).unwrap()
+
+fn setup_draft_grant_v1(repository: text, principal: text, token: text,
+        can_read: bool, can_write: bool) -> ScvGatewayDraftGrantV1:
+    ScvGatewayDraftGrantV1(repository: repository, principal_id: principal,
+        bearer_token: token, can_read: can_read, can_write: can_write)
+
+fn setup_draft_request_v1(method: text, bytes: [u8]) -> ScvGatewayDraftRequestV1:
+    ScvGatewayDraftRequestV1(version: 1, id: "wire-1", repository: "repo-alpha", method: method,
+        request_id: "retry-1", content_sha256: sha256_u8_hex(bytes), bytes: bytes)
+
+fn setup_draft_http_v1(request: ScvGatewayDraftRequestV1, token: text) -> HttpRequest:
+    var http = HttpRequest.new(HttpMethod.Post, "/scv/draft/v1")
+    http.headers = [("Content-Type", "application/sdn"), ("Authorization", "Bearer " + token)]
+    http.body = scv_gateway_draft_request_encode_v1(request, request.repository).unwrap()
+    http
+
+describe "SCV authenticated draft transfer service v1":
+    it "requires strict host grants, exact loopback and a pre-provisioned store root":
+        val root = setup_draft_root_v1()
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "listen_host": SdnValue.String("0.0.0.0"),
+            "listen_port": SdnValue.Int(9981), "store_root": SdnValue.String(root), "grants": SdnValue.Array([])}
+        expect(scv_gateway_draft_config_parse_v1(sdn_encode_canonical(SdnValue.Dict(fields)).bytes()).is_err()).to_equal(true)
+        val fields_loopback: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "listen_host": SdnValue.String("127.0.0.1"),
+            "listen_port": SdnValue.Int(9981), "store_root": SdnValue.String("/tmp/scv-no-such-store"), "grants": SdnValue.Array([])}
+        expect(scv_gateway_draft_config_parse_v1(sdn_encode_canonical(SdnValue.Dict(fields_loopback)).bytes()).is_err()).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "stores through the authenticated grant and exact replay returns the durable store receipt":
+        val root = setup_draft_root_v1()
+        val config = setup_draft_config_v1(root)
+        val grants = [setup_draft_grant_v1("repo-alpha", "principal-1", DRAFT_TEST_TOKEN, true, true)]
+        val bytes: [u8] = [0u8, 255u8, 65u8, 128u8]
+        val request = setup_draft_request_v1("put", bytes)
+        val first = scv_gateway_draft_handle_v1(config, grants, setup_draft_http_v1(request, DRAFT_TEST_TOKEN))
+        val first_receipt = scv_gateway_draft_response_decode_v1(first.body, request, "repo-alpha", "principal-1").unwrap()
+        expect(first_receipt.status).to_equal("ok")
+        expect(first_receipt.state).to_equal("local_durable")
+        expect(first_receipt.byte_count).to_equal(4)
+        val replay = scv_gateway_draft_handle_v1(config, grants, setup_draft_http_v1(request, DRAFT_TEST_TOKEN))
+        expect(scv_gateway_draft_response_decode_v1(replay.body, request, "repo-alpha", "principal-1").unwrap()).to_equal(first_receipt)
+        val scope = ScvDraftBlobAdmittedScopeV1(repository_id: "repo-alpha", principal_id: "principal-1", can_read: true, can_write: true)
+        expect(scv_draft_blob_get_v1(root, scope, sha256_u8_hex(bytes)).unwrap()).to_equal(bytes)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "authenticates before store access and never accepts a request-selected principal":
+        val root = setup_draft_root_v1()
+        val config = setup_draft_config_v1(root)
+        val grants = [setup_draft_grant_v1("repo-alpha", "principal-1", DRAFT_TEST_TOKEN, true, true)]
+        val request = setup_draft_request_v1("get", [])
+        val unauthorized = scv_gateway_draft_handle_v1(config, grants, setup_draft_http_v1(request, "wrong-token"))
+        expect(unauthorized.status).to_equal(HttpStatus.Unauthorized)
+        val extra = setup_draft_http_v1(request, DRAFT_TEST_TOKEN)
+        extra.body = extra.body.replace("method:", "principal_id: attacker\nmethod:")
+        expect(scv_gateway_draft_handle_v1(config, grants, extra).status).to_equal(HttpStatus.BadRequest)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "denies a repository mismatch and a read-only grant before draft object lookup":
+        val root = setup_draft_root_v1()
+        val config = setup_draft_config_v1(root)
+        val reader = setup_draft_grant_v1("repo-alpha", "principal-1", DRAFT_TEST_TOKEN, true, false)
+        var request = setup_draft_request_v1("put", [1u8])
+        val denied_write = scv_gateway_draft_handle_v1(config, [reader], setup_draft_http_v1(request, DRAFT_TEST_TOKEN))
+        expect(denied_write.status).to_equal(HttpStatus.Ok)
+        expect(scv_gateway_draft_response_decode_v1(denied_write.body, request, "repo-alpha", "principal-1").unwrap().status).to_equal("denied")
+        request.repository = "repo-other"
+        val denied_repo = scv_gateway_draft_handle_v1(config, [reader], setup_draft_http_v1(request, DRAFT_TEST_TOKEN))
+        expect(denied_repo.status).to_equal(HttpStatus.Forbidden)
+        expect(dir_remove_all(root)).to_equal(true)
