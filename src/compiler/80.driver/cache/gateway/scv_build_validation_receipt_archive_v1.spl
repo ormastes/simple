@@ -1,0 +1,72 @@
+# Durable immutable content archive, NOT an accepted semantic root publisher.
+# The parent alone authenticates live producer evidence and owns accepted roots.
+# Public receipt construction or archival never grants semantic authority.
+use std.io_runtime.{file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive,
+    file_read_regular_no_follow_bounded, file_exists, file_lock, file_unlock,
+    file_publish_noreplace, file_fsync}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+use compiler.driver.cache.gateway.scv_build_validation_receipt_v1.*
+
+fn _archive_root_valid_v1(root: text) -> bool:
+    if (root == "" or not root.starts_with("/") or root.ends_with("/") or
+            root.contains("\\") or root.contains("\u0000")): return false
+    # Refuse parent symlink traversal rather than checking only the last leaf.
+    var current = ""
+    val segments = root.split("/")
+    for index in 1..segments.len():
+        val segment = segments[index]
+        if segment == "" or segment == "." or segment == "..": return false
+        current = current + "/" + segment
+        if not dir_is_real_no_follow(current): return false
+    true
+
+pub fn scv_build_validation_receipt_read_v1(root: text, accepted_receipt_id: text,
+        expected: ScvBuildValidationReceiptV1) -> Result<ScvBuildValidationReceiptV1, text>:
+    # accepted_receipt_id must come from the parent's authenticated immutable
+    # accepted root. This API proves byte/subject correspondence, not provenance.
+    if not _archive_root_valid_v1(root): return Err("build-receipt-root-invalid")
+    if (not three_payload_contract_digest_valid_v1(accepted_receipt_id) or
+            accepted_receipt_id != expected.receipt_id): return Err("build-receipt-accepted-root-mismatch")
+    val canonical = scv_build_validation_receipt_encode_v1(expected)?
+    val stored = file_read_regular_no_follow_bounded(root + "/" + accepted_receipt_id + ".sdn", 8192)?
+    val decoded = scv_build_validation_receipt_decode_v1(stored)?
+    if decoded.receipt_id != accepted_receipt_id or stored != canonical:
+        return Err("build-receipt-stale-corrupt-or-replayed")
+    Ok(decoded)
+
+fn _archive_locked_v1(root: text, receipt: ScvBuildValidationReceiptV1,
+        payload: text) -> Result<text, text>:
+    val destination = root + "/" + receipt.receipt_id + ".sdn"
+    if file_exists(destination):
+        _ = scv_build_validation_receipt_read_v1(root, receipt.receipt_id, receipt)?
+        if not file_fsync(destination) or not file_fsync(root): return Err("build-receipt-sync-failed")
+        return Ok(receipt.receipt_id)
+    # Root-wide OS lock serializes publishers; fixed exclusive staging never
+    # borrows the global temporary-directory argument slots across threads.
+    # A leftover stage after a crash fails explicitly and requires owner recovery.
+    val stage = root + "/." + receipt.receipt_id + ".stage"
+    if not file_create_exclusive(stage, payload): return Err("build-receipt-stage-unavailable")
+    if not file_fsync(stage):
+        file_delete(stage)
+        return Err("build-receipt-data-sync-failed")
+    val published = file_publish_noreplace(stage, destination)
+    file_delete(stage)
+    if published.is_err(): return Err("build-receipt-publication-failed")
+    # A concurrent publisher outside this lock may only win with identical bytes.
+    # No replacement is attempted, and corrupt preexisting content is retained
+    # for the owner to investigate rather than silently overwritten.
+    _ = scv_build_validation_receipt_read_v1(root, receipt.receipt_id, receipt)?
+    if not file_fsync(destination) or not file_fsync(root): return Err("build-receipt-directory-sync-failed")
+    Ok(receipt.receipt_id)
+
+pub fn scv_build_validation_receipt_archive_v1(root: text,
+        receipt: ScvBuildValidationReceiptV1) -> Result<text, text>:
+    if not _archive_root_valid_v1(root): return Err("build-receipt-root-invalid")
+    val payload = scv_build_validation_receipt_encode_v1(receipt)?
+    val lock = file_lock(root + "/.receipt-archive.lock", 5)
+    if lock < 0: return Err("build-receipt-lock-unavailable")
+    val result = _archive_locked_v1(root, receipt, payload)
+    if not file_unlock(lock): return Err("build-receipt-unlock-failed")
+    result
