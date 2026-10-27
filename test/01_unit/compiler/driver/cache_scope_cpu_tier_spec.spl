@@ -1,0 +1,98 @@
+"""Cache scope key with CPU tier canonicalization.
+
+A native build cache key must distinguish targets by their canonical CPU tier
+specification. Two specs that canonicalize to the same tier produce identical
+keys; different tiers produce different keys. An empty tier specification leaves
+the legacy key unchanged.
+"""
+
+use compiler.driver.driver_build.{native_build_cache_scope_tier_fields, native_build_cache_canonical_tier}
+
+# @manual_section("Tier Canonicalization")
+
+it "canonicalizes x86_64 v3 base without extra features":
+    step("Call native_build_cache_scope_tier_fields for 'x86-64-v3'")
+    val result = native_build_cache_scope_tier_fields("x86_64", "x86-64-v3")
+    step("Expect cpu=x86-64-v3 in key component")
+    expect(result).to_equal("cpu=x86-64-v3")
+
+it "canonicalizes x86_64 v3 with implied features to same form":
+    step("Call with spec 'x86-64-v3+avx2' (avx2 is implied by v3)")
+    val result = native_build_cache_scope_tier_fields("x86_64", "x86-64-v3+avx2")
+    step("Expect implied features dropped, leaving only base")
+    expect(result).to_equal("cpu=x86-64-v3")
+
+it "includes non-implied explicit features in cache key":
+    step("Call with spec 'x86-64-v3+avx512f' (avx512f is NOT implied by v3)")
+    val result = native_build_cache_scope_tier_fields("x86_64", "x86-64-v3+avx512f")
+    step("Expect non-implied feature in key")
+    expect(result).to_equal("cpu=x86-64-v3;features=avx512f")
+
+it "sorts multiple non-implied features alphabetically":
+    step("Call with spec 'x86-64-v3+sha+avx512f' (multiple features)")
+    val result = native_build_cache_scope_tier_fields("x86_64", "x86-64-v3+sha+avx512f")
+    step("Expect features sorted")
+    expect(result).to_equal("cpu=x86-64-v3;features=avx512f,sha")
+
+it "produces identical keys for different feature orderings":
+    step("Call with spec 'x86-64-v3+sha+avx512f'")
+    val key1 = native_build_cache_scope_tier_fields("x86_64", "x86-64-v3+sha+avx512f")
+    step("Call with spec 'x86-64-v3+avx512f+sha' (different order)")
+    val key2 = native_build_cache_scope_tier_fields("x86_64", "x86-64-v3+avx512f+sha")
+    step("Expect keys identical due to canonicalization")
+    expect(key1).to_equal(key2)
+
+it "produces different keys for different CPU bases":
+    step("Call with v2 spec")
+    val key_v2 = native_build_cache_scope_tier_fields("x86_64", "x86-64-v2")
+    step("Call with v3 spec")
+    val key_v3 = native_build_cache_scope_tier_fields("x86_64", "x86-64-v3")
+    step("Expect different cache keys")
+    expect(key_v2).not.to_equal(key_v3)
+
+it "returns cpu=invalid for unparseable tier spec":
+    step("Call with invalid spec 'totally-bogus'")
+    val result = native_build_cache_scope_tier_fields("x86_64", "totally-bogus")
+    step("Expect error placeholder")
+    expect(result).to_equal("cpu=invalid")
+
+it "returns empty string for empty tier spec":
+    step("Call with empty spec")
+    val result = native_build_cache_scope_tier_fields("x86_64", "")
+    step("Expect empty component (legacy key unchanged)")
+    expect(result).to_equal("")
+
+it "handles aarch64 baseline tier":
+    step("Call with aarch64 spec 'armv8-a'")
+    val result = native_build_cache_scope_tier_fields("aarch64", "armv8-a")
+    step("Expect cpu=armv8-a")
+    expect(result).to_equal("cpu=armv8-a")
+
+# @manual_section("Equal tiers share one cache key")
+
+it "gives x86-64-v3 and x86-64-v3 with +avx2 the same key cpu and features":
+    step("Canonicalize the cpu and features the native build passes to the scope key")
+    val plain = native_build_cache_canonical_tier("x86-64-v3", [])
+    val with_implied = native_build_cache_canonical_tier("x86-64-v3", ["+avx2", "+fma"])
+    step("Implied features are dropped, so both reduce to the same pair")
+    expect(with_implied.cpu).to_equal(plain.cpu)
+    expect(with_implied.features.len()).to_equal(0)
+
+it "folds the x86-64-v1 alias onto x86-64":
+    val canon = native_build_cache_canonical_tier("x86-64-v1", [])
+    expect(canon.cpu).to_equal("x86-64")
+
+it "keeps a non-implied feature, sorted, with its plus sign":
+    val canon = native_build_cache_canonical_tier("x86-64-v3", ["+avx512vnni", "+avx512f"])
+    expect(canon.cpu).to_equal("x86-64-v3")
+    expect(canon.features).to_equal(["+avx512f", "+avx512vnni"])
+
+it "leaves a cpu that is not a tier level untouched":
+    val canon = native_build_cache_canonical_tier("haswell", ["+avx2"])
+    expect(canon.cpu).to_equal("haswell")
+    expect(canon.features).to_equal(["+avx2"])
+
+it "leaves negative features untouched":
+    val canon = native_build_cache_canonical_tier("x86-64-v3", ["-avx2"])
+    expect(canon.cpu).to_equal("x86-64-v3")
+    expect(canon.features).to_equal(["-avx2"])
