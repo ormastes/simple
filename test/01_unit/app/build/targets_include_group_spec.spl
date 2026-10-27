@@ -1,0 +1,145 @@
+"""
+## Purpose and audience
+I keep the root `targets.sdn` small: it only names sub-configs and says which
+build group runs by default. Each optional group (backend plugins, the stdlib
+static archive, CPU tiers, cross-triple providers) lives in its own file under
+`config/build/`. This spec proves the two directives that make that work,
+`include:` and `group <name>:`, for the engineers who add a new group.
+
+## Operator workflow
+Run one file: `bin/simple test test/01_unit/app/build/targets_include_group_spec.spl`.
+Fixtures are written under `build/test_fixtures/targets_include_group/`.
+
+## Compatibility and limitations
+A targets file with no `group` block keeps its old meaning: every declared
+target is in the default selection. Include paths resolve relative to the
+including file, and `\\` is normalised to `/` so a config written on Windows
+reads the same on Linux, macOS, FreeBSD and SimpleOS.
+
+## Verification guidance and troubleshooting
+`target-error: include-cycle:` and `target-error: include-missing:` are the
+named refusals; `target-error: unknown-group-member:` names a group entry that
+no included file declares.
+"""
+# @manual_section: build config include and group directives
+# @req REQ-BUILD-GROUP-001 include merges sub-config targets
+# @req REQ-BUILD-GROUP-002 default selection is the default group only
+# @req REQ-BUILD-GROUP-003 include cycles and missing includes are refused
+
+use app.build.targets.build_targets.{
+    parse_targets_text, load_targets_file, validate_targets, find_target,
+    default_group_targets, group_targets, normalize_include_path
+}
+use std.io_runtime.{file_write, dir_create_all}
+use std.spec.step
+
+val ROOT = "build/test_fixtures/targets_include_group"
+
+fn _write(rel: text, body: text) -> bool:
+    file_write(ROOT + "/" + rel, body)
+
+fn _setup() -> bool:
+    dir_create_all(ROOT + "/src")
+    dir_create_all(ROOT + "/config/build")
+    val a = _write("src/main.spl", "fn main(): 0\n")
+    val b = _write("src/plugin.spl", "fn plugin(): 0\n")
+    val c = _write("targets.sdn",
+        "include: config/build/plugins.sdn\n\n" +
+        "group host:\n    default: true\n    members: compiler\n\n" +
+        "target compiler:\n    kind: binary\n    entry: src/main.spl\n")
+    val d = _write("config/build/plugins.sdn",
+        "group plugins:\n    default: false\n    members: plugin_c\n\n" +
+        "target plugin_c:\n    kind: shared\n    entry: src/plugin.spl\n")
+    val e = _write("cycle_a.sdn", "include: cycle_b.sdn\n")
+    val f = _write("cycle_b.sdn", "include: cycle_a.sdn\n")
+    val g = _write("missing.sdn", "include: config/build/nope.sdn\n")
+    val h = _write("backslash.sdn", "include: config\\build\\plugins.sdn\n")
+    a and b and c and d and e and f and g and h
+
+fn _has(xs: [text], needle: text) -> bool:
+    var i = 0
+    while i < xs.len():
+        if xs[i].contains(needle):
+            return true
+        i = i + 1
+    false
+
+describe "build config: include and group directives":
+    """
+    As the owner of an optional build group, I put its targets in a sub-config
+    and include it from the root, so a default build never touches it.
+    """
+
+    it "brings a sub-config's targets into the root set":
+        # @req REQ-BUILD-GROUP-001
+        step("Given a root targets.sdn that includes config/build/plugins.sdn")
+        expect(_setup()).to_equal(true)
+        step("When I load the root file")
+        val ts = load_targets_file(ROOT + "/targets.sdn", ROOT)
+        step("Then both the host target and the included plugin target are declared, with no errors")
+        expect(validate_targets(ts, ROOT).len()).to_equal(0)
+        expect(find_target(ts, "compiler") >= 0).to_equal(true)
+        expect(find_target(ts, "plugin_c") >= 0).to_equal(true)
+
+    it "builds only the host group by default":
+        # @req REQ-BUILD-GROUP-002
+        step("Given the root marks group host default and the plugins group non-default")
+        expect(_setup()).to_equal(true)
+        val ts = load_targets_file(ROOT + "/targets.sdn", ROOT)
+        step("When I ask for the default selection")
+        val sel = default_group_targets(ts)
+        step("Then only the compiler is selected and the plugin is left out")
+        expect(sel.len()).to_equal(1)
+        expect(sel[0]).to_equal("compiler")
+
+    it "builds a non-default group only when I name it":
+        # @req REQ-BUILD-GROUP-002
+        step("Given the plugins group is declared in the included sub-config")
+        expect(_setup()).to_equal(true)
+        val ts = load_targets_file(ROOT + "/targets.sdn", ROOT)
+        step("When I select the plugins group by name")
+        val sel = group_targets(ts, "plugins")
+        step("Then exactly the plugin target is selected")
+        expect(sel.len()).to_equal(1)
+        expect(sel[0]).to_equal("plugin_c")
+
+    it "keeps every target selected when a file declares no groups":
+        # @req REQ-BUILD-GROUP-002
+        step("Given an old-style targets file with two targets and no group block")
+        val ts = parse_targets_text("target a:\n    kind: binary\n    entry: x.spl\n\ntarget b:\n    kind: binary\n    entry: y.spl\n")
+        step("Then the default selection is both targets, as before")
+        expect(default_group_targets(ts).len()).to_equal(2)
+
+    it "refuses an include cycle by name":
+        # @req REQ-BUILD-GROUP-003
+        step("Given two files that include each other")
+        expect(_setup()).to_equal(true)
+        step("When I load the first one")
+        val ts = load_targets_file(ROOT + "/cycle_a.sdn", ROOT)
+        step("Then loading stops with an include-cycle error instead of looping")
+        expect(_has(ts.errors, "target-error: include-cycle:")).to_equal(true)
+
+    it "refuses a missing include by name":
+        # @req REQ-BUILD-GROUP-003
+        step("Given a file that includes a sub-config that does not exist")
+        expect(_setup()).to_equal(true)
+        val ts = load_targets_file(ROOT + "/missing.sdn", ROOT)
+        step("Then the error names the missing include, never an empty default")
+        expect(_has(ts.errors, "target-error: include-missing:")).to_equal(true)
+
+    it "reads a backslash include path the same as a forward-slash one":
+        # @req REQ-BUILD-GROUP-001
+        step("Given an include written with Windows separators")
+        expect(_setup()).to_equal(true)
+        expect(normalize_include_path("config\\build\\plugins.sdn")).to_equal("config/build/plugins.sdn")
+        step("When I load it")
+        val ts = load_targets_file(ROOT + "/backslash.sdn", ROOT)
+        step("Then the plugin target from the sub-config is declared")
+        expect(find_target(ts, "plugin_c") >= 0).to_equal(true)
+
+    it "names a group member that no file declares":
+        # @req REQ-BUILD-GROUP-001
+        step("Given a group that lists a target nobody declares")
+        val ts = parse_targets_text("group g:\n    default: true\n    members: ghost\n")
+        step("Then validation names the unknown member")
+        expect(_has(validate_targets(ts, ROOT), "target-error: unknown-group-member: g -> ghost")).to_equal(true)
