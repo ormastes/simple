@@ -3606,6 +3606,14 @@ impl MirLowering:
         val runtime_array = self.local_is_runtime_array(base_local)
         val typed_u8_runtime_read = (runtime_array and
             rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.U8))
+        # Unsafe `Any` read: the receiver is an erased runtime value that may
+        # hold a byte-packed `[u8]`, whose slots are raw octets. A raw GEP+load
+        # (or rt_array_get under SIMPLE_BOOTSTRAP) misreads them, so go through
+        # the flag-aware, tagged-in/tagged-out rt_index_get. The result stays a
+        # tagged runtime value; unsafe code owns decoding it. Typed arrays,
+        # tuples, raw pointers and GPU paths are untouched.
+        if self.is_any_runtime_index_base(base_local, runtime_array, is_tuple_base, raw_pointer_base):
+            return self.lower_any_runtime_index_get(base_local, index_local)
         if not gpu_raw_pointer and not typed_u8_runtime_read:
             self.emit_bounds_check_for_index(base.type_, base_local, index_local)
         # Bug (native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02,
@@ -3780,6 +3788,29 @@ impl MirLowering:
             val loaded = b.emit_load(mir_operand_copy(ptr), result_type)
             self.builder = b
             loaded
+
+    fn is_any_runtime_index_base(base_local: LocalId, runtime_array: bool, is_tuple_base: bool, raw_pointer_base: bool) -> bool:
+        """True for an index base that is a positive `Any` runtime-value local."""
+        if runtime_array or is_tuple_base or raw_pointer_base:
+            return false
+        if not self.is_runtime_value_local(base_local.id):
+            return false
+        if val base_hir_type = self.find_local_hir_type(base_local.id):
+            return base_hir_type.kind == HirTypeKind.Any
+        false
+
+    me lower_any_runtime_index_get(base_local: LocalId, index_local: LocalId) -> LocalId:
+        val tagged_index = self.box_runtime_value(index_local)
+        val getter = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_index_get"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b = self.builder
+        val got = b.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(tagged_index)], MirType.i64())
+        self.builder = b
+        val result = got ?? base_local
+        self.mark_runtime_value_local(result.id)
+        result
 
     me mark_native_tuple_projection(local: LocalId, field_type: MirType):
         match field_type.kind:
