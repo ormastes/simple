@@ -21,3 +21,8 @@ These eight merged PRs are recorded as related receipts: [#5034](https://github.
 ## Still required for the user's full triage goal
 
 This checkpoint does not complete the requested 1,602-category audit. Canonical category writes, invalid-closure handling, current-runtime qualification, and evidence review/fixes for the 1,187 residual records remain outstanding. No claim of a full-audit PASS is made. No live bug DB, CRC, or status file was touched. No compiler or test toolchain was run for this documentation-only checkpoint.
+
+
+## Append-only correction precedence
+
+Later correction files supersede the archived row for the named `bug_id` while leaving `reviewed_categories.sdn`, the original evidence pages, captured hashes, and original partition counts unchanged. When a correction exists, readers should use its revised fields and rationale for the current classification and retain the original row as historical provenance. The [append-only correction register](corrections.sdn) currently has one entry: [GPU type mapper struct symbol ID layout](correction_gpu_type_mapper_struct_symbolid_layout_2026-10-24.md). The original 415/1,187/0 accounting is a historical snapshot, not a recount after corrections.
