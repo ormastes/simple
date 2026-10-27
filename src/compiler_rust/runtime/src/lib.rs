@@ -1296,6 +1296,7 @@ pub use parallel::{
     rt_par_atomic_add_i64,
     rt_par_atomic_cmpxchg_i64,
     rt_par_atomic_i64_is_lock_free,
+    rt_par_atomic_load_i64,
     rt_par_atomic_max_i64,
     rt_par_atomic_min_i64,
     rt_par_atomic_sub_i64,

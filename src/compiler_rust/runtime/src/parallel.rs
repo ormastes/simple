@@ -385,6 +385,16 @@ pub unsafe extern "C" fn rt_par_atomic_i64_is_lock_free(ptr: *mut i64) -> i64 {
     }
 }
 
+/// Sequentially consistent load for a caller-owned raw atomic i64 cell.
+///
+/// The pointer must name live, correctly aligned storage whose layout has
+/// already passed `rt_par_atomic_i64_is_lock_free` for this provider.
+#[no_mangle]
+pub unsafe extern "C" fn rt_par_atomic_load_i64(ptr: *mut i64) -> i64 {
+    let atomic = &*(ptr as *const AtomicI64);
+    atomic.load(Ordering::SeqCst)
+}
+
 /// Atomic add for i64.
 #[no_mangle]
 pub unsafe extern "C" fn rt_par_atomic_add_i64(ptr: *mut i64, value: i64) -> i64 {
@@ -548,5 +558,49 @@ mod tests {
             0
         };
         assert_eq!(unsafe { rt_par_atomic_i64_is_lock_free(ptr) }, expected);
+    }
+
+    #[test]
+    fn test_atomic_load_i64_seqcst_parity_under_contention() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        const THREADS: usize = 8;
+        const ITERATIONS: i64 = 20_000;
+        let value = Arc::new(AtomicI64::new(0));
+        let address = Arc::as_ptr(&value) as usize;
+        let target = THREADS as i64 * ITERATIONS;
+        assert_eq!(unsafe { rt_par_atomic_load_i64(address as *mut i64) }, 0);
+        let gate = Arc::new(Barrier::new(THREADS + 1));
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let value = Arc::clone(&value);
+                let gate = Arc::clone(&gate);
+                thread::spawn(move || {
+                    let ptr = Arc::as_ptr(&value) as *mut i64;
+                    gate.wait();
+                    for _ in 0..ITERATIONS {
+                        unsafe { rt_par_atomic_add_i64(ptr, 1); }
+                    }
+                })
+            })
+            .collect();
+
+        gate.wait();
+        let mut previous = 0;
+        for _ in 0..20_000_000 {
+            if previous == target {
+                break;
+            }
+            let current = unsafe { rt_par_atomic_load_i64(address as *mut i64) };
+            assert!(current >= previous, "SeqCst load regressed from {previous} to {current}");
+            previous = current;
+        }
+        assert_eq!(previous, target, "reader did not observe the final SeqCst value");
+        for worker in workers {
+            worker.join().expect("atomic writer thread");
+        }
+        assert_eq!(unsafe { rt_par_atomic_load_i64(address as *mut i64) }, target);
+        assert_eq!(value.load(Ordering::SeqCst), target);
     }
 }
