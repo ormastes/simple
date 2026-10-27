@@ -50,3 +50,9 @@ build `needed - present` in parallel (claimed, cached), add to link set, link.
   with `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1`.
 - PR3: per-template body digest in TLDR (DEFINES rows) so one template edit does
   not invalidate every instance of its module.
+- PR4 (final, after stage3 builds end to end on the per-file route + pre-link
+  instance step): retire the global whole-program mono pass
+  (`run_monomorphization` / `run_monomorphization_with_report` and the
+  `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM` route). Only per-module mono + pre-link
+  instance generation remain. Landed together with the per-file lead's removal
+  of the shard ledgers.
