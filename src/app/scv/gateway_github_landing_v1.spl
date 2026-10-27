@@ -57,6 +57,7 @@ pub struct ScvGatewayGithubLandingResultV1:
     observed_pr_merge_sha: text
     observation_id: text
     provider_requests: u64
+    provider_requests_known: bool
 
 fn _scv_gh_landing_sha1_v1(value: text) -> bool:
     if value.len() != 40: return false
@@ -363,7 +364,7 @@ fn _scv_gh_landing_result_v1(state: text,
         request: ScvGatewayGithubPublishRequestV2, content_sha256: text,
         protected_ref_oid: text, pull_request_number: u64,
         merge_commit_sha: text, observed_pr_merge_sha: text,
-        provider_requests: u64) -> ScvGatewayGithubLandingResultV1:
+        provider_requests: u64, provider_requests_known: bool) -> ScvGatewayGithubLandingResultV1:
     ScvGatewayGithubLandingResultV1(state: state, publication: "not_acceptance",
         repository_id: policy.repository.repository_id, principal_id: scope.principal_id,
         request_id: request.request_id, base_ref: request.base_ref,
@@ -372,7 +373,8 @@ fn _scv_gh_landing_result_v1(state: text,
         candidate_oid: request.candidate_oid, content_sha256: content_sha256,
         pull_request_number: pull_request_number, merge_commit_sha: merge_commit_sha,
         observed_pr_merge_sha: observed_pr_merge_sha,
-        observation_id: "", provider_requests: provider_requests)
+        observation_id: "", provider_requests: provider_requests,
+        provider_requests_known: provider_requests_known)
 
 fn _scv_gh_landing_state_bytes_v1(result: ScvGatewayGithubLandingResultV1,
         readback_complete: bool) -> [u8]:
@@ -391,6 +393,7 @@ fn _scv_gh_landing_state_bytes_v1(result: ScvGatewayGithubLandingResultV1,
         "merge_commit_sha": SdnValue.String(result.merge_commit_sha),
         "observed_pr_merge_sha": SdnValue.String(result.observed_pr_merge_sha),
         "provider_requests": SdnValue.Int(result.provider_requests as i64),
+        "provider_requests_known": SdnValue.Bool(result.provider_requests_known),
         "readback_complete": SdnValue.Bool(readback_complete),
         "required_validation": SdnValue.String(if result.state == "observed_merged_needs_validation": "not_available" else: "not_required_yet"),
         "required_checks": SdnValue.String("not_verified"),
@@ -453,6 +456,7 @@ pub fn scv_gateway_github_landing_reconcile_v1(policy: ScvGatewayGithubPublishPo
     var observed_pr_merge_sha = ""
     var complete = false
     var provider_requests = 0u64
+    var provider_requests_known = true
     if not lease_held():
         match _scv_gh_landing_readback_v1(policy.github, policy.landing_request_budget,
                 topic_ref, request.base_ref,
@@ -468,11 +472,13 @@ pub fn scv_gateway_github_landing_reconcile_v1(policy: ScvGatewayGithubPublishPo
                         merge_commit_sha = value.2
                         observed_pr_merge_sha = value.3
                     case Err(_): state = "upstream_unknown"
-            case Err(_): state = "upstream_unknown"
+            case Err(_):
+                state = "upstream_unknown"
+                provider_requests_known = false
     db_git_candidate_cleanup(candidate)?
     var result = _scv_gh_landing_result_v1(state, policy, scope, request,
         expected_content_sha256, protected_ref_oid, pull_request_number, merge_commit_sha,
-        observed_pr_merge_sha, provider_requests)
+        observed_pr_merge_sha, provider_requests, provider_requests_known)
     val bytes = _scv_gh_landing_state_bytes_v1(result, complete)
     val observation_id = _scv_gh_landing_observation_id_v1(bytes)
     val stored = _scv_gh_landing_store_v1(policy, scope, observation_id, bytes)?
