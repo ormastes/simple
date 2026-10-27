@@ -1,0 +1,108 @@
+# Strict finite HTTP/1.1 response framing for a single native SDN RPC.
+# No chunked/compressed bodies, redirects, duplicate headers or pipelining.
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+pub val BOUNDED_HTTP_HEADER_LIMIT_V1: i64 = 16384
+pub val BOUNDED_HTTP_BODY_LIMIT_V1: i64 = 3 * 1024 * 1024
+
+pub fn bounded_http_response_length_v1(header: text, max_body: i64) -> Result<i64, text>:
+    if max_body < 0 or max_body > BOUNDED_HTTP_BODY_LIMIT_V1: return Err("http_body_limit")
+    if header.len() > BOUNDED_HTTP_HEADER_LIMIT_V1 or not header.ends_with("\r\n\r\n"):
+        return Err("http_header_invalid")
+    for byte in header.bytes():
+        if byte != 9 and byte != 10 and byte != 13 and (byte < 32 or byte > 126):
+            return Err("http_header_invalid")
+    val lines = header.substring(0, header.len() - 4).split("\r\n")
+    if lines.len() < 2 or lines.len() > 65: return Err("http_header_invalid")
+    for line in lines:
+        for byte in line.bytes():
+            if byte == 10 or byte == 13: return Err("http_header_invalid")
+    if not lines[0].starts_with("HTTP/1.1 200 "): return Err("http_status_refused")
+    var seen: Dict<text, bool> = {}
+    var length: i64 = -1
+    var close = false
+    var sdn = false
+    var index = 1
+    while index < lines.len():
+        val line = lines[index]
+        val colon = line.index_of(":")
+        if colon <= 0 or colon > 64: return Err("http_header_invalid")
+        val name = line.substring(0, colon).lower()
+        for ch in name.bytes():
+            if not ((ch >= 97 and ch <= 122) or (ch >= 48 and ch <= 57) or ch == 45):
+                return Err("http_header_invalid")
+        if seen.contains_key(name): return Err("http_duplicate_header")
+        seen[name] = true
+        val value = line.substring(colon + 1).trim()
+        if name == "content-length":
+            if value == "" or (value.len() > 1 and value.starts_with("0")):
+                return Err("http_content_length_invalid")
+            length = 0
+            for ch in value.bytes():
+                if ch < 48 or ch > 57: return Err("http_content_length_invalid")
+                val digit = (ch as i64) - 48
+                if digit > max_body or length > (max_body - digit) / 10:
+                    return Err("http_body_limit")
+                length = length * 10 + digit
+        elif name == "connection": close = value.lower() == "close"
+        elif name == "content-type": sdn = value.lower() == "application/sdn"
+        elif name == "transfer-encoding" or name == "content-encoding" or name == "location":
+            return Err("http_framing_refused")
+        index = index + 1
+    if length < 0 or not close or not sdn: return Err("http_framing_required")
+    Ok(length)
+
+pub class BoundedHttpReadV1:
+    max_body: i64
+    bytes: [u8]
+    scan_at: i64
+    header_length: i64
+    expected_length: i64
+
+    static fn create(max_body: i64) -> BoundedHttpReadV1:
+        BoundedHttpReadV1(max_body: max_body, bytes: [], scan_at: 0,
+            header_length: -1, expected_length: -1)
+
+    fn read_limit() -> i64:
+        # One sentinel byte distinguishes exact framing from trailing data.
+        val left = if self.expected_length >= 0:
+            self.expected_length + 1 - self.bytes.len()
+        else:
+            BOUNDED_HTTP_HEADER_LIMIT_V1 + 1 - self.bytes.len()
+        if left < 1: return 0
+        if left < 8192: left else: 8192
+
+    me feed(chunk: [u8]) -> Result<(), text>:
+        if self.max_body < 0 or self.max_body > BOUNDED_HTTP_BODY_LIMIT_V1:
+            return Err("http_body_limit")
+        val limit = BOUNDED_HTTP_HEADER_LIMIT_V1 + self.max_body + 1
+        if chunk.len() > limit - self.bytes.len(): return Err("http_wire_limit")
+        for byte in chunk: self.bytes.push(byte)
+        if self.header_length < 0:
+            while self.scan_at + 3 < self.bytes.len():
+                val at = self.scan_at
+                self.scan_at = self.scan_at + 1
+                if (self.bytes[at] == 13u8 and self.bytes[at + 1] == 10u8 and
+                        self.bytes[at + 2] == 13u8 and self.bytes[at + 3] == 10u8):
+                    self.header_length = at + 4
+                    if self.header_length > BOUNDED_HTTP_HEADER_LIMIT_V1: return Err("http_header_limit")
+                    var head: [u8] = []
+                    for index in 0..self.header_length: head.push(self.bytes[index])
+                    val header = validated_utf8_bytes_to_text_linear(head)?
+                    self.expected_length = self.header_length + bounded_http_response_length_v1(header, self.max_body)?
+                    break
+            if self.header_length < 0 and self.bytes.len() >= BOUNDED_HTTP_HEADER_LIMIT_V1:
+                return Err("http_header_limit")
+        if self.expected_length >= 0 and self.bytes.len() > self.expected_length:
+            return Err("http_trailing_bytes")
+        Ok(())
+
+    fn finish() -> Result<text, text>:
+        if self.header_length < 0 or self.bytes.len() != self.expected_length:
+            return Err("http_truncated_response")
+        var payload: [u8] = []
+        for index in self.header_length..self.expected_length: payload.push(self.bytes[index])
+        validated_utf8_bytes_to_text_linear(payload)
+
+export BOUNDED_HTTP_HEADER_LIMIT_V1, BOUNDED_HTTP_BODY_LIMIT_V1
+export bounded_http_response_length_v1, BoundedHttpReadV1

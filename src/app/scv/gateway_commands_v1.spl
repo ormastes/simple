@@ -1,0 +1,106 @@
+"""CLI owner for the read-only SCV gateway; no production TLS claim."""
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use app.scv.gateway_config_v1.{scv_gateway_config_load_v1, scv_gateway_bearer_load_v1}
+use app.scv.gateway_service_v1.{scv_gateway_serve_v1}
+use app.scv.gateway_config_v1.{scv_gateway_env_name_valid_v1, scv_gateway_bearer_valid_v1}
+use app.scv.gateway_client_v1.{ScvGatewayClientConfigV1, scv_gateway_client_call_v1}
+use std.scv.gateway_protocol_v1.{ScvGatewayRequestV1, scv_gateway_response_encode_v1}
+use app.io.mod.{env_get}
+
+struct ScvGatewayCommandResultV1:
+    exit_code: i64
+    output: text
+
+fn scv_gateway_command_help_v1() -> text:
+    "scv gateway serve --config <native.sdn> --development-loopback --reason <audit reason> (loopback development only); scv gateway read --endpoint <URI/scv/v1> --repository <logical-id> --method <capabilities|read_ref|read_commit|read_blob> --id <request-id> --token-env <name> [--selector <ref-or-oid>] [--tls-address <IPv4>] [--development-loopback]"
+
+fn _gateway_command_result_v1(code: i64, status: text, detail: text) -> ScvGatewayCommandResultV1:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "command": SdnValue.String("scv.gateway"), "status": SdnValue.String(status),
+        "detail": SdnValue.String(detail), "publication": SdnValue.String("not_publication"),
+        "production_qualified": SdnValue.Bool(false)}
+    ScvGatewayCommandResultV1(exit_code: code, output: sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn scv_gateway_command_v1(args: [text]) -> ScvGatewayCommandResultV1:
+    if args.len() == 0 or (args.len() == 1 and args[0] == "--help"):
+        return _gateway_command_result_v1(0, "usage", scv_gateway_command_help_v1())
+    if args[0] == "read": return scv_gateway_read_command_v1(args[1:])
+    if args[0] != "serve":
+        return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+    var config_path = ""
+    var reason = ""
+    var development = false
+    var index = 1
+    while index < args.len():
+        if args[index] == "--config" and config_path == "" and index + 1 < args.len():
+            config_path = args[index + 1]
+            index = index + 2
+        elif args[index] == "--reason" and reason == "" and index + 1 < args.len():
+            reason = args[index + 1]
+            index = index + 2
+        elif args[index] == "--development-loopback" and not development:
+            development = true
+            index = index + 1
+        else:
+            return _gateway_command_result_v1(1, "invalid_request", "Unknown, missing or duplicate gateway argument")
+    if not development:
+        return _gateway_command_result_v1(1, "tls_unavailable", "Production service refused: native TLS owner is not qualified. Development requires --development-loopback and --reason.")
+    if config_path == "" or reason == "":
+        return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+    val config = match scv_gateway_config_load_v1(config_path):
+        case Err(_): return _gateway_command_result_v1(1, "configuration_rejected", "Gateway configuration must be bounded, no-follow, strict native SDN with an exact repository mapping")
+        case Ok(value): value
+    val token = match scv_gateway_bearer_load_v1(config):
+        case Err(_): return _gateway_command_result_v1(1, "credential_unavailable", "Gateway bearer environment reference is unset or invalid")
+        case Ok(value): value
+    match scv_gateway_serve_v1(config, token, development, reason):
+        case Err(_): _gateway_command_result_v1(1, "service_refused", "Loopback development listener could not start; production remains unavailable")
+        case Ok(_): _gateway_command_result_v1(0, "stopped", "Read-only loopback development service stopped")
+
+fn scv_gateway_read_command_v1(args: [text]) -> ScvGatewayCommandResultV1:
+    var values: Dict<text, text> = {}
+    var development = false
+    var index = 0
+    val valued = ["--endpoint", "--repository", "--method", "--id", "--token-env", "--selector", "--tls-address"]
+    while index < args.len():
+        val option = args[index]
+        if option == "--development-loopback" and not development:
+            development = true
+            index = index + 1
+        elif valued.contains(option) and not values.contains_key(option) and index + 1 < args.len():
+            if args[index + 1] == "": return _gateway_command_result_v1(1, "invalid_request", "Empty gateway read argument")
+            values[option] = args[index + 1]
+            index = index + 2
+        else:
+            return _gateway_command_result_v1(1, "invalid_request", "Unknown, missing or duplicate gateway read argument")
+    for required in ["--endpoint", "--repository", "--method", "--id", "--token-env"]:
+        if not values.contains_key(required): return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+    val method = values["--method"]
+    if not ["capabilities", "read_ref", "read_commit", "read_blob"].contains(method):
+        return _gateway_command_result_v1(1, "invalid_request", "Gateway read method is not supported")
+    val has_selector = values.contains_key("--selector")
+    if (method == "capabilities" and has_selector) or (method != "capabilities" and not has_selector):
+        return _gateway_command_result_v1(1, "invalid_request", "Only object reads require a selector")
+    val token_env = values["--token-env"]
+    if not scv_gateway_env_name_valid_v1(token_env):
+        return _gateway_command_result_v1(1, "invalid_request", "Invalid credential environment reference")
+    val request = ScvGatewayRequestV1(version: 1, id: values["--id"], repository: values["--repository"],
+        method: method, ref_or_oid: if has_selector: values["--selector"] else: "")
+    val config = ScvGatewayClientConfigV1(endpoint: values["--endpoint"], repository: request.repository,
+        allow_loopback_http: development, timeout_ms: 5000,
+        tls_address: if values.contains_key("--tls-address"): values["--tls-address"] else: "")
+    # The client invokes this only after endpoint and request preflight. Tokens
+    # are neither command arguments to a child process nor part of SDN config.
+    val credentials: fn() -> Result<text, text> = \:
+        val token = env_get(token_env)
+        if not scv_gateway_bearer_valid_v1(token): return Err("gateway_credential_unavailable")
+        Ok(token)
+    match scv_gateway_client_call_v1(config, request, credentials):
+        case Err(_): _gateway_command_result_v1(1, "read_failed", "Native gateway request failed; no object was admitted")
+        case Ok(response):
+            match scv_gateway_response_encode_v1(response, request, config.repository):
+                case Err(_): _gateway_command_result_v1(1, "read_failed", "Native gateway response failed validation")
+                case Ok(output): ScvGatewayCommandResultV1(exit_code: if response.status == "ok": 0 else: 1, output: output)
+
+export ScvGatewayCommandResultV1, scv_gateway_command_v1, scv_gateway_command_help_v1, scv_gateway_read_command_v1

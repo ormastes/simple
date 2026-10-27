@@ -1,0 +1,70 @@
+# Authored strict framing/policy scenarios; execution awaits admitted Phase 3.
+use std.spec
+use std.nogc_sync_mut.http_client.bounded_endpoint_v1.{bounded_http_target_v1,
+    bounded_http_ipv4_v1, bounded_http_bearer_valid_v1}
+use std.nogc_sync_mut.http_client.bounded_response_v1.{BoundedHttpReadV1,
+    bounded_http_response_length_v1, BOUNDED_HTTP_HEADER_LIMIT_V1}
+use std.common.base_encoding.utilities.{text_to_bytes_linear}
+
+fn bounded_fixture_head(length: text) -> text:
+    "HTTP/1.1 200 OK\r\nContent-Length: " + length + "\r\nContent-Type: application/sdn\r\nConnection: close\r\n\r\n"
+
+describe "bounded native HTTP endpoint policy":
+    it "pins HTTPS address separately from the certificate hostname":
+        val target = bounded_http_target_v1("https://gateway.example:8443/scv/v1", "192.0.2.7", false).unwrap()
+        expect(target.tls).to_equal(true)
+        expect(target.host).to_equal("gateway.example")
+        expect(target.address).to_equal("192.0.2.7")
+        expect(target.port).to_equal(8443)
+        expect(target.path).to_equal("/scv/v1")
+
+    it "requires explicit literal-loopback HTTP and a literal TLS address":
+        expect(bounded_http_target_v1("http://127.0.0.1:8080/scv/v1", "", false).is_err()).to_equal(true)
+        expect(bounded_http_target_v1("http://localhost:8080/scv/v1", "", true).is_err()).to_equal(true)
+        expect(bounded_http_target_v1("http://remote.example/scv/v1", "", true).is_err()).to_equal(true)
+        expect(bounded_http_target_v1("http://127.0.0.1:8080/scv/v1", "", true).unwrap().tls).to_equal(false)
+        expect(bounded_http_target_v1("https://gateway.example/scv/v1", "gateway.example", false).is_err()).to_equal(true)
+        expect(bounded_http_ipv4_v1("127.00.0.1")).to_equal(false)
+        expect(bounded_http_ipv4_v1("256.1.1.1")).to_equal(false)
+
+    it "rejects credentials, control bytes, URL ambiguity and noncanonical authorities":
+        for endpoint in ["https://user:secret@gateway.example/scv/v1", "https://gateway.example/scv/v1#x",
+                "https://gateway.example/scv/v1?q=x", "https://gateway.example/../scv/v1",
+                "https://gateway.example:99999/scv/v1", "https://Gateway.example/scv/v1",
+                "https://gateway.example/scv/v1\r\nX: y"]:
+            expect(bounded_http_target_v1(endpoint, "192.0.2.7", false).is_err()).to_equal(true)
+        for token in ["", "a b", "a\rb", "a\nb", "a\0b", "한글"]:
+            expect(bounded_http_bearer_valid_v1(token)).to_equal(false)
+
+describe "strict bounded response framing":
+    it "rejects duplicate lengths, integer overflow, encodings and redirects":
+        val valid = bounded_fixture_head("2")
+        expect(bounded_http_response_length_v1(valid, 2).unwrap()).to_equal(2)
+        for header in [valid.replace("Content-Length: 2", "Content-Length: 2\r\ncontent-length: 2"),
+                bounded_fixture_head("9999999999999999999999999999999"),
+                bounded_fixture_head("-1"), bounded_fixture_head("02"),
+                valid.replace("Connection: close", "Transfer-Encoding: chunked\r\nConnection: close"),
+                valid.replace("Connection: close", "Content-Encoding: gzip\r\nConnection: close"),
+                valid.replace("200 OK", "302 Found"),
+                valid.replace("Connection: close", "Connection: keep-alive")]:
+            expect(bounded_http_response_length_v1(header, 2).is_err()).to_equal(true)
+
+    it "accepts fragmented headers and requires exact EOF framing":
+        val reader = BoundedHttpReadV1.create(2)
+        val head = bounded_fixture_head("2")
+        expect(reader.feed(text_to_bytes_linear(head.substring(0, head.len() - 1))).is_ok()).to_equal(true)
+        expect(reader.finish().is_err()).to_equal(true)
+        expect(reader.feed(text_to_bytes_linear("\nA")).is_ok()).to_equal(true)
+        expect(reader.finish().is_err()).to_equal(true)
+        expect(reader.feed(text_to_bytes_linear("B")).is_ok()).to_equal(true)
+        expect(reader.read_limit()).to_equal(1)
+        expect(reader.finish().unwrap()).to_equal("AB")
+        expect(reader.feed(text_to_bytes_linear("X")).unwrap_err()).to_equal("http_trailing_bytes")
+
+    it "caps each read before allocation and refuses header-only exhaustion":
+        val reader = BoundedHttpReadV1.create(2)
+        val oversized = text_to_bytes_linear("X".repeat(BOUNDED_HTTP_HEADER_LIMIT_V1))
+        expect(reader.read_limit()).to_equal(8192)
+        expect(reader.feed(oversized).unwrap_err()).to_equal("http_header_limit")
+        val declared = BoundedHttpReadV1.create(2)
+        expect(declared.feed(text_to_bytes_linear(bounded_fixture_head("3"))).is_err()).to_equal(true)
