@@ -1,0 +1,110 @@
+use std.spec.*
+use std.scv.solver_contract_v1.*
+use std.scv.solver_source_v1.*
+use std.scv.solver_host_v1.*
+use std.scv.solver_provider_registry_v1.*
+use std.scv.solver_registered_host_v1.*
+use std.scv.solver_budget_v1.*
+use test.fixtures.scv.solver_host_v1_fixture.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+
+val PROVIDER_TEST_ROOT = "build/test-artifacts/scv-provider-registry-host"
+
+struct ProviderTestArtifactsV1:
+    lock: text
+    parser_digest: text
+    model_digest: text
+    solver_digest: text
+
+struct RegisteredSourceRequestPolicyV1:
+    request: SolveRequestV1
+    policy: SolverHostPolicyV1
+
+fn provider_manifest_text_v1(provider_id: text, role: text, artifact_path: text, artifact_digest: text, build: text, policy: text) -> text:
+    "schema_version: 1\nprovider_id: \"{provider_id}\"\ndomain: \"source.bytes\"\nrole: \"{role}\"\nartifact_path: \"{artifact_path}\"\nartifact_sha256: \"{artifact_digest}\"\nbuild_identity: \"{build}\"\nabi_version: \"scv-provider-abi-v1\"\nprovider_schema: \"raw-bytes-v1\"\nprofile_digest: \"profile-A\"\npolicy_revision: \"{policy}\"\nhost_capability: \"host:builtin-in-process-v1\"\n"
+
+fn provider_test_lock_v1(parser_digest: text, model_digest: text, solver_digest: text, parser_manifest: text, model_manifest: text, solver_manifest: text, policy: text) -> text:
+    val lines = [
+        "schema_version: 1",
+        "providers |provider_id, domain, role, plugin_manifest, manifest_sha256, artifact_path, artifact_sha256, lock_digest, build_identity, abi_version, provider_schema, profile_digest, policy_revision, host_capability|",
+        "    \"scv.parser.raw-bytes.v1\", \"source.bytes\", \"parser\", \"plugins/scv/parser/plugin.sdn\", \"{sha256_u8_hex(parser_manifest.bytes())}\", \"plugins/scv/parser/provider.bin\", \"{parser_digest}\", \"{parser_digest}\", \"build-parser-A\", \"scv-provider-abi-v1\", \"raw-bytes-v1\", \"profile-A\", \"{policy}\", \"host:builtin-in-process-v1\"",
+        "    \"scv.model.source-file.v1\", \"source.bytes\", \"model\", \"plugins/scv/model/plugin.sdn\", \"{sha256_u8_hex(model_manifest.bytes())}\", \"plugins/scv/model/provider.bin\", \"{model_digest}\", \"{model_digest}\", \"build-model-A\", \"scv-provider-abi-v1\", \"raw-bytes-v1\", \"profile-A\", \"{policy}\", \"host:builtin-in-process-v1\"",
+        "    \"scv.solver.source-bytes.v1\", \"source.bytes\", \"solver\", \"plugins/scv/solver/plugin.sdn\", \"{sha256_u8_hex(solver_manifest.bytes())}\", \"plugins/scv/solver/provider.bin\", \"{solver_digest}\", \"{solver_digest}\", \"build-solver-A\", \"scv-provider-abi-v1\", \"raw-bytes-v1\", \"profile-A\", \"{policy}\", \"host:builtin-in-process-v1\"",
+    ]
+    lines.join("\n") + "\n"
+
+fn prepare_source_registry_v1() -> ProviderTestArtifactsV1:
+    expect(dir_create_all(PROVIDER_TEST_ROOT + "/config")).to_equal(true)
+    expect(dir_create_all(PROVIDER_TEST_ROOT + "/plugins/scv/parser")).to_equal(true)
+    expect(dir_create_all(PROVIDER_TEST_ROOT + "/plugins/scv/model")).to_equal(true)
+    expect(dir_create_all(PROVIDER_TEST_ROOT + "/plugins/scv/solver")).to_equal(true)
+    val parser_artifact = "parser artifact fixture".bytes()
+    val model_artifact = "model artifact fixture".bytes()
+    val solver_artifact = "solver artifact fixture".bytes()
+    val parser_digest = sha256_u8_hex(parser_artifact)
+    val model_digest = sha256_u8_hex(model_artifact)
+    val solver_digest = sha256_u8_hex(solver_artifact)
+    val policy_revision = "previous-accepted-policy-A"
+    val parser_manifest = provider_manifest_text_v1("scv.parser.raw-bytes.v1", "parser", "plugins/scv/parser/provider.bin", parser_digest, "build-parser-A", policy_revision)
+    val model_manifest = provider_manifest_text_v1("scv.model.source-file.v1", "model", "plugins/scv/model/provider.bin", model_digest, "build-model-A", policy_revision)
+    val solver_manifest = provider_manifest_text_v1("scv.solver.source-bytes.v1", "solver", "plugins/scv/solver/provider.bin", solver_digest, "build-solver-A", policy_revision)
+    val lock = provider_test_lock_v1(parser_digest, model_digest, solver_digest, parser_manifest, model_manifest, solver_manifest, policy_revision)
+    expect(file_write(PROVIDER_TEST_ROOT + "/plugins/scv/parser/plugin.sdn", parser_manifest)).to_equal(true)
+    expect(file_write(PROVIDER_TEST_ROOT + "/plugins/scv/model/plugin.sdn", model_manifest)).to_equal(true)
+    expect(file_write(PROVIDER_TEST_ROOT + "/plugins/scv/solver/plugin.sdn", solver_manifest)).to_equal(true)
+    expect(file_write(PROVIDER_TEST_ROOT + "/plugins/scv/parser/provider.bin", "parser artifact fixture")).to_equal(true)
+    expect(file_write(PROVIDER_TEST_ROOT + "/plugins/scv/model/provider.bin", "model artifact fixture")).to_equal(true)
+    expect(file_write(PROVIDER_TEST_ROOT + "/plugins/scv/solver/provider.bin", "solver artifact fixture")).to_equal(true)
+    expect(file_write(PROVIDER_TEST_ROOT + "/config/scv-providers.lock.sdn", lock)).to_equal(true)
+    ProviderTestArtifactsV1(lock: lock, parser_digest: parser_digest, model_digest: model_digest, solver_digest: solver_digest)
+
+fn make_registered_source_request_v1(input: SourceMergeInputV1, parser_digest: text, model_digest: text, solver_digest: text) -> RegisteredSourceRequestPolicyV1:
+    var request = freeze_scv_candidate(input)
+    request.binding.parser_lock_digest = parser_digest
+    request.binding.solver_lock_digest = solver_digest
+    request.binding.profile_digest = "profile-A"
+    val ids = solver_builtin_ids_v1("source.bytes")
+    val policy = SolverHostPolicyV1(expected: request.binding,
+        parser: ParserProvider(provider_id: ids[0], lock_digest: parser_digest),
+        model: DomainModelProvider(provider_id: ids[1], lock_digest: model_digest),
+        solver: SolverProvider(provider_id: ids[2], lock_digest: solver_digest),
+        validators: [], publisher: Publisher(provider_id: "unavailable", lock_digest: ""))
+    RegisteredSourceRequestPolicyV1(request: request, policy: policy)
+
+describe "Registered SCV source host boundary":
+    it "runs the selected built-in only after the exact old-policy lock and artifact bytes resolve":
+        step("Write a bounded lock, manifests, and artifact fixtures")
+        val fixtures = prepare_source_registry_v1()
+        val lock = fixtures.lock
+        val parser_digest = fixtures.parser_digest
+        val model_digest = fixtures.model_digest
+        val solver_digest = fixtures.solver_digest
+        val input = setup_scv_fixture()
+        val request_policy = make_registered_source_request_v1(input, parser_digest, model_digest, solver_digest)
+        step("Resolve under the separate accepted policy before the host executes")
+        val solved = solve_registered_source_v1(PROVIDER_TEST_ROOT, sha256_u8_hex(lock.bytes()), request_policy.request, request_policy.policy, input, SdnStrictLimitsV1())
+        step("Check that artifact integrity still cannot qualify execution")
+        expect(solved.result.status).to_equal("needs_inputs")
+        expect(solved.result.execution_status).to_equal("unqualified-builtin-execution")
+        expect(solved.result.complete_proposal).to_equal(false)
+        expect(solved.result.deterministic_result_key).to_equal("")
+        expect(solved.candidate.unwrap().bytes).to_equal(input.right.bytes)
+
+    it "retains inputs and produces no candidate when a locked provider artifact is replaced":
+        step("Write a valid lock and its exact artifacts")
+        val fixtures = prepare_source_registry_v1()
+        val lock = fixtures.lock
+        val parser_digest = fixtures.parser_digest
+        val model_digest = fixtures.model_digest
+        val solver_digest = fixtures.solver_digest
+        val input = setup_scv_fixture()
+        val request_policy = make_registered_source_request_v1(input, parser_digest, model_digest, solver_digest)
+        step("Replace the parser file after the lock was pinned")
+        file_write(PROVIDER_TEST_ROOT + "/plugins/scv/parser/provider.bin", "substituted parser artifact")
+        val solved = solve_registered_source_v1(PROVIDER_TEST_ROOT, sha256_u8_hex(lock.bytes()), request_policy.request, request_policy.policy, input, SdnStrictLimitsV1())
+        step("Check fail-closed behavior and retained original inputs")
+        expect(solved.result.status).to_equal("needs_inputs")
+        expect(solved.candidate).to_be_nil()
+        expect(solved.inputs.base.bytes).to_equal(input.base.bytes)
+        expect(solved.result.deterministic_result_key).to_equal("")
