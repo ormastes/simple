@@ -130,7 +130,8 @@ fn builder_transport_retry_cache_v1(task: BuildTaskV1, host: BuildHostV1, run_ro
             if error != "": return error
     ""
 
-pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_root: text, run_root: text, process: BuilderProcessPortV1) -> BuilderAttemptV1:
+pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_root: text, run_root: text, process: BuilderProcessPortV1,
+        frozen_source_root: text = "", frozen_paths: [text] = []) -> BuilderAttemptV1:
     val root = run_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
     val remote = host.workspace + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
     var result = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
@@ -139,6 +140,32 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
     result.error = builder_validate_task_v1(task)
     if result.error == "": result.error = builder_validate_host_v1(host)
     if result.error != "": return result
+    if (frozen_source_root == "") != (frozen_paths.len() == 0):
+        result.error = "frozen source root and paths must be supplied together"
+        return result
+    var selected: [text] = []
+    for path in frozen_paths:
+        if not builder_relative_path_valid_v1(path) or selected.contains(path):
+            result.error = "invalid or duplicate frozen source path"
+            return result
+        var found = false
+        for input in task.inputs:
+            if input.path == path: found = true
+        if not found:
+            result.error = "frozen source path is not a declared task input"
+            return result
+        selected.push(path)
+    if frozen_paths.len() > 0 and task.links.len() > 0:
+        result.error = "frozen source links are unsupported"
+        return result
+    if frozen_paths.len() > 0:
+        var frozen_task = task
+        frozen_task.inputs = []
+        for input in task.inputs:
+            if frozen_paths.contains(input.path): frozen_task.inputs.push(input)
+        if not builder_regular_input_parents_safe_v1(frozen_task, frozen_source_root):
+            result.error = "frozen source root or input parent is unsafe"
+            return result
     if host.transport != "local" and task.links.len() > 0:
         result.error = "typed links require local no-follow staging"
         return result
@@ -173,7 +200,10 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
         if file_exists(run_root + "/cancel.request"):
             result.error = "dispatch cancelled before worker launch"
             return result
-        result.error = builder_transport_copy_v1(source_root + "/" + input.path, root + "/work/" + input.path, input.digest)
+        # Parent selects an exact validated source map. Reuse the same checked
+        # staging owner; ordinary inputs/producer retain their existing root.
+        val input_root = if frozen_paths.contains(input.path): frozen_source_root else: source_root
+        result.error = builder_transport_copy_v1(input_root + "/" + input.path, root + "/work/" + input.path, input.digest)
         if result.error != "": return result
     if not builder_regular_input_parents_safe_v1(task, root + "/work"):
         result.error = "staged input parent is a symlink or reparse point"

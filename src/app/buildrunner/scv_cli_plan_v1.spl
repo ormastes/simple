@@ -1,0 +1,120 @@
+"""Strict opt-in source-role plan; no extension-based role inference."""
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.scv_config_fields_v1.{scv_config_dict_v1, scv_config_int_v1,
+    scv_config_bool_v1, scv_config_text_v1, scv_config_texts_v1, scv_config_enum_v1}
+use std.scv.snapshot_v2.{scv_snapshot_path_valid_v2, scv_snapshot_in_scope_v2}
+use std.common.build_manager.contracts.{BuildRunV1, BuildTaskV1, builder_relative_path_valid_v1}
+use app.io.file_ops.{file_read_regular_no_follow_bounded_bytes}
+
+pub struct BuildRunnerScvPlanV1:
+    source_scopes: [text]
+    cold_init: bool
+    roles: Dict<text, text>
+    source_sha256: text
+
+pub fn build_runner_scv_plan_parse_v1(bytes: [u8], run: BuildRunV1) -> Result<BuildRunnerScvPlanV1, text>:
+    var value = SdnValue.Null
+    match sdn_parse_strict_bytes_v1(bytes, sdn_strict_limits_v1()):
+        case Ok(parsed): value = parsed.value
+        case Err(issue): return Err("scv-plan-" + issue.code + ":" + issue.message)
+    val fields = scv_config_dict_v1(value, "scv_session", ["schema_version", "source_scopes", "cold_init", "inputs"])?
+    scv_config_int_v1(fields["schema_version"], "schema_version", 1, 1)?
+    val scopes = scv_config_texts_v1(fields["source_scopes"], "source_scopes", [])?
+    for scope in scopes:
+        if not scv_snapshot_path_valid_v2(scope): return Err("scv-plan-scope-invalid")
+        var supported = false
+        for family in ["src", "test", "examples/10_tooling"]:
+            if scv_snapshot_in_scope_v2(scope, family): supported = true
+        if not supported: return Err("scv-plan-generated-or-external-scope-unsupported")
+        for other in scopes:
+            if other != scope and scv_snapshot_in_scope_v2(scope, other): return Err("scv-plan-scopes-overlap")
+    var roles: Dict<text, text> = {}
+    match fields["inputs"]:
+        case Table(headers, rows):
+            if headers != ["task", "path", "role"]: return Err("scv-plan-input-columns")
+            if rows.len() > 65536: return Err("scv-plan-input-limit")
+            for row in rows:
+                if row.len() != 3: return Err("scv-plan-input-width")
+                val task = scv_config_text_v1(row[0], "inputs.task")?
+                val path = scv_config_text_v1(row[1], "inputs.path")?
+                val role = scv_config_enum_v1(row[2], "inputs.role", ["source", "ordinary"])?
+                if not builder_relative_path_valid_v1(path): return Err("scv-plan-input-path")
+                val key = task + "|" + path
+                if roles.contains_key(key): return Err("scv-plan-input-duplicate")
+                roles[key] = role
+        case _: return Err("scv-plan-input-table-required")
+    var count = 0
+    for task in run.tasks:
+        var source_count = 0
+        for input in task.inputs:
+            val key = task.id + "|" + input.path
+            if not roles.contains_key(key): return Err("scv-plan-input-role-missing:" + key)
+            var inside = false
+            for scope in scopes:
+                if scv_snapshot_in_scope_v2(input.path, scope): inside = true
+            if inside != (roles[key] == "source"): return Err("scv-plan-input-role-scope-mismatch:" + key)
+            if inside: source_count = source_count + 1
+            count = count + 1
+        if source_count == 0: return Err("scv-plan-task-source-set-empty:" + task.id)
+    if count != roles.len(): return Err("scv-plan-extra-input-role")
+    Ok(BuildRunnerScvPlanV1(source_scopes: scopes, cold_init: scv_config_bool_v1(fields["cold_init"], "cold_init")?,
+        roles: roles, source_sha256: sha256_u8_hex(bytes)))
+
+pub fn build_runner_scv_plan_read_v1(path: text, run: BuildRunV1) -> Result<BuildRunnerScvPlanV1, text>:
+    build_runner_scv_plan_parse_v1(file_read_regular_no_follow_bounded_bytes(path, 1048576)?, run)
+
+# Source-affecting grammar is deliberately closed. Other compilation forms keep
+# using the unchanged legacy route until their source reads can be represented.
+pub fn build_runner_scv_source_roots_v1(task: BuildTaskV1, scopes: [text], backend: text, library_root: text) -> Result<[text], text>:
+    if task.links.len() > 0: return Err("scv-source-links-unsupported")
+    if task.args.len() < 1 or task.args[0] != "native-build": return Err("scv-task-command-unsupported")
+    var roots: [text] = []
+    var entry = ""
+    var output = ""
+    var selected_backend = ""
+    var flags: [text] = []
+    var index = 1
+    while index < task.args.len():
+        val name = task.args[index]
+        if ["--strip", "--entry-closure"].contains(name):
+            if flags.contains(name): return Err("scv-task-duplicate-option")
+            flags.push(name)
+            index = index + 1
+            continue
+        if not ["--source", "--entry", "--output", "--backend"].contains(name) or index + 1 >= task.args.len():
+            return Err("scv-task-source-affecting-option-unsupported:" + name)
+        val value = task.args[index + 1]
+        if name == "--backend":
+            if selected_backend != "" or value != backend: return Err("scv-task-backend-context-mismatch")
+            selected_backend = value
+        else:
+            if not builder_relative_path_valid_v1(value): return Err("scv-task-absolute-or-unsafe-path")
+            if name == "--source":
+                var covered = false
+                for scope in scopes:
+                    if scv_snapshot_in_scope_v2(value, scope): covered = true
+                if not covered or roots.contains(value): return Err("scv-task-source-root-uncovered-or-duplicate")
+                roots.push(value)
+            elif name == "--entry":
+                if entry != "": return Err("scv-task-duplicate-entry")
+                entry = value
+            else:
+                if output != "": return Err("scv-task-duplicate-output")
+                output = value
+        index = index + 2
+    if roots.len() == 0 or entry == "" or selected_backend == "": return Err("scv-task-source-entry-backend-required")
+    if task.outputs.len() != 1 or task.outputs[0] != output: return Err("scv-task-output-map-mismatch")
+    var entry_bound = false
+    for input in task.inputs:
+        if input.path == entry:
+            for root in roots:
+                if scv_snapshot_in_scope_v2(entry, root): entry_bound = true
+    if not entry_bound: return Err("scv-task-entry-not-staged-source")
+    if library_root == "" or not scopes.contains(library_root): return Err("scv-explicit-covered-library-root-required")
+    if not roots.contains(library_root): roots.push(library_root)
+    Ok(roots)
+
+export BuildRunnerScvPlanV1, build_runner_scv_plan_parse_v1, build_runner_scv_plan_read_v1, build_runner_scv_source_roots_v1
