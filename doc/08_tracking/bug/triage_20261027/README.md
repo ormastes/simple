@@ -65,3 +65,15 @@ The red receipt (`exec-f1426a88-b544-492a-9bb1-3e213ab7524f`, exit 1) ran the si
 Use V3 as the latest derived classification snapshot, with its single scoped HOST_PROTOCOL exception. V1 and V2 categories, manifests, correction rows, and counts remain historical and byte-preserved. The assessment SHA remains `c0`; later implementation fixes and protocol-only green receipts do not qualify a compiled Simple runtime.
 
 Canonical bug database application and runtime-qualified build evidence remain held pending the user's exception. No bug status or closure was applied; no bug database was modified; and no compiler, system test, or live database was run for this documentation correction. This remains partial progress, not a full 1,602-report audit PASS.
+
+
+## V4 final residual consolidation
+
+V4 keeps the V3 scoped aggregate as its immutable base and replaces its 505 residual classifications with the final residual evidence set: `first_half_final_triage.csv` (13 accepted, 2 still needing evidence) and adjudication groups `v2_16` through `v2_31` (461 accepted, 29 still needing evidence). The additions contain 505 unique IDs and exactly equal the V3 residual-ID set. Therefore V4 contains 1,571 accepted classifications and 31 residual IDs, with no missing or foreign IDs. The [V4 merge receipt](merge_receipt_v4.sdn) records the row-level additions; [manifest_v4.sdn](manifest_v4.sdn) binds every source hash.
+
+- The 1,097 accepted V3 rows are carried forward field-for-field; the V3 `HOST_PROTOCOL` source-policy reproduction scope is preserved in [reproduction_scope_v4.sdn](reproduction_scope_v4.sdn) with its portable evidence copied into [evidence_v4](evidence_v4/).
+- The 474 newly accepted rows have their titles, source receipts, classifications, evidence references, and review rationales in the per-lane V4 evidence pages. The remaining 31 rows and their rationales are in [residual review details](evidence_v4/residuals.md). Residual status means not admitted as final; it does not mean every row lacked report/source review. Their reproducibility remains untested.
+- Exactly one record is reproducible in `HOST_PROTOCOL` scope; the other 1,601 remain untested. No compiled Simple runtime is qualified, and full Phase 3, compiler build, and normal CLI qualification remain `UNRUN`.
+- The Bungee font registry row remains the only eligible invalid candidate, with no closure applied. The rejected cross-engine invalid proposal remains valid and keep-open.
+
+This checkpoint does not mutate canonical bug status, apply invalid closures, or claim a full compiler build/runtime pass. Canonical writes and runtime-qualified build evidence remain pending the user's build-exception decision. V3 and all older artifacts remain immutable historical checkpoints. No compiler, system tests, or live bug database were run for V4.
