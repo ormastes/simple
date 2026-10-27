@@ -3,6 +3,8 @@
 use std.spec
 use std.spec.step
 use app.cli.native_build_parse_closure_owner.{native_build_parse_closure_reuse_decision_v1}
+use app.cli.native_build_main.{native_build_closure_drop_prepublished_v1}
+use app.io.env_ops.{env_get, env_set}
 use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_request_identity_matches_v1,
     NativeEntryClosureRequestV1, native_entry_closure_request_publish_v1}
 use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
@@ -84,3 +86,22 @@ describe "parse closure publish-once reuse":
         # The coordinator's own later call sees its consumer marker and reuses.
         val again = native_build_parse_closure_reuse_decision_v1(true, true, "/c/r/request.v1", "d", "")
         expect(again.unwrap()).to_equal(true)
+
+    it "drops a prepublished request when --refresh-source-authority replaces the authority":
+        step("refresh: the stale prepublication is cleared so the worker republishes after the refresh")
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "/c/r/request.v1")
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "d")
+        env_set("SIMPLE_PARSE_CLOSURE_CONSUMER", "1")
+        expect(native_build_closure_drop_prepublished_v1(false)).to_equal(false)
+        expect(env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "").to_equal("/c/r/request.v1")
+        expect(native_build_closure_drop_prepublished_v1(true)).to_equal(false)
+        expect(env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "").to_equal("")
+        expect(env_get("SIMPLE_PARSE_CLOSURE_CONSUMER") ?? "").to_equal("")
+        # Not a consumer any more -> the coordinator publishes (Ok(false)), no mismatch error.
+        val decision = native_build_parse_closure_reuse_decision_v1(false, true, "", "", "")
+        expect(decision.unwrap()).to_equal(false)
+        val src = file_read("src/app/cli/native_build_main.spl")
+        val drop_at = src.index_of("if native_build_closure_drop_prepublished_v1(request.refresh):") ?? -1
+        val publish_at = src.index_of("val _closure_reused = match native_build_closure_publish_once_v1(") ?? -1
+        expect(drop_at > 0).to_equal(true)
+        expect(publish_at > drop_at).to_equal(true)

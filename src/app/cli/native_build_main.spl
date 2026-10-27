@@ -1980,6 +1980,12 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
+    # --refresh-source-authority replaced the authority above, so a request
+    # prepublished (bootstrap_main) under the pre-refresh authority can no
+    # longer admit. Drop it; this coordinator republishes after the refresh.
+    if native_build_closure_drop_prepublished_v1(request.refresh):
+        eprint "error: stale parse closure request could not be cleared"
+        return 1
     val _closure_reused = match native_build_closure_publish_once_v1(args, frontend_cache_dir,
             policy.handoff.policy_digest, simple_bin, library_policy.mode):
         case Ok(value): value
@@ -2345,6 +2351,14 @@ pub fn native_build_closure_publish_once_v1(args: [text], frontend_cache_dir: te
         env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
         return Err(publish_error)
     Ok(false)
+
+# True only when clearing was needed (refresh) and failed.
+pub fn native_build_closure_drop_prepublished_v1(refresh: bool) -> bool:
+    if not refresh: return false
+    val a = env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
+    val b = env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
+    val c = env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
+    not (a and b and c)
 
 # bootstrap_main coordinator route: publish once after the authority step and
 # BEFORE the file-worker/HIR/MIR prepass, so its children only consume.
