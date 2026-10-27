@@ -1,0 +1,177 @@
+# CPU Tier Canonicalization and Admission Specification
+# Validates architecture-specific tier identification, feature canonicalization,
+# and admission rules for multi-target SIMD builds.
+#
+# ## Operator workflow
+# Run `bin/simple test test/01_unit/lib/common/cpu_tier/tier_id_spec.spl` and require the final Results line to report 0 failed.
+#
+# ## Compatibility and limitations
+# Executed on the interpreter test lane; asserts observable behavior only.
+
+# @req: REQ-LIB-CPU_TIER-001 — stable requirement identity for CPU tier canonicalization.
+# doc-path: doc/05_design/compiler/simd/cpu_tier_multibuild.md
+# @manual: primary
+
+use std.spec
+use std.spec.step
+use std.common.cpu_tier.tier_id.{TierId, tier_parse, tier_text, tier_alias, tier_rank, tier_levels, tier_admits}
+
+describe "CPU tier identification and canonicalization":
+    it "tier levels list the correct base levels for each architecture":
+        step("Verify: x86_64 tiers include baseline and three extended levels")
+        # @req: REQ-LIB-CPU_TIER-001
+        val x86_64_tiers = tier_levels("x86_64")
+        expect(x86_64_tiers.len()).to_equal(4)
+        expect(x86_64_tiers[0]).to_equal("x86-64")
+        expect(x86_64_tiers[3]).to_equal("x86-64-v4")
+
+        step("Verify: aarch64 tiers include baseline, v8.2, and v9")
+        val aarch64_tiers = tier_levels("aarch64")
+        expect(aarch64_tiers.len()).to_equal(3)
+        expect(aarch64_tiers[0]).to_equal("armv8-a")
+        expect(aarch64_tiers[2]).to_equal("armv9-a")
+
+        step("Verify: riscv64 tiers include baseline and vector variant")
+        val riscv64_tiers = tier_levels("riscv64")
+        expect(riscv64_tiers.len()).to_equal(2)
+        expect(riscv64_tiers[0]).to_equal("rv64gc")
+        expect(riscv64_tiers[1]).to_equal("rv64gcv")
+
+        step("Verify: unknown architecture returns empty list")
+        expect(tier_levels("mips64").len()).to_equal(0)
+
+    it "tier ranks return the position of each base level":
+        step("Verify: x86-64 is rank 0")
+        expect(tier_rank("x86_64", "x86-64")).to_equal(0i64)
+
+        step("Verify: x86-64-v3 is rank 2")
+        expect(tier_rank("x86_64", "x86-64-v3")).to_equal(2i64)
+
+        step("Verify: x86-64-v4 is rank 3")
+        expect(tier_rank("x86_64", "x86-64-v4")).to_equal(3i64)
+
+        step("Verify: unknown base level returns -1")
+        expect(tier_rank("x86_64", "x86-64-v5")).to_equal(-1i64)
+
+        step("Verify: unknown arch returns -1")
+        expect(tier_rank("mips64", "unknown")).to_equal(-1i64)
+
+    it "aliases resolve x86-64-v1 to x86-64":
+        step("Verify: x86-64-v1 alias resolves to x86-64")
+        expect(tier_alias("x86_64", "x86-64-v1")).to_equal("x86-64")
+
+        step("Verify: non-aliased names pass through unchanged")
+        expect(tier_alias("x86_64", "x86-64-v3")).to_equal("x86-64-v3")
+
+    it "parses tier specs with just a base level":
+        step("Verify: parsing 'x86-64' returns base x86-64 with no features")
+        val parsed_v1 = tier_parse("x86_64", "x86-64")
+        expect(parsed_v1.is_ok()).to_equal(true)
+        val tier_v1 = parsed_v1 ?? TierId(arch: "", base: "", features: [])
+        expect(tier_v1.arch).to_equal("x86_64")
+        expect(tier_v1.base).to_equal("x86-64")
+        expect(tier_v1.features.len()).to_equal(0)
+
+        step("Verify: parsing 'x86-64-v3' returns base x86-64-v3 with no features")
+        val parsed_v3 = tier_parse("x86_64", "x86-64-v3")
+        expect(parsed_v3.is_ok()).to_equal(true)
+        val tier_v3 = parsed_v3 ?? TierId(arch: "", base: "", features: [])
+        expect(tier_v3.base).to_equal("x86-64-v3")
+        expect(tier_v3.features.len()).to_equal(0)
+
+    it "rejects unknown base level with an error":
+        step("Verify: unknown base level returns Err")
+        val parsed = tier_parse("x86_64", "x86-64-v99")
+        expect(parsed.is_ok()).to_equal(false)
+
+    it "canonicalizes by dropping implied features":
+        step("Verify: x86-64-v2+sse3 becomes x86-64-v2 (sse3 is implied)")
+        val parsed = tier_parse("x86_64", "x86-64-v2+sse3")
+        expect(parsed.is_ok()).to_equal(true)
+        val tier = parsed ?? TierId(arch: "", base: "", features: [])
+        expect(tier.base).to_equal("x86-64-v2")
+        expect(tier.features.len()).to_equal(0)
+
+        step("Verify: x86-64-v3+avx2 becomes x86-64-v3 (avx2 is implied)")
+        val parsed_v3 = tier_parse("x86_64", "x86-64-v3+avx2")
+        expect(parsed_v3.is_ok()).to_equal(true)
+        val tier_v3 = parsed_v3 ?? TierId(arch: "", base: "", features: [])
+        expect(tier_v3.features.len()).to_equal(0)
+
+    it "keeps explicit features that are not implied":
+        step("Verify: x86-64-v2+avx512f keeps avx512f (not implied by v2)")
+        val parsed = tier_parse("x86_64", "x86-64-v2+avx512f")
+        expect(parsed.is_ok()).to_equal(true)
+        val tier = parsed ?? TierId(arch: "", base: "", features: [])
+        expect(tier.features.len()).to_equal(1)
+        expect(tier.features[0]).to_equal("avx512f")
+
+    it "sorts features in canonical form":
+        step("Verify: x86-64-v2+ssse3+sse3 sorts to sse3+ssse3")
+        val parsed = tier_parse("x86_64", "x86-64-v2+ssse3+sse3")
+        expect(parsed.is_ok()).to_equal(true)
+        val tier = parsed ?? TierId(arch: "", base: "", features: [])
+        # Both are implied by v2, so should be dropped
+        expect(tier.features.len()).to_equal(0)
+
+    it "deduplicates repeated features":
+        step("Verify: x86-64-v4+avx512f+avx512f deduplicates")
+        val parsed = tier_parse("x86_64", "x86-64-v4+avx512f+avx512f")
+        expect(parsed.is_ok()).to_equal(true)
+        val tier = parsed ?? TierId(arch: "", base: "", features: [])
+        # avx512f is implied by v4, so should be dropped
+        expect(tier.features.len()).to_equal(0)
+
+    it "converts tier back to text form":
+        step("Verify: tier_text with no features returns base")
+        val tier1 = TierId(arch: "x86_64", base: "x86-64", features: [])
+        expect(tier_text(tier1)).to_equal("x86-64")
+
+        step("Verify: tier_text with features returns 'base+feat1+feat2'")
+        val tier2 = TierId(arch: "x86_64", base: "x86-64-v3", features: ["avx512f"])
+        expect(tier_text(tier2)).to_equal("x86-64-v3+avx512f")
+
+    it "accepts armv8.2-a with armv9-a host":
+        step("Verify: armv8.2-a artifact admitted on armv9-a host (same arch, armv8.2 rank <= armv9)")
+        val artifact = TierId(arch: "aarch64", base: "armv8.2-a", features: [])
+        val host = TierId(arch: "aarch64", base: "armv9-a", features: [])
+        expect(tier_admits(artifact, host)).to_equal(true)
+
+    it "rejects higher-rank artifact on lower-rank host":
+        step("Verify: x86-64-v4 artifact rejected on x86-64-v3 host")
+        val artifact = TierId(arch: "x86_64", base: "x86-64-v4", features: [])
+        val host = TierId(arch: "x86_64", base: "x86-64-v3", features: [])
+        expect(tier_admits(artifact, host)).to_equal(false)
+
+    it "rejects artifact with unavailable explicit feature":
+        step("Verify: x86-64-v2+avx512vnni rejected on x86-64-v3 host (avx512vnni not available)")
+        val artifact = TierId(arch: "x86_64", base: "x86-64-v2", features: ["avx512vnni"])
+        val host = TierId(arch: "x86_64", base: "x86-64-v3", features: [])
+        expect(tier_admits(artifact, host)).to_equal(false)
+
+    it "accepts artifact when host has the explicit feature":
+        step("Verify: x86-64-v2+avx512f accepted on x86-64-v3+avx512f host")
+        val artifact = TierId(arch: "x86_64", base: "x86-64-v2", features: ["avx512f"])
+        val host = TierId(arch: "x86_64", base: "x86-64-v3", features: ["avx512f"])
+        expect(tier_admits(artifact, host)).to_equal(true)
+
+    it "rejects cross-architecture admission":
+        step("Verify: x86-64 artifact rejected on aarch64 host")
+        val artifact = TierId(arch: "x86_64", base: "x86-64", features: [])
+        val host = TierId(arch: "aarch64", base: "armv9-a", features: [])
+        expect(tier_admits(artifact, host)).to_equal(false)
+
+    it "accepts armv8-a (baseline) artifact on any aarch64 host":
+        step("Verify: armv8-a artifact admitted on armv8.2-a host")
+        val artifact = TierId(arch: "aarch64", base: "armv8-a", features: [])
+        val host = TierId(arch: "aarch64", base: "armv8.2-a", features: [])
+        expect(tier_admits(artifact, host)).to_equal(true)
+
+    it "parses '+sve' on aarch64 with default baseline":
+        step("Verify: parsing '+sve' uses armv8-a baseline by default")
+        val parsed = tier_parse("aarch64", "+sve")
+        expect(parsed.is_ok()).to_equal(true)
+        val tier = parsed ?? TierId(arch: "", base: "", features: [])
+        expect(tier.base).to_equal("armv8-a")
+        expect(tier.features.len()).to_equal(1)
+        expect(tier.features[0]).to_equal("sve")
