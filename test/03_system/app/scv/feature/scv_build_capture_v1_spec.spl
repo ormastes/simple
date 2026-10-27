@@ -248,6 +248,27 @@ describe "SCV build capture V1":
         val frozen = scv_build_freeze_v1(reconciled, ScvBuildCursorV1(epoch: "new-epoch", sequence: 0)).unwrap()
         expect(scv_build_snapshot_read_v1(frozen, "src/a").unwrap()).to_equal("reconciled".bytes())
 
+    it "never reuses a retired epoch after multiple reconciliations":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val original = scv_build_capture_open_v1(capture_test_universe_v1(), [capture_test_entry_v1("src/a", "original", "worktree")], "epoch-A").unwrap()
+        val old_snapshot = scv_build_freeze_v1(original, ScvBuildCursorV1(epoch: "epoch-A", sequence: 0)).unwrap()
+        val second = scv_build_capture_reconcile_v1(original, capture_test_universe_v1(), [capture_test_entry_v1("src/a", "changed", "worktree")], "epoch-B").unwrap()
+        expect(scv_build_capture_reconcile_v1(second, capture_test_universe_v1(), [capture_test_entry_v1("src/a", "changed-again", "worktree")], "epoch-A")).to_equal(Err("build-reconcile-epoch-reused"))
+        expect(second.retired_epochs).to_equal(["epoch-A"])
+        expect(scv_build_snapshot_read_v1(old_snapshot, "src/a").unwrap()).to_equal("original".bytes())
+        val third = scv_build_capture_reconcile_v1(second, capture_test_universe_v1(), [], "epoch-C").unwrap()
+        expect(third.retired_epochs).to_equal(["epoch-A", "epoch-B"])
+        expect(scv_build_capture_reconcile_v1(third, capture_test_universe_v1(), [], "epoch-A")).to_equal(Err("build-reconcile-epoch-reused"))
+        expect(scv_build_capture_reconcile_v1(third, capture_test_universe_v1(), [], "epoch-B")).to_equal(Err("build-reconcile-epoch-reused"))
+
+    it "rejects tampered retained epoch history instead of accepting old cursor identities":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val original = scv_build_capture_open_v1(capture_test_universe_v1(), [], "epoch-A").unwrap()
+        var second = scv_build_capture_reconcile_v1(original, capture_test_universe_v1(), [], "epoch-B").unwrap()
+        second.retired_epochs[0] = "forged-epoch"
+        expect(scv_build_freeze_v1(second, ScvBuildCursorV1(epoch: "epoch-B", sequence: 0))).to_equal(Err("build-capture-epoch-history-invalid"))
+        expect(scv_build_capture_reconcile_v1(second, capture_test_universe_v1(), [], "epoch-A")).to_equal(Err("build-capture-epoch-history-invalid"))
+
     it "rejects tampered snapshots before byte or absence delivery":
         # @req REQ-SCV-BUILD-CAPTURE-06
         var frozen = scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [capture_test_entry_v1("src/a", "old", "worktree")], capture_test_cursor_v1(0)).unwrap()
