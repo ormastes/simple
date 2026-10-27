@@ -1,7 +1,8 @@
 # Accessor forwarding for field reads (REQ-SELFHOST-ACCESSOR-001).
 # `recv.x` with no real field `x` lowers to `get_x()`, `is_x()` or `x()` on a
 # fully-known owner type (seed parity). The undefined-field hard error is
-# opt-in via SIMPLE_STRICT_FIELD_FORWARDING=1, read once.
+# opt-in via SIMPLE_STRICT_FIELD_FORWARDING=1, read once. Without the flag the
+# fall-through is a W-HIR-FIELD-001 warning (REQ-SELFHOST-ACCESSOR-002).
 
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.*
@@ -9,12 +10,34 @@ use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.types.{HirLowering}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
+# @workaround bug=strict-field-forwarding-opt-in-20261027 reason=src-compiler-has-undefined-field-reads
 var _strict_field_forwarding_state: i64 = 0
 
 fn strict_field_forwarding_enabled() -> bool:
     if _strict_field_forwarding_state == 0:
         _strict_field_forwarding_state = if (env_get_opt("SIMPLE_STRICT_FIELD_FORWARDING") ?? "") == "1": 1 else: 2
     _strict_field_forwarding_state == 1
+
+fn accessor_edit_distance(a: text, b: text) -> i64:
+    val n = a.len()
+    val m = b.len()
+    var prev: [i64] = []
+    for j in 0..(m + 1):
+        prev = prev.push(j)
+    for i in 1..(n + 1):
+        var cur: [i64] = [i]
+        for j in 1..(m + 1):
+            var cost = 1
+            if a.substring(i - 1, i) == b.substring(j - 1, j):
+                cost = 0
+            var best = prev[j - 1] + cost
+            if prev[j] + 1 < best:
+                best = prev[j] + 1
+            if cur[j - 1] + 1 < best:
+                best = cur[j - 1] + 1
+            cur = cur.push(best)
+        prev = cur
+    prev[m]
 
 # Test hook: forget the cached flag so the next read re-queries the environment.
 fn strict_field_forwarding_reset():
@@ -69,4 +92,55 @@ impl HirLowering:
                             span: span)
         if strict_field_forwarding_enabled():
             self.error("no field `{name}` on type and no get_/is_ accessor", span)
+        else:
+            self.warn_undefined_field(name, owner_id, span)
         nil
+
+    me accessor_suggestion(owner_id: i64, name: text) -> text:
+        # Closest real field (edit distance <= 2) plus any get_/is_/set_ method
+        # that exists for it or for `name` itself.
+        var best_field = ""
+        var best_dist = 3
+        unsafe(capabilities: [ffi]):
+            if val owner_symbol = self.symbols.get_symbol_raw(owner_id):
+                var table_keys: [text] = []
+                if val owner_module = owner_symbol.defining_module:
+                    val canonical_name = owner_module + "." + owner_symbol.name
+                    if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
+                        table_keys = self.struct_field_types_by_name[canonical_name].keys()
+                if table_keys.len() == 0 and rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
+                    table_keys = self.struct_field_types_by_name[owner_symbol.name].keys()
+                for key in table_keys:
+                    val d = accessor_edit_distance(name, key)
+                    if d < best_dist:
+                        best_dist = d
+                        best_field = key
+        var parts: [text] = []
+        var base = name
+        if best_field != "":
+            parts = parts.push("field `{best_field}`")
+            base = best_field
+        for prefix in ["get_", "is_", "set_"]:
+            val cand = prefix + base
+            if self.accessor_is_instance_method(owner_id, cand):
+                parts = parts.push("method `{cand}`")
+        if parts.len() == 0:
+            return ""
+        "; did you mean " + parts.join(" / ") + "?"
+
+    me warn_undefined_field(name: text, owner_id: i64, span: Span):
+        # Deduped by file+line+name, per lowering run.
+        val key = "accwarn:{self.module_filename}:{span.line}:{name}"
+        if self.accessor_warned_keys.contains(key):
+            return
+        self.accessor_warned_keys = self.accessor_warned_keys.push(key)
+        val hint = self.accessor_suggestion(owner_id, name)
+        self.warning("[W-HIR-FIELD-001] undefined field `{name}` at {self.module_filename}:{span.line}; no get_/is_ accessor forwards it{hint}", span)
+
+    me accessor_is_instance_method(owner_id: i64, cand: text) -> bool:
+        if val mid = self.symbols.lookup_method_in_type_raw(owner_id, cand):
+            if val sym = self.symbols.get_symbol_raw(mid.id):
+                match sym.kind:
+                    case SymbolKind.Method: return true
+                    case _: ()
+        false
