@@ -151,17 +151,19 @@ fn scv_doctor_checkpoints_ok(root: text) -> bool:
 
 # Cheap health check (stabilization §3): one `<component>  OK|STALE|FAIL` row
 # per check, then a fail-closed verdict line. STALE is non-fatal (rebuildable
-# or reconcilable state); the stale derived workspace pointer is reconciled
-# from the published head view, which is the single publication point.
+# or reconcilable state). An unresolved WAL is an error and stops the check
+# before any derived view is reconciled or rewritten.
 fn scv_doctor(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR — nothing was checked (repository not initialized)\n"
     var out = ""
     var checks = 0
     var failed = 0
-    # WAL recovery first: an incomplete trailing transaction is rolled back
-    # (or forward) before any state below is validated. STALE is non-fatal.
+    # WAL recovery first. Do not continue into doctor reconciliation if an
+    # ambiguous transaction could make a mutable write unsafe.
     val wal_result = scv_wal_recover(root)
+    if wal_result.starts_with("ERROR"):
+        return wal_result
     val journal_row = if wal_result == "wal clean\n": "OK" else: "STALE"
     out = out + "journal  {journal_row}\n"
     checks = checks + 1
