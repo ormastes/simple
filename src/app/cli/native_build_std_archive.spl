@@ -1,0 +1,132 @@
+# Standard library archive linking support for native-build.
+# When --std-archive <path|auto> is provided, use prebuilt stdlib archive
+# instead of recompiling stdlib units, reducing build time.
+
+use std.io_runtime.{file_exists, file_read}
+use std.common.text.{text_contains}
+use std.nogc_sync_mut.sffi.host.{rt_sha256_buffer}
+
+# Archive validation result
+class StdArchiveValidation:
+    ok: bool
+    refusal: Option<text>      # Error message if validation failed
+    archive_path: text
+    iface_digest: text        # From sidecar metadata
+    producer: text
+    abi_major: i32
+    abi_minor: i32
+
+# Load and validate stdlib archive sidecar
+# File format: SDN with fields: name, semver, abi_major, abi_minor,
+# iface_digest, producer, triple, cpu_tier, sha256
+fn native_build_std_archive_validate_v1(
+    archive_path: text,
+    host_triple: text
+) -> StdArchiveValidation:
+
+    # Path checks
+    if not file_exists(archive_path):
+        return StdArchiveValidation(
+            ok: false,
+            refusal: Some("stdlib archive not found: " + archive_path),
+            archive_path: archive_path,
+            iface_digest: "",
+            producer: "",
+            abi_major: 0,
+            abi_minor: 0
+        )
+
+    val sidecar_path = archive_path + ".lib.sdn"
+    if not file_exists(sidecar_path):
+        return StdArchiveValidation(
+            ok: false,
+            refusal: Some("archive sidecar missing: " + sidecar_path),
+            archive_path: archive_path,
+            iface_digest: "",
+            producer: "",
+            abi_major: 0,
+            abi_minor: 0
+        )
+
+    # Read and parse sidecar (SDN format)
+    val sidecar_text = file_read(sidecar_path)
+
+    # Extract fields (placeholder: proper SDN parser would be used)
+    # For now, grep-style field extraction from "field: value" lines
+    val triple_line = sidecar_text.split("\n").filter(\line:
+        text_contains(line, "triple:")
+    ).first()
+
+    # Validate triple matches requested host
+    if let Some(line) = triple_line:
+        if not text_contains(line, host_triple):
+            return StdArchiveValidation(
+                ok: false,
+                refusal: Some("archive triple mismatch: expected " + host_triple +
+                    ", found in sidecar: " + line),
+                archive_path: archive_path,
+                iface_digest: "",
+                producer: "",
+                abi_major: 0,
+                abi_minor: 0
+            )
+
+    # Compute archive sha256 and validate against sidecar
+    val archive_bytes = file_read(archive_path)
+    val computed_sha = rt_sha256_buffer(archive_bytes)
+
+    if text_contains(sidecar_text, "sha256:"):
+        val sidecar_sha_line = sidecar_text.split("\n").filter(\line:
+            text_contains(line, "sha256:")
+        ).first()
+
+        if let Some(sha_line) = sidecar_sha_line:
+            # Extract sha value (after colon, trimmed)
+            val parts = sha_line.split(":")
+            if parts.len() >= 2:
+                val expected_sha = parts.get(1).unwrap_or("").trim()
+                if expected_sha != computed_sha and expected_sha != "":
+                    return StdArchiveValidation(
+                        ok: false,
+                        refusal: Some("archive integrity check failed: sha256 mismatch"),
+                        archive_path: archive_path,
+                        iface_digest: "",
+                        producer: "",
+                        abi_major: 0,
+                        abi_minor: 0
+                    )
+
+    # Extract metadata fields for libver_link_check (when PR lands)
+    val iface_digest = extract_sidecar_field(sidecar_text, "iface_digest")
+    val producer = extract_sidecar_field(sidecar_text, "producer")
+    val abi_major_str = extract_sidecar_field(sidecar_text, "abi_major")
+    val abi_minor_str = extract_sidecar_field(sidecar_text, "abi_minor")
+
+    val abi_major = abi_major_str.to_i32().unwrap_or(0)
+    val abi_minor = abi_minor_str.to_i32().unwrap_or(0)
+
+    # TODO: Call libver_link_check(archive_path, sidecar_text, host_triple) when
+    # work/libver-plan PR lands. Until then, local sha256 validation above suffices.
+    # val libver_req = LibHostReq(producer_required: Some(producer))
+    # if let Err(e) = libver_link_check(archive_path, sidecar_text, host_triple):
+    #     return StdArchiveValidation(ok: false, refusal: Some(e.name()), ...)
+
+    return StdArchiveValidation(
+        ok: true,
+        refusal: None,
+        archive_path: archive_path,
+        iface_digest: iface_digest,
+        producer: producer,
+        abi_major: abi_major,
+        abi_minor: abi_minor
+    )
+
+# Helper: extract field value from SDN sidecar text
+fn extract_sidecar_field(sidecar_text: text, field_name: text) -> text:
+    val lines = sidecar_text.split("\n")
+    for line in lines:
+        if text_contains(line, field_name + ":"):
+            val parts = line.split(":")
+            if parts.len() >= 2:
+                return parts.get(1).unwrap_or("").trim()
+    return ""
