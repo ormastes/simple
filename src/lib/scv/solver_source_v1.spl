@@ -61,25 +61,36 @@ fn source_move_supported_v1(input: SourceMergeInputV1, side: SourceFileV1) -> bo
         if source_move_matches_v1(input.base, side, move): matches = matches + 1
     matches == 1
 
-fn source_merge_v1(input: SourceMergeInputV1) -> SourceProposalV1:
-    """Combine an evidenced move with a one-sided byte edit; preserve uncertainty."""
+fn source_metadata_conflict_v1(input: SourceMergeInputV1) -> text:
+    """Check identity, file metadata and every admitted move before byte solving."""
     val base = input.base
     val left = input.left
     val right = input.right
     if base.file_uid == "" or base.file_uid != left.file_uid or base.file_uid != right.file_uid:
-        return SourceProposalV1(candidate: nil, conflict_code: "SOURCE_IDENTITY_MISMATCH")
+        return "SOURCE_IDENTITY_MISMATCH"
     if base.kind != left.kind or base.kind != right.kind or base.mode != left.mode or base.mode != right.mode:
-        return SourceProposalV1(candidate: nil, conflict_code: "SOURCE_KIND_MODE_CHANGE")
+        return "SOURCE_KIND_MODE_CHANGE"
     if not source_move_supported_v1(input, left) or not source_move_supported_v1(input, right):
-        return SourceProposalV1(candidate: nil, conflict_code: "SOURCE_MOVE_EVIDENCE_REQUIRED")
+        return "SOURCE_MOVE_EVIDENCE_REQUIRED"
     # Reject unused/forged operation records as well as missing required ones.
     var operation_ids: [text] = []
     for move in input.moves:
         if operation_ids.contains(move.operation_id):
-            return SourceProposalV1(candidate: nil, conflict_code: "SOURCE_DUPLICATE_OPERATION")
+            return "SOURCE_DUPLICATE_OPERATION"
         operation_ids.push(move.operation_id)
         if not source_move_matches_v1(base, left, move) and not source_move_matches_v1(base, right, move):
-            return SourceProposalV1(candidate: nil, conflict_code: "SOURCE_OPERATION_PRECONDITION")
+            return "SOURCE_OPERATION_PRECONDITION"
+    if left.path != right.path and left.path != base.path and right.path != base.path:
+        return "SOURCE_DIVERGENT_MOVES"
+    ""
+
+fn source_merge_v1(input: SourceMergeInputV1) -> SourceProposalV1:
+    """Combine an evidenced move with a one-sided byte edit; preserve uncertainty."""
+    val conflict = source_metadata_conflict_v1(input)
+    if conflict != "": return SourceProposalV1(candidate: nil, conflict_code: conflict)
+    val base = input.base
+    val left = input.left
+    val right = input.right
     var path = left.path
     if left.path != right.path:
         if left.path == base.path: path = right.path
@@ -102,3 +113,4 @@ fn source_copy_proposal_v1(original: SourceFileV1, new_uid: text, new_path: text
 
 export SourceFileV1, SourceMoveEvidenceV1, SourceMergeInputV1, SourceProposalV1
 export source_file_digest_v1, source_operations_digest_v1, source_merge_v1, source_copy_proposal_v1
+export source_metadata_conflict_v1
