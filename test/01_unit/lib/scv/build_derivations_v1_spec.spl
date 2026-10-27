@@ -180,3 +180,22 @@ describe "SCV complete outgoing derivation manifests (REQ-SCV-DER-001..008)":
         val conflict = ScvBuildCandidateScopeV1(scope_root: "scope", candidate_uids: ["b"])
         expect(scv_build_replace_consumer_v1(registered, registered.root_id, registered.snapshot_id,
             "module-a", 2, "attempt-b", [], [conflict])).to_equal(Err("derivation-scope-root-conflict"))
+
+    it "cannot attach a new receipt to a historical manifest after snapshot advance":
+        val old = derivation_replace(derivation_registered(), [derivation_use("u", "producer")]).unwrap()
+        val advanced = scv_build_advance_snapshot_v1(old, old.root_id, "snapshot-exact-2").unwrap()
+        val late = ScvBuildReceiptBindingV1(receipt_id: "late-receipt", consumer_uid: "module-a",
+            manifest_digest: old.manifests[0].manifest_digest)
+        expect(scv_build_bind_receipt_v1(advanced, advanced.root_id, late)).to_equal(Err("derivation-receipt-snapshot-mismatch"))
+        var forged = advanced
+        forged.receipts = [late]
+        forged.root_id = scv_build_graph_digest_v1(forged)
+        expect(scv_build_graph_valid_v1(forged)).to_equal(false)
+        val registered = scv_build_register_attempt_v1(advanced, advanced.root_id, "module-a", 2, "attempt-new-snapshot").unwrap()
+        val current = scv_build_replace_consumer_v1(registered, registered.root_id, registered.snapshot_id,
+            "module-a", 2, "attempt-new-snapshot", [derivation_use("u", "producer")], []).unwrap()
+        val fresh = ScvBuildReceiptBindingV1(receipt_id: "current-receipt", consumer_uid: "module-a",
+            manifest_digest: current.manifests[0].manifest_digest)
+        val rebound = scv_build_bind_receipt_v1(current, current.root_id, fresh).unwrap()
+        expect(rebound.receipts).to_equal([fresh])
+        expect(scv_build_graph_valid_v1(rebound)).to_equal(true)
