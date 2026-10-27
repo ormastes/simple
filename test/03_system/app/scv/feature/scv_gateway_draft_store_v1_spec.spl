@@ -1,0 +1,268 @@
+"""Local private SCV draft blob persistence contract.
+
+This spec exercises the storage owner directly. It does not claim a gateway
+wire capability, remote network behavior, or production durability admission.
+"""
+# @cover src/app/scv/gateway_draft_store_v1.spl 80%
+use std.spec.{describe, it, expect, step}
+use app.scv.gateway_draft_store_v1.*
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_write_bytes, directory_fsync}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove_all}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+
+fn draft_blob_root_v1() -> text:
+    val root = secure_temp_dir_raw("/tmp", "scv-draft-blob-v1-")
+    if root.len() > 0:
+        expect(directory_fsync(root)).to_equal(true)
+        expect(directory_fsync("/tmp")).to_equal(true)
+    root
+
+fn draft_blob_scope_v1(repository_id: text, principal_id: text,
+                       can_read: bool, can_write: bool) -> ScvDraftBlobAdmittedScopeV1:
+    ScvDraftBlobAdmittedScopeV1(repository_id: repository_id,
+        principal_id: principal_id, can_read: can_read, can_write: can_write)
+
+fn draft_blob_request_v1(repository_id: text, principal_id: text,
+                         request_id: text, payload: text) -> ScvDraftBlobRequestV1:
+    ScvDraftBlobRequestV1(repository_id: repository_id, principal_id: principal_id,
+        request_id: request_id, content_sha256: sha256_u8_hex(payload.bytes()), bytes: payload.bytes())
+
+fn draft_blob_repository_path_v1(repository_id: text) -> text:
+    sha256_text("scv-gateway-draft-repository-v1\n{repository_id.len()}:{repository_id}\n")
+
+fn draft_blob_principal_path_v1(principal_id: text) -> text:
+    sha256_text("scv-gateway-draft-principal-v1\n{principal_id.len()}:{principal_id}\n")
+
+fn draft_blob_request_key_v1(repository_id: text, principal_id: text, request_id: text) -> text:
+    sha256_text("scv-gateway-draft-request-key-v1\n{repository_id.len()}:{repository_id}\n{principal_id.len()}:{principal_id}\n{request_id.len()}:{request_id}\n")
+
+fn draft_blob_rejected_v1(result: Result<ScvDraftBlobReceiptV1, text>) -> bool:
+    match result:
+        case Ok(_): false
+        case Err(_): true
+
+fn draft_blob_bytes_rejected_v1(result: Result<[u8], text>) -> bool:
+    match result:
+        case Ok(_): false
+        case Err(_): true
+
+describe "SCV draft blob store v1":
+    describe "admitted local ownership and readback":
+        it "stores a bounded blob and returns it only after durable readback":
+            step("setup: create an isolated private store root and host-admitted scope")
+            val root = draft_blob_root_v1()
+            expect(root.len()).to_be_greater_than(0)
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val request = draft_blob_request_v1("repo-alpha", "principal-1", "req-001", "draft bytes")
+            step("exercise: persist the blob through the local owner")
+            val receipt = scv_draft_blob_put_v1(root, scope, request).unwrap()
+            step("assert: acceptance is a local durable receipt bound to exact bytes")
+            expect(receipt.repository_id).to_equal("repo-alpha")
+            expect(receipt.principal_id).to_equal("principal-1")
+            expect(receipt.request_id).to_equal("req-001")
+            expect(receipt.content_sha256).to_equal(sha256_u8_hex("draft bytes".bytes()))
+            expect(receipt.byte_count).to_equal(11)
+            expect(receipt.state).to_equal("local_durable")
+            expect(scv_draft_blob_get_v1(root, scope, request.content_sha256).unwrap()).to_equal("draft bytes".bytes())
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "preserves arbitrary object bytes that are not valid UTF-8":
+            step("setup: bind an object containing NUL and invalid UTF-8 bytes")
+            val root = draft_blob_root_v1()
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val payload: [u8] = [0u8, 255u8, 65u8, 128u8]
+            val request = ScvDraftBlobRequestV1(repository_id: "repo-alpha", principal_id: "principal-1",
+                request_id: "binary-1", content_sha256: sha256_u8_hex(payload), bytes: payload)
+            step("exercise: persist and fetch the exact object bytes")
+            val receipt = scv_draft_blob_put_v1(root, scope, request).unwrap()
+            val fetched = scv_draft_blob_get_v1(root, scope, request.content_sha256).unwrap()
+            step("assert: binary bytes and digest survive without UTF-8 decoding")
+            expect(receipt.byte_count).to_equal(4)
+            expect(receipt.content_sha256).to_equal(sha256_u8_hex(payload))
+            expect(fetched).to_equal(payload)
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "replays an identical request only after verifying the accepted object again":
+            step("setup: persist one request under its admitted repository and principal")
+            val root = draft_blob_root_v1()
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val request = draft_blob_request_v1("repo-alpha", "principal-1", "retry-1", "same payload")
+            val first = scv_draft_blob_put_v1(root, scope, request).unwrap()
+            step("exercise: repeat the exact idempotency key and payload")
+            val replay = scv_draft_blob_put_v1(root, scope, request).unwrap()
+            step("assert: a verified replay returns the same durable receipt")
+            expect(replay).to_equal(first)
+            expect(scv_draft_blob_get_v1(root, scope, request.content_sha256).unwrap()).to_equal("same payload".bytes())
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "rejects a reused request id with different content without replacing the first blob":
+            step("setup: commit the first payload for one scoped request id")
+            val root = draft_blob_root_v1()
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val first = draft_blob_request_v1("repo-alpha", "principal-1", "retry-2", "first")
+            val changed = draft_blob_request_v1("repo-alpha", "principal-1", "retry-2", "changed")
+            scv_draft_blob_put_v1(root, scope, first).unwrap()
+            step("exercise: reuse that request id with a distinct digest")
+            val result = scv_draft_blob_put_v1(root, scope, changed)
+            step("assert: reject the conflict and preserve the original content")
+            expect(draft_blob_rejected_v1(result)).to_equal(true)
+            expect(scv_draft_blob_get_v1(root, scope, first.content_sha256).unwrap()).to_equal("first".bytes())
+            expect(dir_remove_all(root)).to_equal(true)
+
+    describe "authorization before storage lookup":
+        it "denies a known digest when the host scope has no read capability":
+            # The denied caller is presented with an object already present in the store.
+            step("setup: persist bytes in a writable host-admitted scope")
+            val root = draft_blob_root_v1()
+            val writer = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val request = draft_blob_request_v1("repo-alpha", "principal-1", "known-1", "private")
+            scv_draft_blob_put_v1(root, writer, request).unwrap()
+            val denied = draft_blob_scope_v1("repo-alpha", "principal-1", false, false)
+            step("exercise: ask for the exact known digest without read admission")
+            val result = scv_draft_blob_get_v1(root, denied, request.content_sha256)
+            step("assert: deny before exposing whether this object exists")
+            expect(draft_blob_bytes_rejected_v1(result)).to_equal(true)
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "rejects request identity claims that do not match the trusted scope":
+            step("setup: supply a valid caller request under a different host scope")
+            val root = draft_blob_root_v1()
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val forged = draft_blob_request_v1("repo-alpha", "principal-2", "claim-1", "private")
+            step("exercise: attempt a write using the mismatched principal claim")
+            val result = scv_draft_blob_put_v1(root, scope, forged)
+            step("assert: reject before creating request or object namespace entries")
+            expect(draft_blob_rejected_v1(result)).to_equal(true)
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "rejects traversal syntax in a request id before path derivation":
+            step("setup: create a request id containing parent traversal syntax")
+            val root = draft_blob_root_v1()
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val request = draft_blob_request_v1("repo-alpha", "principal-1", "../outside", "private")
+            step("exercise: try to store it under an otherwise valid admitted scope")
+            val result = scv_draft_blob_put_v1(root, scope, request)
+            step("assert: reject before creating any derived request or object path")
+            expect(draft_blob_rejected_v1(result)).to_equal(true)
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "allows read-only scopes to get existing blobs but not to create requests":
+            step("setup: commit a blob as an admitted writer")
+            val root = draft_blob_root_v1()
+            val writer = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val existing = draft_blob_request_v1("repo-alpha", "principal-1", "read-1", "readable")
+            scv_draft_blob_put_v1(root, writer, existing).unwrap()
+            val reader = draft_blob_scope_v1("repo-alpha", "principal-1", true, false)
+            step("exercise: read existing content and attempt a new write")
+            expect(scv_draft_blob_get_v1(root, reader, existing.content_sha256).unwrap()).to_equal("readable".bytes())
+            val denied = scv_draft_blob_put_v1(root, reader,
+                draft_blob_request_v1("repo-alpha", "principal-1", "read-2", "new"))
+            step("assert: read is admitted while write is refused")
+            expect(draft_blob_rejected_v1(denied)).to_equal(true)
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "keeps identical request ids isolated across admitted principal namespaces":
+            step("setup: use the same repository and request id for two principals")
+            val root = draft_blob_root_v1()
+            val first_scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val second_scope = draft_blob_scope_v1("repo-alpha", "principal-2", true, true)
+            val first = draft_blob_request_v1("repo-alpha", "principal-1", "shared-id", "first principal")
+            val second = draft_blob_request_v1("repo-alpha", "principal-2", "shared-id", "second principal")
+            step("exercise: persist both scoped requests")
+            scv_draft_blob_put_v1(root, first_scope, first).unwrap()
+            scv_draft_blob_put_v1(root, second_scope, second).unwrap()
+            step("assert: each admitted namespace reads only its requested content")
+            expect(scv_draft_blob_get_v1(root, first_scope, first.content_sha256).unwrap()).to_equal("first principal".bytes())
+            expect(scv_draft_blob_get_v1(root, second_scope, second.content_sha256).unwrap()).to_equal("second principal".bytes())
+            expect(dir_remove_all(root)).to_equal(true)
+
+    describe "bounded inputs and damaged storage":
+        it "rejects a content digest that does not identify the supplied bytes":
+            step("setup: bind a request digest to different bytes")
+            val root = draft_blob_root_v1()
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val request = ScvDraftBlobRequestV1(repository_id: "repo-alpha", principal_id: "principal-1",
+                request_id: "bad-digest", content_sha256: sha256_text("other"), bytes: "payload".bytes())
+            step("exercise: submit the inconsistent request")
+            val result = scv_draft_blob_put_v1(root, scope, request)
+            step("assert: reject before any local durable receipt")
+            expect(draft_blob_rejected_v1(result)).to_equal(true)
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "rejects oversized content at the fixed local bound":
+            step("setup: create content above the documented per-blob maximum")
+            val root = draft_blob_root_v1()
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val too_large = ("x" * 1048577).bytes()
+            val request = ScvDraftBlobRequestV1(repository_id: "repo-alpha", principal_id: "principal-1",
+                request_id: "oversize", content_sha256: sha256_u8_hex(too_large), bytes: too_large)
+            step("exercise: request storage beyond the fixed one mebibyte limit")
+            val result = scv_draft_blob_put_v1(root, scope, request)
+            step("assert: reject without creating a durable acceptance")
+            expect(draft_blob_rejected_v1(result)).to_equal(true)
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "rejects corrupted stored bytes on both get and accepted-request replay":
+            step("setup: persist a request and locate its scoped immutable object")
+            val root = draft_blob_root_v1()
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val request = draft_blob_request_v1("repo-alpha", "principal-1", "corrupt-1", "original")
+            val receipt = scv_draft_blob_put_v1(root, scope, request).unwrap()
+            val repo_hash = draft_blob_repository_path_v1("repo-alpha")
+            val principal_hash = draft_blob_principal_path_v1("principal-1")
+            val object_path = root + "/repositories/" + repo_hash + "/principals/" + principal_hash + "/objects/" + request.content_sha256 + ".blob"
+            step("exercise: replace the immutable object with bytes that fail its digest")
+            expect(file_write_bytes(object_path, "corrupted".bytes())).to_equal(true)
+            val get_result = scv_draft_blob_get_v1(root, scope, request.content_sha256)
+            val replay_result = scv_draft_blob_put_v1(root, scope, request)
+            step("assert: neither lookup nor an already accepted idempotent replay trusts damaged bytes")
+            expect(draft_blob_bytes_rejected_v1(get_result)).to_equal(true)
+            expect(draft_blob_rejected_v1(replay_result)).to_equal(true)
+            expect(receipt.state).to_equal("local_durable")
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "rejects a symlinked SCV storage ancestor":
+            step("setup: provide an outside target and a symlink used as the private store root")
+            val root = draft_blob_root_v1()
+            expect(dir_create(root + "/outside", false)).to_equal(true)
+            expect(snapshot_symlink_create_nofollow_v1(root, root + "/store", "outside", 2)).to_equal(true)
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val request = draft_blob_request_v1("repo-alpha", "principal-1", "symlink", "private")
+            step("exercise: put through the symlinked ancestor")
+            val result = scv_draft_blob_put_v1(root + "/store", scope, request)
+            step("assert: reject the aliased namespace")
+            expect(draft_blob_rejected_v1(result)).to_equal(true)
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "never reports accepted when an intent has no verified object":
+            # This fixture models process loss after the durable request intent and
+            # before the immutable blob became visible. Recovery must verify bytes.
+            step("setup: retain a request intent but omit its content object")
+            val root = draft_blob_root_v1()
+            val scope = draft_blob_scope_v1("repo-alpha", "principal-1", true, true)
+            val request = draft_blob_request_v1("repo-alpha", "principal-1", "interrupted", "recover me")
+            val repo_hash = draft_blob_repository_path_v1("repo-alpha")
+            val principal_hash = draft_blob_principal_path_v1("principal-1")
+            val request_key = draft_blob_request_key_v1("repo-alpha", "principal-1", "interrupted")
+            val scoped = root + "/repositories/" + repo_hash + "/principals/" + principal_hash
+            val request_dir = scoped + "/requests"
+            expect(dir_create(root + "/repositories", false)).to_equal(true)
+            expect(dir_create(root + "/repositories/" + repo_hash, false)).to_equal(true)
+            expect(dir_create(root + "/repositories/" + repo_hash + "/principals", false)).to_equal(true)
+            expect(dir_create(scoped, false)).to_equal(true)
+            expect(dir_create(request_dir, false)).to_equal(true)
+            val intent = "version: 1\nrecord_type: draft_blob_request\nstate: intent\nrepository_id: repo-alpha\nprincipal_id: principal-1\nrequest_id: interrupted\ncontent_sha256: {request.content_sha256}\nbyte_count: {request.bytes.len()}\n"
+            expect(file_write_bytes(request_dir + "/" + request_key + ".intent.sdn", intent.bytes())).to_equal(true)
+            step("exercise: retry the exact bytes after the interrupted state")
+            val result = scv_draft_blob_put_v1(root, scope, request)
+            step("assert: recovery either completes after verified readback or stays explicitly incomplete")
+            match result:
+                case Ok(receipt):
+                    expect(receipt.state).to_equal("local_durable")
+                    expect(receipt.content_sha256).to_equal(request.content_sha256)
+                    expect(receipt.byte_count).to_equal(request.bytes.len())
+                    expect(scv_draft_blob_get_v1(root, scope, request.content_sha256).unwrap()).to_equal(request.bytes)
+                    expect(scv_draft_blob_put_v1(root, scope, request).unwrap()).to_equal(receipt)
+                case Err(_): expect(draft_blob_rejected_v1(result)).to_equal(true)
+            expect(dir_remove_all(root)).to_equal(true)
