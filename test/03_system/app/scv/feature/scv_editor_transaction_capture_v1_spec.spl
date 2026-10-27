@@ -96,6 +96,46 @@ describe "SCV editor transaction capture V1 system contract":
         expect(result.diagnostics.contains("editor-rename-target-open")).to_equal(true)
         dir_remove_all(root)
 
+    it "refuses a rename onto an open target when the source buffer is closed":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("open only the target buffer and propose an unopened source rename onto it")
+        val (root, spool) = _ide_capture_fixture("closed-source-rename-collision")
+        file_write(spool, "buffer_open\tsrc/b\t\ttarget bytes\npath_rename\tsrc/a\tsrc/b\t\n")
+        val same_poll = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(same_poll.events.len()).to_equal(0)
+        expect(same_poll.completeness).to_equal("needs_reconciliation")
+        expect(same_poll.diagnostics.contains("editor-rename-target-open")).to_equal(true)
+        dir_remove_all(root)
+        step("preserve a previously accepted target buffer when the later rename is ambiguous")
+        val (root2, spool2) = _ide_capture_fixture("closed-source-rename-cross-poll")
+        file_write(spool2, "buffer_open\tsrc/b\t\ttarget bytes\n")
+        val opened = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool2))
+        expect(opened.completeness).to_equal("complete")
+        val accepted_prefix = opened.state.verified_prefix
+        file_write(spool2, "buffer_open\tsrc/b\t\ttarget bytes\npath_rename\tsrc/a\tsrc/b\t\n")
+        val later = scv_editor_capture_poll_v1(opened.state)
+        expect(later.events.len()).to_equal(0)
+        expect(later.completeness).to_equal("needs_reconciliation")
+        expect(later.diagnostics.contains("editor-rename-target-open")).to_equal(true)
+        expect(later.state.ipc.buffers.len()).to_equal(1)
+        expect(later.state.ipc.buffers[0].bytes).to_equal("target bytes")
+        expect(later.state.verified_prefix).to_equal(accepted_prefix)
+        dir_remove_all(root2)
+
+    it "preserves a self-rename within the same open editor buffer":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("open a buffer and report a rename from that path back to itself")
+        val (root, spool) = _ide_capture_fixture("self-rename")
+        file_write(spool, "buffer_open\tsrc/a\t\tbytes\npath_rename\tsrc/a\tsrc/a\t\n")
+        val result = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(result.events.len()).to_equal(2)
+        expect(result.events[1].kind).to_equal("path_rename")
+        expect(result.completeness).to_equal("complete")
+        expect(result.state.ipc.buffers.len()).to_equal(1)
+        expect(result.state.ipc.buffers[0].path).to_equal("src/a")
+        expect(result.state.ipc.buffers[0].bytes).to_equal("bytes")
+        dir_remove_all(root)
+
     it "waits for a split final line and emits it after the terminating newline":
         # @req REQ-SCV-EDITOR-CAPTURE-01
         step("write one full record and one incomplete appended record")
