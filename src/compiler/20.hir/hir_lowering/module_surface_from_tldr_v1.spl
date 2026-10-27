@@ -1,131 +1,123 @@
 # Build a ModuleSurface from TLDR summary rows (PR2d).
 #
 # TLDR rows produced by tldr_summary_v1.spl:
+#   use|<statement>                     every top-level use / import / export statement
 #   export|<name>                       exported names
 #   decl|<kind> <name> id=<stable> cfg=<attrs> sig=<header>   declarations
 #   fallback|<reason>                   unsupported constructs
-# Plus existing companion sections (layout, trait, type, const, impl, generic).
+# Plus the companion section rows (layout, trait, const, impl, generic) that
+# carry the full struct fields / enum variants / trait members / impl headers.
 #
-# Returns nil (fail closed) if ANY fallback| row exists, or if a function
-# sig= has no return type (parse error). Otherwise builds the ModuleSurface
-# with retained declarations for import resolution.
+# The rows hold the module's interface as source text, so the builder
+# reassembles an interface STUB (headers + layouts, executable bodies replaced
+# by `pass`) and parses only that stub -- never the module's source. The
+# resulting ModuleSurface is built by the same module_surface_from_module the
+# full-source path uses, so params, return types, struct fields, visibility,
+# cfg attributes and the semantic hash limbs come from one code path.
+#
+# Returns nil (fail closed) if ANY fallback| row exists, if a function sig has
+# no return type, or if the stub does not parse.
+#
+# Known limits: impl blocks are ordered by their sorted row text (source order
+# is not in the summary), so a module with several impls can digest differently
+# from its source; a `extern`/bodyless header is kept as written.
 
-use compiler.frontend.parser_types.{ParserImport, ParserModule, ParserTypeParam, Export}
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceCompositeIndex, ModuleSurfaceConst, ModuleSurfaceDeclarationAuthorityIndex, ModuleSurfaceEnum, ModuleSurfaceExportOriginIndex, ModuleSurfaceField, ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, module_surface_declaration_authority_index_empty, module_surface_export_origin_index_empty, module_surface_export_origin_index_put}
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
-use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.frontend.parser_types_expr.{Type}
-use compiler.common.diagnostics.span.{Span}
 
-extern fn rt_hash_text(content: text) -> i64
+fn _tldr_first_line(block: text) -> text:
+    val nl = block.index_of("\n")
+    if nl < 0: block else: block.substring(0, nl)
 
-# Build ModuleSurface from TLDR entries.
-pub fn module_surface_from_tldr_v1(module_id: text, rows: [text]) -> ModuleSurface? :
-    # Check for fallback rows first (fail closed)
+# Indented member headers of an impl / trait row get a `pass` body so the stub parses.
+fn _tldr_impl_with_bodies(block: text) -> text:
+    var out: [text] = []
+    for line in block.split("\n"):
+        out.push(line)
+        val t = line.trim()
+        val is_member = t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("static fn ")
+        if is_member and t.ends_with(":") and line.starts_with(" "):
+            out.push("        pass")
+    out.join("\n")
+
+# The interface stub source of a summary, or nil when it must fail closed.
+pub fn module_surface_tldr_stub_source_v1(rows: [text]) -> text?:
     for row in rows:
         if row.starts_with("fallback|"):
             return nil
-
-    # Collect exports and declarations
-    var exported: [text] = []
-    var callable_names: [text] = []
-    var type_names: [text] = []
-
-    # Parse decl rows
+    var parts: [text] = []
     for row in rows:
-        if row.starts_with("decl|"):
-            # Format: decl|<kind> <name> id=<stable> cfg=<attrs> sig=<header>
-            val body = row.substring(5)
-            val space_pos = body.index_of(" ")
-            if space_pos < 0:
-                return nil
-            val kind = body.substring(0, space_pos)
-            val rest = body.substring(space_pos + 1)
+        if row.starts_with("use|"):
+            parts.push(row.substring(4))
+    for row in rows:
+        if not row.starts_with("decl|"):
+            continue
+        # Format: decl|<kind> <name> id=<stable> cfg=<attrs> sig=<header>
+        val body = row.substring(5)
+        val kind_end = body.index_of(" ")
+        if kind_end < 0:
+            return nil
+        val kind = body.substring(0, kind_end)
+        val cfg_at = body.index_of(" cfg=")
+        val sig_at = body.index_of(" sig=")
+        if cfg_at < 0 or sig_at < cfg_at:
+            return nil
+        val cfg = body.substring(cfg_at + 5, sig_at)
+        val sig = body.substring(sig_at + 5)
+        if kind == "fn" and not sig.contains("->"):
+            return nil
+        if cfg != "":
+            for attr in cfg.split(";"):
+                parts.push(attr)
+        var section = ""
+        if kind == "type":
+            section = "layout|"
+        elif kind == "trait":
+            section = "trait|"
+        elif kind == "fn":
+            section = "generic|"
+        var block = ""
+        if section != "":
+            for candidate in rows:
+                if candidate.starts_with(section) and _tldr_first_line(candidate.substring(section.len())) == sig:
+                    block = candidate.substring(section.len())
+        if block != "":
+            parts.push(block)
+        elif kind == "fn" and sig.ends_with(":"):
+            parts.push(sig + "\n    pass")
+        else:
+            parts.push(sig)
+    for row in rows:
+        if row.starts_with("impl|"):
+            parts.push(_tldr_impl_with_bodies(row.substring(5)))
+    Some(parts.join("\n") + "\n")
 
-            # Extract name (first word after kind)
-            val name_end = rest.index_of(" ")
-            val name = if name_end > 0: rest.substring(0, name_end) else: rest
+pub fn module_surface_tldr_stub_module_v1(module_id: text, rows: [text]) -> ParserModule?:
+    val stub = module_surface_tldr_stub_source_v1(rows)
+    if stub == nil:
+        return nil
+    val module_path = module_id.replace(".", "/") + ".spl"
+    val parsed = parse_and_build_module(stub.unwrap(), module_path)
+    if parsed.name == "":
+        return nil
+    Some(parsed)
 
-            # Check if function has return type
-            if kind == "fn":
-                val sig_pos = row.index_of("sig=")
-                if sig_pos < 0:
-                    return nil
-                val sig = row.substring(sig_pos + 4)
-                # Function must have -> return type annotation
-                if not sig.contains("->"):
-                    return nil
-                callable_names.push(name)
-            elif kind == "type":
-                type_names.push(name)
-        elif row.starts_with("export|"):
-            val name = row.substring(7)
-            if not exported.contains(name):
-                exported.push(name)
+# Build ModuleSurface from TLDR entries.
+pub fn module_surface_from_tldr_v1(module_id: text, rows: [text]) -> ModuleSurface?:
+    val stub = module_surface_tldr_stub_source_v1(rows)
+    if stub == nil:
+        return nil
+    val module_path = module_id.replace(".", "/") + ".spl"
+    val parsed = parse_and_build_module(stub.unwrap(), module_path)
+    if parsed.name == "":
+        return nil
+    val source = SourceFile(path: module_path, module_name: module_id, content: stub.unwrap())
+    val built = module_surface_from_module(parsed, source, 0)
+    if built.is_err():
+        return nil
+    Some(built.unwrap())
 
-    # Build minimal ModuleSurface structure for import resolution
-    val logical_name = module_surface_logical_name_from_path(module_id.replace(".", "/") + ".spl")
-    val canonical_name = module_surface_fold_std_alias(logical_name)
-
-    Some(ModuleSurface(
-        physical_index: 0,
-        generation: 0,
-        frozen: false,
-        source_index: 0,
-        canonical_path: module_surface_canonical_path(module_id.replace(".", "/") + ".spl"),
-        module_name: module_id,
-        logical_name: logical_name,
-        canonical_name: canonical_name,
-        package_name: module_surface_package_name_from_name(canonical_name),
-        preferred_registry_name: "",
-        content_length: 0,
-        content_hash: 0,
-        semantic_hash0: 0,
-        semantic_hash1: 0,
-        semantic_hash2: 0,
-        semantic_hash3: 0,
-        semantic_cacheable: false,
-        nogc_strict: false,
-        imports: [],
-        exports: [],
-        friends: [],
-        internal_exports: [],
-        import_target_indices: [],
-        import_target_names: [],
-        import_resolution_traces: [],
-        import_item_offsets: [0],
-        import_item_names: [],
-        import_item_aliases: [],
-        import_item_has_alias: [],
-        export_route_sources: [],
-        export_route_locals: [],
-        export_route_target_indices: [],
-        export_route_target_names: [],
-        export_route_is_glob: [],
-        composite_names: type_names,
-        composite_index: ModuleSurfaceCompositeIndex.empty(),
-        enum_names: [],
-        trait_names: [],
-        callable_names: callable_names,
-        type_alias_names: [],
-        constant_names: [],
-        callable_values: [],
-        composite_values: [],
-        enum_values: [],
-        trait_values: [],
-        type_alias_values: [],
-        constant_values: [],
-        callables: {},
-        composites: {},
-        enums: {},
-        traits: {},
-        impls: [],
-        type_aliases: {},
-        constants: {},
-        export_origins: [],
-        export_origin_index: module_surface_export_origin_index_empty(),
-        declaration_authority_index: module_surface_declaration_authority_index_empty()
-    ))
-
-export module_surface_from_tldr_v1
+export module_surface_tldr_stub_source_v1, module_surface_tldr_stub_module_v1, module_surface_from_tldr_v1

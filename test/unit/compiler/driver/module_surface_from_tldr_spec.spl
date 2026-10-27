@@ -3,8 +3,8 @@ use std.nogc_sync_mut.io_runtime.{mkdtemp_auto}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.driver.cache.tldr_summary_v1.{tldr_summary_entries_v1, tldr_summary_produce_v1, read_tldr}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
-use compiler.hir.hir_lowering.module_surface_from_owner.{module_surface_from_owner, ModuleSurfaceParserOwner}
-use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1}
+use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_owner, ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1, module_surface_tldr_stub_module_v1}
 use compiler.common.driver_core_types.{SourceFile}
 
 # Fixture: small module with pub fn returning i64 and pub struct
@@ -110,3 +110,95 @@ describe "module_surface_from_tldr_v1":
         val tldr_surf = tldr_surface.unwrap()
         expect(tldr_surf.callable_names).to_equal(source_surface.callable_names)
         expect(tldr_surf.composite_names).to_equal(source_surface.composite_names)
+
+# Fixture exercising params, return types, struct fields + visibility, enum
+# variants, cfg attributes, a const, a trait, an impl and imports.
+val SOURCE_RICH: text = 'use pkg.a.{base_val}' + """
+
+@cfg(x)
+pub fn add_one(x: i64, y: text) -> i64:
+    x + 1
+
+pub fn scale(a: i64, b: text) -> i64:
+    a
+
+fn helper(flag: bool) -> bool:
+    flag
+
+pub struct Point:
+    x: i64
+    pub y: [text]
+
+enum Shade:
+    Dark
+    Light(i64)
+
+const LIMIT: i64 = 3
+
+pub trait Shape:
+    fn area(self) -> i64
+
+impl Shape for Point:
+    fn area(self) -> i64:
+        self.x
+"""
+
+describe "module_surface_from_tldr_v1 digest and layout equality":
+
+    it "summary-built module has the same canonical digest as the parsed source":
+        val rows = tldr_summary_entries_v1("test.rich", SOURCE_RICH)
+        val stub = module_surface_tldr_stub_module_v1("test.rich", rows)
+        expect(stub != nil).to_equal(true)
+        val parsed = parse_and_build_module(SOURCE_RICH, "test/rich.spl")
+        val from_summary = module_surface_canonical_digest_v1(stub.unwrap())
+        val from_source = module_surface_canonical_digest_v1(parsed)
+        expect(from_source.len() > 0).to_equal(true)
+        expect(from_summary).to_equal(from_source)
+
+    it "summary surface semantic hash limbs equal the source surface":
+        val parsed = parse_and_build_module(SOURCE_RICH, "test/rich.spl")
+        val source_file = SourceFile(path: "test/rich.spl", module_name: "test.rich", content: SOURCE_RICH)
+        val source_surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source_file, 0).unwrap()
+        val tldr_surface = module_surface_from_tldr_v1("test.rich", tldr_summary_entries_v1("test.rich", SOURCE_RICH)).unwrap()
+        expect(tldr_surface.semantic_hash0).to_equal(source_surface.semantic_hash0)
+        expect(tldr_surface.semantic_hash1).to_equal(source_surface.semantic_hash1)
+        expect(tldr_surface.semantic_hash2).to_equal(source_surface.semantic_hash2)
+        expect(tldr_surface.semantic_hash3).to_equal(source_surface.semantic_hash3)
+        expect(tldr_surface.semantic_cacheable).to_equal(true)
+
+    it "populates callable params, return type and visibility":
+        val surf = module_surface_from_tldr_v1("test.rich", tldr_summary_entries_v1("test.rich", SOURCE_RICH)).unwrap()
+        var shapes: [text] = []
+        for c in surf.callable_values:
+            var ps: [text] = []
+            for p in c.params:
+                ps.push(p.name + ":" + p.type_name)
+            shapes.push("{c.name}({ps.join(",")})->{c.return_type_name} ret={c.has_return_type} pub={c.is_public}")
+        expect(shapes.contains("scale(a:i64,b:text)->i64 ret=true pub=true")).to_equal(true)
+        expect(shapes.contains("helper(flag:bool)->bool ret=true pub=false")).to_equal(true)
+
+    it "populates struct layouts from layout rows":
+        val surf = module_surface_from_tldr_v1("test.rich", tldr_summary_entries_v1("test.rich", SOURCE_RICH)).unwrap()
+        val point = surf.composites["Point"]
+        expect(point.fields.len()).to_equal(2)
+        expect(point.fields[0].name).to_equal("x")
+        expect(point.fields[0].type_name).to_equal("i64")
+        expect(point.fields[1].name).to_equal("y")
+        expect(point.fields[1].array_element_name).to_equal("text")
+        expect(point.is_public).to_equal(true)
+        expect(surf.enums.contains_key("Shade")).to_equal(true)
+        expect(surf.enums["Shade"].variants.len()).to_equal(2)
+        expect(surf.constants.contains_key("LIMIT")).to_equal(true)
+        expect(surf.traits.contains_key("Shape")).to_equal(true)
+        expect(surf.impls.len()).to_equal(1)
+
+    it "treats cfg-attributed declarations exactly like the source surface":
+        val parsed = parse_and_build_module(SOURCE_RICH, "test/rich.spl")
+        val source_file = SourceFile(path: "test/rich.spl", module_name: "test.rich", content: SOURCE_RICH)
+        val source_surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source_file, 0).unwrap()
+        val tldr_surface = module_surface_from_tldr_v1("test.rich", tldr_summary_entries_v1("test.rich", SOURCE_RICH)).unwrap()
+        expect(tldr_surface.callable_names).to_equal(source_surface.callable_names)
+        expect(tldr_surface.composite_names).to_equal(source_surface.composite_names)
+        expect(tldr_surface.enum_names).to_equal(source_surface.enum_names)
+        expect(tldr_surface.trait_names).to_equal(source_surface.trait_names)
+        expect(tldr_surface.constant_names).to_equal(source_surface.constant_names)
