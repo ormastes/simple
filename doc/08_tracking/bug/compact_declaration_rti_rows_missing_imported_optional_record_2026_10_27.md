@@ -1,6 +1,6 @@
 # Imported record return declarations disagree at MIR match ownership
 
-Status: RED on both the original and freshly rebuilt phase2 compiler. The compact-prescan repair is insufficient; diagnosis continues with the rejecting guard intact.
+Status: TARGETED NATIVE PASS after the final owner-proof repair. Exact changed-producer Hello and all three retained record-owner regressions pass. Broader CLI/unit verification remains open; this is not general compiler admission.
 
 The phase2 compiler `/tmp/scv-phase2-current-rebase-20261027/phase2/simple` (SHA-256 `9d202a662186f5e478381465ca357f259a84a5910285256a0945c2577fb2f73f`, compiler source `5b04d099c7891b4ed0396e80e5c3e56f4310e741`) rejects a two-module imported Optional record match. The same compiler compiles and executes a local Optional i64 control, printing `42` and exiting zero. The original RR publication fixture reaches 71 MIR modules, with 59 successful and 12 failed; this report does not claim that one repair clears all independent owner-graph diagnostics.
 
@@ -61,3 +61,9 @@ The semantic-selector snapshot `1c8132a5952` produced compiler `33578986328037c3
 Independent schema-aligned inspection explains why the selector did not apply: HirFunction.symbol is 2; that qualified predeclaration symbol has the correct semantic Function return but no defining_module. The original bare symbol 1 retains the provider path. `module_build.spl` creates this qualified clone with a nil owner, then renames it; this is a known representation, not codec corruption. The selector's nonempty-owner precondition rejected it and kept the physical return.
 
 The final permitted repair attempt passes enclosing provider identity into semantic selection. An explicit defining_module remains authoritative. An ownerless clone must carry an exact qualified free-call prefix equal to the enclosing provider's canonical module, with the same declaration leaf; a mismatch produces an error, never a borrowed declaration. Full HIR and actual compact-projection regressions now reproduce the qualified-name/nil-owner state, plus a wrong-enclosing-provider rejection. No physical ABI or match guard changes are made. Preserve the feature iteration cap: no further retry after this attempt.
+
+## Final targeted red-to-green result
+
+Frozen source `aeae829519e` produced phase2 compiler `8d21317328ccb2b32ba707d2485c3c8ca6c4d02592952537e7754a6d006cb116`; four modules rebuilt, 1600 reused, zero failures, with previous outputs and caches preserved. That exact compiler passed real Hello and the three still-red native regressions: imported Optional record, Result record, and duplicate nominal owners. Each regression executed its actual emitted program, printed `42\n`, produced empty stderr, and exited zero. The final runner ended successfully and no further repair cycle is permitted.
+
+Machine-readable provenance and actual artifact/receipt hashes are in `retained_return_owner_tdd_2026_10_27.sdn`; raw evidence remains under `/tmp/simple-retained-rti-producer-20261027/owner-proof-qualification`. The earlier generic-owner green belongs to compiler 6def and was not rerun or used to admit the final compiler. Full CLI check/test gates and authored unit-spec execution remain open because the expected self-hosted CLI runtime is absent. No seed substitution, physical ABI widening, guard relaxation, or unrelated qualification is claimed.
