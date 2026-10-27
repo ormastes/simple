@@ -8,12 +8,9 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.dependency.member_visibility.{member_access_scope_for_modules, member_visibility_allows, aggregate_constructor_visibility_allows}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
-use compiler.hir.hir_types.*
-use compiler.hir.hir_definitions.*
-use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
 use compiler.hir.hir_lowering.types.HirLowering
-use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceComposite, ModuleSurfaceField}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name, module_surface_package_name_from_name}
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, _hir_expr_symbol_or_invalid}
@@ -52,14 +49,14 @@ fn member_vis_callee_path(e: Expr) -> text:
     ""
 
 impl HirLowering:
-    me record_member_visibility(imported_mod: ModuleSurface, imported_name: text, composite: ModuleSurfaceComposite):
+    me record_member_visibility(type_id: i64, imported_mod: ModuleSurface, imported_name: text, composite: ModuleSurfaceComposite):
         val requester = self.module_filename
         val requester_package = module_surface_package_name_from_name(module_logical_name_from_path(requester))
         val scope = member_access_scope_for_modules(
             requester, requester_package, imported_mod.canonical_path,
             module_surface_package_name(imported_mod), imported_mod.friends,
             imported_mod.internal_exports.contains(imported_name))
-        val prefix = "{imported_mod.module_name}.{imported_name}"
+        val prefix = "{type_id}"
         var visibilities: [Visibility] = []
         for raw_field in composite.fields:
             val field: ModuleSurfaceField = raw_field
@@ -80,19 +77,22 @@ impl HirLowering:
     me check_member_field_visible(base: HirExpr, field: text, span: Span):
         if self.member_field_access_allowed.len() == 0:
             return
-        var owner_id = self.field_owner_for_hir_expr(base)
         val base_symbol = _hir_expr_symbol_or_invalid(base.kind)
+        var owner_id = -1
+        unsafe(capabilities: [ffi]):
+            if base_symbol.is_valid() and rt_dict_contains(self.member_vis_local_owner, base_symbol.id):
+                owner_id = self.member_vis_local_owner[base_symbol.id]
+        if owner_id < 0:
+            owner_id = self.field_owner_for_hir_expr(base)
         if owner_id < 0 and base_symbol.is_valid():
             owner_id = self.owner_type_id_for_base_raw(base_symbol.id)
         if owner_id < 0:
             return
+        val key = "{owner_id}#{field}"
         unsafe(capabilities: [ffi]):
-            if val owner_symbol = self.symbols.get_symbol_raw(owner_id):
-                if val owner_module = owner_symbol.defining_module:
-                    val key = "{owner_module}.{owner_symbol.name}#{field}"
-                    if rt_dict_contains(self.member_field_access_allowed, key):
-                        if not self.member_field_access_allowed[key]:
-                            self.report_member_visibility("field `{field}` is not visible from this module", key, span)
+            if rt_dict_contains(self.member_field_access_allowed, key):
+                if not self.member_field_access_allowed[key]:
+                    self.report_member_visibility("field `{field}` is not visible from this module", key, span)
 
     me check_aggregate_constructor_visible(callee: HirExpr, callee_ast: Expr, span: Span):
         if self.member_ctor_allowed.len() == 0:
@@ -108,10 +108,8 @@ impl HirLowering:
             type_id = self.symbols.lookup_qualified_type_raw(path.substring(0, dot), spelling)
         if type_id < 0:
             return
+        val key = "{type_id}"
         unsafe(capabilities: [ffi]):
-            if val type_symbol = self.symbols.get_symbol_raw(type_id):
-                if val type_module = type_symbol.defining_module:
-                    val key = "{type_module}.{type_symbol.name}"
-                    if rt_dict_contains(self.member_ctor_allowed, key):
-                        if not self.member_ctor_allowed[key]:
-                            self.report_member_visibility("aggregate constructor `{spelling}` is not visible from this module", "ctor:{key}", span)
+            if rt_dict_contains(self.member_ctor_allowed, key):
+                if not self.member_ctor_allowed[key]:
+                    self.report_member_visibility("aggregate constructor `{spelling}` is not visible from this module", "ctor:{key}", span)
