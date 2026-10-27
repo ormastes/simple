@@ -5,9 +5,10 @@ use std.spec
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{dir_create_all, file_exists, file_read, file_write}
 use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal,
+    hir_shard_recovery_close_inventory}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_unit_pick_v1, worker_unit_drained_path_v1,
-    worker_unit_pick_seal_v1}
+    worker_unit_pick_seal_v1, worker_unit_pick_lease_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{NativeFileUnitInvokerV1,
     native_file_worker_mono_pending_path_v1}
 use compiler.driver.driver_build.native_file_unit_loop_v1.{native_file_unit_worker_loop_v1}
@@ -90,3 +91,24 @@ describe "unit pick ledger":
         expect(worker_unit_pick_seal_v1(hir, "u1")).to_equal(0)
         expect(worker_unit_pick_seal_v1(hir, "u0")).to_equal(1)
         expect(worker_unit_pick_v1(hir, "u2", ["a.spl", "b.spl"], [0, 1], 2).unwrap()).to_equal(["b.spl"])
+
+    it "recovers a pick whose owner process is dead":
+        val (hir, _mir) = ledgers()
+        val live = worker_unit_pick_lease_v1("gone").split("\n")
+        val stale_start = (live[2].to_i64() ?? 0) + 1
+        expect(file_write("{hir}/{sha256_text("a.spl")}.pick", "gone\n{live[1]}\n{stale_start}")).to_equal(true)
+        expect(worker_unit_pick_v1(hir, "u1", ["a.spl"], [0], 1).unwrap()).to_equal(["a.spl"])
+        expect(file_read("{hir}/{sha256_text("a.spl")}.pick").starts_with("u1\n")).to_equal(true)
+
+    it "never steals a pick whose owner process is live":
+        val (hir, _mir) = ledgers()
+        expect(worker_unit_pick_v1(hir, "u0", ["a.spl"], [0], 1).unwrap()).to_equal(["a.spl"])
+        expect(worker_unit_pick_v1(hir, "u1", ["a.spl"], [0], 1).unwrap().len()).to_equal(0)
+        expect(file_read("{hir}/{sha256_text("a.spl")}.pick").starts_with("u0\n")).to_equal(true)
+
+    it "closes a picked-but-never-claimed module as unfinished, not done":
+        val (hir, _mir) = ledgers()
+        expect(file_write("{hir}/inventory", "k\na.spl")).to_equal(true)
+        expect(worker_unit_pick_v1(hir, "u0", ["a.spl"], [0], 1).unwrap()).to_equal(["a.spl"])
+        expect(hir_shard_recovery_close_inventory(hir, false)).to_equal(1)
+        expect(file_read("{hir}/{sha256_text("a.spl")}.terminal").starts_with("BLOCKED\n")).to_equal(true)
