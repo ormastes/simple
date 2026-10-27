@@ -24,7 +24,7 @@ use app.io.mod (file_exists, file_read, dir_create)
 use std.scv.core.{scv_objects_dir}
 use std.scv.core.{scv_object_path}
 use std.scv.store.{scv_write_text, scv_hash_text}
-use std.scv.parser.{scv_syntax_node_children}
+use std.scv.parser.{scv_syntax_node_children, scv_fallback_syntax_root, scv_fallback_syntax_hash, scv_fallback_semantic_hash}
 use std.scv.wasm_executor.{scv_wasm_parse}
 
 # ---------------------------------------------------------------------------
@@ -98,11 +98,20 @@ fn _scv_session_blob(root_id: text, prev_root: text, edits: i64,
 # ---------------------------------------------------------------------------
 
 # Open a session: parse source, retain the root node id.
+fn scv_parser_session_parse(root: text, language: text, grammar: text,
+                             version: text, parser_hash: text, source: text) -> text:
+    val (node, error) = scv_wasm_parse(root, language, grammar, version, parser_hash, source)
+    if error == "": return node
+    # Session fallback is an explicitly labeled derived line index. It never
+    # supplies spans or execution evidence to the structural source writer.
+    scv_fallback_syntax_root(root, "{root}/__session__", source, language,
+        grammar, version, parser_hash, scv_hash_text("raw", source),
+        scv_fallback_syntax_hash(source), scv_fallback_semantic_hash(source), "parsed_ok")
+
 fn scv_parser_session_open(root: text, language: text, grammar: text,
                            version: text, parser_hash: text,
                            source: text) -> text:
-    val (root_id, _err) = scv_wasm_parse(root, language, grammar, version,
-                                         parser_hash, source)
+    val root_id = scv_parser_session_parse(root, language, grammar, version, parser_hash, source)
     _scv_session_blob(root_id, "", 0, "", language, grammar, version,
                       parser_hash, source)
 
@@ -122,8 +131,7 @@ fn scv_parser_session_apply_edit(root: text, session: text, start_byte: i64,
     val grammar = _scv_session_field(session, "grammar")
     val version = _scv_session_field(session, "version")
     val parser_hash = _scv_session_field(session, "parser_hash")
-    val (new_root_id, _err) = scv_wasm_parse(root, language, grammar, version,
-                                             parser_hash, new_source)
+    val new_root_id = scv_parser_session_parse(root, language, grammar, version, parser_hash, new_source)
     val prev = scv_session_tree_root(session)
     val edits = scv_session_edit_count(session) + 1
     _scv_session_blob(new_root_id, prev, edits, edit, language, grammar,
