@@ -12,7 +12,12 @@ use std.nogc_sync_mut.io_runtime.{env_get, env_set}
 use test.fixtures.compiler.completeness95.hir_cases_v1.{fixture_hir_module_v1}
 use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
 use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_function_record_identity_v1.{mono_complete_function_digest_v1}
 use compiler.hir.hir_definitions.*
+
+fn first_function(module: HirModule) -> HirFunction:
+    val keys = module.functions.keys()
+    module.functions[keys[0]]
 
 val CONDS: [text] = ["os = \"linux\"", "os = \"windows\""]
 
@@ -58,3 +63,41 @@ describe "HIR CfgSelect codec":
 
     it "encodes byte-identically under SIMPLE_TARGET_OS=linux and windows":
         expect(encode_under_os("linux")).to_equal(encode_under_os("windows"))
+
+    it "round-trips HirFunction cfg, cfg_group and cfg_arm":
+        val module = fixture_hir_module_v1(false)
+        val keys = module.functions.keys()
+        var f = module.functions[keys[0]]
+        f.cfg = ["os=linux", "arch=x86_64"]
+        f.cfg_group = 3
+        f.cfg_arm = 1
+        module.functions[keys[0]] = f
+        val blob = hir_module_encode(module)
+        val decoded = hir_module_decode(blob)
+        expect(decoded != nil).to_equal(true)
+        val g = decoded!.functions[keys[0]]
+        expect(g.cfg.len()).to_equal(2)
+        expect(g.cfg[0]).to_equal("os=linux")
+        expect(g.cfg[1]).to_equal("arch=x86_64")
+        expect(g.cfg_group).to_equal(3)
+        expect(g.cfg_arm).to_equal(1)
+
+    it "mono identity digest differs by cfg, cfg_group and cfg_arm and is stable for equal guards":
+        val module = fixture_hir_module_v1(false)
+        val base = first_function(module)
+        val d0 = mono_complete_function_digest_v1(base)
+        expect(d0 != "").to_equal(true)
+        expect(mono_complete_function_digest_v1(first_function(module))).to_equal(d0)
+        var a = first_function(module)
+        a.cfg = ["os=linux"]
+        var a2 = first_function(module)
+        a2.cfg = ["os=windows"]
+        var b = first_function(module)
+        b.cfg_group = 1
+        var c = first_function(module)
+        c.cfg_arm = 0
+        val da = mono_complete_function_digest_v1(a)
+        expect(da != d0).to_equal(true)
+        expect(da != mono_complete_function_digest_v1(a2)).to_equal(true)
+        expect(mono_complete_function_digest_v1(b) != d0).to_equal(true)
+        expect(mono_complete_function_digest_v1(c) != d0).to_equal(true)

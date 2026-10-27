@@ -52,6 +52,13 @@ runtime registering `rt_tuple_len`. See the plan
 `doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md` and the
 mir_lowering / compiler layer-expert notes.
 
+## Declaration-level cfg guard (2026-10-27 - Step 1)
+
+HirFunction now carries cfg, cfg_group, cfg_arm fields (Option B, design
+hir_cfg_decl_select_design.md). Fields are optional (empty/0/-1 default),
+included in codec and hash, and passed through mono preflight. Test:
+`test/01_unit/compiler/20.hir/hir_function_cfg_guard_spec.spl`.
+
 ## 2026-10-27 - cfg-select source path (SIMPLE_HIR_CFG_SELECT=1, default off)
 
 - Parser path for `HirExprKind.CfgSelect`: in flag mode `_pp_preprocess_conditionals`
