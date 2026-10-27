@@ -1,0 +1,203 @@
+use std.spec.*
+use app.io.mod.{cwd, dir_create, dir_remove_all, file_write, process_run_bounded}
+use app.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use app.scv.db.git_candidate.{DbGitCandidateFile, DbGitCandidateRequest,
+    DbGitPreparedCandidate, db_git_candidate_prepare, db_git_candidate_commit_bytes,
+    db_git_candidate_cleanup}
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1, scv_draft_blob_get_v1}
+use app.scv.gateway_github_v1.{ScvGithubRepositoryV1, ScvGithubReadPolicyV1,
+    ScvGithubReadKindV1, ScvGithubReadRequestV1, ScvGithubReadResultV1,
+    ScvGithubVerificationV1}
+use app.scv.gateway_github_publish_v2.{ScvGatewayGithubPublishPolicyV2,
+    ScvGatewayGithubPublishRequestV2, ScvGatewayGithubPublishResultV2,
+    scv_gateway_github_publish_prepare_v2, scv_gateway_github_publish_reconcile_v2}
+
+struct ScvGatewayPublishFixtureV2:
+    root: text
+    source: text
+    remote: text
+    scratch_parent: text
+    store_root: text
+    base_head: text
+    request: ScvGatewayGithubPublishRequestV2
+    policy: ScvGatewayGithubPublishPolicyV2
+    scope: ScvDraftBlobAdmittedScopeV1
+
+var _scv_gateway_publish_mock_base_v2 = ""
+var _scv_gateway_publish_mock_topic_v2 = ""
+var _scv_gateway_publish_mock_repo_v2 = "repo-42"
+var _scv_gateway_publish_mock_selector_v2 = ""
+
+fn _scv_gateway_publish_git_v2(root: text, args: [text]) -> text:
+    val prefix = ["--no-replace-objects", "-C", root, "-c", "core.hooksPath=/dev/null",
+        "-c", "commit.gpgsign=false", "-c", "user.name=SCV Test",
+        "-c", "user.email=scv-test@invalid"]
+    val (stdout, _stderr, code) = process_run_bounded("git", prefix + args, 30000, 65536)
+    expect(code).to_equal(0)
+    stdout.trim()
+
+fn _scv_gateway_publish_mock_read_v2(policy: ScvGithubReadPolicyV1,
+        request: ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>:
+    _scv_gateway_publish_mock_selector_v2 = request.selector
+    var oid = _scv_gateway_publish_mock_base_v2
+    if request.selector.starts_with("refs/heads/scv/"):
+        oid = _scv_gateway_publish_mock_topic_v2
+    Ok(ScvGithubReadResultV1(repository_id: _scv_gateway_publish_mock_repo_v2,
+        github_repository_id: policy.allowlist[0].github_repository_id,
+        kind: ScvGithubReadKindV1.Ref, selector: request.selector, oid: oid,
+        tree_oid: "", parents: [], blob: [], requests: 1u64,
+        verification: ScvGithubVerificationV1.RefOidFieldMatched))
+
+fn _scv_gateway_publish_fixture_v2() -> ScvGatewayPublishFixtureV2:
+    val allocated = secure_temp_dir_raw(path_final_existing(cwd()).unwrap().path,
+        "scv-gateway-github-publish-v2-")
+    expect(allocated.len()).to_be_greater_than(0)
+    val root = path_final_existing(allocated).unwrap().path
+    val source = root + "/source"
+    val remote = root + "/authority.git"
+    val scratch = root + "/scratch"
+    val store = root + "/outbox"
+    expect(dir_create(source, true)).to_equal(true)
+    expect(dir_create(remote, true)).to_equal(true)
+    expect(dir_create(scratch, true)).to_equal(true)
+    expect(dir_create(store, true)).to_equal(true)
+    _scv_gateway_publish_git_v2(root, ["init", "--bare", "--template=", "--object-format=sha1", remote])
+    _scv_gateway_publish_git_v2(root, ["init", "--template=", "--object-format=sha1", source])
+    expect(file_write(source + "/genesis.txt", "initial gateway base\n")).to_equal(true)
+    _scv_gateway_publish_git_v2(source, ["add", "--", "genesis.txt"])
+    _scv_gateway_publish_git_v2(source, ["commit", "-m", "gateway genesis"])
+    val base_head = _scv_gateway_publish_git_v2(source, ["rev-parse", "HEAD"])
+    _scv_gateway_publish_git_v2(source, ["push", "--no-force", remote, "HEAD:refs/heads/main"])
+
+    val files = [DbGitCandidateFile(path: "state/proposal.sdn",
+        content: "version: 1\nvalue: proposed\n")]
+    val candidate_request = DbGitCandidateRequest(source_root: source, remote: remote,
+        scratch_parent: scratch, expected_head: base_head, object_format: "sha1",
+        files: files, message: "SCV candidate")
+    val candidate = db_git_candidate_prepare(candidate_request, \: false).unwrap()
+    val raw_commit = db_git_candidate_commit_bytes(candidate).unwrap()
+    val candidate_oid = candidate.candidate_oid
+    db_git_candidate_cleanup(candidate).unwrap()
+
+    val repository = ScvGithubRepositoryV1(repository_id: "repo-42", host: "github.com",
+        owner: "simple-org", repository: "simple-repo", github_repository_id: "4242")
+    val github = ScvGithubReadPolicyV1(allowlist: [repository], timeout_ms: 5000,
+        maximum_response_bytes: 2097152, maximum_blob_bytes: 1048576,
+        maximum_requests: 3u64)
+    val policy = ScvGatewayGithubPublishPolicyV2(repository: repository, github: github,
+        remote: remote, source_root: source, scratch_parent: scratch,
+        outbox_root: store, principal_id: "scv-service", base_ref: "refs/heads/main")
+    val scope = ScvDraftBlobAdmittedScopeV1(repository_id: "repo-42",
+        principal_id: "scv-service", can_read: true, can_write: true)
+    val request = ScvGatewayGithubPublishRequestV2(repository_id: "repo-42",
+        request_id: "request-1", base_ref: "refs/heads/main", expected_base_head: base_head,
+        candidate_oid: candidate_oid, candidate_commit_bytes: raw_commit, files: files,
+        message: "SCV candidate")
+    _scv_gateway_publish_mock_base_v2 = base_head
+    _scv_gateway_publish_mock_topic_v2 = ""
+    _scv_gateway_publish_mock_selector_v2 = ""
+    _scv_gateway_publish_mock_repo_v2 = "repo-42"
+    ScvGatewayPublishFixtureV2(root: root, source: source, remote: remote,
+        scratch_parent: scratch, store_root: store, base_head: base_head,
+        request: request, policy: policy, scope: scope)
+
+fn _scv_gateway_publish_cleanup_v2(fixture: ScvGatewayPublishFixtureV2):
+    expect(path_final_existing(fixture.root).unwrap().path).to_equal(fixture.root)
+    expect(dir_remove_all(fixture.root)).to_equal(true)
+
+describe "SCV GitHub gateway publication preparation v2":
+    it "durably prepares exact candidate bytes bound to repository principal and base":
+        val fixture = _scv_gateway_publish_fixture_v2()
+        val result = scv_gateway_github_publish_prepare_v2(fixture.policy, fixture.scope,
+            fixture.request, _scv_gateway_publish_mock_read_v2, \: false).unwrap()
+        expect(result.state).to_equal("export_prepared")
+        expect(result.candidate_oid).to_equal(fixture.request.candidate_oid)
+        expect(result.expected_base_head).to_equal(fixture.base_head)
+        expect(result.topic_ref.starts_with("refs/heads/scv/")).to_equal(true)
+        val envelope = scv_draft_blob_get_v1(fixture.store_root, fixture.scope,
+            result.content_sha256).unwrap()
+        expect(sha256_u8_hex(envelope)).to_equal(result.content_sha256)
+        expect(envelope.len()).to_be_greater_than(fixture.request.candidate_commit_bytes.len())
+        val (_stdout, _stderr, ref_code) = process_run_bounded("git",
+            ["-C", fixture.remote, "show-ref", "--verify", "--quiet", result.topic_ref],
+            30000, 65536)
+        expect(ref_code).to_equal(1)
+        _scv_gateway_publish_cleanup_v2(fixture)
+
+    it "requires authenticated write scope before candidate reads or durable lookup":
+        val fixture = _scv_gateway_publish_fixture_v2()
+        var denied = fixture.scope
+        denied.can_write = false
+        expect(scv_gateway_github_publish_prepare_v2(fixture.policy, denied,
+            fixture.request, _scv_gateway_publish_mock_read_v2, \: false)).to_equal(
+                Err("SCV_GH_PUBLISH_WRITE_DENIED"))
+        expect(_scv_gateway_publish_mock_selector_v2).to_equal("")
+        _scv_gateway_publish_cleanup_v2(fixture)
+
+    it "rejects forged commit identity or a tree that differs from the frozen file snapshot":
+        val fixture = _scv_gateway_publish_fixture_v2()
+        var forged_oid = fixture.request
+        forged_oid.candidate_oid = "0000000000000000000000000000000000000000"
+        expect(scv_gateway_github_publish_prepare_v2(fixture.policy, fixture.scope,
+            forged_oid, _scv_gateway_publish_mock_read_v2, \: false).is_err()).to_equal(true)
+        var forged_tree = fixture.request
+        forged_tree.files = [DbGitCandidateFile(path: "state/proposal.sdn",
+            content: "version: 1\nvalue: forged\n")]
+        expect(scv_gateway_github_publish_prepare_v2(fixture.policy, fixture.scope,
+            forged_tree, _scv_gateway_publish_mock_read_v2, \: false).is_err()).to_equal(true)
+        _scv_gateway_publish_cleanup_v2(fixture)
+
+    it "rejects a stale base ref before writing the outbox":
+        val fixture = _scv_gateway_publish_fixture_v2()
+        _scv_gateway_publish_mock_base_v2 = "1111111111111111111111111111111111111111"
+        expect(scv_gateway_github_publish_prepare_v2(fixture.policy, fixture.scope,
+            fixture.request, _scv_gateway_publish_mock_read_v2, \: false)).to_equal(
+                Err("SCV_GH_PUBLISH_BASE_STALE"))
+        _scv_gateway_publish_mock_base_v2 = fixture.base_head
+        _scv_gateway_publish_cleanup_v2(fixture)
+
+    it "makes same-key retries idempotent and rejects divergent base or snapshot bytes":
+        val fixture = _scv_gateway_publish_fixture_v2()
+        val first = scv_gateway_github_publish_prepare_v2(fixture.policy, fixture.scope,
+            fixture.request, _scv_gateway_publish_mock_read_v2, \: false).unwrap()
+        val retry = scv_gateway_github_publish_prepare_v2(fixture.policy, fixture.scope,
+            fixture.request, _scv_gateway_publish_mock_read_v2, \: false).unwrap()
+        expect(retry.content_sha256).to_equal(first.content_sha256)
+        var divergent = fixture.request
+        divergent.message = "different candidate metadata"
+        expect(scv_gateway_github_publish_prepare_v2(fixture.policy, fixture.scope,
+            divergent, _scv_gateway_publish_mock_read_v2, \: false).is_err()).to_equal(true)
+        _scv_gateway_publish_cleanup_v2(fixture)
+
+    it "reports a branch published only after exact repository selector and commit readback":
+        val fixture = _scv_gateway_publish_fixture_v2()
+        val prepared = scv_gateway_github_publish_prepare_v2(fixture.policy, fixture.scope,
+            fixture.request, _scv_gateway_publish_mock_read_v2, \: false).unwrap()
+        _scv_gateway_publish_mock_topic_v2 = fixture.request.candidate_oid
+        _scv_gateway_publish_mock_repo_v2 = "wrong-repository"
+        val wrong_repo = scv_gateway_github_publish_reconcile_v2(fixture.policy, fixture.scope,
+            fixture.request, prepared.content_sha256, _scv_gateway_publish_mock_read_v2,
+            \: false).unwrap()
+        expect(wrong_repo.state).to_equal("upstream_unknown")
+        _scv_gateway_publish_mock_repo_v2 = fixture.request.repository_id
+        val published = scv_gateway_github_publish_reconcile_v2(fixture.policy, fixture.scope,
+            fixture.request, prepared.content_sha256, _scv_gateway_publish_mock_read_v2,
+            \: false).unwrap()
+        expect(published.state).to_equal("topic_branch_published")
+        expect(_scv_gateway_publish_mock_selector_v2).to_equal(prepared.topic_ref)
+        expect(published.publication).to_equal("not_acceptance")
+        _scv_gateway_publish_cleanup_v2(fixture)
+
+    it "leaves mismatched or unreadable upstream state unknown and never claims acceptance":
+        val fixture = _scv_gateway_publish_fixture_v2()
+        val prepared = scv_gateway_github_publish_prepare_v2(fixture.policy, fixture.scope,
+            fixture.request, _scv_gateway_publish_mock_read_v2, \: false).unwrap()
+        _scv_gateway_publish_mock_topic_v2 = "3333333333333333333333333333333333333333"
+        val mismatch = scv_gateway_github_publish_reconcile_v2(fixture.policy, fixture.scope,
+            fixture.request, prepared.content_sha256, _scv_gateway_publish_mock_read_v2,
+            \: false).unwrap()
+        expect(mismatch.state).to_equal("upstream_unknown")
+        expect(mismatch.publication).to_equal("not_acceptance")
+        _scv_gateway_publish_cleanup_v2(fixture)
