@@ -209,6 +209,25 @@ there is no independent tool-source closure authority. Rebuild and admit a
 candidate containing the manager changes, then prepare all eight manager
 images from that same authority. Do not rewrite an older admission receipt.
 
+### Direct Phase 4 tool build
+
+For one isolated CLI artifact, the grouped entry point accepts
+`--phase-only=phase4 --executor=direct --direct-product=<id> --direct-backend=<llvm|cranelift>`.
+The product ID is one of `bootstrap`, `full-cli`, `interpreter`, `mcp`, `lsp`,
+or `test-runner`. This route still replays Stage 2 producer admission, source,
+runtime and tool authority checks, but it does not require BuildRunner images
+or start module groups and suites. It runs through `scripts/build/run-build.shs`
+under the process-tree watchdog, with a private per-product cache and output
+root.
+
+The output is a single native executable plus `direct-build.env` with
+`evidence_state=BUILD_ONLY` and its watchdog receipt. It never writes a managed
+Phase 4 completion receipt. In particular, building the `test-runner` executable
+does not execute tests; test execution remains owned by a separately validated
+CLI/runner pair and suite manifest. This route builds each selected tool’s entry
+closure independently and does not claim a shared library artifact is built
+once and reused by multiple tools.
+
 ## Module diagnostics after a tool binary fails
 
 The full phase verification profile runs `run_module_compile_inventory` after

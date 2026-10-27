@@ -1,0 +1,150 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+repo_root=$(CDPATH= cd -- "$script_root/../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/phase4-direct-product.XXXXXX")
+case "$tmp" in "${TMPDIR:-/tmp}"/phase4-direct-product.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+source_root="$tmp/frozen source"
+mkdir -p "$source_root/src/compiler" "$source_root/src/app" "$source_root/src/lib" \
+  "$source_root/src/os" "$source_root/src/runtime" "$source_root/src/package_ownership" \
+  "$source_root/src/plugins" "$source_root/src/compositions" \
+  "$source_root"/examples/10_tooling "$source_root"/scripts/bootstrap \
+  "$source_root"/scripts/check/lib "$source_root"/test/03_system/app/bootstrap_builder/feature \
+  "$source_root"/test/fixtures/bootstrap_builder || exit 2
+printf 'fixture source\n' >"$source_root/src/app/simple.sdn"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+bootstrap_stage3_source_snapshot "$tmp/source.authority" "$source_root"
+mkdir -p "$tmp/runtime authority"
+printf 'runtime snapshot\n' >"$tmp/runtime.snapshot"
+printf 'tool authority\n' >"$tmp/tool.authority"
+printf 'authority receipt\n' >"$tmp/authority.receipt"
+cat >"$tmp/authority verifier" <<'EOF'
+#!/bin/sh
+set -eu
+[ "${1:-}" = phase2-native-authority-verify ] || exit 76
+exit 0
+EOF
+cat >"$tmp/fake producer" <<'EOF'
+#!/bin/sh
+set -eu
+[ "${1:-}" = native-build ] || exit 71
+shift
+printf '%s\n' "$@" >"$(dirname -- "$SIMPLE_PROCESS_TREE_RSS_RECEIPT")/args.txt"
+env | LC_ALL=C sort >"$(dirname -- "$SIMPLE_PROCESS_TREE_RSS_RECEIPT")/environment.txt"
+output=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then output=$2; shift 2; else shift; fi
+done
+[ -n "$output" ] || exit 72
+mkdir -p "$(dirname -- "$output")" || exit 73
+perl -e '$h="\0" x 64; substr($h,0,4)="\x7fELF"; substr($h,4,1)=chr(2); substr($h,5,1)=chr(1); substr($h,16,2)=pack("v",2); substr($h,18,2)=pack("v",62); print $h' >"$output" || exit 74
+chmod 700 "$output" || exit 75
+case "$output" in */mutating/bin/*) printf 'mutated during build\n' >>'__SOURCE_FILE__' || exit 77 ;; esac
+EOF
+chmod 700 "$tmp/fake producer"
+sed "s|__SOURCE_FILE__|$source_root/src/app/simple.sdn|" "$tmp/fake producer" >"$tmp/fake producer.patched"
+mv "$tmp/fake producer.patched" "$tmp/fake producer"
+chmod 700 "$tmp/fake producer"
+chmod 700 "$tmp/authority verifier"
+producer_sha=$(sha256sum "$tmp/fake producer" | awk '{print $1}')
+source_sha=$(sha256sum "$tmp/source.authority" | awk '{print $1}')
+runtime_sha=$(sha256sum "$tmp/runtime.snapshot" | awk '{print $1}')
+tool_sha=$(sha256sum "$tmp/tool.authority" | awk '{print $1}')
+authority_sha=$(sha256sum "$tmp/authority.receipt" | awk '{print $1}')
+authority_program_sha=$(sha256sum "$tmp/authority verifier" | awk '{print $1}')
+cuda_identity="cuda-$(printf '%064d' 0)-$(printf '%064d' 1)"
+output_root="$tmp/output with spaces"
+SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_FORCE_WORKER=1 SIMPLE_PARSE_SHARD=1/4 \
+SIMPLE_USER_STORAGE_ROOT="$tmp/ambient-storage" SIMPLE_CACHE_PROJECT=ambient \
+sh "$script_root/build-phase4-direct-product.shs" \
+  --executor=direct --program="$tmp/fake producer" --producer-sha256="$producer_sha" \
+  --source-root="$source_root" --source-authority="$tmp/source.authority" \
+  --source-authority-sha256="$source_sha" --runtime-authority="$tmp/runtime authority" \
+  --runtime-snapshot="$tmp/runtime.snapshot" --runtime-snapshot-sha256="$runtime_sha" \
+  --tool-authority="$tmp/tool.authority" --tool-authority-sha256="$tool_sha" \
+  --authority-program="$tmp/authority verifier" --authority-receipt="$tmp/authority.receipt" \
+  --authority-digest="$authority_sha" --authority-program-sha256="$authority_program_sha" \
+  --timeout-seconds=30 \
+  --target=x86_64-unknown-linux-gnu --threads=8 --memory-bytes=536870912 --memory-policy=enforce \
+  --reserve-bytes=134217728 --estimated-group-disk-bytes=134217728 --minimum-free-disk-bytes=134217728 \
+  --backend=llvm --product=test-runner --cuda-source-root=src/plugins \
+  --cuda-selection-identity="$cuda_identity" --output-root="$output_root" >"$tmp/stdout"
+
+artifact="$output_root/bin/simple_test_runner"
+receipt="$output_root/direct-build.env"
+[ -x "$artifact" ] && [ -f "$receipt" ] || { echo 'FAIL: direct tool artifact/evidence missing' >&2; exit 1; }
+grep -qx -- '--entry' "$output_root/args.txt"
+grep -qx -- 'src/app/test_runner_new/main.spl' "$output_root/args.txt"
+! grep -q '^SIMPLE_BOOTSTRAP=1$' "$output_root/environment.txt"
+! grep -q '^SIMPLE_NATIVE_BUILD_FORCE_WORKER=1$' "$output_root/environment.txt"
+! grep -q '^SIMPLE_PARSE_SHARD=1/4$' "$output_root/environment.txt"
+grep -qx "SIMPLE_USER_STORAGE_ROOT=$output_root/storage" "$output_root/environment.txt"
+grep -qx 'SIMPLE_CACHE_PROJECT=phase4-direct-test-runner-llvm' "$output_root/environment.txt"
+grep -qx -- 'evidence_state=BUILD_ONLY' "$receipt"
+! grep -q '^status=PASS$' "$receipt"
+grep -qx "artifact_sha256=$(sha256sum "$artifact" | awk '{print $1}')" "$receipt"
+grep -q '^PHASE4_DIRECT_BUILD_ONLY product=test-runner backend=llvm ' "$tmp/stdout"
+
+bad_root="$tmp/rejected"
+if sh "$script_root/build-phase4-direct-product.shs" \
+    --executor=direct --program="$tmp/fake producer" --producer-sha256=$(printf '%064d' 0) \
+    --source-root="$source_root" --source-authority="$tmp/source.authority" \
+    --source-authority-sha256="$source_sha" --runtime-authority="$tmp/runtime authority" \
+    --runtime-snapshot="$tmp/runtime.snapshot" --runtime-snapshot-sha256="$runtime_sha" \
+    --tool-authority="$tmp/tool.authority" --tool-authority-sha256="$tool_sha" \
+    --authority-program="$tmp/authority verifier" --authority-receipt="$tmp/authority.receipt" \
+    --authority-digest="$authority_sha" --authority-program-sha256="$authority_program_sha" \
+    --timeout-seconds=30 \
+    --target=x86_64-unknown-linux-gnu --threads=8 --memory-bytes=536870912 --memory-policy=enforce \
+    --reserve-bytes=134217728 --estimated-group-disk-bytes=134217728 --minimum-free-disk-bytes=134217728 \
+    --backend=llvm --product=full-cli --cuda-source-root=src/plugins \
+    --cuda-selection-identity="$cuda_identity" --output-root="$bad_root" >"$tmp/bad.out" 2>"$tmp/bad.err"; then
+  echo 'FAIL: invalid producer identity accepted' >&2
+  exit 1
+fi
+[ ! -e "$bad_root/args.txt" ] || { echo 'FAIL: invalid identity reached compiler' >&2; exit 1; }
+grep -q 'producer digest changed' "$tmp/bad.err"
+
+unsafe_root="$tmp/rejected/../unsafe"
+if sh "$script_root/build-phase4-direct-product.shs" \
+    --executor=direct --program="$tmp/fake producer" --producer-sha256="$producer_sha" \
+    --source-root="$source_root" --source-authority="$tmp/source.authority" \
+    --source-authority-sha256="$source_sha" --runtime-authority="$tmp/runtime authority" \
+    --runtime-snapshot="$tmp/runtime.snapshot" --runtime-snapshot-sha256="$runtime_sha" \
+    --tool-authority="$tmp/tool.authority" --tool-authority-sha256="$tool_sha" \
+    --authority-program="$tmp/authority verifier" --authority-receipt="$tmp/authority.receipt" \
+    --authority-digest="$authority_sha" --authority-program-sha256="$authority_program_sha" \
+    --timeout-seconds=30 --target=x86_64-unknown-linux-gnu --threads=8 --memory-bytes=536870912 --memory-policy=enforce \
+    --reserve-bytes=134217728 --estimated-group-disk-bytes=134217728 --minimum-free-disk-bytes=134217728 \
+    --backend=llvm --product=full-cli --cuda-source-root=src/plugins \
+    --cuda-selection-identity="$cuda_identity" --output-root="$unsafe_root" \
+    >"$tmp/unsafe.out" 2>"$tmp/unsafe.err"; then
+  echo 'FAIL: noncanonical output path accepted' >&2
+  exit 1
+fi
+[ ! -e "$unsafe_root/args.txt" ] || { echo 'FAIL: unsafe path reached compiler' >&2; exit 1; }
+grep -q 'unsafe path spelling' "$tmp/unsafe.err"
+
+mutating_root="$tmp/mutating"
+if sh "$script_root/build-phase4-direct-product.shs" \
+    --executor=direct --program="$tmp/fake producer" --producer-sha256="$producer_sha" \
+    --source-root="$source_root" --source-authority="$tmp/source.authority" \
+    --source-authority-sha256="$source_sha" --runtime-authority="$tmp/runtime authority" \
+    --runtime-snapshot="$tmp/runtime.snapshot" --runtime-snapshot-sha256="$runtime_sha" \
+    --tool-authority="$tmp/tool.authority" --tool-authority-sha256="$tool_sha" \
+    --authority-program="$tmp/authority verifier" --authority-receipt="$tmp/authority.receipt" \
+    --authority-digest="$authority_sha" --authority-program-sha256="$authority_program_sha" \
+    --timeout-seconds=30 --target=x86_64-unknown-linux-gnu --threads=8 --memory-bytes=536870912 --memory-policy=enforce \
+    --reserve-bytes=134217728 --estimated-group-disk-bytes=134217728 --minimum-free-disk-bytes=134217728 \
+    --backend=llvm --product=full-cli --cuda-source-root=src/plugins \
+    --cuda-selection-identity="$cuda_identity" --output-root="$mutating_root" \
+    >"$tmp/mutation.out" 2>"$tmp/mutation.err"; then
+  echo 'FAIL: source mutation during build accepted' >&2
+  exit 1
+fi
+[ ! -e "$mutating_root/direct-build.env" ] || { echo 'FAIL: mutation emitted direct evidence' >&2; exit 1; }
+grep -q 'source tree differs from admitted snapshot' "$tmp/mutation.err"
+echo 'PASS phase4 direct build-only product routing and identity rejection'
