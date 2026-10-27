@@ -1126,11 +1126,30 @@ fn _make_result_from_structured_evidence_core(file_path: text, stdout: text, std
             timed_out: false, cached: false, blocked: blocked,
             unsupported: unsupported, omission_evidence: omissions), combined)
     val (passed, evidence_failed, valid) = read_structured_test_evidence(evidence_path)
+    if valid == 0:
+        var process_detail = ""
+        if exit_code != 0:
+            val extracted_process_detail = extract_error_message(combined)
+            val detail = if extracted_process_detail != "": "{extracted_process_detail} (process exit {exit_code})" else: "Process exited with code {exit_code}"
+            process_detail = " ({detail})"
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending,
+            duration_ms: duration_ms, setup_ms: 0,
+            error: "test-runner: structured BDD evidence unavailable{process_detail}", timed_out: false, cached: false)
+    if passed + evidence_failed == 0:
+        val process_detail = if exit_code != 0: " (Process exited with code {exit_code})" else: ""
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending,
+            duration_ms: duration_ms, setup_ms: 0,
+            error: "--assert-ran: no BDD examples executed{process_detail}", timed_out: false, cached: false)
     if exit_code != 0:
-        val failed = if evidence_failed > 0: evidence_failed else: 1
-        return TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "Process exited with code {exit_code}", timed_out: false, cached: false)
-    if valid == 0 or passed + evidence_failed == 0:
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: no BDD examples executed", timed_out: false, cached: false)
+        if evidence_failed > 0:
+            val assertion_detail = extract_error_message(combined)
+            val detail = if assertion_detail != "": assertion_detail else: "assertion failed"
+            val error = "test-runner: authenticated BDD assertion failure: {detail} (process exit {exit_code})"
+            return TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false)
+        if passed > 0:
+            return TestFileResult(path: file_path, passed: passed, failed: 0, skipped: skipped, pending: pending,
+                duration_ms: duration_ms, setup_ms: 0,
+                error: "test-runner: BDD process failure after authenticated pass (exit {exit_code})", timed_out: false, cached: false)
     # Zero-expectation gate: examples ran and none failed, but the child's own
     # tally says no expect()/assert was ever evaluated. WARN-FIRST: the
     # vacuity line is printed; the result becomes VACUOUS (a failure class)
@@ -1141,7 +1160,11 @@ fn _make_result_from_structured_evidence_core(file_path: text, stdout: text, std
         if env_get("SIMPLE_TEST_VACUOUS_STRICT") == "1" and not vacuous_spec_baselined(file_path):
             return TestFileResult(path: file_path, passed: passed, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: vacuous_result_error(passed), timed_out: false, cached: false)
         print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
-    val error = if evidence_failed > 0: "test-runner: spec failed" else: ""
+    var error = ""
+    if evidence_failed > 0:
+        val assertion_detail = extract_error_message(combined)
+        val detail = if assertion_detail != "": assertion_detail else: "assertion failed"
+        error = "test-runner: authenticated BDD assertion failure: {detail}"
     test_runner_result_with_mcdc_evidence(
         TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
         combined
