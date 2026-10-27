@@ -145,12 +145,27 @@ describe "scv event journal integration (E-03)":
         expect(scv_event_batch_is_committed(missing_root, "m1")).to_equal(false)
         expect(scv_event_batch_commit(missing_root, "m1")).to_equal(false)
 
+        val marker_root = _repo("tamper-marker")
+        expect(scv_event_batch_record(marker_root, "t1", "created", "a.txt", "")).to_equal(true)
+        expect(scv_event_batch_commit(marker_root, "t1")).to_equal(true)
+        expect(file_write("{marker_root}/.scv/journal/event_batches/t1.committed", "corrupt marker\n")).to_equal(true)
+        expect(scv_event_batch_is_committed(marker_root, "t1")).to_equal(false)
+
+        val legacy_root = _repo("legacy-partial-row")
+        expect(scv_event_batch_record(legacy_root, "l1", "created", "a.txt", "")).to_equal(true)
+        expect(file_write(scv_journal_events_path(legacy_root), "op=l1 kind=fsevent refs=kind=created,path=a.txt,related= sha=- utc=1\n")).to_equal(true)
+        expect(scv_event_batch_commit(legacy_root, "l1")).to_equal(false)
+        expect(file_exists(scv_event_batch_pending_path(legacy_root, "l1"))).to_equal(true)
+        expect(_events_lines(legacy_root)).to_equal(1)
+
         val path_root = _repo("path-traversal")
         expect(scv_event_batch_record(path_root, "../outside", "created", "a.txt", "")).to_equal(false)
         expect(file_exists("{path_root}/.scv/journal/outside.pending")).to_equal(false)
         dir_remove_all(seal_root)
         dir_remove_all(row_root)
         dir_remove_all(missing_root)
+        dir_remove_all(marker_root)
+        dir_remove_all(legacy_root)
         dir_remove_all(path_root)
 
     it "refuses a symlinked pending leaf without following or deleting its target":
@@ -163,6 +178,19 @@ describe "scv event journal integration (E-03)":
         expect(scv_event_batch_commit(root, "b1")).to_equal(false)
         expect(file_exists(scv_event_batch_pending_path(root, "b1"))).to_equal(true)
         expect(file_read(target)).to_equal("kind=created path=a.txt related=\n")
+        dir_remove_all(root)
+
+    it "refuses a symlinked event log without replacing or following its target":
+        step("Point events.log at an unrelated regular file and attempt commit")
+        val root = _repo("event-log-symlink")
+        val target = "{root}/outside.events"
+        expect(file_write(target, "keep this file\n")).to_equal(true)
+        expect(scv_event_batch_record(root, "b1", "created", "a.txt", "")).to_equal(true)
+        val (out, err, code) = process_run("ln", ["-s", target, scv_journal_events_path(root)])
+        expect(code).to_equal(0)
+        expect(scv_event_batch_commit(root, "b1")).to_equal(false)
+        expect(file_exists(scv_event_batch_pending_path(root, "b1"))).to_equal(true)
+        expect(file_read(target)).to_equal("keep this file\n")
         dir_remove_all(root)
 
     it "recovers crashes at each durable event-batch boundary without duplicate rows":
