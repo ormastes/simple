@@ -1,0 +1,114 @@
+"""Tests authored before the feed implementation; execution requires an admitted runtime."""
+use std.spec.{describe, it, expect}
+use std.scv.build_capture_v1.{BuildInputEntryV1, BuildInputUniverseV1, BuildFrozenSnapshotV1, ScvBuildCursorV1, scv_build_snapshot_freeze_v1, scv_build_path_policy_digest_v1}
+use std.scv.build_change_feed_v1.{scv_build_feed_new_v1, scv_build_feed_publish_v1, scv_build_feed_poll_v1, scv_build_snapshot_diff_v1, scv_build_feed_subscribe_v1, scv_build_feed_poll_subscription_v1, scv_build_feed_acknowledge_v1, scv_build_feed_unsubscribe_v1, scv_build_delta_affects_path_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn setup_build_feed_universe_v1() -> BuildInputUniverseV1:
+    val digest = sha256_text("feed-fixture")
+    BuildInputUniverseV1("managed-build-inputs-v1", scv_build_path_policy_digest_v1(), ["src"], digest, digest, digest, digest, digest, [])
+
+pub fn setup_build_feed_entry_v1(path: text, bytes: [u8], kind: text = "regular", mode: i64 = 420) -> BuildInputEntryV1:
+    BuildInputEntryV1(path, kind, mode, bytes, "worktree", sha256_text("fixture-producer"))
+
+pub fn setup_build_feed_snapshot_v1(sequence: i64, entries: [BuildInputEntryV1]) -> BuildFrozenSnapshotV1:
+    scv_build_snapshot_freeze_v1(setup_build_feed_universe_v1(), entries, ScvBuildCursorV1("fixture-epoch", sequence)).unwrap()
+
+describe "Bounded complete SCV change feed":
+    it "records exact pair identities and verifies current-cursor empty delta":
+        val first = setup_build_feed_snapshot_v1(0, [setup_build_feed_entry_v1("src/main.spl", [1])])
+        val next = setup_build_feed_snapshot_v1(1, [setup_build_feed_entry_v1("src/main.spl", [2])])
+        val feed = scv_build_feed_publish_v1(scv_build_feed_new_v1(first, 2).unwrap(), first.snapshot_id, "event-1", next).unwrap()
+        val delta = scv_build_feed_poll_v1(feed, first.cursor)
+        expect(delta.status).to_equal("CompleteDelta")
+        expect(delta.from_snapshot_id).to_equal(first.snapshot_id)
+        expect(delta.to_snapshot_id).to_equal(next.snapshot_id)
+        expect(delta.events.len()).to_equal(1)
+        expect(delta.changes[0].operation).to_equal("modify")
+        expect(delta.changes[0].before!.bytes).to_equal([1])
+        expect(delta.changes[0].after!.bytes).to_equal([2])
+        val empty = scv_build_feed_poll_v1(feed, next.cursor)
+        expect(empty.status).to_equal("CompleteDelta")
+        expect(empty.changes.len()).to_equal(0)
+        expect(empty.from_snapshot_id).to_equal(next.snapshot_id)
+
+    it "refuses CAS conflict gaps epoch drift and forged snapshots":
+        val first = setup_build_feed_snapshot_v1(0, [])
+        val feed = scv_build_feed_new_v1(first, 2).unwrap()
+        val next = setup_build_feed_snapshot_v1(1, [])
+        expect(scv_build_feed_publish_v1(feed, "wrong-root", "event", next).is_err()).to_equal(true)
+        expect(scv_build_feed_publish_v1(feed, first.snapshot_id, "event", setup_build_feed_snapshot_v1(2, [])).is_err()).to_equal(true)
+        var forged = next
+        forged.snapshot_id = first.snapshot_id
+        expect(scv_build_feed_publish_v1(feed, first.snapshot_id, "event", forged).is_err()).to_equal(true)
+        var incomplete = next
+        incomplete.complete = false
+        expect(scv_build_feed_publish_v1(feed, first.snapshot_id, "event", incomplete).is_err()).to_equal(true)
+        expect(scv_build_feed_poll_v1(feed, ScvBuildCursorV1("other-epoch", 0)).status).to_equal("UnknownCursor")
+        expect(scv_build_feed_poll_v1(feed, ScvBuildCursorV1("fixture-epoch", 9)).status).to_equal("UnknownCursor")
+
+    it "replays identical event idempotently and rejects changed payload":
+        val first = setup_build_feed_snapshot_v1(0, [])
+        val next = setup_build_feed_snapshot_v1(1, [setup_build_feed_entry_v1("src/a.spl", [1])])
+        val feed = scv_build_feed_publish_v1(scv_build_feed_new_v1(first, 2).unwrap(), first.snapshot_id, "event", next).unwrap()
+        val replay = scv_build_feed_publish_v1(feed, first.snapshot_id, "event", next).unwrap()
+        expect(replay.events.len()).to_equal(1)
+        val altered = setup_build_feed_snapshot_v1(1, [setup_build_feed_entry_v1("src/a.spl", [2])])
+        expect(scv_build_feed_publish_v1(feed, first.snapshot_id, "event", altered).is_err()).to_equal(true)
+        expect(scv_build_feed_publish_v1(feed, next.snapshot_id, "event", setup_build_feed_snapshot_v1(2, [])).is_err()).to_equal(true)
+
+    it "expires history and subscriber cursors without fabricating no-change":
+        val first = setup_build_feed_snapshot_v1(0, [])
+        val second = setup_build_feed_snapshot_v1(1, [])
+        val third = setup_build_feed_snapshot_v1(2, [])
+        var feed = scv_build_feed_subscribe_v1(scv_build_feed_new_v1(first, 1, 1).unwrap(), "build", first.cursor).unwrap()
+        expect(scv_build_feed_subscribe_v1(feed, "other", first.cursor).is_err()).to_equal(true)
+        feed = scv_build_feed_publish_v1(feed, first.snapshot_id, "one", second).unwrap()
+        feed = scv_build_feed_publish_v1(feed, second.snapshot_id, "two", third).unwrap()
+        expect(feed.events.len()).to_equal(1)
+        expect(scv_build_feed_poll_v1(feed, first.cursor).status).to_equal("StaleCursor")
+        expect(scv_build_feed_poll_subscription_v1(feed, "build").status).to_equal("StaleCursor")
+        expect(scv_build_feed_poll_subscription_v1(feed, "missing").status).to_equal("UnknownSubscription")
+        expect(scv_build_feed_acknowledge_v1(feed, "build", first.cursor).is_err()).to_equal(true)
+        feed = scv_build_feed_acknowledge_v1(feed, "build", third.cursor).unwrap()
+        expect(scv_build_feed_poll_subscription_v1(feed, "build").status).to_equal("CompleteDelta")
+        feed = scv_build_feed_unsubscribe_v1(feed, "build").unwrap()
+        expect(feed.subscriptions.len()).to_equal(0)
+
+    it "detects byte mode kind origin producer and symlink-target changes exactly":
+        val original = setup_build_feed_entry_v1("src/a.spl", [1])
+        val first = setup_build_feed_snapshot_v1(0, [original])
+        for replacement in [setup_build_feed_entry_v1("src/a.spl", [2]), setup_build_feed_entry_v1("src/a.spl", [1], "regular", 493)]:
+            val delta = scv_build_snapshot_diff_v1(first, setup_build_feed_snapshot_v1(1, [replacement])).unwrap()
+            expect(delta.changes.len()).to_equal(1)
+            expect(delta.changes[0].operation).to_equal("modify")
+        var generated = original
+        generated.origin = "generated"
+        generated.producer_digest = sha256_text("producer")
+        expect(scv_build_snapshot_diff_v1(first, setup_build_feed_snapshot_v1(1, [generated])).unwrap().changes.len()).to_equal(1)
+
+    it "uses add-delete for equal-content moves and invalidates negative queries":
+        val first = setup_build_feed_snapshot_v1(0, [setup_build_feed_entry_v1("src/old.spl", [1])])
+        val next = setup_build_feed_snapshot_v1(1, [setup_build_feed_entry_v1("src/new.spl", [1])])
+        val delta = scv_build_snapshot_diff_v1(first, next).unwrap()
+        expect(delta.changes.len()).to_equal(2)
+        expect(delta.changes[0].operation).to_equal("add")
+        expect(delta.changes[1].operation).to_equal("delete")
+        expect(delta.membership_changed).to_equal(true)
+        expect(scv_build_delta_affects_path_v1(delta, "src/new.spl")).to_equal(true)
+        expect(scv_build_delta_affects_path_v1(delta, "src")).to_equal(true)
+        expect(scv_build_delta_affects_path_v1(delta, "src/other.spl")).to_equal(false)
+
+    it "invalidates unchanged bytes when the input universe changes":
+        val first = setup_build_feed_snapshot_v1(0, [])
+        var universe = setup_build_feed_universe_v1()
+        universe.environment_digest = sha256_text("changed-environment")
+        val next = scv_build_snapshot_freeze_v1(universe, [], ScvBuildCursorV1("fixture-epoch", 1)).unwrap()
+        val delta = scv_build_snapshot_diff_v1(first, next).unwrap()
+        expect(delta.universe_changed).to_equal(true)
+        expect(scv_build_delta_affects_path_v1(delta, "src/missing.spl")).to_equal(true)
+
+    it "rejects invalid retention and subscriber bounds":
+        val first = setup_build_feed_snapshot_v1(0, [])
+        expect(scv_build_feed_new_v1(first, 0).is_err()).to_equal(true)
+        expect(scv_build_feed_new_v1(first, 2, 0).is_err()).to_equal(true)
