@@ -1,8 +1,11 @@
-# Reviewed built-ins only. This host proposes; it cannot validate externally,
-# publish, allocate aliases, load plugins, or access mutable source paths.
+# Low-level reviewed built-ins only. The registered host wrapper loads and
+# checks the accepted provider lock before calling these proposal adapters.
+# This module cannot validate externally, publish, allocate aliases, load
+# plugin code, or access mutable source paths. Direct results stay unqualified.
 use std.scv.solver_contract_v1.*
 use std.scv.solver_source_v1.*
 use std.scv.solver_budget_v1.{solver_budget_source_v1}
+use std.scv.solver_provider_registry_v1.{solver_builtin_provider_ids_v1}
 
 struct SourceSolveV1:
     result: SolveResultV1
@@ -10,24 +13,26 @@ struct SourceSolveV1:
     candidate: SourceFileV1?
 
 fn solver_builtin_ids_v1(domain: text) -> [text]:
-    if domain == "source.bytes": return ["scv.parser.raw-bytes.v1", "scv.model.source-file.v1", "scv.solver.source-bytes.v1"]
-    if domain == "source.simple": return ["scv.parser.raw-bytes.v1", "scv.model.simple-entity-edits.v1", "scv.solver.simple-entity-edits.v1"]
-    if domain == "db.schema": return ["scv.parser.db-schema-v2.v1", "scv.model.db-schema-v2.v1", "scv.solver.db-schema-v2.v1"]
-    if domain == "db.rows": return ["scv.parser.db-patch-v1.v1", "scv.model.db-rows-v1.v1", "scv.solver.db-reducer-v1.v1"]
-    []
+    # This catalog chooses the built-in code path. It does not attest the
+    # loaded process artifact; proposal results remain unqualified below.
+    solver_builtin_provider_ids_v1(domain)
 
 fn solver_host_preflight_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, domain: text, work: i64, retained_bytes: i64) -> text:
     if request.cancelled: return "cancelled"
     if request.logical_work_budget < work or request.memory_budget < retained_bytes or work < 0 or retained_bytes < 0: return "resource_limited"
     if request.request_id == "" or request.binding.domain != domain: return "failed"
-    if solver_binding_bytes_v1(request.binding) != solver_binding_bytes_v1(policy.expected): return "failed"
+    var normalized_request = request.binding
+    normalized_request.parser_lock_digest = policy.expected.parser_lock_digest
+    normalized_request.solver_lock_digest = policy.expected.solver_lock_digest
+    if solver_binding_bytes_v1(normalized_request) != solver_binding_bytes_v1(policy.expected): return "failed"
+    if request.binding.parser_lock_digest != policy.expected.parser_lock_digest or request.binding.solver_lock_digest != policy.expected.solver_lock_digest: return "needs_inputs"
     val binding = policy.expected
     if binding.repository == "" or binding.namespace == "" or binding.policy_revision == "" or binding.routing_revision == "" or binding.authorization_scope == "" or binding.profile_digest == "" or binding.configuration_digest == "" or binding.identity_map_revision == "": return "needs_inputs"
     val ids = solver_builtin_ids_v1(domain)
     if ids.len() != 3: return "unsupported"
     if policy.parser.provider_id != ids[0] or policy.model.provider_id != ids[1] or policy.solver.provider_id != ids[2]: return "unsupported"
     if policy.parser.lock_digest == "" or policy.model.lock_digest == "" or policy.solver.lock_digest == "": return "needs_inputs"
-    if binding.parser_lock_digest != policy.parser.lock_digest or binding.solver_lock_digest != policy.solver.lock_digest: return "failed"
+    if binding.parser_lock_digest != policy.parser.lock_digest or binding.solver_lock_digest != policy.solver.lock_digest: return "needs_inputs"
     ""
 
 # Checks are a host-owned minimum by domain. A solver's required_checks member
