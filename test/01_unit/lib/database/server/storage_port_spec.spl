@@ -78,6 +78,8 @@ fn _error_outcome(e: StoragePortError) -> text:
             "authentication_failed:{d}"
         StoragePortError.CorruptSource(d):
             "corrupt_source:{d}"
+        StoragePortError.SnapshotUnavailable(d):
+            "snapshot_unavailable:{d}"
         StoragePortError.Io(d):
             "io:{d}"
 
@@ -326,3 +328,49 @@ describe "sqlcipher4 backend over the encrypted fixture (SecretRef path)":
     it "close_view zeroizes the plaintext snapshot":
         step("open, close, inspect image byte 0")
         expect(_closed_image_byte0(ENC_FIXTURE, "sqlcipher4", ENC_SECRET_REF)).to_equal(0)
+
+
+describe "storage plaintext owner release":
+    it "close overwrites the caller's original owner and aliases":
+        var image: [u8] = []
+        image.push(0u8)
+        image.push(128u8)
+        image.push(255u8)
+        val alias = image
+        val view = StorageReadView(
+            format: STORAGE_FORMAT_SQLCIPHER4,
+            source_path: "owned-memory",
+            image: image,
+            page_size: 4096,
+            page_count: 1,
+            reserved_bytes: 80,
+            text_encoding: 1)
+        val port = database_storage_port_v1()
+        expect(port.close_view(view)).to_equal(true)
+        expect(image.len()).to_equal(3)
+        expect(image[0]).to_equal(0u8)
+        expect(image[1]).to_equal(0u8)
+        expect(image[2]).to_equal(0u8)
+        expect(alias[0]).to_equal(0u8)
+        expect(alias[1]).to_equal(0u8)
+        expect(alias[2]).to_equal(0u8)
+        expect(port.close_view(view)).to_equal(true)
+
+    it "closing an empty owner succeeds without indexing it":
+        val view = StorageReadView(
+            format: STORAGE_FORMAT_SQLCIPHER4,
+            source_path: "empty-memory",
+            image: [],
+            page_size: 4096,
+            page_count: 0,
+            reserved_bytes: 80,
+            text_encoding: 1)
+        val port = database_storage_port_v1()
+        expect(port.close_view(view)).to_equal(true)
+
+
+describe "storage snapshot admission diagnostics":
+    it "preserves typed snapshot unavailability without calling it corruption":
+        val error = StoragePortError.SnapshotUnavailable(detail: "unsupported journal mode")
+        expect(error.code()).to_equal("STORAGE_PORT_SNAPSHOT_UNAVAILABLE")
+        expect(error.message()).to_equal("snapshot unavailable: unsupported journal mode")
