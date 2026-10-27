@@ -32,6 +32,22 @@ describe "Simple admitted entity edits produce drafts through the source host":
         expect(solved.candidate.unwrap().path).to_equal("src/moved.spl")
         expect(solved.candidate.unwrap().file_uid).to_equal(input.raw.base.file_uid)
 
+    it "keeps the exact unchanged-side rule when no structural edits were supplied":
+        var input = setup_simple_source_fixture()
+        input.edits = []
+        input.raw.left.bytes = input.raw.base.bytes
+        val solved = exercise_simple_source_fixture(input)
+        expect(solved.candidate.unwrap().bytes).to_equal(input.raw.right.bytes)
+
+    it "permits empty files under the exact byte profile without a parse claim":
+        var input = setup_simple_source_fixture()
+        input.edits = []
+        input.raw.left.bytes = input.raw.base.bytes
+        input.raw.right.bytes = []
+        val solved = exercise_simple_source_fixture(input)
+        expect(solved.candidate.unwrap().bytes).to_equal([])
+        expect(solved.result.status).to_equal("needs_inputs")
+
     it "rejects concurrent changes to the same entity even at disjoint ranges":
         var input = setup_simple_source_fixture()
         input.edits[1].entity_uid = input.edits[0].entity_uid
@@ -45,6 +61,10 @@ describe "Simple admitted entity edits produce drafts through the source host":
     it "rejects duplicate operation IDs across source moves and edits":
         var input = setup_simple_source_fixture()
         input.edits[1].operation_id = input.edits[0].operation_id
+        check_simple_source_conflict(input, "SIMPLE_DUPLICATE_OPERATION")
+        input = setup_simple_source_fixture()
+        input.raw.left.path = "src/moved.spl"
+        input.raw.moves = [SourceMoveEvidenceV1(operation_id: input.edits[0].operation_id, producer_id: "accepted-editor", file_uid: input.raw.base.file_uid, base_revision: input.raw.base.revision, side_revision: input.raw.left.revision, from_path: input.raw.base.path, to_path: input.raw.left.path, expected_base_bytes_digest: sha256_u8_hex(input.raw.base.bytes), expected_side_bytes_digest: sha256_u8_hex(input.raw.left.bytes))]
         check_simple_source_conflict(input, "SIMPLE_DUPLICATE_OPERATION")
 
     it "rejects stale revision identity-map and content preconditions":
@@ -88,6 +108,38 @@ describe "Simple admitted entity edits produce drafts through the source host":
         val solved = solve_simple_source_v1(request, policy, input)
         expect(solved.result.status).to_equal("failed")
         expect(solved.candidate).to_be_nil()
+
+    it "refuses unverified moves and stale moved-side byte evidence":
+        var input = setup_simple_source_fixture()
+        input.raw.left.path = "src/unverified.spl"
+        check_simple_source_conflict(input, "SOURCE_MOVE_EVIDENCE_REQUIRED")
+        input.raw.moves = [SourceMoveEvidenceV1(operation_id: "move", producer_id: "accepted-editor", file_uid: input.raw.base.file_uid, base_revision: input.raw.base.revision, side_revision: input.raw.left.revision, from_path: input.raw.base.path, to_path: input.raw.left.path, expected_base_bytes_digest: sha256_u8_hex(input.raw.base.bytes), expected_side_bytes_digest: sha256_u8_hex(input.raw.base.bytes))]
+        check_simple_source_conflict(input, "SOURCE_MOVE_EVIDENCE_REQUIRED")
+
+    it "sorts admitted disjoint operations independently of producer traversal":
+        val input = setup_simple_source_fixture()
+        var reordered = input
+        reordered.edits = [input.edits[1], input.edits[0]]
+        val first = exercise_simple_source_fixture(input)
+        val second = exercise_simple_source_fixture(reordered)
+        expect(first.candidate.unwrap().bytes).to_equal(second.candidate.unwrap().bytes)
+        expect(first.result.input_binding_key == second.result.input_binding_key).to_equal(false)
+
+    it "enforces a bounded operation count before operation payload hashing":
+        var input = setup_simple_source_fixture()
+        val request = freeze_simple_source_fixture(input)
+        val policy = setup_simple_source_policy(request)
+        while input.edits.len() <= 128: input.edits.push(input.edits[0])
+        val solved = solve_simple_source_v1(request, policy, input)
+        expect(solved.result.status).to_equal("resource_limited")
+        expect(solved.result.input_binding_key).to_equal("")
+
+    it "rejects a mismatched domain profile without changing saved bytes":
+        var input = setup_simple_source_fixture()
+        input.raw.base.path = "src/simple.sdn"
+        input.raw.left.path = input.raw.base.path
+        input.raw.right.path = input.raw.base.path
+        check_simple_source_conflict(input, "SIMPLE_PROFILE_MISMATCH")
 
     it "retains invalid source and literal conflict markers without self validation":
         var input = setup_simple_source_fixture()
