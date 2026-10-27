@@ -196,3 +196,28 @@ For a failing live run, stop at the first trustworthy boundary, preserve the
 receipt, fix the pure-Simple owner, and verify a distinct root-cause cycle. The
 lane has a maximum of three distinct fix/verify cycles. Do not rerun an identical
 failed command; after the third cycle, stop and report the remaining blocker.
+
+## Four executable Hello linkage sanity
+
+When a campaign requests four Hello linkage checks, build and execute four
+separate binaries: one directly from source, one linked from two objects, one
+linked with a static library, and one linked with a shared library. Use the four-binary sanity matrix for Phase 1, 2, or 3; confirm the
+selected compiler, runtime, link inputs, and expected output before launching it. Do not substitute the
+four different frontend probes (`p2_add`, MIR retention, module naming, and
+positional Hello) for this linkage matrix.
+
+Invoke `scripts/bootstrap/hello-sanity-matrix.shs` from Bash or the
+`hello-sanity-matrix.cmd` entrypoint from Windows with `--compiler`,
+`--phase 1|2|3`, `--source-root`, `--runtime-path`, and a new `--output`
+directory. Use the compiler belonging to the phase being checked.
+
+The four independent jobs may read the same frozen source and producer in
+parallel. Give each job distinct output and log paths; isolate writable caches
+only where concurrent writers would conflict. Retain the compiler and runtime
+identities, link inputs and commands, exit statuses, and each executable's
+actual output. A library or object build alone is not an executable Hello pass.
+Also run Hello through the interpreter owned by the selected compiler.
+Compiler-only phases that do not expose interpreter execution must report
+that case as unsupported; a separate CLI is not evidence for that compiler.
+For Phase 2, retain a separate four-lane result for each requested LLVM and
+Cranelift backend. These diagnostics do not replace formal admission receipts.

@@ -26,6 +26,10 @@ and early manual linking, apply the shared
 - Require the exact new compiler to compile Hello World and require that output
   executable to run correctly before starting a dependent provisional phase.
   Full qualification may continue concurrently; label descendants unadmitted.
+- For a requested four-binary Hello linkage sanity, use the campaign runner
+  and verify direct source, two-object, static-library and shared-library
+  executables. Run independent jobs in parallel when requested, with distinct
+  outputs and logs and writer-safe caches. See [parallel handoff](../../../doc/07_guide/app/llm/bootstrap_parallel_handoff.md#four-executable-hello-linkage-sanity).
 - Record user-authorized diagnostic checker bypasses and retain resource/progress
   monitoring, failed receipts and actual identities. Missing artifacts, invalid
   inputs and zero executed tests never become PASS. Restore normal gates before
