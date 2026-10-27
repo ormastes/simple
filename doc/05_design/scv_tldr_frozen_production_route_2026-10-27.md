@@ -135,3 +135,12 @@ the import-owner audit scans all four actual owners. An independent static
 extraction check reconstructs the pre-split file byte-for-byte, and checks that
 existing assertions were not deleted or rewritten. Runtime method registration
 and native linking still require the admitted compiler checks above.
+
+The first parent Phase 2 compile-only attempt exposed seven private `_sffi_*`
+imports reaching the linker undeclared. Normal public support-owner wrappers
+and explicit consumer imports now preserve the original private ABI boundary;
+no externs are duplicated. The linked open bug is
+`phase2_private_sffi_cross_owner_export_unresolved_2026-10-27`. The original
+exact extraction record predates this necessary call-name boundary repair;
+normalizing only those seven call names still gives identical parser methods.
+Compile retry and all runtime acceptance remain pending.

@@ -102,7 +102,11 @@ use compiler.common.structural_contracts.frontend_offload_switch.{
 }
 
 use compiler.common.diagnostics.span.{Span}
-use compiler.driver.driver_source_parse_support.*
+# @workaround bug=phase2_private_sffi_cross_owner_export_unresolved_2026-10-27 reason=explicit_public_owner_imports_avoid_private_inline_sffi_export_resolution
+use compiler.driver.driver_source_parse_support.{
+    rt_transient_heap_promote, driver_parse_env_get_v1, driver_parse_transient_scope_begin_v1,
+    driver_parse_transient_scope_pause_v1, driver_promote_retained_frontend_owners_v1, driver_end_transient_parse_scope
+}
 
 impl CompilerDriver:
     me promote_target_cfg_receipt_v1(source_path: text) -> bool:
@@ -161,7 +165,7 @@ impl CompilerDriver:
         # worker parses the module SKELETON here (surfaces only); HIR re-parses
         # the full source of each module it claims (driver_hir_pipeline_lowering).
         val parse_text = driver_surface_parse_text_v1(source_content,
-            _sffi_env_get("SIMPLE_HIR_SHARD") ?? "", _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
+            driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? "", driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? "")
         # Ordinary native builds retain full ParserModules, not lexer/flat-AST/
         # cache-decode scratch. Borrow one per-file scope through preprocessing,
         # parsing and desugaring, then retain exactly the escaped owners.
@@ -174,11 +178,11 @@ impl CompilerDriver:
                 parse_text, source_path, source_module_name)
         ast_prepare_persistent_owner_v1()
         val parser_generation = parser_initialization_generation_v1()
-        if not _sffi_transient_array_scope_begin():
+        if not driver_parse_transient_scope_begin_v1():
             panic("transient retained parser scope unavailable for {source_path}")
         val parsed = self.parse_full_frontend_in_borrowed_scope_selected_v1(
             parse_text, source_path, source_module_name)
-        if not _sffi_transient_array_scope_pause():
+        if not driver_parse_transient_scope_pause_v1():
             val _ended = driver_end_transient_parse_scope()
             panic("transient retained parser scope pause failed for {source_path}")
         val result_ok = rt_transient_heap_promote(parsed)
@@ -273,7 +277,7 @@ impl CompilerDriver:
             return Err("module surface already exists for physical source: {canonical_path}")
         ast_prepare_persistent_owner_v1()
         val parser_generation = parser_initialization_generation_v1()
-        if not _sffi_transient_array_scope_begin():
+        if not driver_parse_transient_scope_begin_v1():
             return Err("transient parser scope unavailable for {source_path}")
         val source = SourceFile(
             path: source_path,
@@ -288,12 +292,12 @@ impl CompilerDriver:
             ""
         elif worker_mode == 1:
             worker_surface_text_v1(source_path, source_content,
-                if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? "") != "":
-                    (_sffi_env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? "") + "/tldr"
+                if (driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "") != "":
+                    (driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "") + "/tldr"
                 else: "")
         else:
             driver_surface_parse_text_v1(source_content,
-                _sffi_env_get("SIMPLE_HIR_SHARD") ?? "", _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? "", driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? "")
         log_module_surface_stage(source_path, "parse-start")
         if tldr_imports_enabled_v1():
             if frozen_parse_text != nil and surface_text != source_content:
@@ -309,7 +313,7 @@ impl CompilerDriver:
         val module = match selected_module:
             case Ok(value): value
             case Err(error):
-                if not _sffi_transient_array_scope_pause():
+                if not driver_parse_transient_scope_pause_v1():
                     val _ended = driver_end_transient_parse_scope()
                     return Err("transient parser scope pause failed for {source_path}")
                 val error_ok = rt_transient_heap_promote(selected_module)
@@ -320,7 +324,7 @@ impl CompilerDriver:
                     return Err("transient parser scope error ownership failed for {source_path}")
                 return Err(error)
         if par_had_error_get():
-            if not _sffi_transient_array_scope_pause():
+            if not driver_parse_transient_scope_pause_v1():
                 val _ended = driver_end_transient_parse_scope()
                 return Err("transient parser scope pause failed after parse error for {source_path}")
             if not self.promote_target_cfg_receipt_v1(source_path):
@@ -345,7 +349,7 @@ impl CompilerDriver:
         val surface_result = module_surface_from_owner(
             module_owner, source, source_index)
         if surface_result.is_err():
-            if not _sffi_transient_array_scope_pause():
+            if not driver_parse_transient_scope_pause_v1():
                 val _ended = driver_end_transient_parse_scope()
                 return Err("transient parser scope pause failed after surface error for {source_path}")
             if not self.promote_target_cfg_receipt_v1(source_path):
@@ -362,7 +366,7 @@ impl CompilerDriver:
             return Err(surface_result.unwrap_err())
         val surface = surface_result.unwrap()
         log_module_surface_stage(source_path, "surface-done")
-        if not _sffi_transient_array_scope_pause():
+        if not driver_parse_transient_scope_pause_v1():
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source_path}")
         if not self.promote_target_cfg_receipt_v1(source_path):

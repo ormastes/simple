@@ -102,7 +102,14 @@ use compiler.common.structural_contracts.frontend_offload_switch.{
 }
 
 use compiler.common.diagnostics.span.{Span}
-use compiler.driver.driver_source_parse_support.*
+# @workaround bug=phase2_private_sffi_cross_owner_export_unresolved_2026-10-27 reason=explicit_public_owner_imports_avoid_private_inline_sffi_export_resolution
+use compiler.driver.driver_source_parse_support.{
+    rt_transient_heap_promote, driver_parse_exit_v1, driver_parse_stdout_flush_v1,
+    driver_parse_env_get_v1, driver_parse_env_set_v1, driver_parse_transient_scope_begin_v1,
+    driver_parse_transient_scope_pause_v1, driver_parse_transient_scope_end_v1, driver_parse_shard_active,
+    driver_parse_shard_claimed, _driver_parse_shard_owns, _driver_publish_frontend_cache_scope,
+    _STREAM_PARSE_ERROR_PREFIX, driver_frontend_offload_decision
+}
 
 impl CompilerDriver:
     # The streaming surface owner is intentionally committed in place.  Do not
@@ -154,8 +161,8 @@ impl CompilerDriver:
         val parse_shard = driver_parse_shard_active()
         # P5: a HIR shard worker builds real surfaces only for its seeds'
         # import closure (driver_worker_surface_closure_v1.spl).
-        val worker_spec = _sffi_env_get("SIMPLE_HIR_SHARD") ?? ""
-        val worker_flag = _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? ""
+        val worker_spec = driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? ""
+        val worker_flag = driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? ""
         # P-A: a module-scoped MIR child (file-worker lane) seeds from its
         # admitted targets and later loads HIR only for their import closure.
         # Per-file unit child (native_file_worker_v1.spl): picks its batch here,
@@ -165,24 +172,24 @@ impl CompilerDriver:
             self.ctx.add_error("TLDR-IMPORTS-E-BODY-REQUIRED: file worker needs admitted imported bodies")
             return false
         if worker_unit:
-            val pick_result = worker_unit_pick_v1(_sffi_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? "",
-                _sffi_env_get("SIMPLE_HIR_SHARD_OWNER") ?? "", source_paths,
+            val pick_result = worker_unit_pick_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_OWNER") ?? "", source_paths,
                 worker_unit_pick_order_v1(source_paths, canonical_paths, source_contents),
-                native_file_worker_batch_v1(_sffi_env_get("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? ""))
+                native_file_worker_batch_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? ""))
             if pick_result.is_err():
                 self.ctx.add_error("file-worker unit pick failed: {pick_result.unwrap_err()}")
                 return false
             val picked = pick_result.unwrap()
             print "[file-worker] unit picked={picked.len()}"
             if picked.len() == 0:
-                _sffi_stdout_flush()
-                _sffi_exit(0)
-            if not _sffi_env_set(NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1, picked.join("\n")):
+                driver_parse_stdout_flush_v1()
+                driver_parse_exit_v1(0)
+            if not driver_parse_env_set_v1(NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1, picked.join("\n")):
                 self.ctx.add_error("file-worker unit target environment could not be installed")
                 return false
         val mir_targets = if worker_spec == "" or worker_unit:
-            worker_mir_scoped_targets_v1(_sffi_env_get("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
-                _sffi_env_get("SIMPLE_MIR_SHARD_ONLY_PATHS") ?? "", worker_flag)
+            worker_mir_scoped_targets_v1(driver_parse_env_get_v1("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
+                driver_parse_env_get_v1("SIMPLE_MIR_SHARD_ONLY_PATHS") ?? "", worker_flag)
         else:
             []
         val mir_scoped = mir_targets.len() > 0
@@ -209,7 +216,7 @@ impl CompilerDriver:
             if lane_error != "":
                 self.ctx.add_error(lane_error)
                 return false
-            if (_sffi_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? "") != "":
+            if (driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "") != "":
                 self.ctx.add_error("TLDR-IMPORTS-E-UNSUPPORTED-LANE: dynamic HIR claims lack a frozen claim set")
                 return false
             var claims: [bool] = []
@@ -341,9 +348,9 @@ impl CompilerDriver:
             # below is the real build's, and a shard child must never carry on
             # into HIR/MIR/codegen (it did: each child lowered the whole
             # closure in process, N times over).
-            print "[parse-shard] done shard={_sffi_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
-            _sffi_stdout_flush()
-            _sffi_exit(0)
+            print "[parse-shard] done shard={driver_parse_env_get_v1(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
+            driver_parse_stdout_flush_v1()
+            driver_parse_exit_v1(0)
 
         # Rebuild the phase-3 record inventory from the retained SoA strings.
         # The original boxed SourceFile records may have been reclaimed even
@@ -368,7 +375,7 @@ impl CompilerDriver:
         # deep-promote the whole registry graph before committing it. Promoting
         # individual surfaces is insufficient: the registry's Dict and aligned
         # name/index arrays are allocated only during finalization.
-        if not _sffi_transient_array_scope_begin():
+        if not driver_parse_transient_scope_begin_v1():
             self.ctx.add_error(
                 "Module surface retention scope unavailable after phase 2")
             return false
@@ -377,31 +384,31 @@ impl CompilerDriver:
             ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
         val finish_error = builder.finish_into(retained_surfaces)
         if finish_error != "":
-            val paused = _sffi_transient_array_scope_pause()
+            val paused = driver_parse_transient_scope_pause_v1()
             val error_owned = if paused: rt_transient_heap_promote(finish_error) else: false
-            val ended = _sffi_transient_array_scope_end()
+            val ended = driver_parse_transient_scope_end_v1()
             if not (paused and error_owned and ended):
                 self.ctx.add_error("Module surface alignment error ownership failed")
                 return false
             self.ctx.add_error(
                 "Module surface alignment error: {finish_error}")
             return false
-        if not _sffi_transient_array_scope_pause():
-            val _ended = _sffi_transient_array_scope_end()
+        if not driver_parse_transient_scope_pause_v1():
+            val _ended = driver_parse_transient_scope_end_v1()
             self.ctx.add_error(
                 "Module surface retention scope pause failed after phase 2")
             return false
         val promote_reason = module_surfaces_promote_reason(retained_surfaces)
         if promote_reason != "":
             val error_owned = rt_transient_heap_promote(promote_reason)
-            val ended = _sffi_transient_array_scope_end()
+            val ended = driver_parse_transient_scope_end_v1()
             if not (error_owned and ended):
                 self.ctx.add_error("Module surface registry promotion error ownership failed")
                 return false
             self.ctx.add_error(
                 "Module surface registry graph promotion failed after phase 2: {promote_reason}")
             return false
-        if not _sffi_transient_array_scope_end():
+        if not driver_parse_transient_scope_end_v1():
             self.ctx.add_error(
                 "Module surface retention scope end failed after phase 2")
             return false
@@ -449,7 +456,7 @@ impl CompilerDriver:
                 # Every target and every possible advice module must have a
                 # fully built closure, else fail closed (MONO-PENDING): no MIR
                 # from a placeholder surface, no weave missing an advice.
-                val mir_queue_dir = _sffi_env_get("SIMPLE_MIR_SHARD_QUEUE") ?? ""
+                val mir_queue_dir = driver_parse_env_get_v1("SIMPLE_MIR_SHARD_QUEUE") ?? ""
                 val source_of_canonical = source_path_by_canonical_map_v1(canonical_paths, source_paths)
                 var surface_source: [text] = []
                 for rs in retained_surfaces.surfaces:

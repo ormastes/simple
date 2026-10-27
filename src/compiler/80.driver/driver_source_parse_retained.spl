@@ -102,7 +102,12 @@ use compiler.common.structural_contracts.frontend_offload_switch.{
 }
 
 use compiler.common.diagnostics.span.{Span}
-use compiler.driver.driver_source_parse_support.*
+# @workaround bug=phase2_private_sffi_cross_owner_export_unresolved_2026-10-27 reason=explicit_public_owner_imports_avoid_private_inline_sffi_export_resolution
+use compiler.driver.driver_source_parse_support.{
+    driver_parse_exit_v1, driver_parse_stdout_flush_v1, driver_parse_env_get_v1,
+    driver_parse_shard_active, driver_parse_shard_claimed, _driver_parse_shard_owns,
+    _driver_publish_frontend_cache_scope, dtrace
+}
 
 impl CompilerDriver:
     me parse_all_impl() -> (CompileContext, bool):
@@ -172,8 +177,8 @@ impl CompilerDriver:
                 unique_entry_sources.len(), "pending", 1, 6, 0, 0, "running")
             for source in unique_entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
-                if ((_sffi_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
-                    (_sffi_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
+                if ((driver_parse_env_get_v1("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
+                    (driver_parse_env_get_v1("SIMPLE_INTERP_TRACE") ?? "") == "1"):
                     dtrace(
                         "[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
                 log_phase(
@@ -226,8 +231,8 @@ impl CompilerDriver:
                         return (self.ctx, false)
                     progress_parse_done = progress_parse_done + 1
                     continue
-                if ((_sffi_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
-                    (_sffi_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
+                if ((driver_parse_env_get_v1("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
+                    (driver_parse_env_get_v1("SIMPLE_INTERP_TRACE") ?? "") == "1"):
                     dtrace(
                         "[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
                 var parsed_slot = _driver_text_bucket_index(
@@ -287,9 +292,9 @@ impl CompilerDriver:
                 # Shard children exist only to warm the cache. Everything after
                 # this point (surfaces, HIR, MIR, codegen, link) is the real
                 # build's job and must not be duplicated N times.
-                print "[parse-shard] done shard={_sffi_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
-                _sffi_stdout_flush()
-                _sffi_exit(0)
+                print "[parse-shard] done shard={driver_parse_env_get_v1(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
+                driver_parse_stdout_flush_v1()
+                driver_parse_exit_v1(0)
             var entry_surface_builder = ModuleSurfaceBuilder.new(self.ctx.options.library_mode)
             var entry_surface_source_index: i64 = 0
             log_build_progress("surface_build", "files", 0,
@@ -418,11 +423,11 @@ impl CompilerDriver:
             if entry_sources.len() == 0:
                 self.ctx.add_error(
                     "native entry source not found: {native_entry}")
-            if (_sffi_env_get("SIMPLE_TRACE_PHASE2") ?? "") != "":
+            if (driver_parse_env_get_v1("SIMPLE_TRACE_PHASE2") ?? "") != "":
                 print "[phase2] entry-closure verdict error_count={self.ctx.error_count_value} errors_len={self.ctx.errors.len()}"
             return (self.ctx, self.ctx.error_count_value == 0)
-        if ((_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
-            (_sffi_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"):
+        if ((driver_parse_env_get_v1("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+            (driver_parse_env_get_v1("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"):
             var bootstrap_modules: Dict<text, ParserModule> = self.ctx.modules
             var boot_idx = 0
             while boot_idx < sources.len():
