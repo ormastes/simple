@@ -70,6 +70,8 @@ static inline int rt_win_file_copy_create_excl_no_follow(
         if (ok && !FlushFileBuffers(out)) ok = 0;
         if (!CloseHandle(out)) ok = 0;
         out = INVALID_HANDLE_VALUE;
+        if (!CloseHandle(in)) ok = 0;
+        in = INVALID_HANDLE_VALUE;
         if (!ok) DeleteFileW(wdst);
     }
 done:
@@ -93,8 +95,8 @@ static inline int rt_win_file_link_create_excl_no_follow(
     {
         BY_HANDLE_FILE_INFORMATION dst_info;
         HANDLE check = rt_win_excl_open_regular_no_follow(wdst, &dst_info);
-        if (check != INVALID_HANDLE_VALUE) CloseHandle(check);
-        ok = check != INVALID_HANDLE_VALUE &&
+        int closed = check != INVALID_HANDLE_VALUE && CloseHandle(check);
+        ok = closed &&
             dst_info.dwVolumeSerialNumber == src_info.dwVolumeSerialNumber &&
             dst_info.nFileIndexHigh == src_info.nFileIndexHigh &&
             dst_info.nFileIndexLow == src_info.nFileIndexLow;

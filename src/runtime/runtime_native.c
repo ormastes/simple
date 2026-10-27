@@ -17545,6 +17545,9 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
 int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
+    if (!source || !destination || source_len <= 0 || destination_len <= 0 ||
+            memchr(source, 0, (size_t)source_len) != NULL ||
+            memchr(destination, 0, (size_t)destination_len) != NULL) return 0;
 #if defined(_WIN32)
     char src[RT_TEXT_PATH_MAX];
     char dst[RT_TEXT_PATH_MAX];
@@ -17603,6 +17606,9 @@ int rt_file_copy_create_excl_no_follow(
 int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
+    if (!source || !destination || source_len <= 0 || destination_len <= 0 ||
+            memchr(source, 0, (size_t)source_len) != NULL ||
+            memchr(destination, 0, (size_t)destination_len) != NULL) return 0;
 #if defined(_WIN32)
     char src[RT_TEXT_PATH_MAX];
     char dst[RT_TEXT_PATH_MAX];
