@@ -1,0 +1,105 @@
+"""
+## Purpose and audience
+For maintainers who still ship 32-bit x86. I want `native-build` for
+`i686-pc-windows-gnu` (llvm-mingw, clang + lld) and `i686-unknown-linux-gnu`
+(ELF, ld.lld) to give me an exe, an object, a static archive and a DLL/.so.
+## Operator workflow
+From the repository root: `SIMPLE_XC_BIN=<compiler> bin/simple test
+test/02_integration/compiler/cross/i686_cross_spec.spl`.
+## Compatibility and limitations
+The Windows exe runs natively through WoW64 on an x86_64 Windows host; the
+Linux exe needs `qemu-i386` user mode or a Linux host, and reports BLOCKED
+without it. Matrix: doc/03_plan/compiler/cross_compile_matrix_plan.md.
+## Verification guidance and troubleshooting
+The Linux rows must produce ELF (`elf32-i386`); a COFF artifact there means
+the object format followed the host OS instead of the target triple.
+"""
+# @manual_section: cross-compile-i686
+# @req: REQ-XC-003
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{process_run_timeout}
+use .cross_matrix_helpers.{xc_fixture, xc_out, xc_build, xc_check_format, xc_check_symbol, xc_check_entry, xc_check_export, xc_runner}
+
+const WIN: text = "i686-pc-windows-gnu"
+const LNX: text = "i686-unknown-linux-gnu"
+
+describe "i686 Windows (llvm-mingw) cross-compile":
+    it "links an i386 PE executable that runs under WoW64 and prints xc-ok":
+        # NOTE: RED — BUG-XC-CROSS-EXE-LINK.
+        step("build fixture")
+        val out = xc_out(WIN, "exe") + ".exe"
+        expect(xc_build(WIN, "exe", xc_fixture("hello"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "COFF-i386", "IMAGE_FILE_MACHINE_I386")).to_equal("")
+        expect(xc_check_entry(out)).to_equal("")
+        step("run")
+        val (stdout, stderr, rc) = process_run_timeout(out, [], 30000)
+        expect(stdout).to_contain("xc-ok")
+
+    it "emits an i386 COFF object that defines xc_add":
+        step("build fixture")
+        val out = xc_out(WIN, "obj")
+        expect(xc_build(WIN, "obj", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "COFF-i386", "IMAGE_FILE_MACHINE_I386")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "emits an i386 static archive that defines xc_add":
+        step("build fixture")
+        val out = xc_out(WIN, "a")
+        expect(xc_build(WIN, "ar", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "COFF-i386", "IMAGE_FILE_MACHINE_I386")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "links an i386 DLL that exports xc_add":
+        # NOTE: RED — BUG-XC-SHARED-LINK-DFLAG.
+        step("build fixture")
+        val out = xc_out(WIN, "dll")
+        expect(xc_build(WIN, "so", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "COFF-i386", "IMAGE_FILE_MACHINE_I386")).to_equal("")
+        expect(xc_check_export(out, "xc_add")).to_equal("")
+
+describe "i686 Linux cross-compile":
+    it "links an i386 ELF executable with an entry point":
+        # NOTE: RED — BUG-XC-CROSS-EXE-LINK.
+        step("build fixture")
+        val out = xc_out(LNX, "elf")
+        expect(xc_build(LNX, "exe", xc_fixture("hello"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-i386", "EM_386")).to_equal("")
+        expect(xc_check_entry(out)).to_equal("")
+
+    it "runs the i386 ELF executable and prints xc-ok":
+        step("find runner")
+        expect(xc_runner("qemu-i386")).to_equal("")
+
+    it "emits an i386 ELF object that defines xc_add":
+        # NOTE: RED — BUG-XC-ELF-ON-WIN (emits COFF-i386 on a Windows host).
+        step("build fixture")
+        val out = xc_out(LNX, "o")
+        expect(xc_build(LNX, "obj", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-i386", "EM_386")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "emits an i386 ELF static archive that defines xc_add":
+        # NOTE: RED — BUG-XC-ELF-ON-WIN.
+        step("build fixture")
+        val out = xc_out(LNX, "a")
+        expect(xc_build(LNX, "ar", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-i386", "EM_386")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "links an i386 shared object that exports xc_add":
+        # NOTE: RED — BUG-XC-SHARED-LINK-DFLAG.
+        step("build fixture")
+        val out = xc_out(LNX, "so")
+        expect(xc_build(LNX, "so", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "elf32-i386", "EM_386")).to_equal("")
+        expect(xc_check_export(out, "xc_add")).to_equal("")
