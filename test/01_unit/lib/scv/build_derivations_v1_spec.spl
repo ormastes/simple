@@ -69,9 +69,9 @@ describe "SCV complete outgoing derivation manifests (REQ-SCV-DER-001..008)":
 
     it "does not accept duplicate use identities or a scope omitted from complete manifest":
         val state = derivation_registered()
-        val use = derivation_use("u", "producer")
-        expect(derivation_replace(state, [use, use])).to_equal(Err("derivation-duplicate-use"))
-        expect(derivation_replace(state, [use, derivation_use("u", "other")])).to_equal(Err("derivation-duplicate-use"))
+        val item = derivation_use("u", "producer")
+        expect(derivation_replace(state, [item, item])).to_equal(Err("derivation-duplicate-use"))
+        expect(derivation_replace(state, [item, derivation_use("u", "other")])).to_equal(Err("derivation-duplicate-use"))
         expect(derivation_replace(state, [derivation_use("p", "aspect", "pointcut", "scope-1")])).to_equal(Err("derivation-scope-missing"))
 
     it "retains negative and empty pointcut candidate universes and compares old plus new":
@@ -113,3 +113,70 @@ describe "SCV complete outgoing derivation manifests (REQ-SCV-DER-001..008)":
         var tampered = state
         tampered.snapshot_id = "forged-snapshot"
         expect(derivation_replace(tampered, [])).to_equal(Err("derivation-root-invalid"))
+
+    it "invalidates bound receipt identities in the same root as a manifest replacement":
+        val old = derivation_replace(derivation_registered(), [derivation_use("u", "producer")]).unwrap()
+        val binding = ScvBuildReceiptBindingV1(receipt_id: "receipt-1", consumer_uid: "module-a",
+            manifest_digest: old.manifests[0].manifest_digest)
+        val bound = scv_build_bind_receipt_v1(old, old.root_id, binding).unwrap()
+        val registered = scv_build_register_attempt_v1(bound, bound.root_id, "module-a", 2, "attempt-b").unwrap()
+        val next = scv_build_replace_consumer_v1(registered, registered.root_id, registered.snapshot_id,
+            "module-a", 2, "attempt-b", [], []).unwrap()
+        expect(next.invalidated_receipt_ids).to_equal(["receipt-1"])
+        expect(next.receipts.len()).to_equal(0)
+        expect(bound.receipts.len()).to_equal(1)
+        expect(bound.invalidated_receipt_ids).to_equal([])
+        expect(scv_build_bind_receipt_v1(next, next.root_id, binding)).to_equal(Err("derivation-receipt-invalid"))
+
+    it "supports a new retry at the same source generation without resurrecting a superseded ID":
+        val old = derivation_registered()
+        val retry = scv_build_register_attempt_v1(old, old.root_id, "module-a", 1, "retry-a").unwrap()
+        expect(scv_build_register_attempt_v1(retry, retry.root_id, "module-a", 1, "attempt-a")).to_equal(Err("derivation-attempt-reused"))
+        expect(derivation_replace(retry, [])).to_equal(Err("derivation-attempt-stale"))
+        expect(derivation_replace(retry, [], attempt: "retry-a").unwrap().manifests[0].attempt_id).to_equal("retry-a")
+
+    it "binds a new exact snapshot while preserving old users until a successful new producer":
+        val old = derivation_replace(derivation_registered(), [derivation_use("u", "producer")]).unwrap()
+        val binding = ScvBuildReceiptBindingV1(receipt_id: "receipt-1", consumer_uid: "module-a",
+            manifest_digest: old.manifests[0].manifest_digest)
+        val bound = scv_build_bind_receipt_v1(old, old.root_id, binding).unwrap()
+        val next = scv_build_advance_snapshot_v1(bound, bound.root_id, "snapshot-exact-2").unwrap()
+        expect(next.snapshot_id).to_equal("snapshot-exact-2")
+        expect(next.manifests[0].snapshot_id).to_equal("snapshot-exact-1")
+        expect(next.attempts).to_equal([])
+        expect(next.invalidated_receipt_ids).to_equal(["receipt-1"])
+        expect(scv_build_reverse_users_v1(next, "producer")).to_equal(["module-a"])
+        expect(scv_build_replace_consumer_v1(next, next.root_id, next.snapshot_id,
+            "module-a", 1, "attempt-a", [], [])).to_equal(Err("derivation-replay-payload-mismatch"))
+
+    it "copies submitted nested candidate storage and escapes demand identities without collisions":
+        var candidates = ["negative"]
+        var submitted = [derivation_use("a/b", "producer", "generic", "scope")]
+        val state = derivation_registered("c")
+        val scope = ScvBuildCandidateScopeV1(scope_root: "scope", candidate_uids: candidates)
+        val committed = derivation_replace(state, submitted, "c", scopes: [scope]).unwrap()
+        candidates[0] = "changed"
+        submitted[0] = derivation_use("other", "other")
+        expect(scv_build_candidate_users_v1(committed, "negative")).to_equal(["c"])
+        expect(scv_build_demand_v1(committed, "producer", "facet-v1")).to_equal(["c/a%2Fb"])
+        expect(scv_build_graph_valid_v1(committed)).to_equal(true)
+
+    it "rejects unsupported kinds, repeated scope candidates and receipts for an unknown manifest":
+        val state = derivation_registered()
+        expect(derivation_replace(state, [derivation_use("u", "p", "unknown")])).to_equal(Err("derivation-use-kind"))
+        val scope = ScvBuildCandidateScopeV1(scope_root: "scope", candidate_uids: ["a", "a"])
+        expect(derivation_replace(state, [], scopes: [scope])).to_equal(Err("derivation-candidate-invalid"))
+        val receipt = ScvBuildReceiptBindingV1(receipt_id: "r", consumer_uid: "module-a", manifest_digest: "missing")
+        expect(scv_build_bind_receipt_v1(state, state.root_id, receipt)).to_equal(Err("derivation-receipt-manifest-mismatch"))
+
+    it "keeps producer kinds distinct and refuses conflicting content for an immutable scope root":
+        val state = derivation_registered()
+        val scope = ScvBuildCandidateScopeV1(scope_root: "scope", candidate_uids: ["a"])
+        val first = derivation_replace(state, [derivation_use("g", "p"), derivation_use("m", "p", "macro")], scopes: [scope]).unwrap()
+        expect(scv_build_kind_demand_v1(first, "generic", "p", "facet-v1")).to_equal(["module-a/g"])
+        expect(scv_build_kind_demand_v1(first, "macro", "p", "facet-v1")).to_equal(["module-a/m"])
+        expect(scv_build_reverse_kind_users_v1(first, "pointcut", "p")).to_equal([])
+        val registered = scv_build_register_attempt_v1(first, first.root_id, "module-a", 2, "attempt-b").unwrap()
+        val conflict = ScvBuildCandidateScopeV1(scope_root: "scope", candidate_uids: ["b"])
+        expect(scv_build_replace_consumer_v1(registered, registered.root_id, registered.snapshot_id,
+            "module-a", 2, "attempt-b", [], [conflict])).to_equal(Err("derivation-scope-root-conflict"))

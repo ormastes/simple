@@ -15,4 +15,6 @@ Status: authored before implementation; native runtime audit pending. This manua
 | REQ-SCV-DER-007 | Failed, cancelled or stale attempts cannot remove the previous manifest. |
 | REQ-SCV-DER-008 | Persistence owner failure or wrong committed root prevents publication. |
 
+Additional scenarios cover consumer-bound receipt invalidation, retries at the same source generation with fresh attempt IDs, exact snapshot advance retaining historical manifests, independent nested storage, escaped demand identities, kind-specific producer demand, malformed inputs and contradictory content under one immutable candidate scope root. The executable specification contains 15 scenarios.
+
 Compiler owners supply the meaning of producer identities, facet digests and scope witnesses. These graph tests exercise deterministic indexing and transactional candidates, not compiler semantic completeness, a durable database, runtime qualification or artifact reuse authority. Positive persistence requires a real owner callback and integration evidence.
