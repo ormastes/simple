@@ -220,5 +220,21 @@ Run Hello through the interpreter owned by the selected compiler where available
 Phase 2 skips this case by configuration and reports `SKIPPED`; a separate CLI
 is not evidence for that compiler. Other phases report an unavailable interpreter
 as unsupported rather than passing it.
+The phase capability configuration is:
+
+| Phase | Interpreter | BuildRunner |
+| --- | --- | --- |
+| 1 | Required; seed `run` with `SIMPLE_EXECUTION_MODE=interpret` | Skipped |
+| 2 | Skipped; minimal compiler has no `run` | Required |
+| 3 | Required; qualify a full CLI built by the exact phase 3 compiler | Required |
+
+The native matrix reports BuildRunner as `UNRUN` when required: separate
+BuildRunner tasks must execute and verify the four forms for both backends.
+The current native matrix cannot yet accept a separately receipt-bound phase 3
+full CLI, so a minimal compiler's rejected interpreter case remains unsupported;
+phase 3 interpreter qualification is pending that owner integration. Bind the
+full CLI to its phase 3 producer, source and runtime, then use the reviewed
+full-CLI sanity before interpreter execution. Never borrow an ambient CLI.
+
 For Phase 2, retain a separate four-lane result for each requested LLVM and
 Cranelift backend. These diagnostics do not replace formal admission receipts.

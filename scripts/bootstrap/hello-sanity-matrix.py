@@ -114,6 +114,18 @@ def verify_capture_receipt(capture, output, linker):
         raise ValueError("native reproduction archive/output/linker identity mismatch")
 
 
+def phase_capabilities(phase):
+    """Required cases by compiler generation; skips are not passes."""
+    return {1: (True, False), 2: (False, True), 3: (True, True)}[phase]
+
+
+def interpreter_invocation(phase, compiler):
+    fixture = str(FIXTURES / "single.spl")
+    if phase == 1:
+        return [compiler, "run", fixture], {"SIMPLE_EXECUTION_MODE": "interpret", "SIMPLE_NO_BOOTSTRAP_DELEGATE": "1"}
+    return [compiler, "run", fixture, "--interpret"], {"SIMPLE_NO_BOOTSTRAP_DELEGATE": "1"}
+
+
 def matrix_status(phase, native_status, interpreter_status):
     """Phase 2 is compiler-only; its configured skip is not an interpreter pass."""
     if native_status == "FAIL":
@@ -512,6 +524,8 @@ class Matrix:
         values = {"phase": self.args.phase, "compiler_sha256": self.sha, "status": "FAIL"}
         try:
             if self.args.prior_interpreter_evidence:
+                if self.args.phase == 1:
+                    raise ValueError("phase 1 interpreter evidence must bind interpreter environment; reuse unavailable")
                 prior = self.args.prior_interpreter_evidence.resolve()
                 record = dict(line.split(": ", 1) for line in prior.read_text().splitlines())
                 identity = dict(line.split(": ", 1) for line in (prior.parent.parent / "identity.sdn").read_text().splitlines())
@@ -542,8 +556,15 @@ class Matrix:
                 sdn(lane / "result.sdn", values)
                 print("RESULT interpreter " + status + " (exact evidence reused)", flush=True)
                 return values
-            stdout, stderr = self.run(lane, "run", [self.compiler, "run", str(FIXTURES / "single.spl"), "--interpret"], seconds=30)
-            if stdout != EXPECTED or stderr:
+            command, interpreter_env = interpreter_invocation(self.args.phase, self.compiler)
+            sdn(lane / "interpreter-mode.sdn", interpreter_env)
+            stdout, stderr = self.run(lane, "run", command, extra=interpreter_env, seconds=30)
+            # The seed emits this advisory for the full source library, even in
+            # forced interpreter mode. It is not a successful-output substitute.
+            permitted = (stderr.startswith(b"[memory-guard] SIMPLE_LIB=") and
+                         stderr.endswith(" contains 600+ .spl files — consider narrowing scope to avoid memory bloat\n".encode()) and
+                         stderr.count(b"\n") == 1)
+            if stdout != EXPECTED or (stderr and not (self.args.phase == 1 and permitted)):
                 raise ValueError("interpreter stdout/stderr differs from exact Hello oracle")
             values["status"] = "PASS"
         except Exception as error:
@@ -595,7 +616,7 @@ class Matrix:
         barrier = threading.Barrier(len(self.args.lanes))
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.args.lanes) + 1) as pool:
             futures = [pool.submit(self.lane, name, barrier) for name in self.args.lanes]
-            configured_skip = self.args.phase == 2
+            configured_skip = not phase_capabilities(self.args.phase)[0]
             interpreter = pool.submit(self.interpreter) if not configured_skip and not self.args.skip_interpreter else None
             rows = [future.result() for future in futures]
             interpreter_result = interpreter.result() if interpreter else {"status": "SKIPPED" if configured_skip else "UNRUN"}
@@ -611,7 +632,9 @@ class Matrix:
         if self.children:
             status = "RUNNING_FINALIZATION"
         sdn(self.out / "result.sdn", {"phase": self.args.phase, "compiler_sha256": self.sha,
-            "status": status, "native_status": native_status,
+            "status": status, "scope": "compiler-native-and-interpreter",
+            "buildrunner_status": "UNRUN" if phase_capabilities(self.args.phase)[1] else "SKIPPED",
+            "native_status": native_status,
             "selected_native_status": "PASS" if passed == len(rows) else "FAIL",
             "required_native_lanes": 4, "selected_native_lanes": len(rows),
             "interpreter_status": interpreter_result["status"], "executed_lanes": len(rows),
