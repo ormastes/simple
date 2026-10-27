@@ -18,3 +18,5 @@ Typed local `val compiled: Result<CodegenOutput, CompileError> = ...` before the
 ## Real fix
 #4998 (merge 275989c9af6) resolves imported trait method declared returns for bare Ok/Err arms.
 Remove the workarounds once a compiler built from >= 275989c9af6 is deployed.
+
+Note: the current stage2 6b0ba5f3 accepts typed Result locals (the phase3_result_local_match_owner constraint no longer applies), which is why the typed local is safe here.
