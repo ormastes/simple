@@ -1,0 +1,337 @@
+#!/bin/sh
+# Build one Phase 4 CLI artifact directly through the shared build executor.
+# This operation emits build-only evidence; it does not admit a phase or run tests.
+set -eu
+
+die() { printf 'phase4-direct-product: %s\n' "$*" >&2; exit 2; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+absolute() { case "$1" in /*) return 0 ;; *) return 1 ;; esac; }
+safe_absolute() {
+  absolute "$1" || return 1
+  case "$1" in *//*|*/./*|*/../*|*/.|*/..) return 1 ;; esac
+  return 0
+}
+reject_symlink_components() {
+  path=$1 rest=${1#/} current=
+  safe_absolute "$path" || die "unsafe path spelling: $path"
+  while [ -n "$rest" ]; do
+    component=${rest%%/*}
+    if [ "$component" = "$rest" ]; then rest=; else rest=${rest#*/}; fi
+    [ -n "$component" ] || die "empty path component: $path"
+    current="$current/$component"
+    [ ! -L "$current" ] || die "path contains a symlink component: $current"
+  done
+}
+
+executor= program= producer_sha= source_root= source_authority= source_authority_sha=
+target= threads= backend= product= cuda_source_root= cuda_selection_identity=
+memory_bytes= memory_policy= reserve_bytes= estimated_group_disk_bytes= minimum_free_disk_bytes=
+authority_program= authority_receipt= authority_digest= authority_program_sha=
+runtime_authority= runtime_snapshot= runtime_snapshot_sha=
+tool_authority= tool_authority_sha= timeout_seconds= output_root=
+for arg in "$@"; do
+  case "$arg" in
+    --executor=*) executor=${arg#*=} ;;
+    --program=*) program=${arg#*=} ;;
+    --producer-sha256=*) producer_sha=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --source-authority=*) source_authority=${arg#*=} ;;
+    --source-authority-sha256=*) source_authority_sha=${arg#*=} ;;
+    --authority-program=*) authority_program=${arg#*=} ;;
+    --authority-receipt=*) authority_receipt=${arg#*=} ;;
+    --authority-digest=*) authority_digest=${arg#*=} ;;
+    --authority-program-sha256=*) authority_program_sha=${arg#*=} ;;
+    --target=*) target=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;;
+    --memory-bytes=*) memory_bytes=${arg#*=} ;;
+    --memory-policy=*) memory_policy=${arg#*=} ;;
+    --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
+    --estimated-group-disk-bytes=*) estimated_group_disk_bytes=${arg#*=} ;;
+    --minimum-free-disk-bytes=*) minimum_free_disk_bytes=${arg#*=} ;;
+    --backend=*) backend=${arg#*=} ;;
+    --product=*) product=${arg#*=} ;;
+    --cuda-source-root=*) cuda_source_root=${arg#*=} ;;
+    --cuda-selection-identity=*) cuda_selection_identity=${arg#*=} ;;
+    --runtime-authority=*) runtime_authority=${arg#*=} ;;
+    --runtime-snapshot=*) runtime_snapshot=${arg#*=} ;;
+    --runtime-snapshot-sha256=*) runtime_snapshot_sha=${arg#*=} ;;
+    --tool-authority=*) tool_authority=${arg#*=} ;;
+    --tool-authority-sha256=*) tool_authority_sha=${arg#*=} ;;
+    --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+[ "$executor" = direct ] || die 'direct executor required'
+for path in "$program" "$source_root" "$source_authority" "$target" "$threads" "$memory_bytes" \
+    "$memory_policy" "$reserve_bytes" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes" "$backend" \
+    "$product" "$cuda_source_root" "$cuda_selection_identity" "$runtime_authority" \
+    "$runtime_snapshot" "$tool_authority" "$authority_program" "$authority_receipt" "$authority_program_sha" \
+    "$timeout_seconds" "$output_root"; do
+  [ -n "$path" ] || die 'required option missing'
+done
+for path in "$program" "$source_root" "$source_authority" "$runtime_authority" \
+    "$runtime_snapshot" "$tool_authority" "$authority_program" "$authority_receipt" "$output_root"; do
+  reject_symlink_components "$path"
+done
+regular "$program" && [ -x "$program" ] || die 'producer must be an executable regular file'
+[ -d "$source_root" ] && [ ! -L "$source_root" ] || die 'source root must be a real directory'
+source_physical=$(CDPATH= cd -P -- "$source_root" && pwd -P) || die 'source root cannot be resolved physically'
+[ "$source_physical" = "$source_root" ] || die 'source root path is not canonical'
+regular "$source_authority" || die 'source authority must be a regular file'
+[ -d "$runtime_authority" ] && [ ! -L "$runtime_authority" ] || die 'runtime authority must be a real directory'
+regular "$runtime_snapshot" && regular "$tool_authority" || die 'runtime/tool authority files unavailable'
+regular "$authority_program" && [ -x "$authority_program" ] && regular "$authority_receipt" \
+  || die 'compiled source authority verifier/receipt unavailable'
+case "$backend" in llvm|cranelift) ;; *) die "unsupported backend: $backend" ;; esac
+case "$cuda_source_root" in src/plugins|src/compositions/cuda_dynamic|src/compositions/cuda_disabled) ;; *) die 'unsupported selected CUDA source root' ;; esac
+case "$threads" in ''|*[!0-9]*) die 'threads must be a positive integer' ;; esac
+[ "$threads" -gt 0 ] || die 'threads must be a positive integer'
+for number in "$memory_bytes" "$reserve_bytes" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
+  case "$number" in ''|0|0*|*[!0-9]*) die 'resource values must be positive integers' ;; esac
+  [ "${#number}" -le 15 ] || die 'resource value exceeds supported integer range'
+done
+case "$memory_policy" in enforce|monitor) ;; *) die 'memory policy must be enforce or monitor' ;; esac
+[ "$memory_bytes" -le 1125899906842624 ] || die 'memory cap exceeds direct task limit'
+case "$timeout_seconds" in ''|*[!0-9]*) die 'timeout must be a positive integer' ;; esac
+[ "$timeout_seconds" -gt 0 ] || die 'timeout must be a positive integer'
+case "$product" in
+  bootstrap) entry=src/app/cli/bootstrap_main.spl; output=bin/simple_bootstrap ;;
+  full-cli) entry=src/app/cli/_CliMain/main_and_help.spl; output=bin/simple ;;
+  interpreter) entry=src/app/cli/interpreter_main.spl; output=bin/simple_interpreter ;;
+  mcp) entry=src/app/mcp/main.spl; output=bin/simple_mcp_server ;;
+  lsp) entry=src/app/simple_lsp_mcp/main.spl; output=bin/simple_lsp_mcp_server ;;
+  test-runner) entry=src/app/test_runner_new/main.spl; output=bin/simple_test_runner ;;
+  *) die "unsupported product: $product" ;;
+esac
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
+output="$output$exe_suffix"
+printf '%s\n' "$cuda_selection_identity" | grep -Eq '^cuda-[0-9a-f]{64}-[0-9a-f]{64}$' \
+  || die 'CUDA selection identity is malformed'
+for digest in "$producer_sha" "$source_authority_sha" "$runtime_snapshot_sha" "$tool_authority_sha"; do
+  printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$' || die 'identity digests must be lowercase SHA-256'
+done
+printf '%s\n' "$authority_digest" | grep -Eq '^[0-9a-f]{64}$' || die 'authority digest must be lowercase SHA-256'
+[ "$(hash_file "$authority_program")" = "$authority_program_sha" ] || die 'source authority verifier digest changed'
+[ "$(hash_file "$program")" = "$producer_sha" ] || die 'producer digest changed'
+[ "$(hash_file "$source_authority")" = "$source_authority_sha" ] || die 'source authority digest changed'
+[ "$(hash_file "$runtime_snapshot")" = "$runtime_snapshot_sha" ] || die 'runtime snapshot digest changed'
+[ "$(hash_file "$tool_authority")" = "$tool_authority_sha" ] || die 'tool authority digest changed'
+[ "$(hash_file "$authority_receipt")" = "$authority_digest" ] || die 'source authority receipt digest changed'
+case "$output_root/" in "$source_root/"*) die 'output overlaps the frozen source root' ;; esac
+case "$source_root/" in "$output_root/"*) die 'output contains the frozen source root' ;; esac
+[ ! -L "$output_root" ] || die 'output root must not be a symlink'
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die 'repository root unavailable'
+build_selector="$repo_root/scripts/build/run-build.shs"
+[ -f "$build_selector" ] && [ ! -L "$build_selector" ] || die 'shared build selector unavailable'
+timeout_helper="$repo_root/scripts/bootstrap/run-process-group-timeout.shs"
+[ -f "$timeout_helper" ] && [ ! -L "$timeout_helper" ] || die 'compiler watchdog unavailable'
+perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_object \
+  -e 'verify_native_object(undef, $ARGV[0])' "$target" || die 'unsupported direct native target'
+output_parent=$(dirname -- "$output_root")
+mkdir -p "$output_parent" || die 'output parent creation failed'
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) available_memory_bytes=$(powershell.exe -NoProfile -Command '[int64](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1024' | tr -d '\r[:space:]') || die 'Windows memory probe failed' ;;
+  Linux*) available_memory_bytes=$(awk '$1=="MemAvailable:" { printf "%.0f\n", $2*1024; found=1 } END { if (!found) exit 1 }' /proc/meminfo) || die 'Linux memory probe failed' ;;
+  *) die 'unsupported host memory probe' ;;
+esac
+case "$available_memory_bytes" in ''|*[!0-9]*) die 'host memory probe invalid' ;; esac
+available_disk_bytes=$(df -Pk "$output_parent" | awk 'NR==2 { printf "%.0f\n", $4*1024 }') || die 'disk probe failed'
+case "$available_disk_bytes" in ''|*[!0-9]*) die 'host disk probe invalid' ;; esac
+[ "$available_memory_bytes" -ge "$((memory_bytes + reserve_bytes))" ] || die 'host memory below configured cap plus reserve'
+[ "$available_disk_bytes" -ge "$((estimated_group_disk_bytes + minimum_free_disk_bytes))" ] || die 'host disk below estimate plus reserve'
+mkdir "$output_root" 2>/dev/null || die 'direct product output root is already reserved or unavailable'
+umask 077
+printf 'owner_pid=%s\nproduct=%s\nbackend=%s\n' "$$" "$product" "$backend" >"$output_root/reservation.env" \
+  || die 'output root reservation receipt write failed'
+mkdir -p "$output_root/cache" "$output_root/bin" "$output_root/tmp" "$output_root/xdg-cache" "$output_root/storage" \
+  || die 'output/cache creation failed'
+output_physical=$(CDPATH= cd -P -- "$output_root" && pwd -P) || die 'output root cannot be resolved physically'
+[ "$output_physical" = "$output_root" ] || die 'output root path is not canonical'
+artifact="$output_root/$output"
+cache="$output_root/cache/$product-$backend-$cuda_selection_identity"
+mkdir -p "$cache" || die 'private compiler cache creation failed'
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || die 'source snapshot verifier unavailable'
+verify_source_snapshot() {
+  observed="$output_root/source-snapshot-observed.$$.txt"
+  bootstrap_stage3_source_snapshot "$observed" "$source_root" || die 'source snapshot failed'
+  cmp -s "$observed" "$source_authority" || die 'source tree differs from admitted snapshot'
+  "$authority_program" phase2-native-authority-verify \
+    --receipt "$authority_receipt" --digest "$authority_digest" \
+    --canonical-snapshot "$observed" >/dev/null || die 'compiled source authority verifier rejected the snapshot'
+  rm -f "$observed"
+}
+verify_source_snapshot
+
+(
+  cd "$source_root" || exit 2
+  export SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_RUST=0 \
+    SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0 \
+    SIMPLE_NATIVE_BUILD_TARGET="$target" SIMPLE_NATIVE_BUILD_THREADS="$threads" \
+    SIMPLE_MANAGED_NATIVE_TOOLS=1 \
+    SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH="$tool_authority" \
+    SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256="$tool_authority_sha" \
+    SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH="$runtime_authority" \
+    SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH="$runtime_snapshot" \
+    SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256="$runtime_snapshot_sha" \
+    SIMPLE_MANAGED_PHASE4_SOURCE_ROOT="$source_root" \
+    SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH="$source_authority" \
+    SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256="$source_authority_sha" \
+    SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
+    SIMPLE_RUNTIME_PATH="$runtime_authority" SIMPLE_PROJECT_ROOT="$source_root" \
+    SIMPLE_USER_STORAGE_ROOT="$output_root/storage" \
+    SIMPLE_CACHE_PROJECT="phase4-direct-$product-$backend" \
+    SIMPLE_BINARY="$program" SIMPLE_CACHE="$cache" \
+    XDG_CACHE_HOME="$output_root/xdg-cache" \
+    SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache" \
+    SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" SIMPLE_HIR_CACHE_DIR="$cache/hir" \
+    SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=0 \
+    SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS="$threads" \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$(((memory_bytes + 1023) / 1024))" \
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE="$memory_policy" \
+    SIMPLE_PROCESS_TREE_RSS_RECEIPT="$output_root/process-tree-rss.env" \
+    TMPDIR="$output_root/tmp"
+  unset SIMPLE_BOOTSTRAP SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE \
+    SIMPLE_NATIVE_BUILD_WORKER SIMPLE_NATIVE_BUILD_FORCE_WORKER SIMPLE_FRONTEND_DELEGATE \
+    SIMPLE_PARSE_SHARD SIMPLE_PARSE_SHARD_QUEUE SIMPLE_HIR_SHARD SIMPLE_HIR_SHARD_QUEUE \
+    SIMPLE_HIR_SHARD_OWNER SIMPLE_HIR_SHARD_CLAIM_LIMIT SIMPLE_MIR_SHARD SIMPLE_MIR_SHARD_QUEUE \
+    SIMPLE_MIR_SHARD_OWNER \
+    SIMPLE_SHARED_PARSE_CAS_ROOT SIMPLE_SHARED_PARSE_SOURCE_ROOT \
+    SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST
+  mkdir -p "$SIMPLE_FRONTEND_CACHE_DIR" "$SIMPLE_HIR_CACHE_DIR" || exit 2
+  # Launch from a small environment allowlist so ambient compiler routing and
+  # user cache selection cannot redirect this single-product build. HOME stays
+  # the caller's HOME; task-owned caches and scratch live below output_root.
+  set -- env -i "PATH=$PATH" "HOME=${HOME:-}" "USER=${USER:-}" "LOGNAME=${LOGNAME:-}" \
+    "TMPDIR=$output_root/tmp" "TEMP=$output_root/tmp" "TMP=$output_root/tmp" \
+    "SYSTEMROOT=${SYSTEMROOT:-}" "WINDIR=${WINDIR:-}" "COMSPEC=${COMSPEC:-}" "PATHEXT=${PATHEXT:-}"
+  [ -z "${SIMPLE_TOOLCHAINS_ROOT:-}" ] || set -- "$@" "SIMPLE_TOOLCHAINS_ROOT=$SIMPLE_TOOLCHAINS_ROOT"
+  [ -z "${SIMPLE_HOST_CONFIG:-}" ] || set -- "$@" "SIMPLE_HOST_CONFIG=$SIMPLE_HOST_CONFIG"
+  case "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" in
+    xx) set -- "$@" "SIMPLE_BOOTSTRAP_SESSION_ID=$SIMPLE_BOOTSTRAP_SESSION_ID" \
+      "SIMPLE_BOOTSTRAP_SESSION_EXEC=$SIMPLE_BOOTSTRAP_SESSION_EXEC" ;;
+    '') ;;
+    *) echo 'incomplete inherited session contract' >&2; exit 125 ;;
+  esac
+  set -- "$@" \
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_RUST=0 \
+    SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0 \
+    "SIMPLE_NATIVE_BUILD_TARGET=$target" "SIMPLE_NATIVE_BUILD_THREADS=$threads" \
+    SIMPLE_MANAGED_NATIVE_TOOLS=1 \
+    "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH=$tool_authority" \
+    "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256=$tool_authority_sha" \
+    "SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH=$runtime_authority" \
+    "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH=$runtime_snapshot" \
+    "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256=$runtime_snapshot_sha" \
+    "SIMPLE_MANAGED_PHASE4_SOURCE_ROOT=$source_root" \
+    "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH=$source_authority" \
+    "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256=$source_authority_sha" \
+    SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
+    "SIMPLE_RUNTIME_PATH=$runtime_authority" "SIMPLE_PROJECT_ROOT=$source_root" \
+    "SIMPLE_USER_STORAGE_ROOT=$output_root/storage" "SIMPLE_CACHE_PROJECT=phase4-direct-$product-$backend" \
+    "SIMPLE_BINARY=$program" "SIMPLE_CACHE=$cache" \
+    "XDG_CACHE_HOME=$output_root/xdg-cache" "SIMPLE_NATIVE_BUILD_CACHE_DIR=$cache" \
+    "SIMPLE_FRONTEND_CACHE_DIR=$cache/frontend" "SIMPLE_HIR_CACHE_DIR=$cache/hir" \
+    SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=0 "SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS=$threads" \
+    "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$(((memory_bytes + 1023) / 1024))" \
+    "SIMPLE_BOOTSTRAP_RSS_CAP_MODE=$memory_policy" \
+    "SIMPLE_PROCESS_TREE_RSS_RECEIPT=$output_root/process-tree-rss.env" \
+    sh "$timeout_helper" "$timeout_seconds" 5 \
+    sh "$build_selector" --executor=direct --program="$program" -- \
+    --target "$target" --backend "$backend" \
+    --source "$cuda_source_root" \
+    --source src/compositions/kernel_llvm_cranelift \
+    --source src/compiler --source src/app --source src/lib \
+    --source src/os --source src/plugins --source src/package_ownership --source src/compositions \
+    --entry-closure --entry "$entry" --threads "$threads" --mode dynload \
+    --cache-dir "$cache" --output "$artifact"
+  "$@"
+) || die 'direct native build failed'
+[ "$(hash_file "$program")" = "$producer_sha" ] || die 'producer changed during direct build'
+[ "$(hash_file "$source_authority")" = "$source_authority_sha" ] || die 'source authority changed during direct build'
+[ "$(hash_file "$runtime_snapshot")" = "$runtime_snapshot_sha" ] || die 'runtime snapshot changed during direct build'
+[ "$(hash_file "$tool_authority")" = "$tool_authority_sha" ] || die 'tool authority changed during direct build'
+[ "$(hash_file "$authority_program")" = "$authority_program_sha" ] || die 'source authority verifier changed during direct build'
+[ "$(hash_file "$authority_receipt")" = "$authority_digest" ] || die 'source authority receipt changed during direct build'
+verify_source_snapshot
+regular "$output_root/process-tree-rss.env" || die 'compiler watchdog receipt unavailable'
+receipt_field() { awk -F= -v key="$1" '$1==key { value=substr($0,index($0,"=")+1); count++ } END { if (count != 1) exit 1; print value }' "$output_root/process-tree-rss.env"; }
+watchdog_mode=$(receipt_field rss_cap_mode) || die 'watchdog memory mode receipt invalid'
+watchdog_enforced=$(receipt_field rss_cap_enforced) || die 'watchdog enforcement receipt invalid'
+watchdog_limit=$(receipt_field rss_limit_kib) || die 'watchdog RSS limit receipt invalid'
+watchdog_max=$(receipt_field max_rss_kib) || die 'watchdog RSS maximum receipt invalid'
+watchdog_status=$(receipt_field status) || die 'watchdog status receipt invalid'
+watchdog_exit=$(receipt_field exit_status) || die 'watchdog exit receipt invalid'
+watchdog_quiet=$(receipt_field quiescent) || die 'watchdog containment receipt invalid'
+watchdog_source=$(receipt_field cap_source) || die 'watchdog cap source receipt invalid'
+watchdog_bound=$(receipt_field cap_bound) || die 'watchdog cap bound receipt invalid'
+watchdog_samples=$(receipt_field samples) || die 'watchdog sample receipt invalid'
+watchdog_scope=$(receipt_field scope_group) || die 'watchdog process-group scope receipt invalid'
+requested_cap_kib=$(((memory_bytes + 1023) / 1024))
+[ "$watchdog_status" = complete ] && [ "$watchdog_exit" = 0 ] \
+  || die 'watchdog did not record a complete successful command'
+[ "$watchdog_quiet" = 1 ] && [ "$watchdog_samples" -gt 0 ] 2>/dev/null \
+  || die 'watchdog containment/sample evidence is incomplete'
+[ "$watchdog_source" = explicit-env ] && [ "$watchdog_bound" = explicit ] \
+  || die 'watchdog did not record the explicit direct-build budget'
+[ "$watchdog_scope" = 0 ] || die 'standalone direct build unexpectedly has campaign group scoping'
+[ "$watchdog_mode" = "$memory_policy" ] || die 'watchdog memory mode differs from requested policy'
+if [ "$memory_policy" = enforce ]; then
+  [ "$watchdog_enforced" = 1 ] && [ "$watchdog_limit" = "$requested_cap_kib" ] \
+    || die 'watchdog did not enforce requested memory cap'
+else
+  [ "$watchdog_enforced" = 0 ] && [ "$watchdog_limit" = unlimited ] \
+    || die 'watchdog monitor receipt semantics are invalid'
+fi
+[ "$watchdog_max" = "$requested_cap_kib" ] || die 'watchdog RSS ceiling differs from requested memory cap'
+watchdog_sha=$(hash_file "$output_root/process-tree-rss.env") || die 'compiler watchdog receipt digest unavailable'
+regular "$artifact" && [ -x "$artifact" ] || die 'direct build output is missing or not executable'
+
+case "$target" in
+  x86_64-*-linux-*|aarch64-*-linux-*) image_system=Linux ;;
+  x86_64-*-freebsd*|aarch64-*-freebsd*) image_system=FreeBSD ;;
+  x86_64-*-windows-*|aarch64-*-windows-*) image_system=MSWin32 ;;
+  *) die "native image verification does not support target: $target" ;;
+esac
+image_arch=${target%%-*}
+perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_image \
+  -e 'verify_native_image(@ARGV)' "$artifact" "$image_system" "$image_arch" \
+  || die 'direct output is not a validated native executable image'
+
+artifact_sha=$(hash_file "$artifact") || die 'artifact digest unavailable'
+build_args_sha=$(printf '%s\n' 'env SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' \
+  native-build --target "$target" --backend "$backend" \
+  --source "$cuda_source_root" --source src/compositions/kernel_llvm_cranelift \
+  --source src/compiler --source src/app --source src/lib --source src/os \
+  --source src/plugins --source src/package_ownership --source src/compositions \
+  --entry-closure --entry "$entry" --threads "$threads" --mode dynload \
+  --cache-dir "$cache" --output "$artifact" | sha256sum | awk '{print $1}') \
+  || die 'direct build argument digest unavailable'
+receipt="$output_root/direct-build.env"
+umask 077
+{
+  printf '%s\n' 'format=SIMPLE-PHASE4-DIRECT-BUILD-1' 'evidence_state=BUILD_ONLY'
+  printf '%s\n' "executor=$executor" "product=$product" "entry=$entry" \
+    "backend=$backend" "target=$target" "threads=$threads" \
+    "memory_bytes=$memory_bytes" "memory_policy=$memory_policy" \
+    "reserve_bytes=$reserve_bytes" "available_memory_bytes=$available_memory_bytes" \
+    "estimated_group_disk_bytes=$estimated_group_disk_bytes" \
+    "minimum_free_disk_bytes=$minimum_free_disk_bytes" "available_disk_bytes=$available_disk_bytes" \
+    "runtime_bundle=core-c-bootstrap" \
+    "producer_sha256=$producer_sha" "build_args_sha256=$build_args_sha" \
+    "source_authority_sha256=$source_authority_sha" \
+    "runtime_snapshot_sha256=$runtime_snapshot_sha" "tool_authority_sha256=$tool_authority_sha" \
+    "authority_program_sha256=$authority_program_sha" \
+    "process_tree_rss_receipt=$output_root/process-tree-rss.env" \
+    "process_tree_rss_receipt_sha256=$watchdog_sha" \
+    "cuda_selection_identity=$cuda_selection_identity" \
+    "artifact_path=$artifact" "artifact_sha256=$artifact_sha"
+} >"$receipt.tmp.$$" || die 'direct evidence write failed'
+mv "$receipt.tmp.$$" "$receipt" || die 'direct evidence publish failed'
+printf 'PHASE4_DIRECT_BUILD_ONLY product=%s backend=%s artifact_sha256=%s receipt=%s\n' \
+  "$product" "$backend" "$artifact_sha" "$receipt"

@@ -1,0 +1,25 @@
+#!/bin/sh
+# A standalone watchdog must contain descendants that move to another process
+# group in its session. Campaign per-task group scoping is not valid here.
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/watchdog-cross-group.XXXXXX")
+case "$tmp" in "${TMPDIR:-/tmp}"/watchdog-cross-group.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+pid_file="$tmp/child.pid"
+receipt="$tmp/watchdog.env"
+TMPDIR="$tmp" SIMPLE_PROCESS_TREE_RSS_RECEIPT="$receipt" \
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor \
+  sh "$repo_root/scripts/bootstrap/run-process-group-timeout.shs" 10 1 \
+    sh -c 'perl -MPOSIX=setpgid -e '\''setpgid(0,0); open my $f, ">", $ARGV[0] or die $!; print $f "$$\n"; close $f; sleep 60'\'' "$1" & sleep 1; exit 0' sh "$pid_file"
+
+[ -f "$receipt" ] || { echo 'FAIL: watchdog receipt missing' >&2; exit 1; }
+grep -qx 'scope_group=0' "$receipt"
+grep -qx 'status=complete' "$receipt"
+grep -qx 'quiescent=1' "$receipt"
+[ -s "$pid_file" ] || { echo 'FAIL: cross-group child was not launched' >&2; exit 1; }
+child_pid=$(cat "$pid_file")
+case "$child_pid" in ''|*[!0-9]*) echo 'FAIL: child PID invalid' >&2; exit 1 ;; esac
+child_state=$(ps -o stat= -p "$child_pid" 2>/dev/null | tr -d '[:space:]' || true)
+case "$child_state" in ''|Z*|z*) ;; *) echo "FAIL: cross-group child survived watchdog: $child_pid ($child_state)" >&2; exit 1 ;; esac
+echo 'PASS standalone watchdog contains cross-group descendants'
