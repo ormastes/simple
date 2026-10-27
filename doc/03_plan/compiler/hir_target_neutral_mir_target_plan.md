@@ -25,12 +25,26 @@ identity lives in MIR/object cache keys only.
 | `60.mir_opt/mir_opt/target_family.spl:70`, `auto_vectorize_target.spl` | MIR opt | SIMD tier |
 | `70.backend/target_presets.spl` | codegen | triple/cpu |
 
+## Decl-level @cfg decisions (2026-10-27)
+
+User decisions on the 7 open questions from DESIGN § 6. See `doc/05_design/compiler/frontend/hir_cfg_decl_select_design.md` for full detail.
+
+1. **Matrix enumeration scope:** os x arch (+feature) only; no 4th axis until needed.
+2. **Divergent signatures:** `E-CFG-SIG-DIVERGE` error for unguarded callers of incompatible-variant groups.
+3. **Lazy variant checking targets:** build target only (proposed knob `--cfg-check-targets` or `SIMPLE_CFG_CHECK_TARGETS`, default `build`; extensible to `build+host`, `release-matrix`, or `all`).
+4. **Guarded `use` resolution:** via build config; module availability from config, never silent skip.
+5. **Layout assertions:** move to MIR; HIR stays target-neutral.
+6. **Binding export:** explicit `pub val x = expr` inside arms (not inferred from indent); export is opt-in.
+7. **Exhaustive group acceptance:** unguarded callers accepted when the group is exhaustive (some arm always true) AND has compatible signatures (decision 2); non-exhaustive group without `else` is an error (E-CFG-NONEXHAUSTIVE).
+
+**PR order:** see DESIGN § 4 Migration (steps 1–8, 7b).
+
 ## Moves
 1. **MIR selector (slice 1, landed with this plan):** `50.mir/mir_cfg_select.spl`
    `mir_cfg_select_arm(conds, MirTargetContext, features)` - pure, no env/globals.
-2. **HIR node:** `HirCfgSelect(arms: [HirCfgArm(condition_text, body)])`, generated like
+2. **HIR node:** `HirExprKind.CfgSelect(conds, arms, else_)` (landed #4943), generated like
    `InlineAsmMatch`; HIR lowering emits it instead of the preprocessor deleting arms.
-   Decl-level `@cfg` becomes `HirItem.cfg_condition` (all variants kept, name-mangled by arm index).
+   Decl-level `@cfg` becomes per-item `cfg`/`cfg_group`/`cfg_arm` guards (design Option B), all variants kept.
 3. **Parser:** preprocessor stops evaluating in the HIR lane (keeps arms as AST
    `CfgBlock`); host-interpreter lane may keep eager eval.
 4. **MIR:** lowering of `HirCfgSelect`/decl variants calls `mir_cfg_select_arm`; -2 = hard error;
@@ -44,7 +58,7 @@ identity lives in MIR/object cache keys only.
 ## Risk areas
 - Pointer width / ABI sizes used by HIR typing and const-eval (`size_of`, struct layout asserts in `_TypeLayout/c_assert_gen.spl`).
 - Name resolution across arms: two arms may declare the same symbol with different signatures; typecheck each arm, require compatible signatures for neutral callers.
-- Arms referencing target-only imports must typecheck lazily (unresolved import inside a non-selected arm is not an error).
+- Arms referencing target-only imports must typecheck lazily. Module availability per host/target comes from the build config (decision 4), not from a silent skip of unresolved imports.
 - Selector gaps: `debug/release/compiled/interpreter` atoms need a TargetSpec options field (return -2 today); `MirTargetContext` folds thumbv*/armv* to `arm`, so sub-arch atoms need an exact arch field.
 - Cache transition: until step 3 lands, the HIR key is target-blind over target-stripped input (pre-existing hazard).
 

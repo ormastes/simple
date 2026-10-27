@@ -79,10 +79,12 @@ truth values within the matrix. Unknown atoms are an error, as in MIR.
   expression kind is needed; the per-module group index (`cfg_group -> [SymbolId]`, built at
   registration) is the only table, keyed by group id and never by guard text.
 - Signature rule. A caller inside a region whose guard implies one variant's guard (matrix
-  check above) type-checks against that variant's signature. An unguarded caller requires all
-  variants to have identical parameter and return types; otherwise error `E-CFG-SIG-DIVERGE`
-  naming both arms. So `fn foo` in windows and linux arms with different signatures is legal when
-  its callers are themselves guarded, which is how platform code is written today.
+  check above) type-checks against that variant's signature. An unguarded caller requires: (1) the
+  group is exhaustive over the os x arch matrix (some arm always true) OR has an `else` arm, AND
+  (2) all variants have identical parameter and return types; otherwise error `E-CFG-SIG-DIVERGE`
+  naming both arms. A non-exhaustive group without `else` gives error E-CFG-NONEXHAUSTIVE. So
+  `fn foo` in windows and linux arms with different signatures is legal when its callers are
+  themselves guarded, which is how platform code is written today.
 - Standalone `@cfg` items (no chain, so no group yet): each gets its own fresh `cfg_group` with
   `cfg_arm` 0. Two same-named standalone items (`@cfg(os="windows") fn f`, `@cfg(os="linux") fn f`)
   may coexist only if their guards are proven disjoint over the finite os x arch matrix (feature
@@ -102,9 +104,11 @@ truth values within the matrix. Unknown atoms are an error, as in MIR.
   No index is keyed by guard text, so no `cfg_resolution` table exists.
 - Imports: `HirImport` gets the same `cfg`. A guarded `use` registers its names as guarded
   symbols (`module_import_registration.spl`); an unguarded use of such a name is an error
-  unless covered by the same guard. The driver import closure (`closure_digest`,
-  `driver_hir_cache.spl:143`) stays target-neutral: HIR loads every guarded import regardless of
-  target, and the skip happens in MIR (a false-guard import emits no link or codegen dependency).
+  unless covered by the same guard. Module availability per host and target comes from the build
+  config (decision 4); there is no silent skip when a module is absent on a target. The driver
+  import closure (`closure_digest`, `driver_hir_cache.spl:143`) stays target-neutral: HIR loads
+  every guarded import regardless of target, and the skip happens in MIR (a false-guard import
+  emits no link or codegen dependency).
 - Trait impl lowering lives at `20.hir/hir_lowering/_Items/trait_impl_lowering.spl` (e.g.
   `record_impl_textual_method_keys`, `:216`) and runs at HIR-lowering time with no target.
   It stays target-free: it records every guarded impl with its `(cfg_group, cfg_arm)`; the
@@ -115,8 +119,7 @@ truth values within the matrix. Unknown atoms are an error, as in MIR.
 Each variant is type-checked once, target-neutrally, with its guard in scope, referencing only
 its own arm plus unguarded names. That surfaces errors in non-selected arms. Layout-dependent
 queries are the exception (section 5). To bound cost, v1 checks a variant lazily when the item
-is reachable under a configured target set (`--cfg-check-targets`, default build target plus
-host); later widen to all variants.
+is reachable under a configured target set (`--cfg-check-targets`, default `build`, the current build target only (decision 3); extensible to `build+host` and the release matrix); later widen to all variants.
 
 ### How MIR / mono drops non-selected items
 `50.mir/_MirLowering/module_lowering.spl` evaluates each item's guard with a new
@@ -164,24 +167,26 @@ block, so the binding would vanish at block end (`parser_preprocessor.spl:417-42
 
 | Option | Mechanism | Verdict |
 |---|---|---|
-| (a) merged per-arm bindings | `CfgSelect` gains `exports: [HirCfgExport{name, ty, local}]`. HIR resolution declares one `LocalId` per exported name at chain entry; each arm's `val x = e` becomes the initialisation of that local; every arm must give the same type. | Recommended for typing |
+| (a) merged per-arm bindings | `CfgSelect` gains `exports: [HirCfgExport{name, ty, local}]`. HIR resolution declares one `LocalId` per exported name at chain entry; each arm's `pub val x = e` becomes the initialisation of that local; every arm must give the same type. | Recommended for typing |
 | (b) MIR splicing | Arms are non-scoping blocks; MIR splices the selected arm's statements into the parent. Names visible after `@end` need a HIR name table anyway, which is (a). | Use as the MIR realisation of (a) |
 | (c) keep flat strip | status quo | fallback during migration |
 
-Rules for (a)+(b):
-1. Every arm including `else` that exports `n` must agree on the type of `n`. If an arm omits `n`
-   and code after `@end` reads it: `E-CFG-BIND-MISSING` (no implicit nil).
+Rules for (a)+(b), using explicit `pub` for binding export (decision 6):
+1. Every arm including `else` that exports `pub val n` must agree on the type of `n`. If an arm omits `pub val n`
+   and code after `@end` reads it: `E-CFG-BIND-MISSING` (no implicit nil). If an arm declares `val n` (private)
+   while a sibling exports `pub val n`, that is also an error—export status must agree.
 2. No definite-assignment analysis exists in HIR (a search of `src/compiler` finds none), so the rule
    is syntactic: a chain that exports a binding and has no `else` is an error (`E-CFG-BIND-NOELSE`),
    whether or not it is read later. The retained_file shape ends in `@else`, so it is fine. Exports
    propagate through a nested `CfgSelect` in arm position (retained_file's inner windows/linux/else chain
    sits in the outer `@else`): the inner chain's exports count as the outer arm's exports, and the inner
    chain must itself be exhaustive.
-3. Exported names are exactly those at the chain's own indent; nested-block bindings stay scoped.
+3. Exported names are those declared `pub val name = expr` at the chain's indent. A `pub val` in a nested
+   block (indented further) is the error `E-CFG-BIND-NESTED-PUB`; private nested bindings stay block-scoped.
 4. MIR lowers only the selected arm, so exactly one initialisation survives and `val`
    single-assignment holds.
-5. `_pp_chain_marker_ok` drops its `_pp_starts_binding` rejection; the preprocessor tags
-   chain-indent bindings with an `__cfg_export__` marker so HIR does not infer scope from indentation.
+5. The preprocessor stops filtering based on indentation; the grammar's `pub` keyword marks exported bindings
+   in a chain. `_pp_starts_binding` (parser_preprocessor.spl:414) must be extended to match `pub val`/`pub var`/`pub let` in addition to the current `val`/`var`/`let`, so that arm-level `pub val` bindings are recognized and accepted by `_pp_chain_marker_ok`.
 
 Top-level chains (class 2 above) go through section 1: arms contain items whose guards propagate;
 a top-level `val` in an arm is a guarded `HirConst`.
@@ -221,11 +226,11 @@ fallback throughout, so ordering never breaks bootstrap.
 |---|---|---|---|
 | 1 | Add `cfg`, `cfg_group` to `HirFunction` only; regenerate codec/hash/children; version bump; no producer | codec round-trip of a function with `cfg=["os=linux"]` fails (field absent) | round-trip and hash differ by guard |
 | 2 | Same fields on struct/class/enum/trait/const/impl/import; add `mir_cfg_item_enabled` | MIR keeps a guarded item for matching `MirTargetContext`, drops for mismatch, fatal on malformed | evaluator spec |
-| 3 | Guarded `SymbolTable` entries (canonical group id in the five indexes), overlap errors, `E-CFG-SIG-DIVERGE`, guard-aware coherence in `checker.spl` | hand-built HIR (no producer yet): two same-named fns with disjoint guards error today; unguarded+guarded duplicate must error | resolution spec |
+| 3 | Guarded `SymbolTable` entries (canonical group id in the five indexes), overlap errors, `E-CFG-SIG-DIVERGE`, `E-CFG-NONEXHAUSTIVE` (non-exhaustive group without else), exhaustiveness check over matrix, guard-aware coherence in `checker.spl` | hand-built HIR (no producer yet): two same-named fns with disjoint guards error today; unguarded+guarded duplicate must error; unguarded call to non-exhaustive group must error | resolution spec |
 | 4 | Preprocessor emits `__cfg_decl__("cond")` for column-0 `@cfg` on fn, flag on | `@cfg(os="windows") fn f` + `@cfg(os="linux") fn f`: HIR contains both; MIR remaps a call by `cfg_group` | lowering fills `cfg`, `cfg_group`, `cfg_arm` |
 | 5 | Remaining decl kinds, impl members, guarded `use`, guard-aware import closure | linux build must not load a windows-only import | closure spec |
 | 6 | Top-level `@when` chains become guarded items (group + arm index); warning-only for non-selected-arm errors first | module-level chain survives to HIR | per-target MIR item-set spec |
-| 7 | Binding-chain exports (section 2), relax `_pp_chain_marker_ok`, `E-CFG-BIND-*` | `retained_file.spl:197-206` shape compiles on windows and linux; missing-else read fails | exports lowered |
+| 7 | Binding-chain exports (section 2), parser change: allow `pub val/var/let` at statement level (in @when arms only; `parse_statement` src/compiler/10.frontend/core/parser_stmts.spl:817), extend `_pp_starts_binding` to match `pub val`, relax `_pp_chain_marker_ok`, `E-CFG-BIND-*` plus `E-CFG-BIND-NESTED-PUB` | `retained_file.spl:197-206` shape compiles on windows and linux; missing-else read fails; `pub val` in nested block fails | exports lowered, parser spec |
 | 7b | Flip step 6's non-selected-arm diagnostics from warning to error | a type error in a non-selected arm is only a warning today | error-severity spec |
 | 8 | Cache: per-file neutral flag, closure-wide neutral digest, drop target from neutral keys, delete flag and `WA(hir-target-neutral)` | one HIR entry serves two targets for a neutral closure; a neutral file importing a non-neutral module stays target-keyed | key spec |
 
@@ -254,15 +259,43 @@ fallback throughout, so ordering never breaks bootstrap.
   and keeps `thumbv*` and `riscv32` exact; `mir_cfg_select.spl:21-33`
   documents it. The step 5 PR (remaining decl kinds) is in progress and does not close it.
 
-## 6. Open questions
+## 6. Decisions (user, 2026-10-27)
 
-1. Is the os x arch matrix enumeration for cross-chain implication cheap enough, and do any real
-   guards use non-os/arch/feature atoms that would need a fourth axis?
-2. Accept `E-CFG-SIG-DIVERGE` for unguarded callers, or forbid divergent signatures outright in v1?
-3. Default target set for lazy variant checking: build target plus host, or the whole release matrix?
-4. A guarded `use` of a module absent on the build target: error, or silent skip when all uses are guarded?
-5. Layout-dependent `static_assert` moving to MIR: accept, or keep a target-explicit HIR typing mode?
-6. Should binding export be explicit syntax (`@export val x`) rather than inferred from chain indentation?
-7. Should an unguarded caller of a group be accepted when the group is exhaustive over the os x arch
-   matrix (some arm always applies)? A target-neutral exhaustiveness rule would replace "identical
-   signatures" for such callers; a group without `else` that is not exhaustive would be an error.
+1. **Matrix enumeration scope.** Accept enumeration over the os x arch (+feature) matrix only. No fourth axis until a real guard needs one.
+2. **Divergent signatures.** Accept `E-CFG-SIG-DIVERGE` for unguarded callers of a group with incompatible variants.
+3. **Lazy variant checking targets.** Build target only (proposed knob: `--cfg-check-targets=<spec>` or `SIMPLE_CFG_CHECK_TARGETS` env var, default `build`; extensible to `build+host`, `release-matrix` or `all`).
+4. **Guarded `use` resolution.** Via build config when a module is absent on a target; never silent skip. Module availability comes from the config, selected by host and target.
+5. **Layout-dependent assertions.** Move to MIR. HIR typing stays target-neutral.
+6. **Binding export syntax.** Explicit: `pub val x = expr` inside an arm (NEW: `pub` at statement level, in @when arms only; today `pub` is item-level only). Export is not the default; only `pub` bindings escape the chain. Example rewrite of `retained_file.spl:197-206` pattern (answer below).
+7. **Exhaustive group acceptance.** Accept an unguarded caller of a group when the group is exhaustive over the os x arch matrix (some arm always applies) AND has compatible signatures (decision 2). A non-exhaustive group without `else` is an error (E-CFG-NONEXHAUSTIVE).
+
+### Decision 6 detail: explicit binding export with `pub`
+
+Simple's existing visibility keywords apply:
+- `pub`: binding exported (visible outside chain, after `@end`);
+- implicit private: binding scoped to the chain.
+
+Example rewrite of the `retained_file.spl` pattern:
+
+```simple
+@when(os="windows"):
+pub val supported = true
+@else:
+@when(os="linux"):
+pub val supported = true
+@else:
+pub val supported = false
+@end
+@end
+if not supported: return Err("SCVDB_FILE_HOST_UNSUPPORTED")
+```
+
+Every arm must agree on type and export status. An `E-CFG-BIND-*` error fires if:
+- An arm omits `pub val x` that another arm exports, and code after `@end` reads `x` (`E-CFG-BIND-MISSING`);
+- Code after `@end` reads `x` but no arm exported it (missing-declaration error);
+- A chain exports a binding and has no `else` arm (completeness error);
+- `pub val x = e` appears in a nested block (indentation deeper than the chain indent): E-CFG-BIND-NESTED-PUB error, not a silent no-op.
+
+Migration: section 2 rules restate the constraint that every arm agree on export scope and type; no change to the mechanism.
+
+
