@@ -23,6 +23,11 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(report['categories']['spl_doctest']['passed'], 1)
         self.assertEqual(report['file_summary']['discovered'], 1)
 
+    def test_doctest_progress_banner_is_not_a_category_summary(self):
+        report = POSITIVE.replace('SPL Doctest: 1 passed', 'SPL Doctest: Running doctests from 1 source file(s)...\nSPL Doctest: 1 passed')
+        self.assertEqual(module.classify(0, report)[0], 'PASS')
+        self.assertEqual(module.classify(0, report.replace('SPL Doctest: 1 passed, 0 failed, 0 skipped', ''))[0], 'INFRASTRUCTURE_FAILED')
+
     def test_red_requires_nonzero_and_failure_evidence(self):
         self.assertEqual(module.classify(1, RED)[0], 'FAIL')
         self.assertEqual(module.classify(0, RED)[0], 'INFRASTRUCTURE_FAILED')

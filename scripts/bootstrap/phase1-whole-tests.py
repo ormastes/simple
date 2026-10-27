@@ -48,7 +48,7 @@ def classify(exit_code, output):
     files = [FILES.fullmatch(line) for line in lines if line.startswith('Files:')]
     specs = [SPEC.fullmatch(line) for line in lines if line.startswith('SPEC FILE VERDICT:')]
     results = [RESULTS.fullmatch(line) for line in lines if line.startswith('Results:')]
-    spldocs = [SPL_DOC.fullmatch(line) for line in lines if line.startswith('SPL Doctest:')]
+    spldocs = [SPL_DOC.fullmatch(line) for line in lines if line.startswith('SPL Doctest:') and not re.fullmatch(r'SPL Doctest:\s+Running doctests from \d+ source file\(s\)\.\.\.', line)]
     sdocs = [SDOC.fullmatch(line) for line in lines if line.startswith('SDoctest Results')]
     report = dict(format='text-diagnostic', lines=lines, file_summary=None, spec_files=[], categories={})
     if any(len(found) != 1 or found[0] is None for found in (files, results, spldocs, sdocs)) or any(m is None for m in specs):
