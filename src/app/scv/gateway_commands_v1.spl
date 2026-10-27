@@ -21,7 +21,7 @@ struct ScvGatewayCommandResultV1:
     output: text
 
 fn scv_gateway_command_help_v1() -> text:
-    "scv gateway serve --config <native.sdn> --development-loopback --reason <audit reason> (read-only loopback); scv gateway read --endpoint <URI/scv/v1> --repository <logical-id> --method <capabilities|read_ref|read_commit|read_blob> --id <request-id> --token-env <name> [--selector <ref-or-oid>] [--tls-address <IPv4>] [--development-loopback]; scv gateway draft serve --config <native.sdn> --development-loopback --reason <audit reason>; scv gateway draft put|get --endpoint <URI/scv/draft/v1> --repository <id> --principal <id> --request-id <id> --token-env <name> --file <path>|--digest <sha256> --output <path> [--tls-address <IPv4>] [--development-loopback]"
+    "scv gateway serve --config <native.sdn> --development-loopback --reason <audit reason> (read-only loopback); scv gateway read --endpoint <URI/scv/v1> --repository <logical-id> --method <capabilities|read_ref|read_commit|read_blob> --id <request-id> --token-env <name> [--selector <ref-or-oid>] [--tls-address <IPv4>] [--development-loopback]; scv gateway draft serve --config <native.sdn> --development-loopback --reason <audit reason>; scv gateway draft put|get --endpoint <URI/scv/draft/v1> --repository <id> --principal <id> --request-id <id> --token-env <name> --file <path>|--digest <sha256> --output <absolute-new-path> [--tls-address <IPv4>] [--development-loopback]"
 
 fn _gateway_command_result_v1(code: i64, status: text, detail: text) -> ScvGatewayCommandResultV1:
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
@@ -68,12 +68,15 @@ pub fn scv_gateway_draft_write_output_noreplace_v1(path: text, bytes: [u8]) -> R
         index = index + 1
     val destination = if parent == "/": "/" + leaf else: parent + "/" + leaf
     val parent_identity = path_final_existing(parent)?
-    if parent_identity.path != parent or not dir_is_real_no_follow(parent): return Err("draft_output_parent_refused")
+    if parent == "/" or parent_identity.path != parent or not dir_is_real_no_follow(parent): return Err("draft_output_parent_refused")
     if path_entry_present(destination)?: return Err("draft_output_exists")
     val stage = secure_temp_dir(parent, "scv-draft-output-")?
-    val result = _draft_output_stage_v1(parent, stage, destination, bytes)
     val stage_identity = path_final_existing(stage)?
-    if not dir_is_real_no_follow(stage) or stage_identity.path != stage:
+    if stage_identity.path != stage or not path_identity_contains(parent_identity, stage_identity):
+        return Err("draft_output_stage_scope")
+    val result = _draft_output_stage_v1(parent, stage, destination, bytes)
+    val cleanup_identity = path_final_existing(stage)?
+    if not dir_is_real_no_follow(stage) or cleanup_identity != stage_identity:
         return Err("draft_output_stage_scope")
     if not dir_remove_all(stage): return Err("draft_output_stage_cleanup")
     if not directory_fsync(parent): return Err("draft_output_sync")

@@ -73,8 +73,12 @@ server-body deadline support and TLS qualification.
 ```text
 scv gateway draft serve --config draft-gateway.sdn --development-loopback --reason "local integration"
 scv gateway draft put --endpoint http://127.0.0.1:8811/scv/draft/v1 --repository repo-alpha --principal alice --request-id draft-7 --token-env SCV_DRAFT_ALICE_TOKEN --file ./draft.bin --development-loopback
-scv gateway draft get --endpoint http://127.0.0.1:8811/scv/draft/v1 --repository repo-alpha --principal alice --request-id read-7 --token-env SCV_DRAFT_ALICE_TOKEN --digest <sha256> --output ./received.bin --development-loopback
+scv gateway draft get --endpoint http://127.0.0.1:8811/scv/draft/v1 --repository repo-alpha --principal alice --request-id read-7 --token-env SCV_DRAFT_ALICE_TOKEN --digest <sha256> --output /tmp/received.bin --development-loopback
 ```
+
+GET output paths must be absolute, use a canonical existing non-root parent,
+and name a destination that does not exist. The client stages and verifies
+bytes beside that destination, then publishes without replacement.
 
 CLI `local_durable` means the server's private draft store returned its durable
 receipt. It does not mean a Git object exists, a GitHub service accepted bytes,
