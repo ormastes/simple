@@ -5,7 +5,7 @@
 # PR2c: with SIMPLE_TLDR_IMPORTS=1 a file worker parses only its claimed files
 # and resolves imports through TLDR summaries; a closure walk is an error.
 use std.spec
-use std.io_runtime.{file_write, getpid}
+use std.io_runtime.{file_write, getpid, rt_env_get, rt_env_set}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_flag_on_v1, tldr_closure_walk_check_v1,
     tldr_route_import_specs_v1, tldr_route_worker_v1, tldr_import_handle_fill_v1, tldr_import_generic_body_v1}
@@ -25,16 +25,19 @@ fn fixture_root(tag: text) -> text:
     val _d = dir_create_all(r + "/src")
     r
 
-fn put(root: text, name: text, src: text) -> text:
-    val p = root + "/src/" + name + ".spl"
+fn put(root: text, module_id: text, src: text) -> text:
+    val module_path = module_id.replace(".", "/")
+    val p = root + "/src/" + module_path + ".spl"
+    val dir = root + "/src/" + module_path.substring(0, module_path.last_index_of("/"))
+    val _d = dir_create_all(dir)
     val _w = file_write(p, src)
     p
 
 fn inventory(root: text) -> Dict<text, text>:
     var m: Dict<text, text> = {}
-    m["pkg.a"] = put(root, "a", A_SRC)
-    m["pkg.b"] = put(root, "b", B_SRC)
-    m["pkg.d"] = put(root, "d", D_SRC)
+    m["pkg.a"] = put(root, "pkg.a", A_SRC)
+    m["pkg.b"] = put(root, "pkg.b", B_SRC)
+    m["pkg.d"] = put(root, "pkg.d", D_SRC)
     m
 
 describe "TLDR import route (PR2c)":
@@ -113,3 +116,27 @@ describe "TLDR import route (PR2c)":
         val specs = tldr_route_import_specs_v1("use a.b\nuse c.*\n" + 'use d.{x, y as z}')
         expect(specs.len()).to_equal(3)
         expect(specs[2]).to_equal(("d", ["x", "y"]))
+
+    it "parses multi-line brace imports with names spanning lines":
+        val line1 = "use pkg.{a,"
+        val line2 = "  b}"
+        val multiline_src = line1 + "\n" + line2
+        val specs = tldr_route_import_specs_v1(multiline_src)
+        expect(specs.len()).to_equal(1)
+        expect(specs[0].0).to_equal("pkg")
+        expect(specs[0].1.len()).to_equal(2)
+        expect(specs[0].1[0]).to_equal("a")
+        expect(specs[0].1[1]).to_equal("b")
+
+    it "guards the closure walk with SIMPLE_TLDR_IMPORTS=1":
+        val saved_tldr = rt_env_get("SIMPLE_TLDR_IMPORTS") ?? ""
+        val saved_cache_min = rt_env_get("SIMPLE_CACHE_MIN_FREE_BYTES") ?? ""
+        rt_env_set("SIMPLE_TLDR_IMPORTS", "1")
+        rt_env_set("SIMPLE_CACHE_MIN_FREE_BYTES", "0")
+        val got = tldr_closure_walk_check_v1(true, "test_site")
+        expect(got.is_err()).to_equal(true)
+        match got:
+            case Err(msg): expect(msg.contains("TLDR-IMPORTS-E-CLOSURE-WALK")).to_equal(true)
+            case Ok(_): expect(false).to_equal(true)
+        rt_env_set("SIMPLE_TLDR_IMPORTS", saved_tldr)
+        rt_env_set("SIMPLE_CACHE_MIN_FREE_BYTES", saved_cache_min)
