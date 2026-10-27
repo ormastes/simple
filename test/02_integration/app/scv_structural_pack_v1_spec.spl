@@ -1,0 +1,135 @@
+# Purpose and audience: executable specification evidence for structural-record packing.
+# @req REQ-SCV-STRUCTURAL-PACK-V1
+# research: doc/01_research/local/scv_structural_storage_v1.md ; design: doc/05_design/scv_structural_storage_v1.md
+
+"""
+## Purpose and audience
+Proves versioned, parser-independent packing of complete structural records.
+The source payload chunks and raw file chunks remain loose and byte-identical.
+The packed representation preserves existing tagged logical IDs and exact
+record bytes; it does not split source at parser-defined or arbitrary offsets.
+The optional compression provider is reported inactive unless qualified.
+Audience: SCV storage maintainers.
+"""
+# @req: REQ-SCV-STRUCTURAL-PACK-V1
+use std.spec.step
+use std.spec.{describe, it, expect, step, assert_false}
+use app.io.mod (process_run)
+
+fn _harness() -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-struct-pack.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "scv init >/dev/null",
+        "printf '# comment\\r\\nlet x = 1\\r\\n' > source.spl",
+        "printf '\\377\\000A\\r\\n' > invalid.bin",
+        "head -c 131072 /dev/zero | tr '\\000' x > large.txt",
+        "scv snapshot >/dev/null",
+        "OP=$(cat .scv/HEAD_OP)",
+        "printf 'edited\\n' > source.spl",
+        "scv snapshot >/dev/null"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    assert_false(out == "" and err == "")
+    combined
+
+describe "scv structural record pack v1":
+    it "writes a versioned whole-record archive and canonical index":
+        # @req REQ-SCV-STRUCTURAL-PACK-V1
+        step "pack complete syntax records while retaining source payload chunks"
+        val out = _run(_harness() + [
+            "scv syntax-pack-write",
+            "scv syntax-pack-verify",
+            "test -n \"$(find .scv/objects/syntax-packs -name '*.pack' -print -quit)\"",
+            "test -n \"$(find .scv/objects/syntax-packs -name '*.index' -print -quit)\"",
+            "test -n \"$(find .scv/objects/chunks -type f -print -quit)\""
+        ])
+        expect(out).to_contain("format=scv-syntax-record-pack-v1")
+        expect(out).to_contain("index=verified")
+        expect(out).to_contain("raw-retained=true")
+
+    it "restores exact LF, CRLF, comments, invalid UTF-8, and large file bytes without a parser":
+        # @req REQ-SCV-STRUCTURAL-PACK-V1
+        step "remove loose syntax records, restore the indexed structural closure, and compare bytes"
+        val out = _run(_harness() + [
+            "scv syntax-pack-write",
+            "rm .scv/objects/syntax/*",
+            "scv restore-op \"$OP\"",
+            "printf '# comment\\r\\nlet x = 1\\r\\n' > expected.spl",
+            "printf '\\377\\000A\\r\\n' > expected.bin",
+            "head -c 131072 /dev/zero | tr '\\000' x > expected-large.txt",
+            "cmp source.spl expected.spl",
+            "cmp invalid.bin expected.bin",
+            "cmp large.txt expected-large.txt",
+            "test -n \"$(find .scv/objects/chunks -type f -print -quit)\""
+        ])
+        expect(out).to_contain("restored")
+        expect(out).to_contain("exit=0")
+
+    it "fails closed on a missing or corrupt indexed pack instead of reading loose fallback":
+        # @req REQ-SCV-STRUCTURAL-PACK-V1
+        step "remove loose records and corrupt the pack selected by the index"
+        val out = _run(_harness() + [
+            "scv syntax-pack-write >/dev/null",
+            "rm .scv/objects/syntax/*",
+            "P=$(find .scv/objects/syntax-packs -name '*.pack' -print -quit)",
+            "printf X | dd of=\"$P\" bs=1 seek=12 conv=notrunc 2>/dev/null",
+            "if scv restore-op \"$OP\" >restore.out 2>&1; then echo UNEXPECTED_SUCCESS; else cat restore.out; fi"
+        ])
+        expect(out).to_contain("ERROR")
+        assert_false(out.contains("UNEXPECTED_SUCCESS"))
+
+    it "rejects a malformed or duplicate-ID index before lookup":
+        # @req REQ-SCV-STRUCTURAL-PACK-V1
+        step "replace the index with an ambiguous duplicate mapping and verify fail-closed"
+        val out = _run(_harness() + [
+            "scv syntax-pack-write >/dev/null",
+            "I=$(find .scv/objects/syntax-packs -name '*.index' -print -quit)",
+            "printf 'format: scv-syntax-record-index-v1\\nentry syntax_node_collision a a 1 1\\nentry syntax_node_collision b b 1 1\\n' > \"$I\"",
+            "if scv syntax-pack-verify >verify.out 2>&1; then echo UNEXPECTED_SUCCESS; else cat verify.out; fi"
+        ])
+        expect(out).to_contain("ERROR")
+        assert_false(out.contains("UNEXPECTED_SUCCESS"))
+
+    it "keeps parent, child, grandchild, and payload closure visible to checked GC reachability":
+        # @req REQ-SCV-STRUCTURAL-PACK-V1
+        step "resolve every indexed record and payload edge after all loose syntax records are absent"
+        val out = _run(_harness() + [
+            "scv syntax-pack-write >/dev/null",
+            "rm .scv/objects/syntax/*",
+            "scv syntax-pack-verify",
+            "scv gc-dry-run"
+        ])
+        expect(out).to_contain("syntax-pack-v1-closure=verified")
+        expect(out).to_contain("PASS — gc dry run")
+
+    it "does not quarantine or prune raw chunks when the packed syntax closure is corrupt":
+        # @req REQ-SCV-STRUCTURAL-PACK-V1
+        step "corrupt the selected pack and make destructive GC stop before moving any object"
+        val out = _run(_harness() + [
+            "scv syntax-pack-write >/dev/null",
+            "P=$(find .scv/objects/syntax-packs -name '*.pack' -print -quit)",
+            "printf X | dd of=\"$P\" bs=1 seek=12 conv=notrunc 2>/dev/null",
+            "CHUNK=$(find .scv/objects/chunks -type f -print -quit)",
+            "if scv gc >gc.out 2>&1; then echo UNEXPECTED_SUCCESS; else cat gc.out; fi",
+            "test -f \"$CHUNK\""
+        ])
+        expect(out).to_contain("ERROR")
+        assert_false(out.contains("UNEXPECTED_SUCCESS"))
+
+    it "reports compression as optional and inactive when no qualified codec is selected":
+        # @req REQ-SCV-STRUCTURAL-PACK-V1
+        step "write identity-framed complete records without claiming compression savings"
+        val out = _run(_harness() + [
+            "scv syntax-pack-write",
+            "scv syntax-pack-status"
+        ])
+        expect(out).to_contain("compression=optional-not-active")
+        expect(out).to_contain("codec=identity")
+        assert_false(out.contains("compression=gzip PASS"))
