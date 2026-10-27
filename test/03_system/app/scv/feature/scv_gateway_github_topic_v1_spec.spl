@@ -16,6 +16,10 @@ use app.scv.gateway_github_publish_v2.{ScvGatewayGithubPublishPolicyV2,
     ScvGatewayGithubPublishRequestV2, scv_gateway_github_publish_prepare_v2}
 use app.scv.gateway_github_topic_v1.{ScvGithubTopicRefObservationV1,
     ScvGatewayGithubTopicPortV1, scv_gateway_github_topic_publish_v1}
+use app.scv.gateway_config_v1.{ScvGatewayConfigV1}
+use app.scv.gateway_publish_service_v2.{scv_gateway_publish_request_encode_v2,
+    scv_gateway_publish_handle_v2}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpMethod, HttpStatus}
 
 struct TopicTransportFixtureV1:
     root: text
@@ -43,6 +47,7 @@ fn _topic_derived_ref_v1(fixture: TopicTransportFixtureV1) -> text:
 fn _topic_candidate_read_v1(policy: ScvGithubReadPolicyV1,
         request: ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>:
     if request.kind != ScvGithubReadKindV1.Ref: return Err("test_read_kind")
+    _topic_test_read_calls_v1 = _topic_test_read_calls_v1 + 1
     Ok(ScvGithubReadResultV1(repository_id: policy.allowlist[0].repository_id,
         github_repository_id: policy.allowlist[0].github_repository_id,
         kind: ScvGithubReadKindV1.Ref, selector: request.selector,
@@ -271,6 +276,48 @@ describe "SCV GitHub topic create transport v1":
             fixture.request, fixture.content_sha256, _topic_gateway_port_v1(), \: false)
         step("assert: deny before GitHub read, outbox access, or Git mutation")
         expect(result.is_err()).to_equal(true)
+        expect(_topic_test_read_calls_v1).to_equal(0)
+        expect(_topic_test_push_calls_v1).to_equal(0)
+        _topic_cleanup_v1(fixture)
+
+    it "rejects unauthenticated topic publication before any GitHub read or Git effect":
+        step("setup: encode a publish request for a durably prepared candidate")
+        val fixture = _topic_fixture_v1()
+        val gateway = ScvGatewayConfigV1(repository: "repo-42", listen_host: "127.0.0.1",
+            listen_port: 24321, bearer_token_env: "SCV_TEST_TOKEN", github: fixture.policy.github)
+        val body = scv_gateway_publish_request_encode_v2("publish", fixture.request,
+            fixture.content_sha256).unwrap()
+        val http = HttpRequest(method: HttpMethod.Post, path: "/scv/v2/publish", query: "",
+            headers: [("Content-Type", "application/sdn")], body: body)
+        _topic_test_read_calls_v1 = 0
+        step("exercise: submit the topic operation without a bearer credential")
+        val response = scv_gateway_publish_handle_v2(gateway, fixture.policy,
+            "abcdefghijklmnopqrstuvwxyz012345", http, _topic_candidate_read_v1, \: false)
+        step("assert: reject before reading GitHub or invoking Git")
+        expect(response.status).to_equal(HttpStatus.Unauthorized)
+        expect(_topic_test_read_calls_v1).to_equal(0)
+        expect(_topic_test_push_calls_v1).to_equal(0)
+        _topic_cleanup_v1(fixture)
+
+    it "requires host topic-write policy for the authenticated publish endpoint":
+        step("setup: prepare a valid caller and disable only the host topic-write capability")
+        val fixture = _topic_fixture_v1()
+        var denied_policy = fixture.policy
+        denied_policy.allow_topic_publish = false
+        val gateway = ScvGatewayConfigV1(repository: "repo-42", listen_host: "127.0.0.1",
+            listen_port: 24321, bearer_token_env: "SCV_TEST_TOKEN", github: fixture.policy.github)
+        val token = "abcdefghijklmnopqrstuvwxyz012345"
+        val body = scv_gateway_publish_request_encode_v2("publish", fixture.request,
+            fixture.content_sha256).unwrap()
+        val http = HttpRequest(method: HttpMethod.Post, path: "/scv/v2/publish", query: "",
+            headers: [("Authorization", "Bearer " + token),
+                ("Content-Type", "application/sdn")], body: body)
+        _topic_test_read_calls_v1 = 0
+        step("exercise: call the actual HTTP dispatch with a valid bearer token")
+        val response = scv_gateway_publish_handle_v2(gateway, denied_policy,
+            token, http, _topic_candidate_read_v1, \: false)
+        step("assert: host policy denies before outbox, GitHub read, or Git write")
+        expect(response.status).to_equal(HttpStatus.Forbidden)
         expect(_topic_test_read_calls_v1).to_equal(0)
         expect(_topic_test_push_calls_v1).to_equal(0)
         _topic_cleanup_v1(fixture)
