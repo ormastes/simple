@@ -307,6 +307,10 @@ describe "return-type interface v1":
             var function = function_named(hir, name)
             function.return_type = HirType(kind: HirTypeKind.Int(64, true), span: function.span)
             hir.functions[function.symbol] = function
+            var symbol = hir.symbols.symbols[function.symbol.id]
+            symbol.name = "rti_abi.provider.{name}"
+            symbol.defining_module = nil
+            hir.symbols.symbols[function.symbol.id] = symbol
         val rows = rti_rows_from_hir_v1(hir).unwrap()
         val optional_row = row_for(rows.rows, "fn:maybe").unwrap()
         val result_row = row_for(rows.rows, "fn:result").unwrap()
@@ -314,6 +318,18 @@ describe "return-type interface v1":
         expect(rti_term_canonical_text(ReturnTypeInterfaceTable.new().require_concrete(result_row.entry).unwrap())).to_start_with("result(")
         # Row publication must not widen the physical function signature.
         expect(rti_term_canonical_text(rti_term_of_hir_type(function_named(hir, "maybe").return_type, hir.symbols, []).unwrap())).to_equal("b:i64")
+
+    it "rejects an ownerless qualified clone from a different enclosing provider":
+        var hir = path_spelled_hir("fn maybe() -> i32?:\n    Some(42)\n", "src/rti_abi/provider.spl")
+        val function = function_named(hir, "maybe")
+        var symbol = hir.symbols.symbols[function.symbol.id]
+        symbol.name = "rti_abi.provider.maybe"
+        symbol.defining_module = nil
+        hir.symbols.symbols[function.symbol.id] = symbol
+        val signature = RtiCallableSignatureV1(symbol: function.symbol, name: function.name,
+            type_params: [], owner_type_params: [], is_static: false,
+            return_type: HirType(kind: HirTypeKind.Int(64, true), span: function.span))
+        expect(err_code(rti_row_from_signature_v1("rti_abi.other", hir.symbols, signature))).to_equal("E-RTI-007")
 
     it "does not invent a semantic scalar from an unresolved declared signature":
         var hir = path_spelled_hir("fn unresolved() -> i64:\n    0\n", "src/rti_abi/unresolved.spl")
