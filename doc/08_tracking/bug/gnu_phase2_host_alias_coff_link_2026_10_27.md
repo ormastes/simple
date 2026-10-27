@@ -4,6 +4,63 @@ Tracking key: BUG-GNU-PHASE2-HOST-ALIAS-LINK-20261027.
 Status: OPEN, claimed by phase2-test-runner parent. Canonical BugDB insertion
 is pending writer verification; this Markdown record is not a DB write.
 
+## Current evidence — 2026-10-28
+
+The GNU archive projection retained an obsolete ar symbol index after ceding
+COFF definitions. That index still advertised `___chkstk_ms` and selected
+unnecessary LLVM compiler members. `llvm-ar sD` preserved the stale index;
+`llvm-ar rDs` with no replacement members rebuilt it. Relinking the retained
+Hello objects with only that index changed succeeded and printed exactly
+`windows native hello` (link 0, run 0). The production GNU projection now
+rebuilds its index and binds the selected archiver hash in its v2 cache key.
+
+The rebuilt Phase2 image SHA256 is
+`712810dda1f63137d0399c597b64bfabe0f49a2d83b721f3db87ece5cd8bc7f3`.
+It independently compiled the tracked Hello fixture and executed its output
+successfully. Evidence is in the bootstrap lane's
+`build/phase2-coff-workaround/gnu-index-hello-cycle2/`. This is provisional
+Hello qualification; canonical admission remains false.
+
+The descendant test runner passed materialization verification and reached
+MIR: 290 modules succeeded and two failed with E-RTI-007. The source already
+declares generic `rt_mutex_lock<T> -> T` and metrics
+`-> Option<(i64, i64)>`; their returns reached RTI as Any. No declaration
+weakening, replacement library family, runner PASS, full CLI PASS or landed
+PR is claimed. Full evidence is retained under the integration lane's
+`build/phase2-descendants-20261028/runner-same-volume/`.
+
+The history below records superseded failed candidates. Canonical BugDB
+registration is still pending; this report does not substitute for it.
+
+### Follow-up typed-return repair
+
+The explicit `Option<T>` parser branch accepted only primitive, named and
+callable payloads. Tuple tags start at 3000, below the named-type base 10000,
+so `Option<(i64, i64)>` lost its tuple payload. The parser now retains tuple
+tags through the existing Option registry. Separately, the flat extern
+converter passed an empty type-parameter list to `parser_function_new`,
+discarding `<T>`; it now uses the same conversion helper as normal functions.
+Focused parser regression assertions were added but remain UNRUN.
+
+The revised GNU Phase2 compiler rebuilt five modules, reused 1603 and linked
+with zero failures (57.1 seconds compile, 9.7 seconds link). SHA256:
+`c0e2853893ff2cdc4dc93176985bad8e407a74098335e202a138a3bb70b457d7`.
+This exact image compiled Hello and ran it with exact expected output;
+both exits were zero. Evidence: bootstrap lane
+`build/phase2-coff-workaround/gnu-return-types-{reviewed,hello}/`.
+
+The runner retry is still FAIL. It reached strict monomorphization and
+reported E-MONO-032 for return-only `rt_mutex_lock<T>` at mutex.spl:163 and
+the closure/nil arguments of `rt_thread_spawn_isolated` at thread.spl:156.
+E-MONO-033 refuses the two unspecialized calls. No inference guard was
+weakened and no library family was substituted. Evidence: integration lane
+`build/phase2-descendants-20261028/runner-typed-returns/`.
+
+The bounded repair campaign stops here with all build processes terminal.
+PR #5153 remains draft and unmerged; no runner, full CLI or new SPL spec
+execution is claimed. Upstream release revision 597b86aef35 has the same
+BugDB blob as baseline 69dfacbee15d, so its canonical write blocker persists.
+
 ## Reproduction
 
 Source 69dfacbee15d3136f10f0b8108e3f3eac7ebc9fd; GNU-only bootstrap attempt4
