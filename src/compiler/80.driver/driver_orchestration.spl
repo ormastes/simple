@@ -370,6 +370,73 @@ impl CompilerDriver:
         log_build_progress("load_sources", "files", self.ctx.sources.len(),
             self.ctx.sources.len(), "complete", 1, 6, 0, 0, "running")
 
+        match self.stage_parse():
+            case Some(stop): return stop
+            case None: pass
+        val archive_production = driver_hir_archive_production_requested_v1(self.ctx, compile_mode_text)
+        match self.stage_lower_hir(compile_mode_text, archive_production):
+            case Some(stop): return stop
+            case None: pass
+        # stage_lower_hir returns None only on an admitted HIR phase.
+        val analyze_ok_effective = true
+
+
+        if compile_mode_text == "check":
+            if self.ctx.config.contains_key("collection-plan-explain-mir"):
+                if not self.monomorphize_for_explicit_compilation(analyze_ok_effective):
+                    return CompileResult.TypeError(self.ctx.errors)
+                if not self.lower_to_mir_for_explicit_target(driver_mir_target_context(self.ctx.options)):
+                    return CompileResult.CodegenError(self.ctx.errors.join("\n"))
+            log_debug("check mode")
+            return CompileResult.Success(None)
+        match self.stage_monomorphize(compile_mode_text, archive_production):
+            case Some(stop): return stop
+            case None: pass
+
+
+        log_phase("phase5:mode_dispatch:start")
+        log_debug("phase 5: mode-specific processing...")
+        if compile_mode_text == "check":
+            log_debug("check mode")
+            return CompileResult.Success(None)
+        if compile_mode_text == "sdn":
+            log_debug("sdn mode")
+            return self.process_sdn()
+        if compile_mode_text == "interpret":
+            log_debug("interpret mode")
+            return self.interpret()
+        if compile_mode_text == "jit":
+            log_debug("jit mode")
+            return self.jit_compile_and_run()
+        if compile_mode_text == "aot":
+            log_debug("aot mode")
+            val aot_result = self.aot_compile()
+            if aot_result.is_success() and native_noop_eligible:
+                val built_output = self.ctx.options.output_file ??
+                    driver_noop_default_output_v1(self.ctx.options.input_files)
+                val publication = native_noop_publish_built_v1(
+                    native_noop_request, self.ctx.source_paths_owner, built_output)
+                if publication != "ok":
+                    return CompileResult.CodegenError(
+                        "native no-op receipt publication failed: {publication}")
+                if collection_receipt_requested:
+                    val copied = collection_native_copy_v1(built_output, native_noop_request_output_v1(native_noop_request), native_noop_request.identity)
+                    if copied != "":
+                        return CompileResult.CodegenError("native collection receipt cache publication failed: {copied}")
+            return aot_result
+        if compile_mode_text == "smf_exec":
+            log_debug("smf_exec mode")
+            return self.execute_smf()
+
+        log_warn("no mode matched, falling through")
+        CompileResult.Success(None)
+
+    # PR2a per-stage entry points. Each runs one phase of compile() on the
+    # driver's current ctx and returns Some(result) to stop the compilation
+    # with that result, or None to continue. compile() is their composition.
+
+    # Phase 2: parse loaded sources into AST modules.
+    me stage_parse() -> Option<CompileResult>:
         log_phase("phase2:parse:start")
         log_debug("phase 2: parsing...")
         val mcdc_mode_text = self.ctx.config["mcdc_mode"] ?? "off"
@@ -397,11 +464,11 @@ impl CompilerDriver:
                 phase2_err_idx = phase2_err_idx + 1
             log_build_progress("parse", "files", -1, self.ctx.sources.len(),
                 "failed", 1, 6, 1, 0, "failed")
-            return CompileResult.ParseError(self.ctx.errors)
+            return Some(CompileResult.ParseError(self.ctx.errors))
         if self.ctx.config.contains_key("coverage") or mcdc_enabled:
             if not compiler_coverage_inventory_valid():
                 self.ctx.add_error(compiler_coverage_inventory_error())
-                return CompileResult.ParseError(self.ctx.errors)
+                return Some(CompileResult.ParseError(self.ctx.errors))
         if self.ctx.config.contains_key("coverage"):
             compiler_coverage_inventory_emit()
         if mcdc_enabled:
@@ -437,7 +504,10 @@ impl CompilerDriver:
             log_debug("low-memory: reclaimed source buffers={reclaimed_sources}")
             self.ctx.evict_sources()
             log_phase("phase2:source_reclaim:done reclaimed={reclaimed_sources}")
+        None
 
+    # Phase 3: lower AST to target-neutral typed HIR.
+    me stage_lower_hir(compile_mode_text: text, archive_production: bool) -> Option<CompileResult>:
         log_phase("phase3:hir_typecheck:start")
         log_trace("BEFORE phase 3")
         # Derive routing from stable configuration, not the adjacent mutable
@@ -445,7 +515,6 @@ impl CompilerDriver:
         # methods. lower_and_check_streaming_surfaces_impl validates/rebuilds
         # the frozen owner before doing any work.
         val hir_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
-        val archive_production = driver_hir_archive_production_requested_v1(self.ctx, compile_mode_text)
         var analyze_ok_effective = false
         if archive_production:
             log_phase("phase3:hir_typecheck:carrier=owned-archives")
@@ -469,7 +538,7 @@ impl CompilerDriver:
             else:
                 log_error("phase 3 FAILED (go-to-end: failure not attributable to modules)")
                 self.go_to_end_absorb_errors_v1("hir")
-                return self.go_to_end_finish_v1(0, [])
+                return Some(self.go_to_end_finish_v1(0, []))
         if not analyze_ok_effective:
             log_error("phase 3 FAILED")
             if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
@@ -487,7 +556,7 @@ impl CompilerDriver:
             # the failure is still real, so report it instead of dereferencing.
             if not rt_heap_ref_wellformed(self.ctx):
                 log_error("phase 3 FAILED with no surviving compile context")
-                return CompileResult.TypeError([])
+                return Some(CompileResult.TypeError([]))
             # The historical refusal to read the diagnostics here is RETIRED,
             # and the reason is that the hazard it was avoiding was fixed in the
             # accessor rather than at this call site.
@@ -537,15 +606,15 @@ impl CompilerDriver:
                 # Restores the ResolveError/TypeError distinction that the
                 # no-read branch had to give up.
                 if phase3_surviving_errors[0].contains("Method resolution"):
-                    return CompileResult.ResolveError(phase3_surviving_errors)
-                return CompileResult.TypeError(phase3_surviving_errors)
+                    return Some(CompileResult.ResolveError(phase3_surviving_errors))
+                return Some(CompileResult.TypeError(phase3_surviving_errors))
             # Reached only when nothing readable came back. The recorded scalar
             # count is included deliberately: count>0 here means N diagnostics
             # were lost in transport, count==0 means the phase failed without
             # recording any -- two very different bugs that the old fixed
             # string conflated.
             log_error("phase 3 FAILED (no readable diagnostics; recorded error_count={phase3_recorded_count}; per-module root causes were emitted above as [hir-fatal])")
-            return CompileResult.TypeError([])
+            return Some(CompileResult.TypeError([]))
         log_debug("phase 3 done")
         log_phase("phase3:hir_typecheck:done")
         log_build_progress("hir", "modules", -1, -1,
@@ -554,71 +623,29 @@ impl CompilerDriver:
         if self.ctx.options.low_memory:
             log_debug("low-memory: evicting AST modules")
             self.ctx.evict_ast()
+        None
 
-        if compile_mode_text == "check":
-            if self.ctx.config.contains_key("collection-plan-explain-mir"):
-                if not self.monomorphize_for_explicit_compilation(analyze_ok_effective):
-                    return CompileResult.TypeError(self.ctx.errors)
-                if not self.lower_to_mir_for_explicit_target(driver_mir_target_context(self.ctx.options)):
-                    return CompileResult.CodegenError(self.ctx.errors.join("\n"))
-            log_debug("check mode")
-            return CompileResult.Success(None)
-
+    # Phase 4: monomorphize the admitted HIR (still target-neutral).
+    me stage_monomorphize(compile_mode_text: text, archive_production: bool) -> Option<CompileResult>:
         log_phase("phase4:monomorphize:start")
         log_debug("phase 4: monomorphization...")
         val mono_ok = if archive_production:
             driver_hir_archive_production_phase4_v1(self, false, true, true)
         else:
-            self.monomorphize_impl(analyze_ok_effective)
+            self.monomorphize_impl(true)
         if not mono_ok:
             log_error("phase 4 FAILED")
             log_build_progress("monomorphize", "modules", -1, -1,
                 "failed", 3, 6, 1, 0, "failed")
             if compile_mode_text == "aot" and go_to_end_enabled_v1():
                 self.go_to_end_absorb_errors_v1("mono")
-                return self.go_to_end_finish_v1(0, [])
-            return CompileResult.TypeError(self.ctx.errors)
+                return Some(self.go_to_end_finish_v1(0, []))
+            return Some(CompileResult.TypeError(self.ctx.errors))
         log_debug("phase 4 done")
         log_phase("phase4:monomorphize:done")
         log_build_progress("monomorphize", "modules", -1, -1,
             "complete", 4, 6, 0, 0, "running")
-
-        log_phase("phase5:mode_dispatch:start")
-        log_debug("phase 5: mode-specific processing...")
-        if compile_mode_text == "check":
-            log_debug("check mode")
-            return CompileResult.Success(None)
-        if compile_mode_text == "sdn":
-            log_debug("sdn mode")
-            return self.process_sdn()
-        if compile_mode_text == "interpret":
-            log_debug("interpret mode")
-            return self.interpret()
-        if compile_mode_text == "jit":
-            log_debug("jit mode")
-            return self.jit_compile_and_run()
-        if compile_mode_text == "aot":
-            log_debug("aot mode")
-            val aot_result = self.aot_compile()
-            if aot_result.is_success() and native_noop_eligible:
-                val built_output = self.ctx.options.output_file ??
-                    driver_noop_default_output_v1(self.ctx.options.input_files)
-                val publication = native_noop_publish_built_v1(
-                    native_noop_request, self.ctx.source_paths_owner, built_output)
-                if publication != "ok":
-                    return CompileResult.CodegenError(
-                        "native no-op receipt publication failed: {publication}")
-                if collection_receipt_requested:
-                    val copied = collection_native_copy_v1(built_output, native_noop_request_output_v1(native_noop_request), native_noop_request.identity)
-                    if copied != "":
-                        return CompileResult.CodegenError("native collection receipt cache publication failed: {copied}")
-            return aot_result
-        if compile_mode_text == "smf_exec":
-            log_debug("smf_exec mode")
-            return self.execute_smf()
-
-        log_warn("no mode matched, falling through")
-        CompileResult.Success(None)
+        None
 
     me compile_vhdl_only() -> CompileResult:
         if self.ctx.options.backend != "vhdl" or self.ctx.options.mode != CompileMode.Aot:

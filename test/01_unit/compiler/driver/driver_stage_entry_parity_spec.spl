@@ -1,0 +1,99 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# plan: doc/03_plan/compiler/build_system/true_per_file_src_to_obj_plan.md (PR2a)
+#
+# PR2a: compile() is a thin composition of per-stage entry points
+# (stage_parse, stage_lower_hir, stage_monomorphize, stage_lower_mir,
+# stage_emit_object). This spec proves each stage is callable alone on one
+# module and that composing them yields the same result as the monolithic call.
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, read_file}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.common.driver_compile_options.{CompileOptions, driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{CompileMode}
+use compiler.common.driver_core_types.{CompileResult}
+
+fn stage_fixture(name: text, code: text) -> text:
+    val dir = "build/test_tmp/driver_stage_entry_parity"
+    dir_create_all(dir)
+    val path = dir + "/" + name + ".spl"
+    file_write(path, code)
+    path
+
+fn stage_options(path: text) -> CompileOptions:
+    var options = driver_core_compile_options_default()
+    options.input_files = [path]
+    options.mode = CompileMode.Check
+    options.bootstrap_input_count = 0
+    options
+
+fn result_tag(result: CompileResult) -> text:
+    match result:
+        case Success(_): "success"
+        case ParseError(_): "parse"
+        case ResolveError(_): "resolve"
+        case TypeError(_): "type"
+        case _: "other"
+
+# Runs the stages one by one, exactly as compile() composes them for check mode.
+fn composed_check(path: text) -> text:
+    var driver = compiler_driver_create(stage_options(path))
+    val (_ctx, loaded) = driver.load_sources_impl()
+    if not loaded:
+        return "load"
+    match driver.stage_parse():
+        case Some(stop): return result_tag(stop)
+        case None: pass
+    match driver.stage_lower_hir("check", false):
+        case Some(stop): return result_tag(stop)
+        case None: pass
+    "success"
+
+fn monolithic_check(path: text) -> text:
+    result_tag(compiler_driver_run_compile(compiler_driver_create(stage_options(path))))
+
+val GOOD_SRC = "fn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn main() -> i64:\n    add(1, 2)\n"
+val BAD_SRC = "fn main( -> i64:\n    1\n"
+
+describe "driver per-stage entry points (PR2a)":
+    it "invokes stage_parse alone on one module":
+        val path = stage_fixture("good_parse", GOOD_SRC)
+        var driver = compiler_driver_create(stage_options(path))
+        val (_ctx, loaded) = driver.load_sources_impl()
+        expect(loaded).to_be(true)
+        expect(driver.stage_parse().is_none()).to_be(true)
+
+    it "invokes stage_lower_hir alone after parse":
+        val path = stage_fixture("good_hir", GOOD_SRC)
+        var driver = compiler_driver_create(stage_options(path))
+        val (_ctx, loaded) = driver.load_sources_impl()
+        expect(loaded).to_be(true)
+        expect(driver.stage_parse().is_none()).to_be(true)
+        expect(driver.stage_lower_hir("check", false).is_none()).to_be(true)
+
+    it "stops at stage_parse with a ParseError on a malformed module":
+        val path = stage_fixture("bad_parse", BAD_SRC)
+        expect(composed_check(path)).to_equal("parse")
+
+    it "composed stages match the monolithic compile on a good module":
+        val path = stage_fixture("good_parity", GOOD_SRC)
+        expect(composed_check(path)).to_equal(monolithic_check(path))
+        expect(monolithic_check(path)).to_equal("success")
+
+    it "composed stages match the monolithic compile on a malformed module":
+        val path = stage_fixture("bad_parity", BAD_SRC)
+        expect(composed_check(path)).to_equal(monolithic_check(path))
+
+    it "compile() is a thin composition of the stage entry points":
+        val orch = read_file("src/compiler/80.driver/driver_orchestration.spl")
+        expect(orch).to_contain("me stage_parse() -> Option<CompileResult>:")
+        expect(orch).to_contain("me stage_lower_hir(compile_mode_text: text, archive_production: bool) -> Option<CompileResult>:")
+        expect(orch).to_contain("me stage_monomorphize(compile_mode_text: text, archive_production: bool) -> Option<CompileResult>:")
+        expect(orch).to_contain("match self.stage_parse():")
+        expect(orch).to_contain("match self.stage_lower_hir(compile_mode_text, archive_production):")
+        expect(orch).to_contain("match self.stage_monomorphize(compile_mode_text, archive_production):")
+        val aot = read_file("src/compiler/80.driver/driver_aot_pipeline.spl")
+        expect(aot).to_contain("me stage_lower_mir() -> Option<CompileResult>:")
+        expect(aot).to_contain("me stage_emit_object() -> CompileResult:")
+        expect(aot).to_contain("match self.stage_lower_mir():")
