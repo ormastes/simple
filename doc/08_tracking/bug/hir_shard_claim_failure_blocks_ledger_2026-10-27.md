@@ -1,6 +1,10 @@
-# One crashed HIR shard blocks the whole ledger (misleading "claim" reason)
+# HIR shard ledger claim race / worker-crash global block
 
 **Status:** fixed (2026-10-27, branch `work/hir-claim-reason`; the OOM in shard 6 itself is out of scope)
+
+**Severity:** P0
+
+**Measured cause: the coordinator reap-rule global block, NOT a lock race.** The title keeps "claim race" only because that was the initial hypothesis; the log order disproves it.
 
 ## Symptom
 
@@ -80,3 +84,23 @@ aggregate).
 | AOT/codegen batch flush, `driver_aot_pipeline.spl:178,216,310,762` (`SIMPLE_NATIVE_STAGED_CODEGEN_BATCH`) | go-to-end | n/a | yes (records per-module, excludes) | none |
 | File-worker aggregate, `native_build_main.spl:1520` | none | link blocked | n/a | same as MIR shard aggregate |
 | Link / publish, `driver_aot_native_output.spl:3067` | go-to-end writes manifest, never links, exits non-zero | — | yes | by design |
+
+## Same-class review (other claim / queue paths)
+
+| Path | file:line | Verdict |
+|---|---|---|
+| MIR queue reap (`run_ledger_shards "mir-shard"`) | `src/app/cli/native_build_main.spl:1287,1409` -> shared reap `:1116` | same bug; fixed by the shared `hir_shard_recovery_reap_blocks_ledger_v1` |
+| MIR worker claim | `driver_pipeline_lowering.spl:1529`, `driver_mir_selective_worker_v1.spl:418` (via `native_mir_shard.spl:135`) | fails only that worker (no global block); error now names the claim reason |
+| MIR link reads BLOCKED | `native_mir_shard.spl:188,249` | safe: reader, reports the (first-wins) reason |
+| MIR fork child seal failure | `native_mir_fork_v1.spl:202` | safe: genuine ledger corruption, fail-closed kept |
+| File-worker row picks (`run_ledger_shards "file-worker"`) | `native_build_main.spl:1491` -> reap `:1116`; children claim via `hir_shard_begin` | same bug; fixed by the shared reap rule + named claim reason |
+| Parse-shard claims (split=queue) | `driver_source_pipeline_parsing.spl:240-252` | safe: lock-free `file_create_exclusive`, no global marker, create failure falls back to static ownership; dead-holder claims released by `parse_shard_queue.spl:45` |
+| SCV refresh lock | `src/app/compiler_entrypoint/inventory_events.spl:955,1039` | safe: 300 s lock, failure returns a named per-process reason (`compile-event-refresh-lock-unavailable`), no global block, no retry |
+
+## Stress
+
+`sh scripts/check/stress-hir-claim-ledger.shs [iterations] [claimers] [paths]` runs REAL
+child processes (`bin/simple run test/03_system/compiler/driver/fixtures/hir_claim_stress_worker.spl`):
+8 claimers x 200 paths with rotated start offsets + 1 worker that dies holding
+the ledger `.lock` with 0 claims, then the coordinator reap rule for it.
+Result (2026-10-27, Windows, 80 threads): `PASS — 100/100 iterations, 8 claimers x 200 paths + 1 lock-holding crash, wall 739s`. Red check: with the 0-claim-crash exemption removed, iteration 1 fails `BLOCKED=stress reap blocked owner=crashed progress=0`.
