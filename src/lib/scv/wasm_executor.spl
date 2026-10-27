@@ -15,6 +15,7 @@
 
 use app.io.mod (file_exists)
 use std.nogc_sync_mut.sffi.dynamic.{DynLib, sffi_lib_path}
+use std.nogc_sync_mut.sffi.scv_wasm_provider.{scv_wasm_provider_parse_blob}
 use std.scv.store.{scv_write_text, scv_hash_text, scv_content_id_for_u8}
 use std.scv.file_buffer.{scv_file_buffer_read_bounded}
 use std.scv.parser_registry.{scv_locked_parser_hash, scv_locked_parser_error, scv_wasm_magic_ok}
@@ -203,31 +204,12 @@ fn _scv_parse_node_blob(root: text, blob: text, source: text, language: text,
 # Full WASM parse pipeline: load grammar → parse → walk → write nodes.
 # Returns (root_node_id, error_or_empty).
 #
-# When the scv_wasm shim is compiled and linked (i.e., the runtime is built
-# with wasmtime support), these extern declarations are resolved and the real
-# path is used.  When the shim is absent, scv_wasm_executor_available()
-# returns false and the call never reaches these externs. Fallback is selected
-# by callers and cannot acquire a successful WASM execution label.
-#
-# In interpreter mode or when only DynLib probing is available (no compiled
-# shim), the availability check gates everything and reports unavailable.
-@unsafe(reason: "wasm shim handle from foreign loader; availability-gated before use", capabilities: [ffi])
-extern fn wasm_rt_load(path: text) -> i64
-@unsafe(reason: "frees a foreign wasm shim handle; caller owns handle lifetime", capabilities: [ffi])
-extern fn wasm_rt_free(handle: i64)
-@unsafe(reason: "foreign parse over caller buffer; length passed explicitly", capabilities: [ffi])
-extern fn wasm_rt_parse_all(handle: i64, source: text, source_len: i64) -> text
-
-# Smallest ffi-unsafe boundary around the shim: load, parse, free.
-# Returns "" when the grammar cannot be loaded or parsing yields nothing.
-@unsafe(reason: "wasm shim load/parse/free sequence; handle validity checked, freed on all paths", capabilities: [ffi])
+# Runtime probing cannot satisfy native static imports. Resolve and retain the
+# actual dynamic provider, using exact load/parse/free signatures and copied
+# output. Missing or invalid providers remain explicit unavailable/parse errors.
 fn _scv_wasm_parse_blob(grammar_path: text, source: text, source_len: i64) -> text:
-    val handle = wasm_rt_load(grammar_path)
-    if handle <= 0:
-        return ""
-    val blob = wasm_rt_parse_all(handle, source, source_len)
-    wasm_rt_free(handle)
-    blob
+    unsafe(capabilities: [ffi, raw_ptr]):
+        scv_wasm_provider_parse_blob(grammar_path, source, source_len)
 
 fn scv_wasm_parse(root: text, language: text, grammar: text, version: text,
                   parser_hash: text, source: text) -> (text, text):
