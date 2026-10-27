@@ -11,7 +11,7 @@ Audience: Maintainers of the SCV storage/event layers.
 """
 # @req: REQ-SCV-EVENT-JOURNAL-001
 use std.spec.{describe, it, expect, step}
-use app.io.mod (file_exists, file_read, dir_create, dir_remove_all, process_run)
+use app.io.mod (file_exists, file_read, file_write, file_delete, dir_create, dir_remove_all, process_run)
 use std.scv.store.{scv_init_repo}
 use std.scv.journal.{scv_event_batch_record, scv_event_batch_commit, scv_event_batch_replay, scv_event_batch_is_committed, scv_event_batch_pending_path, scv_journal_events_path, scv_event_log}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
@@ -95,6 +95,8 @@ describe "scv event journal integration (E-03)":
         step("Fail marker publication after the event row is durable")
         val root = _repo("marker-write-failure")
         expect(scv_event_batch_record(root, "b1", "created", "a.txt", "")).to_equal(true)
+        expect(_fault_cli(root, "event_batch_event", "event-commit", "b1")).to_equal(3)
+        expect(_events_lines(root)).to_equal(1)
         dir_create("{root}/.scv/journal/event_batches/b1.committed", true)
         expect(scv_event_batch_commit(root, "b1")).to_equal(false)
         expect(_events_lines(root)).to_equal(1)
@@ -117,6 +119,52 @@ describe "scv event journal integration (E-03)":
         expect(_events_lines(root)).to_equal(1)
         dir_remove_all(root)
 
+    it "rejects altered seal, event rows, and missing published rows while preserving pending input":
+        step("Tamper with each identity-bearing artifact after its prior durable boundary")
+        val seal_root = _repo("tamper-seal")
+        expect(scv_event_batch_record(seal_root, "s1", "created", "a.txt", "")).to_equal(true)
+        expect(_fault_cli(seal_root, "event_batch_sealed", "event-commit", "s1")).to_equal(3)
+        expect(file_write(scv_event_batch_pending_path(seal_root, "s1"), "kind=created path=b.txt related=\n")).to_equal(true)
+        expect(scv_event_batch_commit(seal_root, "s1")).to_equal(false)
+        expect(file_exists(scv_event_batch_pending_path(seal_root, "s1"))).to_equal(true)
+        expect(_events_lines(seal_root)).to_equal(0)
+
+        val row_root = _repo("tamper-row")
+        expect(scv_event_batch_record(row_root, "r1", "created", "a.txt", "")).to_equal(true)
+        expect(_fault_cli(row_root, "event_batch_event", "event-commit", "r1")).to_equal(3)
+        val original = file_read(scv_journal_events_path(row_root))
+        val changed = original.replace("refs=kind=created,path=a.txt,related=", "refs=kind=created,path=b.txt,related=")
+        expect(file_write(scv_journal_events_path(row_root), changed)).to_equal(true)
+        expect(scv_event_batch_commit(row_root, "r1")).to_equal(false)
+        expect(file_exists(scv_event_batch_pending_path(row_root, "r1"))).to_equal(true)
+
+        val missing_root = _repo("missing-row")
+        expect(scv_event_batch_record(missing_root, "m1", "created", "a.txt", "")).to_equal(true)
+        expect(scv_event_batch_commit(missing_root, "m1")).to_equal(true)
+        expect(file_delete(scv_journal_events_path(missing_root))).to_equal(true)
+        expect(scv_event_batch_is_committed(missing_root, "m1")).to_equal(false)
+        expect(scv_event_batch_commit(missing_root, "m1")).to_equal(false)
+
+        val path_root = _repo("path-traversal")
+        expect(scv_event_batch_record(path_root, "../outside", "created", "a.txt", "")).to_equal(false)
+        expect(file_exists("{path_root}/.scv/journal/outside.pending")).to_equal(false)
+        dir_remove_all(seal_root)
+        dir_remove_all(row_root)
+        dir_remove_all(missing_root)
+        dir_remove_all(path_root)
+
+    it "refuses a symlinked pending leaf without following or deleting its target":
+        step("Place a pending-name symlink to an ordinary file and attempt commit")
+        val root = _repo("pending-symlink")
+        val target = "{root}/outside.pending-data"
+        expect(file_write(target, "kind=created path=a.txt related=\n")).to_equal(true)
+        val (out, err, code) = process_run("ln", ["-s", target, scv_event_batch_pending_path(root, "b1")])
+        expect(code).to_equal(0)
+        expect(scv_event_batch_commit(root, "b1")).to_equal(false)
+        expect(file_exists(scv_event_batch_pending_path(root, "b1"))).to_equal(true)
+        expect(file_read(target)).to_equal("kind=created path=a.txt related=\n")
+        dir_remove_all(root)
+
     it "recovers crashes at each durable event-batch boundary without duplicate rows":
         step("Crash after pending, seal, event-row, and terminal-marker publication")
         val pending_root = _repo("crash-pending")
@@ -135,7 +183,7 @@ describe "scv event journal integration (E-03)":
         expect(scv_event_batch_record(row_root, "r1", "created", "a.txt", "")).to_equal(true)
         expect(scv_event_batch_record(row_root, "r1", "modified", "a.txt", "")).to_equal(true)
         expect(_fault_cli(row_root, "event_batch_event", "event-commit", "r1")).to_equal(3)
-        expect(_events_lines(row_root)).to_equal(1)
+        expect(_events_lines(row_root)).to_equal(2)
         expect(scv_event_batch_replay(row_root)).to_equal(1)
         expect(_events_lines(row_root)).to_equal(2)
 
@@ -158,17 +206,22 @@ describe "scv event journal integration (E-03)":
             "REPO=$(pwd)",
             "cd \"{root}\"",
             "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
-            "scv event-record c1 created a.txt &",
-            "scv event-record c2 created b.txt &",
-            "wait",
-            "scv event-commit c1",
-            "scv event-commit c2",
+            "scv event-record c1 created a.txt & p1=$!",
+            "scv event-record c2 created b.txt & p2=$!",
+            "wait \"$p1\"",
+            "wait \"$p2\"",
+            "scv event-commit c1 & p1=$!",
+            "scv event-commit c2 & p2=$!",
+            "wait \"$p1\"",
+            "wait \"$p2\"",
             "printf 'writers=done\\n'"
         ].join("\n") + "\n"
         val (out, err, code) = process_run("/bin/sh", ["-c", script])
         expect(code).to_equal(0)
         expect("{out}{err}").to_contain("writers=done")
         expect(_events_lines(root)).to_equal(2)
+        expect(file_read(scv_journal_events_path(root))).to_contain("refs=kind=created,path=a.txt,related=")
+        expect(file_read(scv_journal_events_path(root))).to_contain("refs=kind=created,path=b.txt,related=")
         expect(scv_event_batch_is_committed(root, "c1")).to_equal(true)
         expect(scv_event_batch_is_committed(root, "c2")).to_equal(true)
         dir_remove_all(root)
