@@ -91,3 +91,5 @@ Follow-up: the design-required cfg fields in `hir_declaration_summary_v1` are no
   plus its strip-decision digest. Flag off is unchanged. Spec: `hir_cache_key_neutral_spec.spl`.
   The strip-decision memo is keyed (content, cfg identity, native target, mode); neutral is read
   only from a marker-mode entry while the driver declared marker mode, else fail closed (`U`).
+- Step 3 (2026-10-27): `src/compiler/30.types/cfg_decl_check.spl` `cfg_decl_check_module` proves guarded same-name items exclusive over the os x arch (+feature) matrix and emits E-CFG-OVERLAP / NONEXHAUSTIVE / SIG-DIVERGE / IMPL-OVERLAP; wired in `80.driver/hir_typecheck_consumer_v1.spl` as errors. Spec: `test/01_unit/compiler/30.types/cfg_decl_check_spec.spl`.
+- TODO (cfg_decl_check): MethodCall callers are not walked; @cfg on methods inside impl/class is not collected; move `mir_cfg_eval_for_target` to core next to `cfg_platform` (30.types currently imports 50.mir, a layering inversion). Deferred from design row 3: checker.spl coherence integration and SymbolTable canonical group-id indexes.
