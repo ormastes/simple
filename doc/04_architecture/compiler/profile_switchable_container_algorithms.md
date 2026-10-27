@@ -1,5 +1,22 @@
 # Profile-based switchable container algorithms
 
+## 2026-10-27 common backend and profile contract
+
+The [shared collection capability contract](collection_backend_capabilities.md)
+governs the interface with typed DataFrames, lockless maps and async resources.
+Linear/Hash/Ordered describes representation, not concurrency; `.sprof`
+observations rank eligible choices and cannot relax required operations,
+key/value equality, lifetime, progress, layout or target policy. Constructor
+selection, live migration and measurement support are separate visible
+capabilities. Static-only/no-capture/unsupported transitions report a reason;
+explicit unsupported requirements fail before effects. Advisory Auto can retain
+Original. The active legacy capture lock is ineligible on a strict lockless
+operation unless capture is disabled or replaced by a qualified path.
+
+This planning refinement does not implement a new tag or backend. CBC-01–12
+in the [TDD plan](../../03_plan/sys_test/collection_backend_capabilities.md)
+extend PSC-AC-001–008; historical source/evidence statuses below are retained.
+
 ## Status reconciliation (2026-10-25)
 
 Verified against `origin/release/1.0.0` and its git log on 2026-10-25. Docs-only; no tests were run for this note.
