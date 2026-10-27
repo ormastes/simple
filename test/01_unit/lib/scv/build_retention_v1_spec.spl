@@ -1,0 +1,91 @@
+"""Build cache retention preserves exact historical closure under bounded GC.
+
+REQ-SCV-BUILD-RETENTION-001..006: authoritative history, namespace isolation,
+pin and reader leases, bounded closure, CAS admission and real guarded eviction.
+"""
+use std.spec.{describe, it, expect, step}
+use std.scv.build_retention_v1.*
+
+fn retention_node(id: text, dependencies: [text], authoritative: bool, bytes: i64) -> BuildRetentionNodeV1:
+    BuildRetentionNodeV1(namespace: "snapshot", id: id, dependencies: dependencies,
+        authoritative: authoritative, rebuildable: not authoritative, bytes: bytes, last_used: 1)
+
+fn retention_state(nodes: [BuildRetentionNodeV1]) -> BuildRetentionStateV1:
+    BuildRetentionStateV1(generation: 1, nodes: nodes, pins: [], leases: [])
+
+fn retention_limits(bytes: i64) -> BuildRetentionLimitsV1:
+    BuildRetentionLimitsV1(max_nodes: 64, max_edges: 128, max_work: 4096,
+        max_bytes: bytes, max_retained: 64, max_remove: 64)
+
+describe "Build retention V1 closure authority":
+    it "keeps sole authoritative history and all dependencies despite a zero budget":
+        step("Retain authoritative receipt and its snapshot; report protected pressure")
+        val state = retention_state([
+            retention_node("receipt", ["snapshot/old"], true, 4),
+            retention_node("old", [], false, 8),
+            retention_node("orphan", [], false, 16)])
+        val plan = build_retention_plan_v1(state, retention_limits(0), 10).unwrap()
+        expect(plan.protected.contains("snapshot/old")).to_equal(true)
+        expect(plan.deletions).to_equal(["snapshot/orphan"])
+        expect(plan.status).to_equal("protected_over_budget")
+        expect(plan.remaining_bytes).to_equal(12)
+
+    it "pins exact namespaced IDs rather than matching a bare digest":
+        step("Pin snapshot/same while artifact/same remains independently evictable")
+        var state = retention_state([retention_node("same", [], false, 8),
+            BuildRetentionNodeV1(namespace: "artifact", id: "same", dependencies: [],
+                authoritative: false, rebuildable: true, bytes: 16, last_used: 1)])
+        state = build_retention_pin_v1(state, 1, "branches/main", "snapshot/same").unwrap()
+        val plan = build_retention_plan_v1(state, retention_limits(8), 10).unwrap()
+        expect(plan.deletions).to_equal(["artifact/same"])
+        expect(plan.protected).to_equal(["snapshot/same"])
+
+    it "rejects missing dependencies, cycles and work exhaustion instead of reporting a successful closure":
+        step("Each damaged or unfinished graph fails before producing deletion authority")
+        val missing = retention_state([retention_node("a", ["snapshot/missing"], false, 1)])
+        expect(build_retention_plan_v1(missing, retention_limits(0), 1).is_err()).to_equal(true)
+        val cycle = retention_state([retention_node("a", ["snapshot/b"], false, 1),
+            retention_node("b", ["snapshot/a"], false, 1)])
+        expect(build_retention_plan_v1(cycle, retention_limits(0), 1).is_err()).to_equal(true)
+        var limits = retention_limits(0)
+        limits.max_work = 1
+        expect(build_retention_plan_v1(cycle, limits, 1).is_err()).to_equal(true)
+
+    it "preserves active readers until lease expiry and reports bounded pressure":
+        step("An old client lease protects its historical snapshot and dependency")
+        var state = retention_state([retention_node("old", ["snapshot/base"], false, 8),
+            retention_node("base", [], false, 8)])
+        state = build_retention_lease_v1(state, 1, "old-client", "snapshot/old", 100).unwrap()
+        val live = build_retention_plan_v1(state, retention_limits(0), 99).unwrap()
+        expect(live.deletions.len()).to_equal(0)
+        expect(live.status).to_equal("protected_over_budget")
+        val expired = build_retention_plan_v1(state, retention_limits(0), 100).unwrap()
+        expect(expired.deletions).to_equal(["snapshot/old", "snapshot/base"])
+
+    it "uses idempotent pin operations and rejects stale generation updates":
+        step("A repeated pin leaves generation stable and stale unpin loses CAS")
+        val initial = retention_state([retention_node("old", [], false, 8)])
+        val pinned = build_retention_pin_v1(initial, 1, "user_pins/keep", "snapshot/old").unwrap()
+        val repeated = build_retention_pin_v1(pinned, 2, "user_pins/keep", "snapshot/old").unwrap()
+        expect(repeated.generation).to_equal(2)
+        expect(build_retention_unpin_v1(repeated, 1, "user_pins/keep").is_err()).to_equal(true)
+        val removed = build_retention_unpin_v1(repeated, 2, "user_pins/keep").unwrap()
+        expect(build_retention_unpin_v1(removed, 3, "user_pins/keep").unwrap().generation).to_equal(3)
+
+    it "keeps dependents intact until their rebuildable owner can also be removed":
+        step("A finite delete budget removes the owner before its dependency")
+        val state = retention_state([retention_node("base", [], false, 8),
+            retention_node("owner", ["snapshot/base"], false, 8)])
+        var limits = retention_limits(0)
+        limits.max_remove = 1
+        val plan = build_retention_plan_v1(state, limits, 10).unwrap()
+        expect(plan.deletions).to_equal(["snapshot/owner"])
+        expect(plan.status).to_equal("throttled")
+
+    it "never frees non-rebuildable objects even when their authoritative bit is absent":
+        step("An unknown historical payload defaults to retained")
+        var node = retention_node("sole-copy", [], false, 8)
+        node.rebuildable = false
+        val plan = build_retention_plan_v1(retention_state([node]), retention_limits(0), 1).unwrap()
+        expect(plan.deletions.len()).to_equal(0)
+        expect(plan.status).to_equal("protected_over_budget")
