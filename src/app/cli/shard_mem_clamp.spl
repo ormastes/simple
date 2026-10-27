@@ -307,6 +307,24 @@ pub fn shard_commit_live_footprint_v1(base_headroom_kib: i64, now_headroom_kib: 
 pub fn shard_commit_estimate_kib_v1(static_kib: i64, observed_peak_kib: i64) -> i64:
     if observed_peak_kib > static_kib: observed_peak_kib else: static_kib
 
+# 2026-10-27 phase 3 (stage2 6b0ba5f3): with no recorded peak the pool priced
+# 8 HIR workers at the static 6 GB and admitted all of them at warmup (live
+# footprint 0), they each grew to ~11 GB commit, the host commit limit ran out
+# and every worker died in Rust's alloc-error abort. Until a peak is measured
+# for this producer, price a worker at twice the static estimate; an explicit
+# SIMPLE_*_SHARD_WORKER_KB override (override_kib > 0) is honored as-is.
+pub fn shard_commit_unmeasured_estimate_kib_v1(static_kib: i64, recorded_peak_kib: i64, override_kib: i64 = 0) -> i64:
+    if override_kib > 0: return shard_commit_estimate_kib_v1(override_kib, recorded_peak_kib)
+    if recorded_peak_kib > 0: shard_commit_estimate_kib_v1(static_kib, recorded_peak_kib) else: static_kib * 2
+
+# 0xC0000409 (-1073740791 / 3221226505) is the Windows fast-fail that Rust's
+# `handle_alloc_error` abort raises after "memory allocation of N bytes failed".
+pub fn shard_worker_exit_hint_v1(code: i64, label: text) -> text:
+    if code != -1073740791 and code != 3221226505: return ""
+    # file-worker pools are priced from the HIR knob (run_ledger_shards).
+    val knob = if label == "mir-shard": "SIMPLE_MIR_SHARD_WORKER_KB" elif label == "file-worker": "SIMPLE_HIR_SHARD_WORKER_KB (file-worker pool)" else: "SIMPLE_HIR_SHARD_WORKER_KB"
+    " (allocation-failure abort 0xC0000409: host commit limit exhausted; set {knob} to at least the measured worker peak commit)"
+
 pub fn shard_commit_spawn_admit_v1(headroom_kib: i64, reserve_kib: i64, est_kib: i64, live_private_kib: [i64]) -> bool:
     if headroom_kib < 0: return true
     if live_private_kib.len() == 0: return true
