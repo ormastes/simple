@@ -19,7 +19,7 @@
 #   use app.io (file_write)
 #   file_write("doc/08_tracking/bug/bug_db.sdn", content)  // ❌ Race condition!
 
-use nogc_sync_mut.database.atomic (atomic_write, atomic_read)
+use nogc_sync_mut.database.atomic (atomic_write, atomic_write_exclusive, atomic_read)
 use std.convert (try_parse_int, try_parse_i32)
 
 use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
@@ -238,14 +238,19 @@ class SdnTable:
             if trimmed.contains("|") and not trimmed.starts_with("#"):
                 # Parse header
                 val parts: [text] = trimmed.split("|")
-                if parts.len() >= 3:
-                    table_name = parts[0].trim()
-                    val col_part = parts[1].trim()
-                    # NOTE: Cannot chain .split().map() - bootstrap runtime bug
-                    val raw_cols: [text] = col_part.split(",")
-                    columns = raw_cols.map(&:trim)
-                    header_idx = i
-                    break
+                if parts.len() != 3:
+                    return nil
+                if parts[2].trim() != "":
+                    return nil
+                table_name = parts[0].trim()
+                val col_part = parts[1].trim()
+                if table_name == "" or col_part == "":
+                    return nil
+                # NOTE: Cannot chain .split().map() - bootstrap runtime bug
+                val raw_cols: [text] = col_part.split(",")
+                columns = raw_cols.map(&:trim)
+                header_idx = i
+                break
             i = i + 1
 
         if header_idx == -1:
@@ -274,7 +279,7 @@ class SdnTable:
             # Handles quoted values that contain commas
             val parts = split_sdn_row(line)
             if parts.len() != columns_parsed.len():
-                continue
+                return nil
 
             val row = SdnRow(fields: {}, _version: 0)
             var j = 0
@@ -513,6 +518,11 @@ class SdnDatabase:
 
             val table_opt = parse_sdn_table(section)
             if not table_opt.?:
+                if sdn_section_has_table_header(section):
+                    # A table-shaped section that fails parsing is corrupt.
+                    # Reject the whole database instead of silently saving a
+                    # smaller view that omits its malformed rows.
+                    return nil
                 # Tracked SDN files may contain prose/report sections between
                 # tables. Ignore any section that does not parse as a table.
                 continue
@@ -558,8 +568,10 @@ class SdnDatabase:
 
         Some(db)
 
-    # Save to disk (atomic with file locking)
-    me save() -> bool:
+    # Render one canonical SDN payload for both replacement and create-only
+    # publication. Keep the checksum and table ordering identical across both
+    # writer paths.
+    fn serialized_content() -> text:
         var sections: [text] = []
 
         # Write strings table first. Built via the uniquely-named
@@ -582,7 +594,11 @@ class SdnDatabase:
 
         val body = sections.join("\n\n") + "\n\n"
         val crc = crc32_text(body)
-        val content = "#sdn-crc32:{crc}\n" + body
+        "#sdn-crc32:{crc}\n" + body
+
+    # Save to disk (atomic with file locking)
+    me save() -> bool:
+        val content = self.serialized_content()
 
         if not atomic_write(self.path, content):
             return false
@@ -598,6 +614,16 @@ class SdnDatabase:
             nil:
                 pass
 
+        true
+
+    # Publish an initially absent database without replacing any path entry.
+    # Used when a nil load could mean either absence or unreadable contents:
+    # the exclusive no-replace publish is the atomic absence proof.
+    me save_exclusive() -> bool:
+        val content = self.serialized_content()
+        if not atomic_write_exclusive(self.path, content):
+            return false
+        self.modified = false
         true
 
     # Get table by name
@@ -721,7 +747,25 @@ fn split_sdn_row(line: text) -> [text]:
     if chars.len() > 0 or parts.len() > 0:
         parts.push(chars.join(""))
 
+    if in_quotes:
+        return []
+
     parts
+
+# True when a section begins with an SDN table-shaped header. This lets the
+# loader continue to ignore prose sections while rejecting malformed tables.
+fn sdn_section_has_table_header(section: text) -> bool:
+    val lines: [text] = section.split("\n")
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        if not line.contains("|"):
+            continue
+        # SdnTable.parse treats the first non-comment pipe line as its header
+        # candidate and fails malformed candidates immediately.
+        return true
+    false
 
 # Strip surrounding double quotes from a value.
 # '"hello"' -> 'hello', 'plain' -> 'plain'

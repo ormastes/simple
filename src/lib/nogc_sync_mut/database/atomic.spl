@@ -27,6 +27,9 @@ extern fn rt_file_delete(path: text) -> bool
 use std.io_runtime.{file_rename}
 extern fn rt_file_create_excl(path: text, content: text) -> bool
 extern fn rt_file_sync(path: text) -> bool
+extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
+extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
+extern fn rt_dir_remove(path: text, recursive: bool) -> bool
 use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{thread_sleep}
@@ -218,6 +221,38 @@ fn atomic_write(path: text, content: text) -> bool:
 
     lock.release()
     success
+
+# Create a database only when the destination is absent. The stage directory
+# lives beside the destination so publication stays on one filesystem, and
+# publish_noreplace treats every existing directory entry (including a
+# dangling symlink) as occupied. A failed stage is cleaned only from the
+# private directory this call created.
+fn atomic_write_exclusive(path: text, content: text) -> bool:
+    if path == "" or content == "":
+        return false
+    val separator = path.rfind("/")
+    val parent = if separator < 0: "." else if separator == 0: "/" else: path[0:separator]
+    val stage_dir = rt_secure_temp_dir(parent, ".sdn-create")
+    if stage_dir.len() <= 0:
+        return false
+    val staged_path = stage_dir + "/database.sdn"
+    if not rt_file_create_excl(staged_path, content):
+        # A provider may have created the private stage file before a partial
+        # write failed. Remove only this attempt's stage entry.
+        rt_file_delete(staged_path)
+        rt_dir_remove(stage_dir, false)
+        return false
+    if not rt_file_sync(staged_path):
+        rt_file_delete(staged_path)
+        rt_dir_remove(stage_dir, false)
+        return false
+    val status = rt_file_publish_noreplace(staged_path, path)
+    # Native and interpreter no-replace providers consume the stage on success;
+    # also remove it here in case a provider reports success with a hard-link
+    # fallback whose source unlink failed.
+    rt_file_delete(staged_path)
+    rt_dir_remove(stage_dir, false)
+    status == 1
 
 # Write multiple files atomically: acquire all locks, write via temp, rename all, release all.
 # Locks are acquired in sorted path order to prevent deadlocks.
