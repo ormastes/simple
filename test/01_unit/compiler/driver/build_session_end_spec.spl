@@ -5,57 +5,74 @@
 
 use std.spec
 use std.io_runtime.{env_set}
-use compiler.driver.session.build_session.{BuildSession, SessionEndPort,
-    build_session_inactive}
+use compiler.driver.session.build_session.{BuildSession, SessionEndPort, SessionKept,
+    build_session_inactive, session_kept_begin, keep_with}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_store, bootstrap_hir_store_set_session}
 
-var _shared: [text] = []
 var _ended: [u32] = []
 var _end_ok: bool = true
+var _shared: [i64] = []
 
 fn _reset():
-    _shared = []
     _ended = []
     _end_ok = true
-
-fn _f_share(v: Any) -> bool:
-    val k = "{v}"
-    if k == "bad":
-        return false
-    _shared = _shared.push(k)
-    true
+    _shared = []
 
 fn _f_heap_end(heap: u32) -> bool:
     _ended = _ended.push(heap)
     _end_ok
 
 fn _port() -> SessionEndPort:
-    SessionEndPort(share: _f_share, heap_end: _f_heap_end)
+    SessionEndPort(heap_end: _f_heap_end)
+
+fn _share_ok(v: i64) -> bool:
+    _shared = _shared.push(v)
+    true
+
+fn _share_bad(v: i64) -> bool:
+    _shared = _shared.push(v)
+    v != 2
 
 fn _live(heap: u32) -> BuildSession:
     var s = build_session_inactive()
     s.heap = heap
     s
 
-fn _kept(values: [text]) -> [Any]:
-    var kept: [Any] = []
-    for v in values:
-        kept = kept.push(v)
-    kept
+fn _kept(all_ok: bool, active: bool) -> SessionKept:
+    SessionKept(all_ok: all_ok, session_active: active)
 
 describe "BuildSession.end":
+    it "inactive session: keep_with never shares and end is a no-op true":
+        _reset()
+        var s = build_session_inactive()
+        var k = session_kept_begin(s)
+        k = keep_with(k, 1, _share_ok)
+        k = keep_with(k, 2, _share_ok)
+        expect(_shared.len()).to_equal(0)
+        expect(s.end_with(k, _port())).to_equal(true)
+        expect(_ended.len()).to_equal(0)
+
     it "shares every kept value in order, then ends the heap":
         _reset()
         var s = _live(7u32)
-        expect(s.end_with(_kept(["errors", "warnings", "result"]), _port())).to_equal(true)
-        expect(_shared.join(",")).to_equal("errors,warnings,result")
+        var k = session_kept_begin(s)
+        k = keep_with(k, 1, _share_ok)
+        k = keep_with(k, 2, _share_ok)
+        k = keep_with(k, 3, _share_ok)
+        expect(s.end_with(k, _port())).to_equal(true)
+        expect(_shared).to_equal([1, 2, 3])
         expect(_ended.len()).to_equal(1)
         expect(s.active()).to_equal(false)
 
-    it "does not end the session when a share fails":
+    it "does not end the session when one share fails":
         _reset()
         var s = _live(7u32)
-        expect(s.end_with(_kept(["errors", "bad", "result"]), _port())).to_equal(false)
+        var k = session_kept_begin(s)
+        k = keep_with(k, 1, _share_bad)
+        k = keep_with(k, 2, _share_bad)
+        k = keep_with(k, 3, _share_bad)
+        expect(k.all_ok).to_equal(false)
+        expect(s.end_with(k, _port())).to_equal(false)
         expect(_ended.len()).to_equal(0)
         expect(s.active()).to_equal(true)
 
@@ -63,30 +80,31 @@ describe "BuildSession.end":
         _reset()
         _end_ok = false
         var s = _live(7u32)
-        expect(s.end_with(_kept(["result"]), _port())).to_equal(false)
+        expect(s.end_with(_kept(true, true), _port())).to_equal(false)
         expect(s.active()).to_equal(true)
 
-    it "is idempotent: a second end is a no-op":
+    it "is idempotent: ending an already-ended session is a no-op":
         _reset()
         var s = _live(7u32)
-        expect(s.end_with(_kept(["result"]), _port())).to_equal(true)
-        expect(s.end_with(_kept(["result"]), _port())).to_equal(true)
+        expect(s.end_with(_kept(true, true), _port())).to_equal(true)
+        expect(s.active()).to_equal(false)
+        # stale session_active: true on an ended session must not end again
+        expect(s.end_with(_kept(true, true), _port())).to_equal(true)
         expect(_ended.len()).to_equal(1)
-        expect(_shared.len()).to_equal(1)
 
     it "is a no-op returning true without a session":
         _reset()
         var s = build_session_inactive()
-        expect(s.end_with(_kept(["result"]), _port())).to_equal(true)
-        expect(s.end(_kept(["result"]))).to_equal(true)
-        expect(_shared.len()).to_equal(0)
+        expect(s.end_with(_kept(true, false), _port())).to_equal(true)
+        expect(s.end(_kept(true, false))).to_equal(true)
         expect(_ended.len()).to_equal(0)
 
     it "SIMPLE_BUILD_SESSION_END=0 leaves the session live and returns true":
         _reset()
         env_set("SIMPLE_BUILD_SESSION_END", "0")
         var s = _live(7u32)
-        val ended = s.end(_kept(["result"]))
+        val k = _kept(true, true)
+        val ended = s.end(k)
         env_set("SIMPLE_BUILD_SESSION_END", "")
         expect(ended).to_equal(true)
         expect(s.active()).to_equal(true)
@@ -96,10 +114,10 @@ describe "BuildSession.end":
         env_set("SIMPLE_BUILD_SESSION_END", "")
         bootstrap_hir_store_set_session(true)
         var s = _live(7u32)
-        val ended = s.end(_kept(["result"]))
+        val k = _kept(true, true)
+        val ended = s.end(k)
         val flag = bootstrap_hir_store().session_on
         bootstrap_hir_store_set_session(false)
         expect(ended).to_equal(true)
         expect(s.active()).to_equal(true)
         expect(flag).to_equal(true)
-        expect(_shared.len()).to_equal(0)

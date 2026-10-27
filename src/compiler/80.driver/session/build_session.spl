@@ -19,6 +19,7 @@
 
 use std.env.{env_get}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.sffi.host.{rt_rc_share}
 use compiler.hir.hir_lowering._Items.bootstrap_hir_store.{BootstrapHirStore}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_store, bootstrap_hir_store_set_session,
     bootstrap_hir_modules_reset}
@@ -39,8 +40,6 @@ extern fn rt_session_alloc_begin() -> bool
 extern fn rt_session_alloc_end() -> bool
 @unsafe(reason: "release every session-owned allocation in one sweep", capabilities: [ffi])
 extern fn rt_session_heap_end(session: u32) -> bool
-@unsafe(reason: "move a kept value out of the session into an rc root", capabilities: [ffi])
-extern fn rt_rc_share<T>(value: T) -> bool
 
 fn build_session_enabled_by_env() -> bool:
     (env_get("SIMPLE_BUILD_SESSION") ?? "") != "0"
@@ -68,7 +67,7 @@ fn build_session_end_reset_globals_v1():
     resource_registry_reset()
     bootstrap_fn_registries_reset_after_session_v1()
 
-fn _sffi_session_rc_share(value: Any) -> bool:
+fn _sffi_session_rc_share<T>(value: T) -> bool:
     unsafe(capabilities: [ffi]):
         rt_rc_share(value)
 
@@ -78,11 +77,27 @@ fn _sffi_session_heap_end(heap: u32) -> bool:
 
 # Injectable so specs run on a runtime that predates the externs.
 struct SessionEndPort:
-    share: fn(Any) -> bool
     heap_end: fn(u32) -> bool
 
+struct SessionKept:
+    all_ok: bool
+    session_active: bool
+
 fn session_end_port_runtime() -> SessionEndPort:
-    SessionEndPort(share: _sffi_session_rc_share, heap_end: _sffi_session_heap_end)
+    SessionEndPort(heap_end: _sffi_session_heap_end)
+
+fn session_kept_begin(session: BuildSession) -> SessionKept:
+    SessionKept(all_ok: true, session_active: session.active())
+
+fn keep<T>(k: SessionKept, value: T) -> SessionKept:
+    keep_with(k, value, _sffi_session_rc_share)
+
+# Test seam: keep() with an injectable share.
+fn keep_with<T>(k: SessionKept, value: T, share: fn(T) -> bool) -> SessionKept:
+    if k.session_active:
+        val ok = share(value)
+        k.all_ok = k.all_ok and ok
+    k
 
 class BuildSession:
     heap: u32
@@ -112,39 +127,35 @@ class BuildSession:
         unsafe(capabilities: [ffi]):
             rt_session_alloc_end()
 
-    me end(kept: [Any]) -> bool:
-        unsafe(capabilities: [type_erasure]):
-            if not self.active():
-                return true
-            if not build_session_end_enabled_by_env():
-                if not _build_session_end_disabled_logged:
-                    eprint("build-session: end disabled (opt-in)")
-                    _build_session_end_disabled_logged = true
-                return true
-            val ended = self.end_with(kept, session_end_port_runtime())
-            if ended:
-                build_session_end_reset_globals_v1()
-            ended
+    me end(kept: SessionKept) -> bool:
+        if not self.active() or not kept.session_active:
+            return true
+        if not build_session_end_enabled_by_env():
+            if not _build_session_end_disabled_logged:
+                eprint("build-session: end disabled (opt-in)")
+                _build_session_end_disabled_logged = true
+            return true
+        val ended = self.end_with(kept, session_end_port_runtime())
+        if ended:
+            build_session_end_reset_globals_v1()
+        ended
 
-    # Shares every kept value, then ends the heap. No share failure may end
-    # the session; heap 0 afterwards makes a repeat call a no-op (idempotent).
-    me end_with(kept: [Any], port: SessionEndPort) -> bool:
-        unsafe(capabilities: [type_erasure]):
-            if not self.active():
-                return true
-            val id = self.heap
-            var shared = 0
-            for value in kept:
-                if not port.share(value):
-                    eprint("build-session: end skipped reason=share-failed index={shared} id={id}")
-                    return false
-                shared = shared + 1
-            if not port.heap_end(id):
-                eprint("build-session: end skipped reason=heap-end-refused id={id}")
-                return false
-            self.heap = 0u32
-            eprint("build-session: end id={id} shared={shared}")
-            true
+    # Shares were done in keep(). end_with checks the session is live and all_ok,
+    # then ends the heap. Fail-closed: if any share failed, heap_end is not called.
+    # heap 0 afterwards makes a repeat call a no-op (self.active() guard).
+    me end_with(kept: SessionKept, port: SessionEndPort) -> bool:
+        if not self.active() or not kept.session_active:
+            return true
+        val id = self.heap
+        if not kept.all_ok:
+            eprint("build-session: end skipped reason=share-failed id={id}")
+            return false
+        if not port.heap_end(id):
+            eprint("build-session: end skipped reason=heap-end-refused id={id}")
+            return false
+        self.heap = 0u32
+        eprint("build-session: end id={id} shares=completed")
+        true
 
 
 fn build_session_inactive() -> BuildSession:

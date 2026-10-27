@@ -4,6 +4,7 @@ use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_handoff_take_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.session.build_session.{SessionKept, session_kept_begin, keep}
 use compiler.driver.driver_backend_plugin_selection.{driver_cuda_plugin_request_error_v1}
 
 # Formation probe, NOT a liveness proof. `== nil` cannot be used to validate a
@@ -198,18 +199,17 @@ impl CompilerDriver:
     # Leaves first (rc_graph.rs: a node already an rc root is not reclaimed
     # by a parent's share), the CompileResult last. Callers that read ctx
     # products after compile() set config "build-session-retain-products".
-    fn session_kept_values_v1(result: CompileResult) -> [Any]:
-        unsafe(capabilities: [type_erasure]):
-            var kept: [Any] = []
-            kept = kept.push(self.ctx.errors)
-            kept = kept.push(self.ctx.warnings)
-            kept = kept.push(self.ctx.visibility_warnings)
-            if (self.ctx.config["build-session-retain-products"] ?? "") == "1":
-                kept = kept.push(self.ctx.mir_modules)
-                kept = kept.push(self.ctx.cold_hir_typed_receipts)
-                kept = kept.push(self.ctx.runtime_std_hir_emissions)
-                kept = kept.push(self.ctx.runtime_std_mir_emissions)
-            kept.push(result)
+    fn session_kept_values_v1(result: CompileResult) -> SessionKept:
+        var k = session_kept_begin(self.ctx.session)
+        k = keep(k, self.ctx.errors)
+        k = keep(k, self.ctx.warnings)
+        k = keep(k, self.ctx.visibility_warnings)
+        if (self.ctx.config["build-session-retain-products"] ?? "") == "1":
+            k = keep(k, self.ctx.mir_modules)
+            k = keep(k, self.ctx.cold_hir_typed_receipts)
+            k = keep(k, self.ctx.runtime_std_hir_emissions)
+            k = keep(k, self.ctx.runtime_std_mir_emissions)
+        keep(k, result)
 
     me compile_in_session_v1() -> CompileResult:
         var requested_mode = self.ctx.options.mode.to_text()
