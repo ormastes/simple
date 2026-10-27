@@ -1,0 +1,119 @@
+"""
+## Purpose and audience
+
+Executable specification for library version publish manifest (AC-10).
+Verifies that libver_publish_manifest emits a deterministic, sorted SDN
+release manifest listing each artifact's file name and sha256. Written for
+engineers implementing release publishing and for reviewers verifying the
+manifest contract.
+
+## Operator workflow
+
+Run: bin/simple test test/unit/compiler/driver/libver/libver_publish_spec.spl
+
+Every scenario calls real functions from src/compiler/80.driver/libver/cache.spl.
+
+## Verification guidance
+
+A manifest failure means the function drifted, sorting changed, or SDN format
+changed. If the output is not deterministic (changes between runs), that is
+a non-determinism bug. Parse the SDN output to verify structure.
+"""
+
+# @manual_section: library version publish manifest
+
+use compiler.driver.libver.identity.{LibIdentity}
+use compiler.driver.libver.cache.{libver_publish_manifest, LibPublishEntry}
+use std.spec.step
+
+fn make_id(
+    name: text, semver: text, triple: text, tier: text, sha256: text
+) -> LibIdentity:
+    LibIdentity(
+        name: name,
+        semver: semver,
+        abi_major: 1,
+        abi_minor: 0,
+        iface_digest: "d",
+        iface_parts: [],
+        producer: "c",
+        triple: triple,
+        cpu_tier: tier,
+        sha256: sha256
+    )
+
+describe "libver_publish: manifest format":
+    # @req AC-10
+    it "emits valid SDN format":
+        step("Manifest must be valid SDN format")
+        val id = make_id("lib1", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "hash1")
+        val entries = [LibPublishEntry(file_name: "liblib1-1.0.0-x86_64-unknown-linux-gnu-x86-64-v2.a", id: id)]
+        val manifest = libver_publish_manifest(entries)
+
+        expect(manifest.starts_with("libs:")).to_equal(true)
+        expect(manifest.contains("file:")).to_equal(true)
+        expect(manifest.contains("sha256:")).to_equal(true)
+
+describe "libver_publish: sorting by file name":
+    # @req AC-10
+    it "sorts entries by filename":
+        step("Manifest entries must be sorted by filename regardless of input order")
+        val entries = [
+            LibPublishEntry(file_name: "zebra-1.0.0.a", id: make_id("zebra", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "h3")),
+            LibPublishEntry(file_name: "apple-2.0.0.a", id: make_id("apple", "2.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "h1")),
+            LibPublishEntry(file_name: "monkey-1.5.0.a", id: make_id("monkey", "1.5.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "h2"))
+        ]
+        val manifest = libver_publish_manifest(entries)
+
+        # Find positions of filenames in output
+        val apple_pos = manifest.index_of("apple-2.0.0.a")
+        val monkey_pos = manifest.index_of("monkey-1.5.0.a")
+        val zebra_pos = manifest.index_of("zebra-1.0.0.a")
+
+        # All should be found
+        expect(apple_pos >= 0).to_equal(true)
+        expect(monkey_pos >= 0).to_equal(true)
+        expect(zebra_pos >= 0).to_equal(true)
+
+        # Should be in alphabetical order
+        expect(apple_pos < monkey_pos).to_equal(true)
+        expect(monkey_pos < zebra_pos).to_equal(true)
+
+    # @req AC-10
+    it "produces same sorted output for any input order":
+        step("Same entries in different order produce identical output")
+        val entries1 = [
+            LibPublishEntry(file_name: "aaa.a", id: make_id("aaa", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "h1")),
+            LibPublishEntry(file_name: "bbb.a", id: make_id("bbb", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "h2")),
+            LibPublishEntry(file_name: "ccc.a", id: make_id("ccc", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "h3"))
+        ]
+        val entries2 = [
+            LibPublishEntry(file_name: "ccc.a", id: make_id("ccc", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "h3")),
+            LibPublishEntry(file_name: "aaa.a", id: make_id("aaa", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "h1")),
+            LibPublishEntry(file_name: "bbb.a", id: make_id("bbb", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2", "h2"))
+        ]
+
+        val manifest1 = libver_publish_manifest(entries1)
+        val manifest2 = libver_publish_manifest(entries2)
+
+        expect(manifest1).to_equal(manifest2)
+
+describe "libver_publish: entry structure":
+    # @req AC-10
+    it "includes file name and sha256 for each entry":
+        step("Each entry must have file and sha256 fields")
+        val id = make_id("test", "1.0.0", "x86_64-unknown-linux-gnu", "generic", "deadbeefcafe")
+        val entries = [LibPublishEntry(file_name: "libtest-1.0.0-x86_64-unknown-linux-gnu-generic.a", id: id)]
+        val manifest = libver_publish_manifest(entries)
+
+        expect(manifest.contains("libtest-1.0.0-x86_64-unknown-linux-gnu-generic.a")).to_equal(true)
+        expect(manifest.contains("deadbeefcafe")).to_equal(true)
+
+describe "libver_publish: empty list":
+    # @req AC-10
+    it "handles empty artifact list":
+        step("Empty list should produce empty manifest")
+        val entries: [LibPublishEntry] = []
+        val manifest = libver_publish_manifest(entries)
+
+        expect(manifest.starts_with("libs:")).to_equal(true)

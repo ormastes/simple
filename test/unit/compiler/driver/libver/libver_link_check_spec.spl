@@ -1,0 +1,150 @@
+"""
+## Purpose and audience
+
+As a linker, I check that a static archive file name matches its sidecar before
+using it, preventing silent architecture mismatches. This spec is the manual for
+that check (AC-12a).
+
+## Operator workflow
+
+Run: bin/simple test test/unit/compiler/driver/libver/libver_link_check_spec.spl
+
+## Verification guidance
+
+Each scenario compares an archive file name to its sidecar. A mismatch in tier
+or other parsed fields, or an unparseable name, is reported as NameMismatch.
+A mismatched SHA256 is reported as HashMismatch.
+"""
+
+# @manual_section: link-time library check
+
+use compiler.driver.libver.naming.{name_tier_dylib}
+use compiler.driver.libver.identity.{LibIdentity}
+use compiler.driver.libver.sidecar.{libver_emit_sidecar}
+use compiler.driver.libver.admit.{
+    LibHostReq,
+    LibAdmit,
+    libver_link_check
+}
+use std.spec.step
+
+fn base_id() -> LibIdentity:
+    LibIdentity(
+        name: "simple_std",
+        semver: "1.0.0",
+        abi_major: 2,
+        abi_minor: 1,
+        iface_digest: "d1",
+        iface_parts: ["fn a()", "fn b()"],
+        producer: "p1",
+        triple: "x86_64-unknown-linux-gnu",
+        cpu_tier: "x86-64-v2",
+        sha256: "h1"
+    )
+
+fn base_host() -> LibHostReq:
+    LibHostReq(
+        name_required: "simple_std",
+        host_triple: "x86_64-unknown-linux-gnu",
+        host_tier_base: "x86-64-v3",
+        host_tier_features: ["avx2"],
+        abi_major_supported: 2,
+        abi_minor_supported: 1,
+        abi_window: 1,
+        deprecated_abi: [1],
+        iface_parts_required: [],
+        iface_digest_required: "d1",
+        artifact_sha256: "h1",
+        producer_required: None
+    )
+
+describe "Link-time check: matching archive and sidecar":
+    # @req AC-12a
+    it "admits an archive name that matches the sidecar":
+        step("Create archive name and sidecar from baseline identity")
+        val id = base_id()
+        val archive_name = name_tier_dylib(id.name, id.semver, id.triple, id.cpu_tier)
+        val sidecar_text = libver_emit_sidecar(id)
+
+        step("Check the archive against its sidecar")
+        val result = libver_link_check(archive_name, sidecar_text, base_host())
+        expect(result.ok).to_equal(true)
+
+describe "Link-time check: name mismatches":
+    # @req AC-12a
+    it "refuses an archive name with wrong tier":
+        step("Create archive name with wrong tier")
+        val id = base_id()
+        val archive_name = name_tier_dylib(id.name, id.semver, id.triple, "x86-64-v3")  # wrong tier
+        val sidecar_text = libver_emit_sidecar(id)
+
+        step("Check the archive against its sidecar")
+        val result = libver_link_check(archive_name, sidecar_text, base_host())
+        expect(result.ok).to_equal(false)
+        match result.refusal:
+            case Some(r): expect(r.name()).to_equal("NameMismatch")
+            case None: expect(true).to_equal(false)  # should have a refusal
+
+    # @req AC-12a
+    it "refuses an unparseable archive name":
+        step("Try to check an archive name that does not parse")
+        val bad_archive_name = "garbage.so"
+        val id = base_id()
+        val sidecar_text = libver_emit_sidecar(id)
+
+        step("Check the bad archive against the sidecar")
+        val result = libver_link_check(bad_archive_name, sidecar_text, base_host())
+        expect(result.ok).to_equal(false)
+        match result.refusal:
+            case Some(r): expect(r.name()).to_equal("NameMismatch")
+            case None: expect(true).to_equal(false)  # should have a refusal
+
+    # @req AC-12a
+    it "refuses an archive name with wrong library name":
+        step("Create archive name with wrong library name")
+        val id = base_id()
+        val archive_name = name_tier_dylib("other_lib", id.semver, id.triple, id.cpu_tier)
+        val sidecar_text = libver_emit_sidecar(id)
+
+        step("Check the archive against its sidecar")
+        val result = libver_link_check(archive_name, sidecar_text, base_host())
+        expect(result.ok).to_equal(false)
+        match result.refusal:
+            case Some(r): expect(r.name()).to_equal("NameMismatch")
+            case None: expect(true).to_equal(false)
+
+describe "Link-time check: hash mismatches":
+    # @req AC-12a
+    it "refuses an archive with mismatched SHA256":
+        step("Create archive name and sidecar, then mismatch the hash")
+        val id = base_id()
+        var modified_id = id
+        modified_id.sha256 = "wrong_hash"
+
+        val archive_name = name_tier_dylib(id.name, id.semver, id.triple, id.cpu_tier)
+        val sidecar_text = libver_emit_sidecar(modified_id)
+
+        step("Check the archive against mismatched sidecar")
+        val result = libver_link_check(archive_name, sidecar_text, base_host())
+        expect(result.ok).to_equal(false)
+        match result.refusal:
+            case Some(r): expect(r.name()).to_equal("HashMismatch")
+            case None: expect(true).to_equal(false)
+
+describe "Link-time check: admission rules apply":
+    # @req AC-12a
+    it "applies normal admission rules after name verification":
+        step("Create matching archive and sidecar, but fail admission")
+        val id = base_id()
+        var failed_id = id
+        failed_id.cpu_tier = "x86-64-v4"  # too high for the host
+
+        val archive_name = name_tier_dylib(failed_id.name, failed_id.semver, failed_id.triple, failed_id.cpu_tier)
+        val sidecar_text = libver_emit_sidecar(failed_id)
+
+        step("Check the archive against its sidecar")
+        val result = libver_link_check(archive_name, sidecar_text, base_host())
+        expect(result.ok).to_equal(false)
+        match result.refusal:
+            case Some(r): expect(r.name()).to_equal("TierTooHigh")
+            case None: expect(true).to_equal(false)  # should have TierTooHigh, not NameMismatch

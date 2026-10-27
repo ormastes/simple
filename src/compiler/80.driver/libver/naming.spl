@@ -1,83 +1,119 @@
-# Naming patterns and parsers for versioned artifacts.
-# AC-3: File names are built and parsed exactly per plan.
+# File naming for versioned library artifacts (AC-3, AC-13..AC-17).
+# Plan: doc/03_plan/compiler/lib_dylib_versioning_plan.md
 
-use std.text (text_replace, text_split, text_trim)
+struct LibPlatformNames:
+    """Per-OS dynamic-library identity: file extension and the name the OS
+    loader records (ELF DT_SONAME, Mach-O install_name, PE DLL name)."""
+    os: text
+    ext: text
+    soname: text
+    install_name: text
+    compat_version: text
 
-# Build the static archive name: libsimple_std-<semver>-<triple>-<tier>.a
+fn libver_os_of(triple: text) -> text:
+    if triple.contains("windows"):
+        return "windows"
+    if triple.contains("apple") or triple.contains("darwin") or triple.contains("macos"):
+        return "macos"
+    if triple.contains("freebsd"):
+        return "freebsd"
+    if triple.contains("simpleos"):
+        return "simpleos"
+    if triple.contains("linux"):
+        return "linux"
+    ""
+
+fn libver_dylib_ext(triple: text) -> text:
+    match libver_os_of(triple):
+        case "windows": "dll"
+        case "macos": "dylib"
+        case _: "so"
+
+# ELF hosts (linux, freebsd, simpleos): soname lib<name>.so.<abi_major>.
+# macOS: install_name @rpath/lib<name>.<abi_major>.dylib, compat <major>.<minor>.0.
+# Windows: no soname; the DLL file name itself carries -v<abi_major>.
+fn libver_platform_names(triple: text, name: text, abi_major: i64, abi_minor: i64) -> LibPlatformNames:
+    val os = libver_os_of(triple)
+    val ext = libver_dylib_ext(triple)
+    var soname = ""
+    var install_name = ""
+    var compat = ""
+    if os == "macos":
+        install_name = "@rpath/lib{name}.{abi_major}.dylib"
+        compat = "{abi_major}.{abi_minor}.0"
+    elif os == "windows":
+        soname = "{name}-v{abi_major}.dll"
+    elif os != "":
+        soname = "lib{name}.so.{abi_major}"
+    LibPlatformNames(os: os, ext: ext, soname: soname, install_name: install_name, compat_version: compat)
+
 fn name_stdlib(semver: text, triple: text, tier: text) -> text:
-    """Emit the static stdlib archive file name."""
-    "libsimple_std-" + semver + "-" + triple + "-" + tier + ".a"
+    "libsimple_std-{semver}-{triple}-{tier}.a"
 
-# Build the backend plugin name: backend_<name>-<triple>-v<abi>.<ext>
-fn name_backend(name: text, triple: text, abi: i64, ext: text) -> text:
-    """Emit the backend plugin file name."""
-    "backend_" + name + "-" + triple + "-v" + text::from_i64(abi) + "." + ext
+fn name_backend(name: text, triple: text, abi: i64) -> text:
+    "backend_{name}-{triple}-v{abi}.{libver_dylib_ext(triple)}"
 
-# Build the tier dylib name: lib<name>-<semver>-<triple>-<tier>.<ext>
-fn name_tier_dylib(name: text, semver: text, triple: text, tier: text, ext: text) -> text:
-    """Emit the CPU-tier dylib file name."""
-    "lib" + name + "-" + semver + "-" + triple + "-" + tier + "." + ext
+fn name_tier_dylib(name: text, semver: text, triple: text, tier: text) -> text:
+    "lib{name}-{semver}-{triple}-{tier}.{libver_dylib_ext(triple)}"
 
-# Parse stdlib name into (semver, triple, tier).
-fn parse_stdlib_name(filename: text) -> Option<(text, text, text)>:
-    """Parse libsimple_std-<semver>-<triple>-<tier>.a"""
-    if filename.ends_with(".a"):
-        val without_ext = filename.take(filename.len() - 2)
-        if without_ext.starts_with("libsimple_std-"):
-            val parts = without_ext.drop(14).split("-")
-            if parts.len() >= 3:
-                val tier = parts[parts.len() - 1]
-                val semver = parts[0]
-                val triple_parts = parts.slice(1, parts.len() - 1)
-                val triple = text_join("-", triple_parts)
-                return Option.some((semver, triple, tier))
-    Option.none<(text, text, text)>()
+# Parsed artifact file name. Triples contain '-', so fields are recovered
+# against a known triple list rather than by naive splitting.
+struct LibNameParts:
+    name: text
+    semver: text
+    abi: i64
+    triple: text
+    tier: text
 
-# Parse backend name into (name, triple, abi).
-fn parse_backend_name(filename: text) -> Option<(text, text, i64)>:
-    """Parse backend_<name>-<triple>-v<abi>.<ext>"""
-    if filename.starts_with("backend_"):
-        val without_prefix = filename.drop(8)
-        val dot_index = without_prefix.rfind(".")
-        if dot_index >= 0:
-            val without_ext = without_prefix.take(dot_index)
-            val v_index = without_ext.rfind("-v")
-            if v_index >= 0:
-                val abi_str = without_ext.drop(v_index + 2)
-                val abi_opt = text::try_parse_i64(abi_str)
-                if abi_opt.is_some():
-                    val name_triple = without_ext.take(v_index)
-                    val last_dash = name_triple.rfind("-")
-                    if last_dash >= 0:
-                        val name = name_triple.take(last_dash)
-                        val triple = name_triple.drop(last_dash + 1)
-                        return Option.some((name, triple, abi_opt.unwrap()))
-    Option.none<(text, text, i64)>()
+fn libver_known_triples() -> [text]:
+    ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "riscv64-unknown-linux-gnu", "x86_64-pc-windows-gnu", "aarch64-pc-windows-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-freebsd", "aarch64-unknown-freebsd", "riscv64-unknown-freebsd", "x86_64-unknown-simpleos", "aarch64-unknown-simpleos", "riscv64-unknown-simpleos"]
 
-# Parse tier dylib name into (name, semver, triple, tier).
-fn parse_tier_dylib_name(filename: text) -> Option<(text, text, text, text)>:
-    """Parse lib<name>-<semver>-<triple>-<tier>.<ext>"""
-    if filename.starts_with("lib"):
-        val dot_index = filename.rfind(".")
-        if dot_index >= 0:
-            val without_prefix = filename.drop(3).take(dot_index - 3)
-            val parts = without_prefix.split("-")
-            if parts.len() >= 3:
-                val name = parts[0]
-                val semver = parts[1]
-                val tier = parts[parts.len() - 1]
-                val triple_parts = parts.slice(2, parts.len() - 1)
-                val triple = text_join("-", triple_parts)
-                return Option.some((name, semver, triple, tier))
-    Option.none<(text, text, text, text)>()
+fn strip_suffix(s: text, suffix: text) -> text:
+    if s.ends_with(suffix):
+        return s[0:s.len() - suffix.len()]
+    ""
 
-# Helper to join strings with a separator
-fn text_join(sep: text, items: [text]) -> text:
-    """Join an array of strings with a separator."""
-    if items.len() == 0:
-        return ""
+# "<head>-<triple>-<tail>" -> (head, triple, tail); empty triple when none matches.
+fn split_on_triple(s: text) -> (text, text, text):
+    for t in libver_known_triples():
+        val at = s.index_of("-{t}-")
+        if at > 0:
+            return (s[0:at], t, s[at + t.len() + 2:])
+    ("", "", "")
 
-    var result = items[0]
-    for i in 1..items.len():
-        result = result + sep + items[i]
-    result
+fn parse_stdlib_name(filename: text) -> Option<LibNameParts>:
+    if not filename.starts_with("libsimple_std-"):
+        return None
+    val body = strip_suffix(filename[14:], ".a")
+    if body == "":
+        return None
+    val (semver, triple, tier) = split_on_triple("x-" + body)
+    if triple == "":
+        return None
+    Some(LibNameParts(name: "simple_std", semver: semver[2:], abi: 0, triple: triple, tier: tier))
+
+fn parse_backend_name(filename: text) -> Option<LibNameParts>:
+    if not filename.starts_with("backend_"):
+        return None
+    val dot = filename.last_index_of(".")
+    if dot < 0:
+        return None
+    val (name, triple, vabi) = split_on_triple(filename[8:dot])
+    if triple == "" or not vabi.starts_with("v"):
+        return None
+    val abi = vabi[1:].to_int()
+    Some(LibNameParts(name: name, semver: "", abi: abi, triple: triple, tier: ""))
+
+fn parse_tier_dylib_name(filename: text) -> Option<LibNameParts>:
+    if not filename.starts_with("lib"):
+        return None
+    val dot = filename.last_index_of(".")
+    if dot < 0:
+        return None
+    val (head, triple, tier) = split_on_triple(filename[3:dot])
+    if triple == "":
+        return None
+    val dash = head.last_index_of("-")
+    if dash <= 0:
+        return None
+    Some(LibNameParts(name: head[0:dash], semver: head[dash + 1:], abi: 0, triple: triple, tier: tier))
