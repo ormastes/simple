@@ -6176,23 +6176,76 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         return 1
     }
     (
+        bootstrap_stage3_seed_find_literal_path() {
+            [ "$#" -eq 1 ] || return 1
+            printf '%s\n' "$1" | awk '
+                {
+                    escaped = ""
+                    for (position = 1; position <= length($0); position++) {
+                        character = substr($0, position, 1)
+                        if (character == "\\")
+                            escaped = escaped "\\\\"
+                        else if (character == "*")
+                            escaped = escaped "[*]"
+                        else if (character == "?")
+                            escaped = escaped "[?]"
+                        else if (character == "[")
+                            escaped = escaped "[[]"
+                        else if (character == "]")
+                            escaped = escaped "[]]"
+                        else
+                            escaped = escaped character
+                    }
+                    print escaped
+                }
+            '
+        }
+        bootstrap_stage3_seed_root_has_symlink() (
+            bootstrap_stage3_seed_scan_root=$1
+            bootstrap_stage3_seed_scan_dependencies=$2
+            bootstrap_stage3_seed_scan_compiler_root=$3
+            set -- "$bootstrap_stage3_seed_find" \
+                "$bootstrap_stage3_seed_scan_root"
+            bootstrap_stage3_seed_scan_prune_count=0
+            if [ "$bootstrap_stage3_seed_scan_compiler_root" = yes ]; then
+                bootstrap_stage3_seed_scan_target=$(
+                    bootstrap_stage3_seed_find_literal_path \
+                        "$bootstrap_stage3_seed_scan_root/target"
+                ) || return 1
+                set -- "$@" \( -type d \( -path \
+                    "$bootstrap_stage3_seed_scan_target"
+                bootstrap_stage3_seed_scan_prune_count=1
+            fi
+            while IFS= read -r bootstrap_stage3_seed_scan_dependency; do
+                [ -n "$bootstrap_stage3_seed_scan_dependency" ] || continue
+                case "$bootstrap_stage3_seed_scan_dependency" in
+                    "$bootstrap_stage3_seed_scan_root"|\
+                    "$bootstrap_stage3_seed_scan_root"/*)
+                        if [ "$bootstrap_stage3_seed_scan_prune_count" -gt 0 ]; then
+                            set -- "$@" -o
+                        else
+                            set -- "$@" \( -type d \(
+                        fi
+                        bootstrap_stage3_seed_scan_target=$(
+                            bootstrap_stage3_seed_find_literal_path \
+                                "$bootstrap_stage3_seed_scan_dependency/target"
+                        ) || return 1
+                        set -- "$@" -path \
+                            "$bootstrap_stage3_seed_scan_target"
+                        bootstrap_stage3_seed_scan_prune_count=$((
+                            bootstrap_stage3_seed_scan_prune_count + 1
+                        ))
+                        ;;
+                esac
+            done <"$bootstrap_stage3_seed_scan_dependencies"
+            if [ "$bootstrap_stage3_seed_scan_prune_count" -gt 0 ]; then
+                set -- "$@" \) -prune \) -o
+            fi
+            set -- "$@" -type l -print -quit
+            "$@" | grep -q .
+        )
         cd "$bootstrap_stage3_seed_root" || exit 1
         bootstrap_stage3_seed_trace reject-symlink-inputs
-        if "$bootstrap_stage3_seed_find" src/compiler_rust src/runtime \
-            \( -type d -name target -prune \) -o \
-            -type l -print -quit | grep -q .; then
-            exit 1
-        fi
-        bootstrap_stage3_seed_trace collect-compiler-inputs
-        "$bootstrap_stage3_seed_find" src/compiler_rust \
-            \( -type d -name target \) -prune -o \
-            -type f -print 2>/dev/null \
-            >"$bootstrap_stage3_seed_tmp/compiler.unsorted" || exit 1
-        LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/compiler.unsorted" \
-            >"$bootstrap_stage3_seed_tmp/compiler.paths" || exit 1
-        bootstrap_stage3_hash_path_list \
-            "$bootstrap_stage3_seed_tmp/compiler.paths" \
-            >>"$bootstrap_stage3_seed_records" || exit 1
         # Cargo path dependencies may live outside src/compiler_rust (the
         # hosted runtime currently does). Discover them from dependency
         # sections instead of maintaining a partial hand-written allowlist.
@@ -6200,7 +6253,7 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         # traverse a symlink, and must contribute all Cargo.toml/Rust inputs.
         bootstrap_stage3_seed_trace collect-cargo-path-dependencies
         "$bootstrap_stage3_seed_find" src/compiler_rust \
-            \( -type d -name target -prune \) -o \
+            \( -type d -path src/compiler_rust/target -prune \) -o \
             \( -name Cargo.toml -type f -print \) \
             >"$bootstrap_stage3_seed_tmp/cargo-manifests" || exit 1
         : >"$bootstrap_stage3_seed_tmp/path-deps.unsorted" || exit 1
@@ -6232,14 +6285,54 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         done <"$bootstrap_stage3_seed_tmp/path-dep-pairs"
         LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/path-deps.unsorted" \
             >"$bootstrap_stage3_seed_tmp/path-deps" || exit 1
+        # Reject symlinks before accepting any collected inputs. Only the
+        # compiler's actual generated target root and each discovered Cargo
+        # dependency's direct target root are excluded from this walk.
+        if bootstrap_stage3_seed_root_has_symlink \
+            src/compiler_rust "$bootstrap_stage3_seed_tmp/path-deps" yes; then
+            exit 1
+        fi
+        if bootstrap_stage3_seed_root_has_symlink \
+            src/runtime "$bootstrap_stage3_seed_tmp/path-deps" no; then
+            exit 1
+        fi
+        while IFS= read -r bootstrap_stage3_seed_dep_root; do
+            [ -n "$bootstrap_stage3_seed_dep_root" ] || continue
+            case "$bootstrap_stage3_seed_dep_root" in
+                */target|*/target/*) exit 1 ;;
+            esac
+            bootstrap_stage3_seed_dep_target=$(
+                bootstrap_stage3_seed_find_literal_path \
+                    "$bootstrap_stage3_seed_dep_root/target"
+            ) || exit 1
+            if "$bootstrap_stage3_seed_find" "$bootstrap_stage3_seed_dep_root" \
+                \( -type d -path "$bootstrap_stage3_seed_dep_target" -prune \) -o \
+                -type l -print -quit | grep -q .; then
+                exit 1
+            fi
+        done <"$bootstrap_stage3_seed_tmp/path-deps"
+        bootstrap_stage3_seed_trace collect-compiler-inputs
+        "$bootstrap_stage3_seed_find" src/compiler_rust \
+            \( -type d -path src/compiler_rust/target -prune \) -o \
+            -type f -print 2>/dev/null \
+            >"$bootstrap_stage3_seed_tmp/compiler.unsorted" || exit 1
+        LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/compiler.unsorted" \
+            >"$bootstrap_stage3_seed_tmp/compiler.paths" || exit 1
+        bootstrap_stage3_hash_path_list \
+            "$bootstrap_stage3_seed_tmp/compiler.paths" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
         bootstrap_stage3_seed_trace hash-cargo-path-dependencies
         while IFS= read -r bootstrap_stage3_seed_dep_root; do
             [ -n "$bootstrap_stage3_seed_dep_root" ] || continue
             case "$bootstrap_stage3_seed_dep_root" in
                 */target|*/target/*) exit 1 ;;
             esac
+            bootstrap_stage3_seed_dep_target=$(
+                bootstrap_stage3_seed_find_literal_path \
+                    "$bootstrap_stage3_seed_dep_root/target"
+            ) || exit 1
             "$bootstrap_stage3_seed_find" "$bootstrap_stage3_seed_dep_root" \
-                \( -type d -name target -prune \) -o \
+                \( -type d -path "$bootstrap_stage3_seed_dep_target" -prune \) -o \
                 -type f -print \
                 >"$bootstrap_stage3_seed_tmp/path-dep-files.unsorted" ||
                 exit 1
