@@ -1,0 +1,210 @@
+# TLDR import route (true_per_file_src_to_obj_plan.md PR2c), behind
+# SIMPLE_TLDR_IMPORTS=1 (default off: the closure route is unchanged).
+#
+# With the flag on a file worker parses ONLY its claimed files. Every import
+# resolves through the imported module's TLDR summary (tldr_summary_ensure_v1,
+# produced on demand by a line scan, never a parse). Imported decls are lazy
+# (module_id, stable_symbol_id) handles filled through read_tldr; a generic
+# body is sliced lazily from its one defining module. A module whose summary
+# carries fallback rows loads its own source only (counted, `[tldr-fallback]`).
+# A closure walk with the flag on is a hard error (tldr_closure_walk_check_v1).
+use std.io_runtime.{file_exists, file_read}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use compiler.driver.cache.tldr_summary_v1.{tldr_summary_ensure_v1, read_tldr}
+
+struct TldrImportHandleV1:
+    module_id: text
+    symbol_id: text
+    name: text
+    kind: text
+
+struct TldrRouteResultV1:
+    modules_parsed: i64
+    summaries_read: i64
+    fallbacks: i64
+    fallback_modules: [text]
+    handles: [TldrImportHandleV1]
+    missing: [text]
+
+pub fn tldr_imports_flag_on_v1(value: text) -> bool:
+    value == "1"
+
+# Read once per process (-1 unread, 0 off, 1 on); reset only by tests.
+var tldr_imports_memo_v1: i64 = -1
+
+pub fn tldr_imports_memo_reset_v1():
+    tldr_imports_memo_v1 = -1
+
+pub fn tldr_imports_enabled_v1() -> bool:
+    if tldr_imports_memo_v1 < 0:
+        var on = false
+        match env_get_nullable("SIMPLE_TLDR_IMPORTS"):
+            case Some(v): on = tldr_imports_flag_on_v1(v)
+            case nil: on = false
+        tldr_imports_memo_v1 = if on: 1 else: 0
+    tldr_imports_memo_v1 == 1
+
+# Err when the TLDR route is on: a closure walk must never run under it.
+pub fn tldr_closure_walk_check_v1(flag_on: bool, site: text) -> Result<i64, text>:
+    if flag_on:
+        return Err("TLDR-IMPORTS-E-CLOSURE-WALK: {site} walked the import closure with SIMPLE_TLDR_IMPORTS=1")
+    Ok(0)
+
+# (module_id, imported names) per `use` / `export use` / `pub use` line.
+# Names are [] for a bare or glob import (the summary's export list expands it).
+# Supports multi-line imports: use x.{a,\n b}
+pub fn tldr_route_import_specs_v1(source: text) -> [(text, [text])]:
+    var out: [(text, [text])] = []
+    val lines = source.replace("\r\n", "\n").split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val t = line.trim()
+        var rest = ""
+        if t.starts_with("use "): rest = t.substring(4)
+        elif t.starts_with("export use "): rest = t.substring(11)
+        elif t.starts_with("pub use "): rest = t.substring(8)
+        if rest == "":
+            i = i + 1
+            continue
+        rest = rest.trim()
+        val brace = rest.index_of(".{")
+        var names: [text] = []
+        var base = rest
+        if brace > 0:
+            base = rest.substring(0, brace)
+            var close = rest.index_of("}")
+            var inner = ""
+            if close > brace:
+                inner = rest.substring(brace + 2, close)
+            else:
+                # Multi-line case: closing brace is on a later line
+                inner = rest.substring(brace + 2)
+                i = i + 1
+                while i < lines.len():
+                    val next_line = lines[i].trim()
+                    val close_idx = next_line.index_of("}")
+                    if close_idx >= 0:
+                        inner = inner + next_line.substring(0, close_idx)
+                        break
+                    else:
+                        inner = inner + next_line
+                    i = i + 1
+            for item in inner.split(","):
+                var name = item.trim()
+                val item_as = name.index_of(" as ")
+                if item_as > 0: name = name.substring(0, item_as).trim()
+                if name != "" and name != "*": names.push(name)
+        else:
+            val as_at = base.index_of(" as ")
+            if as_at > 0: base = base.substring(0, as_at)
+            if base.ends_with(".*"): base = base.substring(0, base.len() - 2)
+        out.push((base.trim(), names))
+        i = i + 1
+    out
+
+# "decl|<kind> <name> id=<id> cfg=... sig=..." -> (kind, name, id)
+fn _tr_decl_fields_v1(row: text) -> (text, text, text):
+    val body = row.substring(5)
+    val parts = body.split(" ")
+    if parts.len() < 3 or not parts[2].starts_with("id="):
+        return ("", "", "")
+    (parts[0], parts[1], parts[2].substring(3))
+
+fn _tr_handles_for_v1(module_id: text, rows: [text], names: [text]) -> ([TldrImportHandleV1], [text]):
+    var exported: [text] = []
+    for r in rows:
+        if r.starts_with("export|"): exported.push(r.substring(7))
+    val wanted = if names.len() > 0: names else: exported
+    var handles: [TldrImportHandleV1] = []
+    var missing: [text] = []
+    for name in wanted:
+        var found = false
+        for r in rows:
+            if r.starts_with("decl|"):
+                val (kind, dname, id) = _tr_decl_fields_v1(r)
+                if dname == name:
+                    handles.push(TldrImportHandleV1(module_id: module_id, symbol_id: id, name: name, kind: kind))
+                    found = true
+        if not found:
+            missing.push(module_id + "." + name)
+    (handles, missing)
+
+# Route one worker batch. `claimed` are the source paths this worker owns (the
+# only files the caller parses); `module_paths` maps an imported module id to
+# its source path (the frozen inventory). Imported sources are read as text for
+# the summary producer only, never parsed.
+pub fn tldr_route_worker_v1(root: text, claimed: [text], module_paths: Dict<text, text>) -> TldrRouteResultV1:
+    var summaries = 0
+    var fallbacks = 0
+    var fallback_modules: [text] = []
+    var handles: [TldrImportHandleV1] = []
+    var missing: [text] = []
+    var seen: [text] = []
+    for path in claimed:
+        for spec in tldr_route_import_specs_v1(file_read(path)):
+            val (module_id, names) = spec
+            if not module_paths.contains_key(module_id):
+                missing.push(module_id + " (unresolved)")
+                continue
+            val src_path = module_paths[module_id]
+            if not file_exists(src_path):
+                missing.push(module_id + " (no source)")
+                continue
+            match tldr_summary_ensure_v1(root, module_id, file_read(src_path)):
+                case Some(rows):
+                    if not seen.contains(module_id):
+                        seen.push(module_id)
+                        summaries = summaries + 1
+                        var has_fallback = false
+                        for r in rows:
+                            if r.starts_with("fallback|"): has_fallback = true
+                        if has_fallback:
+                            fallbacks = fallbacks + 1
+                            fallback_modules.push(module_id)
+                            print("[tldr-fallback] module={module_id} reason=summary-fallback-rows source-load=1")
+                    val (hs, miss) = _tr_handles_for_v1(module_id, rows, names)
+                    for h in hs: handles.push(h)
+                    for m in miss: missing.push(m)
+                case nil:
+                    missing.push(module_id + " (no verified summary)")
+    val parsed = claimed.len() + fallbacks
+    print("[tldr-imports] worker modules_parsed={parsed} summaries_read={summaries} fallbacks={fallbacks}")
+    TldrRouteResultV1(modules_parsed: parsed, summaries_read: summaries, fallbacks: fallbacks,
+        fallback_modules: fallback_modules, handles: handles, missing: missing)
+
+# Fill a lazy handle: its decl row from the published summary (read_tldr).
+pub fn tldr_import_handle_fill_v1(root: text, handle: TldrImportHandleV1) -> text?:
+    match read_tldr(root, handle.module_id):
+        case Some(rows):
+            for r in rows:
+                if r.starts_with("decl|") and r.contains(" id=" + handle.symbol_id + " "):
+                    return Some(r)
+            nil
+        case nil: nil
+
+# Lazy generic body: the one decl's text block from its defining module only.
+pub fn tldr_import_generic_body_v1(handle: TldrImportHandleV1, source_path: text) -> text?:
+    if not file_exists(source_path): return nil
+    val lines = file_read(source_path).replace("\r\n", "\n").split("\n")
+    var i = 0
+    while i < lines.len():
+        val l = lines[i]
+        val head = if l.starts_with("pub "): l.substring(4) else: l
+        val sp = head.index_of(" ")
+        if sp > 0 and not l.starts_with(" ") and head.substring(sp + 1).starts_with(handle.name):
+            val after = head.substring(sp + 1 + handle.name.len())
+            if after.starts_with("<") or after.starts_with("(") or after.starts_with(":"):
+                var body = l
+                var j = i + 1
+                while j < lines.len() and (lines[j] == "" or lines[j].starts_with(" ") or lines[j].starts_with("\t")):
+                    body = body + "\n" + lines[j]
+                    j = j + 1
+                return Some(body.trim())
+        i = i + 1
+    nil
+
+export TldrImportHandleV1, TldrRouteResultV1
+export tldr_imports_flag_on_v1, tldr_imports_enabled_v1, tldr_closure_walk_check_v1
+export tldr_route_import_specs_v1, tldr_route_worker_v1
+export tldr_import_handle_fill_v1, tldr_import_generic_body_v1
