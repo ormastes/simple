@@ -51,7 +51,7 @@ describe "Build retention V1 closure authority":
         limits.max_work = 1
         expect(build_retention_plan_v1(cycle, limits, 1).is_err()).to_equal(true)
 
-    it "preserves active readers until lease expiry and reports bounded pressure":
+    it "preserves active readers until explicit release and reports bounded pressure":
         step("An old client lease protects its historical snapshot and dependency")
         var state = retention_state([retention_node("old", ["snapshot/base"], false, 8),
             retention_node("base", [], false, 8)])
@@ -59,8 +59,11 @@ describe "Build retention V1 closure authority":
         val live = build_retention_plan_v1(state, retention_limits(0), 99).unwrap()
         expect(live.deletions.len()).to_equal(0)
         expect(live.status).to_equal("protected_over_budget")
-        val expired = build_retention_plan_v1(state, retention_limits(0), 100).unwrap()
-        expect(expired.deletions).to_equal(["snapshot/old", "snapshot/base"])
+        val late = build_retention_plan_v1(state, retention_limits(0), 1000).unwrap()
+        expect(late.deletions.len()).to_equal(0)
+        val released = build_retention_release_v1(state, 2, "old-client").unwrap()
+        val collect = build_retention_plan_v1(released, retention_limits(0), 1000).unwrap()
+        expect(collect.deletions).to_equal(["snapshot/old", "snapshot/base"])
 
     it "uses idempotent pin operations and rejects stale generation updates":
         step("A repeated pin leaves generation stable and stale unpin loses CAS")
