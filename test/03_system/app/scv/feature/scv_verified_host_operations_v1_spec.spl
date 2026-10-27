@@ -8,6 +8,7 @@ use std.scv.verified_host_operations_v1.*
 use app.scv.host_capture_commands_v1.{scv_host_capture_command_v1}
 use app.io.mod.{dir_create, dir_remove_all, file_exists, file_read_bytes, file_write, file_write_bytes, secure_temp_dir}
 use std.scv.core.{scv_chunk_path}
+use std.scv.store.{scv_content_id_for_u8}
 
 fn host_ops_test_root_v1() -> text:
     val root = secure_temp_dir("/tmp", "scv-host-ops-v1").unwrap()
@@ -65,6 +66,20 @@ describe "SCV verified host operations V1":
         expect(receipt.status).to_equal("failed")
         expect(file_read_bytes("{root}/source.bin")).to_equal(bytes)
         expect(file_exists("{root}/.scv/objects/chunks")).to_equal(false)
+        dir_remove_all(root)
+
+    it "rejects a corrupt preexisting content-addressed chunk":
+        # @req REQ-SCV-HOST-CAPTURE-07
+        val root = host_ops_test_root_v1()
+        val source: [u8] = [20, 21, 22]
+        val wrong: [u8] = [23, 24, 25]
+        file_write_bytes("{root}/source.bin", source)
+        val id = scv_content_id_for_u8(source)
+        file_write_bytes(scv_chunk_path(root, id), wrong)
+        val receipt = scv_host_capture_read_v1(root, "source.bin")
+        expect(receipt.status).to_equal("capture_write_failed")
+        expect(file_read_bytes("{root}/source.bin")).to_equal(source)
+        expect(file_read_bytes(scv_chunk_path(root, id))).to_equal(wrong)
         dir_remove_all(root)
 
     it "refuses copy and leaves both user paths unchanged":
