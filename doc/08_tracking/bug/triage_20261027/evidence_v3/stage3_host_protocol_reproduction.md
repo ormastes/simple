@@ -1,7 +1,7 @@
 # Scoped reproduction evidence: Stage 3 source policy
 
-**Bug:** [`BUG-STAGE3-RESUME-SOURCE-POLICY-20261011`](https://github.com/ormastes/simple/blob/c0b3ad911f4cb00c0f3550b05baa8d06347d17d0/doc/08_tracking/bug/stage3_resume_source_policy_2026-10-11.md)  
-**Assessment:** `c0b3ad911f4cb00c0f3550b05baa8d06347d17d0`  
+**Bug:** [`BUG-STAGE3-RESUME-SOURCE-POLICY-20261011`](https://github.com/ormastes/simple/blob/c0b3ad911f4cb00c0f3550b05baa8d06347d17d0/doc/08_tracking/bug/stage3_resume_source_policy_2026-10-11.md)<br>
+**Assessment:** `c0b3ad911f4cb00c0f3550b05baa8d06347d17d0`<br>
 **Mandatory scope:** `HOST_PROTOCOL` only, case `test_real_digest_and_worker_builders_match`.
 
 This is one host-side shell argument-builder reproduction. It does not reproduce an actual compiler build, qualify the Simple runtime, or establish a full Phase 3 result.
