@@ -1,0 +1,476 @@
+# Immutable indexing candidates only. Compiler owns semantic-read meaning and
+# completeness; the BuildRunner owner admits producers and journals/CASes roots.
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.snapshot_v2.{scv_snapshot_sorted_v2}
+
+pub struct ScvBuildUseV1:
+    use_id: text
+    kind: text
+    producer_uid: text
+    facet_digest: text
+    scope_root: text
+
+# Exact compiler-owned universe, including nonmatches and empty universes.
+pub struct ScvBuildCandidateScopeV1:
+    scope_root: text
+    candidate_uids: [text]
+
+pub struct ScvBuildOutgoingManifestV1:
+    snapshot_id: text
+    consumer_uid: text
+    source_generation: i64
+    attempt_id: text
+    outgoing: [ScvBuildUseV1]
+    scopes: [ScvBuildCandidateScopeV1]
+    manifest_digest: text
+
+pub struct ScvBuildAttemptV1:
+    consumer_uid: text
+    source_generation: i64
+    attempt_id: text
+
+pub struct ScvBuildDerivationReplayV1:
+    attempt_id: text
+    transaction_digest: text
+
+pub struct ScvBuildReceiptBindingV1:
+    receipt_id: text
+    consumer_uid: text
+    manifest_digest: text
+
+pub struct ScvBuildGraphStateV1:
+    schema: i64
+    snapshot_id: text
+    generation: i64
+    root_id: text
+    manifests: [ScvBuildOutgoingManifestV1]
+    attempts: [ScvBuildAttemptV1]
+    attempt_history: [ScvBuildAttemptV1]
+    replays: [ScvBuildDerivationReplayV1]
+    receipts: [ScvBuildReceiptBindingV1]
+    invalidated_receipt_ids: [text]
+
+fn scv_build_frame_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn scv_build_use_bytes_v1(item: ScvBuildUseV1) -> text:
+    scv_build_frame_v1(item.use_id) + scv_build_frame_v1(item.kind) +
+        scv_build_frame_v1(item.producer_uid) + scv_build_frame_v1(item.facet_digest) +
+        scv_build_frame_v1(item.scope_root)
+
+fn scv_build_scope_bytes_v1(scope: ScvBuildCandidateScopeV1) -> text:
+    var bytes = scv_build_frame_v1(scope.scope_root) + "{scope.candidate_uids.len()}:"
+    for uid in scope.candidate_uids: bytes = bytes + scv_build_frame_v1(uid)
+    bytes
+
+fn scv_build_manifest_bytes_v1(manifest: ScvBuildOutgoingManifestV1) -> text:
+    var bytes = scv_build_frame_v1(manifest.snapshot_id) + scv_build_frame_v1(manifest.consumer_uid) +
+        "{manifest.source_generation}:" + scv_build_frame_v1(manifest.attempt_id) + "{manifest.outgoing.len()}:"
+    for item in manifest.outgoing: bytes = bytes + scv_build_frame_v1(scv_build_use_bytes_v1(item))
+    bytes = bytes + "{manifest.scopes.len()}:"
+    for scope in manifest.scopes: bytes = bytes + scv_build_frame_v1(scv_build_scope_bytes_v1(scope))
+    bytes
+
+pub fn scv_build_manifest_digest_v1(manifest: ScvBuildOutgoingManifestV1) -> text:
+    "sha256_" + sha256_text("scv-build-outgoing-v1:" + scv_build_manifest_bytes_v1(manifest))
+
+fn scv_build_graph_bytes_v1(state: ScvBuildGraphStateV1) -> text:
+    var bytes = "scv-build-derivations-v1:" + scv_build_frame_v1(state.snapshot_id) + "{state.generation}:{state.manifests.len()}:"
+    for manifest in state.manifests:
+        bytes = bytes + scv_build_frame_v1(scv_build_manifest_bytes_v1(manifest)) + scv_build_frame_v1(manifest.manifest_digest)
+    bytes = bytes + "{state.attempts.len()}:"
+    for attempt in state.attempts:
+        bytes = bytes + scv_build_frame_v1(attempt.consumer_uid) + "{attempt.source_generation}:" + scv_build_frame_v1(attempt.attempt_id)
+    bytes = bytes + "{state.attempt_history.len()}:"
+    for attempt in state.attempt_history:
+        bytes = bytes + scv_build_frame_v1(attempt.consumer_uid) + "{attempt.source_generation}:" + scv_build_frame_v1(attempt.attempt_id)
+    bytes = bytes + "{state.replays.len()}:"
+    for replay in state.replays:
+        bytes = bytes + scv_build_frame_v1(replay.attempt_id) + scv_build_frame_v1(replay.transaction_digest)
+    bytes = bytes + "{state.receipts.len()}:"
+    for receipt in state.receipts:
+        bytes = bytes + scv_build_frame_v1(receipt.receipt_id) + scv_build_frame_v1(receipt.consumer_uid) + scv_build_frame_v1(receipt.manifest_digest)
+    bytes = bytes + "{state.invalidated_receipt_ids.len()}:"
+    for id in state.invalidated_receipt_ids: bytes = bytes + scv_build_frame_v1(id)
+    bytes
+
+pub fn scv_build_graph_digest_v1(state: ScvBuildGraphStateV1) -> text:
+    "sha256_" + sha256_text(scv_build_graph_bytes_v1(state))
+
+fn scv_build_seal_v1(state: ScvBuildGraphStateV1) -> ScvBuildGraphStateV1:
+    var candidate = state
+    # Copy nested storage: no version may share arrays that a later candidate
+    # appends to or that a producer retains after submitting its manifest.
+    var manifests: [ScvBuildOutgoingManifestV1] = []
+    for manifest in state.manifests:
+        var copied = manifest
+        var outgoing: [ScvBuildUseV1] = []
+        for item in manifest.outgoing: outgoing = outgoing.push(item)
+        var scopes: [ScvBuildCandidateScopeV1] = []
+        for scope in manifest.scopes:
+            var uids: [text] = []
+            for uid in scope.candidate_uids: uids = uids.push(uid)
+            scopes = scopes.push(ScvBuildCandidateScopeV1(scope_root: scope.scope_root, candidate_uids: uids))
+        copied.outgoing = outgoing
+        copied.scopes = scopes
+        manifests = manifests.push(copied)
+    var attempts: [ScvBuildAttemptV1] = []
+    for attempt in state.attempts: attempts = attempts.push(attempt)
+    var history: [ScvBuildAttemptV1] = []
+    for attempt in state.attempt_history: history = history.push(attempt)
+    var replays: [ScvBuildDerivationReplayV1] = []
+    for replay in state.replays: replays = replays.push(replay)
+    var receipts: [ScvBuildReceiptBindingV1] = []
+    for receipt in state.receipts: receipts = receipts.push(receipt)
+    var invalidated: [text] = []
+    for id in state.invalidated_receipt_ids: invalidated = invalidated.push(id)
+    candidate.manifests = manifests
+    candidate.attempts = attempts
+    candidate.attempt_history = history
+    candidate.replays = replays
+    candidate.receipts = receipts
+    candidate.invalidated_receipt_ids = invalidated
+    candidate.root_id = scv_build_graph_digest_v1(candidate)
+    candidate
+
+pub fn scv_build_graph_empty_v1(snapshot_id: text) -> Result<ScvBuildGraphStateV1, text>:
+    if snapshot_id == "" or snapshot_id.len() > 4096: return Err("derivation-snapshot-invalid")
+    Ok(scv_build_seal_v1(ScvBuildGraphStateV1(schema: 1, snapshot_id: snapshot_id,
+        generation: 0, root_id: "", manifests: [], attempts: [], attempt_history: [], replays: [], receipts: [], invalidated_receipt_ids: [])))
+
+fn scv_build_manifest_v1(snapshot_id: text, consumer_uid: text, source_generation: i64,
+        attempt_id: text, outgoing: [ScvBuildUseV1], scopes: [ScvBuildCandidateScopeV1]) -> Result<ScvBuildOutgoingManifestV1, text>:
+    if snapshot_id == "" or snapshot_id.len() > 4096: return Err("derivation-snapshot-invalid")
+    if consumer_uid == "" or attempt_id == "" or source_generation < 0: return Err("derivation-consumer-invalid")
+    if outgoing.len() > 4096 or scopes.len() > 4096: return Err("derivation-budget")
+    var use_ids: [text] = []
+    var scope_ids: [text] = []
+    var normalized_scopes: [ScvBuildCandidateScopeV1] = []
+    var retained_bytes = snapshot_id.len() + consumer_uid.len() + attempt_id.len()
+    for scope in scopes:
+        retained_bytes = retained_bytes + scope.scope_root.len()
+        if retained_bytes > 1048576: return Err("derivation-budget")
+        if scope.scope_root == "" or scope_ids.contains(scope.scope_root): return Err("derivation-scope-invalid")
+        if scope.candidate_uids.len() > 4096: return Err("derivation-budget")
+        var candidates: [text] = []
+        for uid in scope.candidate_uids:
+            retained_bytes = retained_bytes + uid.len()
+            if retained_bytes > 1048576: return Err("derivation-budget")
+            if uid == "" or candidates.contains(uid): return Err("derivation-candidate-invalid")
+            candidates = candidates.push(uid)
+        scope_ids = scope_ids.push(scope.scope_root)
+        normalized_scopes = normalized_scopes.push(ScvBuildCandidateScopeV1(scope_root: scope.scope_root,
+            candidate_uids: scv_snapshot_sorted_v2(candidates)))
+    for item in outgoing:
+        retained_bytes = retained_bytes + item.use_id.len() + item.kind.len() + item.producer_uid.len() + item.facet_digest.len() + item.scope_root.len()
+        if retained_bytes > 1048576: return Err("derivation-budget")
+        if item.use_id == "" or item.producer_uid == "" or item.facet_digest == "": return Err("derivation-use-invalid")
+        if not ["macro", "generic", "pointcut", "semantic"].contains(item.kind): return Err("derivation-use-kind")
+        if use_ids.contains(item.use_id): return Err("derivation-duplicate-use")
+        if item.scope_root != "" and not scope_ids.contains(item.scope_root): return Err("derivation-scope-missing")
+        if item.kind == "pointcut" and item.scope_root == "": return Err("derivation-scope-missing")
+        use_ids = use_ids.push(item.use_id)
+    var sorted_uses: [ScvBuildUseV1] = []
+    for id in scv_snapshot_sorted_v2(use_ids):
+        for item in outgoing:
+            if item.use_id == id: sorted_uses = sorted_uses.push(item)
+    var sorted_scopes: [ScvBuildCandidateScopeV1] = []
+    for id in scv_snapshot_sorted_v2(scope_ids):
+        for scope in normalized_scopes:
+            if scope.scope_root == id: sorted_scopes = sorted_scopes.push(scope)
+    var manifest = ScvBuildOutgoingManifestV1(snapshot_id: snapshot_id, consumer_uid: consumer_uid,
+        source_generation: source_generation, attempt_id: attempt_id, outgoing: sorted_uses,
+        scopes: sorted_scopes, manifest_digest: "")
+    manifest.manifest_digest = scv_build_manifest_digest_v1(manifest)
+    Ok(manifest)
+
+fn scv_build_graph_bounded_v1(state: ScvBuildGraphStateV1) -> bool:
+    if state.snapshot_id.len() > 4096 or state.root_id.len() > 4096: return false
+    if state.manifests.len() > 4096 or state.attempts.len() > 4096 or state.attempt_history.len() > 65536 or state.replays.len() > 65536 or state.receipts.len() > 65536 or state.invalidated_receipt_ids.len() > 65536: return false
+    var retained = state.snapshot_id.len() + state.root_id.len()
+    var rows = 0
+    for manifest in state.manifests:
+        if manifest.outgoing.len() > 4096 or manifest.scopes.len() > 4096: return false
+        rows = rows + manifest.outgoing.len() + manifest.scopes.len()
+        if rows > 65536: return false
+        retained = retained + manifest.snapshot_id.len() + manifest.consumer_uid.len() + manifest.attempt_id.len() + manifest.manifest_digest.len()
+        if retained > 8388608: return false
+        for item in manifest.outgoing:
+            retained = retained + item.use_id.len() + item.kind.len() + item.producer_uid.len() + item.facet_digest.len() + item.scope_root.len()
+            if retained > 8388608: return false
+        for scope in manifest.scopes:
+            if scope.candidate_uids.len() > 4096: return false
+            rows = rows + scope.candidate_uids.len()
+            retained = retained + scope.scope_root.len()
+            if rows > 65536 or retained > 8388608: return false
+            for uid in scope.candidate_uids:
+                retained = retained + uid.len()
+                if retained > 8388608: return false
+    for attempt in state.attempts + state.attempt_history:
+        retained = retained + attempt.consumer_uid.len() + attempt.attempt_id.len()
+        if retained > 8388608: return false
+    for replay in state.replays:
+        retained = retained + replay.attempt_id.len() + replay.transaction_digest.len()
+        if retained > 8388608: return false
+    for receipt in state.receipts:
+        retained = retained + receipt.receipt_id.len() + receipt.consumer_uid.len() + receipt.manifest_digest.len()
+        if retained > 8388608: return false
+    for id in state.invalidated_receipt_ids:
+        retained = retained + id.len()
+        if retained > 8388608: return false
+    true
+
+pub fn scv_build_graph_valid_v1(state: ScvBuildGraphStateV1) -> bool:
+    if state.schema != 1 or state.snapshot_id == "" or state.generation < 0: return false
+    if not scv_build_graph_bounded_v1(state): return false
+    if state.root_id != scv_build_graph_digest_v1(state): return false
+    var consumers: [text] = []
+    for manifest in state.manifests:
+        if consumers.contains(manifest.consumer_uid): return false
+        consumers = consumers.push(manifest.consumer_uid)
+        val rebuilt = scv_build_manifest_v1(manifest.snapshot_id, manifest.consumer_uid,
+            manifest.source_generation, manifest.attempt_id, manifest.outgoing, manifest.scopes)
+        match rebuilt:
+            Err(reason): return false
+            Ok(value):
+                if value.manifest_digest != manifest.manifest_digest: return false
+                if scv_build_manifest_bytes_v1(value) != scv_build_manifest_bytes_v1(manifest): return false
+    var attempt_consumers: [text] = []
+    var attempt_ids: [text] = []
+    var history_ids: [text] = []
+    for attempt in state.attempt_history:
+        if attempt.consumer_uid == "" or attempt.attempt_id == "" or attempt.source_generation < 0 or history_ids.contains(attempt.attempt_id): return false
+        history_ids = history_ids.push(attempt.attempt_id)
+    for manifest in state.manifests:
+        var recorded = false
+        for attempt in state.attempt_history:
+            if attempt.consumer_uid == manifest.consumer_uid and attempt.source_generation == manifest.source_generation and attempt.attempt_id == manifest.attempt_id: recorded = true
+        if not recorded or not scv_build_scopes_consistent_v1(state, manifest.scopes): return false
+    for attempt in state.attempts:
+        if attempt.consumer_uid == "" or attempt.attempt_id == "" or attempt.source_generation < 0: return false
+        if attempt_consumers.contains(attempt.consumer_uid) or attempt_ids.contains(attempt.attempt_id): return false
+        attempt_consumers = attempt_consumers.push(attempt.consumer_uid)
+        attempt_ids = attempt_ids.push(attempt.attempt_id)
+        var recorded = false
+        for old in state.attempt_history:
+            if old.consumer_uid == attempt.consumer_uid and old.source_generation == attempt.source_generation and old.attempt_id == attempt.attempt_id: recorded = true
+        if not recorded: return false
+    var replay_ids: [text] = []
+    for replay in state.replays:
+        if replay.attempt_id == "" or replay.transaction_digest == "" or replay_ids.contains(replay.attempt_id): return false
+        replay_ids = replay_ids.push(replay.attempt_id)
+        if not history_ids.contains(replay.attempt_id): return false
+    var receipt_ids: [text] = []
+    for receipt in state.receipts:
+        if receipt.receipt_id == "" or receipt_ids.contains(receipt.receipt_id): return false
+        receipt_ids = receipt_ids.push(receipt.receipt_id)
+        var bound = false
+        for manifest in state.manifests:
+            if manifest.consumer_uid == receipt.consumer_uid and manifest.manifest_digest == receipt.manifest_digest: bound = true
+        if not bound or state.invalidated_receipt_ids.contains(receipt.receipt_id): return false
+    state.invalidated_receipt_ids.len() <= 65536
+
+fn scv_build_root_precondition_v1(state: ScvBuildGraphStateV1, expected_root: text) -> text:
+    if not scv_build_graph_valid_v1(state): return "derivation-root-invalid"
+    if expected_root != state.root_id: return "derivation-root-cas"
+    if state.generation >= 9223372036854775806: return "derivation-generation-exhausted"
+    ""
+
+fn scv_build_scopes_consistent_v1(state: ScvBuildGraphStateV1,
+        scopes: [ScvBuildCandidateScopeV1]) -> bool:
+    for manifest in state.manifests:
+        for old in manifest.scopes:
+            for scope in scopes:
+                if old.scope_root == scope.scope_root and scv_build_scope_bytes_v1(old) != scv_build_scope_bytes_v1(scope): return false
+    true
+
+# Must be persisted by the owner before producer execution. Registration never
+# removes an accepted manifest; a superseded producer cannot erase its edges.
+pub fn scv_build_register_attempt_v1(state: ScvBuildGraphStateV1, expected_root: text,
+        consumer_uid: text, source_generation: i64, attempt_id: text) -> Result<ScvBuildGraphStateV1, text>:
+    val refusal = scv_build_root_precondition_v1(state, expected_root)
+    if refusal != "": return Err(refusal)
+    if consumer_uid == "" or attempt_id == "" or source_generation < 0: return Err("derivation-consumer-invalid")
+    for replay in state.replays:
+        if replay.attempt_id == attempt_id: return Err("derivation-attempt-reused")
+    for old in state.attempt_history:
+        if old.attempt_id == attempt_id:
+            for current in state.attempts:
+                if current.attempt_id == attempt_id and current.consumer_uid == consumer_uid and current.source_generation == source_generation: return Ok(state)
+            return Err("derivation-attempt-reused")
+    var attempts: [ScvBuildAttemptV1] = []
+    for attempt in state.attempts:
+        if attempt.consumer_uid == consumer_uid:
+            if attempt.source_generation == source_generation and attempt.attempt_id == attempt_id: return Ok(state)
+            if source_generation < attempt.source_generation: return Err("derivation-generation-stale")
+        else:
+            if attempt.attempt_id == attempt_id: return Err("derivation-attempt-reused")
+            attempts = attempts.push(attempt)
+    if attempts.len() >= 4096: return Err("derivation-budget")
+    attempts = attempts.push(ScvBuildAttemptV1(consumer_uid: consumer_uid, source_generation: source_generation, attempt_id: attempt_id))
+    var next = state
+    next.attempts = attempts
+    var history: [ScvBuildAttemptV1] = []
+    for old in state.attempt_history: history = history.push(old)
+    next.attempt_history = history.push(ScvBuildAttemptV1(consumer_uid: consumer_uid,
+        source_generation: source_generation, attempt_id: attempt_id))
+    next.generation = state.generation + 1
+    if not scv_build_graph_bounded_v1(next): return Err("derivation-budget")
+    Ok(scv_build_seal_v1(next))
+
+# Exact snapshot binding only; no semantic interpretation of snapshot IDs.
+# Historical manifests remain until each successful current producer replaces
+# them. New snapshot admission invalidates old receipt bindings in the same root.
+pub fn scv_build_advance_snapshot_v1(state: ScvBuildGraphStateV1, expected_root: text,
+        snapshot_id: text) -> Result<ScvBuildGraphStateV1, text>:
+    val refusal = scv_build_root_precondition_v1(state, expected_root)
+    if refusal != "": return Err(refusal)
+    if snapshot_id == "" or snapshot_id.len() > 4096: return Err("derivation-snapshot-invalid")
+    if snapshot_id == state.snapshot_id: return Ok(state)
+    var invalidated: [text] = []
+    for id in state.invalidated_receipt_ids: invalidated = invalidated.push(id)
+    for receipt in state.receipts:
+        if not invalidated.contains(receipt.receipt_id): invalidated = invalidated.push(receipt.receipt_id)
+    var next = state
+    next.snapshot_id = snapshot_id
+    next.generation = state.generation + 1
+    next.attempts = []
+    next.receipts = []
+    next.invalidated_receipt_ids = scv_snapshot_sorted_v2(invalidated)
+    if not scv_build_graph_bounded_v1(next): return Err("derivation-budget")
+    Ok(scv_build_seal_v1(next))
+
+pub fn scv_build_replace_consumer_v1(state: ScvBuildGraphStateV1, expected_root: text,
+        snapshot_id: text, consumer_uid: text, source_generation: i64, attempt_id: text,
+        outgoing: [ScvBuildUseV1], scopes: [ScvBuildCandidateScopeV1]) -> Result<ScvBuildGraphStateV1, text>:
+    if not scv_build_graph_valid_v1(state): return Err("derivation-root-invalid")
+    if snapshot_id != state.snapshot_id: return Err("derivation-snapshot-mismatch")
+    val manifest = scv_build_manifest_v1(snapshot_id, consumer_uid, source_generation, attempt_id, outgoing, scopes)?
+    if not scv_build_scopes_consistent_v1(state, manifest.scopes): return Err("derivation-scope-root-conflict")
+    val transaction = "sha256_" + sha256_text("scv-build-replace-v1:" + scv_build_frame_v1(expected_root) + scv_build_frame_v1(manifest.manifest_digest))
+    for replay in state.replays:
+        if replay.attempt_id == attempt_id:
+            if replay.transaction_digest == transaction: return Ok(state)
+            return Err("derivation-replay-payload-mismatch")
+    val refusal = scv_build_root_precondition_v1(state, expected_root)
+    if refusal != "": return Err(refusal)
+    var registered = false
+    for attempt in state.attempts:
+        if attempt.consumer_uid == consumer_uid and attempt.source_generation == source_generation and attempt.attempt_id == attempt_id: registered = true
+    if not registered: return Err("derivation-attempt-stale")
+    var manifests: [ScvBuildOutgoingManifestV1] = []
+    var consumers: [text] = [consumer_uid]
+    for previous in state.manifests:
+        if previous.consumer_uid != consumer_uid: consumers = consumers.push(previous.consumer_uid)
+    if consumers.len() > 4096 or state.replays.len() >= 65536: return Err("derivation-budget")
+    for uid in scv_snapshot_sorted_v2(consumers):
+        if uid == consumer_uid: manifests = manifests.push(manifest)
+        else:
+            for previous in state.manifests:
+                if previous.consumer_uid == uid: manifests = manifests.push(previous)
+    var receipts: [ScvBuildReceiptBindingV1] = []
+    var invalidated: [text] = []
+    for id in state.invalidated_receipt_ids: invalidated = invalidated.push(id)
+    for receipt in state.receipts:
+        if receipt.consumer_uid == consumer_uid:
+            if not invalidated.contains(receipt.receipt_id): invalidated = invalidated.push(receipt.receipt_id)
+        else: receipts = receipts.push(receipt)
+    if invalidated.len() > 65536: return Err("derivation-budget")
+    var next = state
+    next.generation = state.generation + 1
+    next.manifests = manifests
+    next.receipts = receipts
+    next.invalidated_receipt_ids = scv_snapshot_sorted_v2(invalidated)
+    var replays: [ScvBuildDerivationReplayV1] = []
+    for replay in state.replays: replays = replays.push(replay)
+    next.replays = replays.push(ScvBuildDerivationReplayV1(attempt_id: attempt_id, transaction_digest: transaction))
+    if not scv_build_graph_bounded_v1(next): return Err("derivation-budget")
+    Ok(scv_build_seal_v1(next))
+
+# The callback is an owner capability, never a request-supplied attestation.
+# It must journal and atomically CAS expected_root to candidate.root_id; a
+# matching return value alone is not proof that an arbitrary callback is durable.
+pub fn scv_build_publish_consumer_v1(state: ScvBuildGraphStateV1, expected_root: text,
+        snapshot_id: text, consumer_uid: text, source_generation: i64, attempt_id: text,
+        outgoing: [ScvBuildUseV1], scopes: [ScvBuildCandidateScopeV1], outcome: text,
+        persist: fn(text, ScvBuildGraphStateV1) -> Result<text, text>) -> Result<ScvBuildGraphStateV1, text>:
+    if outcome != "completed": return Err("derivation-producer-not-successful")
+    val candidate = scv_build_replace_consumer_v1(state, expected_root, snapshot_id,
+        consumer_uid, source_generation, attempt_id, outgoing, scopes)?
+    if candidate.root_id == state.root_id: return Ok(state)
+    val committed_root = persist(expected_root, scv_build_seal_v1(candidate))?
+    if committed_root != candidate.root_id: return Err("derivation-owner-root-mismatch")
+    Ok(candidate)
+
+pub fn scv_build_bind_receipt_v1(state: ScvBuildGraphStateV1, expected_root: text,
+        binding: ScvBuildReceiptBindingV1) -> Result<ScvBuildGraphStateV1, text>:
+    val refusal = scv_build_root_precondition_v1(state, expected_root)
+    if refusal != "": return Err(refusal)
+    if binding.receipt_id == "" or state.invalidated_receipt_ids.contains(binding.receipt_id): return Err("derivation-receipt-invalid")
+    for receipt in state.receipts:
+        if receipt.receipt_id == binding.receipt_id:
+            if receipt.consumer_uid == binding.consumer_uid and receipt.manifest_digest == binding.manifest_digest: return Ok(state)
+            return Err("derivation-receipt-reused")
+    var found = false
+    for manifest in state.manifests:
+        if manifest.consumer_uid == binding.consumer_uid and manifest.manifest_digest == binding.manifest_digest: found = true
+    if not found: return Err("derivation-receipt-manifest-mismatch")
+    if state.receipts.len() >= 65536: return Err("derivation-budget")
+    var next = state
+    var receipts: [ScvBuildReceiptBindingV1] = []
+    for receipt in state.receipts: receipts = receipts.push(receipt)
+    next.receipts = receipts.push(binding)
+    next.generation = state.generation + 1
+    Ok(scv_build_seal_v1(next))
+
+pub fn scv_build_reverse_users_v1(state: ScvBuildGraphStateV1, producer_uid: text) -> [text]:
+    var users: [text] = []
+    for manifest in state.manifests:
+        for item in manifest.outgoing:
+            if item.producer_uid == producer_uid and not users.contains(manifest.consumer_uid): users = users.push(manifest.consumer_uid)
+    scv_snapshot_sorted_v2(users)
+
+pub fn scv_build_reverse_kind_users_v1(state: ScvBuildGraphStateV1,
+        kind: text, producer_uid: text) -> [text]:
+    var users: [text] = []
+    for manifest in state.manifests:
+        for item in manifest.outgoing:
+            if item.kind == kind and item.producer_uid == producer_uid and not users.contains(manifest.consumer_uid): users = users.push(manifest.consumer_uid)
+    scv_snapshot_sorted_v2(users)
+
+fn scv_build_use_key_escape_v1(value: text) -> text:
+    value.split("%").join("%25").split("/").join("%2F")
+
+pub fn scv_build_demand_v1(state: ScvBuildGraphStateV1, producer_uid: text, facet_digest: text) -> [text]:
+    var uses: [text] = []
+    for manifest in state.manifests:
+        for item in manifest.outgoing:
+            if item.producer_uid == producer_uid and item.facet_digest == facet_digest:
+                uses = uses.push(scv_build_use_key_escape_v1(manifest.consumer_uid) + "/" + scv_build_use_key_escape_v1(item.use_id))
+    scv_snapshot_sorted_v2(uses)
+
+pub fn scv_build_kind_demand_v1(state: ScvBuildGraphStateV1, kind: text,
+        producer_uid: text, facet_digest: text) -> [text]:
+    var uses: [text] = []
+    for manifest in state.manifests:
+        for item in manifest.outgoing:
+            if item.kind == kind and item.producer_uid == producer_uid and item.facet_digest == facet_digest:
+                uses = uses.push(scv_build_use_key_escape_v1(manifest.consumer_uid) + "/" + scv_build_use_key_escape_v1(item.use_id))
+    scv_snapshot_sorted_v2(uses)
+
+pub fn scv_build_candidate_users_v1(state: ScvBuildGraphStateV1, candidate_uid: text) -> [text]:
+    var users: [text] = []
+    for manifest in state.manifests:
+        for scope in manifest.scopes:
+            if scope.candidate_uids.contains(candidate_uid) and not users.contains(manifest.consumer_uid): users = users.push(manifest.consumer_uid)
+    scv_snapshot_sorted_v2(users)
+
+pub fn scv_build_pointcut_candidates_v1(old: ScvBuildGraphStateV1,
+        requested: ScvBuildGraphStateV1, consumer_uid: text) -> [text]:
+    var candidates: [text] = []
+    for manifest in old.manifests + requested.manifests:
+        if manifest.consumer_uid == consumer_uid:
+            for scope in manifest.scopes:
+                for uid in scope.candidate_uids:
+                    if not candidates.contains(uid): candidates = candidates.push(uid)
+    scv_snapshot_sorted_v2(candidates)
