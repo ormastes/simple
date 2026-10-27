@@ -10,6 +10,8 @@ use std.nogc_sync_mut.io.browser_net_runtime.{browser_monotonic_ms,
     browser_tls_read_bytes_timeout, browser_tls_close}
 use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
 
+const BOUNDED_HTTP_REQUEST_LIMIT_V1: i64 = 2105344
+
 fn bounded_http_remaining_v1(deadline: i64) -> Result<i64, text>:
     val now = browser_monotonic_ms()
     if now < 0 or now >= deadline: return Err("http_deadline")
@@ -46,11 +48,12 @@ fn bounded_http_exchange_v1(request: text, max_body: i64, deadline: i64,
         if chunk.len() == 0: return response.finish()
         response.feed(chunk)?
 
-pub fn bounded_http_post_v1(target: BoundedHttpTargetV1, bearer: text,
-        body: text, timeout_ms: i64, max_body: i64) -> Result<text, text>:
+fn _bounded_http_post_with_request_limit_v1(target: BoundedHttpTargetV1, bearer: text,
+        body: text, timeout_ms: i64, max_body: i64, max_request_body: i64) -> Result<text, text>:
     bounded_http_target_validate_v1(target)?
     if not bounded_http_bearer_valid_v1(bearer): return Err("http_credentials_invalid")
-    if body.len() > 4096 or max_body < 0 or max_body > BOUNDED_HTTP_BODY_LIMIT_V1:
+    if max_request_body < 0 or max_request_body > BOUNDED_HTTP_REQUEST_LIMIT_V1 or
+        body.len() as i64 > max_request_body or max_body < 0 or max_body > BOUNDED_HTTP_BODY_LIMIT_V1:
         return Err("http_body_limit")
     if timeout_ms < 1 or timeout_ms > 60000: return Err("http_timeout_invalid")
     val now = browser_monotonic_ms()
@@ -87,4 +90,12 @@ pub fn bounded_http_post_v1(target: BoundedHttpTargetV1, bearer: text,
             case Ok(value): Ok(value)
             case Err(_): Err("http_exchange_failed")
 
-export bounded_http_post_v1
+pub fn bounded_http_post_v1(target: BoundedHttpTargetV1, bearer: text,
+        body: text, timeout_ms: i64, max_body: i64) -> Result<text, text>:
+    _bounded_http_post_with_request_limit_v1(target, bearer, body, timeout_ms, max_body, 4096)
+
+pub fn bounded_http_post_with_request_limit_v1(target: BoundedHttpTargetV1, bearer: text,
+        body: text, timeout_ms: i64, max_body: i64, max_request_body: i64) -> Result<text, text>:
+    _bounded_http_post_with_request_limit_v1(target, bearer, body, timeout_ms, max_body, max_request_body)
+
+export bounded_http_post_v1, bounded_http_post_with_request_limit_v1

@@ -1,0 +1,260 @@
+"""Authenticated native SCV draft blob endpoint, loopback development only."""
+use app.io.mod.{env_get, file_read_regular_no_follow_bounded_bytes}
+use app.scv.gateway_config_v1.{scv_gateway_env_name_valid_v1, scv_gateway_bearer_valid_v1}
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1, ScvDraftBlobRequestV1,
+    scv_draft_blob_put_v1, scv_draft_blob_get_v1}
+use std.scv.gateway_draft_protocol_v1.{ScvGatewayDraftRequestV1, ScvGatewayDraftResponseV1,
+    SCV_GATEWAY_DRAFT_MAX_REQUEST_BYTES_V1, SCV_GATEWAY_DRAFT_MAX_RESPONSE_BYTES_V1,
+    scv_gateway_draft_request_decode_v1, scv_gateway_draft_response_encode_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.scv.scv_config_fields_v1.{scv_config_dict_v1, scv_config_text_v1, scv_config_int_v1, scv_config_bool_v1}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus, HttpMethod}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, plaintext_development_capability}
+use std.nogc_sync_mut.http_server.router.{Router}
+
+pub struct ScvGatewayDraftGrantConfigV1:
+    repository: text
+    principal_id: text
+    bearer_token_env: text
+    can_read: bool
+    can_write: bool
+
+pub struct ScvGatewayDraftGrantV1:
+    repository: text
+    principal_id: text
+    bearer_token: text
+    can_read: bool
+    can_write: bool
+
+pub struct ScvGatewayDraftConfigV1:
+    listen_host: text
+    listen_port: i32
+    store_root: text
+    grants: [ScvGatewayDraftGrantConfigV1]
+
+fn _draft_scope_id_valid_v1(value: text) -> bool:
+    if value.len() <= 0 or value.len() > 128 or value == "." or value == "..": return false
+    for byte in value.bytes():
+        val ch = byte.to_i64()
+        if not ((ch >= 48 and ch <= 57) or (ch >= 65 and ch <= 90) or
+            (ch >= 97 and ch <= 122) or ch == 45 or ch == 46 or ch == 95): return false
+    true
+
+fn _draft_root_valid_v1(root: text) -> bool:
+    if root.len() < 2 or root.len() > 4096 or not root.starts_with("/") or root.ends_with("/") or root == "/": return false
+    if root.contains("//") or root.contains("\\") or root.contains("\n") or root.contains("\r"): return false
+    for part in root.split("/"):
+        if part == ".." or part == ".": return false
+    match path_final_existing(root):
+        case Ok(identity): identity.path == root and dir_is_real_no_follow(root)
+        case Err(_): false
+
+fn _draft_http_unbound_v1(status: HttpStatus, code: text) -> HttpResponse:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "status": SdnValue.String("error"), "error": SdnValue.String(code)}
+    HttpResponse(status: status, body: sdn_encode_canonical(SdnValue.Dict(fields)),
+        headers: [("Content-Type", "application/sdn"), ("Cache-Control", "no-store")])
+
+pub fn scv_gateway_draft_config_parse_v1(bytes: [u8]) -> Result<ScvGatewayDraftConfigV1, text>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 32768, max_depth: 5,
+        max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 16)
+    val document = match sdn_parse_strict_bytes_v1(bytes, limits):
+        case Ok(value): value
+        case Err(_): return Err("draft_config_syntax")
+    val fields = scv_config_dict_v1(document.value, "draft_gateway",
+        ["version", "listen_host", "listen_port", "store_root", "grants"])?
+    scv_config_int_v1(fields["version"], "version", 1, 1)?
+    val host = scv_config_text_v1(fields["listen_host"], "listen_host")?
+    if host != "127.0.0.1": return Err("draft_loopback_required")
+    val port = scv_config_int_v1(fields["listen_port"], "listen_port", 1024, 65535)?
+    val root = scv_config_text_v1(fields["store_root"], "store_root")?
+    if not _draft_root_valid_v1(root): return Err("draft_store_root_refused")
+    var grants: [ScvGatewayDraftGrantConfigV1] = []
+    match fields["grants"]:
+        case Array(items):
+            if items.len() == 0 or items.len() > 64: return Err("draft_grant_count")
+            for item in items:
+                val grant = scv_config_dict_v1(item, "grant",
+                    ["repository", "principal_id", "bearer_token_env", "can_read", "can_write"])?
+                val repository = scv_config_text_v1(grant["repository"], "grant.repository")?
+                val principal = scv_config_text_v1(grant["principal_id"], "grant.principal_id")?
+                val token_env = scv_config_text_v1(grant["bearer_token_env"], "grant.bearer_token_env")?
+                if not _draft_scope_id_valid_v1(repository) or not _draft_scope_id_valid_v1(principal) or
+                    not scv_gateway_env_name_valid_v1(token_env): return Err("draft_grant_invalid")
+                val read = scv_config_bool_v1(grant["can_read"], "grant.can_read")?
+                val write = scv_config_bool_v1(grant["can_write"], "grant.can_write")?
+                if not read and not write: return Err("draft_grant_empty")
+                for prior in grants:
+                    if prior.repository == repository and prior.principal_id == principal:
+                        return Err("draft_grant_ambiguous")
+                grants.push(ScvGatewayDraftGrantConfigV1(repository: repository,
+                    principal_id: principal, bearer_token_env: token_env, can_read: read, can_write: write))
+        case _: return Err("draft_grants_required")
+    Ok(ScvGatewayDraftConfigV1(listen_host: host, listen_port: port.to_i32(), store_root: root, grants: grants))
+
+pub fn scv_gateway_draft_config_load_v1(path: text) -> Result<ScvGatewayDraftConfigV1, text>:
+    val bytes = match file_read_regular_no_follow_bounded_bytes(path, 32768):
+        case Ok(value): value
+        case Err(_): return Err("draft_config_read_refused")
+    scv_gateway_draft_config_parse_v1(bytes)
+
+fn _draft_constant_token_equal_v1(left: text, right: text) -> bool:
+    var difference = if left.len() == right.len(): 0 else: 1
+    for index in 0..263:
+        val a = if index < left.len(): left.char_code_at(index) else: 0
+        val b = if index < right.len(): right.char_code_at(index) else: 0
+        if a != b: difference = difference + 1
+    difference == 0
+
+pub fn scv_gateway_draft_grants_resolve_v1(config: ScvGatewayDraftConfigV1) -> Result<[ScvGatewayDraftGrantV1], text>:
+    var grants: [ScvGatewayDraftGrantV1] = []
+    for item in config.grants:
+        val token = env_get(item.bearer_token_env)
+        if not scv_gateway_bearer_valid_v1(token): return Err("draft_credential_unavailable")
+        for prior in grants:
+            if _draft_constant_token_equal_v1(prior.bearer_token, token): return Err("draft_grant_ambiguous")
+        grants.push(ScvGatewayDraftGrantV1(repository: item.repository, principal_id: item.principal_id,
+            bearer_token: token, can_read: item.can_read, can_write: item.can_write))
+    Ok(grants)
+
+fn _draft_grant_for_http_v1(http: HttpRequest, grants: [ScvGatewayDraftGrantV1]) -> Result<ScvGatewayDraftGrantV1, text>:
+    var count = 0
+    var supplied = ""
+    for header in http.headers:
+        if header.0.to_lower() == "authorization":
+            count = count + 1
+            supplied = header.1
+    if count != 1 or supplied.len() > 263: return Err("draft_authentication_required")
+    var matches = 0
+    var selected = ScvGatewayDraftGrantV1(repository: "", principal_id: "", bearer_token: "", can_read: false, can_write: false)
+    for grant in grants:
+        val expected = "Bearer " + grant.bearer_token
+        if _draft_constant_token_equal_v1(expected, supplied):
+            matches = matches + 1
+            selected = grant
+    if matches != 1: return Err("draft_authentication_required")
+    Ok(selected)
+
+fn _draft_resolved_grants_valid_v1(config: ScvGatewayDraftConfigV1,
+        grants: [ScvGatewayDraftGrantV1]) -> bool:
+    if grants.len() != config.grants.len() or grants.len() == 0 or grants.len() > 64: return false
+    for index in 0..grants.len():
+        val grant = grants[index]
+        val configured = config.grants[index]
+        if grant.repository != configured.repository or grant.principal_id != configured.principal_id or
+            grant.can_read != configured.can_read or grant.can_write != configured.can_write or
+            not scv_gateway_bearer_valid_v1(grant.bearer_token): return false
+        for earlier in 0..index:
+            if _draft_constant_token_equal_v1(grant.bearer_token, grants[earlier].bearer_token) or
+                (grant.repository == grants[earlier].repository and grant.principal_id == grants[earlier].principal_id):
+                return false
+    true
+
+fn _draft_content_type_valid_v1(http: HttpRequest) -> bool:
+    var count = 0
+    var valid = false
+    for header in http.headers:
+        if header.0.to_lower() == "content-type":
+            count = count + 1
+            valid = header.1.to_lower() == "application/sdn"
+    count == 1 and valid
+
+fn _draft_bound_response_v1(request: ScvGatewayDraftRequestV1, grant: ScvGatewayDraftGrantV1,
+        status: text, digest: text, count: i64, state: text, payload: [u8], error: text) -> HttpResponse:
+    val response = ScvGatewayDraftResponseV1(version: 1, id: request.id, repository: request.repository,
+        principal_id: grant.principal_id, method: request.method, request_id: request.request_id,
+        status: status, content_sha256: digest, byte_count: count, state: state, payload: payload, error: error)
+    match scv_gateway_draft_response_encode_v1(response, request, grant.repository, grant.principal_id):
+        case Ok(body): HttpResponse(status: HttpStatus.Ok, body: body,
+            headers: [("Content-Type", "application/sdn"), ("Cache-Control", "no-store")])
+        case Err(_): _draft_http_unbound_v1(HttpStatus.InternalError, "draft_response_rejected")
+
+pub fn scv_gateway_draft_handle_v1(config: ScvGatewayDraftConfigV1,
+        grants: [ScvGatewayDraftGrantV1], http: HttpRequest) -> HttpResponse:
+    # Resolve bearer identity before decoding request-controlled subject or digest,
+    # and before any store path or object lookup can be derived.
+    if not _draft_resolved_grants_valid_v1(config, grants):
+        return _draft_http_unbound_v1(HttpStatus.InternalError, "draft_service_policy_rejected")
+    val grant = match _draft_grant_for_http_v1(http, grants):
+        case Ok(value): value
+        case Err(_): return _draft_http_unbound_v1(HttpStatus.Unauthorized, "draft_authentication_required")
+    if http.method != HttpMethod.Post or http.path != "/scv/draft/v1" or http.query != "":
+        return _draft_http_unbound_v1(HttpStatus.BadRequest, "draft_endpoint_rejected")
+    if http.body.len() as i64 > SCV_GATEWAY_DRAFT_MAX_REQUEST_BYTES_V1 or not _draft_content_type_valid_v1(http):
+        return _draft_http_unbound_v1(HttpStatus.BadRequest, "draft_request_rejected")
+    val request = match scv_gateway_draft_request_decode_v1(http.body):
+        case Ok(value): value
+        case Err(_): return _draft_http_unbound_v1(HttpStatus.BadRequest, "draft_request_invalid")
+    if request.repository != grant.repository:
+        return _draft_http_unbound_v1(HttpStatus.Forbidden, "draft_repository_denied")
+    val scope = ScvDraftBlobAdmittedScopeV1(repository_id: grant.repository,
+        principal_id: grant.principal_id, can_read: grant.can_read, can_write: grant.can_write)
+    if request.method == "put":
+        if not grant.can_write:
+            return _draft_bound_response_v1(request, grant, "denied", request.content_sha256, 0, "", [], "draft_write_denied")
+        val store_request = ScvDraftBlobRequestV1(repository_id: grant.repository,
+            principal_id: grant.principal_id, request_id: request.request_id,
+            content_sha256: request.content_sha256, bytes: request.bytes)
+        match scv_draft_blob_put_v1(config.store_root, scope, store_request):
+            case Ok(receipt):
+                if receipt.repository_id != grant.repository or receipt.principal_id != grant.principal_id or
+                    receipt.request_id != request.request_id or receipt.content_sha256 != request.content_sha256 or
+                    receipt.byte_count != request.bytes.len() as i64 or receipt.state != "local_durable":
+                    return _draft_bound_response_v1(request, grant, "error", request.content_sha256, 0, "", [], "draft_receipt_rejected")
+                _draft_bound_response_v1(request, grant, "ok", receipt.content_sha256,
+                    receipt.byte_count, receipt.state, [], "")
+            case Err(_): _draft_bound_response_v1(request, grant, "error", request.content_sha256, 0, "", [], "draft_store_rejected")
+    else:
+        if not grant.can_read:
+            return _draft_bound_response_v1(request, grant, "denied", request.content_sha256, 0, "", [], "draft_read_denied")
+        match scv_draft_blob_get_v1(config.store_root, scope, request.content_sha256):
+            case Ok(bytes): _draft_bound_response_v1(request, grant, "ok", request.content_sha256,
+                bytes.len() as i64, "local_readback", bytes, "")
+            case Err(_): _draft_bound_response_v1(request, grant, "error", request.content_sha256, 0, "", [], "draft_store_unavailable")
+
+pub fn scv_gateway_draft_server_policy_v1(reason: text) -> Result<SecureServerPolicy, text>:
+    val capability = plaintext_development_capability(reason)?
+    var policy = SecureServerPolicy.plaintext_dev(capability)
+    policy.max_request_line = 256
+    policy.max_header_count = 16
+    policy.max_header_line = 1024
+    policy.max_body = SCV_GATEWAY_DRAFT_MAX_REQUEST_BYTES_V1 as i32
+    policy.max_read_iters = 18
+    policy.read_timeout_ms = 5000
+    policy.write_timeout_ms = 5000
+    policy.max_connections = 4
+    policy.max_response_bytes = SCV_GATEWAY_DRAFT_MAX_RESPONSE_BYTES_V1
+    Ok(policy)
+
+pub fn scv_gateway_draft_router_v1(config: ScvGatewayDraftConfigV1,
+        grants: [ScvGatewayDraftGrantV1]) -> Router:
+    var router = Router.new()
+    router.set_not_found(\http: scv_gateway_draft_handle_v1(config, grants, http))
+    router
+
+pub fn scv_gateway_draft_serve_v1(config: ScvGatewayDraftConfigV1,
+        grants: [ScvGatewayDraftGrantV1], development_loopback: bool, reason: text) -> Result<(), text>:
+    if not development_loopback: return Err("draft_tls_unavailable_production_refused")
+    if config.listen_host != "127.0.0.1" or config.listen_port < 1024 or config.listen_port > 65535:
+        return Err("draft_listener_policy_rejected")
+    if not _draft_root_valid_v1(config.store_root): return Err("draft_store_root_refused")
+    if not _draft_resolved_grants_valid_v1(config, grants): return Err("draft_grants_unresolved")
+    if reason.len() == 0 or reason.len() > 256: return Err("draft_development_reason_required")
+    for byte in reason.bytes():
+        if byte < 32 or byte > 126: return Err("draft_development_reason_required")
+    val capability = plaintext_development_capability(reason)?
+    val policy = scv_gateway_draft_server_policy_v1(reason)?
+    val router = scv_gateway_draft_router_v1(config, grants)
+    var server = SimpleHttpServer.new(config.listen_host, config.listen_port, router)
+    server = server.with_policy(policy)
+    server.start_plaintext(capability)
+
+export ScvGatewayDraftGrantConfigV1, ScvGatewayDraftGrantV1, ScvGatewayDraftConfigV1
+export scv_gateway_draft_config_parse_v1, scv_gateway_draft_config_load_v1, scv_gateway_draft_grants_resolve_v1
+export scv_gateway_draft_handle_v1, scv_gateway_draft_server_policy_v1
+export scv_gateway_draft_router_v1, scv_gateway_draft_serve_v1
