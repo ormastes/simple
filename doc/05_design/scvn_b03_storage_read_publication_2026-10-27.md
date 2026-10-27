@@ -16,8 +16,12 @@ captures. Missing, inaccessible, nonregular and symlink inputs are explicit
 errors. Content-id and publication methods check `buffer.error` and return
 Results. Successful captures keep legitimate empty files and exact bytes.
 
-Byte chunks publish through `atomic_write_bytes`, which reuses the existing
-database FileLock, staging-file write, file sync and rename facade. Text
+Byte chunks publish through `atomic_write_bytes`, which uses the existing
+typed secure-temp-directory facade to exclusively create a private stage in
+the destination parent. It exclusively creates its own payload, writes/syncs
+that payload and atomically renames it into place. Only owned staging paths
+are cleaned; arbitrary destination `.tmp` and `.lock` neighbors are never
+used. Whole-payload replacement needs no shared read/modify lock. Text
 publication retains its bool API and removes the non-atomic fallback. Existing
 chunks are verified before deduplication. Snapshot creation checks each owned
 object, WAL, mutable-head/workspace, status-index and event acknowledgement.
@@ -26,6 +30,11 @@ The WAL BEGIN/SET/NEW recovery record is staged as one append before root
 publication. A partial root failure leaves the record pending rather than
 falsely writing ABORT. Recovery checks its own writes before acknowledging
 forward/rollback success; snapshot rejects recovery errors.
+
+Annotated-tag import checks the object writer's error outcome before either
+reference update. Reference setters report failed writes, and annotated
+references reject unsafe/nonexistent tag object identities. This does not
+establish a transaction spanning both tag references.
 
 The public structural matcher imports remain compatible through explicit
 exports after splitting shared values and source/CST adapters. Checkpoint

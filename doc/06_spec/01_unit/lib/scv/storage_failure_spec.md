@@ -8,8 +8,10 @@ scan **not_run** without a qualified native runtime.
 The ten authored scenarios cover empty-file SHA-256 versus absent/directory
 input; failed-buffer rejection without an empty chunk; invalid/excess/exact
 bounds; read-once binary capture after source replacement; text staging failure
-without non-atomic fallback; byte-exact binary atomic publication and failure;
-failed chunk staging; failed rename preserving its destination directory;
+without non-atomic fallback; byte-exact binary atomic publication preserving
+valuable `.tmp` and `.lock` neighbors;
+failed chunk staging through an obstructed parent; failed rename preserving
+its destination directory and both valuable neighbors;
 explicit symlink refusal; and corrupt existing-chunk rejection.
 
 The empty and `abc` digests are literal standard SHA-256 values. Binary arrays,

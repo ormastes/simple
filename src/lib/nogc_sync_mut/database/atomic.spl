@@ -25,7 +25,9 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 use std.io_runtime.{file_rename}
-use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.path.{dirname}
 extern fn rt_file_create_excl(path: text, content: text) -> bool
 extern fn rt_file_sync(path: text) -> bool
 extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
@@ -57,8 +59,7 @@ fn sleep_ms(ms: i64):
 # Exports
 
 # =====================================================================# Process Utilities
-# =====================================================================
-# Check if a process is alive (cross-platform)
+# ==============================================================# Check if a process is alive (cross-platform)
 fn is_process_alive(pid: i64) -> bool:
     if pid <= 0:
         return false
@@ -66,8 +67,7 @@ fn is_process_alive(pid: i64) -> bool:
     process_is_running(pid)
 
 # =====================================================================# FileLock - File-based locking mechanism
-# =====================================================================
-class FileLock:
+# ==============================================================class FileLock:
     path: text              # Path to file being locked
     lock_path: text         # Path to lock file
     acquired: bool          # Whether lock is held
@@ -170,8 +170,7 @@ class FileLock:
         self.acquired = false
 
 # =====================================================================# Atomic File Operations
-# =====================================================================
-# Read file with lock
+# ==============================================================# Read file with lock
 fn atomic_read(path: text) -> text?:
     # Fast path: if file doesn't exist, no need to acquire lock
     if not file_exists(path):
@@ -248,22 +247,34 @@ fn atomic_write_exclusive(path: text, content: text) -> bool:
     rt_file_delete(staged_path)
     rt_dir_remove(stage_dir, false)
     status == 1
-# Byte-exact counterpart of atomic_write. An unsuccessful write/sync/rename
-# never falls back to overwriting the published destination. This syncs the
-# file; it does not claim parent-directory fsync or multi-file transactions.
+
+# Byte-exact replacement for arbitrary user destinations. The secure-temp
+# owner exclusively creates a private directory on the destination filesystem;
+# only our exclusively-created payload is written, synced, renamed or removed.
+# Never borrow destination.tmp or destination.lock: those may be user files.
+# Whole-payload replacement needs no shared read/modify lock. Concurrent writers
+# retain ordinary atomic-replace semantics. This does not claim directory fsync.
 fn atomic_write_bytes(path: text, content: [u8]) -> bool:
-    var lock = FileLock.for_file(path)
-    if not lock.acquire():
+    val parent = dirname(path)
+    val staging = match secure_temp_dir(parent, ".simple-atomic-bytes-"):
+        Ok(directory): directory
+        Err(error): return false
+    val temp_path = "{staging}/payload"
+    if not rt_file_create_excl(temp_path, ""):
+        dir_remove(staging, false)
         return false
-    val temp_path = atomic_temp_path(path)
     if not file_write_bytes(temp_path, content):
-        lock.release()
+        file_delete(temp_path)
+        dir_remove(staging, false)
         return false
     if not rt_file_sync(temp_path):
-        lock.release()
+        file_delete(temp_path)
+        dir_remove(staging, false)
         return false
     val success = file_rename(temp_path, path)
-    lock.release()
+    if not success:
+        file_delete(temp_path)
+    dir_remove(staging, false)
     success
 
 # Write multiple files atomically: acquire all locks, write via temp, rename all, release all.

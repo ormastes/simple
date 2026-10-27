@@ -61,3 +61,39 @@ the bool text-write facade elsewhere in SCV still ignore failures. Warm status
 retains its pre-existing same-stat event optimization; frozen inventory and
 watcher completeness belong to subsequent capture work. No B03 done mark,
 verify PASS, release, push, PR or merge is claimed by this source candidate.
+
+## Frozen-candidate review corrections
+
+Reviewed source: `bba564c2185c64bdf828cd0704629f7f3ad3aa6f`.
+Reviewer: parent Astra `astra_storage_tldr_review`; review is source-only.
+
+Two P1 findings required a follow-up source candidate before integration:
+
+1. Annotated-tag import did not check a failed tag-object write before updating
+   lightweight and annotated references. The importer now returns that failure
+   before either write. All reference setters check text-write outcomes;
+   annotated setters also reject error text/unsafe/missing object references.
+2. The new byte publisher borrowed predictable destination `.tmp` and `.lock`
+   paths, which could overwrite/delete unrelated files during restore/export.
+   It now uses the existing typed secure-temp-directory owner (exclusive
+   private stage in the same parent), exclusively creates its own payload,
+   writes/syncs/renames it, and cleans only owned staging paths. It touches no
+   destination lock neighbor. The original text-atomic metadata protocol is
+   unchanged; no generalized migration of that existing protocol is claimed.
+
+The byte staging fault fixtures now obstruct the actual staging parent rather
+than assuming a fixed `.tmp` pathname. Added four restore/export scenarios
+(success and replacement failure, retaining both valuable neighbors) and four
+annotated-tag/reference integration scenarios. There are now twenty-two
+authored regressions across the three new specs, plus the migrated legacy
+FileBuffer integration spec. Execution/docgen/core checks remain **not_run**.
+Parent-directory fsync, multi-root transactions and full B03 acceptance remain
+pending. This follow-up corrects the two findings in source; it does not claim
+runtime acceptance or release admission.
+
+Follow-up static source review: `git diff --check` passes; eleven paths are
+changed/added; no modified `.spl` exceeds 800 lines. The tag-object error check
+precedes both reference calls. The byte publisher references neither FileLock
+nor `atomic_temp_path`, and uses the typed private-stage facade. Scenario
+counts are unit 10, system 8, integration 4; no placeholder passes were found.
+These checks are source inspection, not executed behavioral evidence.
