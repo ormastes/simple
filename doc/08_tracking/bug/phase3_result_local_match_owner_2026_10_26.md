@@ -1,6 +1,6 @@
 # Phase 3 Result local match loses its declared enum owner
 
-Status: OPEN; native behavioral mechanisms qualified for six method-call sites
+Status: OPEN; native behavioral mechanisms qualified for four method-call sites
 and four generic codec sites. Combined production-owner qualification pending.
 Canonical ID: `phase3_result_local_match_owner_2026_10_26`.
 Authoritative DB reconciliation is pending: no qualified full CLI is available.
@@ -25,7 +25,7 @@ No cast, raw payload extraction, result suppression, or stub is introduced.
 Intended-code recovery reference: `9642b8ec4c3a14e8cb7893dce75887b2f4ecdf4b`.
 Initial workaround commit: `548831268ca` (retained local experiment, not a published landing).
 That initial four-file proposal is superseded: its four generic codec edits
-were disproven and restored to their intended code. Only the six method sites
+were disproven and restored to their intended code. Only the four method sites
 in `backend_helpers`, `backend_api`, and `obj_taker` are retained.
 Root-fix owner: compiler MIR declared local/call result provenance lane.
 Root-fix entry: `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`,
@@ -41,7 +41,7 @@ method workaround's success and error behavior. Full production-owner verificati
 requires the ordinary full-context HIR/MIR owner queue and valid dependency
 witnesses. Reduced fixtures cannot admit production objects.
 
-Recovery gate: with a rebuilt qualified producer, restore these six locals
+Recovery gate: with a rebuilt qualified producer, restore these four locals
 narrowly and compile all four affected owners through the normal queue, then run the
 behavioral fixture and the MIR ownership regression suite. Keep this bug open
 and the tags intact until that gate passes; fetching a root fix is insufficient.
@@ -141,3 +141,5 @@ frozen a0 source, and canonical entry shims derived from actual object symbols.
 Both relinks and executions returned 0. The native-build command itself is
 still FAIL; this is not a full pipeline PASS, cache admission, or production
 object donation. No fourth cycle was run.
+
+Update 2026-10-27: the two sites at `backend_api.spl` (`compile`) and `backend_helpers.spl` (compile_module call) now use a typed `Result<CodegenOutput, CompileError>` local again, tracked under `mir_bare_ok_imported_trait_method_return_2026_10_27`; their phase3 tags were removed. Method sites retained here: six -> four.
