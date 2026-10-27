@@ -17,14 +17,10 @@
 # signatures, variants), NOT interface_digest_of_source (under-captures fields).
 #
 # Concurrency: in-process CacheSingleFlightV1; cross-process a `<path>.lease`
-# file created exclusively, holding "<pid> <start_us>". Liveness gap: the
-# runtime has no foreign-process start-time query, so the start time is only
-# verified when the lease pid is this process's pid (pid reuse by us); a
-# foreign pid is judged by rt_process_exists alone. The seed interpreter's
-# non-unix rt_process_exists returns true for every pid, so under it a foreign
-# dead lease is never stolen (fails safe: losers wait, then fall back).
-# doc/08_tracking/bug/interp_rt_process_exists_always_true_windows_2026-10-27.md
-use std.io_runtime.{file_exists, file_read, file_delete, getpid, thread_sleep, time_now_unix_micros}
+# file created exclusively, holding "<pid> <start_identity>" from
+# rt_process_start_identity (process creation time). The owner is dead iff the
+# identity observed now differs from the recorded one (#4962 pattern).
+use std.io_runtime.{file_exists, file_read, file_delete, getpid, thread_sleep}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
@@ -38,14 +34,13 @@ use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
     SINGLE_FLIGHT_LEADER_V1, cache_single_flight_key_v1}
 use compiler.semantics.symbol_id.stable_id.{SymbolComponents, stable_symbol_id}
 
-extern fn rt_process_exists(pid: i64) -> bool
+extern fn rt_process_start_identity(pid: i64) -> i64
 
 val TLDR_SUMMARY_MAGIC_V1: text = "tldr-summary-v1"
 val TLDR_PUBLISH_RETRIES_V1: i64 = 8
 val TLDR_LEASE_WAIT_STEPS_V1: i64 = 200
 
 var _TLDR_FALLBACKS_V1: i64 = 0
-var _TLDR_START_US_V1: i64 = 0
 var _TLDR_FLIGHTS_V1: CacheSingleFlightV1 = CacheSingleFlightV1.create()
 
 pub fn tldr_summary_fallback_count_v1() -> i64:
@@ -75,13 +70,38 @@ fn _tldr_note_fallback_v1(module_id: text, reason: text, out: [text]) -> [text]:
     next.push("fallback|" + reason)
     next
 
+fn _tldr_count_v1(s: text, ch: text) -> i64:
+    var n = 0
+    var i = 0
+    while i < s.len():
+        if s.substring(i, i + 1) == ch:
+            n = n + 1
+        i = i + 1
+    n
+
+# Names re-exported by `pub use a.b.{x, y as z}` / `export use a.b.{x}`;
+# nil when the form is not an explicit brace list (glob, bare module).
+fn _tldr_reexport_names_v1(spec: text) -> [text]?:
+    val lb = spec.index_of(".{")
+    if lb < 0 or not spec.ends_with("}"): return nil
+    var names: [text] = []
+    for part in spec.substring(lb + 2, spec.len() - 1).split(","):
+        val item = part.trim()
+        if item == "" or item == "*": return nil
+        val as_at = item.index_of(" as ")
+        names.push(if as_at > 0: item.substring(as_at + 4).trim() else: item)
+    Some(names)
+
 # Summary entries ("<kind>|<body>") of one module's own source, sorted.
 pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
     var out = module_tldr_sections_of_source_v1(source)
     val lines = source.replace("\r\n", "\n").split("\n")
     var exported: [text] = []
     var attrs: [text] = []
-    for line in lines:
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        li = li + 1
         if line == "" or line.starts_with(" ") or line.starts_with("\t") or line.starts_with("#"):
             continue
         if line.starts_with("@"):
@@ -96,16 +116,28 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
         val sp = decl.index_of(" ")
         val word = if sp > 0: decl.substring(0, sp) else: decl
         val rest = if sp > 0: decl.substring(sp + 1).trim() else: ""
-        if word == "use" or word == "import" or word == "impl" or word == "extend":
+        if word == "import" or word == "impl" or word == "extend" or (word == "use" and not is_pub):
+            attrs = []
+            continue
+        if word == "use" or (word == "export" and rest.starts_with("use ")):
+            val spec = if word == "use": rest else: rest.substring(4).trim()
+            match _tldr_reexport_names_v1(spec):
+                case Some(names):
+                    for name in names:
+                        if not exported.contains(name):
+                            exported.push(name)
+                case nil:
+                    out = _tldr_note_fallback_v1(module_id, "reexport:" + spec, out)
             attrs = []
             continue
         if word == "export":
-            if rest.starts_with("use ") or rest.ends_with("*"):
+            if rest.ends_with("*") or rest.contains(" from "):
                 out = _tldr_note_fallback_v1(module_id, "reexport:" + rest, out)
             else:
                 for part in rest.split(","):
                     val name = part.trim()
-                    if name != "" and not exported.contains(name): exported.push(name)
+                    if name != "" and not exported.contains(name):
+                        exported.push(name)
             attrs = []
             continue
         var kind = ""
@@ -121,12 +153,17 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
             out = _tldr_note_fallback_v1(module_id, "unsupported:" + word, out)
             attrs = []
             continue
+        # A header spans continuation lines until its parentheses balance.
+        var header = line.trim()
+        while li < lines.len() and _tldr_count_v1(header, "(") > _tldr_count_v1(header, ")"):
+            header = header + " " + lines[li].trim()
+            li = li + 1
         val name = rest.substring(0, _tldr_ident_end_v1(rest))
-        val header = line.trim()
         val id = stable_symbol_id(SymbolComponents(package: "simple", module_path: module_id,
             item_kind: kind, owner_id: "", name: name, signature: header))
         out.push("decl|{kind} {name} id={id} cfg={attrs.join(";")} sig={header}")
-        if is_pub and not exported.contains(name): exported.push(name)
+        if is_pub and not exported.contains(name):
+            exported.push(name)
         attrs = []
     for name in exported:
         out.push("export|" + name)
@@ -175,24 +212,25 @@ pub fn read_tldr(root: text, module_id: text) -> [text]?:
 fn _tldr_read_fresh_v1(root: text, module_id: text, source_digest: text) -> [text]?:
     val path = tldr_summary_path_v1(root, module_id)
     if not file_exists(path): return nil
-    if _tldr_header_v1(file_read(path), "source") != source_digest: return nil
-    read_tldr(root, module_id)
+    val content = file_read(path)
+    if _tldr_header_v1(content, "source") != source_digest: return nil
+    if _tldr_header_v1(content, "module") != module_id: return nil
+    tldr_summary_parse_v1(content)
 
-fn _tldr_self_start_v1() -> i64:
-    if _TLDR_START_US_V1 == 0:
-        _TLDR_START_US_V1 = time_now_unix_micros()
-    _TLDR_START_US_V1
-
-pub fn tldr_lease_owner_alive_v1(pid: i64, start_us: i64) -> bool:
-    if pid <= 0: return false
-    if pid == getpid(): return start_us == _tldr_self_start_v1()
-    rt_process_exists(pid)
+# Owner liveness, #4962 pattern (worker_unit_pick_owner_dead_v1): the owner is
+# alive iff its pid's current start identity equals the recorded one. 0 means
+# no such process (or unreadable), so a 0 observation is dead.
+pub fn tldr_lease_owner_alive_v1(pid: i64, start_identity: i64) -> bool:
+    if pid <= 0 or start_identity == 0: return false
+    val observed = rt_process_start_identity(pid)
+    observed != 0 and observed == start_identity
 
 pub fn tldr_lease_record_v1() -> text:
-    "{getpid()} {_tldr_self_start_v1()}"
+    val pid = getpid()
+    "{pid} {rt_process_start_identity(pid)}"
 
-# Exclusive-create the lease; a lease whose owner is dead (or is a previous
-# incarnation of this pid) is reclaimed once. false = a live owner holds it.
+# Exclusive-create the lease; a lease whose owner is dead (identity differs)
+# is reclaimed once. false = a live owner holds it.
 pub fn tldr_lease_acquire_v1(lease_path: text) -> bool:
     val slash = lease_path.rfind("/")
     if slash > 0:
@@ -200,7 +238,7 @@ pub fn tldr_lease_acquire_v1(lease_path: text) -> bool:
     if file_create_exclusive(lease_path, tldr_lease_record_v1()): return true
     val held = file_read(lease_path).trim().split(" ")
     val pid = if held.len() >= 1: held[0].to_i64() ?? -1 else: -1
-    val start = if held.len() >= 2: held[1].to_i64() ?? -1 else: -1
+    val start = if held.len() >= 2: held[1].to_i64() ?? 0 else: 0
     if tldr_lease_owner_alive_v1(pid, start): return false
     val _r = file_delete(lease_path)
     file_create_exclusive(lease_path, tldr_lease_record_v1())
@@ -210,14 +248,19 @@ pub fn tldr_lease_release_v1(lease_path: text):
         val _r = file_delete(lease_path)
 
 # Atomic publish; the rename is retried with bounded backoff because Windows
-# MoveFileEx fails while a reader holds the destination open. Fails closed.
-pub fn tldr_summary_publish_v1(path: text, content: text) -> bool:
+# MoveFileEx fails while a reader holds the destination open. Returns the
+# attempt that succeeded (1-based), or -1 after `max_attempts` (fail closed).
+pub fn tldr_summary_publish_attempts_v1(path: text, content: text, max_attempts: i64) -> i64:
     var attempt = 0
-    while attempt < TLDR_PUBLISH_RETRIES_V1:
-        if module_artifact_publish_atomic_v1(path, content): return true
-        thread_sleep(5 * (attempt + 1))
+    while attempt < max_attempts:
+        if module_artifact_publish_atomic_v1(path, content): return attempt + 1
         attempt = attempt + 1
-    false
+        if attempt < max_attempts:
+            thread_sleep(5 * attempt)
+    -1
+
+pub fn tldr_summary_publish_v1(path: text, content: text) -> bool:
+    tldr_summary_publish_attempts_v1(path, content, TLDR_PUBLISH_RETRIES_V1) > 0
 
 # Produce-or-read. In process: single-flight per (module, source xxh3 index).
 # Across processes: the lease winner publishes; losers wait (bounded) and
@@ -251,4 +294,4 @@ pub fn tldr_summary_ensure_v1(root: text, module_id: text, source: text) -> [tex
 export tldr_summary_fallback_count_v1, tldr_summary_path_v1, tldr_summary_entries_v1
 export tldr_summary_produce_v1, tldr_summary_digest_v1, tldr_summary_parse_v1, read_tldr
 export tldr_lease_owner_alive_v1, tldr_lease_record_v1, tldr_lease_acquire_v1, tldr_lease_release_v1
-export tldr_summary_publish_v1, tldr_summary_ensure_v1
+export tldr_summary_publish_v1, tldr_summary_publish_attempts_v1, tldr_summary_ensure_v1

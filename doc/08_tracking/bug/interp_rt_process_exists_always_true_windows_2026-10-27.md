@@ -8,6 +8,9 @@ Measured on Windows with `bin/simple run`: `rt_process_exists(2147483000)`,
 `rt_process_exists(99999)` and `rt_process_exists(getpid())` all return true.
 (`rt_process_is_alive` / `rt_process_is_running` return false even for self.)
 
-Impact: pid-liveness lease reclaim (`tldr_summary_v1.spl`, `lane_locks.spl`)
-never steals a dead foreign owner's lease under the interpreter on Windows.
-Fix: use `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` like the C runtime.
+Impact: any lease that judges liveness by `rt_process_exists` alone (for example
+`lane_locks.spl`) never steals a dead foreign owner's lease under the interpreter
+on Windows. `tldr_summary_v1.spl` is NOT affected: it uses
+`rt_process_start_identity`, the #4962 owner-identity pattern.
+Fix: make the interpreter's non-unix branch call `OpenProcess`, as the C runtime
+does. Lease callers should prefer `rt_process_start_identity`.
