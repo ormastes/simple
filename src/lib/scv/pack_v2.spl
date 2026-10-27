@@ -4,7 +4,7 @@ use app.io.mod (file_exists, file_read, dir_create, dir_walk)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
 use std.common.compress.gzip.{gzip_compress, gzip_decompress}
 use std.scv.core.{scv_objects_dir, scv_chunk_path, scv_object_path, scv_line_set_contains}
-use std.scv.maintenance.{scv_object_id_from_path, scv_gc_roots_reachable, scv_gc_quarantine}
+use std.scv.maintenance.{scv_object_id_from_path, scv_gc_roots_reachable_checked, scv_gc_quarantine}
 use std.scv.integrity.{scv_fsck}
 use std.scv.working_copy.{scv_snapshot}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
@@ -545,7 +545,9 @@ fn scv_pack_v2_load_payload(root: text, requested_pack: text) -> ([u8], text, te
 fn scv_pack_write_v2_reachable(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR repository not initialized\n"
-    val reachable = scv_gc_roots_reachable(root)
+    val reachable = match scv_gc_roots_reachable_checked(root):
+        Ok(value): value
+        Err(error): return error
     val pack_dir = "{scv_objects_dir(root)}/packs"
     dir_create(pack_dir, true)
     var manifest_rows: [text] = ["format: scv-pack-v1\n"]
@@ -726,6 +728,8 @@ fn scv_pack_v2_soak(root: text, iterations: i64) -> text:
         val t_pack = current_time_ms()
         val write_out = scv_pack_write_v2_reachable(root)
         ms_pack = ms_pack + (current_time_ms() - t_pack)
+        if write_out.starts_with("ERROR"):
+            return write_out
         if not write_out.contains("lost=0"):
             lost = lost + 1
             if first_bad == "":
@@ -733,8 +737,12 @@ fn scv_pack_v2_soak(root: text, iterations: i64) -> text:
         # 3. gc: real quarantine of unreachables (min age 0 — a dry run would
         #    be vacuous), reusing maintenance.spl's GC, never a local copy
         val t_gc = current_time_ms()
-        val reachable = scv_gc_roots_reachable(root)
-        val (moved, _young, _qdir) = scv_gc_quarantine(root, reachable, 0, current_time_ms())
+        val reachable = match scv_gc_roots_reachable_checked(root):
+            Ok(value): value
+            Err(error): return error
+        val (moved, _young, _qdir) = match scv_gc_quarantine(root, reachable, 0, current_time_ms()):
+            Ok(value): value
+            Err(error): return error
         ms_gc = ms_gc + (current_time_ms() - t_gc)
         quarantined = quarantined + moved
         # 4. verify: every reachable object still readable, fsck still clean
