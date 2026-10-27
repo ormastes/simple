@@ -193,6 +193,25 @@ describe "scv event journal integration (E-03)":
         expect(file_read(target)).to_equal("keep this file\n")
         dir_remove_all(root)
 
+    it "fails closed on dangling pending and lock symlinks":
+        step("Ensure no-replace creation rejects dangling entry names before acknowledging work")
+        val pending_root = _repo("dangling-pending")
+        val absent_target = "{pending_root}/missing-target"
+        val (pending_out, pending_err, pending_code) = process_run("ln", ["-s", absent_target, scv_event_batch_pending_path(pending_root, "b1")])
+        expect(pending_code).to_equal(0)
+        expect(scv_event_batch_record(pending_root, "b1", "created", "a.txt", "")).to_equal(false)
+        expect(scv_event_batch_commit(pending_root, "b1")).to_equal(false)
+        expect(file_exists(absent_target)).to_equal(false)
+
+        val lock_root = _repo("dangling-lock")
+        val lock_target = "{lock_root}/missing-lock-target"
+        val (lock_out, lock_err, lock_code) = process_run("ln", ["-s", lock_target, "{lock_root}/.scv/journal/events.lock"])
+        expect(lock_code).to_equal(0)
+        expect(scv_event_batch_record(lock_root, "b1", "created", "a.txt", "")).to_equal(false)
+        expect(file_exists(lock_target)).to_equal(false)
+        dir_remove_all(pending_root)
+        dir_remove_all(lock_root)
+
     it "recovers crashes at each durable event-batch boundary without duplicate rows":
         step("Crash after pending, seal, event-row, and terminal-marker publication")
         val pending_root = _repo("crash-pending")
