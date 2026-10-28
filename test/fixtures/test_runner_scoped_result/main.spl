@@ -1,0 +1,49 @@
+use std.nogc_sync_mut.test_runner.native_owned_process.{ScopedChildRun, run_scoped_child}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass}
+
+fn check(ok: bool, name: text) -> i64:
+    if ok:
+        print "PASS {name}"
+        return 0
+    print "FAIL {name}"
+    1
+
+fn wrap_child(exit_text: text) -> Result<(ScopedChildRun, text), text>:
+    val scoped_child = run_scoped_child(ExecutionResourceClass.Unit, "/bin/sh", ["-c", exit_text], 2000, 0, 0, 256, 0, false)
+    Ok((scoped_child, "evidence-path"))
+
+fn verify_wrapped_child() -> i64:
+    val invocation = wrap_child("printf wrapped; exit 0")
+    # @workaround bug=phase2_runner_empty_limit_classification_2026_10_28 recover=334f5c009cc reason=Cached phase2 loses tuple element layouts through a match destructuring binding
+    val invocation_pair: (ScopedChildRun, text) = match invocation:
+        case Ok(value): value
+        case Err(error):
+            print "FAIL wrapper-error {error}"
+            return 1
+    val scoped_child: ScopedChildRun = invocation_pair.0
+    val evidence_path: text = invocation_pair.1
+    val direct = scoped_child.result
+    print "wrapped nested={scoped_child.result.limit_exceeded} flat={direct.limit_exceeded} kind={direct.limit_type} exit={direct.exit_code} out={direct.stdout} evidence={evidence_path}"
+    check(not scoped_child.result.limit_exceeded and not direct.limit_exceeded and direct.limit_type == "" and direct.exit_code == 0 and direct.stdout == "wrapped" and evidence_path == "evidence-path", "wrapped-normal-exit-zero")
+
+fn main() -> i64:
+    var failures = 0
+    val normal = run_scoped_child(ExecutionResourceClass.Unit, "/bin/sh", ["-c", "printf normal; exit 0"], 2000, 0, 0, 256, 0, false)
+    val normal_result = normal.result
+    print "normal nested={normal.result.limit_exceeded} flat={normal_result.limit_exceeded} kind={normal_result.limit_type} exit={normal_result.exit_code} out={normal_result.stdout} budget={normal.budget_status}"
+    failures = failures + check(not normal.result.limit_exceeded and not normal_result.limit_exceeded and normal_result.limit_type == "" and normal_result.exit_code == 0 and normal_result.stdout == "normal", "normal-exit-zero-not-limited")
+    val failed = run_scoped_child(ExecutionResourceClass.Unit, "/bin/sh", ["-c", "printf child-error >&2; exit 7"], 2000, 0, 0, 256, 0, false)
+    val failed_result = failed.result
+    print "exit7 nested={failed.result.limit_exceeded} flat={failed_result.limit_exceeded} kind={failed_result.limit_type} exit={failed_result.exit_code} err={failed_result.stderr}"
+    failures = failures + check(not failed.result.limit_exceeded and not failed_result.limit_exceeded and failed_result.limit_type == "" and failed_result.exit_code == 7 and failed_result.stderr == "child-error", "exit-seven-not-limited")
+    val missing = run_scoped_child(ExecutionResourceClass.Unit, "/nonexistent/scoped-result-probe", [], 2000, 0, 0, 256, 0, false)
+    val missing_result = missing.result
+    print "missing nested={missing.result.limit_exceeded} flat={missing_result.limit_exceeded} kind={missing_result.limit_type} exit={missing_result.exit_code}"
+    failures = failures + check(missing_result.exit_code != 0, "missing-command-fails")
+    val timed = run_scoped_child(ExecutionResourceClass.Unit, "/bin/sh", ["-c", "sleep 2"], 50, 0, 0, 256, 0, false)
+    val timed_result = timed.result
+    print "timeout nested={timed.result.limit_exceeded} flat={timed_result.limit_exceeded} kind={timed_result.limit_type} exit={timed_result.exit_code}"
+    failures = failures + check(timed.result.limit_exceeded and timed_result.limit_exceeded and timed_result.limit_type == "timeout" and timed_result.exit_code != 0, "actual-timeout-remains-limited")
+    failures = failures + verify_wrapped_child()
+    print "SCOPED_RESULT_REGRESSION failures={failures}"
+    if failures > 0: 1 else: 0

@@ -25,3 +25,19 @@ both `ProcessResult.limit_exceeded` and `limit_type` for exit 0, exit 7,
 missing executable and a real timeout. Preserve scope enforcement and distinguish
 nested-record transport, boolean comparison, and actual budget failures.
 No runtime replacement or compiler rebuild is authorized by this report.
+
+## Minimal native reproduction
+
+At source `334f5c009cc`, direct `run_scoped_child` preserves normal exit 0,
+exit 7, missing executable exit 126 and actual timeout classification. Both
+nested and flattened `ProcessResult` booleans agree. Returning that result as
+`Result<(ScopedChildRun, text), text>` and binding a match using tuple
+destructuring instead corrupts all child fields into pointer integers.
+The minimal probe's direct four cases PASS but wrapped exit-zero case FAILS.
+Receipts and baseline source: `/tmp/runner-limit-transport-evidence-20261028/`
+(`tuple-match-baseline.spl`, original `probe.stdout`).
+
+Candidate workaround: typed tuple match result followed by typed `.0`/`.1`
+projections. It preserves the Result error branch and does not alter limits.
+Owning compiler defect remains open; no phase2 rebuild is performed.
+Workaround qualification pending.
