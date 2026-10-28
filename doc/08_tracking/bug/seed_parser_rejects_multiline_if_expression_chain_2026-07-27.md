@@ -74,3 +74,18 @@ probes still fail on Defect 2.
 Correct fix is to deploy the pure-Simple self-hosted binary as `bin/simple`
 (both constructs already parse there). Failing that, teach the seed the
 `@hardware` attribute and multi-line `if`-expression chains.
+
+## Additional reproduction — Caret/smux source load (2026-10-28)
+
+The Phase1 seed also rejected inline conditional expressions in
+`src/os/apps/smux/window_layout_service.spl` while loading Caret's dashboard and
+pane-backend specs. The per-file command
+`simple <spec> --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran`
+reported `Unexpected token: expected expression, found Else` before executing
+any examples. The affected expressions selected geometry, canvas, split
+coordinates, and zoom state. Rewriting them as statement-form assignments
+allowed the specs to parse and execute; a standalone one-line string-valued
+conditional parses, so this is a context-dependent seed limitation and its
+exact grammar boundary remains to be isolated. The source workaround is in
+`src/os/apps/smux/window_layout_service.spl`; the correct fix remains in the
+seed parser, not a broader rewrite of conditional expressions.
