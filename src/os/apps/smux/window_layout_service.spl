@@ -9,6 +9,9 @@ use os.apps.smux.mux_rects.{MuxRect, mux_full_rect, mux_layout_known, mux_layout
 use std.sosix.pty.{sosix_pty_can_resize as pty_can_resize,
     sosix_pty_resize as pty_resize}
 
+# The Phase1 seed rejects value-position if/else expressions in this module;
+# keep these selections as statement-form assignments (bug tracked in doc/08_tracking/bug/seed_parser_rejects_multiline_if_expression_chain_2026-07-27.md).
+
 # Explicit compensation outcome. Error text is diagnostic, never state logic.
 pub class WindowGeometryUpdate:
     state: ServiceState
@@ -83,8 +86,9 @@ pub fn window_viewport_rects(st: ServiceState, session_id: text, window_id: text
     val window = st.get_window(idx)
     var rects: [MuxRect] = []
     for rect in window_base_rects(st, session_id, window_id):
-        val allocation = if rect.pane_id == window.zoom_pane:
-            mux_full_rect(rect.pane_id, window.canvas_cols as i64, window.canvas_rows as i64) else: rect
+        var allocation = rect
+        if rect.pane_id == window.zoom_pane:
+            allocation = mux_full_rect(rect.pane_id, window.canvas_cols as i64, window.canvas_rows as i64)
         rects.push(pane_content_rect(allocation, pane_presentation(window, rect.pane_id)))
     return rects
 
@@ -283,11 +287,19 @@ pub fn arrange_window_plan(before: ServiceState, session_id: text, window_id: te
         i = i + 1
     if ids.len() == 0:
         return Err("no panes in window: " + window_id)
-    val rects = if name == "": window_plan_rects(before, session_id, window_id, cols, rows) else: mux_layout_rects(ids, cols as i64, rows as i64, name)
+    var rects: [MuxRect] = []
+    if name == "":
+        rects = window_plan_rects(before, session_id, window_id, cols, rows)
+    else:
+        rects = mux_layout_rects(ids, cols as i64, rows as i64, name)
     if rects.len() != ids.len() or not window_rects_valid(rects, cols, rows):
         return Err("layout cannot fit panes in canvas")
     val window = before.get_window(wi)
-    val resized = if name == "": window.with_canvas(cols, rows) else: window.with_layout(name, cols, rows)
+    var resized: MuxWindow = window
+    if name == "":
+        resized = window.with_canvas(cols, rows)
+    else:
+        resized = window.with_layout(name, cols, rows)
     val next = before.replace_window(wi, resized)
     if not window_content_valid(next, session_id, window_id):
         return Err("presentation cannot fit layout")
@@ -345,9 +357,15 @@ pub fn split_window_sized_plan(before: ServiceState, new_pane_id: text, session_
             rects.push(MuxRect(pane_id: pane_id, col: rect.col, row: rect.row,
                 cols: plan.old_cols as i64, rows: plan.old_rows as i64))
             val horizontal = direction == "horizontal" or direction == "h"
+            var split_col = rect.col
+            var split_row = rect.row
+            if horizontal:
+                split_row = rect.row + (plan.old_rows as i64) + 1
+            else:
+                split_col = rect.col + (plan.old_cols as i64) + 1
             sibling.push(MuxRect(pane_id: new_pane_id,
-                col: if horizontal: rect.col else: rect.col + (plan.old_cols as i64) + 1,
-                row: if horizontal: rect.row + (plan.old_rows as i64) + 1 else: rect.row,
+                col: split_col,
+                row: split_row,
                 cols: plan.new_cols as i64, rows: plan.new_rows as i64))
         else:
             rects.push(rect)
@@ -390,14 +408,22 @@ pub fn resize_pane_plan(before: ServiceState, session_id: text, window_id: text,
     val previous = window_base_rects(before, session_id, window_id)
     if previous.len() == 0:
         return Err("window has no valid pane geometry")
-    val canvas_cols = if previous.len() == 1: allocation_cols else: window.canvas_cols
-    val canvas_rows = if previous.len() == 1: allocation_rows else: window.canvas_rows
+    var canvas_cols = window.canvas_cols
+    var canvas_rows = window.canvas_rows
+    if previous.len() == 1:
+        canvas_cols = allocation_cols
+        canvas_rows = allocation_rows
     var rects: [MuxRect] = []
     for rect in previous:
         if rect.pane_id == pane_id:
+            var rect_col = rect.col
+            var rect_row = rect.row
+            if previous.len() == 1:
+                rect_col = 0
+                rect_row = 0
             rects.push(MuxRect(pane_id: pane_id,
-                col: if previous.len() == 1: 0 else: rect.col,
-                row: if previous.len() == 1: 0 else: rect.row,
+                col: rect_col,
+                row: rect_row,
                 cols: allocation_cols as i64, rows: allocation_rows as i64))
         else:
             rects.push(rect)
@@ -448,7 +474,9 @@ pub fn toggle_zoom_plan(before: ServiceState, session_id: text, window_id: text,
         return Err("window has no valid pane geometry")
     if base.len() == 1 and window.zoom_pane == "": return Ok(before)
     # tmux resize-pane -Z restores ANY already zoomed window, regardless of -t.
-    val zoom = if window.zoom_pane == "": pane_id else: ""
+    var zoom = ""
+    if window.zoom_pane == "":
+        zoom = pane_id
     var changed = before.replace_window(wi, window.with_zoom(zoom))
     if zoom != "":
         var i = 0
