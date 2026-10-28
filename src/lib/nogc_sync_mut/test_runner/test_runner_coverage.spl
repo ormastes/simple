@@ -5,7 +5,7 @@
 
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.io_runtime.{dir_create_all}
-use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists, file_delete}
 
 # Coverage extern declarations (same as coverage_simple.spl)
 extern fn rt_coverage_enabled() -> bool
@@ -159,6 +159,11 @@ fn setup_coverage():
     print "[Coverage] Enabled - tracking decisions and conditions"
     # Ensure output directory exists
     dir_create_all("build/coverage")
+    # A failed or empty run must not leave an older successful report looking
+    # like evidence for this invocation.
+    for path in ["build/coverage/coverage.sdn", "build/coverage/summary.md",
+            "build/coverage/uncovered.md"]:
+        if file_exists(path): file_delete(path)
 
 # =========================================================================
 # Collection: Get coverage data after test run
@@ -186,6 +191,31 @@ fn record_coverage_sdn(sdn: text):
         return
     coverage_parts.push(sdn)
     accumulate_coverage_sdn(sdn)
+
+# A compiler manifest declares sites; it does not prove a test reached one.
+# This distinguishes a broken/empty instrumented run from genuinely
+# branchless code, which has no decision or condition sites to satisfy.
+fn coverage_has_declared_sites(data: CoverageData) -> bool:
+    data.total_decisions > 0 or data.total_conditions > 0
+
+fn coverage_has_runtime_observations() -> bool:
+    for key in decision_keys:
+        if (decision_true[key] ?? 0) > 0 or (decision_false[key] ?? 0) > 0:
+            return true
+    for key in condition_keys:
+        if (condition_true[key] ?? 0) > 0 or (condition_false[key] ?? 0) > 0:
+            return true
+    false
+
+fn coverage_has_declared_sites_without_observations(data: CoverageData) -> bool:
+    coverage_has_declared_sites(data) and not coverage_has_runtime_observations()
+
+fn coverage_evidence_publishable(data: CoverageData, explicitly_required: bool) -> bool:
+    if coverage_has_runtime_observations():
+        return true
+    if explicitly_required or coverage_has_declared_sites_without_observations(data):
+        return false
+    true
 
 fn coverage_manifest_decimal(value: text) -> bool:
     val trimmed = value.trim()
@@ -827,6 +857,9 @@ export parse_coverage_state_sdn, record_coverage_sdn, record_compiler_decision_m
 export accumulate_coverage_sdn, build_coverage_data_from_state, render_coverage_state_sdn
 export find_or_add_file, print_coverage_summary, generate_coverage_reports
 export sort_files_by_coverage, check_coverage_threshold, get_coverage_threshold
+export coverage_has_declared_sites, coverage_has_runtime_observations
+export coverage_has_declared_sites_without_observations
+export coverage_evidence_publishable
 export save_coverage_baseline, load_coverage_baseline, print_coverage_delta
 export extract_cover_annotations_for_coverage, check_cover_annotation_threshold
 export check_cover_annotation_thresholds

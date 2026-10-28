@@ -30,7 +30,7 @@ and rendering, file tracking, sorting, and threshold enforcement.
 """
 
 use std.spec
-use std.test_runner.test_runner_coverage.{FileCoverage, CoverageData, reset_coverage_state, decision_key, condition_key, merge_counts, parse_i64_safe, accumulate_coverage_sdn, build_coverage_data_from_state, render_coverage_state_sdn, find_or_add_file, sort_files_by_coverage, check_coverage_threshold, parse_coverage_state_sdn, record_coverage_sdn}
+use std.test_runner.test_runner_coverage.{FileCoverage, CoverageData, reset_coverage_state, decision_key, condition_key, merge_counts, parse_i64_safe, accumulate_coverage_sdn, build_coverage_data_from_state, render_coverage_state_sdn, find_or_add_file, sort_files_by_coverage, check_coverage_threshold, parse_coverage_state_sdn, record_coverage_sdn, record_compiler_decision_manifest_sdn, coverage_has_declared_sites, coverage_has_runtime_observations, coverage_has_declared_sites_without_observations, coverage_evidence_publishable}
 
 # ============================================================================
 # Struct Construction
@@ -343,6 +343,38 @@ describe "record_coverage_sdn":
         val data = build_coverage_data_from_state("")
         expect(data.total_decisions).to_equal(1)
         expect(data.total_decisions_covered).to_equal(1)
+
+describe "coverage observation admission":
+
+    before_each:
+        reset_coverage_state()
+
+    it "does not reject code with no declared decisions or conditions":
+        val data = build_coverage_data_from_state("")
+        expect(coverage_has_declared_sites(data)).to_equal(false)
+        expect(coverage_has_runtime_observations()).to_equal(false)
+        expect(coverage_has_declared_sites_without_observations(data)).to_equal(false)
+        expect(coverage_evidence_publishable(data, false)).to_equal(true)
+        expect(coverage_evidence_publishable(data, true)).to_equal(false)
+
+    it "rejects a declared instrumentation site that emitted no runtime outcome":
+        val manifest = "version: 1.0\ndecisions |id, file, line, column, true_count, false_count|\n    1, src/branchy.spl, 10, 5, 0, 0\nconditions |decision_id, condition_id, file, line, column, true_count, false_count|"
+        expect(record_compiler_decision_manifest_sdn(manifest)).to_equal(true)
+        val data = build_coverage_data_from_state("")
+        expect(coverage_has_declared_sites(data)).to_equal(true)
+        expect(coverage_has_runtime_observations()).to_equal(false)
+        expect(coverage_has_declared_sites_without_observations(data)).to_equal(true)
+        expect(coverage_evidence_publishable(data, false)).to_equal(false)
+
+    it "accepts an observed runtime outcome for a declared site":
+        val manifest = "version: 1.0\ndecisions |id, file, line, column, true_count, false_count|\n    1, src/branchy.spl, 10, 5, 0, 0\nconditions |decision_id, condition_id, file, line, column, true_count, false_count|"
+        expect(record_compiler_decision_manifest_sdn(manifest)).to_equal(true)
+        record_coverage_sdn("decisions |id, file, line, column, true_count, false_count|\n    1, src/branchy.spl, 10, 5, 1, 0")
+        expect(coverage_has_runtime_observations()).to_equal(true)
+        expect(coverage_has_declared_sites_without_observations(
+            build_coverage_data_from_state(""))).to_equal(false)
+        expect(coverage_evidence_publishable(
+            build_coverage_data_from_state(""), false)).to_equal(true)
 
 # ============================================================================
 # sort_files_by_coverage

@@ -39,7 +39,7 @@ use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary,
 # GROUP 3: Container
 # use sequential_container.{SequentialContainerConfig, sequential_container_run_all_tests}
 # use test_runner_container.container_detect_runtime
-use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, print_coverage_summary, generate_coverage_reports, check_coverage_threshold, check_cover_annotation_thresholds, get_coverage_threshold, print_coverage_delta}
+use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, print_coverage_summary, generate_coverage_reports, check_coverage_threshold, check_cover_annotation_thresholds, get_coverage_threshold, print_coverage_delta, coverage_evidence_publishable}
 # GROUP 4: Database & feature tracking -- recorded by the test-db lane child
 # (test_db_lane_main.spl) so the database modules stay out of this closure.
 use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode}
@@ -1480,15 +1480,29 @@ fn run_test_cli() -> i64:
             val coverage = collect_coverage()
             if not sdn_worker:
                 print_coverage_summary(coverage)
-            generate_coverage_reports(coverage)
-            print_coverage_delta(coverage)
             val threshold = get_coverage_threshold()
-            if threshold > 0 and not check_coverage_threshold(coverage, threshold):
-                exit_code = 1
+            var threshold_passed = true
+            if threshold > 0:
+                threshold_passed = check_coverage_threshold(coverage, threshold)
             var coverage_test_files: [text] = []
             for result_file in result_files:
                 coverage_test_files.push(result_file.path)
-            if not options.no_cover_check and not check_cover_annotation_thresholds(coverage, coverage_test_files):
+            var annotation_thresholds_passed = true
+            if not options.no_cover_check:
+                annotation_thresholds_passed = check_cover_annotation_thresholds(coverage, coverage_test_files)
+            # An explicit threshold or @cover contract can require evidence even
+            # when the compiler emitted no site manifest. A branchless run with
+            # no such contract remains valid and is not treated as a runner bug.
+            val evidence_required = threshold > 0 or not annotation_thresholds_passed
+            if not coverage_evidence_publishable(coverage, evidence_required):
+                print "[Coverage] ERROR: required coverage produced no runtime decision/condition outcomes; no coverage report was published"
+                exit_code = 1
+            else:
+                generate_coverage_reports(coverage)
+                print_coverage_delta(coverage)
+            if not threshold_passed:
+                exit_code = 1
+            if not annotation_thresholds_passed:
                 exit_code = 1
 
         # Name every spec that produced no verdict. Absence of a result must
