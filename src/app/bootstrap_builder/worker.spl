@@ -111,17 +111,24 @@ fn builder_worker_capacity_settle_v1(root: text, identity: text, host_id: text) 
         identity, host_id, "no-parent-owned"))
     payload != "" and file_atomic_write(root + "/capacity.settled", payload)
 
-pub fn builder_worker_memory_admit_v1(task: BuildTaskV1, root: text, host_id: text) -> Result<bool, text>:
-    val enforced = builder_memory_enforcement_bytes_v1(task.memory_policy, task.memory_limit_bytes)?
-    if enforced == 0: return Ok(true)
-    val reason = "memory enforcement requires the cgroup or Job worker"
+fn builder_worker_reject_before_start_v1(task: BuildTaskV1, root: text,
+        host_id: text, reason: text) -> text:
+    # Only admission paths before pinning/starting the compiler may call this.
+    # The portable worker never owns a delegated capacity parent. This proof
+    # does not certify a reaped tree or convert a provider refusal to success.
     val identity = builder_task_identity_v1(task)
     val payload = builder_no_child_started_encode_v1(BuilderNoChildStartedV1(identity, host_id, reason))
     if payload == "" or not file_atomic_write(root + "/compiler.not-started.sdn", payload):
-        return Err(reason + "; no-child receipt persistence failed")
+        return reason + "; no-child receipt persistence failed"
     if not builder_worker_capacity_settle_v1(root, identity, host_id):
-        return Err(reason + "; capacity settlement persistence failed")
-    Err(reason)
+        return reason + "; capacity settlement persistence failed"
+    reason
+
+pub fn builder_worker_memory_admit_v1(task: BuildTaskV1, root: text, host_id: text) -> Result<bool, text>:
+    val enforced = builder_memory_enforcement_bytes_v1(task.memory_policy, task.memory_limit_bytes)?
+    if enforced == 0: return Ok(true)
+    Err(builder_worker_reject_before_start_v1(task, root, host_id,
+        "memory enforcement requires the cgroup or Job worker"))
 
 fn builder_worker_abort_v1(owner: ProcessObservationLeaseV4, root: text, identity: text, host_id: text) -> bool:
     var lease = owner
@@ -152,8 +159,13 @@ fn builder_worker_abort_v1(owner: ProcessObservationLeaseV4, root: text, identit
 fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result<(text, i64), text>:
     # This provider has process-group containment but no per-tree memory cap.
     val admitted = builder_worker_memory_admit_v1(task, root, host_id)?
-    val capabilities = process_observation_capabilities_v4()?
-    if not capabilities.available: return Err("exact process observation V4 unavailable")
+    val capabilities = match process_observation_capabilities_v4():
+        Ok(value): value
+        Err(message):
+            return Err(builder_worker_reject_before_start_v1(task, root, host_id, message))
+    if not capabilities.available:
+        return Err(builder_worker_reject_before_start_v1(task, root, host_id,
+            "exact process observation V4 unavailable"))
     val environment = builder_worker_environment_v1(root)?
     for input in task.inputs:
         if input.path == "task-context/" + task.id + ".sdn":
