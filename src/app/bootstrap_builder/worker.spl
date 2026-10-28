@@ -296,11 +296,18 @@ pub fn builder_worker_execute_v1(task_path: text, attempt_root: text, host_id: t
     var outputs: [BuildInputV1] = []
     var diagnostic = builder_validate_task_v1(task)
     if not builder_identifier_valid_v1(host_id): diagnostic = "invalid host identity"
-    if diagnostic == "": diagnostic = builder_worker_verify_inputs_v1(task, attempt_root)
     if diagnostic == "":
-        for kind in ["native", "runtime", "hir", "frontend", "temp"]:
-            if not dir_create_all(attempt_root + "/work/.builder-cache/" + kind):
-                diagnostic = "cannot create isolated cache"
+        diagnostic = builder_worker_verify_inputs_v1(task, attempt_root)
+        if diagnostic == "":
+            for kind in ["native", "runtime", "hir", "frontend", "temp"]:
+                if not dir_create_all(attempt_root + "/work/.builder-cache/" + kind):
+                    diagnostic = "cannot create isolated cache"
+        # Only validated task/host preflight refusals reach this writer. The
+        # process owner has not been called; later run/output errors must not
+        # acquire a no-child certificate through the shared ERROR path below.
+        if diagnostic != "":
+            diagnostic = builder_worker_reject_before_start_v1(task,
+                attempt_root, host_id, diagnostic)
     if diagnostic == "":
         match builder_worker_run_v1(task, attempt_root, host_id):
             Err(message): diagnostic = message
