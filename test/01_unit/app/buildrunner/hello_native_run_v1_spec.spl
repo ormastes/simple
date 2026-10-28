@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect}
-use std.common.build_manager.contracts.{BuildInputV1, builder_validate_run_v1, builder_task_identity_v1}
+use std.common.build_manager.contracts.{BuildInputV1, BuildResultV1, BuildRunV1, builder_validate_run_v1, builder_validate_result_v1, builder_task_identity_v1}
 use std.common.build_manager.codec.{builder_encode_run_v1, builder_decode_run_v1}
 use std.common.crypto.sha256.{sha256_text}
 use test.fixtures.buildrunner.hello_native_run_v1.{HELLO_NATIVE_SOURCE_V1, hello_native_run_v1}
@@ -26,6 +26,74 @@ describe "BuildRunner Hello native task fixture":
         expect(decoded.hosts[0].worker_program).to_equal("/runner lane/buildrunner")
         expect(task.memory_policy).to_equal("enforce")
         expect(task.timeout_ms).to_equal(120000)
+
+    it "rejects malformed hello task paths and retry overflow while retaining the source input":
+        val digest = sha256_text("identity")
+        val runtime = BuildInputV1(path: "runtime/libsimple_runtime.a", digest: digest)
+        val valid = hello_native_run_v1("/compiler", digest, "/worker", digest,
+            "/work", [runtime], digest, "aarch64-apple-darwin", "llvm-lib", 8589934592)
+        expect(builder_validate_run_v1(valid)).to_equal("")
+
+        var traversal = valid
+        var traversal_task = traversal.tasks[0]
+        traversal_task.outputs = ["../hello.exe"]
+        traversal.tasks[0] = traversal_task
+        expect(builder_validate_run_v1(traversal)).to_equal("invalid declared output")
+
+        var no_output = valid
+        var no_output_task = no_output.tasks[0]
+        no_output_task.outputs = []
+        no_output.tasks[0] = no_output_task
+        expect(builder_validate_run_v1(no_output)).to_equal("task exceeds collection bounds or declares no outputs")
+
+        var no_retry_budget = valid
+        var retry_task = no_retry_budget.tasks[0]
+        retry_task.attempt = 2
+        no_retry_budget.tasks[0] = retry_task
+        expect(builder_validate_run_v1(no_retry_budget)).to_equal("attempt exceeds run retry budget")
+
+        # The manifest contract cannot infer compiler runtime requirements.
+        # Confirm the fixture always declares its source even with no runtime.
+        val source_only = hello_native_run_v1("/compiler", digest, "/worker", digest,
+            "/work", [], digest, "aarch64-apple-darwin", "llvm-lib", 8589934592)
+        expect(source_only.tasks[0].inputs.len()).to_equal(1)
+        expect(source_only.tasks[0].inputs[0].path).to_equal("src/main.spl")
+
+    it "admits only a matching success receipt and rejects stale hello output authority":
+        val digest = sha256_text("identity")
+        val runtime = BuildInputV1(path: "runtime/libsimple_runtime.a", digest: digest)
+        val run = hello_native_run_v1("/compiler", digest, "/worker", digest,
+            "/work", [runtime], digest, "aarch64-apple-darwin", "llvm-lib", 8589934592)
+        val task = run.tasks[0]
+        val valid = BuildRunV1(tasks: [task], hosts: run.hosts,
+            keep_going: false, max_attempts: 1)
+        expect(builder_validate_run_v1(valid)).to_equal("")
+
+        var changed = task
+        changed.attempt = 2
+        val stale_identity = builder_task_identity_v1(task)
+        val success_receipt = builder_validate_result_v1(task,
+            BuildResultV1(task_id: task.id,
+                attempt: 1, identity_digest: stale_identity, host_id: "local",
+                status: "OK", exit_code: 0,
+                outputs: [BuildInputV1(path: "hello.exe", digest: digest)],
+                cache_hits: -1, cache_misses: -1, cache_stores: -1))
+        expect(success_receipt).to_equal("")
+        expect(builder_validate_result_v1(changed,
+            BuildResultV1(task_id: task.id,
+                attempt: 1, identity_digest: stale_identity, host_id: "local",
+                status: "OK", exit_code: 0,
+                outputs: [BuildInputV1(path: "hello.exe", digest: digest)],
+                cache_hits: -1, cache_misses: -1, cache_stores: -1)))
+            .to_equal("stale or mismatched result identity")
+
+        expect(builder_validate_result_v1(task,
+            BuildResultV1(task_id: task.id,
+                attempt: task.attempt, identity_digest: builder_task_identity_v1(task),
+                host_id: "local", status: "ERROR", exit_code: 1, outputs: [
+                    BuildInputV1(path: "hello.exe", digest: digest)],
+                cache_hits: -1, cache_misses: -1, cache_stores: -1)))
+            .to_equal("failed result may not admit outputs or exit zero")
 
     it "changes cache and task identity when the admitted runtime changes":
         val digest = sha256_text("identity")
