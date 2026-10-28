@@ -1,0 +1,158 @@
+"""Runs a pinned Linux cgroup worker and native compiler through BuildRunner.
+
+Configure BUILDRUNNER_TEST_RUNNER (Linux BuildRunner manager),
+BUILDRUNNER_TEST_WORKER (Linux cgroup-v2 worker),
+BUILDRUNNER_TEST_COMPILER, BUILDRUNNER_TEST_RUNTIME_ROOT,
+BUILDRUNNER_TEST_TARGET, BUILDRUNNER_TEST_BACKEND, and
+BUILDRUNNER_TEST_MEMORY_PROVIDER=cgroup-v2. The worker must retain a real
+`compiler.memory` receipt. Hosts without that provider remain pending in
+ordinary assurance and fail closed under the critical assurance profile.
+"""
+use std.spec.{describe, it, expect, step, pending, fail, after_each}
+use std.io_runtime.{env_get, dir_walk, dir_create_all, dir_exists, file_write,
+    file_copy, file_hash_sha256, file_read, file_exists, dir_remove_all,
+    process_run_timeout}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_is_regular_no_follow}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{BuildInputV1}
+use std.spec.skip_governance.{validate_bare_pending}
+use app.bootstrap_builder.codec.{builder_write_run_v1}
+use test.fixtures.buildrunner.hello_native_run_v1.{HELLO_NATIVE_SOURCE_V1,
+    hello_native_run_v1}
+
+var hello_integration_owned_root = ""
+
+fn hello_integration_env(key: text) -> text:
+    env_get(key) ?? ""
+
+fn hello_integration_missing_provider() -> text:
+    val runner = hello_integration_env("BUILDRUNNER_TEST_RUNNER")
+    val worker = hello_integration_env("BUILDRUNNER_TEST_WORKER")
+    val compiler = hello_integration_env("BUILDRUNNER_TEST_COMPILER")
+    val runtime = hello_integration_env("BUILDRUNNER_TEST_RUNTIME_ROOT")
+    val target = hello_integration_env("BUILDRUNNER_TEST_TARGET")
+    val backend = hello_integration_env("BUILDRUNNER_TEST_BACKEND")
+    val memory = hello_integration_env("BUILDRUNNER_TEST_MEMORY_PROVIDER")
+    if runner == "" or worker == "" or compiler == "" or runtime == "" or
+            target == "" or backend == "" or memory == "":
+        return "pinned manager, cgroup-v2 worker, compiler, runtime, target, backend, and memory provider must be configured"
+    if memory != "cgroup-v2" or not target.contains("linux"):
+        return "this integration requires the Linux cgroup-v2 worker and a Linux target; portable/macOS workers cannot enforce the fixture memory policy"
+    ""
+
+fn run_hello_native_buildrunner_integration():
+    val runner = hello_integration_env("BUILDRUNNER_TEST_RUNNER")
+    val worker = hello_integration_env("BUILDRUNNER_TEST_WORKER")
+    val compiler = hello_integration_env("BUILDRUNNER_TEST_COMPILER")
+    val runtime_root = hello_integration_env("BUILDRUNNER_TEST_RUNTIME_ROOT")
+    val target = hello_integration_env("BUILDRUNNER_TEST_TARGET")
+    val backend = hello_integration_env("BUILDRUNNER_TEST_BACKEND")
+    step("Validate the configured manager, worker, and compiler executables")
+    expect(file_is_regular_no_follow(runner)).to_equal(true)
+    expect(file_is_regular_no_follow(worker)).to_equal(true)
+    expect(file_is_regular_no_follow(compiler)).to_equal(true)
+
+    val normalized_runtime_root = if runtime_root.ends_with("/"):
+        runtime_root.substring(0, runtime_root.len() - 1)
+    else:
+        runtime_root
+    val runtime_files = dir_walk(normalized_runtime_root)
+    expect(runtime_files.len() > 0).to_equal(true)
+    for path in runtime_files:
+        expect(file_is_regular_no_follow(path)).to_equal(true)
+
+    step("Stage the hello source and complete compiler runtime inventory")
+    val temp_parent = env_get("TMPDIR") ?? "/tmp"
+    val allocated = match secure_temp_dir(temp_parent, "buildrunner-hello-"):
+        case Ok(value): value
+        case Err(reason):
+            fail("cannot allocate isolated BuildRunner integration root: " + reason)
+            return
+    hello_integration_owned_root = allocated
+    val source_root = allocated + "/source"
+    val state_root = allocated + "/state"
+    val output_root = allocated + "/published"
+    val source = source_root + "/src/main.spl"
+    expect(dir_create_all(source_root + "/src")).to_equal(true)
+    expect(dir_create_all(source_root + "/runtime")).to_equal(true)
+    expect(file_write(source, HELLO_NATIVE_SOURCE_V1)).to_equal(true)
+
+    var runtime_inputs: [BuildInputV1] = []
+    var runtime_identity = ""
+    for path in runtime_files:
+        val relative = path.substring(normalized_runtime_root.len() + 1)
+        val staged = source_root + "/runtime/" + relative
+        val slash = staged.substring(0, staged.last_index_of("/"))
+        expect(dir_create_all(slash)).to_equal(true)
+        expect(file_copy(path, staged)).to_equal(true)
+        val digest = file_hash_sha256(staged)
+        expect(digest.len()).to_equal(64)
+        runtime_inputs = runtime_inputs.push(BuildInputV1(
+            path: "runtime/" + relative, digest: digest))
+        runtime_identity = runtime_identity + relative + "|" + digest + "\n"
+
+    val compiler_digest = file_hash_sha256(compiler)
+    val worker_digest = file_hash_sha256(worker)
+    val toolchain_digest = sha256_text(target + "|" + backend + "|" + runtime_identity)
+    val run = hello_native_run_v1(compiler, compiler_digest, worker, worker_digest,
+        allocated + "/worker-space", runtime_inputs, toolchain_digest,
+        target, backend, 8589934592)
+    val manifest = allocated + "/manifest.sdn"
+    expect(builder_write_run_v1(manifest, run)).to_equal(true)
+
+    step("Run the manifest through the production BuildRunner manager")
+    val (build_out, _build_err, build_code) = process_run_timeout(runner,
+        ["run", "--manifest", manifest, "--state", state_root,
+            "--source-root", source_root, "--output-root", output_root], 300000)
+    expect(build_code).to_equal(0)
+    expect(file_is_regular_no_follow(output_root + "/hello.exe")).to_equal(true)
+    val memory_receipt = file_read(state_root + "/attempts/hello/1/local/compiler.memory")
+    expect(memory_receipt).to_contain("requested_policy=enforce")
+    expect(memory_receipt).to_contain("enforcement=cgroup-memory-max")
+    expect(memory_receipt).to_contain("peak_metric=cgroup-memory-peak")
+
+    step("Verify the production manifest, journal, receipt, retained attempt, and output")
+    val (verify_out, _verify_err, verify_code) = process_run_timeout(runner,
+        ["verify", "--manifest", manifest, "--state", state_root,
+            "--source-root", source_root, "--output-root", output_root], 300000)
+    expect(verify_code).to_equal(0)
+    expect(verify_out).to_contain("builder: verified tasks=1")
+
+    step("Execute the published hello artifact and compare exact output")
+    val (hello_out, hello_err, hello_code) = process_run_timeout(
+        output_root + "/hello.exe", [], 15000)
+    expect(hello_code).to_equal(0)
+    expect(hello_err).to_equal("")
+    expect(hello_out).to_equal("Hello, World!\n")
+
+    step("Change the source to another valid program and require digest refusal before dispatch")
+    expect(file_write(source, "fn main():\n    print \"Changed, World!\"\n")).to_equal(true)
+    val changed_state = allocated + "/changed-state"
+    val changed_output = allocated + "/changed-output"
+    val (changed_out, _changed_err, changed_code) = process_run_timeout(runner,
+        ["run", "--manifest", manifest, "--state", changed_state,
+            "--source-root", source_root, "--output-root", changed_output], 300000)
+    expect(changed_code).to_equal(2)
+    expect(changed_out).to_contain(
+        "producer/input digest mismatch for hello: declared input hash differs: src/main.spl")
+    expect(dir_exists(changed_state + "/attempts/hello")).to_equal(false)
+    expect(file_exists(changed_output + "/hello.exe")).to_equal(false)
+
+describe "BuildRunner publishes and executes a native Hello artifact":
+    after_each():
+        if hello_integration_owned_root != "":
+            expect(dir_remove_all(hello_integration_owned_root)).to_equal(true)
+            hello_integration_owned_root = ""
+
+    val missing_provider = hello_integration_missing_provider()
+    if missing_provider != "":
+        val profile = env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+        if not validate_bare_pending(profile).ok:
+            it "fails closed when the enforced native worker provider is unavailable":
+                fail("BuildRunner integration unavailable under critical assurance: " + missing_provider)
+        else:
+            it "records unavailable native provider coverage as pending, never as execution success":
+                pending("BuildRunner native Hello integration unavailable: " + missing_provider)
+    else:
+        it "runs BuildRunner, verifies and executes Hello, then refuses valid source drift":
+            run_hello_native_buildrunner_integration()
