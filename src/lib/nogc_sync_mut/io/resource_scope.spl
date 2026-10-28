@@ -313,8 +313,9 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     val ancestor_cap = if memory_scoped: _ancestor_memory_max() else: 0
     val memory_bytes = if ancestor_cap > 0 and ancestor_cap < requested_memory: ancestor_cap else: requested_memory
     # Inside a scope the pid cap is TasksMax, so no `ulimit -u` and no bash needed.
-    val shell = if memory_scoped: "/bin/sh" else: _limit_shell(scope)
-    if shell == "":
+    # @workaround bug=phase2_resource_scope_shell_shadow_2026_10_28 recover=74c4f7c879b reason=Cached phase2 resolves the local shell argument as a global function value
+    val limit_shell_path = if memory_scoped: "/bin/sh" else: _limit_shell(scope)
+    if limit_shell_path == "":
         return ObservedProcessResult(
             stdout: "",
             stderr: "resource scope: max_pids={scope.budget.max_pids} requires a shell with `ulimit -u` (bash/ksh/zsh); none found, refusing to run unlimited",
@@ -344,7 +345,7 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     command = command + _shell_quote(cmd)
     for arg in args:
         command = command + " " + _shell_quote(arg)
-    val process = process_run_observed_bounded(shell, ["-c", command], scope.timeout_ms, scope.max_output_bytes)
+    val process = process_run_observed_bounded(limit_shell_path, ["-c", command], scope.timeout_ms, scope.max_output_bytes)
     var memscope: [text] = []
     if report != "" and file_exists(report):
         memscope = file_read_text(report).trim().split(":")
