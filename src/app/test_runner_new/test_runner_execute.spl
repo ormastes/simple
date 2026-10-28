@@ -21,6 +21,7 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout, process_run_with_limits, ProcessResult}
+use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_decision_manifest_sdn}
 
 # Import from split-out files (same directory, but need use for re-export)
 use std.test_runner.test_executor_parsing.{
@@ -30,6 +31,7 @@ use std.test_runner.test_executor_parsing.{
     build_child_args, make_result_from_output,
     coverage_wrapper_suffix, build_coverage_wrapper,
     extract_coverage_sdn, strip_coverage_blocks,
+    extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks,
     COVERAGE_BEGIN, COVERAGE_END,
     list_tests_static, extract_static_test_name
 }
@@ -88,8 +90,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     if options.coverage:
         val combined = stdout + "\n" + stderr
         val sdn = extract_coverage_sdn(combined)
-        # MEMORY DEBUG: record_coverage_sdn commented out (GROUP 3 isolation)
-        # record_coverage_sdn(sdn)
+        record_coverage_sdn(sdn)
         stdout = strip_coverage_blocks(stdout)
         stderr = strip_coverage_blocks(stderr)
 
@@ -146,7 +147,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
         if options.coverage:
             val combined = stdout + "\n" + stderr
             val sdn = extract_coverage_sdn(combined)
-            # record_coverage_sdn(sdn)  # Deferred: coverage import removed for startup perf
+            record_coverage_sdn(sdn)
             stdout = strip_coverage_blocks(stdout)
             stderr = strip_coverage_blocks(stderr)
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
@@ -619,6 +620,22 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             cached: false
         )
 
+    # Register compiler-owned zero-count sites before execution so the report
+    # can distinguish branchless input from a requested run whose probes never
+    # produced an outcome.
+    if options.coverage:
+        val compile_output = compile_stdout + "\n" + compile_stderr
+        val (manifest, manifest_valid) = extract_compiler_coverage_manifest_sdn(compile_output)
+        if not manifest_valid or not record_compiler_decision_manifest_sdn(manifest):
+            if cleanup_path != "" and not options.keep_artifacts and file_exists(cleanup_path):
+                file_delete(cleanup_path)
+            if file_exists(smf_path): file_delete(smf_path)
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
+                error: "ABORTED BEFORE EXECUTION — compiler did not provide a valid coverage site manifest; no coverage instrumentation evidence exists",
+                timed_out: false, cached: false)
+
     # Step 3: Run the compiled .smf
     if options.verbose:
         print "[native] Running {smf_path}"
@@ -666,8 +683,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if options.coverage:
         val combined = stdout + "\n" + stderr
         val sdn = extract_coverage_sdn(combined)
-        # MEMORY DEBUG: record_coverage_sdn commented out (GROUP 3 isolation)
-        # record_coverage_sdn(sdn)
+        record_coverage_sdn(sdn)
         stdout = strip_coverage_blocks(stdout)
         stderr = strip_coverage_blocks(stderr)
 

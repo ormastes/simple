@@ -242,6 +242,20 @@ fn discover_all_requested_files(options: TestOptions, use_cache: bool) -> [text]
     print "Requested {requested.len()} target(s); {all_files.len()} distinct test file(s) to run."
     all_files
 
+fn coverage_setup_failure_result(paths: [text]) -> TestRunResult:
+    var failed_paths = paths
+    if failed_paths.len() == 0:
+        failed_paths.push("<coverage setup>")
+    var files: [TestFileResult] = []
+    for path in failed_paths:
+        files.push(TestFileResult(path: path, passed: 0, failed: 1,
+            skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0,
+            error: "ABORTED BEFORE EXECUTION — coverage setup failed; stale artifacts could not be removed",
+            timed_out: false, cached: false))
+    TestRunResult(files: files, total_passed: 0, total_failed: files.len(),
+        total_skipped: 0, total_pending: 0, total_timed_out: 0,
+        total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+
 fn run_tests(options: TestOptions) -> TestRunResult:
     # CI mode override (config already loaded by main(), use options.ci_mode)
     # Apply CI mode overrides
@@ -340,6 +354,11 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     val _t_discover_ms = (time_now_unix_micros() - _t_discover_start) / 1000
     print "  [setup] discover: {_t_discover_ms}ms ({all_files.len()} file(s))"
 
+    # Start a requested coverage session before any return that could leave an
+    # older report in place (including `--list` and admission failures).
+    if options.coverage and not setup_coverage():
+        return coverage_setup_failure_result(all_files)
+
     # Inventory must precede execution-only admission gates. Missing coverage
     # annotations are findings for a run, not reasons to suppress a listing.
     if options.list:
@@ -402,9 +421,6 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     # Freeze the admitted file set. The daemon retains its existing option
     # semantics; direct worker dispatch captures its effective options below.
     val admitted_paths = files
-
-    if options.coverage:
-        setup_coverage()
 
     # Propagate env vars
     propagate_env_vars(options)

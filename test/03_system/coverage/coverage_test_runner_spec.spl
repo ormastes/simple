@@ -30,7 +30,11 @@ and rendering, file tracking, sorting, and threshold enforcement.
 """
 
 use std.spec
-use std.test_runner.test_runner_coverage.{FileCoverage, CoverageData, reset_coverage_state, decision_key, condition_key, merge_counts, parse_i64_safe, accumulate_coverage_sdn, build_coverage_data_from_state, render_coverage_state_sdn, find_or_add_file, sort_files_by_coverage, check_coverage_threshold, parse_coverage_state_sdn, record_coverage_sdn, record_compiler_decision_manifest_sdn, coverage_has_declared_sites, coverage_has_runtime_observations, coverage_has_declared_sites_without_observations, coverage_evidence_publishable}
+use std.io_runtime.{dir_create_all, dir_exists, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_delete}
+use std.test_runner.test_runner_coverage.{FileCoverage, CoverageData, reset_coverage_state, decision_key, condition_key, merge_counts, parse_i64_safe, accumulate_coverage_sdn, build_coverage_data_from_state, render_coverage_state_sdn, find_or_add_file, sort_files_by_coverage, check_coverage_threshold, parse_coverage_state_sdn, record_coverage_sdn, record_compiler_decision_manifest_sdn, compiler_coverage_manifest_count, coverage_has_declared_sites, coverage_has_runtime_observations, coverage_has_declared_sites_without_observations, coverage_evidence_publishable, delete_coverage_artifact}
+
+val COVERAGE_DELETE_REJECTION_FIXTURE = "build/coverage/runner-delete-failure-fixture.sdn"
 
 # ============================================================================
 # Struct Construction
@@ -93,6 +97,9 @@ describe "parse_i64_safe":
     it "trims whitespace before parsing":
         val result = parse_i64_safe("  7  ")
         expect(result).to_equal(7)
+
+    it "preserves the false-count digit three after trimming":
+        expect(parse_i64_safe(" 3")).to_equal(3)
 
 # ============================================================================
 # decision_key / condition_key
@@ -349,13 +356,21 @@ describe "coverage observation admission":
     before_each:
         reset_coverage_state()
 
-    it "does not reject code with no declared decisions or conditions":
+    it "does not reject branchless code with an attested empty inventory":
+        val manifest = "version: 1.0\ndecisions |id, file, line, column, true_count, false_count|\nconditions |decision_id, condition_id, file, line, column, true_count, false_count|"
+        expect(record_compiler_decision_manifest_sdn(manifest)).to_equal(true)
         val data = build_coverage_data_from_state("")
         expect(coverage_has_declared_sites(data)).to_equal(false)
         expect(coverage_has_runtime_observations()).to_equal(false)
         expect(coverage_has_declared_sites_without_observations(data)).to_equal(false)
         expect(coverage_evidence_publishable(data, false)).to_equal(true)
         expect(coverage_evidence_publishable(data, true)).to_equal(false)
+        expect(compiler_coverage_manifest_count()).to_equal(1)
+
+    it "rejects an empty run with no compiler inventory receipt":
+        val data = build_coverage_data_from_state("")
+        expect(compiler_coverage_manifest_count()).to_equal(0)
+        expect(coverage_evidence_publishable(data, false)).to_equal(false)
 
     it "rejects a declared instrumentation site that emitted no runtime outcome":
         val manifest = "version: 1.0\ndecisions |id, file, line, column, true_count, false_count|\n    1, src/branchy.spl, 10, 5, 0, 0\nconditions |decision_id, condition_id, file, line, column, true_count, false_count|"
@@ -375,6 +390,18 @@ describe "coverage observation admission":
             build_coverage_data_from_state(""))).to_equal(false)
         expect(coverage_evidence_publishable(
             build_coverage_data_from_state(""), false)).to_equal(true)
+
+describe "coverage artifact cleanup":
+
+    after_each:
+        if dir_exists(COVERAGE_DELETE_REJECTION_FIXTURE): dir_remove_all(COVERAGE_DELETE_REJECTION_FIXTURE)
+        if file_exists(COVERAGE_DELETE_REJECTION_FIXTURE): file_delete(COVERAGE_DELETE_REJECTION_FIXTURE)
+
+    it "reports failure instead of treating an undeletable stale path as cleared":
+        if file_exists(COVERAGE_DELETE_REJECTION_FIXTURE): file_delete(COVERAGE_DELETE_REJECTION_FIXTURE)
+        if dir_exists(COVERAGE_DELETE_REJECTION_FIXTURE): dir_remove_all(COVERAGE_DELETE_REJECTION_FIXTURE)
+        expect(dir_create_all(COVERAGE_DELETE_REJECTION_FIXTURE)).to_equal(true)
+        expect(delete_coverage_artifact(COVERAGE_DELETE_REJECTION_FIXTURE)).to_equal(false)
 
 # ============================================================================
 # sort_files_by_coverage
