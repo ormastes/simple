@@ -1,0 +1,32 @@
+# Bootstrap diagnostic: the child exit and both output streams cross a
+# function return before tuple destructuring. This also verifies field access.
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native}
+
+fn capture() -> (text, text, i64):
+    process_run_bounded("/bin/sh", ["-c", "printf 'marker 한글'; printf problem >&2; exit 7"], 2000, 4096)
+
+fn main() -> i64:
+    val (stdout, stderr, status) = capture()
+    if stdout != "marker 한글" or stderr != "problem" or status != 7:
+        print "FAIL destructure status={status} stdout={stdout} stderr={stderr}"
+        return 1
+    val result = capture()
+    if result.0 != "marker 한글" or result.1 != "problem" or result.2 != 7:
+        print "FAIL fields status={result.2} stdout={result.0} stderr={result.1}"
+        return 1
+    val (direct_out, direct_err, direct_status) = process_capture_bounded_native(
+        "/bin/sh", ["-c", "printf direct; printf detail >&2; exit 7"], 2000, 4096)
+    if direct_out != "direct" or direct_err != "detail" or direct_status != 7:
+        print "FAIL direct status={direct_status} stdout={direct_out} stderr={direct_err}"
+        return 1
+    val (empty_out, empty_err, empty_status) = process_run_bounded("/usr/bin/true", [], 2000, 4096)
+    if empty_out != "" or empty_err != "" or empty_status != 0:
+        print "FAIL empty output status={empty_status}"
+        return 1
+    val (_missing_out, _missing_err, missing_status) = process_run_bounded("/nonexistent/simple-tuple-probe", [], 2000, 4096)
+    if missing_status == 0:
+        print "FAIL missing command was accepted"
+        return 1
+    print "PASS native process tuple boundary"
+    0

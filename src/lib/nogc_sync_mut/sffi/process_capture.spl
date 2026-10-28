@@ -5,10 +5,35 @@
 extern fn rt_string_data<T>(value: T) -> i64
 @unsafe(reason: "UTF8 byte extent for the retained command", capabilities: [ffi])
 extern fn rt_string_len<T>(value: T) -> i64
+@unsafe(reason: "copy the provider-owned UTF8 output into a Simple string", capabilities: [ffi, raw_ptr])
+extern fn rt_string_new(bytes: i64, len: i64) -> text
+@unsafe(reason: "read fields of the provider's three-word result block", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_i64(address: i64, offset: i64) -> i64
 @unsafe(reason: "existing native bounded tuple provider takes explicit command pointer and length", capabilities: [ffi, raw_ptr])
-extern fn rt_process_run_bounded_tuple(command_ptr: i64, command_len: i64, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+extern fn rt_process_run_bounded_tuple(command_ptr: i64, command_len: i64, args: [text], timeout_ms: i64, max_output_bytes: i64) -> i64
 @unsafe(reason: "existing native unbounded tuple provider takes explicit command pointer and length", capabilities: [ffi, raw_ptr])
-extern fn rt_process_run_tuple(command_ptr: i64, command_len: i64, args: [text]) -> (text, text, i64)
+extern fn rt_process_run_tuple(command_ptr: i64, command_len: i64, args: [text]) -> i64
+
+fn process_capture_result(block: i64) -> (text, text, i64):
+    if block == 0:
+        return ("", "native process capture returned no result", -1)
+    val stdout_handle = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(block, 0)
+    val stderr_handle = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(block, 8)
+    # The provider's third word is already an untagged signed status.
+    val status = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(block, 16)
+    val stdout_data = unsafe(capabilities: [ffi, raw_ptr]): rt_string_data(stdout_handle)
+    val stdout_len = unsafe(capabilities: [ffi]): rt_string_len(stdout_handle)
+    val stderr_data = unsafe(capabilities: [ffi, raw_ptr]): rt_string_data(stderr_handle)
+    val stderr_len = unsafe(capabilities: [ffi]): rt_string_len(stderr_handle)
+    if stdout_len < 0 or stderr_len < 0 or (stdout_data == 0 and stdout_len > 0) or (stderr_data == 0 and stderr_len > 0):
+        return ("", "native process capture returned invalid text", -1)
+    var stdout_text = ""
+    if stdout_len > 0:
+        stdout_text = unsafe(capabilities: [ffi, raw_ptr]): rt_string_new(stdout_data, stdout_len)
+    var stderr_text = ""
+    if stderr_len > 0:
+        stderr_text = unsafe(capabilities: [ffi, raw_ptr]): rt_string_new(stderr_data, stderr_len)
+    (stdout_text, stderr_text, status)
 
 # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=Preserve the existing unbounded native provider with explicit command pointer and UTF8 length instead of changing its capture or timeout policy
 fn process_capture_unbounded_native(command: text, args: [text]) -> (text, text, i64):
@@ -19,8 +44,9 @@ fn process_capture_unbounded_native(command: text, args: [text]) -> (text, text,
         rt_string_len(retained_command)
     if pointer == 0 or length <= 0:
         return ("", "native unbounded capture command pointer or length is unavailable", -1)
-    unsafe(capabilities: [ffi, raw_ptr]):
+    val block = unsafe(capabilities: [ffi, raw_ptr]):
         rt_process_run_tuple(pointer, length, args)
+    process_capture_result(block)
 
 # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=Split command data and UTF8 length explicitly through the existing bounded tuple provider until the deployed P2 text ABI is qualified
 fn process_capture_bounded_native(command: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
@@ -31,5 +57,6 @@ fn process_capture_bounded_native(command: text, args: [text], timeout_ms: i64, 
         rt_string_len(retained_command)
     if pointer == 0 or length <= 0:
         return ("", "native bounded capture command pointer or length is unavailable", -1)
-    unsafe(capabilities: [ffi, raw_ptr]):
+    val block = unsafe(capabilities: [ffi, raw_ptr]):
         rt_process_run_bounded_tuple(pointer, length, args, timeout_ms, max_output_bytes)
+    process_capture_result(block)
