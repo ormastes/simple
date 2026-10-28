@@ -540,3 +540,9 @@ Native SDN group counters on the retained phase2 compiler need explicit array
 mutation: indexed assignment can leave zero counts. See
 `doc/08_tracking/bug/phase2_runner_indexed_group_accumulation_2026_10_28.md`
 and the native `check-native-sdn-groups.shs` regression gate.
+
+
+Public SDN aliases (`--sdn`, `--format sdn`, `--format=sdn`) must enter the same
+transport admission path. Do not bypass unsupported V4 process ownership by
+printing a partial legacy console summary. See
+`doc/08_tracking/bug/test_runner_sdn_equals_transport_bypass_2026_10_28.md`.
