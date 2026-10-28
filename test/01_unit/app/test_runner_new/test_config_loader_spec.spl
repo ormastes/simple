@@ -1,0 +1,60 @@
+# Regression coverage for the app test runner's live config loader.
+
+use std.spec.{describe, it, expect, after_each}
+use app.test_runner_new.test_config.{TestConfig, load_test_config_from_path}
+use app.io.env_ops.{env_get, env_set}
+use std.io_runtime.{file_write, file_delete, time_now_unix_micros}
+
+val config_loader_original_ci = env_get("CI") ?? ""
+val config_loader_temp_path = "/tmp/simple_test_config_loader_{time_now_unix_micros()}.sdn"
+
+fn restore_config_loader_state():
+    env_set("CI", config_loader_original_ci)
+    file_delete(config_loader_temp_path)
+
+describe "app test config loader":
+    after_each:
+        restore_config_loader_state()
+
+    it "keeps compiled defaults when the config path is missing":
+        env_set("CI", "")
+        val config = load_test_config_from_path(config_loader_temp_path)
+        expect(config.timeout_seconds).to_equal(60)
+        expect(config.run_spec_tests).to_equal(true)
+        expect(config.run_sdoctests).to_equal(false)
+
+    it "applies CI overrides when the config path is missing":
+        env_set("CI", "true")
+        val config = load_test_config_from_path(config_loader_temp_path)
+        expect(config.timeout_seconds).to_equal(60)
+        expect(config.ci_mode).to_equal(true)
+        expect(config.run_slow_tests).to_equal(true)
+        expect(config.fail_fast).to_equal(false)
+
+    it "applies CI overrides when the config path is empty":
+        env_set("CI", "true")
+        val config = load_test_config_from_path("")
+        expect(config.timeout_seconds).to_equal(60)
+        expect(config.ci_mode).to_equal(true)
+        expect(config.run_slow_tests).to_equal(true)
+        expect(config.fail_fast).to_equal(false)
+
+    it "applies CI overrides when the config file is empty":
+        env_set("CI", "true")
+        expect(file_write(config_loader_temp_path, "")).to_equal(true)
+        val config = load_test_config_from_path(config_loader_temp_path)
+        expect(config.timeout_seconds).to_equal(60)
+        expect(config.ci_mode).to_equal(true)
+        expect(config.run_slow_tests).to_equal(true)
+        expect(config.fail_fast).to_equal(false)
+
+    it "loads valid entries and falls back for malformed values":
+        env_set("CI", "")
+        file_write(config_loader_temp_path,
+            "test:\n  timeout: invalid\n  run_sdoctests: true\n" +
+            "  cpu_throttle:\n    threshold: nope\n    enabled: true\n")
+        val config = load_test_config_from_path(config_loader_temp_path)
+        expect(config.timeout_seconds).to_equal(60)
+        expect(config.run_sdoctests).to_equal(true)
+        expect(config.cpu_threshold).to_equal(80.0)
+        expect(config.throttle_enabled).to_equal(true)
