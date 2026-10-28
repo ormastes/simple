@@ -133,7 +133,68 @@ static void assert_owned(int parent, int group, int pidfd) {
     assert(fcntl(pidfd, F_GETFD) >= 0);
 }
 
+static void check_cleanup_retry(int cancel) {
+    char root[] = "/tmp/simple-group-retry-XXXXXX";
+    assert(mkdtemp(root));
+    int parent = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(parent >= 0 && test_mkdirat(parent, "simple-native-retry", 0700) == 0);
+    int group = openat(parent, "simple-native-retry", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int pidfd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    assert(group >= 0 && pidfd >= 0);
+    rt_linux_group = (RtLinuxGroup){.active=1, .parent_fd=parent, .group_fd=group,
+        .pidfd=pidfd, .pid=child_pid, .started_ms=9000,
+        .timeout_ms=cancel ? 0 : 1000};
+    strcpy(rt_linux_group.name, "simple-native-retry");
+    reap_ready = 0;
+    assert(unlinkat(group, "cgroup.kill", 0) == 0);
+    if (cancel) assert(rt_linux_group_cancel_v1(1) == ENOENT);
+    /* A persistent failure remains an error on every poll/collect. Neither
+     * the timeout flag nor cancellation intent means kill was delivered. */
+    for (int attempt = 0; attempt < 3; attempt++) {
+        SplArray *receipt = attempt == 1 ? rt_linux_group_collect_v1(1)
+            : rt_linux_group_poll_v1(1);
+        assert(receipt->items[0].as_int == ENOENT);
+        assert(receipt->items[1].as_int == 0 && receipt->items[2].as_int == 0);
+        assert(receipt->items[3].as_int == 0 && receipt->items[4].as_int == 1);
+        assert(receipt->items[6].as_int == !cancel);
+        assert(receipt->items[7].as_int == cancel);
+        free_receipt(receipt);
+        assert_owned(parent, group, pidfd);
+    }
+    /* Recovery retries without a second cancel request or resetting timeout. */
+    write_leaf(group, "cgroup.kill", "0");
+    SplArray *receipt = rt_linux_group_poll_v1(1);
+    assert(receipt->items[0].as_int == 0 && receipt->items[1].as_int == 0);
+    free_receipt(receipt);
+    char killed[8];
+    assert(rt_lg_read_at(group, "cgroup.kill", killed, sizeof(killed)));
+    assert(!strcmp(killed, "1"));
+    receipt = rt_linux_group_collect_v1(1);
+    assert(receipt->items[0].as_int == EBUSY && receipt->items[1].as_int == 0);
+    free_receipt(receipt);
+    reap_ready = 1;
+    receipt = rt_linux_group_collect_v1(1);
+    assert(receipt->items[0].as_int == EBUSY && receipt->items[1].as_int == 0);
+    free_receipt(receipt);
+    assert_owned(parent, group, pidfd);
+    write_leaf(group, "cgroup.events", "populated 0\n");
+    receipt = rt_linux_group_collect_v1(1);
+    assert(receipt->items[0].as_int == 0 && receipt->items[1].as_int == 1);
+    assert(receipt->items[6].as_int == !cancel && receipt->items[7].as_int == cancel);
+    free_receipt(receipt);
+    assert(rt_linux_group.collected && blocking_wait_calls == 0);
+    assert(fcntl(parent, F_GETFD) == -1 && errno == EBADF);
+    assert(fcntl(group, F_GETFD) == -1 && errno == EBADF);
+    assert(fcntl(pidfd, F_GETFD) == -1 && errno == EBADF);
+    assert(rmdir(root) == 0);
+    rt_linux_group = (RtLinuxGroup){0};
+    reap_ready = 0;
+    wait_calls = 0;
+}
+
 int main(void) {
+    check_cleanup_retry(0);
+    check_cleanup_retry(1);
     char root[] = "/tmp/simple-group-start-XXXXXX";
     assert(mkdtemp(root));
     int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -175,7 +236,7 @@ int main(void) {
     assert(unlinkat(group, "cgroup.kill", 0) == 0);
     assert(rt_linux_group_cancel_v1(1) == ENOENT);
     receipt = rt_linux_group_collect_v1(1);
-    assert(receipt->items[0].as_int == EBUSY);
+    assert(receipt->items[0].as_int == ENOENT);
     free_receipt(receipt);
     assert_owned(owned_parent, group, pidfd);
     assert(rt_linux_group_parent_release_v1(rt_lg_delegation.token) == EBUSY);

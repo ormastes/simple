@@ -39,7 +39,7 @@ typedef struct {
     pid_t pid;
     char name[80];
     int64_t started_ms, timeout_ms, peak, current;
-    int leader_reaped, tree_empty, timed_out, cancelled, exit_code;
+    int leader_reaped, tree_empty, timed_out, cancelled, exit_code, kill_pending;
 } RtLinuxGroup;
 
 static RtLinuxGroup rt_linux_group = {0};
@@ -265,7 +265,12 @@ static int64_t rt_lg_now_ms(void) {
 }
 
 static int rt_lg_kill(RtLinuxGroup *owner) {
-    return rt_lg_write_at(owner->group_fd, "cgroup.kill", "1");
+    /* Intent survives a failed write. A timeout/cancel latch is not evidence
+     * that the kernel received the kill request. */
+    owner->kill_pending = 1;
+    if (!rt_lg_write_at(owner->group_fd, "cgroup.kill", "1")) return 0;
+    owner->kill_pending = 0;
+    return 1;
 }
 
 /* A controller being available is not a delegation to child groups. Do not
@@ -414,8 +419,9 @@ static int rt_lg_poll(RtLinuxGroup *owner) {
     if (owner->timeout_ms > 0 && !owner->timed_out && !owner->leader_reaped &&
         now - owner->started_ms >= owner->timeout_ms) {
         owner->timed_out = 1;
-        if (!rt_lg_kill(owner)) return errno ? errno : EIO;
+        owner->kill_pending = 1;
     }
+    if (owner->kill_pending && !rt_lg_kill(owner)) return errno ? errno : EIO;
     if (!owner->leader_reaped) {
         int status = 0;
         pid_t observed = waitpid(owner->pid, &status, WNOHANG);
