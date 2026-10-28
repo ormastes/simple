@@ -17544,13 +17544,17 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
 /* Byte-for-byte copy via stdio; truncates/creates dst (std::fs::copy). */
 int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                  const uint8_t* dst_ptr, uint64_t dst_len) {
-    char src_path[RT_TEXT_PATH_MAX];
-    char dst_path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(src_ptr, src_len, src_path, sizeof(src_path))) return 0;
-    if (!rt_text_arg_to_path(dst_ptr, dst_len, dst_path, sizeof(dst_path))) return 0;
-    FILE* in = fopen(src_path, "rb");
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
+    if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
+    FILE* in = fopen(src, "rb");
     if (!in) return 0;
-    FILE* out = fopen(dst_path, "wb");
+#if !defined(_WIN32)
+    struct stat source_stat;
+    if (fstat(fileno(in), &source_stat) != 0) { fclose(in); return 0; }
+#endif
+    FILE* out = fopen(dst, "wb");
     if (!out) { fclose(in); return 0; }
     uint8_t buf[65536];
     int ok = 1;
@@ -17558,9 +17562,16 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
         if (fwrite(buf, 1, got, out) != got) { ok = 0; break; }
     }
-    if (ferror(in)) ok = 0;
+    if (ferror(in) || fflush(out) != 0) ok = 0;
+#if !defined(_WIN32)
+    /* BuildRunner publishes this copy as the executable artifact. Preserve
+     * ordinary permissions from the opened source, independent of umask or
+     * an existing destination's mode; never propagate privilege bits. Apply
+     * only after the bytes are flushed, through the already-open destination. */
+    if (ok && fchmod(fileno(out), source_stat.st_mode & 0777) != 0) ok = 0;
+#endif
     if (fclose(out) != 0) ok = 0;
-    fclose(in);
+    if (fclose(in) != 0) ok = 0;
     return ok;
 }
 
