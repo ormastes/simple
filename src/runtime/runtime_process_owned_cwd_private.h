@@ -79,7 +79,30 @@ int64_t rt_process_observation_v4_pin_cwd_value(const char* path_data,
         int saved = errno ? errno : EINVAL;
         RT_OWNED_HOST_FREE(path); errno = saved; return 0;
     }
-    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+#if defined(RT_PROCESS_OBSERVATION_V4_TESTING) && defined(POV4_CWD_TEST_AFTER_REALPATH)
+    POV4_CWD_TEST_AFTER_REALPATH();
+#endif
+    /* O_NOFOLLOW on a full path protects only its final component; walk from
+     * root so no intermediate component can be replaced by a followed symlink. */
+    int fd = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd >= 0) {
+        char* component = path + 1;
+        while (*component) {
+            char* slash = strchr(component, '/');
+            if (slash) *slash = '\0';
+            int next = openat(fd, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            int saved = errno;
+            if (slash) *slash = '/';
+            close(fd);
+            fd = next;
+            if (fd < 0) { errno = saved; break; }
+#if defined(RT_PROCESS_OBSERVATION_V4_TESTING) && defined(POV4_CWD_TEST_AFTER_COMPONENT)
+            POV4_CWD_TEST_AFTER_COMPONENT(component, slash);
+#endif
+            if (!slash) break;
+            component = slash + 1;
+        }
+    }
     uint8_t digest[POV4_DIGEST_BYTES];
     if (fd < 0 || !pov4_directory_digest(fd, digest)) {
         int saved = errno ? errno : EIO;
