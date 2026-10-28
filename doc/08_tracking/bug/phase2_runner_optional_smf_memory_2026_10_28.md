@@ -35,6 +35,12 @@ or stub-writer success are claimed.
 
 ## Source investigation, 2026-10-29
 
+Landing status update: PR #5153 was merged into `release/1.0.0` on
+2026-10-28 at 05:58:11 UTC, merge commit
+`c0c1e5a37b7f64a7562c3936d9b2b519568c0e6c`.
+The earlier draft/HOLD description above records the investigation's prior
+state; merging does not establish the missing runner or production checks.
+
 The retained descendant command supplies `--entry` but omits `--mode`.
 The full native-build worker defaults to `dynload`;
 `src/app/cli/native_build_output_plan.spl::native_build_output_format_v1`
