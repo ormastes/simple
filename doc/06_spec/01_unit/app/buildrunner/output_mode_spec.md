@@ -12,6 +12,8 @@ POSIX-only fixture as pending; production Windows permission behavior is unchang
 | Nonexecutable retained output gains execute bits | Publication restores the nonexecutable mode |
 | Destination content differs | Publication refuses it without changing its mode |
 | Destination is a symlink | Publication refuses it without changing the linked file |
+| Output parent symlink escapes the output root | Publication refuses before creating a missing directory in the external tree |
+| Nested output directories do not yet exist | Publication creates parents inside the output root and publishes the admitted bytes |
 
 The companion `bootstrap_builder/output_root_spec.spl` covers read-only CLI
 verification, cache repair, and local reuse of an SSH attempt's collected

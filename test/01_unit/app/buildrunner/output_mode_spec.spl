@@ -4,7 +4,7 @@ use app.io.env_ops.{host_os}
 use app.bootstrap_builder.process_port.{builder_process_portable_v1}
 use std.common.build_manager.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1, builder_task_identity_v1}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write, file_hash_sha256}
-use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove_all, process_run_timeout}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove_all, dir_exists, process_run_timeout}
 use std.nogc_sync_mut.package_sffi.{set_permissions, create_symlink}
 use std.nogc_sync_mut.sffi.fs.{file_mode}
 
@@ -86,3 +86,30 @@ describe "BuildRunner retained output permissions":
             expect(create_symlink(other, output_mode_root + "/output/hello")).to_equal(true)
             expect(output_mode_publish(task, receipt)).to_equal(false)
             expect(file_mode(other)).to_equal(0o600)
+
+        it "refuses an escaping parent before creating directories outside the output root":
+            var (task, receipt) = output_mode_fixture()
+            val nested = "escape/new/deep/hello"
+            expect(dir_create_all(output_mode_root + "/attempt/work/escape/new/deep")).to_equal(true)
+            expect(file_write(output_mode_root + "/attempt/work/" + nested,
+                "#!/bin/sh\nprintf 'Hello, World!\\n'\n")).to_equal(true)
+            task.outputs = [nested]
+            receipt.outputs = [BuildInputV1(path: nested, digest: receipt.outputs[0].digest)]
+            receipt.identity_digest = builder_task_identity_v1(task)
+            val outside = output_mode_root + "/outside"
+            expect(dir_create_all(outside)).to_equal(true)
+            expect(create_symlink(outside, output_mode_root + "/output/escape")).to_equal(true)
+            expect(output_mode_publish(task, receipt)).to_equal(false)
+            expect(dir_exists(outside + "/new")).to_equal(false)
+
+        it "creates nested output parents inside the output owner":
+            var (task, receipt) = output_mode_fixture()
+            val nested = "new/deep/hello"
+            expect(dir_create_all(output_mode_root + "/attempt/work/new/deep")).to_equal(true)
+            expect(file_write(output_mode_root + "/attempt/work/" + nested,
+                "#!/bin/sh\nprintf 'Hello, World!\\n'\n")).to_equal(true)
+            task.outputs = [nested]
+            receipt.outputs = [BuildInputV1(path: nested, digest: receipt.outputs[0].digest)]
+            receipt.identity_digest = builder_task_identity_v1(task)
+            expect(output_mode_publish(task, receipt)).to_equal(true)
+            expect(file_hash_sha256(output_mode_root + "/output/" + nested)).to_equal(receipt.outputs[0].digest)

@@ -3,7 +3,7 @@ use app.io.env_ops.{cwd, host_os}
 use app.buildrunner.scv_session_v1.{BuildRunnerScvSessionV1, build_runner_scv_task_error_v1}
 use app.io.file_ops.{file_exists, file_hash_sha256, file_is_regular_no_follow,
     path_absolute, secure_temp_dir, file_copy, file_publish_noreplace, file_delete}
-use app.io.dir_ops.{dir_create_all}
+use app.io.dir_ops.{dir_create}
 use std.nogc_sync_mut.package_sffi.{set_permissions}
 use std.nogc_sync_mut.sffi.fs.{file_mode}
 use std.nogc_sync_mut.io_runtime.{dir_exists, dir_remove}
@@ -90,12 +90,33 @@ fn builder_cli_output_modes_match_v1(task: BuildTaskV1, attempt_root: text,
                 output_root + "/" + path, false): return false
     true
 
+fn builder_cli_create_output_parents_v1(root: text, relative: text,
+        process: BuilderProcessPortV1) -> bool:
+    # Validate each existing prefix before creating its child. Creating the
+    # whole path first can follow an escaping symlink and mutate another tree
+    # even when the later publication check refuses the output.
+    if relative.contains("\\") or relative.contains(":"): return false
+    val parts = relative.split("/")
+    for part in parts:
+        if part == "" or part == "." or part == "..": return false
+    if not dir_exists(root) or not builder_cli_output_parent_safe_v1(root, "output", process):
+        return false
+    var prefix = ""
+    for index in 0..parts.len() - 1:
+        prefix = prefix + parts[index] + "/"
+        val parent = root + "/" + prefix
+        if not dir_exists(parent) and not dir_create(parent, false): return false
+        if not builder_cli_output_parent_safe_v1(root, prefix + "output", process):
+            return false
+    true
+
 fn builder_cli_publish_one_v1(source: text, output_root: text, relative: text,
         digest: text, process: BuilderProcessPortV1) -> bool:
     if not file_is_regular_no_follow(source) or file_hash_sha256(source) != digest: return false
     val destination = output_root + "/" + relative
     val parent = builder_cli_parent_directory_v1(destination)
-    if not dir_create_all(parent) or not builder_cli_output_parent_safe_v1(output_root, relative, process):
+    if not builder_cli_create_output_parents_v1(output_root, relative, process) or
+            not builder_cli_output_parent_safe_v1(output_root, relative, process):
         return false
     if file_exists(destination):
         return file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest and
