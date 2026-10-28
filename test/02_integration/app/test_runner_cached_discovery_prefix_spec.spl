@@ -1,0 +1,108 @@
+"""
+## Purpose and audience
+Purpose: Verify cached test discovery honors canonical directory boundaries.
+Audience: test runner maintainers.
+## Operator workflow
+Run with `simple test test/02_integration/app/test_runner_cached_discovery_prefix_spec.spl`.
+"""
+use std.spec.*
+use std.test_runner.test_runner_files.{discover_test_files_fast_with_manifest_path}
+use app.test_runner_new.test_runner_files.{discover_test_files_fast_with_manifest_path as app_discover_test_files_fast_with_manifest_path}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_manifest.{manifest_covers, manifest_load}
+use std.package_sffi.{create_symlink, remove_dir_all}
+use std.io_runtime.{file_delete, file_write, getpid, mkdir_p, time_now_unix_micros}
+
+describe "Cached test discovery directory boundaries":
+    it "filters a real cached manifest across prefix and canonical path variants":
+        val target = "test/01_unit/app/test_runner_new/discovery_fixtures/target"
+        val inside = "{target}/inside_spec.spl"
+        val sibling = "{target}-shadow/leak_spec.spl"
+        val root = "test/01_unit/app/test_runner_new/discovery_fixtures"
+        val manifest_path = ".simple/test-runner-discovery-{getpid()}.idx"
+        val scan_timestamp = time_now_unix_micros()
+        val serialized = "# test-manifest v1\nscan_timestamp={scan_timestamp}\nroots={root}\nentry_count=2\nsdoctest_count=0\n\n# entries (path|size|mtime|level|slow|skip|pending|tags|platform|fuzz|chaos|deploy|security|bare|duration_ms)\n{inside}|1|1|1|0|0|0|||0|0|0|0|0|0\n{sibling}|1|1|1|0|0|0|||0|0|0|0|0|0\n\n# sdoctest (path|size|mtime|blocks)\n"
+        val setup_ok = mkdir_p(".simple") and file_write(manifest_path, serialized)
+
+        val cached = manifest_load(manifest_path)
+        val options = parse_test_args(["--unit"])
+        val canonical_result = discover_test_files_fast_with_manifest_path(target, options, true, manifest_path)
+        val canonical_count = canonical_result.len()
+        val canonical_has_inside = canonical_result.contains(inside)
+        val canonical_has_sibling = canonical_result.contains(sibling)
+
+        val dotted_root = "./test//01_unit/app/test_runner_new/discovery_fixtures/./target/"
+        val canonical_root_covered = manifest_covers(cached, dotted_root)
+        val canonicalized_result = discover_test_files_fast_with_manifest_path(dotted_root, options, true, manifest_path)
+        val canonicalized_count = canonicalized_result.len()
+        val canonicalized_has_inside = canonicalized_result.contains(inside)
+        val canonicalized_has_sibling = canonicalized_result.contains(sibling)
+        val app_result = app_discover_test_files_fast_with_manifest_path(dotted_root, options, true, manifest_path)
+        val app_count = app_result.len()
+        val app_has_inside = app_result.contains(inside)
+        val app_has_sibling = app_result.contains(sibling)
+
+        val cleanup_ok = file_delete(manifest_path)
+        expect(setup_ok).to_equal(true)
+        expect(canonical_count).to_equal(1)
+        expect(canonical_has_inside).to_equal(true)
+        expect(canonical_has_sibling).to_equal(false)
+        expect(canonical_root_covered).to_equal(true)
+        expect(canonicalized_count).to_equal(1)
+        expect(canonicalized_has_inside).to_equal(true)
+        expect(canonicalized_has_sibling).to_equal(false)
+        expect(app_count).to_equal(1)
+        expect(app_has_inside).to_equal(true)
+        expect(app_has_sibling).to_equal(false)
+        expect(cleanup_ok).to_equal(true)
+
+    it "uses filesystem walking when a parent segment crosses a relative symlink":
+        val fixture_root = ".simple/test-runner-symlink-{getpid()}"
+        val link_path = "{fixture_root}/link"
+        val physical_root = "{fixture_root}/physical"
+        val target_dir = "{physical_root}/target"
+        val lexical_dir = "{fixture_root}/target"
+        val inside_path = "{target_dir}/inside_spec.spl"
+        val lexical_path = "{lexical_dir}/leak_spec.spl"
+        val base_path = "{link_path}/../target"
+        val manifest_path = ".simple/test-runner-symlink-manifest-{getpid()}.idx"
+        val symlink_source = "use std.spec.*\n\ndescribe \"Symlink discovery fixture\":\n    it \"is reached through filesystem parent semantics\":\n        expect(true).to_equal(true)\n"
+        val dirs_ready = mkdir_p("{physical_root}/child") and mkdir_p(target_dir) and mkdir_p(lexical_dir)
+        val files_ready = file_write(inside_path, symlink_source) and file_write(lexical_path, symlink_source)
+        val link_ready = dirs_ready and files_ready and create_symlink("physical/child", link_path)
+
+        if link_ready:
+            val root = base_path
+            val scan_timestamp = time_now_unix_micros()
+            val serialized = "# test-manifest v1\nscan_timestamp={scan_timestamp}\nroots={root}\nentry_count=2\nsdoctest_count=0\n\n# entries (path|size|mtime|level|slow|skip|pending|tags|platform|fuzz|chaos|deploy|security|bare|duration_ms)\n{lexical_path}|1|1|0|0|0|0|||0|0|0|0|0|0\n{inside_path}|1|1|0|0|0|0|||0|0|0|0|0|0\n\n# sdoctest (path|size|mtime|blocks)\n"
+            val manifest_ready = file_write(manifest_path, serialized)
+            val cached = manifest_load(manifest_path)
+            val root_claimed_covered = manifest_covers(cached, base_path)
+            val discovered = discover_test_files_fast_with_manifest_path(base_path, parse_test_args([]), true, manifest_path)
+            val app_discovered = app_discover_test_files_fast_with_manifest_path(base_path, parse_test_args([]), true, manifest_path)
+            val discovered_count = discovered.len()
+            val discovered_inside = discovered.len() > 0 and discovered[0].ends_with("/inside_spec.spl")
+            val discovered_lexical_leak = discovered.contains(lexical_path)
+            val app_discovered_count = app_discovered.len()
+            val app_discovered_inside = app_discovered.len() > 0 and app_discovered[0].ends_with("/inside_spec.spl")
+            val app_discovered_lexical_leak = app_discovered.contains(lexical_path)
+
+            val manifest_removed = file_delete(manifest_path)
+            val link_removed = file_delete(link_path)
+            val fixture_removed = remove_dir_all(fixture_root)
+
+            expect(manifest_ready).to_equal(true)
+            expect(discovered_lexical_leak).to_equal(false)
+            expect(discovered_count).to_equal(1)
+            expect(discovered_inside).to_equal(true)
+            expect(root_claimed_covered).to_equal(false)
+            expect(manifest_removed).to_equal(true)
+            expect(link_removed).to_equal(true)
+            expect(fixture_removed).to_equal(true)
+            expect(app_discovered_lexical_leak).to_equal(false)
+            expect(app_discovered_count).to_equal(1)
+            expect(app_discovered_inside).to_equal(true)
+        else:
+            file_delete(link_path)
+            remove_dir_all(fixture_root)
+            skip("cached discovery symlink traversal", "host filesystem does not permit creating a relative symlink")
