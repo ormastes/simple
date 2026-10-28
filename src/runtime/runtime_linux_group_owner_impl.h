@@ -434,14 +434,16 @@ static int rt_lg_poll(RtLinuxGroup *owner) {
     }
     int populated = 1;
     char current_text[128];
-    if (!rt_lg_populated(owner->group_fd, &populated) ||
-        !rt_lg_read_at(owner->group_fd, "memory.current", current_text,
-            sizeof(current_text)) ||
-        !rt_lg_number(current_text, &owner->current) ||
-        !rt_lg_peak(owner->group_fd, &owner->peak)) return EIO;
+    if (!rt_lg_populated(owner->group_fd, &populated)) return EIO;
+    /* Retire remaining descendants even when resource telemetry fails.
+     * Telemetry errors still retain ownership and block collection. */
     if (owner->leader_reaped && populated) {
         if (!rt_lg_kill(owner)) return errno ? errno : EIO;
     }
+    if (!rt_lg_read_at(owner->group_fd, "memory.current", current_text,
+            sizeof(current_text)) ||
+        !rt_lg_number(current_text, &owner->current) ||
+        !rt_lg_peak(owner->group_fd, &owner->peak)) return EIO;
     owner->tree_empty = owner->leader_reaped && !populated;
     return 0;
 }

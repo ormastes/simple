@@ -120,3 +120,35 @@ claim successful cleanup. Permanent kill failure still requires an external
 ownership/persistence design before broker exit can be safe. Credential
 containment, V4 receipt/ACK integration and the actual BuildRunner Hello gate
 remain open.
+
+
+## Descendant cleanup before telemetry (2026-10-28)
+
+Baseline: release/1.0.0 `8bae5a950dc`, after PR #5193. Polling previously
+read and decoded memory.current and memory.peak before cancelling descendants
+left after leader exit. A missing or malformed metric returned EIO before
+cgroup.kill, leaving the group running even though the leader was reaped;
+the leader timeout no longer applies once that flag is set.
+
+Polling now sends descendant cancellation immediately after a valid populated
+observation, before reading resource metrics. Metric errors still return EIO,
+block collection, and retain ownership descriptors. No capability, completion,
+or containment admission rule changed.
+
+The native Linux aarch64 fault fixture reproduced the old failure at the
+assertion that cgroup.kill contained `1`. The fixed owner passed all lifecycle
+cases, including missing and malformed memory.current and memory.peak,
+retained descriptors while collection fails, and successful collection after
+metrics recover. Run `sh scripts/check/check-linux-group-start-ownership.shs`.
+The population decoder and complete V4 lifecycle selfcheck also passed in
+the native container, run from `/tmp` (the fixture rejects the container root
+as its pinned working directory). Luna reviewed the exact source diff and
+found no P0/P1 issue. This is native C
+component evidence, not Pure Simple/SPipe or live descendant containment.
+No Phase2 rebuild occurred. Local evidence is under
+`/private/tmp/buildrunner-cleanup-telemetry-20261028`.
+
+Review also noted a pre-existing observation consistency issue: a tree_empty
+value from an earlier poll can persist in an error receipt after a later
+population observation changes. Collection rejects the nonzero error before
+retiring ownership; clearing stale completion fields remains separate work.

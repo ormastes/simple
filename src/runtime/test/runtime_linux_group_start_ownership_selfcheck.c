@@ -192,7 +192,55 @@ static void check_cleanup_retry(int cancel) {
     wait_calls = 0;
 }
 
+/* Descendant retirement cannot wait for unrelated resource telemetry. */
+static void check_cleanup_telemetry_failure(const char *metric, int missing) {
+    char root[] = "/tmp/simple-group-telemetry-XXXXXX";
+    assert(mkdtemp(root));
+    int parent = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(parent >= 0 && test_mkdirat(parent, "simple-native-telemetry", 0700) == 0);
+    int group = openat(parent, "simple-native-telemetry", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int pidfd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    assert(group >= 0 && pidfd >= 0);
+    rt_linux_group = (RtLinuxGroup){.active=1, .parent_fd=parent, .group_fd=group,
+        .pidfd=pidfd, .pid=child_pid, .started_ms=10000, .timeout_ms=1000};
+    strcpy(rt_linux_group.name, "simple-native-telemetry");
+    reap_ready = 1;
+    if (missing) assert(unlinkat(group, metric, 0) == 0);
+    else write_leaf(group, metric, "invalid");
+    SplArray *receipt = rt_linux_group_poll_v1(1);
+    assert(receipt->items[0].as_int == EIO);
+    assert(receipt->items[1].as_int == 0 && receipt->items[2].as_int == 1);
+    assert(receipt->items[3].as_int == 0 && receipt->items[6].as_int == 0);
+    free_receipt(receipt);
+    char killed[8];
+    assert(rt_lg_read_at(group, "cgroup.kill", killed, sizeof(killed)));
+    assert(!strcmp(killed, "1"));
+    assert_owned(parent, group, pidfd);
+    /* Telemetry failure still blocks collection, even after population drops. */
+    write_leaf(group, "cgroup.events", "populated 0\n");
+    receipt = rt_linux_group_collect_v1(1);
+    assert(receipt->items[0].as_int == EIO && receipt->items[1].as_int == 0);
+    free_receipt(receipt);
+    assert_owned(parent, group, pidfd);
+    write_leaf(group, metric, "0");
+    receipt = rt_linux_group_collect_v1(1);
+    assert(receipt->items[0].as_int == 0 && receipt->items[1].as_int == 1);
+    free_receipt(receipt);
+    assert(rt_linux_group.collected && blocking_wait_calls == 0);
+    assert(fcntl(parent, F_GETFD) == -1 && errno == EBADF);
+    assert(fcntl(group, F_GETFD) == -1 && errno == EBADF);
+    assert(fcntl(pidfd, F_GETFD) == -1 && errno == EBADF);
+    assert(rmdir(root) == 0);
+    rt_linux_group = (RtLinuxGroup){0};
+    reap_ready = 0;
+    wait_calls = 0;
+}
+
 int main(void) {
+    check_cleanup_telemetry_failure("memory.current", 0);
+    check_cleanup_telemetry_failure("memory.current", 1);
+    check_cleanup_telemetry_failure("memory.peak", 0);
+    check_cleanup_telemetry_failure("memory.peak", 1);
     check_cleanup_retry(0);
     check_cleanup_retry(1);
     char root[] = "/tmp/simple-group-start-XXXXXX";
