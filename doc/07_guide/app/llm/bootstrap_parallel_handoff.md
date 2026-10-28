@@ -230,6 +230,9 @@ The phase capability configuration is:
 
 The native matrix reports BuildRunner as `UNRUN` when required: separate
 BuildRunner tasks must execute and verify the four forms for both backends.
+For Phase 2, a matrix `PASS` (and exit code 0) certifies only its four native
+Hello lanes plus the configured interpreter skip. It does not mean the Phase 2
+sanity gate or compiler phase is complete while BuildRunner remains `UNRUN`.
 The current native matrix cannot yet accept a separately receipt-bound phase 3
 full CLI, so a minimal compiler's rejected interpreter case remains unsupported;
 phase 3 interpreter qualification is pending that owner integration. Bind the
