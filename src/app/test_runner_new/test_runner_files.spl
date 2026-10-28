@@ -225,6 +225,13 @@ fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
 # =========================================================================
 
 fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bool) -> [text]:
+    discover_test_files_fast_with_manifest_path(base_path, options, use_cache, MANIFEST_PATH)
+
+# Narrow injection point for isolated callers and tests. The runner continues
+# to use `MANIFEST_PATH` through `discover_test_files_fast` above.
+pub fn discover_test_files_fast_with_manifest_path(
+    base_path: text, options: TestOptions, use_cache: bool, manifest_path: text
+) -> [text]:
     # Normalize path separators for Windows compatibility
     var base_path = base_path.replace("\\", "/")
     # Single file — no manifest needed
@@ -235,16 +242,21 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
             return [base_path]
         return []
 
+    # Preserve filesystem `..` resolution across symlinks. A lexical manifest
+    # filter cannot determine which physical directory this path reaches.
+    if has_parent_path_component(base_path):
+        return discover_test_files_slow(base_path, options)
+
     if not use_cache:
         return discover_test_files_slow(base_path, options)
 
     # Try loading manifest
-    val manifest = manifest_load(MANIFEST_PATH)
+    val manifest = manifest_load(manifest_path)
     if not manifest_is_fresh(manifest):
         # Manifest missing or stale — fall back to full scan, then save
         val result = discover_test_files_slow(base_path, options)
         # Build manifest in background for next run
-        save_manifest_from_discovery(base_path)
+        save_manifest_to_path(base_path, manifest_path)
         return result
 
     # Fast path: filter manifest entries in-memory
@@ -331,6 +343,9 @@ fn manifest_entry_matches_level(entry: TestManifestEntry, level: TestLevel) -> b
         case TestLevel.System: entry.test_level == 3
 
 fn save_manifest_from_discovery(base_path: text):
+    save_manifest_to_path(base_path, MANIFEST_PATH)
+
+fn save_manifest_to_path(base_path: text, manifest_path: text):
     # Determine scan directories based on base_path
     var dirs: [text] = []
     if base_path == "test/" or base_path == "test":
@@ -339,13 +354,13 @@ fn save_manifest_from_discovery(base_path: text):
         dirs = [base_path]
     # Use incremental update when an existing manifest is available —
     # only re-reads files whose size or mtime changed.
-    val old = manifest_load(MANIFEST_PATH)
+    val old = manifest_load(manifest_path)
     var manifest = old
     if old.entries.len() > 0:
         manifest = manifest_incremental_update(old, dirs)
     else:
         manifest = manifest_full_scan(dirs)
-    manifest_save(manifest, MANIFEST_PATH)
+    manifest_save(manifest, manifest_path)
 
 # =========================================================================
 # Test File Discovery (original full-scan path)
