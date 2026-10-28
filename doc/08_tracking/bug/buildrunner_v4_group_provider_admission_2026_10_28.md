@@ -183,3 +183,63 @@ still report stale errno for a malformed value; this does not admit execution.
 These checks provide injected C host component evidence only. They do not
 qualify live cgroup containment, Pure Simple/SPipe or BuildRunner Hello.
 V4 group rejection remains enabled and no Phase2 compiler was rebuilt.
+
+## Darwin evidence must not report an unexecuted Linux check as passing
+
+Baseline: release/1.0.0 `5df8d08425a`. The C V4 lifecycle selfcheck's
+non-Linux entrypoint returned zero without executing any assertions. On native
+Darwin arm64, the original file compiled and returned zero. It now prints
+`process-observation-v4: requires Linux (not a PASS)` and returns 77. The
+existing `check-process-v4-group-admission.shs` already rejects non-Linux hosts
+with 77 before compiling; its Linux invocation and Linux fixture are unchanged.
+The `config/check/must_check_gates.sdn` bootstrap gate invokes that wrapper.
+Its shared runner currently records 77 as failure, which is conservative and
+predates this change; it does not report unsupported hosts as passing. No
+second direct caller was found in repository source/configuration references.
+
+Native Darwin verification compiled the changed file with
+`cc -std=c11 -Wall -Wextra -Werror`; both direct execution and the existing
+wrapper returned 77. Evidence is under
+`/private/tmp/buildrunner-darwin-admission-20261028/`. This validates the
+unsupported result, not a process provider. Linux regression execution belongs
+on the Linux host; no Docker or Phase2 rebuild was used in this follow-up.
+The complete Linux branch is byte-identical to the baseline. A separate
+temporary native C harness linked the current Darwin unavailable stubs and
+checked unavailable capabilities, rejected start/poll/cancel/collect/ACK,
+empty payload/binding and absent PID/ticket/tree-empty time. That harness
+passed within a ten-second deadline; it does not exercise any child process.
+Luna reviewed the exact source/documentation diff and found no P0/P1 issue.
+
+The earlier immutable native capability probe remains
+`/private/tmp/buildrunner-native-20261028/capability03/buildrunner`, SHA256
+`99b8c4a6707b817bbb35d53a19d1936f201ad7b10953fe4e695eea686d826209`.
+Its recorded result is `version=4 fields=8 available=0 capability_bits=0
+error=45`, exit 78. It is a capability probe, not the complete BuildRunner.
+The portable-core extraction and interpreter attempts there did not qualify
+native BuildRunner execution and must not be promoted into Hello evidence.
+
+The remaining Darwin implementation has two distinct ownership boundaries:
+
+1. `process_port.spl`'s portable worker launcher calls `process_spawn_async`
+   and does not consume its `digest` or `directory` arguments. A Darwin worker
+   adapter must bind the admitted worker executable and working directory,
+   retain ownership through launch/observation/cancellation failures, and prove
+   worker retirement before slot reuse. A raw PID is not that proof.
+2. `worker.spl` requires V4 ProcessGroup for the compiler. Apple's native clang
+   in this investigation defines `__APPLE__` and `__MACH__`, but not
+   `__unix__`; `runtime_process_owned.c` therefore selects its unavailable
+   stubs. Widening that preprocessor guard cannot qualify an owner: the current
+   exact start uses Linux-only process facilities and rejects grouped policy.
+   A Darwin provider needs an enforced descendant boundary, exact execution
+   identity, bounded output/deadlines, retained cleanup ownership, terminal
+   proof and frozen-result/ACK integration before capabilities can be enabled.
+
+Resume the existing Hello objective only after both boundaries have native
+adversarial evidence: executable replacement, launch failure after child
+creation, descendant escape attempts, leader exit with surviving descendants,
+failed cancellation, owner interruption and duplicate/stale ACK. Then build
+only the reachable manager/worker closure using the existing pinned Phase2,
+stage the real Hello task from the preserved fixture, admit its task and
+process receipts, verify the published executable digest, and execute it for
+exact `Hello, World!` plus LF. Direct compiler output or a process-group signal
+alone cannot satisfy this gate. Darwin Hello remains open; V4 is unchanged.
