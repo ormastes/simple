@@ -1,0 +1,107 @@
+# Executes the portable worker admission path on hosts without the exact V4
+# provider. A refused compiler must remain an ERROR, with recoverable ownership.
+use std.spec.{describe, it, expect, fail, pending, after_each}
+use app.bootstrap_builder.worker.{builder_worker_execute_v1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildInputV1, BuildHostV1, builder_task_identity_v1}
+use app.bootstrap_builder.codec.{builder_write_task_v1, builder_read_result_v1, builder_write_result_v1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_terminal_v1, builder_transport_reaped_v1, builder_transport_recover_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use std.nogc_sync_mut.io.process_observation_v4.{process_observation_capabilities_v4}
+use std.common.build_manager.no_child_started.{builder_no_child_started_decode_v1}
+use app.io.file_ops.{file_atomic_write, file_hash_sha256, file_read, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+
+var capability_refusal_root = ""
+
+fn capability_refusal_fixture(suffix: text) -> (BuildTaskV1, BuilderAttemptV1):
+    capability_refusal_root = "build/worker-capability-refusal-" + str(getpid()) + "-" + suffix
+    val root = capability_refusal_root + "/attempts/compiler/1/local"
+    expect(dir_create_all(root + "/work")).to_equal(true)
+    expect(file_atomic_write(root + "/producer.exe", "#!/bin/sh\necho unexpected > child-started\n")).to_equal(true)
+    expect(file_atomic_write(root + "/work/source.spl", "fn main():\n    print 1\n")).to_equal(true)
+    val digest = file_hash_sha256(root + "/work/source.spl")
+    val task = BuildTaskV1(id: "compiler", attempt: 1, phase: "compile",
+        producer_digest: file_hash_sha256(root + "/producer.exe"),
+        source_digest: digest, toolchain_digest: digest, dependencies: [],
+        program: "producer.exe", args: [], inputs: [BuildInputV1("source.spl", digest)],
+        outputs: ["result.o"], cache_key: digest, timeout_ms: 1000,
+        memory_limit_bytes: 1048576, memory_policy: "monitor", links: [])
+    expect(builder_write_task_v1(root + "/task.sdn", task)).to_equal(true)
+    val host = BuildHostV1("local", "local", "", capability_refusal_root, "worker", digest, 1)
+    val attempt = BuilderAttemptV1(task_id: task.id, attempt: 1, host: host, pid: 0,
+        local_root: root, remote_root: root, error: "", identity_digest: builder_task_identity_v1(task),
+        process: builder_process_portable_v1())
+    (task, attempt)
+
+describe "Portable worker capability refusal preserves terminal ownership":
+    after_each():
+        if capability_refusal_root != "":
+            expect(dir_remove_all(capability_refusal_root)).to_equal(true)
+            capability_refusal_root = ""
+
+    val unavailable = match process_observation_capabilities_v4():
+        Ok(value): not value.available
+        Err(_reason): true
+    if unavailable:
+        it "retains an exact no-child ERROR that a fresh manager can recover":
+            val fixture = capability_refusal_fixture("recover")
+            val task = fixture.0
+            val attempt = fixture.1
+            val root = attempt.local_root
+            expect(builder_worker_execute_v1(root + "/task.sdn", root, "local")).to_equal(2)
+            expect(file_read(root + "/worker.error")).to_contain("observation")
+            expect(file_exists(root + "/work/child-started")).to_equal(false)
+            expect(file_exists(root + "/compiler.reaped")).to_equal(false)
+            expect(builder_transport_reaped_v1(attempt)).to_equal(false)
+            expect(builder_transport_terminal_v1(attempt)).to_equal(true)
+            match builder_no_child_started_decode_v1(file_read(root + "/compiler.not-started.sdn")):
+                Ok(proof):
+                    expect(proof.identity_digest).to_equal(builder_task_identity_v1(task))
+                    expect(proof.host_id).to_equal("local")
+                    expect(proof.reason).to_equal(file_read(root + "/worker.error"))
+                Err(reason): fail(reason)
+            match builder_transport_recover_v1(task, attempt.host, capability_refusal_root, attempt.process):
+                Ok(recovered): expect(recovered.identity_digest).to_equal(attempt.identity_digest)
+                Err(reason): fail(reason)
+            var result = match builder_read_result_v1(root + "/result.sdn"):
+                Ok(value): value
+                Err(reason):
+                    fail(reason)
+                    return
+            expect(result.status).to_equal("ERROR")
+            expect(result.outputs.len()).to_equal(0)
+            result.host_id = "substituted"
+            expect(builder_write_result_v1(root + "/result.sdn", result)).to_equal(true)
+            expect(builder_transport_terminal_v1(attempt)).to_equal(false)
+            result.host_id = "local"
+            result.status = "OK"
+            result.exit_code = 0
+            expect(file_atomic_write(root + "/work/result.o", "substituted output")).to_equal(true)
+            result.outputs = [BuildInputV1("result.o", file_hash_sha256(root + "/work/result.o"))]
+            expect(builder_write_result_v1(root + "/result.sdn", result)).to_equal(true)
+            expect(builder_transport_terminal_v1(attempt)).to_equal(false)
+
+        it "does not settle ownership if the capacity receipt cannot be persisted":
+            val fixture = capability_refusal_fixture("settlement-write")
+            val attempt = fixture.1
+            val root = attempt.local_root
+            expect(dir_create_all(root + "/capacity.settled")).to_equal(true)
+            expect(builder_worker_execute_v1(root + "/task.sdn", root, "local")).to_equal(2)
+            expect(file_read(root + "/worker.error")).to_contain("capacity settlement persistence failed")
+            expect(builder_transport_terminal_v1(attempt)).to_equal(false)
+            expect(file_exists(root + "/compiler.reaped")).to_equal(false)
+
+        it "does not publish capacity settlement when no-child persistence fails":
+            val fixture = capability_refusal_fixture("no-child-write")
+            val attempt = fixture.1
+            val root = attempt.local_root
+            expect(dir_create_all(root + "/compiler.not-started.sdn")).to_equal(true)
+            expect(builder_worker_execute_v1(root + "/task.sdn", root, "local")).to_equal(2)
+            expect(file_read(root + "/worker.error")).to_contain("no-child receipt persistence failed")
+            expect(file_exists(root + "/capacity.settled")).to_equal(false)
+            expect(builder_transport_terminal_v1(attempt)).to_equal(false)
+            expect(file_exists(root + "/compiler.reaped")).to_equal(false)
+    else:
+        it "requires a host without V4 to exercise actual provider refusal":
+            pending("exact V4 provider is available on this host")
