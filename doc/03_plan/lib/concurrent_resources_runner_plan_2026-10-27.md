@@ -320,3 +320,37 @@ S1 exit requires the real library and pending I/O path, stable slots/wakes, hard
 The Astra library review lane defines interfaces and unsafe/progress obligations before the implementation lane writes counterparts. The coordinator merges only reviewed owned commits through `work/*` PRs; planning changes do not include other sessions' dirty files. Each scope has an SDN owner/base/provider/evidence receipt. The task is not complete merely because a PR is open or a model test passed. Tags and release publication remain separate.
 
 Retained sources: [canonical task ABI](../../../src/lib/common/contracts/execution/simple_ring_async_v1.spl), [single-owner ring](../../../src/lib/nogc_async_mut/async_ring/simple_ring.spl), [compatibility map](../../../src/lib/nogc_async_mut/concurrent.spl), [common TaskRunner](../../../src/lib/common/task_runner/), [cache single-flight](../../../src/compiler/80.driver/cache/daemon/cache_single_flight_v1.spl), [SOSIX host facade](../../../src/lib/nogc_async_mut/sosix/host_facade.spl). Source observations establish migration targets, not implementation or native qualification of this plan.
+
+
+## 15. Runner admission audit — 2026-10-28
+
+Release baseline `39ce4bca7a6` has distinct reusable owners:
+
+- BuildRunner's `runner.spl` reexports common TaskRunner DAG scheduling. Its
+  host slots retain RUNNING and REAPED tasks until parent receipt admission.
+- TestRunner shares TaskRunner identity/recovery and per-case receipt adapters,
+  while its process loop/resource governor remain separate. The governor's
+  `max_memory_mb` report alone does not reserve estimated child memory;
+  `governor_can_spawn` checks active CPU count and current free percentages.
+- Common `FiberSchedV1` is used by compiler `file_fiber_v1.spl` and IO reactor
+  wake integration. Its carrier steps queues sequentially. Queue count is not
+  proof of OS-thread parallelism or shared build/test budget enforcement.
+- `SIMPLE_HOST_MAX_THREADS` already has a pure upper-bound parser in
+  `app/cli/shard_mem_clamp.spl:shard_host_threads_cap`, consumed by native build.
+  Missing/invalid cap leaves the request unchanged; positive cap only lowers it.
+  The adjacent memory clamp divides before multiplication and falls back to
+  one worker for unknown memory/invalid estimates. Reuse these semantics when
+  moving policy to a shared owner; do not add another environment spelling.
+
+The narrow implemented prerequisite is completion ownership validation in the
+existing fiber core, with duplicate/wrong-worker/pending/parked/bounds
+regressions (see [bug and evidence](../../08_tracking/bug/fiber_scheduler_completion_ownership_2026_10_28.md)).
+It protects reservation accounting; it does not close SRH-W10/W11 or SRH-35.
+Future common admission must reserve child-process estimates before spawn,
+retain reservations through reap and evidence validation, preserve the
+TestRunner free-resource floor, <=128 group bound and per-case execution
+identity, and keep progress reserves inside the selected hard budget.
+The current fiber progress overcommit policy is not itself that hard-budget
+admission policy. A threaded carrier additionally needs synchronized claims
+and per-pick generations; the serialized core's implicit picked predicate is
+not a concurrent ownership protocol.
