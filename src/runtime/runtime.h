@@ -1289,6 +1289,9 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 
 /* ===== Process Async ===== */
 
+/* Darwin async children inherit only open, non-CLOEXEC stdin/out/err.
+ * Descriptors above stderr are closed; this API has no extra-fd handoff.
+ * Other platforms retain their existing descriptor inheritance policy. */
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
 #ifdef _WIN32
 /* Core-C PID/handle ownership shared with rt_process_wait. */

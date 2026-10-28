@@ -51,6 +51,7 @@
 #if defined(__APPLE__)
 #include <libproc.h>
 #include <crt_externs.h>
+#include "runtime_spawn_async_macos.h"
 #endif
 
 /* ----------------------------------------------------------------
@@ -585,7 +586,7 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
     argv[0] = (char*)cmd;
     for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
     pid_t pid = -1;
-    int error = posix_spawnp(&pid, cmd, NULL, NULL, argv, *_NSGetEnviron());
+    int error = runtime_spawn_async_macos(&pid, cmd, argv);
     free(argv);
     return error == 0 ? (int64_t)pid : -1;
 #else

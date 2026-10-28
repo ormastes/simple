@@ -243,3 +243,43 @@ stage the real Hello task from the preserved fixture, admit its task and
 process receipts, verify the published executable digest, and execute it for
 exact `Hello, World!` plus LF. Direct compiler output or a process-group signal
 alone cannot satisfy this gate. Darwin Hello remains open; V4 is unchanged.
+
+
+## Darwin worker descriptor ownership prerequisite (2026-10-28)
+
+Baseline: release/1.0.0 `4fe34ee9f67`. The portable worker launcher reaches
+`rt_process_spawn_async`; both Darwin runtime lanes called `posix_spawnp`
+without file actions or attributes. Consequently a worker inherited open
+non-CLOEXEC files, pipe endpoints and sockets owned by its parent. This can
+retain parent resources after the parent closes them and expose unintended
+handles to the worker.
+
+Both lanes now share a Darwin helper using `POSIX_SPAWN_CLOEXEC_DEFAULT` and
+explicitly inherit only open standard descriptors without `FD_CLOEXEC`.
+Closed standard descriptors and their close-on-exec intent remain preserved.
+The public async API has no descriptor handoff parameter; reviewed BuildRunner,
+native compiler and QEMU callers do not declare an extra-descriptor handoff.
+This intentionally removes ambient descriptors above stderr from Darwin async
+children; an explicit handoff API would need its own contract.
+
+Native macOS C repro failed seven descriptor cases against the old core
+runtime. Both corrected core and bootstrap runtime lanes passed the expanded
+existing fixture: non-CLOEXEC sentinel exclusion, unchanged parent ownership,
+stdin/stdout/stderr byte transport, each standard descriptor closed and
+close-on-exec separately, multithreaded launch, exit status, missing executable
+and malformed argument rejection. Each executable has a ten-second deadline.
+Reproduce with `sh scripts/check/check-macos-async-spawn-ownership.shs`.
+Evidence is `/private/tmp/buildrunner-darwin-fd-20261028/` (`red.status` is 1;
+`green-core.status` and `green-bootstrap.status` are 0). Bootstrap compilation
+retains a pre-existing nested-comment warning in runtime.c.
+
+This closes a resource inheritance defect in the real worker launch primitive.
+It does not bind executable bytes/cwd or establish descendant containment,
+retained cancellation ownership, tree retirement, or frozen V4 receipt/ACK.
+V4 guards/capabilities and raw PID semantics are unchanged. Actual BuildRunner
+Hello remains unqualified. No Docker or Phase2 rebuild was used.
+
+Luna independently reviewed the source diff and found no P0/P1 issue. Its
+compatibility note is documented at the public C API boundary: out-of-tree
+Darwin callers relying on ambient descriptor handoff must change; other
+platforms retain their previous inheritance policy.
