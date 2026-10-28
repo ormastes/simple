@@ -199,7 +199,12 @@ fn fiber_sched_pick(s: FiberSchedV1, w: i64) -> FiberPickV1:
     FiberPickV1(sched: t, fiber: id)
 
 fn fiber_sched_complete(s: FiberSchedV1, w: i64, fiber: i64, step: FiberStepV1) -> FiberSchedV1:
-    """Apply one step result of the fiber currently picked by worker w."""
+    """Apply one step result of `fiber`, run on worker w.
+
+    A voluntary yield goes behind already-ready peers in local dispatch order.
+    Local picks use the array bottom, so enqueue the yielding fiber at the top.
+    This preserves retained admission and costs O(local ready queue length).
+    """
     var t = s
     # READY plus absence from the owner's queue is this single-carrier core's
     # implicit picked state. Reject duplicate/unowned delivery before changing
@@ -221,7 +226,10 @@ fn fiber_sched_complete(s: FiberSchedV1, w: i64, fiber: i64, step: FiberStepV1) 
         t.fiber_state[fiber] = FIBER_STATE_PARKED
         t.fiber_token[fiber] = step.token
         return fiber_sched_admit(t)
-    t.queues[w] = t.queues[w].push(fiber)
+    var ready: [i64] = [fiber]
+    for peer in t.queues[w]:
+        ready = ready.push(peer)
+    t.queues[w] = ready
     t
 
 fn fiber_sched_wake(s: FiberSchedV1, token: i64) -> FiberSchedV1:

@@ -195,6 +195,43 @@ describe "fiber scheduler core":
         s = fiber_sched_complete(pick.sched, 0, 0, fiber_step_done())
         expect(fiber_sched_all_done(s)).to_be(true)
 
+    it "a yielding consumer lets its ready resource producer run next":
+        var s = fiber_sched_new([0], 30)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_submit(s, 20)
+        s = fiber_sched_admit(s)
+        var pick = fiber_sched_pick(s, 0)
+        expect(pick.fiber).to_equal(1)
+        s = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_yield())
+        expect(s.reserved).to_equal(30)
+        expect(fiber_sched_runnable_count(s)).to_equal(2)
+        pick = fiber_sched_pick(s, 0)
+        expect(pick.fiber).to_equal(0)
+        s = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_done())
+        expect(s.reserved).to_equal(20)
+        pick = fiber_sched_pick(s, 0)
+        expect(pick.fiber).to_equal(1)
+        s = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_done())
+        expect(s.reserved).to_equal(0)
+        expect(fiber_sched_all_done(s)).to_be(true)
+
+    it "repeated voluntary yields visit all ready peers before returning":
+        var s = fiber_sched_new([0], 40)
+        for _i in 0..4:
+            s = fiber_sched_submit(s, 10)
+        s = fiber_sched_admit(s)
+        for _round in 0..3:
+            for offset in 0..4:
+                val pick = fiber_sched_pick(s, 0)
+                expect(pick.fiber).to_equal(3 - offset)
+                s = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_yield())
+                expect(s.reserved).to_equal(40)
+                expect(fiber_sched_runnable_count(s)).to_equal(4)
+        s = _drain(s, _always_done, 4)
+        expect(fiber_sched_all_done(s)).to_be(true)
+        expect(s.reserved).to_equal(0)
+        expect(s.overcommits).to_equal(0)
+
     it "drains many fibers across workers within budget":
         var s = fiber_sched_new([0, 0, 1, 1], 64)
         var i = 0

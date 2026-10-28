@@ -41,6 +41,15 @@ Start → AwaitSource → Parse → AwaitDeps(TLDR/packed AST) → Hir → Mir �
   (parked until an IO completion or a single-flight future fires).
 - Yield points are stage boundaries and every file/TLDR/AST read. Stages are
   not preempted mid-way; per-file stages are small enough for this.
+- A voluntary Yield re-enters behind the worker's already-ready peers in
+  dispatch order. The current single-carrier array queue picks its bottom,
+  so Yield inserts at the top; putting it back at the bottom would select the
+  same task again and starve a ready resource producer. This array operation
+  costs O(local queue length); it is a fairness correction, not a constant-time
+  queue or multicore performance claim. Done/Park admission and wake ownership
+  remain unchanged. The focused 2026-10-28 diagnostic proves yield order and
+  park/wake behavior, but exposes a separate native reserved-byte accounting
+  failure: see [the bug record](../../../08_tracking/bug/fiber_scheduler_native_reserved_accounting_2026-10-28.md).
 - Reason: a stack switch (CreateFiber/SwitchToFiber, ucontext/asm) would be a
   new C/asm boundary, is unrunnable under the seed interpreter (interpreted
   frames live on the host stack), and costs a stack (≥64 KiB) per fiber at
