@@ -342,6 +342,15 @@ Release baseline `39ce4bca7a6` has distinct reusable owners:
   one worker for unknown memory/invalid estimates. Reuse these semantics when
   moving policy to a shared owner; do not add another environment spelling.
 
+2026-10-28: the normal TestRunner process pool now applies that same host
+thread ceiling to explicit `--max-workers` requests as well as auto-detected
+counts, before configuring its existing process-slot scheduler and resource
+governor. The runner's existing automatic ceiling of eight remains in place.
+This is a worker-count ceiling only; TestRunner's governor and optional RSS
+admission still own resource checks. QEMU and session-daemon work use separate
+routes and are outside this change. The change does not claim common build/test
+admission or hard memory reservation; those remain future work described below.
+
 The narrow implemented prerequisite is completion ownership validation in the
 existing fiber core, with duplicate/wrong-worker/pending/parked/bounds
 regressions (see [bug and evidence](../../08_tracking/bug/fiber_scheduler_completion_ownership_2026_10_28.md)).
