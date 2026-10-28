@@ -1,7 +1,7 @@
 use app.buildrunner.scv_cli_options_v1.{build_runner_scv_options_v1}
 use app.buildrunner.scv_session_v1.{BuildRunnerScvSessionV1, build_runner_scv_session_open_v1,
     build_runner_scv_source_root_v1, build_runner_scv_source_paths_v1}
-use app.buildrunner.cli_files_v1.{builder_cli_hash_outputs_v1, builder_cli_input_error_v1, builder_cli_inputs_match_v1, builder_cli_publish_v1, builder_cli_resolve_roots_v1}
+use app.buildrunner.cli_files_v1.{builder_cli_hash_outputs_v1, builder_cli_input_error_v1, builder_cli_inputs_match_v1, builder_cli_publish_v1, builder_cli_resolve_roots_v1, builder_cli_output_modes_match_v1}
 use app.buildrunner.database_session.{BuildRunnerDatabaseSessionV1, build_runner_database_session_open_v1}
 # The manager owns every canonical transition and published output. Worker
 # processes own isolated attempt directories and return encoded receipts.
@@ -57,6 +57,18 @@ fn builder_cli_restore_v1(task: BuildTaskV1, cached: BuildResultV1, run: BuildRu
                             if not builder_cli_inputs_match_v1(task, source_root, scv): return false
                             return builder_cli_publish_v1(task, cached, attempt.local_root,
                                 output_root, process)
+    false
+
+fn builder_cli_cached_modes_v1(task: BuildTaskV1, cached: BuildResultV1, run: BuildRunV1,
+        state_root: text, output_root: text, process: BuilderProcessPortV1) -> bool:
+    # Collection retains a local copy for both local and SSH attempts. A byte-
+    # matching cache hit needs no remote worker or new process observation.
+    # Read the admitted source bytes and permissions from that retained copy.
+    for host in run.hosts:
+        if host.id == cached.host_id:
+            val attempt_root = state_root + "/attempts/" + task.id + "/" +
+                str(task.attempt) + "/" + host.id
+            return builder_cli_publish_v1(task, cached, attempt_root, output_root, process)
     false
 
 fn builder_cli_cancel_v1(attempts: [BuilderAttemptV1]) -> bool:
@@ -181,13 +193,19 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                     match builder_read_result_v1(path):
                         case Ok(cached):
                             if cached.status == "OK" and builder_validate_result_v1(task, cached) == "":
+                                # Byte equality alone misses lost executable permissions.
                                 var observed = builder_cli_hash_outputs_v1(task, output_root, process)
-                                if build_runner_output_error(task, cached, observed) != "":
-                                    if builder_cli_restore_v1(task, cached, run, config.state,
-                                            source_root, output_root, process, scv):
+                                var restored = false
+                                if build_runner_output_error(task, cached, observed) == "":
+                                    restored = builder_cli_cached_modes_v1(task, cached, run,
+                                        config.state, output_root, process)
+                                else:
+                                    restored = builder_cli_restore_v1(task, cached, run, config.state,
+                                        source_root, output_root, process, scv)
+                                    if restored:
                                         observed = builder_cli_hash_outputs_v1(task, output_root, process)
                                         print "builder: {task.id} restored=verified-artifact"
-                                if build_runner_output_error(task, cached, observed) == "":
+                                if restored and build_runner_output_error(task, cached, observed) == "":
                                     state = build_runner_resume(state, cached, observed)
                                     if val session = database:
                                         match session.record_cached(run, task, cached, observed, process):
@@ -328,7 +346,9 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                 match builder_read_result_v1(cached_path):
                     case Ok(cached):
                         val observed = builder_cli_hash_outputs_v1(task, output_root, process)
-                        if cached.status == "OK" and builder_validate_result_v1(task, cached) == "" and build_runner_output_error(task, cached, observed) == "":
+                        if cached.status == "OK" and builder_validate_result_v1(task, cached) == "" and build_runner_output_error(task, cached, observed) == "" and
+                                builder_cli_cached_modes_v1(task, cached, run, config.state,
+                                    output_root, process):
                             state = build_runner_resume(state, cached, observed)
                             if val session = database:
                                 match session.record_cached(run, task, cached, observed, process):
@@ -587,6 +607,9 @@ fn builder_cli_verify_locked_v1(run: BuildRunV1, resolved: BuilderCliV1,
                         return 1
                 if builder_encode_result_v1(collected) != builder_encode_result_v1(cached):
                     print "builder: attempt and published result differ: {task.id}"
+                    return 1
+                if not builder_cli_output_modes_match_v1(task, attempt_root, resolved.output_root, process):
+                    print "builder: published output permissions differ: {task.id}"
                     return 1
         if not host_found:
             print "builder: task host is unknown: {task.id}"
