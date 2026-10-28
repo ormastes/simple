@@ -43,6 +43,19 @@ Command: `sh scripts/check/check-runtime-file-copy-mode.shs`
 This proves publication preserves an executable artifact on macOS. It does
 not claim that the complete Hello native compiler/BuildRunner path has run.
 
+## Required Gates wiring correction
+
+PR #5214's Required Gates run 40784628246 failed
+`local-range-shs-hygiene`: the new native selfcheck wrapper had no enforcement
+root. The C regression itself was passing, but a manual invocation did not
+make it part of the automated suite.
+
+The `runtime-file-copy-mode` bootstrap automated row now invokes the wrapper
+through `check-bootstrap-must-pass.shs`'s generic command dispatcher. Its
+accepted final PASS requires the real copy/publish/execute fixture to pass;
+unsupported-platform SKIP output is not accepted as a bootstrap PASS. No
+opt-out, baseline exemption, or weakened hygiene check is used.
+
 ## Remaining recovery gap
 
 Previously published files are not repaired by this change. BuildRunner's
