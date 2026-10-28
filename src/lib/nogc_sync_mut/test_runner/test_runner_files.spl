@@ -399,6 +399,13 @@ fn print_convention_exclusions(fuzz: i64, chaos: i64, deploy: i64, security: i64
     print "  Excluded by directory convention, NOT run: {total} file(s): {parts.join(', ')}"
 
 fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bool) -> [text]:
+    discover_test_files_fast_with_manifest_path(base_path, options, use_cache, MANIFEST_PATH)
+
+# Narrow injection point for isolated callers and tests. The public runner keeps
+# using `MANIFEST_PATH` through `discover_test_files_fast` above.
+pub fn discover_test_files_fast_with_manifest_path(
+    base_path: text, options: TestOptions, use_cache: bool, manifest_path: text
+) -> [text]:
     # Normalize path separators for Windows compatibility
     var base_path = base_path.replace("\\", "/")
     # Single file — no manifest needed
@@ -418,7 +425,7 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         return discover_test_files_slow(base_path, options)
 
     # Try loading manifest
-    val manifest = manifest_load(MANIFEST_PATH)
+    val manifest = manifest_load(manifest_path)
     if not manifest_is_fresh(manifest) or not manifest_covers(manifest, base_path):
         # Manifest missing, stale, or built from a walk that never visited
         # `base_path` — fall back to a full scan, then save. Filtering an index
@@ -430,7 +437,7 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
         # the fast branch below and silently return the under-collected set.
         if result.len() > 0:
             # Build manifest in background for next run
-            save_manifest_from_discovery(base_path)
+            save_manifest_to_path(base_path, manifest_path)
         return result
 
     # An already-fresh manifest skips the walk entirely, so the slow path's
@@ -541,7 +548,7 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
     # next run is fast again.
     if test_files.len() == 0:
         val verified = discover_test_files_slow(base_path, options)
-        save_manifest_from_discovery(base_path)
+        save_manifest_to_path(base_path, manifest_path)
         return verified
 
     print "  Discovery: {elapsed_ms}ms (from manifest, {manifest.entries.len()} indexed)"
@@ -556,7 +563,7 @@ fn manifest_entry_matches_level(entry: TestManifestEntry, level: TestLevel) -> b
         case TestLevel.Integration: entry.test_level == 2
         case TestLevel.System: entry.test_level == 3
 
-fn save_manifest_from_discovery(base_path: text):
+fn save_manifest_to_path(base_path: text, manifest_path: text):
     # Determine scan directories based on base_path
     var dirs: [text] = []
     if base_path == "test/" or base_path == "test":
@@ -565,13 +572,16 @@ fn save_manifest_from_discovery(base_path: text):
         dirs = [base_path]
     # Use incremental update when an existing manifest is available —
     # only re-reads files whose size or mtime changed.
-    val old = manifest_load(MANIFEST_PATH)
+    val old = manifest_load(manifest_path)
     var manifest = old
     if old.entries.len() > 0:
         manifest = manifest_incremental_update(old, dirs)
     else:
         manifest = manifest_full_scan(dirs)
-    manifest_save(manifest, MANIFEST_PATH)
+    manifest_save(manifest, manifest_path)
+
+fn save_manifest_from_discovery(base_path: text):
+    save_manifest_to_path(base_path, MANIFEST_PATH)
 
 # =========================================================================
 # Test File Discovery (original full-scan path)

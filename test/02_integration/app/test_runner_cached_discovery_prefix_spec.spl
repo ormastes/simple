@@ -6,10 +6,10 @@ Audience: test runner maintainers.
 Run with `simple test test/02_integration/app/test_runner_cached_discovery_prefix_spec.spl`.
 """
 use std.spec.*
-use std.test_runner.test_runner_files.{discover_test_files_fast}
+use std.test_runner.test_runner_files.{discover_test_files_fast_with_manifest_path}
 use std.test_runner.test_runner_args.{parse_test_args}
-use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_covers, manifest_load}
-use std.io_runtime.{file_delete, file_exists, file_write, mkdir_p, read_file_text, time_now_unix_micros}
+use std.test_runner.test_manifest.{manifest_covers, manifest_load}
+use std.io_runtime.{file_delete, file_write, getpid, mkdir_p, time_now_unix_micros}
 
 describe "Cached test discovery directory boundaries":
     it "filters a real cached manifest across prefix and canonical path variants":
@@ -17,31 +17,26 @@ describe "Cached test discovery directory boundaries":
         val inside = "{target}/inside_spec.spl"
         val sibling = "{target}-shadow/leak_spec.spl"
         val root = "test/01_unit/app/test_runner_new/discovery_fixtures"
-        val had_manifest = file_exists(MANIFEST_PATH)
-        val old_manifest_content = if had_manifest: read_file_text(MANIFEST_PATH) else: ""
+        val manifest_path = ".simple/test-runner-discovery-{getpid()}.idx"
         val scan_timestamp = time_now_unix_micros()
         val serialized = "# test-manifest v1\nscan_timestamp={scan_timestamp}\nroots={root}\nentry_count=2\nsdoctest_count=0\n\n# entries (path|size|mtime|level|slow|skip|pending|tags|platform|fuzz|chaos|deploy|security|bare|duration_ms)\n{inside}|1|1|1|0|0|0|||0|0|0|0|0|0\n{sibling}|1|1|1|0|0|0|||0|0|0|0|0|0\n\n# sdoctest (path|size|mtime|blocks)\n"
-        val setup_ok = mkdir_p(".simple") and file_write(MANIFEST_PATH, serialized)
+        val setup_ok = mkdir_p(".simple") and file_write(manifest_path, serialized)
 
-        val cached = manifest_load(MANIFEST_PATH)
+        val cached = manifest_load(manifest_path)
         val options = parse_test_args(["--unit"])
-        val canonical_result = discover_test_files_fast(target, options, true)
+        val canonical_result = discover_test_files_fast_with_manifest_path(target, options, true, manifest_path)
         val canonical_count = canonical_result.len()
         val canonical_has_inside = canonical_result.contains(inside)
         val canonical_has_sibling = canonical_result.contains(sibling)
 
         val dotted_root = "./test//01_unit/app/test_runner_new/discovery_fixtures/../discovery_fixtures/target/"
         val canonical_root_covered = manifest_covers(cached, dotted_root)
-        val canonicalized_result = discover_test_files_fast(dotted_root, options, true)
+        val canonicalized_result = discover_test_files_fast_with_manifest_path(dotted_root, options, true, manifest_path)
         val canonicalized_count = canonicalized_result.len()
         val canonicalized_has_inside = canonicalized_result.contains(inside)
         val canonicalized_has_sibling = canonicalized_result.contains(sibling)
 
-        var cleanup_ok = false
-        if had_manifest:
-            cleanup_ok = file_write(MANIFEST_PATH, old_manifest_content)
-        else:
-            cleanup_ok = file_delete(MANIFEST_PATH)
+        val cleanup_ok = file_delete(manifest_path)
         expect(setup_ok).to_equal(true)
         expect(canonical_count).to_equal(1)
         expect(canonical_has_inside).to_equal(true)
