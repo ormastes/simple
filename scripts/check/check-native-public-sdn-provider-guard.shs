@@ -1,0 +1,53 @@
+#!/bin/sh
+# Exercise the public SDN aliases against the real runner on a host where its
+# V4 scoped-environment provider is unavailable. This is a manual native
+# qualification: it needs a runner binary built from the selected source.
+set -eu
+if [ "$#" -ne 2 ] || [ "$1" != --binary ] || [ ! -x "$2" ]; then
+    echo "usage: $0 --binary <native-test-runner>" >&2
+    exit 2
+fi
+runner=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd -P)/$(basename -- "$2")
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+fixture=$repo/test/fixtures/test_runner_source_routes/calibration/public_sdn_guard_marker_spec.spl
+fixture_sha256=41bc17c60bccc4ddb31bff3a297ada97e45d2f1529a96fd8ba7d214beef26fc3
+actual_fixture_sha256=$(shasum -a 256 "$fixture" | awk '{print $1}')
+if [ "$actual_fixture_sha256" != "$fixture_sha256" ]; then
+    echo "FAIL fixture identity: expected $fixture_sha256, got $actual_fixture_sha256" >&2
+    exit 1
+fi
+runner_sha256=$(shasum -a 256 "$runner" | awk '{print $1}')
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-public-sdn-guard.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+check_alias() {
+    name=$1
+    shift
+    marker=$work/$name.body-ran
+    set +e
+    SIMPLE_PUBLIC_SDN_GUARD_MARKER=$marker \
+        sh "$repo/scripts/bootstrap/run-process-group-timeout.shs" 30 2 \
+        "$runner" "$fixture" "$@" >"$work/$name.stdout" 2>"$work/$name.stderr"
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL $name: expected guarded exit 1, got $status" >&2
+        cat "$work/$name.stdout" "$work/$name.stderr" >&2
+        exit 1
+    fi
+    if ! grep -Fx '{error: "SDN worker scoped-environment process provider is unavailable or insufficient", schema: simple.test-runner.failure/v1, success: false, worker_exit_code: -1}' "$work/$name.stdout" >/dev/null; then
+        echo "FAIL $name: missing structured provider refusal" >&2
+        cat "$work/$name.stdout" "$work/$name.stderr" >&2
+        exit 1
+    fi
+    if [ -e "$marker" ]; then
+        echo "FAIL $name: test body wrote its execution marker despite provider refusal" >&2
+        exit 1
+    fi
+    echo "PASS $name: structured refusal; body marker absent"
+}
+
+check_alias public-sdn --sdn
+check_alias public-split --format sdn
+check_alias public-equals --format=sdn
+echo "PUBLIC_SDN_PROVIDER_GUARD_REGRESSION PASS aliases=3 runner_sha256=$runner_sha256 fixture_sha256=$actual_fixture_sha256"
