@@ -5,7 +5,7 @@
 
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.io_runtime.{dir_create_all}
-use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists, file_delete, file_is_regular_no_follow, file_atomic_write}
 
 # Coverage extern declarations (same as coverage_simple.spl)
 extern fn rt_coverage_enabled() -> bool
@@ -58,6 +58,7 @@ struct CriticalBranchOutcomeCheck:
 # =========================================================================
 
 var coverage_parts: [text] = []
+var compiler_coverage_manifests: i64 = 0
 
 var decision_keys: [text] = []
 var decision_true: Dict<text, i64> = {}
@@ -69,6 +70,7 @@ var condition_false: Dict<text, i64> = {}
 
 fn reset_coverage_state():
     coverage_parts = []
+    compiler_coverage_manifests = 0
     decision_keys = []
     decision_true = {}
     decision_false = {}
@@ -106,59 +108,101 @@ fn coverage_key_fields(key: text) -> [text]:
     fields
 
 fn merge_counts(keys: [text], tmap: Dict<text, i64>, fmap: Dict<text, i64>, key: text, t: i64, f: i64):
-    if not tmap.has(key) and not fmap.has(key):
+    if not tmap.contains_key(key) and not fmap.contains_key(key):
         keys.push(key)
         tmap[key] = 0
         fmap[key] = 0
     if t > 0:
-        val prev_t = tmap[key] ?? 0
+        val prev_t = if tmap.contains_key(key): tmap[key] else: 0
         tmap[key] = prev_t + t
     if f > 0:
-        val prev_f = fmap[key] ?? 0
+        val prev_f = if fmap.contains_key(key): fmap[key] else: 0
         fmap[key] = prev_f + f
 
 fn merge_decision_count(key: text, t: i64, f: i64):
-    if not decision_true.has(key) and not decision_false.has(key):
+    if not decision_true.contains_key(key) and not decision_false.contains_key(key):
         decision_keys.push(key)
         decision_true[key] = 0
         decision_false[key] = 0
     if t > 0:
-        val prev_t = decision_true[key] ?? 0
+        val prev_t = if decision_true.contains_key(key): decision_true[key] else: 0
         decision_true[key] = prev_t + t
     if f > 0:
-        val prev_f = decision_false[key] ?? 0
+        val prev_f = if decision_false.contains_key(key): decision_false[key] else: 0
         decision_false[key] = prev_f + f
 
 fn merge_condition_count(key: text, t: i64, f: i64):
-    if not condition_true.has(key) and not condition_false.has(key):
+    if not condition_true.contains_key(key) and not condition_false.contains_key(key):
         condition_keys.push(key)
         condition_true[key] = 0
         condition_false[key] = 0
     if t > 0:
-        val prev_t = condition_true[key] ?? 0
+        val prev_t = if condition_true.contains_key(key): condition_true[key] else: 0
         condition_true[key] = prev_t + t
     if f > 0:
-        val prev_f = condition_false[key] ?? 0
+        val prev_f = if condition_false.contains_key(key): condition_false[key] else: 0
         condition_false[key] = prev_f + f
+
+fn _coverage_decimal_digit(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
 
 fn parse_i64_safe(s: text) -> i64:
     val trimmed = s.trim()
     if trimmed == "":
         return 0
-    # Fallback to 0 if parsing fails (avoid runtime errors)
-    trimmed.to_int() ?? 0
+    # The native P2 parser was measured returning 0 for `" 3"` through
+    # `to_int() ?? 0`, dropping a real false_count. Parse decimal digits
+    # directly so whitespace and the count's final digit cannot silently
+    # become zero-valued coverage.
+    var value: i64 = 0
+    for index in 0..trimmed.len():
+        val ch = trimmed[index:index + 1]
+        val digit = _coverage_decimal_digit(ch)
+        if digit < 0: return 0
+        if value > 922337203685477580 or
+                (value == 922337203685477580 and digit > 7):
+            return 0
+        value = value * 10 + digit
+    value
 
 # =========================================================================
 # Setup: Enable coverage before test run
 # =========================================================================
 
-fn setup_coverage():
+fn delete_coverage_artifact(path: text) -> bool:
+    if not file_exists(path):
+        return true
+    if not file_is_regular_no_follow(path):
+        return false
+    file_delete(path)
+
+fn setup_coverage() -> bool:
     env_set("SIMPLE_COVERAGE", "1")
     rt_coverage_clear()
     reset_coverage_state()
+    # Ensure output directory exists.
+    if not dir_create_all("build/coverage"):
+        print "[Coverage] ERROR: cannot create build/coverage; refusing to run"
+        return false
+    # A failed or empty run must not leave an older successful report looking
+    # like evidence for this invocation.
+    for path in ["build/coverage/coverage.sdn", "build/coverage/summary.md",
+            "build/coverage/uncovered.md"]:
+        if not delete_coverage_artifact(path):
+            print "[Coverage] ERROR: cannot remove stale report {path}; refusing to run with ambiguous coverage evidence"
+            return false
     print "[Coverage] Enabled - tracking decisions and conditions"
-    # Ensure output directory exists
-    dir_create_all("build/coverage")
+    true
 
 # =========================================================================
 # Collection: Get coverage data after test run
@@ -187,6 +231,44 @@ fn record_coverage_sdn(sdn: text):
     coverage_parts.push(sdn)
     accumulate_coverage_sdn(sdn)
 
+# A compiler manifest declares sites; it does not prove a test reached one.
+# This distinguishes a broken/empty instrumented run from genuinely
+# branchless code, which has no decision or condition sites to satisfy.
+fn coverage_has_declared_sites(data: CoverageData) -> bool:
+    data.total_decisions > 0 or data.total_conditions > 0
+
+fn coverage_has_runtime_observations() -> bool:
+    for key in decision_keys:
+        if (decision_true.contains_key(key) and decision_true[key] > 0) or
+                (decision_false.contains_key(key) and decision_false[key] > 0):
+            return true
+    for key in condition_keys:
+        if (condition_true.contains_key(key) and condition_true[key] > 0) or
+                (condition_false.contains_key(key) and condition_false[key] > 0):
+            return true
+    false
+
+fn coverage_has_declared_sites_without_observations(data: CoverageData) -> bool:
+    coverage_has_declared_sites(data) and not coverage_has_runtime_observations()
+
+fn coverage_evidence_publishable(data: CoverageData, explicitly_required: bool) -> bool:
+    if coverage_has_runtime_observations():
+        return true
+    if explicitly_required or coverage_has_declared_sites_without_observations(data):
+        return false
+    # An empty data set is valid only when the compiler explicitly attested an
+    # inventory with no sites. Without that receipt, no observations cannot be
+    # distinguished from an instrumenter that silently did nothing.
+    compiler_coverage_manifests > 0
+
+fn coverage_session_should_finalize(coverage_requested: bool, inspection_only: bool,
+        setup_failed: bool, carried_from_checkpoint: bool) -> bool:
+    coverage_requested and not inspection_only and not setup_failed and
+        not carried_from_checkpoint
+
+fn compiler_coverage_manifest_count() -> i64:
+    compiler_coverage_manifests
+
 fn coverage_manifest_decimal(value: text) -> bool:
     val trimmed = value.trim()
     if trimmed == "":
@@ -206,29 +288,41 @@ fn coverage_manifest_location(value: text) -> bool:
     trimmed.len() < 10 or trimmed <= "2147483647"
 
 fn record_compiler_decision_manifest_sdn(sdn: text) -> bool:
-    """Pre-register compiler-owned decision/condition rows with zero counts.
+    """Record compiler attestation of the decision/condition inventory.
 
-    This accepts only the existing SDN table format and rejects runtime
-    outcomes, event rows, malformed rows, and manifests without a decision.
-    TODO594 remains open until the compiler emits this manifest.
+    A valid empty inventory proves the compiled source has no decision sites.
+    Non-empty manifests register zero-count obligations until runtime outcomes
+    arrive. This accepts only the existing SDN table format and rejects runtime
+    outcomes, event rows, and malformed rows.
     """
     if sdn == "":
         return false
 
     var section = ""
+    var saw_version = false
+    var saw_decisions = false
+    var saw_conditions = false
     var decision_rows = 0
+    var condition_rows = 0
     for raw_line in sdn.split("\n"):
         val trimmed = raw_line.trim()
         if trimmed == "" or trimmed.starts_with("#"):
             continue
         if trimmed == "version: 1.0":
-            if section != "":
+            if saw_version or section != "":
                 return false
+            saw_version = true
             continue
         if trimmed == "decisions |id, file, line, column, true_count, false_count|":
+            if not saw_version or saw_decisions:
+                return false
+            saw_decisions = true
             section = "decisions"
             continue
         if trimmed == "conditions |decision_id, condition_id, file, line, column, true_count, false_count|":
+            if not saw_decisions or saw_conditions:
+                return false
+            saw_conditions = true
             section = "conditions"
             continue
 
@@ -253,11 +347,14 @@ fn record_compiler_decision_manifest_sdn(sdn: text) -> bool:
                 return false
             if parts[5].trim() != "0" or parts[6].trim() != "0":
                 return false
+            condition_rows = condition_rows + 1
             continue
         return false
 
-    if decision_rows == 0:
+    if not saw_version or not saw_decisions or not saw_conditions or
+            (decision_rows == 0 and condition_rows > 0):
         return false
+    compiler_coverage_manifests = compiler_coverage_manifests + 1
     coverage_parts.push(sdn)
     accumulate_coverage_sdn(sdn)
     true
@@ -370,8 +467,8 @@ fn build_coverage_data_from_state(raw_sdn: text) -> CoverageData:
         val parts = coverage_key_fields(key)
         if parts.len() >= 3:
             val fpath = coverage_key_path(key)
-            val t = decision_true[key] ?? 0
-            val f = decision_false[key] ?? 0
+            val t = if decision_true.contains_key(key): decision_true[key] else: 0
+            val f = if decision_false.contains_key(key): decision_false[key] else: 0
             val covered = t > 0 and f > 0
             val fi = find_or_add_file(
                 file_paths,
@@ -391,8 +488,8 @@ fn build_coverage_data_from_state(raw_sdn: text) -> CoverageData:
         val parts = coverage_key_fields(key)
         if parts.len() >= 4:
             val fpath = coverage_key_path(key)
-            val t = condition_true[key] ?? 0
-            val f = condition_false[key] ?? 0
+            val t = if condition_true.contains_key(key): condition_true[key] else: 0
+            val f = if condition_false.contains_key(key): condition_false[key] else: 0
             val covered = t > 0 and f > 0
             val fi = find_or_add_file(
                 file_paths,
@@ -462,8 +559,8 @@ fn render_coverage_state_sdn() -> text:
             val line_str = parts[0]
             val col_str = parts[1]
             val decision_id = parts[2]
-            val t = decision_true[key] ?? 0
-            val f = decision_false[key] ?? 0
+            val t = if decision_true.contains_key(key): decision_true[key] else: 0
+            val f = if decision_false.contains_key(key): decision_false[key] else: 0
             lines.push("    {decision_id}, {fpath}, {line_str}, {col_str}, {t}, {f}")
 
     lines.push("")
@@ -476,8 +573,8 @@ fn render_coverage_state_sdn() -> text:
             val col_str = parts[1]
             val decision_id = parts[2]
             val condition_id = parts[3]
-            val t = condition_true[key] ?? 0
-            val f = condition_false[key] ?? 0
+            val t = if condition_true.contains_key(key): condition_true[key] else: 0
+            val f = if condition_false.contains_key(key): condition_false[key] else: 0
             lines.push("    {decision_id}, {condition_id}, {fpath}, {line_str}, {col_str}, {t}, {f}")
 
     lines.push("")
@@ -487,13 +584,13 @@ fn render_coverage_state_sdn() -> text:
     var covered_dec = 0
     var covered_cond = 0
     for key in decision_keys:
-        val t = decision_true[key] ?? 0
-        val f = decision_false[key] ?? 0
+        val t = if decision_true.contains_key(key): decision_true[key] else: 0
+        val f = if decision_false.contains_key(key): decision_false[key] else: 0
         if t > 0 and f > 0:
             covered_dec = covered_dec + 1
     for key in condition_keys:
-        val t = condition_true[key] ?? 0
-        val f = condition_false[key] ?? 0
+        val t = if condition_true.contains_key(key): condition_true[key] else: 0
+        val f = if condition_false.contains_key(key): condition_false[key] else: 0
         if t > 0 and f > 0:
             covered_cond = covered_cond + 1
     val dec_pct = if total_dec > 0: (covered_dec * 100) / total_dec else: 0
@@ -539,11 +636,15 @@ fn print_coverage_summary(data: CoverageData):
 # Reports: Generate coverage files
 # =========================================================================
 
-fn generate_coverage_reports(data: CoverageData):
-    dir_create_all("build/coverage")
+fn generate_coverage_reports(data: CoverageData, output_dir: text = "build/coverage") -> bool:
+    if not dir_create_all(output_dir):
+        print "[Coverage] ERROR: cannot create report directory {output_dir}"
+        return false
 
     # 1. Raw SDN data
-    file_write("build/coverage/coverage.sdn", data.raw_sdn)
+    if not file_atomic_write("{output_dir}/coverage.sdn", data.raw_sdn):
+        print "[Coverage] ERROR: cannot publish {output_dir}/coverage.sdn"
+        return false
 
     # 2. Summary markdown
     var summary_parts: [text] = []
@@ -561,7 +662,9 @@ fn generate_coverage_reports(data: CoverageData):
     for fc in sorted:
         summary_parts.push("| {fc.path} | {fc.decisions_covered} | {fc.decisions_total} | {fc.decision_pct}% | {fc.conditions_covered} | {fc.conditions_total} | {fc.condition_pct}% |")
 
-    file_write("build/coverage/summary.md", summary_parts.join("\n") + "\n")
+    if not file_atomic_write("{output_dir}/summary.md", summary_parts.join("\n") + "\n"):
+        print "[Coverage] ERROR: cannot publish {output_dir}/summary.md"
+        return false
 
     # 3. Uncovered report (files with <100% coverage, sorted by gap)
     var uncov_parts: [text] = []
@@ -581,12 +684,15 @@ fn generate_coverage_reports(data: CoverageData):
         uncov_parts.push("| (none) | 100% | 0 | All covered! |")
 
     uncov_parts.push("\nTotal files with gaps: {uncov_count}")
-    file_write("build/coverage/uncovered.md", uncov_parts.join("\n") + "\n")
+    if not file_atomic_write("{output_dir}/uncovered.md", uncov_parts.join("\n") + "\n"):
+        print "[Coverage] ERROR: cannot publish {output_dir}/uncovered.md"
+        return false
 
-    print "[Coverage] Reports written to build/coverage/"
-    print "  build/coverage/coverage.sdn  (raw data)"
-    print "  build/coverage/summary.md    (per-file summary)"
-    print "  build/coverage/uncovered.md  (files with gaps)"
+    print "[Coverage] Reports written to {output_dir}/"
+    print "  {output_dir}/coverage.sdn  (raw data)"
+    print "  {output_dir}/summary.md    (per-file summary)"
+    print "  {output_dir}/uncovered.md  (files with gaps)"
+    true
 
 fn sort_files_by_coverage(files: [FileCoverage]) -> [FileCoverage]:
     # Simple insertion sort by decision_pct ascending (worst coverage first)
@@ -755,8 +861,8 @@ fn coverage_owner_outcome_summary(
         if parts.len() != 5 or parts[0] != path:
             continue
         condition_site_total = condition_site_total + 1
-        val true_count = condition_true[key] ?? 0
-        val false_count = condition_false[key] ?? 0
+        val true_count = if condition_true.contains_key(key): condition_true[key] else: 0
+        val false_count = if condition_false.contains_key(key): condition_false[key] else: 0
         if true_count > 0:
             branch_outcome_covered = branch_outcome_covered + 1
         else:
@@ -786,8 +892,11 @@ fn _critical_outcome_covered(
         # file, line, decision, and condition id.
         if (parts.len() == 5 and parts[0] == path and parts[1] == line and
                 parts[3] == decision_id and parts[4] == condition_id):
-            val count = if outcome == "true": condition_true[key] ?? 0
-                else: condition_false[key] ?? 0
+            var count = 0
+            if outcome == "true" and condition_true.contains_key(key):
+                count = condition_true[key]
+            if outcome == "false" and condition_false.contains_key(key):
+                count = condition_false[key]
             if count > 0: return true
     false
 
@@ -827,6 +936,12 @@ export parse_coverage_state_sdn, record_coverage_sdn, record_compiler_decision_m
 export accumulate_coverage_sdn, build_coverage_data_from_state, render_coverage_state_sdn
 export find_or_add_file, print_coverage_summary, generate_coverage_reports
 export sort_files_by_coverage, check_coverage_threshold, get_coverage_threshold
+export coverage_has_declared_sites, coverage_has_runtime_observations
+export coverage_has_declared_sites_without_observations
+export coverage_evidence_publishable
+export coverage_session_should_finalize
+export compiler_coverage_manifest_count
+export delete_coverage_artifact
 export save_coverage_baseline, load_coverage_baseline, print_coverage_delta
 export extract_cover_annotations_for_coverage, check_cover_annotation_threshold
 export check_cover_annotation_thresholds
