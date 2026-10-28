@@ -294,3 +294,11 @@ ordinary resolution with existing prefix boundaries. Preserve requested-name
 closure aliases instead of rewriting HIR names. Source regressions are UNRUN;
 actual T32 consumers need a rebuilt producer and real Hello compile/run sanity.
 See [matrix](../../../08_tracking/bug/tooling_phase3_matrix_2026_10_25.md).
+
+## FileFiber admission overflow (2026-10-28)
+
+The scheduler latches reservation overflow without consuming the pending head.
+FileFiber drains runnable and external IO/host work before reporting that error
+and terminalizing unfinished fibers. Queued fills and ready async results count
+as external work. Focused Phase 1 specs passed; native qualification is pending.
+See `doc/08_tracking/bug/fiber_scheduler_reservation_overflow_2026_10_28.md`.
