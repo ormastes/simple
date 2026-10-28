@@ -534,3 +534,9 @@ would conceal the defect. Native tests must include distinct nonzero metrics,
 absent evidence, and the limited-result path. See
 `doc/08_tracking/bug/phase2_runner_tuple_resource_projection_2026_10_28.md` and
 `scripts/check/check-native-resource-projection.shs`.
+
+
+Native SDN group counters on the retained phase2 compiler need explicit array
+mutation: indexed assignment can leave zero counts. See
+`doc/08_tracking/bug/phase2_runner_indexed_group_accumulation_2026_10_28.md`
+and the native `check-native-sdn-groups.shs` regression gate.
