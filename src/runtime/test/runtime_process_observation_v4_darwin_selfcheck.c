@@ -82,7 +82,29 @@ SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
     for (int i = 0; i < 32; i++) assert(rt_array_push(a, executable_digest[i]));
     return a;
 }
+static void cwd_race_hook(void);
+static void cwd_component_hook(const char* component, const char* slash);
+#define POV4_CWD_TEST_AFTER_REALPATH() cwd_race_hook()
+#define POV4_CWD_TEST_AFTER_COMPONENT(component, slash) cwd_component_hook(component, slash)
 #include "../runtime_process_owned.c"
+
+static const char *race_ancestor, *race_saved, *race_target;
+static int race_after_component;
+static void cwd_race_hook(void) {
+    if (!race_ancestor || race_after_component) return;
+    assert(rename(race_ancestor, race_saved) == 0);
+    assert(symlink(race_target, race_ancestor) == 0);
+    race_ancestor = NULL;
+}
+
+static void cwd_component_hook(const char* component, const char* slash) {
+    if (!race_ancestor || !race_after_component || !slash ||
+        (size_t)(slash - component) != strlen("ancestor") ||
+        strncmp(component, "ancestor", strlen("ancestor")) != 0) return;
+    assert(rename(race_ancestor, race_saved) == 0);
+    assert(symlink(race_target, race_ancestor) == 0);
+    race_ancestor = NULL;
+}
 
 static void put_u64(SplArray* a, uint64_t value) {
     for (int i = 0; i < 8; i++) assert(rt_array_push(a, (int64_t)((value >> (8 * i)) & 255)));
@@ -307,6 +329,37 @@ int main(void) {
     assert(snprintf(linkpath, sizeof(linkpath), "%s/link", canonical_root) > 0);
     assert(mkdir(original, 0700) == 0);
     assert(symlink(original, linkpath) == 0);
+
+    char ancestor[PATH_MAX], saved[PATH_MAX], target[PATH_MAX], nested[PATH_MAX], target_nested[PATH_MAX];
+    assert(snprintf(ancestor, sizeof(ancestor), "%s/ancestor", canonical_root) > 0);
+    assert(snprintf(saved, sizeof(saved), "%s/saved", canonical_root) > 0);
+    assert(snprintf(target, sizeof(target), "%s/target", canonical_root) > 0);
+    assert(snprintf(nested, sizeof(nested), "%s/ancestor/nested", canonical_root) > 0);
+    assert(snprintf(target_nested, sizeof(target_nested), "%s/target/nested", canonical_root) > 0);
+    assert(mkdir(ancestor, 0700) == 0 && mkdir(target, 0700) == 0);
+    assert(mkdir(nested, 0700) == 0 && mkdir(target_nested, 0700) == 0);
+    int64_t nested_pin = rt_process_observation_v4_pin_cwd_value(nested, strlen(nested));
+    assert(nested_pin > 0 && rt_process_observation_v4_close_cwd_value(nested_pin));
+    race_ancestor = ancestor; race_saved = saved; race_target = target;
+    int64_t raced_pin = rt_process_observation_v4_pin_cwd_value(nested, strlen(nested));
+    assert(raced_pin == 0); /* An ancestor symlink must never redirect the pin. */
+    assert(unlink(ancestor) == 0 && rename(saved, ancestor) == 0);
+    char saved_nested[PATH_MAX];
+    assert(snprintf(saved_nested, sizeof(saved_nested), "%s/saved/nested", canonical_root) > 0);
+    race_ancestor = ancestor; race_after_component = 1;
+    raced_pin = rt_process_observation_v4_pin_cwd_value(nested, strlen(nested));
+    assert(!race_ancestor && raced_pin > 0);
+    uint8_t raced_digest[32]; get_digest(raced_pin, raced_digest);
+    assert_digest_matches_inode(saved_nested, raced_digest);
+    int raced_fd = pov4_acquire_cwd((uint64_t)raced_pin, nested, raced_digest);
+    assert(raced_fd >= 0);
+    struct stat held, expected;
+    assert(fstat(raced_fd, &held) == 0 && stat(saved_nested, &expected) == 0);
+    assert(held.st_dev == expected.st_dev && held.st_ino == expected.st_ino);
+    assert(close(raced_fd) == 0 && rt_process_observation_v4_close_cwd_value(raced_pin));
+    assert(unlink(ancestor) == 0 && rename(saved, ancestor) == 0);
+    assert(rmdir(nested) == 0 && rmdir(ancestor) == 0);
+    assert(rmdir(target_nested) == 0 && rmdir(target) == 0);
 
     int64_t pin = rt_process_observation_v4_pin_cwd_value(original, strlen(original));
     assert(pin > 0);
