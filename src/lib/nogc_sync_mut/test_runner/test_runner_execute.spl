@@ -20,7 +20,7 @@ use std.common.test_runner.native_framework_wrapper.{spipe_partition_source, spi
 use std.nogc_sync_mut.test_runner.source_route.{interpreter_snippet_source}
 use std.test_runner.test_result_wrapper.{result_wrapper_path}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
-use std.test_runner.native_owned_process.{ScopedChildRun, run_scoped_child as _run_scoped_child}
+use std.test_runner.native_owned_process.{ScopedChildRun, run_scoped_child as _run_scoped_child, scoped_child_usage, scoped_child_budget_status}
 export use std.nogc_sync_mut.test_runner.resource_policy.{safe_mode_caps}
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines, simple_string_byte_ranges}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
@@ -306,8 +306,8 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     stdout = scoped_child.result.stdout
     stderr = scoped_child.result.stderr
     exit_code = scoped_child.result.exit_code
-    observed_usage = scoped_child.usage
-    budget_status = scoped_child.budget_status
+    observed_usage = scoped_child_usage(scoped_child)
+    budget_status = scoped_child_budget_status(scoped_child)
     if scoped_child.result.limit_exceeded:
         val result = scoped_child.result
         val end2 = time_now_unix_micros()
@@ -419,9 +419,9 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
             val dur = (end2 - start) / 1000
             return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(scoped_child.result.limit_type): 0 else: 1, skipped: 0, pending: 0,
                 duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(scoped_child.result, options), timed_out: scoped_child.result.limit_type.contains("timeout"), cached: false,
-                execution_ms: dur, resource_usage: scoped_child.usage,
+                execution_ms: dur, resource_usage: scoped_child_usage(scoped_child),
                 resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
-                cohort_id: test_execution_cohort_id(file_path, options), budget_status: scoped_child.budget_status, anomaly_status: "incomplete")
+                cohort_id: test_execution_cohort_id(file_path, options), budget_status: scoped_child_budget_status(scoped_child), anomaly_status: "incomplete")
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         if options.coverage:
@@ -431,7 +431,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
             stdout = strip_coverage_blocks(stdout)
             stderr = strip_coverage_blocks(stderr)
         val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
-        return _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
+        return _attach_scope_evidence(base_result, scoped_child_usage(scoped_child), scoped_child_budget_status(scoped_child), file_path, options, 0, duration_ms)
 
     # No precompiled artifact exists. Compile to SMF instead of silently
     # falling back to source execution.
@@ -456,7 +456,7 @@ fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileRe
     val duration_ms = (end - start) / 1000
 
     val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
-    _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
+    _attach_scope_evidence(base_result, scoped_child_usage(scoped_child), scoped_child_budget_status(scoped_child), file_path, options, 0, duration_ms)
 
 fn spipe_inline_helpers() -> text:
     "# === spipe inline helpers (compile-mode only) ===\n" +
@@ -781,7 +781,7 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
         remove_structured_evidence(evidence_path)
         return scoped_limit_exceeded_result(file_path, scoped_child, options, duration_ms, reason, degrade_token)
     val base_result = finish_interpreter_child_evidence(file_path, stdout, stderr, exit_code, duration_ms, options.timeout, evidence_path)
-    val evidenced = _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
+    val evidenced = _attach_scope_evidence(base_result, scoped_child_usage(scoped_child), scoped_child_budget_status(scoped_child), file_path, options, 0, duration_ms)
     TestFileResult(
         path: evidenced.path, passed: evidenced.passed, failed: evidenced.failed,
         skipped: evidenced.skipped, pending: evidenced.pending,
@@ -808,9 +808,9 @@ pub fn scoped_limit_exceeded_result(file_path: text, scoped_child: ScopedChildRu
     val result = scoped_child.result
     TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
         duration_ms: duration_ms, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false,
-        execution_ms: duration_ms, resource_usage: scoped_child.usage,
+        execution_ms: duration_ms, resource_usage: scoped_child_usage(scoped_child),
         resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
-        cohort_id: test_execution_cohort_id(file_path, options), budget_status: scoped_child.budget_status, anomaly_status: "incomplete",
+        cohort_id: test_execution_cohort_id(file_path, options), budget_status: scoped_child_budget_status(scoped_child), anomaly_status: "incomplete",
         mcdc_skip_reason: mcdc_skip_reason, degraded_reason: degraded_reason)
 
 # --- coverage fail-closed gate (2026-08-31) -------------------------------
@@ -1421,13 +1421,13 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
             error: "Resource limit exceeded: {result.limit_type}",
             timed_out: result.limit_type.contains("timeout"),
             cached: false,
-            execution_ms: duration_ms, resource_usage: scoped_child.usage,
+            execution_ms: duration_ms, resource_usage: scoped_child_usage(scoped_child),
             resource_class: "safe", cohort_id: test_execution_cohort_id(file_path, options),
-            budget_status: scoped_child.budget_status, anomaly_status: "incomplete"
+            budget_status: scoped_child_budget_status(scoped_child), anomaly_status: "incomplete"
         )
 
     val base_result = make_result_from_output(file_path, result.stdout, result.stderr, result.exit_code, duration_ms, options.timeout)
-    _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
+    _attach_scope_evidence(base_result, scoped_child_usage(scoped_child), scoped_child_budget_status(scoped_child), file_path, options, 0, duration_ms)
 
 # =========================================================================
 # Exports - includes re-exports from split-out files for backward compat
