@@ -26,7 +26,7 @@ use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_contin
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_decision_manifest_sdn}
-use std.test_runner.test_runner_metrics.{test_resource_class, test_execution_cohort_id, test_child_memory_bytes}
+use std.test_runner.test_runner_metrics.{test_resource_class, test_resource_class_name, test_execution_cohort_id, test_child_memory_bytes}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.nogc_sync_mut.env.variables.{env_unset}
@@ -833,6 +833,34 @@ pub fn mcdc_manifest_absent_degrade_opted_in(env_value: text) -> bool:
 pub fn coverage_wrapper_abort_error(diagnostic: text) -> text:
     "ABORTED BEFORE EXECUTION — coverage instrumentation wrapper failed to compile; the spec was NEVER run under the requested coverage path, so this is NOT a test result. Compiler diagnostic: " + diagnostic + " (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)"
 
+# A killed compiler is not a source diagnostic. Preserve the fail-closed
+# verdict while reporting the process limit and the resource receipt that
+# explain why no coverage was collected.
+pub struct CoverageWrapperCompileFailureV1:
+    error: text
+    timed_out: bool
+    compile_ms: i64
+    resource_class: text
+    budget_status: text
+
+pub fn coverage_wrapper_compile_failure_v1(
+    diagnostic: text, limit_type: text, compile_ms: i64,
+    resource_class: text, budget_status: text
+) -> CoverageWrapperCompileFailureV1:
+    val timeout = limit_type == "timeout"
+    val failure = if timeout:
+        "coverage instrumentation wrapper compilation timed out after {compile_ms}ms"
+    else:
+        "coverage instrumentation wrapper failed to compile"
+    val detail = if timeout:
+        "Compiler output observed before timeout: {diagnostic}"
+    else:
+        "Compiler diagnostic: {diagnostic}"
+    CoverageWrapperCompileFailureV1(
+        error: "ABORTED BEFORE EXECUTION — {failure}; the spec was NEVER run under the requested coverage path, so this is NOT a test result. limit={limit_type}; compile_ms={compile_ms}; resource_class={resource_class}; budget_status={budget_status}. {detail} (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)",
+        timed_out: timeout, compile_ms: compile_ms,
+        resource_class: resource_class, budget_status: budget_status)
+
 # First NON-EMPTY line. `compile_output` is `stdout + "\n" + stderr`, so when
 # the compiler wrote nothing to stdout the string starts with "\n" and a
 # naive first-line take yields an empty diagnostic (observed: the printed
@@ -1196,18 +1224,25 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         # then it is loudly tagged and never presented as coverage evidence.
         if options.coverage and wrapper_active and not coverage_interpreter_fallback_opted_in(env_get("SIMPLE_COVERAGE_FALLBACK") ?? ""):
             val end_abort = time_now_unix_micros()
+            val failure = coverage_wrapper_compile_failure_v1(
+                first_line(compile_output), compile_result.limit_type, compile_ms,
+                test_resource_class_name(compile_class), scoped_child_budget_status(compile_scoped))
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
             return TestFileResult(
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: (end_abort - start) / 1000, setup_ms: 0,
-                error: coverage_wrapper_abort_error(first_line(compile_output)),
-                timed_out: false, cached: false,
-                compile_ms: compile_ms, resource_usage: compile_scoped.usage,
-                resource_class: test_resource_class(file_path),
+                error: failure.error,
+                timed_out: failure.timed_out, cached: false,
+                compile_ms: failure.compile_ms, resource_usage: scoped_child_usage(compile_scoped),
+                resource_class: failure.resource_class,
                 cohort_id: test_execution_cohort_id(file_path, options),
-                budget_status: compile_scoped.budget_status,
+                budget_status: failure.budget_status,
                 anomaly_status: "incomplete",
-                mcdc_skip_reason: "coverage-abort: wrapper failed to compile"
+                mcdc_skip_reason: if compile_result.limit_type == "timeout":
+                    "coverage-abort: wrapper compile timeout"
+                else:
+                    "coverage-abort: wrapper compile failure",
+                process_completion: compile_scoped.completion
             )
         if options.coverage and wrapper_active:
             # The coverage wrapper (build_coverage_wrapper) writes an

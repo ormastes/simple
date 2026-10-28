@@ -7,7 +7,8 @@
 # The degrade stays available, but only on an explicit
 # SIMPLE_COVERAGE_FALLBACK=interpreter opt-in.
 use std.test_runner.test_runner_execute.{
-    coverage_interpreter_fallback_opted_in, coverage_wrapper_abort_error
+    coverage_interpreter_fallback_opted_in, coverage_wrapper_abort_error,
+    coverage_wrapper_compile_failure_v1
 }
 
 describe "coverage wrapper compile failure fails closed":
@@ -37,3 +38,46 @@ describe "coverage wrapper compile failure fails closed":
     it "tells the operator how to opt in to the uninstrumented degrade":
         val message = coverage_wrapper_abort_error("boom")
         expect(message.contains("SIMPLE_COVERAGE_FALLBACK=interpreter")).to_equal(true)
+
+    it "reports a compiler timeout distinctly and retains resource evidence":
+        val failure = coverage_wrapper_compile_failure_v1(
+            "98 | ) -> Result[(), PackageImageErrorV1]:", "timeout", 300035,
+            "large", "within")
+        val message = failure.error
+        expect(failure.timed_out).to_equal(true)
+        expect(failure.compile_ms).to_equal(300035)
+        expect(failure.resource_class).to_equal("large")
+        expect(failure.budget_status).to_equal("within")
+        expect(message.contains("compilation timed out after 300035ms")).to_equal(true)
+        expect(message.contains("ABORTED BEFORE EXECUTION")).to_equal(true)
+        expect(message.contains("NEVER run")).to_equal(true)
+        expect(message.contains("NOT a test result")).to_equal(true)
+        expect(message.contains("limit=timeout")).to_equal(true)
+        expect(message.contains("resource_class=large")).to_equal(true)
+        expect(message.contains("budget_status=within")).to_equal(true)
+        expect(message.contains("Compiler output observed before timeout:")).to_equal(true)
+        expect(message.contains("SIMPLE_COVERAGE_FALLBACK=interpreter")).to_equal(true)
+
+    it "preserves a real compiler diagnostic separately from resource evidence":
+        val failure = coverage_wrapper_compile_failure_v1(
+            "error: unexpected token", "", 17, "large", "failure")
+        val message = failure.error
+        expect(failure.timed_out).to_equal(false)
+        expect(failure.compile_ms).to_equal(17)
+        expect(failure.resource_class).to_equal("large")
+        expect(failure.budget_status).to_equal("failure")
+        expect(message.contains("failed to compile")).to_equal(true)
+        expect(message.contains("Compiler diagnostic: error: unexpected token")).to_equal(true)
+        expect(message.contains("compile_ms=17")).to_equal(true)
+        expect(message.contains("resource_class=large")).to_equal(true)
+        expect(message.contains("budget_status=failure")).to_equal(true)
+        expect(message.contains("timed out")).to_equal(false)
+        expect(message.contains("NOT a test result")).to_equal(true)
+
+    it "does not misclassify a memory kill as a timeout":
+        val failure = coverage_wrapper_compile_failure_v1(
+            "process exceeded memory budget", "memory", 47000, "large", "failure")
+        expect(failure.timed_out).to_equal(false)
+        expect(failure.error.contains("failed to compile")).to_equal(true)
+        expect(failure.error.contains("limit=memory")).to_equal(true)
+        expect(failure.error.contains("compile_ms=47000")).to_equal(true)
