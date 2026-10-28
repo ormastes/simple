@@ -1,0 +1,130 @@
+# Bounded HTTP compatibility transport for hosts without the native provider.
+# Caller credentials and payloads stay in private files, never process argv.
+use std.env.{env_get}
+use std.io.file_ops.{secure_temp_dir, file_write_bytes, file_delete, file_exists, file_read_regular_no_follow_bounded}
+use std.io.dir_ops.{dir_remove}
+use std.io.process_ops.{process_run_bounded, process_run_bounded_native}
+use std.io_runtime.{host_os}
+use std.sffi.fs.{file_atomic_write_mode}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+val CURL_HTTP_MAX_BODY_BYTES = 67108864
+val CURL_HTTP_MAX_RESPONSE_BYTES = 1048576
+
+fn _curl_cleanup(private_dir: text) -> bool:
+    val headers = private_dir + "/headers.txt"
+    val body = private_dir + "/body.bin"
+    val response = private_dir + "/response.txt"
+    val headers_removed = if file_exists(headers): file_delete(headers) else: true
+    val body_removed = if file_exists(body): file_delete(body) else: true
+    val response_removed = if file_exists(response): file_delete(response) else: true
+    val directory_removed = dir_remove(private_dir, false)
+    headers_removed and body_removed and response_removed and directory_removed
+
+fn _curl_request_admission(method: text, url: text, headers: [text]) -> text:
+    if method != "GET" and method != "POST" and method != "PUT" and method != "PATCH" and method != "DELETE" and method != "HEAD" and method != "OPTIONS":
+        return "unsupported HTTP method"
+    if not url.starts_with("http://") and not url.starts_with("https://"):
+        return "HTTP URL must use http or https"
+    if url.contains("\r") or url.contains("\n") or url.contains("\u{0000}"):
+        return "HTTP URL contains a control delimiter"
+    # Userinfo would expose credentials through argv even without verbose curl.
+    val authority_start = if url.starts_with("https://"): 8 else: 7
+    val authority_tail = url[authority_start:]
+    val authority = authority_tail.split("/", 2)[0]
+    if authority == "" or authority.contains("@"):
+        return "HTTP URL authority is empty or contains userinfo"
+    for header in headers:
+        if header.contains("\r") or header.contains("\n") or header.contains("\u{0000}"):
+            return "HTTP header contains a control delimiter"
+        if not header.contains(":"):
+            return "HTTP header must contain a name and colon"
+    ""
+
+fn _curl_http_status(value: text) -> i64:
+    val status = value.trim()
+    if status.len() != 3: return 0
+    var result: i64 = 0
+    var index = 0
+    while index < 3:
+        val code = status.byte_at(index) as i64
+        if code < 48 or code > 57: return 0
+        result = result * 10 + code - 48
+        index = index + 1
+    if result < 100 or result > 599: return 0
+    result
+
+fn curl_request_bytes(method: text, url: text, headers: [text], body: [u8]) -> (i64, text, text):
+    curl_request_bytes_with_program("curl", method, url, headers, body)
+
+# @workaround bug=windows_core_http_client_unavailable_2026_10_27 reason=Use the bounded private-file curl transport while the selected Windows core HTTP provider is unavailable
+fn curl_request_bytes_with_program(program: text, method: text, url: text, headers: [text], body: [u8]) -> (i64, text, text):
+    """HTTP status/body/error through real curl, without shell or text conversion.
+
+    HTTP errors retain their status and body. Transport/admission failures use
+    status zero and a nonempty error. Requests are limited to 64 MiB, replies
+    to 1 MiB, and execution to 35 seconds including curl's 30-second deadline.
+    """
+    if program == "": return (0, "", "curl HTTP executable is empty")
+    val refused = _curl_request_admission(method, url, headers)
+    if refused != "": return (0, "", refused)
+    if body.len() > CURL_HTTP_MAX_BODY_BYTES:
+        return (0, "", "HTTP body exceeds the bounded compatibility limit")
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "": parent = "/tmp"
+    val private_dir: text = match secure_temp_dir(parent, "simple-http-"):
+        case Ok(path): path
+        case Err(_): return (0, "", "private HTTP staging directory unavailable")
+    val body_path = private_dir + "/body.bin"
+    val headers_path = private_dir + "/headers.txt"
+    val response_path = private_dir + "/response.txt"
+    # Create owner-only files BEFORE writing bytes. The binary writer opens
+    # the existing file with wb, retaining its ACL/mode rather than unlinking.
+    if not file_atomic_write_mode(body_path, "", 384) or not file_atomic_write_mode(headers_path, headers.join("\n") + "\n", 384) or not file_atomic_write_mode(response_path, "", 384):
+        _curl_cleanup(private_dir)
+        return (0, "", "private HTTP staging files unavailable")
+    if not file_write_bytes(body_path, body):
+        _curl_cleanup(private_dir)
+        return (0, "", "HTTP binary staging write failed")
+    val status_format = "%" + "{" + "http_code" + "}"
+    var arguments: [text] = ["-q", "--silent", "--show-error", "--globoff", "--path-as-is",
+        "--proto", "=http,https", "--request", method, "--url", url,
+        "--max-time", "30", "--max-filesize", "{CURL_HTTP_MAX_RESPONSE_BYTES}",
+        "--header", "@" + headers_path,
+        "--output", response_path, "--write-out", status_format]
+    if method == "HEAD":
+        arguments = arguments + ["--head"]
+    elif body.len() > 0 or method == "POST" or method == "PUT" or method == "PATCH":
+        arguments = arguments + ["--data-binary", "@" + body_path]
+    val initial: (text, text, i64) = process_run_bounded(program, arguments, 35000, 4096)
+    # The deployed native P2 returned this exact prelaunch fault without any
+    # loopback request. Retry that observed signature once through the explicit
+    # native tuple ABI; ordinary interpreter/process results retain their owner.
+    # This is not a general claim about arbitrary configured executables.
+    val result: (text, text, i64) = if host_os() == "windows" and initial.0 == "" and initial.1.trim() == "missing command" and initial.2 == -1:
+        process_run_bounded_native(program, arguments, 35000, 4096)
+    else:
+        initial
+    if result.2 != 0:
+        _curl_cleanup(private_dir)
+        return (0, "", "curl HTTP transport failed (exit {result.2}): " + result.1.trim())
+    val status = _curl_http_status(result.0)
+    if status == 0:
+        _curl_cleanup(private_dir)
+        return (0, "", "curl HTTP transport returned an invalid status")
+    val response: text = match file_read_regular_no_follow_bounded(response_path, CURL_HTTP_MAX_RESPONSE_BYTES):
+        case Ok(value): value
+        case Err(_):
+            _curl_cleanup(private_dir)
+            return (0, "", "HTTP response exceeded its limit or could not be read")
+    if not _curl_cleanup(private_dir):
+        return (0, "", "private HTTP staging cleanup failed")
+    (status, response, "")
+
+fn curl_request_text(method: text, url: text, headers: [text], body: text) -> (i64, text, text):
+    curl_request_bytes(method, url, headers, text_to_utf8_bytes(body))
+
+fn curl_request_text_with_program(program: text, method: text, url: text, headers: [text], body: text) -> (i64, text, text):
+    curl_request_bytes_with_program(program, method, url, headers, text_to_utf8_bytes(body))

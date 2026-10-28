@@ -36,6 +36,8 @@ use std.database.server.storage_port.{
     database_storage_port_v1, StorageOpenResult, StoragePortError
 }
 use std.database.sql.types.{DbRow, DbValue}
+use std.common.json.value.{json_value_escape_string}
+use app.devhub.messenger.adapter.history_rows.{messenger_history_rows}
 
 val MESSENGER_ADAPTER_HISTORY_DEFAULT_LIMIT: i64 = 50
 
@@ -51,7 +53,7 @@ fn _rb() -> text:
     "}"
 
 fn _json_escape(value: text) -> text:
-    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
+    json_value_escape_string(value)
 
 fn _json_str(value: text) -> text:
     "\"{_json_escape(value)}\""
@@ -63,7 +65,7 @@ fn _json_str(value: text) -> text:
 # Value of column `name` in a typed row; nil when absent or NULL.
 fn _col(row: DbRow, name: text) -> DbValue?:
     var i = 0
-    while i < row.columns.len():
+    while i < row.columns.len() and i < row.values.len():
         if row.columns[i] == name:
             return Some(row.values[i])
         i = i + 1
@@ -243,21 +245,17 @@ fn messenger_db_history(target: MessengerTarget, format_name: text, room: text, 
                 case DbReadOutcome.Failed(result):
                     result
                 case DbReadOutcome.Rows(rows):
-                    # Rows arrive in ascending rowid order; history is
-                    # seq-ordered within a room (§7.4: sequence_kind is
-                    # monotonic_within_room for this schema profile).
+                    val ordered: [DbRow] = match messenger_history_rows(rows, profile.message_room_id, profile.message_sequence, room, bounded):
+                        case Ok(selected): selected
+                        case Err(_): return MessengerPortResult.config_error("invalid history sequence metadata")
                     var payload = _lb() + "\"room\":{_json_str(room)},\"messages\":["
                     var i = 0
-                    var count = 0
-                    while i < rows.len():
-                        if _col_text(rows[i], profile.message_room_id) == room:
-                            if count > 0:
-                                payload = payload + ","
-                            payload = payload + _message_json(rows[i], profile)
-                            count = count + 1
-                            if count >= bounded:
-                                break
+                    while i < ordered.len():
+                        if i > 0:
+                            payload = payload + ","
+                        payload = payload + _message_json(ordered[i], profile)
                         i = i + 1
+                    val count = ordered.len()
                     MessengerPortResult.ok(payload + "],\"count\":{count}" + _rb())
             return outcome
 

@@ -78,3 +78,45 @@ inherited PATH. On Unix, the executable `bin/mail` can run directly.
 Never place passwords in command lines or launcher files. See the
 [mail-cli guide](../../doc/07_guide/app/mail_cli.md) for configuration and
 password input modes.
+
+## Hosted fixture dependency
+
+The host-fixture credential executable deliberately implements only synthetic
+encryption orchestration. SDN scenarios require a separate, real
+`MAIL_CONFIG_BIN`; that executable must run the canonical Simple parser.
+`scripts/ci/prepare_mail_config_helper.py` builds the current helper source with
+an existing, pinned Phase-2 compiler and exercises valid and malformed SDN
+before exporting its path to subsequent workflow steps. It never rebuilds the
+compiler or falls back to a seed, another parser, or skipped assertions.
+
+Configure the repository variable `MAIL_CI_PHASE2_PRODUCERS_JSON` with qualified
+producer bundles for the hosted platforms, for example:
+
+```json
+{
+  "linux-x86_64": {
+    "phase": 2,
+    "url": "https://example.invalid/existing-qualified-phase2.tar.gz",
+    "sha256": "<exact 64-character lowercase bundle SHA-256>",
+    "format": "tar.gz",
+    "compiler": "bin/simple",
+    "asset_root": "."
+  }
+}
+```
+
+Supported host keys are `linux-x86_64`, `darwin-arm64`, `darwin-x86_64` and
+`windows-x86_64`. Formats are `file`, `tar.gz` and `zip`; bundles must include
+the producer's runtime dependencies and an available native toolchain. The
+digest pins the complete bundle, while the producer generation comes from its
+qualification record. A missing profile, checksum mismatch or failed real
+helper build remains an infrastructure failure. The workflow preserves build
+logs and producer/helper digests instead of reporting the SDN scenarios passed.
+
+TODO (hosted CI infrastructure, 2026-10-27): provide qualified existing Phase-2
+producer profiles for every matrix host and qualify the resulting current-source
+helper builds. No Linux/Darwin profile has been selected. The provisioning
+admission tests passed locally; the focused config and placeholder fixtures
+passed with the existing real Windows SDN helper. This is not hosted-matrix or
+new-helper-build acceptance, and the workflow remains blocked until those
+external producer dependencies are provisioned.

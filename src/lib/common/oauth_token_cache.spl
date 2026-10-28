@@ -1,0 +1,50 @@
+# Token-cache I/O owner shared by the configured OAuth implementations.
+# The native primitive creates a private same-directory staging file before
+# writing secret bytes and publishes it atomically; a mock chmod is never used.
+use std.nogc_sync_mut.io_runtime.{read_file_text_result}
+use std.nogc_sync_mut.sffi.fs.{file_atomic_write_mode}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse_with_issues, SdnIssue}
+
+pub fn oauth_token_cache_read(path: text) -> text:
+    if path == "":
+        return ""
+    match read_file_text_result(path):
+        case Ok(content): content
+        case Err(_): ""
+
+pub fn oauth_token_cache_write(path: text, content: text) -> bool:
+    if path == "":
+        return false
+    # Explicit provider ownership here is shared by all configured families.
+    # Applications import std.oauth2, never a physical family to select policy.
+    # Pinned Phase-2 workaround: octal mode lowering produced read-only files.
+    # Decimal 384 is the exact owner-read/write mask on both old and new producers.
+    # @workaround bug=phase2_octal_permission_mode_lowering_2026_10_27 reason=Pass the proven decimal owner-only mode instead of the failing pinned P2 octal carrier
+    file_atomic_write_mode(path, content, 384 as i32)
+
+# Use the canonical SDN string writer/parser so escaped or Unicode token bytes
+# round-trip without allowing a newline to inject another cache field.
+pub fn oauth_token_cache_render(token: text, expires_at: i64) -> text:
+    val encoded = sdn_encode_canonical(SdnValue.String(token))
+    "# OAuth token cache (auto-managed; do not edit)\n" +
+        "access_token: {encoded}\nexpires_at: {expires_at}\n"
+
+pub fn oauth_token_cache_parse(content: text) -> (text, i64):
+    if content == "":
+        return ("", 0)
+    val parsed: (SdnValue, [SdnIssue]) = match parse_with_issues(content):
+        case Ok(value): value
+        case Err(_): return ("", 0)
+    val root: SdnValue = parsed.0
+    val issues: [SdnIssue] = parsed.1
+    if issues.len() > 0 or not root.is_dict():
+        return ("", 0)
+    val token: SdnValue = root.get("access_token") ?? SdnValue.Null
+    val expiry: SdnValue = root.get("expires_at") ?? SdnValue.Null
+    if not token.is_string() or not expiry.is_int():
+        return ("", 0)
+    val decoded: text = token.as_str() ?? ""
+    val expires: i64 = expiry.as_i64() ?? 0
+    (decoded, expires)

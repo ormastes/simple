@@ -17,6 +17,11 @@
 use nogc_sync_mut.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
 use nogc_sync_mut.database.query
 use std.convert (try_parse_int)
+use nogc_sync_mut.database.atomic.{FileLock}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists}
+use std.io_runtime.{read_file_text_result}
+use std.nogc_sync_mut.compression.gzip.crc.{crc32_update}
+use std.common.text_bytes.{text_to_utf8_bytes}
 use nogc_sync_mut.database.checker.{DbIssue, check_duplicate_ids, check_valid_column,
     check_empty_required, check_file_refs, check_enum_values, check_orphan_refs}
 # Removed 'use app.io' - it shadows core.spl's local function declarations
@@ -469,6 +474,17 @@ class BugDatabase:
     me save() -> bool:
         self.db.save()
 
+    # Append-only migration path for a legacy registry whose opaque rows must
+    # not be parsed and regenerated. Only new open bugs are serialized; every
+    # pre-existing payload byte remains intact, including overwide old rows.
+    # @workaround bug=bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27 reason=Append only new canonical rows until full registry round trips preserve opaque legacy payloads
+    me append_open_bugs_preserving_legacy(records: [Bug]) -> bool:
+        var lock: FileLock = FileLock.for_file(self.db.path)
+        if not lock.try_acquire(5000): return false
+        val published = _bug_append_open_locked(self.db.path, records)
+        lock.release()
+        published
+
     # Create a new bug database without replacing an existing path entry.
     me save_exclusive() -> bool:
         self.db.save_exclusive()
@@ -751,3 +767,80 @@ fn bug_to_row(bug: Bug) -> SdnRow:
     val valid_str = if bug.valid: "true" else: "false"
     row.set("valid", valid_str)
     row
+
+
+# One physical line is the admitted field contract of the legacy table writer.
+fn _bug_append_field_safe(value: text) -> bool:
+    value == value.trim() and not value.contains("\n") and not value.contains("\r") and not value.contains("\0") and not value.contains("\"")
+
+fn _bug_append_id_safe(value: text) -> bool:
+    if value == "": return false
+    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+    for character in value.chars():
+        if not allowed.contains(character): return false
+    true
+
+fn _bug_append_open_locked(path: text, records: [Bug]) -> bool:
+    if records.len() == 0: return false
+    # A pending WAL is authoritative. Do not bypass or discard its records.
+    if file_exists(path + ".wal"):
+        val wal: text = match read_file_text_result(path + ".wal"):
+            case Ok(value): value
+            case Err(_): return false
+        if wal.trim() != "": return false
+    val original: text = match read_file_text_result(path):
+        case Ok(value): value
+        case Err(_): return false
+    if not original.starts_with("#sdn-crc32:") or original.len() > 33554432:
+        return false
+    val newline = original.index_of("\n")
+    if newline < 0: return false
+    val expected = try_parse_int(original.substring(11, newline).trim())
+    if expected == nil: return false
+    val body: text = original.substring(newline + 1)
+    val initial_crc = crc32_update(0xffffffff, text_to_utf8_bytes(body)) ^ 0xffffffff
+    if initial_crc != (expected ?? -1): return false
+    val original_lines: [text] = body.split("\n")
+    var pending: BugDatabase = create_bug_database(path)
+    val columns: [text] = ["id", "severity", "status", "title", "file", "line", "reproducible_by", "created_at", "updated_at", "valid"]
+    pending.db.set_table("bugs_active", SdnTable.new("bugs_active", columns))
+    for raw_record in records:
+        val record: Bug = raw_record
+        if record.status != BugStatus.Open or not record.valid or not _bug_append_id_safe(record.id): return false
+        if not _bug_append_field_safe(record.title) or not _bug_append_field_safe(record.file) or not _bug_append_field_safe(record.reproducible_by) or not _bug_append_field_safe(record.created_at) or not _bug_append_field_safe(record.updated_at): return false
+        for field in record.description + record.fix_strategy + record.investigation_log:
+            if not _bug_append_field_safe(field): return false
+        for raw_line in original_lines:
+            val line: text = raw_line.trim()
+            if line.starts_with(record.id + ",") or line.starts_with("\"" + record.id + "\","):
+                return false
+        # Use the existing domain row and multiline serialization helpers.
+        if not pending.add_bug(record): return false
+    var updated: text = body
+    val names: [text] = ["bugs_active", "bug_descriptions", "bug_fix_strategies", "bug_investigation_logs"]
+    for name in names:
+        val table: SdnTable = match pending.db.get_table(name):
+            case Some(value): value
+            case None: return false
+        if table.rows.len() == 0: continue
+        val encoded: text = table.to_sdn()
+        val separator = encoded.index_of("\n")
+        if separator < 0: return false
+        val header = encoded.substring(0, separator)
+        var rows = encoded.substring(separator + 1)
+        val anchored = "\n" + updated
+        val crlf = "\n" + header + "\r\n"
+        val lf = "\n" + header + "\n"
+        val crlf_count = anchored.split(crlf).len() - 1
+        val lf_count = anchored.split(lf).len() - 1
+        if crlf_count + lf_count != 1: return false
+        if crlf_count == 1:
+            rows = rows.replace("\n", "\r\n")
+            updated = anchored.replace(crlf, crlf + rows).substring(1)
+        else:
+            updated = anchored.replace(lf, lf + rows).substring(1)
+    val final_crc = crc32_update(0xffffffff, text_to_utf8_bytes(updated)) ^ 0xffffffff
+    val prefix = if original.substring(0, newline).ends_with("\r"): "#sdn-crc32:{final_crc}\r\n" else: "#sdn-crc32:{final_crc}\n"
+    # FileLock is already held across read/validation/publication. The real
+    # native atomic publisher creates its own exclusive same-directory stage.
+    file_atomic_write(path, prefix + updated)

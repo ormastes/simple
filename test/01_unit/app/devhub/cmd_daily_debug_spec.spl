@@ -10,6 +10,8 @@ Covers:
 """
 
 use std.spec
+use std.io_runtime.{env_get_opt}
+use std.env.{env_set, env_unset}
 use app.devhub.cmd_daily_debug.{
     extract_jira_keys,
     extract_minio_urls,
@@ -21,6 +23,18 @@ use app.devhub.cmd_daily_debug.{
     daily_debug_day_stamp,
     daily_debug_rfc3339_stamp,
 }
+
+fn run_without_graph_tenant(args: [text]) -> (i64, bool):
+    val previous = env_get_opt("GRAPH_TENANT_ID")
+    if not env_set("GRAPH_TENANT_ID", ""):
+        return (-1, false)
+    val code = run_daily_debug(args)
+    var restored = false
+    if val value = previous:
+        restored = env_set("GRAPH_TENANT_ID", value)
+    else:
+        restored = env_unset("GRAPH_TENANT_ID")
+    (code, restored)
 
 describe "extract_jira_keys (issue #10 step 3)":
 
@@ -130,19 +144,17 @@ describe "watermark roundtrip (issue #10 steps 1+6)":
 
 describe "run_daily_debug --dry-run (issue #10 AC4)":
 
-    it "exits 0 with --dry-run and writes no files":
-        # In --dry-run mode the driver must not call file_write_text on
-        # either the digest or the watermark. The outlook adapter is gated
-        # by `outlook_available = false` so step 2 returns []. The test
-        # verifies the exit code only; the absence of file writes is
-        # guaranteed structurally by the single `if not dry_run` gate
-        # around each `file_write_text` call.
-        val rc = run_daily_debug(["--dry-run", "--quiet"])
-        expect(rc).to_equal(0)
+    it "should reject an unconfigured inbox during a quiet dry run":
+        step("Remove one required Graph setting and restore it before assertions")
+        val result: (i64, bool) = run_without_graph_tenant(["--dry-run", "--quiet"])
+        expect(result.0).to_equal(1)
+        expect(result.1).to_equal(true)
 
-    it "exits 0 with --dry-run alone":
-        val rc = run_daily_debug(["--dry-run"])
-        expect(rc).to_equal(0)
+    it "should reject an unconfigured inbox with dry-run alone":
+        step("Run the production validation path without a tenant")
+        val result: (i64, bool) = run_without_graph_tenant(["--dry-run"])
+        expect(result.0).to_equal(1)
+        expect(result.1).to_equal(true)
 
     it "--help exits 0 and never runs the pipeline":
         # Regression: --help used to fall through with dry_run=false and

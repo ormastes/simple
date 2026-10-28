@@ -1,0 +1,30 @@
+# Supplemental real auth.sdn owner checks, never a replacement SSpec runner.
+use std.env.{env_get}
+use std.io_runtime.{file_delete, read_file_text_result}
+use app.devhub.auth_token_store.{save_auth_token_to, load_auth_token_from}
+
+fn main() -> i64:
+    val root = env_get("DEVHUB_AUTH_PROBE_ROOT")
+    if root == "": return 1
+    val path = root + "/auth.sdn"
+    val synthetic = "héllo 日本 \"quote\" \\path\nsecond line"
+    assert(save_auth_token_to(path, "jira", synthetic))
+    assert(save_auth_token_to(path, "confluence.primary", "synthetic-other"))
+    assert(load_auth_token_from(path, "jira") == synthetic)
+    assert(load_auth_token_from(path, "confluence.primary") == "synthetic-other")
+    print "PASS actual auth token Unicode/escape roundtrip and other-provider preservation"
+    val before: text = match read_file_text_result(path):
+        case Ok(value): value
+        case Err(_): return 1
+    assert(not save_auth_token_to(path, "jira:\nother", "synthetic-injection"))
+    val after: text = match read_file_text_result(path):
+        case Ok(value): value
+        case Err(_): return 1
+    assert(before == after)
+    assert(not save_auth_token_to(root, "jira", "synthetic-directory"))
+    assert(save_auth_token_to(path, "jira", ""))
+    assert(load_auth_token_from(path, "jira") == "")
+    assert(load_auth_token_from(path, "confluence.primary") == "synthetic-other")
+    assert(file_delete(path))
+    print "PASS provider injection, invalid destination, deletion and cleanup guards"
+    0
