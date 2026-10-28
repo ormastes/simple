@@ -1,0 +1,158 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, cache, mono, generics
+# @cover src/compiler/40.mono/monomorphize/type_subst.spl
+# @cover src/compiler/40.mono/monomorphize_integration.spl
+# Authored regression: extern specialization keeps a unique typed instance id
+# while retaining its source C ABI spelling. No extern is invoked here.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.core.parser.parser_error_count
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_types.{HirModule, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExprKind, HirFunction}
+use compiler.mono.monomorphize_integration.MonomorphizationPass
+use compiler.mono.mono_invocation_policy_v1.mono_verification_limits_v1
+
+fn _extern_linkage_hir_v1() -> HirModule:
+    val source = "@unsafe(reason: \"generic extern linkage regression\", capabilities: [ffi])\n" +
+        "extern fn rt_mutex_lock<T>(mutex: i64) -> T\n" +
+        "@unsafe(reason: \"generic extern linkage regression\", capabilities: [ffi])\n" +
+        "extern fn rt_mutex_new<T>(initial: T) -> i64\n" +
+        "@unsafe(reason: \"generic extern linkage regression\", capabilities: [ffi])\n" +
+        "extern fn rt_mutex_unlock<T>(mutex: i64, new_value: T) -> i64\n" +
+        "\n" +
+        "fn lock_i64(mutex: i64) -> i64:\n    unsafe(capabilities: [ffi]):\n        rt_mutex_lock<i64>(mutex)\n" +
+        "fn lock_bool(mutex: i64) -> bool:\n    unsafe(capabilities: [ffi]):\n        rt_mutex_lock<bool>(mutex)\n" +
+        "fn new_i64(value: i64) -> i64:\n    unsafe(capabilities: [ffi]):\n        rt_mutex_new<i64>(value)\n" +
+        "fn unlock_bool(mutex: i64, value: bool) -> i64:\n    unsafe(capabilities: [ffi]):\n        rt_mutex_unlock<bool>(mutex, value)\n" +
+        "fn identity<T>(value: T) -> T:\n    value\n" +
+        "fn ordinary_i64(value: i64) -> i64:\n    identity<i64>(value)\n"
+    val parsed = parse_full_frontend(source, "generic_extern_linkage.spl", "generic_extern_linkage", Logger(level: 0))
+    assert(parser_error_count() == 0)
+    var lowering = HirLowering.with_filename("generic_extern_linkage.spl")
+    val module = lowering.lower_module(parsed)
+    assert(lowering.errors.len() == 0)
+    module
+
+fn _extern_linkage_modules_v1(module: HirModule) -> Dict<text, HirModule>:
+    var modules: Dict<text, HirModule> = {}
+    modules["generic_extern_linkage"] = module
+    modules
+
+fn _extern_linkage_find_function_v1(module: HirModule, name: text) -> HirFunction?:
+    for symbol in module.functions.keys():
+        val function: HirFunction = module.functions[symbol]
+        if function.name == name:
+            return Some(function)
+    nil
+
+fn _extern_linkage_assert_signature_v1(module: HirModule, function: HirFunction):
+    assert(function.is_extern)
+    assert(function.type_params.len() == 0)
+    assert(function.params.len() > 0)
+    if val row = module.symbols.get_symbol_raw(function.symbol.id):
+        assert(row.name == function.name)
+        if val signature = row.type_:
+            match signature.kind:
+                case HirTypeKind.Function(params, ret, _):
+                    assert(params.len() == function.params.len())
+                    var index = 0
+                    while index < params.len():
+                        assert(params[index].kind == function.params[index].type_.kind)
+                        index = index + 1
+                    assert(ret.kind == function.return_type.kind)
+                case _: assert(false)
+        else:
+            assert(false)
+    else:
+        assert(false)
+
+describe "generic extern linkage identity":
+    it "keeps C names and concrete typed rows while assigning distinct specialization symbols":
+        val original = _extern_linkage_hir_v1()
+        var pass_ = MonomorphizationPass.create_isolated_v1(mono_verification_limits_v1()).unwrap()
+        val modules = _extern_linkage_modules_v1(original)
+        val completed = pass_.process_modules_checked_v1(modules)
+        assert(completed.is_ok())
+        val result = completed.unwrap()
+        val output = result.modules
+        assert(pass_.diagnostics.len() == 0)
+        assert(pass_.stats.unresolved_generic_calls == 0)
+        assert(output.has("generic_extern_linkage"))
+        val module: HirModule = output["generic_extern_linkage"]
+
+        var lock_i64_id: i64 = -1
+        var lock_bool_id: i64 = -1
+        var extern_specializations = 0
+        var ordinary_generic_mangled = false
+        for key in pass_.specialized_functions.keys():
+            val function: HirFunction = pass_.specialized_functions[key]
+            if function.is_extern:
+                extern_specializations = extern_specializations + 1
+                _extern_linkage_assert_signature_v1(module, function)
+                if function.name == "rt_mutex_lock":
+                    assert(function.params[0].type_.kind == HirTypeKind.Int(64, true))
+                    if function.return_type.kind == HirTypeKind.Int(64, true):
+                        lock_i64_id = function.symbol.id
+                    elif function.return_type.kind == HirTypeKind.Bool:
+                        lock_bool_id = function.symbol.id
+                elif function.name == "rt_mutex_new":
+                    assert(function.params[0].type_.kind == HirTypeKind.Int(64, true))
+                    assert(function.return_type.kind == HirTypeKind.Int(64, true))
+                elif function.name == "rt_mutex_unlock":
+                    assert(function.params.len() == 2)
+                    assert(function.params[0].type_.kind == HirTypeKind.Int(64, true))
+                    assert(function.params[1].type_.kind == HirTypeKind.Bool)
+                    assert(function.return_type.kind == HirTypeKind.Int(64, true))
+                else:
+                    assert(false)
+            elif function.name.starts_with("identity$"):
+                assert(function.params.len() == 1)
+                assert(function.params[0].type_.kind == HirTypeKind.Int(64, true))
+                assert(function.return_type.kind == HirTypeKind.Int(64, true))
+                ordinary_generic_mangled = true
+
+        assert(extern_specializations == 4)
+        assert(lock_i64_id >= 0)
+        assert(lock_bool_id >= 0)
+        assert(lock_i64_id != lock_bool_id)
+        assert(ordinary_generic_mangled)
+
+        pass_.current_module = "generic_extern_linkage"
+        if val caller = _extern_linkage_find_function_v1(module, "lock_i64"):
+            assert(caller.body.has)
+            match caller.body.value.kind:
+                case HirExprKind.UnsafeBlock(body):
+                    assert(body.has)
+                    match body.value.kind:
+                        case HirExprKind.Call(callee, _, _):
+                            match callee.kind:
+                                case HirExprKind.NamedVar(symbol, name):
+                                    assert(name == "rt_mutex_lock")
+                                    assert(symbol.id == lock_i64_id)
+                                    assert(pass_.callee_generic_name(callee) == "")
+                                case _: assert(false)
+                        case _: assert(false)
+                case _: assert(false)
+
+            val specialization_count = pass_.stats.specializations_created
+            val rewritten_again = pass_.rewrite_function(caller)
+            assert(rewritten_again.body.has)
+            assert(pass_.stats.specializations_created == specialization_count)
+            match rewritten_again.body.value.kind:
+                case HirExprKind.UnsafeBlock(body):
+                    assert(body.has)
+                    match body.value.kind:
+                        case HirExprKind.Call(callee, _, _):
+                            match callee.kind:
+                                case HirExprKind.NamedVar(symbol, name):
+                                    assert(name == "rt_mutex_lock")
+                                    assert(symbol.id == lock_i64_id)
+                                    assert(pass_.callee_generic_name(callee) == "")
+                                case _: assert(false)
+                        case _: assert(false)
+                case _: assert(false)
+        else:
+            assert(false)

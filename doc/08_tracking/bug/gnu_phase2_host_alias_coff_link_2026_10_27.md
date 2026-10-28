@@ -296,3 +296,13 @@ BugDB source-matched read-only audit confirms CRC32 but predicts loader failure
 on headerless section6; 20 balanced-quote rows also have excess fields. They
 are not valid multiline quoted records. Intended values require disposition;
 no payload was guessed/discarded and canonical writes/readback remain zero.
+
+## Final bounded follow-up, 2026-10-28
+
+The GNU producer a757895813b3f6e31c31dead703ee4cd3e5434df75a138bfc7ad3ffed6a885fc
+passes real Hello execution, version/unsupported-command checks, and frontend
+smoke in both modes. Generic extern linkage and Windows command-length fixes
+allow the full runner native compilation and link to finish. A later optional
+SMF cache step hits the 16 GiB watchdog, leaving the outer build failed (88).
+See `phase2_runner_optional_smf_memory_2026_10_28.md`. No canonical admission,
+fullCLI verification, canonical BugDB write, or release readiness is claimed.
