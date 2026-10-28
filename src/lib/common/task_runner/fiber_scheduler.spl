@@ -199,8 +199,20 @@ fn fiber_sched_pick(s: FiberSchedV1, w: i64) -> FiberPickV1:
     FiberPickV1(sched: t, fiber: id)
 
 fn fiber_sched_complete(s: FiberSchedV1, w: i64, fiber: i64, step: FiberStepV1) -> FiberSchedV1:
-    """Apply one step result of `fiber`, run on worker w."""
+    """Apply one step result of the fiber currently picked by worker w."""
     var t = s
+    # READY plus absence from the owner's queue is this single-carrier core's
+    # implicit picked state. Reject duplicate/unowned delivery before changing
+    # queues or reservations. A valid owner may still drain after an error.
+    if w < 0 or w >= t.queues.len():
+        if t.error == "": t.error = "completion worker index out of range"
+        return t
+    if fiber < 0 or fiber >= t.fiber_state.len():
+        if t.error == "": t.error = "completion fiber index out of range"
+        return t
+    if t.fiber_state[fiber] != FIBER_STATE_READY or t.fiber_worker[fiber] != w or t.queues[w].contains(fiber):
+        if t.error == "": t.error = "completion requires a picked fiber owned by worker"
+        return t
     if step.kind == FIBER_STEP_DONE:
         t.fiber_state[fiber] = FIBER_STATE_DONE
         t.reserved = t.reserved - t.fiber_est[fiber]
