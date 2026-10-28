@@ -65,6 +65,8 @@ for index, path in enumerate(fixtures):
         valid = valid and ("structured BDD evidence unavailable" in shown or "no BDD examples executed" in shown)
     if path.name == "plain_green_test.spl":
         valid = valid and "Results: 1 total, 1 passed, 0 failed" in shown
+    if path.name == "plain_bdd_prefix_names_green_test.spl":
+        valid = valid and "Results: 1 total, 1 passed, 0 failed" in shown and "CALIBRATION_EXPECTED_plain_bdd_prefix_names_test" not in shown
     if path.name.startswith("mixed_") and path.name != "mixed_empty_spec.spl":
         valid = valid and "Results:" in shown and "SPL Doctest:" in shown
     if "red" in path.name:
