@@ -3,20 +3,44 @@
 # V4 scoped-environment provider is unavailable. This is a manual native
 # qualification: it needs a runner binary built from the selected source.
 set -eu
-if [ "$#" -ne 2 ] || [ "$1" != --binary ] || [ ! -x "$2" ]; then
-    echo "usage: $0 --binary <native-test-runner>" >&2
+if [ "$#" -ne 4 ] || [ "$1" != --binary ] || [ "$3" != --binary-sha256 ] || [ ! -x "$2" ]; then
+    echo "usage: $0 --binary <native-test-runner> --binary-sha256 <expected-sha256>" >&2
     exit 2
 fi
 runner=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd -P)/$(basename -- "$2")
+expected_runner_sha256=$4
+case "$expected_runner_sha256" in
+    *[!0-9a-f]*|'') echo "FAIL invalid expected runner SHA-256" >&2; exit 2 ;;
+esac
+if [ "${#expected_runner_sha256}" -ne 64 ]; then
+    echo "FAIL expected runner SHA-256 must contain 64 lowercase hex digits" >&2
+    exit 2
+fi
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 fixture=$repo/test/fixtures/test_runner_source_routes/calibration/public_sdn_guard_marker_spec.spl
 fixture_sha256=41bc17c60bccc4ddb31bff3a297ada97e45d2f1529a96fd8ba7d214beef26fc3
-actual_fixture_sha256=$(shasum -a 256 "$fixture" | awk '{print $1}')
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 -q "$1"
+    else
+        echo "FAIL no SHA-256 utility found (need shasum, sha256sum, or sha256)" >&2
+        return 1
+    fi
+}
+actual_fixture_sha256=$(sha256_file "$fixture")
 if [ "$actual_fixture_sha256" != "$fixture_sha256" ]; then
     echo "FAIL fixture identity: expected $fixture_sha256, got $actual_fixture_sha256" >&2
     exit 1
 fi
-runner_sha256=$(shasum -a 256 "$runner" | awk '{print $1}')
+runner_sha256=$(sha256_file "$runner")
+if [ "$runner_sha256" != "$expected_runner_sha256" ]; then
+    echo "FAIL runner identity: expected $expected_runner_sha256, got $runner_sha256" >&2
+    exit 1
+fi
 work=$(mktemp -d "${TMPDIR:-/tmp}/native-public-sdn-guard.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
