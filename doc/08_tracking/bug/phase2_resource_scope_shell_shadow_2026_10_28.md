@@ -33,4 +33,37 @@ The standalone gate verifies all 11 named cases independently of runner status.
 Native runner acceptance uses positive, negative and empty BDD, SSpec, plain SPL,
 Markdown and source-comment fixtures; all receipts are retained separately.
 
-Qualification results: pending.
+## Native qualification
+
+Workaround commits: `9fd8fc597a6` (call site) and `75a52c487ae` (selector).
+Qualified source: `75a52c487aefa57e0a5a6fc9bd7cda103a40fec4`.
+Producer SHA256: `0d6f2e4720845195c9f91de292056fac4c57cabef81390507c78d95e51133a28`.
+The phase2 compiler was not rebuilt. The initial sparse-checkout link failure
+(missing counterpart header) and call-site-only 10/11 result remain retained.
+After both renames, all 11 native regression cases pass. Probe SHA256:
+`ddd6e27f108367b6b2ee10b0de6b18771aa4a88fb7d62b963b97d28669ae2277`.
+Luna reviewed the exact source commit without findings.
+
+The native runner built in 195 seconds, peak observed process-tree RSS
+7,439,824 KiB, quiescent completion, SHA256:
+`ea9972bd35a2023594baa24c2a4e6d37c90dd3702bb8e44c46951e4c3b62b501`.
+Receipts and immutable fixture copies/hashes:
+`/tmp/runner-limit-shell-evidence-20261028/` (`scope-build.status`,
+`scope-check.stdout`, `runner-build.status`, `runner-build.rss.env`,
+`qualification-patched/identity.json`, `qualification-patched/rows.json`).
+Its 24 positive/negative/empty invocations used the retained Phase1 child;
+this mixed-producer run is diagnostic, not phase2 child admission.
+
+Markdown returns expected exits 0/1/1 and pass/fail/no-block results. The four
+source-documentation forms (`#`, `##`, `///`, docstring) each produce expected
+doctest subresults: green 1 passed, red 1 failed, empty rejected. Standalone
+snippets use conditional `panic` assertions; the earlier raw `assert` inputs
+were invalid under the retained child and remain preserved in the prior folder.
+
+The normal file route still reports `Resource limit exceeded ()` for BDD,
+SSpec, plain SPL and source-comment files, after successfully launching the
+child. All 21 non-Markdown commands therefore return 1. Some show the existing
+MC/DC compile fallback diagnostic (`struct i64 has no field recorder`). No
+positive BDD/SSpec/plain-SPL acceptance or whole comment-command success is
+claimed. See `phase2_runner_empty_limit_classification_2026_10_28.md` for the
+next blocker. Do not promote this candidate or mark the compiler defect fixed.
