@@ -32,3 +32,31 @@ The bounded repair campaign is stopped. New SPL specs, fullCLI/core/MCP smoke,
 and production readiness remain unverified. PR stays draft. The malformed
 canonical BugDB and missing real writer block registration; no database edits
 or stub-writer success are claimed.
+
+## Source investigation, 2026-10-29
+
+Landing status update: PR #5153 was merged into `release/1.0.0` on
+2026-10-28 at 05:58:11 UTC, merge commit
+`c0c1e5a37b7f64a7562c3936d9b2b519568c0e6c`.
+The earlier draft/HOLD description above records the investigation's prior
+state; merging does not establish the missing runner or production checks.
+
+The retained descendant command supplies `--entry` but omits `--mode`.
+The full native-build worker defaults to `dynload`;
+`src/app/cli/native_build_output_plan.spl::native_build_output_format_v1`
+selects Both for that mode when neither explicit native-only output nor a
+native group is requested. `--mode one-binary` selects Native when
+`--emit-smf` is absent. The assignment to Native on bootstrap_main's
+positional source route does not establish the explicit-entry worker's policy.
+
+This provides a supported native-only diagnostic command without changing
+compiler defaults, disabling the memory guard, or introducing MSVC settings.
+Prepared local helper:
+`build/shared-scheduler-evidence/build_phase2_native_only_prepared.sh`.
+It adds `--mode one-binary` to the retained GNU command and preserves the
+14 GiB cap, 8 GiB reserve, one worker, producer hash check, and fresh-output
+requirement. It has NOT been executed: the prior repair campaign's retry
+budget is exhausted. No build, runner, admission, or memory-improvement PASS
+is claimed. The SMF collector also rejects COFF only after compiling and
+concatenating modules; early format validation remains a separate proposed
+repair, not an established cause of the measured allocation peak.
