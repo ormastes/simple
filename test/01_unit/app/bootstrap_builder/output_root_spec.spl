@@ -3,6 +3,10 @@ use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1, buil
 use app.bootstrap_builder.cli_args.{builder_cli_parse_v1}
 use app.bootstrap_builder.main.{builder_cli_resolve_roots_v1, builder_cli_publish_v1,
     builder_cli_verify_v1}
+use app.buildrunner.cli.{builder_cli_run_locked_v1}
+use app.io.env_ops.{host_os}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
+use std.nogc_sync_mut.sffi.fs.{file_mode}
 use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_encode_v1}
 use app.bootstrap_builder.codec.{builder_write_result_v1}
 use app.bootstrap_builder.process_port.{BuilderProcessPortV1, builder_process_portable_v1}
@@ -146,5 +150,29 @@ describe "bootstrap builder private output owner":
         expect(file_exists(attempt + "/result.sdn")).to_equal(true)
         expect(file_exists(attempt + "/compiler.reaped")).to_equal(true)
         expect(builder_cli_verify_v1(run, config, output_root_test_process_v1())).to_equal(0)
+        if host_os() != "windows":
+            # Existing synthetic receipt fixture tests cache orchestration,
+            # not a real compiler run or native process-provider admission.
+            expect(set_permissions(attempt + "/work/module.o", 0o750)).to_equal(true)
+            expect(set_permissions(root + "/output/module.o", 0o640)).to_equal(true)
+            expect(builder_cli_verify_v1(run, config, output_root_test_process_v1())).to_equal(1)
+            expect(file_mode(root + "/output/module.o")).to_equal(0o640)
+            expect(builder_cli_run_locked_v1(run, config, output_root_test_process_v1(), nil)).to_equal(0)
+            expect(file_mode(root + "/output/module.o")).to_equal(0o750)
+            expect(builder_cli_verify_v1(run, config, output_root_test_process_v1())).to_equal(0)
         expect(file_atomic_write(root + "/output/module.o", "damaged bytes\n")).to_equal(true)
         expect(builder_cli_verify_v1(run, config, output_root_test_process_v1())).to_equal(1)
+
+        if host_os() != "windows":
+            # A remote attempt's already collected local output is sufficient
+            # for a byte-matching hit. No SSH/SCP or worker start is needed.
+            var remote = host
+            remote.transport = "ssh"
+            remote.endpoint = "127.0.0.1"
+            val remote_run = BuildRunV1(tasks: [task], hosts: [remote], keep_going: true, max_attempts: 2)
+            expect(file_atomic_write(root + "/state/journal.sdn",
+                builder_manager_encode_v1(builder_manager_start(remote_run)))).to_equal(true)
+            expect(file_atomic_write(root + "/output/module.o", "object bytes\n")).to_equal(true)
+            expect(set_permissions(root + "/output/module.o", 0o640)).to_equal(true)
+            expect(builder_cli_run_locked_v1(remote_run, config, output_root_test_process_v1(), nil)).to_equal(0)
+            expect(file_mode(root + "/output/module.o")).to_equal(0o750)

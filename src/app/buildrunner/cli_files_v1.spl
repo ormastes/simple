@@ -4,6 +4,8 @@ use app.buildrunner.scv_session_v1.{BuildRunnerScvSessionV1, build_runner_scv_ta
 use app.io.file_ops.{file_exists, file_hash_sha256, file_is_regular_no_follow,
     path_absolute, secure_temp_dir, file_copy, file_publish_noreplace, file_delete}
 use app.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
+use std.nogc_sync_mut.sffi.fs.{file_mode}
 use std.nogc_sync_mut.io_runtime.{dir_exists, dir_remove}
 use app.bootstrap_builder.cli_args.{BuilderCliV1}
 use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
@@ -64,6 +66,30 @@ fn builder_cli_output_parent_safe_v1(root: text, relative: text,
     val prefix = if canonical_root.ends_with("/"): canonical_root else: canonical_root + "/"
     canonical_parent == canonical_root or canonical_parent.starts_with(prefix)
 
+fn builder_cli_output_mode_v1(source: text, destination: text, repair: bool) -> bool:
+    if not file_is_regular_no_follow(source) or not file_is_regular_no_follow(destination):
+        return false
+    # Windows execution does not use POSIX mode bits. On POSIX the retained
+    # artifact owns ordinary permissions; never propagate setuid/setgid bits.
+    if host_os() == "windows": return true
+    val source_mode = file_mode(source)
+    val destination_mode = file_mode(destination)
+    if source_mode < 0 or destination_mode < 0: return false
+    val expected = source_mode & 0o777
+    if destination_mode == expected: return true
+    # Output/attempt roots and their ancestors are manager-owned, as for
+    # publication's existing no-follow checks followed by path-based copying.
+    if not repair or not set_permissions(destination, expected.to_i32()): return false
+    file_is_regular_no_follow(destination) and file_mode(destination) == expected
+
+fn builder_cli_output_modes_match_v1(task: BuildTaskV1, attempt_root: text,
+        output_root: text, process: BuilderProcessPortV1) -> bool:
+    for path in task.outputs:
+        if not builder_cli_output_parent_safe_v1(output_root, path, process): return false
+        if not builder_cli_output_mode_v1(attempt_root + "/work/" + path,
+                output_root + "/" + path, false): return false
+    true
+
 fn builder_cli_publish_one_v1(source: text, output_root: text, relative: text,
         digest: text, process: BuilderProcessPortV1) -> bool:
     if not file_is_regular_no_follow(source) or file_hash_sha256(source) != digest: return false
@@ -72,13 +98,15 @@ fn builder_cli_publish_one_v1(source: text, output_root: text, relative: text,
     if not dir_create_all(parent) or not builder_cli_output_parent_safe_v1(output_root, relative, process):
         return false
     if file_exists(destination):
-        return file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest
+        return file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest and
+            builder_cli_output_mode_v1(source, destination, true) and file_hash_sha256(destination) == digest
     val stage_root = match secure_temp_dir(parent, "builder-publish"):
         case Ok(value): value
         case Err(_reason): return false
     val stage = stage_root + "/output"
     var ready = file_copy(source, stage)
     if ready: ready = file_is_regular_no_follow(stage) and file_hash_sha256(stage) == digest
+    if ready: ready = builder_cli_output_mode_v1(source, stage, true)
     # Recheck the full parent chain immediately before the no-replace move.
     if ready: ready = builder_cli_output_parent_safe_v1(output_root, relative, process)
     var published = false
@@ -88,7 +116,8 @@ fn builder_cli_publish_one_v1(source: text, output_root: text, relative: text,
             case Err(_reason): ()
     if not published: file_delete(stage)
     if not dir_remove(stage_root, false): return false
-    file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest
+    file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest and
+        builder_cli_output_mode_v1(source, destination, true) and file_hash_sha256(destination) == digest
 
 fn builder_cli_publish_v1(task: BuildTaskV1, receipt: BuildResultV1, attempt_root: text,
         output_root: text, process: BuilderProcessPortV1) -> bool:
@@ -169,3 +198,4 @@ fn builder_cli_resolve_roots_v1(config: BuilderCliV1,
 export builder_cli_hash_outputs_v1, builder_cli_input_error_v1, builder_cli_inputs_match_v1
 export builder_cli_parent_directory_v1, builder_cli_output_parent_safe_v1, builder_cli_publish_v1
 export builder_cli_resolve_roots_v1
+export builder_cli_output_modes_match_v1
