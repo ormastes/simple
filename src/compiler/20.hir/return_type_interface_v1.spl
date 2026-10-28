@@ -64,9 +64,8 @@ struct RtiError:
     code: text
     message: text
 
-# @workaround bug=mono_generic_return_ctx_inference_2026-10-27: was generic rti_err<T>() -> Result<T, RtiError>; mono cannot infer T from the expected return type (E-MONO-032), so callers wrap Err(...) themselves.
-fn rti_error(code: text, message: text) -> RtiError:
-    RtiError(code: code, message: code + ": " + message)
+fn rti_err<T>(code: text, message: text) -> Result<T, RtiError>:
+    Err(RtiError(code: code, message: code + ": " + message))
 
 fn rti_module_id(name: text) -> text:
     """The ONE module-identity fold for RTI. Declaration-populated symbols
@@ -220,7 +219,7 @@ fn rti_named_term(raw: i64, args: [HirType], symbols: SymbolTable, type_params: 
 fn rti_param_term(name: text, type_params: [text]) -> Result<RtType, RtiError>:
     val index = rti_param_index(name, type_params)
     if index < 0:
-        return Err(rti_error("E-RTI-007", "type parameter '{name}' is not bound by the callable or its owner"))
+        return rti_err("E-RTI-007", "type parameter '{name}' is not bound by the callable or its owner")
     Ok(RtType.Param(index))
 
 fn rti_term_of_hir_type(t: HirType, symbols: SymbolTable, type_params: [text]) -> Result<RtType, RtiError>:
@@ -244,10 +243,10 @@ fn rti_term_of_hir_type(t: HirType, symbols: SymbolTable, type_params: [text]) -
         case HirTypeKind.Shared(inner): Ok(RtType.OwnedT("shared", rti_term_of_hir_type(inner, symbols, type_params)?))
         case HirTypeKind.Weak(inner): Ok(RtType.OwnedT("weak", rti_term_of_hir_type(inner, symbols, type_params)?))
         case HirTypeKind.Isolated(inner): rti_term_of_hir_type(inner, symbols, type_params)
-        case HirTypeKind.Any: Err(rti_error("E-RTI-007", "declared return is Any; not representable in an interface row"))
-        case HirTypeKind.Infer(_, _): Err(rti_error("E-RTI-007", "declared return is an inference variable"))
-        case HirTypeKind.Error: Err(rti_error("E-RTI-007", "declared return is an error type"))
-        case _: Err(rti_error("E-RTI-007", "declared return term is not representable in RTI v1"))
+        case HirTypeKind.Any: rti_err("E-RTI-007", "declared return is Any; not representable in an interface row")
+        case HirTypeKind.Infer(_, _): rti_err("E-RTI-007", "declared return is an inference variable")
+        case HirTypeKind.Error: rti_err("E-RTI-007", "declared return is an error type")
+        case _: rti_err("E-RTI-007", "declared return term is not representable in RTI v1")
 
 # ============================================================================
 # Local symbol -> DeclRef
@@ -262,8 +261,8 @@ fn rti_type_decl_ref(symbols: SymbolTable, raw: i64) -> Result<DeclRef, RtiError
         val module_id = rti_symbol_module(symbols, raw)
         if kind != "" and module_id != "":
             return Ok(rti_type_ref(module_id, kind, rti_last_segment(sym.name)))
-        return Err(rti_error("E-RTI-004", "symbol '{sym.name}' is not a nominal type with a defining module"))
-    Err(rti_error("E-RTI-004", "no local symbol for id {raw}"))
+        return rti_err("E-RTI-004", "symbol '{sym.name}' is not a nominal type with a defining module")
+    rti_err("E-RTI-004", "no local symbol for id {raw}")
 
 fn rti_owner_ref(symbols: SymbolTable, module_id: text, owner_name: text) -> DeclRef:
     var kind = rti_owner_kind_at(symbols, module_id, symbols.lookup_qualified_type_raw(module_id, owner_name))
@@ -368,7 +367,7 @@ fn rti_row_from_signature_v1(module_name: text, symbols: SymbolTable,
             val key = CalleeKey(module_id: module_id, owner: owner, name: rti_last_segment(decl.display), is_static: signature.is_static)
             Ok(ReturnTypeRow(decl: decl, key: key, type_param_count: params.len(), entry: ReturnTypeEntry.Decided(t)))
         case Err(e):
-            Err(rti_error(e.code, "callee '{decl.display}' of module '{module_id}': {e.message}"))
+            rti_err(e.code, "callee '{decl.display}' of module '{module_id}': {e.message}")
 
 fn rti_row_of_function(module: HirModule, module_id: text, f: HirFunction) -> Result<ReturnTypeRow, RtiError>:
     var sym_name = f.name
@@ -494,11 +493,11 @@ impl ReturnTypeInterfaceTable:
         val key_text = rti_key_text(row.key)
         val owned = module_id + "|" + row.decl.decl_id
         if self.rows_by_key.has(key_text) and self.rows_by_key[key_text] != owned:
-            return Err(rti_error("E-RTI-006", "two rows for callee '{row.key.name}' in module '{module_id}': {self.rows_by_key[key_text]} and {owned} ({row.decl.display})"))
+            return rti_err("E-RTI-006", "two rows for callee '{row.key.name}' in module '{module_id}': {self.rows_by_key[key_text]} and {owned} ({row.decl.display})")
         if rows.has(row.decl.decl_id):
             if rti_row_canonical_text_v1(rows[row.decl.decl_id]) == rti_row_canonical_text_v1(row):
                 return Ok(0)
-            return Err(rti_error("E-RTI-006", "conflicting rows for '{row.decl.display}' in module '{module_id}'"))
+            return rti_err("E-RTI-006", "conflicting rows for '{row.decl.display}' in module '{module_id}'")
         rows[row.decl.decl_id] = row
         self.rows_by_module[module_id] = rows
         self.rows_by_key[key_text] = owned
@@ -513,7 +512,7 @@ impl ReturnTypeInterfaceTable:
             if expected_module == "":
                 expected_module = row.decl.module_id
             if row.decl.module_id != expected_module:
-                return Err(rti_error("E-RTI-006", "rows from multiple modules in one registration: '{expected_module}' and '{row.decl.module_id}'"))
+                return rti_err("E-RTI-006", "rows from multiple modules in one registration: '{expected_module}' and '{row.decl.module_id}'")
             added = added + self.register_row(row.decl.module_id, row)?
         Ok(added)
 
@@ -551,9 +550,9 @@ impl ReturnTypeInterfaceTable:
         val decl = rti_key_ref(key)
         if val row = self.row_at(decl):
             if row.key.is_static != key.is_static:
-                return Err(rti_error("E-RTI-001", "callee '{key.name}' of module '{key.module_id}' has no {rti_static_word(key.is_static)} return-type row ({decl.display})"))
+                return rti_err("E-RTI-001", "callee '{key.name}' of module '{key.module_id}' has no {rti_static_word(key.is_static)} return-type row ({decl.display})")
             return Ok(row)
-        Err(rti_error("E-RTI-001", "callee '{key.name}' of module '{key.module_id}' has no return-type row ({decl.display})"))
+        rti_err("E-RTI-001", "callee '{key.name}' of module '{key.module_id}' has no return-type row ({decl.display})")
 
     fn resolve(entry: ReturnTypeEntry) -> Result<ReturnTypeEntry, RtiError>:
         var current = entry
@@ -565,32 +564,32 @@ impl ReturnTypeInterfaceTable:
                 case ReturnTypeEntry.AsyncRef(target):
                     val step = target.module_id + "." + target.display
                     if chain.contains(step) or chain.len() >= RTI_MAX_DEPTH:
-                        return Err(rti_error("E-RTI-005", "return-type alias chain cycles or exceeds depth {RTI_MAX_DEPTH}: " + chain.push(step).join(" -> ")))
+                        return rti_err("E-RTI-005", "return-type alias chain cycles or exceeds depth {RTI_MAX_DEPTH}: " + chain.push(step).join(" -> "))
                     chain = chain.push(step)
                     if val row = self.row_at(target):
                         current = row.entry
                     else:
-                        return Err(rti_error("E-RTI-002", "return type of '{step}' not loaded at MIR lowering; reader fill failed/absent"))
+                        return rti_err("E-RTI-002", "return type of '{step}' not loaded at MIR lowering; reader fill failed/absent")
         current
 
     fn require_concrete(entry: ReturnTypeEntry) -> Result<RtType, RtiError>:
         match entry:
             case ReturnTypeEntry.Decided(term):
                 if rti_term_has_param(term):
-                    return Err(rti_error("E-RTI-003", "unsubstituted generic parameter in '{rti_term_canonical_text(term)}' reached a concrete consumer"))
+                    return rti_err("E-RTI-003", "unsubstituted generic parameter in '{rti_term_canonical_text(term)}' reached a concrete consumer")
                 Ok(term)
             case ReturnTypeEntry.Union(terms):
-                Err(rti_error("E-RTI-002", "return type is a union of {terms.len()} arms; MIR must select the arm for its target"))
+                rti_err("E-RTI-002", "return type is a union of {terms.len()} arms; MIR must select the arm for its target")
             case ReturnTypeEntry.AsyncRef(target):
-                Err(rti_error("E-RTI-002", "return type of '{target.module_id}.{target.display}' not loaded at MIR lowering; reader fill failed/absent"))
+                rti_err("E-RTI-002", "return type of '{target.module_id}.{target.display}' not loaded at MIR lowering; reader fill failed/absent")
 
     fn instantiate(row: ReturnTypeRow, args: [RtType]) -> Result<RtType, RtiError>:
         if args.len() != row.type_param_count:
-            return Err(rti_error("E-RTI-003", "'{row.decl.display}' of module '{row.decl.module_id}' takes {row.type_param_count} type argument(s), got {args.len()}"))
+            return rti_err("E-RTI-003", "'{row.decl.display}' of module '{row.decl.module_id}' takes {row.type_param_count} type argument(s), got {args.len()}")
         match self.resolve(row.entry)?:
             case ReturnTypeEntry.Decided(term): Ok(rti_subst(term, args))
-            case ReturnTypeEntry.Union(_): Err(rti_error("E-RTI-002", "'{row.decl.display}' returns a union; select an arm before instantiating"))
-            case ReturnTypeEntry.AsyncRef(target): Err(rti_error("E-RTI-002", "'{target.display}' unresolved"))
+            case ReturnTypeEntry.Union(_): rti_err("E-RTI-002", "'{row.decl.display}' returns a union; select an arm before instantiating")
+            case ReturnTypeEntry.AsyncRef(target): rti_err("E-RTI-002", "'{target.display}' unresolved")
 
     fn bind_all(terms: [RtType], symbols: SymbolTable) -> Result<[HirType], RtiError>:
         var out: [HirType] = []
@@ -613,7 +612,7 @@ impl ReturnTypeInterfaceTable:
             case RtType.RefT(inner, mutable): Ok(rti_hir(HirTypeKind.Ref(self.bind(inner, symbols)?, mutable)))
             case RtType.PtrT(inner, mutable): Ok(rti_hir(HirTypeKind.Ptr(self.bind(inner, symbols)?, mutable)))
             case RtType.OwnedT(kind, inner): rti_bind_owned(kind, self.bind(inner, symbols)?)
-            case RtType.Param(index): Err(rti_error("E-RTI-003", "generic parameter #{index} reached bind unsubstituted"))
+            case RtType.Param(index): rti_err("E-RTI-003", "generic parameter #{index} reached bind unsubstituted")
 
     fn bind_decl(decl: DeclRef, symbols: SymbolTable) -> Result<i64, RtiError>:
         val name = rti_last_segment(decl.display)
@@ -626,17 +625,17 @@ impl ReturnTypeInterfaceTable:
             if rti_type_matches(symbols, raw, decl): return Ok(raw)
         for raw in symbols.symbols.keys():
             if rti_type_matches(symbols, raw, decl): return Ok(raw)
-        Err(rti_error("E-RTI-004", "type '{decl.module_id}.{decl.display}' is not imported in this module"))
+        rti_err("E-RTI-004", "type '{decl.module_id}.{decl.display}' is not imported in this module")
 
     fn decl_ref_of(symbols: SymbolTable, raw_id: i64) -> Result<DeclRef, RtiError>:
         if val sym = symbols.get_symbol_raw(raw_id):
             val module_id = rti_symbol_module(symbols, raw_id)
             if module_id == "":
-                return Err(rti_error("E-RTI-001", "callee '{sym.name}' has no defining module"))
+                return rti_err("E-RTI-001", "callee '{sym.name}' has no defining module")
             match sym.kind:
                 case SymbolKind.Function | SymbolKind.Method: return Ok(self.callable_ref(symbols, module_id, sym.name))
                 case _: return rti_type_decl_ref(symbols, raw_id)
-        Err(rti_error("E-RTI-004", "no local symbol for id {raw_id}"))
+        rti_err("E-RTI-004", "no local symbol for id {raw_id}")
 
     fn callable_ref(symbols: SymbolTable, module_id: text, name: text) -> DeclRef:
         val parts = rti_method_parts(name)
@@ -654,14 +653,14 @@ impl ReturnTypeInterfaceTable:
             case HirExprKind.MethodCall(receiver, method, _, _): self.method_return(receiver, method, symbols, receiver_type)
             case HirExprKind.Var(sym): self.fn_return(symbols, sym.id, "")
             case HirExprKind.NamedVar(sym, name): self.fn_return(symbols, sym.id, name)
-            case _: Err(rti_error("E-RTI-001", "expression is not a call to a declared callable (RTI v1 covers free functions and struct/class methods)"))
+            case _: rti_err("E-RTI-001", "expression is not a call to a declared callable (RTI v1 covers free functions and struct/class methods)")
 
     fn call_return(callee: HirExpr, symbols: SymbolTable) -> Result<ReturnTypeEntry, RtiError>:
         match callee.kind:
             case HirExprKind.Var(sym): self.fn_return(symbols, sym.id, "")
             case HirExprKind.NamedVar(sym, name): self.fn_return(symbols, sym.id, name)
             case HirExprKind.Field(base, field, _): self.method_return(base, field, symbols, nil)
-            case _: Err(rti_error("E-RTI-001", "callee expression shape is not covered by RTI v1 (closures/indirect calls)"))
+            case _: rti_err("E-RTI-001", "callee expression shape is not covered by RTI v1 (closures/indirect calls)")
 
     fn fn_return(symbols: SymbolTable, raw: i64, name: text) -> Result<ReturnTypeEntry, RtiError>:
         # NamedVar deliberately preserves this identity across HIR transport:
@@ -682,22 +681,22 @@ impl ReturnTypeInterfaceTable:
                         val own_module = rti_symbol_module(symbols, raw)
                         val own_decl = rti_fn_ref(own_module, rti_last_segment(symbol.name))
                         if own_module != "" and rti_decl_ref_same(own_decl, qualified):
-                            return Err(rti_error("E-RTI-001", "qualified callee '{name}' has no return-type row for the same declared callable"))
+                            return rti_err("E-RTI-001", "qualified callee '{name}' has no return-type row for the same declared callable")
                     case _: ()
-            return Err(rti_error("E-RTI-002", "qualified callee '{name}' has no exact return-type row; raw symbol fallback is not authoritative"))
+            return rti_err("E-RTI-002", "qualified callee '{name}' has no exact return-type row; raw symbol fallback is not authoritative")
         var target = raw
         if raw < 0:
             target = rti_wildcard_callable(symbols, name)?
         val decl = self.decl_ref_of(symbols, target)?
         if val row = self.row_at(decl):
             return Ok(row.entry)
-        Err(rti_error("E-RTI-001", "callee '{rti_last_segment(decl.display)}' of module '{decl.module_id}' has no return-type row ({decl.display})"))
+        rti_err("E-RTI-001", "callee '{rti_last_segment(decl.display)}' of module '{decl.module_id}' has no return-type row ({decl.display})")
 
     fn receiver_owner(receiver: HirExpr, symbols: SymbolTable, receiver_type: HirType?) -> Result<(DeclRef, bool), RtiError>:
         if val declared = receiver_type:
             match declared.kind:
                 case HirTypeKind.Named(sym, _): return Ok((rti_type_decl_ref(symbols, sym.id)?, false))
-                case HirTypeKind.DynTrait(_): return Err(rti_error("E-RTI-001", "dyn-trait receivers are RTI PR2"))
+                case HirTypeKind.DynTrait(_): return rti_err("E-RTI-001", "dyn-trait receivers are RTI PR2")
                 case _: ()
         match receiver.kind:
             case HirExprKind.Var(sym): return self.static_or_value_owner(symbols, sym.id)
@@ -706,7 +705,7 @@ impl ReturnTypeInterfaceTable:
         val term = self.require_concrete(self.resolve(self.callee_return(receiver, symbols, nil)?)?)?
         match term:
             case RtType.Nominal(decl, _): Ok((decl, false))
-            case _: Err(rti_error("E-RTI-001", "receiver type '{rti_term_canonical_text(term)}' is not a struct/class (trait receivers are RTI PR2)"))
+            case _: rti_err("E-RTI-001", "receiver type '{rti_term_canonical_text(term)}' is not a struct/class (trait receivers are RTI PR2)")
 
     fn static_or_value_owner(symbols: SymbolTable, raw: i64) -> Result<(DeclRef, bool), RtiError>:
         if val sym = symbols.get_symbol_raw(raw):
@@ -716,7 +715,7 @@ impl ReturnTypeInterfaceTable:
                 match declared.kind:
                     case HirTypeKind.Named(type_sym, _): return Ok((rti_type_decl_ref(symbols, type_sym.id)?, false))
                     case _: ()
-        Err(rti_error("E-RTI-001", "receiver symbol {raw} has no declared struct/class type (trait receivers are RTI PR2)"))
+        rti_err("E-RTI-001", "receiver symbol {raw} has no declared struct/class type (trait receivers are RTI PR2)")
 
     fn method_return(receiver: HirExpr, method: text, symbols: SymbolTable, receiver_type: HirType?) -> Result<ReturnTypeEntry, RtiError>:
         val (owner, is_static) = self.receiver_owner(receiver, symbols, receiver_type)?
@@ -753,10 +752,10 @@ fn rti_wildcard_callable(symbols: SymbolTable, name: text) -> Result<i64, RtiErr
         if key.ends_with(suffix):
             val raw: i64 = symbols.module_callables[key]
             if found >= 0 and found != raw:
-                return Err(rti_error("E-RTI-006", "callee '{name}' matches several wildcard-imported callables"))
+                return rti_err("E-RTI-006", "callee '{name}' matches several wildcard-imported callables")
             found = raw
     if found < 0:
-        return Err(rti_error("E-RTI-001", "callee '{name}' has no symbol and no module_callables row"))
+        return rti_err("E-RTI-001", "callee '{name}' has no symbol and no module_callables row")
     Ok(found)
 
 fn rti_function_module(module: HirModule, fallback: text, f: HirFunction) -> text:
