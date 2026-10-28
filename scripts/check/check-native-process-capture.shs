@@ -1,0 +1,36 @@
+#!/bin/sh
+# Execute a prebuilt test/fixtures/test_runner_native_process_capture/main.spl.
+# Keep this gate outside the test runner whose startup depends on process capture.
+set -eu
+if [ "$#" -ne 2 ] || [ "$1" != --binary ] || [ ! -x "$2" ]; then
+    echo "usage: $0 --binary <native-process-capture-regression>" >&2
+    exit 2
+fi
+binary=$2
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-process-capture.XXXXXX")
+trap '[ "${SIMPLE_NATIVE_CAPTURE_KEEP_WORK:-0}" = 1 ] || rm -rf "$work"' EXIT HUP INT TERM
+export TMPDIR=$work
+export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1048576
+export SIMPLE_PROCESS_TREE_RSS_RECEIPT=$work/process.rss.env
+set +e
+sh "$repo/scripts/bootstrap/run-process-group-timeout.shs" 30 2 "$binary" > "$work/stdout" 2> "$work/stderr"
+status=$?
+set -e
+cat "$work/stdout"
+if [ "$status" -ne 0 ]; then
+    cat "$work/stderr" >&2
+    echo "FAIL native process capture: executable exit=$status; evidence=$work" >&2
+    exit 1
+fi
+for case_name in unbounded-argv-utf8-exit bounded-empty-spaced-arguments-stderr empty-argv missing-command-fails empty-command-fails timeout-fails stdout-stderr-capture-limit; do
+    if ! grep -Fx "PASS $case_name" "$work/stdout" >/dev/null; then
+        echo "FAIL native process capture: missing case $case_name; evidence=$work" >&2
+        exit 1
+    fi
+done
+if grep '^FAIL ' "$work/stdout" >/dev/null || ! grep -Fx 'PROCESS_CAPTURE_REGRESSION failures=0' "$work/stdout" >/dev/null; then
+    echo "FAIL native process capture: invalid regression summary; evidence=$work" >&2
+    exit 1
+fi
+echo "PASS native process capture: 7 cases; binary=$binary; evidence=$work"
