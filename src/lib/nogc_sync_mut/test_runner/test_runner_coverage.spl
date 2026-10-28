@@ -5,7 +5,7 @@
 
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.io_runtime.{dir_create_all}
-use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists, file_delete, file_is_regular_no_follow}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists, file_delete, file_is_regular_no_follow, file_atomic_write}
 
 # Coverage extern declarations (same as coverage_simple.spl)
 extern fn rt_coverage_enabled() -> bool
@@ -636,11 +636,15 @@ fn print_coverage_summary(data: CoverageData):
 # Reports: Generate coverage files
 # =========================================================================
 
-fn generate_coverage_reports(data: CoverageData):
-    dir_create_all("build/coverage")
+fn generate_coverage_reports(data: CoverageData, output_dir: text = "build/coverage") -> bool:
+    if not dir_create_all(output_dir):
+        print "[Coverage] ERROR: cannot create report directory {output_dir}"
+        return false
 
     # 1. Raw SDN data
-    file_write("build/coverage/coverage.sdn", data.raw_sdn)
+    if not file_atomic_write("{output_dir}/coverage.sdn", data.raw_sdn):
+        print "[Coverage] ERROR: cannot publish {output_dir}/coverage.sdn"
+        return false
 
     # 2. Summary markdown
     var summary_parts: [text] = []
@@ -658,7 +662,9 @@ fn generate_coverage_reports(data: CoverageData):
     for fc in sorted:
         summary_parts.push("| {fc.path} | {fc.decisions_covered} | {fc.decisions_total} | {fc.decision_pct}% | {fc.conditions_covered} | {fc.conditions_total} | {fc.condition_pct}% |")
 
-    file_write("build/coverage/summary.md", summary_parts.join("\n") + "\n")
+    if not file_atomic_write("{output_dir}/summary.md", summary_parts.join("\n") + "\n"):
+        print "[Coverage] ERROR: cannot publish {output_dir}/summary.md"
+        return false
 
     # 3. Uncovered report (files with <100% coverage, sorted by gap)
     var uncov_parts: [text] = []
@@ -678,12 +684,15 @@ fn generate_coverage_reports(data: CoverageData):
         uncov_parts.push("| (none) | 100% | 0 | All covered! |")
 
     uncov_parts.push("\nTotal files with gaps: {uncov_count}")
-    file_write("build/coverage/uncovered.md", uncov_parts.join("\n") + "\n")
+    if not file_atomic_write("{output_dir}/uncovered.md", uncov_parts.join("\n") + "\n"):
+        print "[Coverage] ERROR: cannot publish {output_dir}/uncovered.md"
+        return false
 
-    print "[Coverage] Reports written to build/coverage/"
-    print "  build/coverage/coverage.sdn  (raw data)"
-    print "  build/coverage/summary.md    (per-file summary)"
-    print "  build/coverage/uncovered.md  (files with gaps)"
+    print "[Coverage] Reports written to {output_dir}/"
+    print "  {output_dir}/coverage.sdn  (raw data)"
+    print "  {output_dir}/summary.md    (per-file summary)"
+    print "  {output_dir}/uncovered.md  (files with gaps)"
+    true
 
 fn sort_files_by_coverage(files: [FileCoverage]) -> [FileCoverage]:
     # Simple insertion sort by decision_pct ascending (worst coverage first)
