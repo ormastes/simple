@@ -1,0 +1,37 @@
+"""Hosted SOSIX background script launch. Empty result means launch failure; "unsupported" identifies an unbound host.
+
+Unix hosts use the shell-backed service to detach the monitor without retaining
+stdio pipes. Windows uses the existing native async process provider. SimpleOS
+has no bound hosted script service and is deliberately unsupported here.
+"""
+use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default, process_spawn_async}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.env_ops.{host_os}
+
+fn _sosix_shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+pub fn sosix_launch_background_script_for_host(os: text, script_path: text) -> text:
+    if os != "windows" and os != "linux" and os != "macos" and os != "freebsd" and os != "openbsd" and os != "netbsd" and not os.starts_with("mingw") and not os.starts_with("msys") and not os.starts_with("cygwin"):
+        return "unsupported"
+    if script_path == "" or script_path.contains("\0") or not file_exists(script_path):
+        return ""
+    if os == "windows":
+        val pid = process_spawn_async("cmd", ["/c", script_path])
+        if pid > 0:
+            return "{pid}"
+        return ""
+    val command = "nohup sh {_sosix_shell_quote(script_path)} >/dev/null 2>&1 </dev/null & pid=$!; case \"$pid\" in ''|*[!0-9]*) exit 1 ;; esac; printf '%s\\n' \"$pid\""
+    val pid = shell_output_default(command, "").trim()
+    if (pid.to_i64() ?? 0) > 0 and shell_bool("kill -0 {pid} 2>/dev/null"):
+        pid
+    else:
+        ""
+
+# Select script and provider at the SOSIX host boundary.
+pub fn sosix_launch_background_script(sh_path: text, bat_path: text) -> text:
+    val os = host_os()
+    if os == "windows":
+        sosix_launch_background_script_for_host(os, bat_path)
+    else:
+        sosix_launch_background_script_for_host(os, sh_path)
