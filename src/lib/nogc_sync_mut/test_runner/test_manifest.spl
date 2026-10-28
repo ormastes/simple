@@ -95,15 +95,26 @@ fn manifest_is_fresh_with_ttl(manifest: TestManifest, ttl_micros: i64) -> bool:
 # Coverage Check
 # ============================================================================
 
-# Canonicalize roots using the shared path normalizer so callers and roots
-# compare consistently across `./`, dot segments, repeated separators, and
-# Windows separators. Preserve empty roots: they do not attest coverage.
+# Canonicalize roots using the shared path normalizer for `./`, repeated
+# separators, and Windows separators. Keep `..` lexical: collapsing it across
+# a symlink can change which directory the filesystem walk visits. Preserve
+# empty roots: they do not attest coverage.
 fn manifest_normalize_root(raw: text) -> text:
     if raw == "":
         return ""
+    if manifest_has_parent_component(raw):
+        return raw.replace("\\", "/")
     normalize_path(raw)
 
+fn manifest_has_parent_component(path: text) -> bool:
+    for part in path.replace("\\", "/").split("/"):
+        if part == "..":
+            return true
+    false
+
 fn manifest_path_is_within_root(path: text, root: text) -> bool:
+    if manifest_has_parent_component(path) or manifest_has_parent_component(root):
+        return path == root
     if path == root:
         return true
     if root == "/":
@@ -116,8 +127,12 @@ fn manifest_path_is_within_root(path: text, root: text) -> bool:
 # enough: a fresh index built from a narrower root has no entries for anything
 # outside it, and an empty filter result would otherwise read as "no tests".
 fn manifest_covers(manifest: TestManifest, base_path: text) -> bool:
+    if manifest_has_parent_component(base_path):
+        return false
     val target = manifest_normalize_root(base_path)
     for raw_root in manifest.roots:
+        if manifest_has_parent_component(raw_root):
+            continue
         val root = manifest_normalize_root(raw_root)
         if root == "":
             continue
