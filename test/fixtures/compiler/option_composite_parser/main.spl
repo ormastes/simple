@@ -1,0 +1,66 @@
+# Native TDD driver: call the real parser and inspect its owned type registry.
+use compiler.core.parser.{parser_init, parser_parse_type, parser_has_errors}
+use compiler.core.types.{TYPE_I64, TYPE_TEXT, TYPE_ANY, TYPE_OPTION, TYPE_OPTION_I64,
+    TYPE_ARRAY_I64, TYPE_NAMED_BASE, is_option_generic_tag, option_generic_tag_to_id,
+    option_generic_type_get_inner, is_result_tag, result_tag_to_id,
+    result_type_get_ok, result_type_get_err, is_dict_tag, dict_tag_to_id,
+    dict_type_get_key, dict_type_get_value, is_tuple_type_tag, tuple_type_tag_to_id,
+    tuple_type_get_elems, is_function_tag, type_tag_name}
+
+fn parse_inner(source: text) -> i64:
+    parser_init(source)
+    val tag = parser_parse_type()
+    if parser_has_errors(): return -1
+    if not is_option_generic_tag(tag): return -2
+    option_generic_type_get_inner(option_generic_tag_to_id(tag))
+
+fn result_kept(source: text) -> bool:
+    val inner = parse_inner(source)
+    if not is_result_tag(inner): return false
+    val id = result_tag_to_id(inner)
+    result_type_get_ok(id) == TYPE_I64 and result_type_get_err(id) == TYPE_TEXT
+
+fn dict_kept() -> bool:
+    val inner = parse_inner("Option<Dict<text, i64>>")
+    if not is_dict_tag(inner): return false
+    val id = dict_tag_to_id(inner)
+    dict_type_get_key(id) == TYPE_TEXT and dict_type_get_value(id) == TYPE_I64
+
+fn tuple_kept() -> bool:
+    val inner = parse_inner("Option<(i64, text)>")
+    if not is_tuple_type_tag(inner): return false
+    val elements = tuple_type_get_elems(tuple_type_tag_to_id(inner))
+    elements.len() == 2 and elements[0] == TYPE_I64 and elements[1] == TYPE_TEXT
+
+fn primitive_kept() -> bool:
+    parser_init("Option<i64>")
+    val tag = parser_parse_type()
+    not parser_has_errors() and tag == TYPE_OPTION_I64
+
+fn actual_any_kept() -> bool:
+    parser_init("Option<Any>")
+    val tag = parser_parse_type()
+    if parser_has_errors(): return false
+    if tag == TYPE_OPTION: return true
+    is_option_generic_tag(tag) and option_generic_type_get_inner(option_generic_tag_to_id(tag)) == TYPE_ANY
+
+fn check(name: text, passed: bool) -> i64:
+    if passed:
+        print "{name}=PASS"
+        0
+    else:
+        print "{name}=FAIL"
+        1
+
+fn main() -> i64:
+    var failures = 0
+    failures = failures + check("explicit-result", result_kept("Option<Result<i64, text>>"))
+    failures = failures + check("postfix-result", result_kept("Result<i64, text>?"))
+    failures = failures + check("array", parse_inner("Option<[i64]>") == TYPE_ARRAY_I64)
+    failures = failures + check("dict", dict_kept())
+    failures = failures + check("tuple", tuple_kept())
+    failures = failures + check("primitive", primitive_kept())
+    failures = failures + check("named", type_tag_name(parse_inner("Option<Probe>")) == "Probe")
+    failures = failures + check("callable", is_function_tag(parse_inner("Option<fn(text) -> i64>")))
+    failures = failures + check("actual-any", actual_any_kept())
+    failures
