@@ -50,11 +50,15 @@ PR #5214's Required Gates run 40784628246 failed
 root. The C regression itself was passing, but a manual invocation did not
 make it part of the automated suite.
 
-The `runtime-file-copy-mode` bootstrap automated row now invokes the wrapper
-through `check-bootstrap-must-pass.shs`'s generic command dispatcher. Its
-accepted final PASS requires the real copy/publish/execute fixture to pass;
-unsupported-platform SKIP output is not accepted as a bootstrap PASS. No
-opt-out, baseline exemption, or weakened hygiene check is used.
+The dedicated `runtime-file-copy-mode.yml` workflow now invokes the real
+wrapper on Ubuntu for pull requests and pushes to main and release branches
+that change the C runtime, wrapper, or workflow. Its sparse checkout includes
+both providers and their headers plus the test fixture. A failed copy,
+publication, execution, or mode assertion fails the job. No opt-out, baseline
+exemption, or weakened hygiene check is used. The POSIX fixture is not added
+to the cross-platform bootstrap registry: Windows does not implement POSIX
+execute permissions, and its explicit SKIP must not become a bootstrap FAIL
+or a fabricated PASS.
 
 ## Remaining recovery gap
 
