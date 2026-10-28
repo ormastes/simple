@@ -363,3 +363,15 @@ The current fiber progress overcommit policy is not itself that hard-budget
 admission policy. A threaded carrier additionally needs synchronized claims
 and per-pick generations; the serialized core's implicit picked predicate is
 not a concurrent ownership protocol.
+
+2026-10-28 follow-up: common TaskRunner now owns unit-neutral strict process
+memory-fit, conservative charge-floor and checked-total arithmetic in
+`memory_admission.spl`. TestRunner's RSS admission uses KiB; the native
+bootstrap build-group admission owner uses bytes. Both keep their existing
+policies and effect owners. TestRunner rejects snapshots whose aggregate
+reservation cannot fit i64 before its process loop sums them. Focused Phase 1
+red/green and review evidence is in
+[aggregate overflow](../../08_tracking/bug/runner_memory_aggregate_overflow_2026_10_28.md).
+This policy reuse does not close SRH-W10/W11 or SRH-35: shared process lifecycle,
+hard-budget native integration, environment policy migration and mixed-workload
+qualification remain open. The fiber progress rule is unchanged.
