@@ -30,7 +30,7 @@
 #                  for i in run.take_parse_requests(): ...; run.parse_done(i, tldr, err)
 #                  for key in run.take_fill_requests(): ...; run.module_loaded(key) / module_failed
 
-use std.common.task_runner.fiber_scheduler.{FiberSchedV1, FiberStepV1, fiber_sched_new, fiber_sched_submit, fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake, fiber_sched_all_done, fiber_sched_runnable_count, fiber_step_done, fiber_step_yield, fiber_step_park}
+use std.common.task_runner.fiber_scheduler.{FiberSchedV1, FiberStepV1, fiber_sched_new, fiber_sched_submit, fiber_sched_admit, fiber_sched_abort, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake, fiber_sched_all_done, fiber_sched_runnable_count, fiber_step_done, fiber_step_yield, fiber_step_park}
 use std.nogc_async_mut.fiber.io_reactor.{FiberIoReactorV1, fiber_io_new, fiber_io_close, fiber_io_submit_open, fiber_io_submit_read, fiber_io_submit_close, fiber_io_ready, fiber_io_result, fiber_io_data, fiber_io_forget, fiber_io_pump}
 use std.nogc_sync_mut.io_runtime.{file_size}
 use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, tldr_table_fill_v1}
@@ -218,6 +218,10 @@ class FileFiberRunV1:
         self.async_fut = keep_fut
         out
 
+    fn external_work_count() -> i64:
+        self.reactor.in_flight + self.parse_requests.len() + self.async_idx.len() +
+            self.async_done.len() + self.table.fill_queue.len()
+
     me take_fill_requests() -> [text]:
         self.table.take_fill_requests()
 
@@ -232,14 +236,14 @@ class FileFiberRunV1:
 
     me advance(imports_of: fn(text) -> [text]):
         """One carrier round: admit, step one fiber per worker, pump IO."""
-        self.sched.external_inflight = self.reactor.in_flight + self.parse_requests.len() + self.async_idx.len()
+        self.sched.external_inflight = self.external_work_count()
         self.sched = fiber_sched_admit(self.sched)
         for w in 0..self.sched.queues.len():
             val pick = fiber_sched_pick(self.sched, w)
             self.sched = pick.sched
             if pick.fiber >= 0:
                 val result = self.step(pick.fiber, imports_of)
-                self.sched.external_inflight = self.reactor.in_flight + self.parse_requests.len() + self.async_idx.len()
+                self.sched.external_inflight = self.external_work_count()
                 self.sched = fiber_sched_complete(self.sched, w, pick.fiber, result)
         val wait_ms = if fiber_sched_runnable_count(self.sched) > 0 or self.parse_requests.len() > 0 or self.async_done.len() > 0: 0 else: 50
         val pump = fiber_io_pump(self.reactor, self.sched, wait_ms)
@@ -260,6 +264,14 @@ class FileFiberRunV1:
             if self.stage[i] != FILE_FIBER_DONE:
                 self.error[i] = "stalled waiting in stage {self.stage[i]}"
                 self.stage[i] = FILE_FIBER_DONE
+
+    me fail_scheduler():
+        val why = "fiber scheduler failed: {self.sched.error}"
+        for i in 0..self.stage.len():
+            if self.stage[i] != FILE_FIBER_DONE:
+                self.error[i] = why
+                self.stage[i] = FILE_FIBER_DONE
+        self.sched = fiber_sched_abort(self.sched)
 
 fn file_fiber_begin_v1(entries: [FileFiberEntryV1], worker_sockets: [i64], budget: i64) -> FileFiberRunV1:
     var sched = fiber_sched_new(worker_sockets, budget)
@@ -286,9 +298,18 @@ fn file_fiber_begin_v1(entries: [FileFiberEntryV1], worker_sockets: [i64], budge
         dep_parks: 0, fills: 0, async_idx: [], async_fut: [], async_done: [], async_parks: 0)
 
 fn file_fiber_finished_v1(run: FileFiberRunV1) -> bool:
-    fiber_sched_all_done(run.sched) or run.stalled()
+    if run.sched.error != "":
+        return fiber_sched_runnable_count(run.sched) == 0 and run.external_work_count() == 0
+    (fiber_sched_all_done(run.sched) and run.external_work_count() == 0) or run.stalled()
 
 fn file_fiber_end_v1(run: FileFiberRunV1):
+    if fiber_sched_runnable_count(run.sched) > 0 or run.external_work_count() > 0: return
+    if run.sched.error != "":
+        # Callers should first drain host work and IO through advance(). Never
+        # discard fibers while the carrier still owns runnable or external work.
+        fiber_io_close(run.reactor)
+        run.fail_scheduler()
+        return
     if run.stalled(): run.fail_stalled()
     fiber_io_close(run.reactor)
 
