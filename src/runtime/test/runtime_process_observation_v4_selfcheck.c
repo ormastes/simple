@@ -2,7 +2,11 @@
  * This is host evidence only; Simple admission still requires the self-hosted
  * compiler/runtime lane. */
 #if !defined(__linux__)
-int main(void) { return 0; }
+#include <stdio.h>
+int main(void) {
+    fputs("process-observation-v4: requires Linux (not a PASS)\n", stderr);
+    return 77;
+}
 #else
 #define _GNU_SOURCE
 #define RT_PROCESS_OBSERVATION_V4_TESTING 1
