@@ -20,11 +20,11 @@ Reproduction and identities: sibling report
 by the empty-kind resource error. The MC/DC path also reports `struct i64 has
 no field recorder` and explicitly falls back; this is a separate diagnostic.
 
-Next diagnostic: compile a minimal native caller of
-`std.nogc_sync_mut.test_runner.native_owned_process.run_scoped_child`, inspect
+Completed diagnostic: a minimal native caller of
+`std.nogc_sync_mut.test_runner.native_owned_process.run_scoped_child` inspected
 both `ProcessResult.limit_exceeded` and `limit_type` for exit 0, exit 7,
-missing executable and a real timeout. Preserve scope enforcement and distinguish
-nested-record transport, boolean comparison, and actual budget failures.
+missing executable and a real timeout. The results below isolate tuple-match
+transport while preserving scope enforcement and actual budget failures.
 No runtime replacement or compiler rebuild is authorized by this report.
 
 ## Minimal native reproduction
