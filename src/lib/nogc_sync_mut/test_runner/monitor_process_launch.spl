@@ -1,0 +1,21 @@
+# Detached launch helper for the resource safeguard monitor.
+#
+# Avoid the native async-spawn entry point on Unix. The monitor is a long-lived
+# background process, so a short synchronous shell request can detach it and
+# return its PID without keeping any parent pipe open.
+
+use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+fn _monitor_shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+pub fn launch_monitor_script_detached(script_path: text) -> text:
+    if script_path == "" or not file_exists(script_path):
+        return ""
+    val command = "nohup sh {_monitor_shell_quote(script_path)} >/dev/null 2>&1 </dev/null & pid=$!; case \"$pid\" in ''|*[!0-9]*) exit 1 ;; esac; printf '%s\\n' \"$pid\""
+    val pid = shell_output_default(command, "").trim()
+    if (pid.to_i64() ?? 0) > 0 and shell_bool("kill -0 {pid} 2>/dev/null"):
+        pid
+    else:
+        ""
