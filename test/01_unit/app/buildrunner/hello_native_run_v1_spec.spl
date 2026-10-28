@@ -1,0 +1,39 @@
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{BuildInputV1, builder_validate_run_v1, builder_task_identity_v1}
+use std.common.build_manager.codec.{builder_encode_run_v1, builder_decode_run_v1}
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.buildrunner.hello_native_run_v1.{HELLO_NATIVE_SOURCE_V1, hello_native_run_v1}
+
+describe "BuildRunner Hello native task fixture":
+    it "round trips a real compiler task with separate manager and compiler argv":
+        val digest = sha256_text("identity")
+        # Representative wire input only; native execution needs the complete
+        # target-specific runtime inventory, not this synthetic identity.
+        val runtime = BuildInputV1(path: "runtime/libsimple_runtime.a", digest: digest)
+        val run = hello_native_run_v1("/compiler lane/simple", digest,
+            "/runner lane/buildrunner", digest, "/work lane", [runtime], digest,
+            "aarch64-apple-darwin", "llvm-lib", 8589934592)
+        expect(builder_validate_run_v1(run)).to_equal("")
+        val decoded = builder_decode_run_v1(builder_encode_run_v1(run)).unwrap()
+        val task = decoded.tasks[0]
+        expect(task.program).to_equal("/compiler lane/simple")
+        expect(task.args[0]).to_equal("native-build")
+        expect(task.args.contains("--help")).to_equal(false)
+        expect(task.args.contains("--manifest")).to_equal(false)
+        expect(task.outputs).to_equal(["hello.exe"])
+        expect(task.inputs[0].digest).to_equal(sha256_text(HELLO_NATIVE_SOURCE_V1))
+        expect(task.inputs[1].path).to_equal(runtime.path)
+        expect(decoded.hosts[0].worker_program).to_equal("/runner lane/buildrunner")
+        expect(task.memory_policy).to_equal("enforce")
+        expect(task.timeout_ms).to_equal(120000)
+
+    it "changes cache and task identity when the admitted runtime changes":
+        val digest = sha256_text("identity")
+        val first = hello_native_run_v1("/compiler", digest, "/worker", digest,
+            "/work", [BuildInputV1(path: "runtime/runtime.a", digest: digest)],
+            digest, "aarch64-apple-darwin", "llvm-lib", 8589934592)
+        val second = hello_native_run_v1("/compiler", digest, "/worker", digest,
+            "/work", [BuildInputV1(path: "runtime/runtime.a", digest: sha256_text("changed"))],
+            digest, "aarch64-apple-darwin", "llvm-lib", 8589934592)
+        expect(first.tasks[0].cache_key == second.tasks[0].cache_key).to_equal(false)
+        expect(builder_task_identity_v1(first.tasks[0]) == builder_task_identity_v1(second.tasks[0])).to_equal(false)

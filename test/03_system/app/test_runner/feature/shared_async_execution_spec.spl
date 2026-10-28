@@ -1,0 +1,69 @@
+"""REQ-001..005: real parallel child receipts under the pinned descendant CLI.
+
+Run with SIMPLE_BINARY and SIMPLE_TEST_BINARY both naming that qualified full
+CLI. Missing pinning is a failure, never a skipped or simulated process check.
+"""
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use app.test_runner_new.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_async.{run_tests_parallel_with_monitoring}
+
+fn require_shared_async_cli_v1():
+    val pinned = env_get("SIMPLE_TEST_BINARY") ?? ""
+    expect(pinned != "").to_equal(true)
+    expect(env_get("SIMPLE_BINARY") ?? "").to_equal(pinned)
+    assert pinned != ""
+    assert (env_get("SIMPLE_BINARY") ?? "") == pinned
+
+describe "shared async process scheduling":
+    it "collects two real green children in manifest order":
+        step("Pin the qualified descendant CLI")
+        require_shared_async_cli_v1()
+        val slow = "test/fixtures/test_runner_shared_async/slow_green_spec.spl"
+        val fast = "test/fixtures/test_runner_shared_async/fast_green_spec.spl"
+        val options = parse_test_args(["--mode=interpreter", "--parallel", "--max-workers=2", "--assert-ran",
+            "--no-cache", "--no-db", "--no-session-daemon", "--timeout", "20"])
+        step("Run two interpreter children through the shared async owner")
+        val results = run_tests_parallel_with_monitoring([slow, fast], options, 2)
+        step("Publish results in manifest order")
+        expect(results.len()).to_equal(2)
+        expect(results[0].path).to_equal(slow)
+        expect(results[1].path).to_equal(fast)
+        for result in results:
+            expect(result.passed).to_equal(1)
+            expect(result.failed).to_equal(0)
+            expect(result.is_ok()).to_equal(true)
+
+    it "continues a green sibling when a real child fails":
+        step("Pin the qualified descendant CLI")
+        require_shared_async_cli_v1()
+        val red = "scripts/check/fixtures/font_evidence_runner_fail_spec.spl"
+        val green = "test/fixtures/test_runner_shared_async/fast_green_spec.spl"
+        val options = parse_test_args(["--mode=interpreter", "--parallel", "--max-workers=2", "--assert-ran",
+            "--no-cache", "--no-db", "--no-session-daemon", "--timeout", "20"])
+        step("Collect a red child and continue its green sibling")
+        val results = run_tests_parallel_with_monitoring([red, green], options, 2)
+        expect(results.len()).to_equal(2)
+        expect(results[0].path).to_equal(red)
+        expect(results[0].failed).to_equal(1)
+        expect(results[0].is_ok()).to_equal(false)
+        expect(results[1].passed).to_equal(1)
+        expect(results[1].is_ok()).to_equal(true)
+
+    it "rejects a zero-example child without suppressing a green sibling":
+        step("Pin the qualified descendant CLI")
+        require_shared_async_cli_v1()
+        val empty = "test/fixtures/test_runner_single/zero_examples_spec.spl"
+        val green = "test/fixtures/test_runner_shared_async/fast_green_spec.spl"
+        val options = parse_test_args(["--mode=interpreter", "--parallel", "--max-workers=2", "--assert-ran",
+            "--no-cache", "--no-db", "--no-session-daemon", "--timeout", "20"])
+        step("Reject missing or zero BDD evidence and collect the sibling")
+        val results = run_tests_parallel_with_monitoring([empty, green], options, 2)
+        expect(results.len()).to_equal(2)
+        expect(results[0].passed).to_equal(0)
+        expect(results[0].is_ok()).to_equal(false)
+        val zero_reason = results[0].error.contains("no BDD examples executed") or results[0].error.contains("structured BDD evidence unavailable")
+        expect(zero_reason).to_equal(true)
+        expect(results[1].passed).to_equal(1)
+        expect(results[1].is_ok()).to_equal(true)

@@ -1,0 +1,35 @@
+# Source snippets execute as a real generated BDD example. Declaration-only
+# modules never acquire an example merely because wrapping added statements.
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines, simple_string_byte_ranges}
+use std.common.test_runner.native_framework_wrapper.{spipe_partition_source}
+
+fn source_has_bdd_structure(source: text) -> bool:
+    for code_line in simple_code_lines(source):
+        val code = code_line.trim()
+        for keyword in ["describe", "context", "it", "slow_it", "feature", "scenario", "pending", "skip_it"]:
+            if code.starts_with(keyword + " ") or code.starts_with(keyword + "("):
+                return true
+    false
+
+fn interpreter_snippet_source(file_path: text, source: text) -> text:
+    # Spec files retain the existing no-example contract, even when malformed.
+    if file_path.ends_with("_spec.spl") or source_has_bdd_structure(source):
+        return ""
+    val codes = simple_code_lines(source)
+    val partition = spipe_partition_source(source, source.split("\n"), codes,
+        simple_string_continuation_lines(source), true, simple_string_byte_ranges(source))
+    if partition.is_err(): return ""
+    val parts = partition.unwrap()
+    var executable = false
+    for line in simple_code_lines(parts.body):
+        val code = line.trim()
+        if code != "" and code != "\"\"" and code != "pass" and code != "...":
+            executable = true
+    if not executable: return ""
+    var body: [text] = []
+    for line in parts.body.split("\n"):
+        body.push("    " + line)
+    parts.imports + "\nuse std.spec\n" + parts.declarations +
+        "\ndescribe \"standalone SPL snippet\":\n    it \"executes the top-level source body\":\n" + body.join("\n") + "\n"
+
+export source_has_bdd_structure, interpreter_snippet_source

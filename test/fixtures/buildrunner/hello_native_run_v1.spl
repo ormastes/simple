@@ -1,0 +1,38 @@
+"""Real compiler task fixture; constructing a manifest is not execution evidence.
+
+The caller stages HELLO_NATIVE_SOURCE_V1 at src/main.spl and supplies every
+regular runtime file below runtime/. Toolchain/SDK access remains host-owned.
+Use the canonical codec to write this run, then invoke the native manager with
+run --manifest ... --state ... --source-root ... --output-root ... and verify.
+The published hello.exe must execute with exact stdout Hello, World! plus LF.
+"""
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, BuildRunV1, BuildHostV1}
+use std.common.crypto.sha256.{sha256_text}
+
+pub val HELLO_NATIVE_SOURCE_V1 = "fn main():\n    print \"Hello, World!\"\n"
+
+pub fn hello_native_run_v1(compiler: text, compiler_digest: text,
+        worker: text, worker_digest: text, workspace: text,
+        runtime_inputs: [BuildInputV1], toolchain_digest: text,
+        target: text, backend: text, memory_limit_bytes: i64) -> BuildRunV1:
+    val source_digest = sha256_text(HELLO_NATIVE_SOURCE_V1)
+    var inputs = [BuildInputV1(path: "src/main.spl", digest: source_digest)]
+    var cache_identity = compiler_digest + "|" + toolchain_digest + "|" +
+        target + "|" + backend + "|" + source_digest
+    for input in runtime_inputs:
+        inputs = inputs.push(input)
+        cache_identity = cache_identity + "|" + input.path + "|" + input.digest
+    val task = BuildTaskV1(id: "hello", attempt: 1, phase: "sanity",
+        producer_digest: compiler_digest, source_digest: source_digest,
+        toolchain_digest: toolchain_digest, dependencies: [], program: compiler,
+        args: ["native-build", "--source", "src", "--entry", "src/main.spl",
+            "--entry-closure", "--target", target, "--backend", backend,
+            "--runtime-path", "runtime", "--runtime-bundle", "core-c-bootstrap",
+            "--threads", "1", "--output", "hello.exe"],
+        inputs: inputs, outputs: ["hello.exe"], cache_key: sha256_text(cache_identity),
+        timeout_ms: 120000, memory_limit_bytes: memory_limit_bytes, links: [])
+    val host = BuildHostV1(id: "local", transport: "local", endpoint: "",
+        workspace: workspace, worker_program: worker, worker_digest: worker_digest, slots: 1)
+    BuildRunV1(tasks: [task], hosts: [host], keep_going: false, max_attempts: 1)
+
+export HELLO_NATIVE_SOURCE_V1, hello_native_run_v1

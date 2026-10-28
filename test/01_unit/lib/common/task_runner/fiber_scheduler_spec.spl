@@ -9,7 +9,7 @@ Run this spec with the test runner and read the per-scenario verdict lines.
 Single-carrier deterministic core only; the threaded carrier is covered later.
 Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §3-4
 """
-use std.common.task_runner.fiber_scheduler.{FiberStepV1, FiberSchedV1, fiber_step_done, fiber_step_yield, fiber_step_park, fiber_sched_new, fiber_sched_submit, fiber_sched_prioritize, fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake, fiber_sched_runnable_count, fiber_sched_parked_count, fiber_sched_all_done, fiber_sched_run_round, FIBER_STATE_PENDING, FIBER_STATE_READY, FIBER_STATE_DONE}
+use std.common.task_runner.fiber_scheduler.{FiberStepV1, FiberSchedV1, fiber_step_done, fiber_step_yield, fiber_step_park, fiber_sched_new, fiber_sched_submit, fiber_sched_prioritize, fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake, fiber_sched_runnable_count, fiber_sched_parked_count, fiber_sched_all_done, fiber_sched_run_round, FIBER_STATE_PENDING, FIBER_STATE_READY, FIBER_STATE_PARKED, FIBER_STATE_DONE}
 
 fn _always_done(id: i64) -> FiberStepV1:
     fiber_step_done()
@@ -38,6 +38,52 @@ describe "fiber scheduler core":
         expect(s.fiber_state[2]).to_equal(FIBER_STATE_PENDING)
         expect(s.overcommits).to_equal(0)
 
+    it "does not wrap the fit check at the maximum i64 budget":
+        val max_i64 = 9223372036854775807
+        var s = fiber_sched_new([0], max_i64)
+        s = fiber_sched_submit(s, max_i64)
+        s = fiber_sched_submit(s, 1)
+        # Keep the first admission from triggering the progress rule; this
+        # isolates the ordinary budget-fit calculation.
+        s.external_inflight = 1
+        s = fiber_sched_admit(s)
+        expect(s.reserved).to_equal(max_i64)
+        expect(s.pending.len()).to_equal(1)
+        expect(s.overcommits).to_equal(0)
+
+    it "fails closed when progress would overflow parked reservations":
+        val max_i64 = 9223372036854775807
+        var s = fiber_sched_new([0], max_i64)
+        s = fiber_sched_submit(s, max_i64)
+        s = fiber_sched_submit(s, max_i64)
+        s = fiber_sched_admit(s)
+        expect(s.fiber_state[1]).to_equal(FIBER_STATE_PENDING)
+        expect(s.reserved).to_equal(max_i64)
+
+        val pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_park(9))
+        expect(s.error).to_equal("reservation total exceeds i64")
+        expect(s.fiber_state[0]).to_equal(FIBER_STATE_PARKED)
+        expect(s.fiber_state[1]).to_equal(FIBER_STATE_PENDING)
+        expect(s.pending).to_equal([1])
+        expect(fiber_sched_runnable_count(s)).to_equal(0)
+        expect(s.reserved).to_equal(max_i64)
+        expect(s.overcommits).to_equal(0)
+        val failed_admission = fiber_sched_admit(s)
+        expect(failed_admission.error).to_equal("reservation total exceeds i64")
+        expect(failed_admission.pending).to_equal([1])
+        expect(failed_admission.reserved).to_equal(max_i64)
+
+        # The already-admitted fiber can still wake and release its reservation;
+        # the latched error prevents silently admitting the unrepresentable head.
+        s = fiber_sched_wake(s, 9)
+        val resumed = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(resumed.sched, 0, resumed.fiber, fiber_step_done())
+        expect(s.reserved).to_equal(0)
+        expect(s.fiber_state[0]).to_equal(FIBER_STATE_DONE)
+        expect(s.fiber_state[1]).to_equal(FIBER_STATE_PENDING)
+        expect(s.pending).to_equal([1])
+
     it "releases memory on completion and admits the next fiber":
         var s = fiber_sched_new([0], 50)
         s = fiber_sched_submit(s, 50)
@@ -59,6 +105,22 @@ describe "fiber scheduler core":
         s = _drain(s, _always_done, 5)
         expect(fiber_sched_all_done(s)).to_be(true)
         expect(s.reserved).to_equal(0)
+
+    it "does not mistake an over-budget reservation for ordinary budget headroom":
+        var s = fiber_sched_new([0], 10)
+        s = fiber_sched_submit(s, 11)
+        s = fiber_sched_admit(s)
+        expect(s.reserved).to_equal(11)
+        expect(s.overcommits).to_equal(1)
+
+        s = fiber_sched_submit(s, 1)
+        s = fiber_sched_admit(s)
+        expect(s.pending.len()).to_equal(1)
+        expect(s.reserved).to_equal(11)
+
+        val pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_park(8))
+        expect(s.fiber_state[1]).to_equal(FIBER_STATE_READY)
 
     it "never deadlocks when every admitted fiber parks on a pending producer":
         # Fiber 0 (consumer) fills the budget and parks on token 7; fiber 1
@@ -196,3 +258,90 @@ describe "fiber scheduler core":
         s = fiber_sched_admit(s)
         expect(s.pending.len()).to_equal(0)
         expect(s.overcommits).to_equal(1)
+
+    it "rejects duplicate completion without releasing another fiber reservation":
+        var s = fiber_sched_new([0], 20)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_admit(s)
+        val pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_done())
+        expect(s.reserved).to_equal(10)
+        s = fiber_sched_complete(s, 0, pick.fiber, fiber_step_done())
+        expect(s.error).to_equal("completion requires a picked fiber owned by worker")
+        expect(s.reserved).to_equal(10)
+        expect(fiber_sched_runnable_count(s)).to_equal(1)
+
+    it "rejects a completion before the admitted fiber was picked":
+        var s = fiber_sched_new([0], 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_admit(s)
+        s = fiber_sched_complete(s, 0, 0, fiber_step_done())
+        expect(s.error).to_equal("completion requires a picked fiber owned by worker")
+        expect(s.reserved).to_equal(10)
+        expect(s.fiber_state[0]).to_equal(FIBER_STATE_READY)
+        expect(s.queues[0]).to_equal([0])
+
+    it "rejects a pending fiber completion without manufacturing headroom":
+        var s = fiber_sched_new([0], 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_complete(s, 0, 0, fiber_step_done())
+        expect(s.error).to_equal("completion requires a picked fiber owned by worker")
+        expect(s.reserved).to_equal(0)
+        expect(s.pending).to_equal([0])
+        expect(s.fiber_state[0]).to_equal(FIBER_STATE_PENDING)
+
+    it "rejects duplicate yield without duplicating the runnable queue":
+        var s = fiber_sched_new([0], 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_admit(s)
+        val pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, 0, fiber_step_yield())
+        s = fiber_sched_complete(s, 0, 0, fiber_step_yield())
+        expect(s.error).to_equal("completion requires a picked fiber owned by worker")
+        expect(s.queues[0]).to_equal([0])
+        expect(s.reserved).to_equal(10)
+
+    it "rejects a parked completion and retains its wake token and reservation":
+        var s = fiber_sched_new([0], 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_admit(s)
+        val pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, 0, fiber_step_park(7))
+        s = fiber_sched_complete(s, 0, 0, fiber_step_done())
+        expect(s.error).to_equal("completion requires a picked fiber owned by worker")
+        expect(s.fiber_state[0]).to_equal(FIBER_STATE_PARKED)
+        expect(s.fiber_token[0]).to_equal(7)
+        expect(s.reserved).to_equal(10)
+        s = fiber_sched_wake(s, 7)
+        val resumed = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(resumed.sched, 0, 0, fiber_step_done())
+        expect(s.reserved).to_equal(0)
+        expect(fiber_sched_all_done(s)).to_equal(true)
+
+    it "rejects a completion from another worker but allows the owner to drain":
+        var s = fiber_sched_new([0, 0], 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_admit(s)
+        val pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 1, 0, fiber_step_done())
+        expect(s.error).to_equal("completion requires a picked fiber owned by worker")
+        expect(s.reserved).to_equal(10)
+        expect(s.fiber_state[0]).to_equal(FIBER_STATE_READY)
+        s = fiber_sched_complete(s, 0, 0, fiber_step_done())
+        expect(s.reserved).to_equal(0)
+        expect(fiber_sched_all_done(s)).to_equal(true)
+
+    it "rejects invalid completion indices before accessing scheduler arrays":
+        var s = fiber_sched_new([0], 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_admit(s)
+        val pick = fiber_sched_pick(s, 0)
+        for worker in [-1, 1]:
+            val invalid = fiber_sched_complete(pick.sched, worker, 0, fiber_step_done())
+            expect(invalid.error).to_equal("completion worker index out of range")
+            expect(invalid.reserved).to_equal(10)
+        for fiber in [-1, 1]:
+            val invalid = fiber_sched_complete(pick.sched, 0, fiber, fiber_step_done())
+            expect(invalid.error).to_equal("completion fiber index out of range")
+            expect(invalid.reserved).to_equal(10)

@@ -1,0 +1,57 @@
+# Native regression: preserve evidence after extracting an imported struct from
+# Result<(ScopedChildRun, text), text>. Distinct fields catch offset-zero reads.
+use std.test_runner.native_owned_process.{ScopedChildRun, scoped_child_usage, scoped_child_budget_status}
+use std.test_runner.test_runner_execute.{scoped_limit_exceeded_result}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.nogc_sync_mut.io.process_ops.{ProcessResult}
+use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause, resource_evidence_quality_name, termination_cause_name}
+
+fn invocation(present: bool, limited: bool = false) -> Result<(ScopedChildRun, text), text>:
+    val usage = ResourceUsage(wall_ms: 37, user_cpu_ms: 11, system_cpu_ms: 13,
+        peak_tree_charge_bytes: 101, peak_direct_child_rss_bytes: 103,
+        heap_live_end_bytes: 107, heap_peak_bytes: 109, io_read_bytes: 113,
+        io_write_bytes: 127, pids_peak: 3, evidence_quality: ResourceEvidenceQuality.SampledTree,
+        termination: TerminationCause.Exited, signal: 0, exit_code: 0)
+    val child = ScopedChildRun(
+        result: ProcessResult(stdout: "distinct stdout", stderr: "distinct stderr", exit_code: 0,
+            limit_exceeded: limited, limit_type: if limited: "timeout" else: ""),
+        usage: if present: Some(usage) else: nil, budget_status: if limited: "failure" else: "pass")
+    Ok((child, "evidence-path"))
+
+fn verify_projection(present: bool) -> bool:
+    val pair: (ScopedChildRun, text) = match invocation(present):
+        case Ok(value): value
+        case Err(_): return false
+    val child: ScopedChildRun = pair.0
+    if pair.1 != "evidence-path" or scoped_child_budget_status(child) != "pass": return false
+    match scoped_child_usage(child):
+        case Some(usage):
+            present and usage.wall_ms == 37 and usage.io_write_bytes == 127 and usage.pids_peak == 3 and
+                resource_evidence_quality_name(usage.evidence_quality) == "sampled_tree" and
+                termination_cause_name(usage.termination) == "exited"
+        case nil: not present
+
+fn verify_limit_projection() -> bool:
+    val pair: (ScopedChildRun, text) = match invocation(true, true):
+        case Ok(value): value
+        case Err(_): return false
+    val child: ScopedChildRun = pair.0
+    val result = scoped_limit_exceeded_result("fixture.spl", child, parse_test_args(["--mode=interpreter", "--timeout=1"]), 41, "coverage skipped", "degraded")
+    if result.budget_status != "failure" or result.duration_ms != 41 or not result.timed_out: return false
+    if result.mcdc_skip_reason != "coverage skipped" or result.degraded_reason != "degraded": return false
+    match result.resource_usage:
+        case Some(usage): usage.wall_ms == 37 and usage.io_write_bytes == 127
+        case nil: false
+
+fn main() -> i64:
+    if not verify_projection(true):
+        print "FAIL present resource evidence projection"
+        return 1
+    if not verify_projection(false):
+        print "FAIL absent resource evidence projection"
+        return 1
+    if not verify_limit_projection():
+        print "FAIL limit result resource evidence projection"
+        return 1
+    print "RESOURCE_PROJECTION_REGRESSION PASS present absent limit"
+    0

@@ -1,0 +1,28 @@
+"""
+Purpose: Guard worker reservation arithmetic before process admission.
+Audience: TestRunner and common TaskRunner maintainers.
+Workflow: Run this spec and inspect every scenario verdict.
+Limit: Pure accounting diagnostics; no native RSS enforcement claim.
+"""
+use std.nogc_sync_mut.test_runner.worker_memory.{worker_memory_charges, worker_memory_can_spawn}
+
+describe "Worker memory reservation admission":
+    it "charges descendants and keeps smaller or missing roots reserved":
+        expect(worker_memory_charges("10 1 100\n11 10 200\n12 11 300\n20 1 50\n99 1 9000\n", [10, 20, 30], 128)).to_equal([600, 128, 128])
+
+    it "rejects an unrepresentable aggregate reservation":
+        val maximum = 9223372036854775807
+        expect(worker_memory_charges("10 1 0\n20 1 0\n", [10, 20], maximum)).to_equal([])
+
+    it "retains the largest representable single reservation":
+        val maximum = 9223372036854775807
+        expect(worker_memory_charges("10 1 0\n", [10], maximum)).to_equal([maximum])
+        expect(worker_memory_can_spawn(maximum, 0, maximum)).to_equal(true)
+        expect(worker_memory_can_spawn(maximum, 1, maximum)).to_equal(false)
+
+    it "rejects negative charges and reserves missing children until reap":
+        expect(worker_memory_can_spawn(1000, -1, 200)).to_equal(false)
+        expect(worker_memory_can_spawn(1000, 0, -1)).to_equal(false)
+        expect(worker_memory_charges("99 1 0\n", [10, 20], 200)).to_equal([200, 200])
+        expect(worker_memory_can_spawn(600, 400, 200)).to_equal(true)
+        expect(worker_memory_can_spawn(599, 400, 200)).to_equal(false)

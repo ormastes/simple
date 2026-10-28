@@ -1208,6 +1208,7 @@ impl NativeProjectBuilder {
         let cc = generated_c_source_compiler(target);
         let is_msvc = uses_msvc_flags(target.linker_flavor());
 
+        // @workaround bug=BUG-GNU-PHASE2-HOST-ALIAS-LINK-20261027 reason=gnu-coff-entry-and-init-must-not-resolve-to-zero-weak-fallbacks
         let stub_code = if is_msvc {
             r#"
 #include <wchar.h>
@@ -1267,11 +1268,18 @@ extern "C" {
 #ifdef __cplusplus
 extern "C" {
 #endif
+    // COFF weak fallbacks can satisfy archive roots with an absolute zero.
+    // These two definitions are guaranteed by the entry and generated caller.
+#if defined(_WIN32)
+    int spl_main(void);
+    void __simple_call_module_inits(void);
+#else
     int __attribute__((weak)) spl_main(void);
+    void __attribute__((weak)) __simple_call_module_inits(void);
+#endif
     void rt_set_args(int argc, char** argv);
     void __attribute__((weak)) __simple_runtime_init(void);
     void __attribute__((weak)) __simple_runtime_shutdown(void);
-    void __attribute__((weak)) __simple_call_module_inits(void);
 #ifdef __cplusplus
 }
 #endif
@@ -1407,6 +1415,17 @@ int main(int argc, char** argv) {
                      void {}(void) {{}}\n",
                     name, stub, stub
                 ));
+            }
+            code.push_str("void __simple_call_module_inits(void) {\n");
+            for name in &init_names {
+                code.push_str(&format!("    {}();\n", name));
+            }
+            code.push_str("}\n");
+        } else if cross_target.os == simple_common::target::TargetOS::Windows {
+            // Every name was scanned from a real definition. Strong references
+            // let GNU COFF lazily extract those members without zero weak aliases.
+            for name in &init_names {
+                code.push_str(&format!("    void {}(void);\n", name));
             }
             code.push_str("void __simple_call_module_inits(void) {\n");
             for name in &init_names {
@@ -2004,7 +2023,14 @@ int main(int argc, char** argv) {
                             msvc_link_args.push(format!("/INCLUDE:{name}"));
                         }
                         msvc_link_args.push(clang_cl_whole_archive_arg(&archive_path));
+                    } else if cross_target.os == simple_common::target::TargetOS::Windows {
+                        // Entry/init callers use strong GNU COFF references.
+                        // Pull only members needed by those and actual calls;
+                        // forcing optional host wrappers imports other platforms.
+                        cmd.arg(external_tool_path(&archive_path));
                     } else {
+                        // This cfg is the Windows host, not necessarily its
+                        // target. Preserve other cross-target retention policy.
                         cmd.arg("-Wl,--whole-archive")
                             .arg(external_tool_path(&archive_path))
                             .arg("-Wl,--no-whole-archive");

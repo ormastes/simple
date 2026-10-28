@@ -1,0 +1,104 @@
+# @no_gc
+# Fixed-capacity, insert-once i64 map facade. Existing ConcurrentMap and
+# HashMap APIs remain unchanged and retain their existing backend semantics.
+
+use std.nogc_async_mut.concurrent.lockless_i64_core.{
+    CoreCreateI64, core_create_i64, core_valid_scope_i64, core_key_capacity_i64,
+    core_close_quiescent_i64, core_request_i64, core_find_i64
+}
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefI64, async_ref_from_core_i64}
+
+const _MAP_CREATE_INVALID: i64 = 1
+const _MAP_CREATE_UNSUPPORTED: i64 = 2
+const _MAP_CREATE_ALLOCATION: i64 = 3
+const _MAP_REQUEST_INVALID: i64 = -1
+const _MAP_REQUEST_FULL: i64 = -2
+const _MAP_REQUEST_DESCRIPTOR_FULL: i64 = -3
+const _MAP_REQUEST_RECIPE_CONFLICT: i64 = -4
+
+pub enum MapError:
+    InvalidCapacity
+    UnsupportedAtomics
+    AllocationFailed
+    Full
+    DescriptorFull
+    RecipeConflict
+
+pub class LocklessMapI64:
+    _scope: i64
+
+impl LocklessMapI64:
+    pub static fn create(
+        key_capacity: i64,
+        descriptor_capacity: i64,
+        outcome_capacity: i64,
+        waiter_capacity: i64
+    ) -> Result<LocklessMapI64, MapError>:
+        val created = unsafe(capabilities: [ffi]):
+            core_create_i64(key_capacity, descriptor_capacity, outcome_capacity, waiter_capacity)
+        if created.error == _MAP_CREATE_INVALID:
+            return Err(MapError.InvalidCapacity)
+        if created.error == _MAP_CREATE_UNSUPPORTED:
+            return Err(MapError.UnsupportedAtomics)
+        if created.error == _MAP_CREATE_ALLOCATION:
+            return Err(MapError.AllocationFailed)
+        Ok(LocklessMapI64(_scope: created.scope))
+
+    # A successful request returns the one stable result slot for the exact
+    # (i64 key, recipe_id) pair. Different recipes for the same key are rejected.
+    @unsafe(reason: "map handle is copyable and raw-scope field opacity is not enforced", capabilities: [ffi])
+    pub fn request(key: i64, recipe_id: i64) -> Result<AsyncRefI64, MapError>:
+        val valid_scope = unsafe(capabilities: [ffi]): core_valid_scope_i64(self._scope)
+        if not valid_scope:
+            return Err(MapError.InvalidCapacity)
+        val entry = unsafe(capabilities: [ffi]): core_request_i64(self._scope, key, recipe_id)
+        if entry == _MAP_REQUEST_FULL:
+            return Err(MapError.Full)
+        if entry == _MAP_REQUEST_DESCRIPTOR_FULL:
+            return Err(MapError.DescriptorFull)
+        if entry == _MAP_REQUEST_RECIPE_CONFLICT:
+            return Err(MapError.RecipeConflict)
+        if entry <= 0:
+            return Err(MapError.InvalidCapacity)
+        Ok(unsafe(capabilities: [ffi]): async_ref_from_core_i64(self._scope, entry))
+
+    @unsafe(reason: "map handle is copyable and raw-scope field opacity is not enforced", capabilities: [ffi])
+    pub fn find(key: i64) -> AsyncRefI64?:
+        val entry = unsafe(capabilities: [ffi]): core_find_i64(self._scope, key)
+        if entry <= 0: nil else: unsafe(capabilities: [ffi]): async_ref_from_core_i64(self._scope, entry)
+
+    # Compatibility vocabulary shared with native concurrent-map adapters.
+    # This profile deliberately has no remove, clear, or mutable replace.
+    @unsafe(reason: "map handle is copyable and raw-scope field opacity is not enforced", capabilities: [ffi])
+    pub fn get(key: i64) -> AsyncRefI64?:
+        self.find(key)
+
+    @unsafe(reason: "map handle is copyable and raw-scope field opacity is not enforced", capabilities: [ffi])
+    pub fn contains_key(key: i64) -> bool:
+        unsafe(capabilities: [ffi]): core_find_i64(self._scope, key) > 0
+
+    @unsafe(reason: "map handle is copyable and raw-scope field opacity is not enforced", capabilities: [ffi])
+    pub fn capacity() -> i64:
+        val valid_scope = unsafe(capabilities: [ffi]): core_valid_scope_i64(self._scope)
+        if valid_scope:
+            unsafe(capabilities: [ffi]): core_key_capacity_i64(self._scope)
+        else:
+            0
+
+    @unsafe(reason: "same-process raw arena handoff; owner retains the scope until all users quiesce", capabilities: [ffi])
+    pub fn scope_address() -> i64:
+        self._scope
+
+    @unsafe(reason: "scope must be live and owned by the caller; never transfer it over IPC", capabilities: [ffi])
+    pub static fn from_scope_address(scope: i64) -> Result<LocklessMapI64, MapError>:
+        if not core_valid_scope_i64(scope):
+            return Err(MapError.InvalidCapacity)
+        Ok(LocklessMapI64(_scope: scope))
+
+    @unsafe(reason: "all map users, refs, subscriptions, and cursors must be quiescent before raw arena release", capabilities: [ffi])
+    pub me close_quiescent():
+        if self._scope != 0 and core_valid_scope_i64(self._scope):
+            core_close_quiescent_i64(self._scope)
+            self._scope = 0
+
+export MapError, LocklessMapI64
