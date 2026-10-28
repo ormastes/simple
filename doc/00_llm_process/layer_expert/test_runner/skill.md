@@ -523,3 +523,14 @@ CLI, seed parser behind main); measure with
 `sh scripts/check/sspec-score-seed-lane.shs <spec|dir>`, which prints both
 surfaces per spec from proven copies of the real scorer modules. Feature
 expert: [modern_sspec](../../feature_expert/modern_sspec/skill.md).
+
+
+## Native resource projection regression (2026-10-28)
+
+Retained phase2 code can read imported `ScopedChildRun.usage` and
+`budget_status` at offset zero after a `Result` tuple extraction. Preserve
+resource evidence through owner-module projection helpers; nil substitution
+would conceal the defect. Native tests must include distinct nonzero metrics,
+absent evidence, and the limited-result path. See
+`doc/08_tracking/bug/phase2_runner_tuple_resource_projection_2026_10_28.md` and
+`scripts/check/check-native-resource-projection.shs`.
