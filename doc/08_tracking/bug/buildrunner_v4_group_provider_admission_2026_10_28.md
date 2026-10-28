@@ -152,3 +152,34 @@ Review also noted a pre-existing observation consistency issue: a tree_empty
 value from an earlier poll can persist in an error receipt after a later
 population observation changes. Collection rejects the nonzero error before
 retiring ownership; clearing stale completion fields remains separate work.
+
+## Exact resource-control readback admission (2026-10-28)
+
+Baseline: release/1.0.0 `8cec09d951a`, with PRs #5190, #5193 and #5194
+merged. Grouped start previously accepted any memory.swap.max readback
+beginning with `0` and any memory.oom.group readback beginning with `1`.
+Thus `01` and `10`, malformed suffixes and overflowing values could pass
+control admission before clone. Both readbacks now use the existing complete
+nonnegative integer decoder and must equal the requested value, zero or one.
+The unbounded-memory `max` readback path is unchanged.
+
+The injected Linux start fixture covers twelve invalid readbacks: unequal
+numeric values, junk suffixes, trailing spaces/tabs, extra lines and integer
+overflow for each control. Every rejection occurs before clock/clone/wait,
+leaves no active lease or stdout/stderr file, removes the new group directory,
+and preserves the acquired delegation descriptors. Exact bare values reach
+the intentionally failing clock; newline terminated values admit a successful
+start and complete the existing retained-ownership/collection cases.
+
+The old code failed the new rejection assertion; the fixed owner passed
+`sh scripts/check/check-linux-group-start-ownership.shs` on native Linux
+aarch64 in Docker. Adjacent population decoding and the complete V4 host
+selfcheck also passed via `sh scripts/check/check-process-v4-group-admission.shs`.
+Local logs are `/private/tmp/buildrunner-readback-{red,green,adjacent}.log`.
+Luna reviewed the final diff and found no P0/P1 or remaining coverage issue
+for this narrow admission fix. The pre-existing compound failure branch can
+still report stale errno for a malformed value; this does not admit execution.
+
+These checks provide injected C host component evidence only. They do not
+qualify live cgroup containment, Pure Simple/SPipe or BuildRunner Hello.
+V4 group rejection remains enabled and no Phase2 compiler was rebuilt.
