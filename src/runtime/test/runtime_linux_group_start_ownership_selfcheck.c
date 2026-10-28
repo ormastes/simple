@@ -18,6 +18,8 @@
 
 static int fail_clock, clone_calls, clock_calls, reap_ready, fail_remove;
 static int wait_calls, blocking_wait_calls;
+static int newline_readbacks;
+static const char *readback_name, *readback_value;
 static const pid_t child_pid = 424242;
 static const char *group_files[] = {"memory.max", "memory.swap.max",
     "memory.oom.group", "memory.peak", "memory.current", "cgroup.events",
@@ -38,6 +40,13 @@ static int test_mkdirat(int dir, const char *name, mode_t mode) {
     for (size_t i = 0; i < sizeof(group_files) / sizeof(group_files[0]); i++)
         write_leaf(group, group_files[i], !strcmp(group_files[i], "cgroup.events")
             ? "populated 1\n" : "0");
+    /* Prefix writes leave these controlled readback suffixes in the regular
+     * file fixture. Kernel cgroup reads normally return one final newline. */
+    if (newline_readbacks) {
+        write_leaf(group, "memory.swap.max", "0\n");
+        write_leaf(group, "memory.oom.group", "0\n");
+    }
+    if (readback_name) write_leaf(group, readback_name, readback_value);
     close(group);
     return 0;
 }
@@ -259,10 +268,36 @@ int main(void) {
     strcpy(rt_lg_delegation.name, "parent");
     strcpy(rt_lg_delegation.attempt, root); strcpy(rt_lg_delegation.identity, identity);
 
-    /* A failed clock must reject BEFORE execution, with no blocking reap. */
+    const char *bad_swap[] = {"01\n", "0junk", "0 \n", "0\t\n",
+        "0\n1\n", "09223372036854775808\n"};
+    const char *bad_oom[] = {"10\n", "1junk", "1 \n", "1\t\n",
+        "1\n0\n", "18446744073709551616\n"};
+    int admission_clock_calls = clock_calls;
+    for (int metric = 0; metric < 2; metric++) {
+        readback_name = metric ? "memory.oom.group" : "memory.swap.max";
+        for (size_t i = 0; i < sizeof(bad_swap) / sizeof(bad_swap[0]); i++) {
+            readback_value = metric ? bad_oom[i] : bad_swap[i];
+            SplArray *rejected = start(root, identity);
+            assert(rejected->items[0].as_int == 0 && rejected->items[1].as_int != 0);
+            assert(clone_calls == 0 && clock_calls == admission_clock_calls && wait_calls == 0);
+            assert(!rt_linux_group.active);
+            char group_name[80];
+            snprintf(group_name, sizeof(group_name), "simple-native-%s", identity);
+            assert(faccessat(parent, group_name, F_OK, 0) == -1 && errno == ENOENT);
+            assert(faccessat(root_fd, "stdout", F_OK, 0) == -1 && errno == ENOENT);
+            assert(faccessat(root_fd, "stderr", F_OK, 0) == -1 && errno == ENOENT);
+            assert(fcntl(parent, F_GETFD) >= 0 && fcntl(root_fd, F_GETFD) >= 0);
+            free_receipt(rejected);
+        }
+    }
+    readback_name = readback_value = NULL;
+
+    /* Exact readbacks without newlines pass control admission and reach the
+     * clock. A failed clock still rejects before execution or blocking reap. */
     fail_clock = 1;
     SplArray *receipt = start(root, identity);
     assert(receipt->items[0].as_int == 0 && receipt->items[1].as_int == EIO);
+    assert(clock_calls == admission_clock_calls + 1);
     assert(clone_calls == 0 && blocking_wait_calls == 0);
     assert(!rt_linux_group.active);
     free_receipt(receipt);
@@ -270,6 +305,7 @@ int main(void) {
     unlinkat(root_fd, "stdout", 0); unlinkat(root_fd, "stderr", 0);
 
     fail_clock = 0;
+    newline_readbacks = 1;
     int before_clock = clock_calls;
     receipt = start(root, identity);
     assert(receipt->items[0].as_int == 1 && receipt->items[1].as_int == 0);

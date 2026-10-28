@@ -571,10 +571,12 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
             (!rt_lg_number(verify, &readback) || readback != memory_limit)) ||
         !rt_lg_write_at(group_fd, "memory.swap.max", memory_limit == 0 ? "max" : "0") ||
         !rt_lg_read_at(group_fd, "memory.swap.max", verify, sizeof(verify)) ||
-        (memory_limit == 0 ? (strcmp(verify, "max") != 0 && strcmp(verify, "max\n") != 0) : verify[0] != '0') ||
+        (memory_limit == 0 ? (strcmp(verify, "max") != 0 && strcmp(verify, "max\n") != 0) :
+            (!rt_lg_number(verify, &readback) || readback != 0)) ||
         !rt_lg_write_at(group_fd, "memory.oom.group", "1") ||
         !rt_lg_read_at(group_fd, "memory.oom.group", verify, sizeof(verify)) ||
-        verify[0] != '1' || !rt_lg_read_at(group_fd, "memory.peak", verify, sizeof(verify))) {
+        !rt_lg_number(verify, &readback) || readback != 1 ||
+        !rt_lg_read_at(group_fd, "memory.peak", verify, sizeof(verify))) {
         answer[1] = errno ? errno : ENOTSUP; goto done;
     }
     out_fd = open(stdout_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
