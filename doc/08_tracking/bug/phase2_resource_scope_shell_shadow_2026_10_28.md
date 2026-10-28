@@ -16,7 +16,11 @@ Producer: existing `stage2-simple-aliasfix` under
 `/Users/ormastes/wt/release-phase2-review/build/verify/pure-spl-aliasfix-p2-20261025-02/`.
 The compiler is intentionally not rebuilt in this task.
 
-Workaround: rename only the `_run_with_unix_limits` local to `limit_shell_path`.
+Workaround: rename the `_run_with_unix_limits` local to `limit_shell_path`
+and the `_limit_shell` loop local to `candidate_shell_path`. The first native
+probe proved the neighboring loop collision as well: no-pid-cap children passed,
+but the pid-capped child incorrectly reported that no supported shell existed.
+The host has `/bin/bash`; the renamed loop must return that executable.
 Its tagged source and this report are committed before native qualification;
 the workaround commit is discoverable with `git log -S phase2_resource_scope_shell_shadow_2026_10_28`.
 Retirement requires a new admitted producer and an original-name reproducer that
