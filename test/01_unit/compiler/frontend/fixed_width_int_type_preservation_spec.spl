@@ -17,6 +17,10 @@ fn render(t: Type) -> text:
             if name == "Option" and args.len() == 1: render(args[0]) + "?"
             elif name == "Option": "Option<any>"
             else: name
+        case Tuple(items):
+            var rendered: [text] = []
+            for item in items: rendered.push(render(item))
+            "(" + rendered.join(", ") + ")"
         case Optional(inner): render(inner) + "?"
         case _: "other"
 
@@ -60,3 +64,23 @@ describe "fixed-width types reach the module surface digest":
         expect(u7 == i64_).to_equal(false)
         expect(u7_opt == u7).to_equal(false)
         expect(surface_of("pub fn f(a: u7) -> i64:\n    0\n", "sd_f")).to_equal(u7)
+
+describe "registered composite Option payloads":
+    it "preserves tuple payloads in explicit Option annotations":
+        val source = "pub fn metrics() -> Option<(i64, i64)>:\n    nil\n"
+        val parsed = parse_full_frontend(source, "option_tuple_fixture.spl",
+            "option_tuple_fixture", Logger(level: 0))
+        expect(parser_error_count()).to_equal(0)
+        expect(render(parsed.functions["metrics"].return_type)).to_equal("(i64, i64)?")
+
+    it "retains the generic parameter on an extern declaration":
+        val source = "extern fn identity<T>(value: T) -> T\n"
+        val parsed = parse_full_frontend(source, "generic_extern_fixture.spl",
+            "generic_extern_fixture", Logger(level: 0))
+        expect(parser_error_count()).to_equal(0)
+        val function = parsed.functions["identity"]
+        expect(function.is_extern).to_equal(true)
+        expect(function.type_params.len()).to_equal(1)
+        assert function.type_params.len() == 1
+        expect(function.type_params[0].name).to_equal("T")
+        expect(render(function.return_type)).to_equal("T")

@@ -64,6 +64,25 @@ registry hunk presence. After any expr_dispatch refactor, re-verify:
 - [src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl)
   (construct/read/write codegen).
 
+### Declaration-level cfg guards (2026-10-27)
+
+**Pattern:** `lower_module` first calls `apply_decl_cfg_guards(module)` (asm_and_targets.spl), which drops
+guarded decls that are off for `self.target_context` and returns the module untouched (no allocation) when
+nothing is guarded. Grouped arms (`cfg_group != 0`) are decided once per group by `cfg_group_winners`
+(arms ordered by `cfg_arm`, else = `-1` last, cond = cfg joined with " and ", `mir_cfg_select_arm`; -1 drops the
+group, -2 or a numbered arm without cfg is `error_fatal`). Group 0 items use
+`mir_cfg_item_enabled(cfg, target, features)`. A dropped class/struct/enum also drops its impls; a dropped
+impl or class drops its methods from `module.functions`. The bootstrap flat-store lane calls
+`cfg_group_winners_for_functions` + `decl_cfg_keep` per function (`bootstrap_globals.spl`), as does the JIT path.
+
+**File refs:**
+- [src/compiler/50.mir/_MirLowering/asm_and_targets.spl](../../../../src/compiler/50.mir/_MirLowering/asm_and_targets.spl)
+  (apply_decl_cfg_guards, cfg_group_winners, decl_cfg_keep).
+- [src/compiler/50.mir/mir_cfg_select.spl](../../../../src/compiler/50.mir/mir_cfg_select.spl)
+  (mir_cfg_item_enabled).
+
+**TODO (decl-level @cfg):** Dropping a type drops its impls by type name, but specialization records and trait impls declared in other modules are not covered yet. Follow up in step 3 or 5.
+
 ## Gotchas
 
 1. **Arrays are value types:** passed by copy, so `.push()` / `.pop()` /

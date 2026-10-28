@@ -1,6 +1,25 @@
 <!-- codex-design -->
 # Collection planner architecture
 
+## 2026-10-27 DataFrame, backend and layout consistency
+
+The [shared capability contract](compiler/collection_backend_capabilities.md)
+now binds Item 3 physical planning to Item 7 containers and the async resource
+architecture. A logical HashLookup does not prove its map concurrent or
+lockless. Select an eligible index backend independently from column layout,
+using one common capability description and exact operation/type/lifetime/
+progress/target guards before costs. Static-only, no-capture and unsupported
+transitions are explicit; required capabilities never silently fall back.
+
+Both `src/lib/nogc_sync_mut/df/` and `src/lib/nogc_async_mut/df/` contain
+DataFrame and typed-series implementations. Keep their exported family APIs
+and checked conversions; neither `[Series]` storage nor the async family name
+certifies generic erased columns or concurrent mutation. Reuse existing
+StorageLayoutPlanV1 and the proposed shared IndexRefFactory/ref contracts;
+do not invent DataFrame-specific pointer or resource factories. CBC-01–12 in
+the [TDD matrix](../03_plan/sys_test/collection_backend_capabilities.md) refine
+existing requirements without claiming implementation or native completion.
+
 Status: design in progress, 2026-09-27. Functional scope is REQ-001–011 in
 `doc/02_requirements/feature/collection_planner.md`; balanced performance
 targets are selected in `doc/02_requirements/nfr/collection_planner.md`. The

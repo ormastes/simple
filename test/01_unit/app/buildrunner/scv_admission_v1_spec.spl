@@ -1,0 +1,215 @@
+# Direct pure gate specifications. Fixtures are logical input values, not runtime proof.
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, BuildLinkV1,
+    builder_task_identity_v1}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_revision_id_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1,
+    CompileSourceInventoryEntryV1, compile_source_inventory_encode_v1}
+use std.scv.snapshot_v1_adapter.{CompileSnapshotV1Adapter}
+use std.scv.snapshot_v2.{ScvSnapshotV2, ScvFrozenFileV2, scv_snapshot_file_v2,
+    scv_snapshot_freeze_v2}
+use std.scv.source_witness_v1.{ScvSourceWitnessV1, scv_snapshot_lookup_domain_v2,
+    scv_snapshot_directory_v2, scv_snapshot_directory_source_witness_v1}
+use app.buildrunner.scv_admission_v1.{BuildRunnerScvAdmissionV1,
+    build_runner_scv_bind_v1, build_runner_scv_revalidate_v1,
+    build_runner_scv_admission_digest_v1}
+
+fn gate_adapter(files: [ScvFrozenFileV2], generation: i64 = 1) -> CompileSnapshotV1Adapter:
+    val snapshot = scv_snapshot_freeze_v2("compile-inventory-v1", files, ["src"], generation,
+        0, "complete", ["editor-overlays", "generated-inputs", "external-inputs", "configuration",
+            "filesystem-event-coverage", "physical-file-modes", "physical-path-aliases"]).unwrap()
+    var rows: [text] = []
+    var entries: [CompileSourceInventoryEntryV1] = []
+    for file in snapshot.files:
+        rows = rows.push("{file.path}|{file.content_id}|{file.bytes.len()}")
+        val digest = file.content_id.substring(7)
+        entries = entries.push(CompileSourceInventoryEntryV1(file.path, digest, digest,
+            digest, digest, digest, file.bytes.len()))
+    val manifest_digest = sha256_text(rows.join("\n"))
+    val tree = "scv-tree-v1-" + manifest_digest
+    val revision = scv_compile_snapshot_revision_id_v1(tree, manifest_digest)
+    val root = "/fixture/build/scv/snapshots/" + revision
+    val legacy = ScvCompileSnapshotV1(valid: true, reason: "ok", revision_id: revision,
+        commit_id: "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|{tree}|{files.len()}"),
+        tree_id: tree, inventory_digest: manifest_digest, inventory_count: files.len(),
+        snapshot_root: root, provenance_path: root + "/SCV_COMPILE_SNAPSHOT",
+        receipt_path: "/fixture/build/scv/receipts/" + revision + ".receipt", source_drifted: false)
+    val inventory = CompileSourceInventoryV1(schema_version: 1, generation: generation, entries: entries)
+    CompileSnapshotV1Adapter(legacy: legacy, snapshot: snapshot,
+        source_inventory_digest: "sha256_" + sha256_text(compile_source_inventory_encode_v1(inventory)),
+        source_inventory_generation: generation)
+
+fn gate_task(adapter: CompileSnapshotV1Adapter) -> BuildTaskV1:
+    var inputs: [BuildInputV1] = []
+    for file in adapter.snapshot.files:
+        inputs = inputs.push(BuildInputV1(path: file.path, digest: file.content_id.substring(7)))
+    inputs = inputs.push(BuildInputV1(path: "assets/policy.txt", digest: sha256_text("ordinary policy")))
+    BuildTaskV1(id: "source_1", attempt: 1, phase: "native", producer_digest: sha256_text("producer"),
+        source_digest: adapter.legacy.inventory_digest, toolchain_digest: sha256_text("toolchain"),
+        dependencies: [], program: "producer", args: ["native-build", "--source", "src"],
+        inputs: inputs, outputs: ["out/result.o"], cache_key: sha256_text("cache"),
+        timeout_ms: 1000, memory_limit_bytes: 4096, links: [], memory_policy: "enforce")
+
+fn gate_witnesses(adapter: CompileSnapshotV1Adapter, directory: bool = true) -> [ScvSourceWitnessV1]:
+    var witnesses: [ScvSourceWitnessV1] = []
+    for file in adapter.snapshot.files:
+        witnesses = witnesses.push(scv_snapshot_lookup_domain_v2(adapter.snapshot,
+            file.path, "compile-inventory-v1").unwrap())
+    if directory:
+        witnesses = witnesses.push(scv_snapshot_directory_source_witness_v1(
+            scv_snapshot_directory_v2(adapter.snapshot, "src").unwrap()))
+    witnesses
+
+fn gate_fixture() -> CompileSnapshotV1Adapter:
+    gate_adapter([scv_snapshot_file_v2("src/a.spl", [35u8, 10u8])])
+
+fn gate_binding() -> BuildRunnerScvAdmissionV1:
+    val adapter = gate_fixture()
+    build_runner_scv_bind_v1(gate_task(adapter), adapter, gate_witnesses(adapter)).unwrap()
+
+describe "BuildRunner SCV source-only admission (REQ-009/010/013/014)":
+    it "binds exact task identity and declared frozen bytes while preserving unsupported coverage":
+        val adapter = gate_fixture()
+        val task = gate_task(adapter)
+        val binding = build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter)).unwrap()
+        expect(binding.task_identity).to_equal(builder_task_identity_v1(task))
+        expect(binding.source_inputs).to_equal([task.inputs[0]])
+        expect(binding.source_only).to_equal(true)
+        expect(binding.receipt.source_only).to_equal(true)
+        expect(binding.receipt.unsupported_inputs).to_contain("configuration")
+        expect(binding.receipt.unsupported_inputs).to_contain("filesystem-event-coverage")
+        expect(build_runner_scv_admission_digest_v1(binding).unwrap()).to_equal(binding.admission_digest)
+
+    it "rejects a declared source digest differing from the frozen bytes":
+        val adapter = gate_fixture()
+        var task = gate_task(adapter)
+        task.inputs = [BuildInputV1(path: "src/a.spl", digest: sha256_text("wrong bytes"))]
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV declared source digest differs: src/a.spl"))
+
+    it "refuses a declared source missing from the immutable inventory":
+        val adapter = gate_fixture()
+        var task = gate_task(adapter)
+        task.inputs = task.inputs.push(BuildInputV1(path: "src/missing.spl", digest: sha256_text("missing")))
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV declared source is unmapped: src/missing.spl"))
+
+    it "refuses duplicate declared paths through the real task contract":
+        val adapter = gate_fixture()
+        var task = gate_task(adapter)
+        task.inputs = task.inputs.push(task.inputs[0])
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV task contract: overlapping inputs"))
+
+    it "requires an actual positive witness for every mapped source input":
+        val adapter = gate_fixture()
+        val directory = scv_snapshot_directory_source_witness_v1(scv_snapshot_directory_v2(adapter.snapshot, "src").unwrap())
+        expect(build_runner_scv_bind_v1(gate_task(adapter), adapter, [directory])).to_equal(Err("build SCV declared source has no positive witness: src/a.spl"))
+
+    it "uses explicit scope membership rather than classifying suffixes as source roles":
+        val adapter = gate_fixture()
+        var task = gate_task(adapter)
+        task.inputs = [BuildInputV1(path: "outside/a.spl", digest: sha256_text("ordinary role"))]
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV task has no supported declared source input"))
+
+    it "refuses directory evidence describing source files the worker will not materialize":
+        val adapter = gate_adapter([scv_snapshot_file_v2("src/a.spl", [35u8]), scv_snapshot_file_v2("src/b.spl", [10u8])])
+        var task = gate_task(adapter)
+        task.inputs = [task.inputs[0]]
+        val positive = scv_snapshot_lookup_domain_v2(adapter.snapshot, "src/a.spl", "compile-inventory-v1").unwrap()
+        val directory = scv_snapshot_directory_source_witness_v1(scv_snapshot_directory_v2(adapter.snapshot, "src").unwrap())
+        expect(build_runner_scv_bind_v1(task, adapter, [positive, directory])).to_equal(Err("build SCV worker directory membership is incomplete: src"))
+
+    it "refuses positive observations absent from the task input declaration":
+        val adapter = gate_adapter([scv_snapshot_file_v2("src/a.spl", [35u8]), scv_snapshot_file_v2("src/b.spl", [10u8])])
+        var task = gate_task(adapter)
+        task.inputs = [task.inputs[0]]
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter, false))).to_equal(Err("build SCV positive read is not a declared source input: src/b.spl"))
+
+    it "refuses duplicate source queries without silently deduplicating the read set":
+        val adapter = gate_fixture()
+        val read = gate_witnesses(adapter, false)[0]
+        expect(build_runner_scv_bind_v1(gate_task(adapter), adapter, [read, read])).to_equal(Err("build SCV duplicate source query"))
+
+    it "refuses negative queries that overlap the worker-visible input tree":
+        val adapter = gate_fixture()
+        val absent_file_at_directory = scv_snapshot_lookup_domain_v2(adapter.snapshot, "src", "compile-inventory-v1").unwrap()
+        val witnesses = gate_witnesses(adapter, false).push(absent_file_at_directory)
+        expect(build_runner_scv_bind_v1(gate_task(adapter), adapter, witnesses)).to_equal(Err("build SCV negative query overlaps a worker input: src"))
+
+    it "rejects generation contradictions and mismatching legacy inventory subjects":
+        var adapter = gate_fixture()
+        val task = gate_task(adapter)
+        val witnesses = gate_witnesses(adapter)
+        adapter.source_inventory_generation = 2
+        expect(build_runner_scv_bind_v1(task, adapter, witnesses)).to_equal(Err("build SCV adapter coverage or generation differs"))
+        adapter = gate_fixture()
+        adapter.legacy.inventory_digest = sha256_text("other inventory")
+        expect(build_runner_scv_bind_v1(task, adapter, witnesses)).to_equal(Err("build SCV frozen inventory binding differs"))
+
+    it "rejects a newly present formerly absent file during requested-snapshot verification":
+        val adapter = gate_fixture()
+        val missing = scv_snapshot_lookup_domain_v2(adapter.snapshot, "src/new.spl", "compile-inventory-v1").unwrap()
+        val witnesses = gate_witnesses(adapter, false).push(missing)
+        val binding = build_runner_scv_bind_v1(gate_task(adapter), adapter, witnesses).unwrap()
+        val requested = gate_adapter([adapter.snapshot.files[0], scv_snapshot_file_v2("src/new.spl", [35u8])], 2).snapshot
+        expect(build_runner_scv_revalidate_v1(binding, requested)).to_equal(Err("verify-source-observation-changed:src/new.spl"))
+
+    it "rejects changed requested bytes rather than trusting the old adapter receipt":
+        val adapter = gate_fixture()
+        val binding = build_runner_scv_bind_v1(gate_task(adapter), adapter, gate_witnesses(adapter)).unwrap()
+        val changed = gate_adapter([scv_snapshot_file_v2("src/a.spl", [35u8, 32u8, 10u8])], 2)
+        expect(build_runner_scv_revalidate_v1(binding, changed.snapshot)).to_equal(Err("verify-source-observation-changed:src/a.spl"))
+
+    it "binds a fresh source-only receipt to an unchanged requested generation":
+        val adapter = gate_fixture()
+        val binding = build_runner_scv_bind_v1(gate_task(adapter), adapter, gate_witnesses(adapter)).unwrap()
+        val requested = gate_adapter(adapter.snapshot.files, 2).snapshot
+        val next = build_runner_scv_revalidate_v1(binding, requested).unwrap()
+        expect(next.task_identity).to_equal(binding.task_identity)
+        expect(next.receipt.requested_snapshot_id).to_equal(requested.snapshot_id)
+        expect(next.admission_digest == binding.admission_digest).to_equal(false)
+        expect(next.source_only).to_equal(true)
+
+    it "refuses requested unknown directory coverage and changed query domains":
+        val adapter = gate_fixture()
+        val binding = build_runner_scv_bind_v1(gate_task(adapter), adapter, gate_witnesses(adapter)).unwrap()
+        val unknown = scv_snapshot_freeze_v2("compile-inventory-v1", adapter.snapshot.files,
+            ["src"], 2, 0, "unknown", adapter.snapshot.unsupported_inputs).unwrap()
+        expect(build_runner_scv_revalidate_v1(binding, unknown)).to_equal(Err("directory-coverage-unknown"))
+        val other = scv_snapshot_freeze_v2("declared-source-files-v2", adapter.snapshot.files,
+            ["src"], 2, 0, "complete", adapter.snapshot.unsupported_inputs).unwrap()
+        expect(build_runner_scv_revalidate_v1(binding, other)).to_equal(Err("verify-source-domain-mismatch"))
+
+    it "never drops V1 coverage limitations merely because a requested model omits them":
+        val adapter = gate_fixture()
+        val binding = build_runner_scv_bind_v1(gate_task(adapter), adapter, gate_witnesses(adapter)).unwrap()
+        val incomplete_disclosure = scv_snapshot_freeze_v2("compile-inventory-v1", adapter.snapshot.files,
+            ["src"], 2, 0, "complete", []).unwrap()
+        expect(build_runner_scv_revalidate_v1(binding, incomplete_disclosure)).to_equal(Err("build SCV requested omits required coverage limitation: editor-overlays"))
+
+    it "rejects source-relevant links and source output paths":
+        val adapter = gate_fixture()
+        var task = gate_task(adapter)
+        task.links = [BuildLinkV1(kind: "file", path: "src/alias.spl", target: "a.spl",
+            resolved_path: "src/a.spl", target_digest: task.inputs[0].digest)]
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV link aliases a declared source: src/alias.spl"))
+        task = gate_task(adapter)
+        task.links = [BuildLinkV1(kind: "file", path: "alias/a.spl", target: "../src/a.spl",
+            resolved_path: "src/a.spl", target_digest: task.inputs[0].digest)]
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV link aliases a declared source: alias/a.spl"))
+        task = gate_task(adapter)
+        task.outputs = ["src/generated.o"]
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV source namespace contains a link or output: src/generated.o"))
+
+    it "reconstructs the task, receipt and mapping before accepting a supplied digest":
+        var binding = gate_binding()
+        binding.admission_digest = sha256_text("forged")
+        expect(build_runner_scv_admission_digest_v1(binding)).to_equal(Err("build SCV admission subject or digest differs"))
+        binding = gate_binding()
+        binding.task.args = ["changed"]
+        expect(build_runner_scv_admission_digest_v1(binding)).to_equal(Err("build SCV admission subject or digest differs"))
+        binding = gate_binding()
+        binding.source_inputs = []
+        expect(build_runner_scv_admission_digest_v1(binding)).to_equal(Err("build SCV admission subject or digest differs"))
+        binding = gate_binding()
+        binding.receipt.source_only = false
+        expect(build_runner_scv_admission_digest_v1(binding)).to_equal(Err("build SCV source-only contract differs"))

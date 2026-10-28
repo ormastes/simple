@@ -1,0 +1,486 @@
+# Managed logical build-input owner. This is not a filesystem observation port.
+# Parent producers must reconcile actual filesystem/editor inputs, bind their
+# exact config/environment digests, and call unknown on a producer gap/overflow.
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.scv.snapshot_v2.{ScvSnapshotV2, ScvFrozenFileV2, scv_snapshot_freeze_v2,
+    scv_snapshot_file_v2, scv_snapshot_valid_v2, scv_snapshot_copy_bytes_v2,
+    scv_snapshot_path_valid_v2, scv_snapshot_in_scope_v2, scv_snapshot_sorted_v2}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_identity_cmp_v1}
+
+pub struct ScvBuildCursorV1:
+    epoch: text
+    sequence: i64
+
+pub struct BuildInputEntryV1:
+    path: text
+    kind: text
+    mode: i64
+    bytes: [u8]
+    origin: text
+    producer_digest: text
+
+pub struct BuildInputUniverseV1:
+    namespace: text
+    path_policy_digest: text
+    complete_scopes: [text]
+    configuration_digest: text
+    target_digest: text
+    compiler_digest: text
+    runtime_digest: text
+    environment_digest: text
+    external_roots: [text]
+
+pub struct BuildFrozenSnapshotV1:
+    snapshot_id: text
+    source: ScvSnapshotV2
+    entries: [BuildInputEntryV1]
+    universe: BuildInputUniverseV1
+    cursor: ScvBuildCursorV1
+    complete: bool
+    reason: text
+
+pub struct BuildCaptureRenameV1:
+    from_path: text
+    to_path: text
+    expected_entry_digest: text
+
+pub struct BuildCaptureTransactionV1:
+    cursor: ScvBuildCursorV1
+    upserts: [BuildInputEntryV1]
+    deleted_paths: [text]
+    renames: [BuildCaptureRenameV1]
+
+pub struct BuildCaptureAcknowledgementV1:
+    expected_cursor: ScvBuildCursorV1
+    transaction_id: text
+    transaction_digest: text
+    changes: BuildCaptureTransactionV1
+
+pub struct BuildCaptureStateV1:
+    universe: BuildInputUniverseV1
+    entries: [BuildInputEntryV1]
+    base_snapshot_id: text
+    applied_sequence: i64
+    cursor: ScvBuildCursorV1
+    pending: [BuildCaptureAcknowledgementV1]
+    unknown_reason: text
+    retired_epochs: [text]
+    epoch_history_digest: text
+
+pub fn scv_build_path_policy_digest_v1() -> text:
+    sha256_text("simple/scv-build-path-policy/v1|logical-relative-utf8-exact-case|slash|no-empty-dot-dotdot-control-backslash-colon-bar|no-unicode-fold|regular:420,493|directory:493,empty|symlink:511,exact-target,no-follow")
+
+fn build_digest_valid_v1(digest: text) -> bool:
+    if digest.len() != 64: return false
+    for byte in digest.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return false
+    true
+
+fn build_path_valid_v1(path: text) -> bool:
+    if not scv_snapshot_path_valid_v2(path): return false
+    for byte in path.bytes():
+        if byte < 32 or byte == 127: return false
+    true
+
+fn build_cursor_valid_v1(cursor: ScvBuildCursorV1) -> bool:
+    if cursor.epoch == "" or cursor.sequence < 0: return false
+    for byte in cursor.epoch.bytes():
+        if byte < 32 or byte == 127: return false
+    true
+
+fn build_cursor_equal_v1(a: ScvBuildCursorV1, b: ScvBuildCursorV1) -> bool:
+    a.epoch == b.epoch and a.sequence == b.sequence
+
+fn build_frame_v1(value: text) -> text:
+    "{value.len()}:" + value
+
+fn build_epoch_history_digest_v1(epoch: text, retired_epochs: [text]) -> text:
+    var subject = "simple/scv-build-epoch-history/v1" + build_frame_v1(epoch) +
+        build_frame_v1(retired_epochs.len().to_text())
+    for retired in retired_epochs: subject = subject + build_frame_v1(retired)
+    sha256_text(subject)
+
+fn build_epoch_history_valid_v1(state: BuildCaptureStateV1) -> bool:
+    if not build_cursor_valid_v1(state.cursor) or state.retired_epochs.len() > 1024: return false
+    if state.epoch_history_digest != build_epoch_history_digest_v1(state.cursor.epoch, state.retired_epochs): return false
+    val sorted = scv_snapshot_sorted_v2(state.retired_epochs)
+    var previous = ""
+    for epoch in sorted:
+        if epoch == state.cursor.epoch or epoch == previous: return false
+        if not build_cursor_valid_v1(ScvBuildCursorV1(epoch: epoch, sequence: 0)): return false
+        previous = epoch
+    true
+
+fn build_entry_copy_v1(entry: BuildInputEntryV1) -> BuildInputEntryV1:
+    BuildInputEntryV1(path: entry.path, kind: entry.kind, mode: entry.mode,
+        bytes: scv_snapshot_copy_bytes_v2(entry.bytes), origin: entry.origin,
+        producer_digest: entry.producer_digest)
+
+pub fn scv_build_entry_digest_v1(entry: BuildInputEntryV1) -> text:
+    sha256_text("simple/scv-build-entry/v1" + build_frame_v1(entry.path) +
+        build_frame_v1(entry.kind) + build_frame_v1(entry.mode.to_text()) +
+        build_frame_v1(entry.origin) + build_frame_v1(entry.producer_digest) +
+        build_frame_v1(entry.bytes.len().to_text()) + build_frame_v1(sha256_u8_hex(entry.bytes)))
+
+fn build_under_roots_v1(path: text, roots: [text]) -> bool:
+    for root in roots:
+        if scv_snapshot_in_scope_v2(path, root): return true
+    false
+
+fn build_roots_valid_v1(roots: [text]) -> bool:
+    for root in roots:
+        if not build_path_valid_v1(root): return false
+    var index = 0
+    while index < roots.len():
+        var other = index + 1
+        while other < roots.len():
+            if (scv_snapshot_in_scope_v2(roots[index], roots[other]) or
+                    scv_snapshot_in_scope_v2(roots[other], roots[index])): return false
+            other = other + 1
+        index = index + 1
+    true
+
+fn build_universe_copy_v1(universe: BuildInputUniverseV1) -> BuildInputUniverseV1:
+    BuildInputUniverseV1(namespace: universe.namespace, path_policy_digest: universe.path_policy_digest,
+        complete_scopes: scv_snapshot_sorted_v2(universe.complete_scopes),
+        configuration_digest: universe.configuration_digest, target_digest: universe.target_digest,
+        compiler_digest: universe.compiler_digest, runtime_digest: universe.runtime_digest,
+        environment_digest: universe.environment_digest,
+        external_roots: scv_snapshot_sorted_v2(universe.external_roots))
+
+fn build_universe_validate_v1(universe: BuildInputUniverseV1) -> Result<bool, text>:
+    if universe.namespace != "managed-build-inputs-v1": return Err("build-namespace-unsupported")
+    if universe.path_policy_digest != scv_build_path_policy_digest_v1(): return Err("build-path-policy-unsupported")
+    for digest in [universe.configuration_digest, universe.target_digest, universe.compiler_digest,
+            universe.runtime_digest, universe.environment_digest]:
+        if not build_digest_valid_v1(digest): return Err("build-universe-digest-invalid")
+    if universe.complete_scopes.len() == 0 or not build_roots_valid_v1(universe.complete_scopes):
+        return Err("build-complete-scopes-invalid")
+    if not build_roots_valid_v1(universe.external_roots): return Err("build-external-roots-invalid")
+    for root in universe.external_roots:
+        if not build_under_roots_v1(root, universe.complete_scopes): return Err("build-external-root-outside-universe")
+    Ok(true)
+
+fn build_entry_validate_v1(entry: BuildInputEntryV1, universe: BuildInputUniverseV1) -> Result<bool, text>:
+    if not build_path_valid_v1(entry.path): return Err("build-path-invalid")
+    if not build_under_roots_v1(entry.path, universe.complete_scopes): return Err("build-entry-outside-universe")
+    if entry.kind == "regular":
+        if entry.mode != 420 and entry.mode != 493: return Err("build-kind-or-mode-unsupported")
+    elif entry.kind == "directory":
+        if entry.mode != 493 or entry.bytes.len() != 0: return Err("build-kind-or-mode-unsupported")
+    elif entry.kind == "symlink":
+        if entry.mode != 511 or entry.bytes.len() == 0: return Err("build-kind-or-mode-unsupported")
+        for byte in entry.bytes:
+            if byte == 0: return Err("build-symlink-target-invalid")
+    else: return Err("build-kind-or-mode-unsupported")
+    if not ["committed", "worktree", "editor", "generated", "external", "configuration"].contains(entry.origin):
+        return Err("build-origin-unsupported")
+    if not build_digest_valid_v1(entry.producer_digest): return Err("build-producer-digest-invalid")
+    val external = build_under_roots_v1(entry.path, universe.external_roots)
+    if entry.origin == "external" and not external: return Err("build-external-root-undeclared")
+    if external and entry.origin != "external": return Err("build-external-origin-collision")
+    Ok(true)
+
+fn build_sift_entries_v1(mut entries: [BuildInputEntryV1], initial: i64, count: i64):
+    var root = initial
+    while root * 2 + 1 < count:
+        val left = root * 2 + 1
+        var largest = root
+        if compile_source_inventory_identity_cmp_v1(entries[largest].path, entries[left].path) < 0: largest = left
+        val right = left + 1
+        if right < count and compile_source_inventory_identity_cmp_v1(entries[largest].path, entries[right].path) < 0: largest = right
+        if largest == root: return
+        val temporary = entries[root]
+        entries[root] = entries[largest]
+        entries[largest] = temporary
+        root = largest
+
+fn build_entries_copy_sorted_v1(entries: [BuildInputEntryV1]) -> [BuildInputEntryV1]:
+    var copied: [BuildInputEntryV1] = []
+    for entry in entries: copied = copied.push(build_entry_copy_v1(entry))
+    var start = copied.len() / 2
+    while start > 0:
+        start = start - 1
+        build_sift_entries_v1(copied, start, copied.len())
+    var end = copied.len()
+    while end > 1:
+        end = end - 1
+        val temporary = copied[0]
+        copied[0] = copied[end]
+        copied[end] = temporary
+        build_sift_entries_v1(copied, 0, end)
+    copied
+
+fn build_entry_index_v1(entries: [BuildInputEntryV1], path: text) -> i64:
+    var low = 0
+    var high = entries.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        val order = compile_source_inventory_identity_cmp_v1(entries[middle].path, path)
+        if order == 0: return middle
+        if order < 0: low = middle + 1
+        else: high = middle
+    -1
+
+fn build_snapshot_identity_v1(universe: BuildInputUniverseV1, entries: [BuildInputEntryV1], cursor: ScvBuildCursorV1) -> text:
+    var subject = "simple/scv-build-snapshot/v1"
+    for field in [universe.namespace, universe.path_policy_digest, universe.configuration_digest,
+            universe.target_digest, universe.compiler_digest, universe.runtime_digest,
+            universe.environment_digest, cursor.epoch, cursor.sequence.to_text()]:
+        subject = subject + build_frame_v1(field)
+    subject = subject + build_frame_v1(universe.complete_scopes.len().to_text())
+    for scope in universe.complete_scopes: subject = subject + build_frame_v1(scope)
+    subject = subject + build_frame_v1(universe.external_roots.len().to_text())
+    for root in universe.external_roots: subject = subject + build_frame_v1(root)
+    subject = subject + build_frame_v1(entries.len().to_text())
+    for entry in entries: subject = subject + build_frame_v1(scv_build_entry_digest_v1(entry))
+    "scv-build-snapshot-v1-sha256-" + sha256_text(subject)
+
+pub fn scv_build_snapshot_freeze_v1(universe: BuildInputUniverseV1, entries: [BuildInputEntryV1],
+        cursor: ScvBuildCursorV1) -> Result<BuildFrozenSnapshotV1, text>:
+    build_universe_validate_v1(universe)?
+    if not build_cursor_valid_v1(cursor): return Err("build-cursor-invalid")
+    val owned_universe = build_universe_copy_v1(universe)
+    for entry in entries: build_entry_validate_v1(entry, owned_universe)?
+    val owned_entries = build_entries_copy_sorted_v1(entries)
+    var previous = ""
+    var regular: [ScvFrozenFileV2] = []
+    var unsupported: [text] = []
+    for entry in owned_entries:
+        if entry.path == previous: return Err("build-path-duplicate")
+        previous = entry.path
+        var ancestor = ""
+        val parts = entry.path.split("/")
+        var part_index = 0
+        while part_index + 1 < parts.len():
+            ancestor = if ancestor == "": parts[part_index] else: ancestor + "/" + parts[part_index]
+            val index = build_entry_index_v1(owned_entries, ancestor)
+            if index >= 0 and owned_entries[index].kind != "directory": return Err("build-parent-not-directory")
+            part_index = part_index + 1
+        if entry.kind == "regular": regular = regular.push(scv_snapshot_file_v2(entry.path, entry.bytes))
+        else: unsupported = unsupported.push(entry.path)
+    val coverage = if unsupported.len() == 0: "complete" else: "unknown"
+    val source = scv_snapshot_freeze_v2("declared-source-files-v2", regular,
+        owned_universe.complete_scopes, cursor.sequence, cursor.sequence, coverage, unsupported)?
+    val identity = build_snapshot_identity_v1(owned_universe, owned_entries, cursor)
+    Ok(BuildFrozenSnapshotV1(snapshot_id: identity, source: source, entries: owned_entries,
+        universe: owned_universe, cursor: cursor, complete: true, reason: ""))
+
+pub fn scv_build_snapshot_valid_v1(snapshot: BuildFrozenSnapshotV1) -> bool:
+    if not snapshot.complete or snapshot.reason != "" or not scv_snapshot_valid_v2(snapshot.source): return false
+    val rebuilt = scv_build_snapshot_freeze_v1(snapshot.universe, snapshot.entries, snapshot.cursor)
+    if val Err(_) = rebuilt: return false
+    val canonical = rebuilt.unwrap()
+    if canonical.snapshot_id != snapshot.snapshot_id or canonical.source.snapshot_id != snapshot.source.snapshot_id: return false
+    # Indexed consumers require the canonical array order as well as its hash.
+    var index = 0
+    while index < snapshot.entries.len():
+        if snapshot.entries[index].path != canonical.entries[index].path: return false
+        index = index + 1
+    index = 0
+    while index < snapshot.universe.complete_scopes.len():
+        if snapshot.universe.complete_scopes[index] != canonical.universe.complete_scopes[index]: return false
+        index = index + 1
+    index = 0
+    while index < snapshot.universe.external_roots.len():
+        if snapshot.universe.external_roots[index] != canonical.universe.external_roots[index]: return false
+        index = index + 1
+    true
+
+fn build_path_status_v1(snapshot: BuildFrozenSnapshotV1, path: text) -> text:
+    if not build_path_valid_v1(path): return "build-path-invalid"
+    if not build_under_roots_v1(path, snapshot.universe.complete_scopes): return "build-path-unknown"
+    val index = build_entry_index_v1(snapshot.entries, path)
+    if index >= 0: return snapshot.entries[index].kind
+    for root in snapshot.universe.complete_scopes:
+        if root == path: return "directory"
+    for entry in snapshot.entries:
+        if entry.path.starts_with(path + "/"): return "directory"
+        if path.starts_with(entry.path + "/") and entry.kind == "symlink": return "symlink"
+        if path.starts_with(entry.path + "/") and entry.kind == "regular": return "build-parent-not-directory"
+    "build-path-absent"
+
+pub fn scv_build_snapshot_read_v1(snapshot: BuildFrozenSnapshotV1, path: text) -> Result<[u8], text>:
+    if not scv_build_snapshot_valid_v1(snapshot): return Err("build-snapshot-invalid")
+    val status = build_path_status_v1(snapshot, path)
+    if status == "symlink": return Err("build-symlink-resolution-unsupported")
+    if status == "directory": return Err("build-path-is-directory")
+    if status != "regular": return Err(status)
+    Ok(scv_snapshot_copy_bytes_v2(snapshot.entries[build_entry_index_v1(snapshot.entries, path)].bytes))
+
+pub fn scv_build_snapshot_list_v1(snapshot: BuildFrozenSnapshotV1, directory: text) -> Result<[text], text>:
+    if not scv_build_snapshot_valid_v1(snapshot): return Err("build-snapshot-invalid")
+    val status = build_path_status_v1(snapshot, directory)
+    if status == "symlink": return Err("build-symlink-resolution-unsupported")
+    if status == "regular": return Err("build-path-not-directory")
+    if status != "directory": return Err(status)
+    var children: [text] = []
+    for entry in snapshot.entries:
+        if not entry.path.starts_with(directory + "/"): continue
+        val parts = entry.path.split("/")
+        val depth = directory.split("/").len()
+        var child = directory + "/" + parts[depth]
+        if not children.contains(child): children = children.push(child)
+    Ok(scv_snapshot_sorted_v2(children))
+
+fn build_transaction_copy_v1(changes: BuildCaptureTransactionV1) -> BuildCaptureTransactionV1:
+    var upserts: [BuildInputEntryV1] = []
+    var deleted: [text] = []
+    var renames: [BuildCaptureRenameV1] = []
+    for entry in changes.upserts: upserts = upserts.push(build_entry_copy_v1(entry))
+    for path in changes.deleted_paths: deleted = deleted.push(path)
+    for rename in changes.renames:
+        renames = renames.push(BuildCaptureRenameV1(from_path: rename.from_path, to_path: rename.to_path,
+            expected_entry_digest: rename.expected_entry_digest))
+    BuildCaptureTransactionV1(cursor: changes.cursor, upserts: upserts, deleted_paths: deleted, renames: renames)
+
+fn build_transaction_digest_v1(expected: ScvBuildCursorV1, changes: BuildCaptureTransactionV1) -> text:
+    var subject = "simple/scv-build-transaction/v1" + build_frame_v1(expected.epoch) +
+        build_frame_v1(expected.sequence.to_text()) + build_frame_v1(changes.cursor.epoch) +
+        build_frame_v1(changes.cursor.sequence.to_text()) + build_frame_v1(changes.upserts.len().to_text())
+    for entry in changes.upserts: subject = subject + build_frame_v1(scv_build_entry_digest_v1(entry))
+    subject = subject + build_frame_v1(changes.deleted_paths.len().to_text())
+    for path in changes.deleted_paths: subject = subject + build_frame_v1(path)
+    subject = subject + build_frame_v1(changes.renames.len().to_text())
+    for rename in changes.renames:
+        subject = subject + build_frame_v1(rename.from_path) + build_frame_v1(rename.to_path) + build_frame_v1(rename.expected_entry_digest)
+    sha256_text(subject)
+
+fn build_transaction_entries_v1(entries: [BuildInputEntryV1], changes: BuildCaptureTransactionV1) -> Result<[BuildInputEntryV1], text>:
+    var touched: [text] = []
+    var removed: [text] = []
+    var replacements: [BuildInputEntryV1] = []
+    for entry in changes.upserts:
+        if touched.contains(entry.path): return Err("build-transaction-path-duplicate")
+        touched = touched.push(entry.path)
+        removed = removed.push(entry.path)
+        replacements = replacements.push(build_entry_copy_v1(entry))
+    for path in changes.deleted_paths:
+        if not build_path_valid_v1(path): return Err("build-path-invalid")
+        if touched.contains(path): return Err("build-transaction-path-duplicate")
+        val index = build_entry_index_v1(entries, path)
+        if index < 0: return Err("build-delete-precondition-failed")
+        touched = touched.push(path)
+        removed = removed.push(path)
+        if entries[index].kind == "directory":
+            for entry in entries:
+                if not entry.path.starts_with(path + "/"): continue
+                if touched.contains(entry.path): return Err("build-transaction-path-duplicate")
+                touched = touched.push(entry.path)
+                removed = removed.push(entry.path)
+    for rename in changes.renames:
+        if not build_path_valid_v1(rename.from_path) or not build_path_valid_v1(rename.to_path): return Err("build-path-invalid")
+        if (rename.from_path == rename.to_path or touched.contains(rename.from_path) or
+                touched.contains(rename.to_path)): return Err("build-transaction-path-duplicate")
+        val index = build_entry_index_v1(entries, rename.from_path)
+        if index < 0 or scv_build_entry_digest_v1(entries[index]) != rename.expected_entry_digest:
+            return Err("build-rename-precondition-failed")
+        if build_entry_index_v1(entries, rename.to_path) >= 0: return Err("build-rename-target-exists")
+        if rename.to_path.starts_with(rename.from_path + "/"): return Err("build-rename-descendant-cycle")
+        for entry in entries:
+            if entry.path.starts_with(rename.to_path + "/"): return Err("build-rename-target-exists")
+        touched = touched.push(rename.from_path)
+        touched = touched.push(rename.to_path)
+        removed = removed.push(rename.from_path)
+        var replacement = build_entry_copy_v1(entries[index])
+        replacement.path = rename.to_path
+        replacements = replacements.push(replacement)
+        if entries[index].kind == "directory":
+            for entry in entries:
+                if not entry.path.starts_with(rename.from_path + "/"): continue
+                val destination = rename.to_path + entry.path.substring(rename.from_path.len())
+                if touched.contains(entry.path) or touched.contains(destination): return Err("build-transaction-path-duplicate")
+                touched = touched.push(entry.path)
+                touched = touched.push(destination)
+                removed = removed.push(entry.path)
+                var descendant = build_entry_copy_v1(entry)
+                descendant.path = destination
+                replacements = replacements.push(descendant)
+    var result: [BuildInputEntryV1] = []
+    for entry in entries:
+        if not removed.contains(entry.path): result = result.push(build_entry_copy_v1(entry))
+    for entry in replacements: result = result.push(entry)
+    Ok(result)
+
+pub fn scv_build_capture_open_v1(universe: BuildInputUniverseV1, initial_entries: [BuildInputEntryV1], epoch: text) -> Result<BuildCaptureStateV1, text>:
+    val cursor = ScvBuildCursorV1(epoch: epoch, sequence: 0)
+    val snapshot = scv_build_snapshot_freeze_v1(universe, initial_entries, cursor)?
+    Ok(BuildCaptureStateV1(universe: snapshot.universe, entries: snapshot.entries,
+        base_snapshot_id: snapshot.snapshot_id, applied_sequence: 0, cursor: cursor,
+        pending: [], unknown_reason: "", retired_epochs: [],
+        epoch_history_digest: build_epoch_history_digest_v1(epoch, [])))
+
+pub fn scv_build_freeze_v1(state: BuildCaptureStateV1, expected_cursor: ScvBuildCursorV1) -> Result<BuildFrozenSnapshotV1, text>:
+    if not build_epoch_history_valid_v1(state): return Err("build-capture-epoch-history-invalid")
+    if state.unknown_reason != "": return Err("build-capture-unknown:" + state.unknown_reason)
+    if not build_cursor_equal_v1(state.cursor, expected_cursor): return Err("build-barrier-cursor-mismatch")
+    if state.applied_sequence != 0 or state.pending.len() != state.cursor.sequence: return Err("build-capture-state-invalid")
+    var cursor = ScvBuildCursorV1(epoch: state.cursor.epoch, sequence: 0)
+    var snapshot = scv_build_snapshot_freeze_v1(state.universe, state.entries, cursor)?
+    if snapshot.snapshot_id != state.base_snapshot_id: return Err("build-capture-state-invalid")
+    var seen: [text] = []
+    for acknowledged in state.pending:
+        val changes = acknowledged.changes
+        if (not build_cursor_equal_v1(acknowledged.expected_cursor, cursor) or
+                changes.cursor.epoch != cursor.epoch or changes.cursor.sequence != cursor.sequence + 1 or
+                seen.contains(acknowledged.transaction_id) or acknowledged.transaction_id == "" or
+                acknowledged.transaction_digest != build_transaction_digest_v1(cursor, changes)):
+            return Err("build-capture-state-invalid")
+        seen = seen.push(acknowledged.transaction_id)
+        val entries = build_transaction_entries_v1(snapshot.entries, changes)?
+        snapshot = scv_build_snapshot_freeze_v1(state.universe, entries, changes.cursor)?
+        cursor = changes.cursor
+    Ok(snapshot)
+
+pub fn scv_build_capture_apply_v1(state: BuildCaptureStateV1, expected_cursor: ScvBuildCursorV1,
+        transaction_id: text, changes: BuildCaptureTransactionV1) -> Result<BuildCaptureStateV1, text>:
+    if state.unknown_reason != "": return Err("build-capture-unknown:" + state.unknown_reason)
+    val current = scv_build_freeze_v1(state, state.cursor)?
+    if transaction_id == "": return Err("build-transaction-id-empty")
+    val digest = build_transaction_digest_v1(expected_cursor, changes)
+    for acknowledged in state.pending:
+        if acknowledged.transaction_id == transaction_id:
+            if acknowledged.transaction_digest != digest: return Err("build-transaction-id-collision")
+            return Ok(build_state_copy_v1(state))
+    if (not build_cursor_equal_v1(state.cursor, expected_cursor) or changes.cursor.epoch != expected_cursor.epoch or
+            changes.cursor.sequence != expected_cursor.sequence + 1): return Err("build-transaction-cursor-gap")
+    if state.pending.len() >= 1024: return Err("build-capture-overflow-reconcile-required")
+    val next_entries = build_transaction_entries_v1(current.entries, changes)?
+    scv_build_snapshot_freeze_v1(state.universe, next_entries, changes.cursor)?
+    var next = build_state_copy_v1(state)
+    next.pending = next.pending.push(BuildCaptureAcknowledgementV1(expected_cursor: expected_cursor,
+        transaction_id: transaction_id, transaction_digest: digest, changes: build_transaction_copy_v1(changes)))
+    next.cursor = changes.cursor
+    Ok(next)
+
+fn build_state_copy_v1(state: BuildCaptureStateV1) -> BuildCaptureStateV1:
+    var pending: [BuildCaptureAcknowledgementV1] = []
+    var retired_epochs: [text] = []
+    for epoch in state.retired_epochs: retired_epochs = retired_epochs.push(epoch)
+    for acknowledgement in state.pending:
+        pending = pending.push(BuildCaptureAcknowledgementV1(expected_cursor: acknowledgement.expected_cursor,
+            transaction_id: acknowledgement.transaction_id, transaction_digest: acknowledgement.transaction_digest,
+            changes: build_transaction_copy_v1(acknowledgement.changes)))
+    BuildCaptureStateV1(universe: build_universe_copy_v1(state.universe),
+        entries: build_entries_copy_sorted_v1(state.entries), base_snapshot_id: state.base_snapshot_id,
+        applied_sequence: state.applied_sequence, cursor: state.cursor, pending: pending,
+        unknown_reason: state.unknown_reason, retired_epochs: retired_epochs,
+        epoch_history_digest: state.epoch_history_digest)
+
+pub fn scv_build_capture_unknown_v1(state: BuildCaptureStateV1, reason: text) -> BuildCaptureStateV1:
+    var unknown = build_state_copy_v1(state)
+    unknown.unknown_reason = if reason == "": "producer-coverage-unknown" else: reason
+    unknown
+
+pub fn scv_build_capture_reconcile_v1(state: BuildCaptureStateV1, universe: BuildInputUniverseV1,
+        entries: [BuildInputEntryV1], new_epoch: text) -> Result<BuildCaptureStateV1, text>:
+    if not build_epoch_history_valid_v1(state): return Err("build-capture-epoch-history-invalid")
+    if new_epoch == state.cursor.epoch or state.retired_epochs.contains(new_epoch): return Err("build-reconcile-epoch-reused")
+    if state.retired_epochs.len() >= 1024: return Err("build-reconcile-epoch-history-exhausted")
+    var reconciled = scv_build_capture_open_v1(universe, entries, new_epoch)?
+    var retired_epochs: [text] = []
+    for epoch in state.retired_epochs: retired_epochs = retired_epochs.push(epoch)
+    retired_epochs = retired_epochs.push(state.cursor.epoch)
+    reconciled.retired_epochs = retired_epochs
+    reconciled.epoch_history_digest = build_epoch_history_digest_v1(new_epoch, retired_epochs)
+    Ok(reconciled)

@@ -6,9 +6,11 @@
 # Discovery consumes only the returned frozen root; there is no live-worktree
 # fallback.
 use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1, scv_cost_elapsed_v1}
+use std.scv.compile_snapshot_values_v1.*
+use std.scv.compile_snapshot_retention_v1.*
 
 use app.io.mod.{
-    file_exists, file_delete, file_read_regular_no_follow_bounded,
+    file_exists, file_delete,
     dir_exists, dir_create
 }
 use app.io.file_ops.{path_absolute}
@@ -22,12 +24,9 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
     file_read_regular_no_follow_bounded_bytes,
-    secure_temp_dir_raw, file_publish_noreplace_raw, file_modified_time}
-use std.io_runtime.{env_get}
-use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
+    secure_temp_dir_raw, file_publish_noreplace_raw}
 use std.nogc_sync_mut.io_runtime.{
-    dir_list, dir_remove, file_rename, file_copy, file_hash_sha256_or_empty, file_size,
-    process_is_running
+    dir_list, dir_remove, file_rename, file_copy, file_hash_sha256_or_empty, file_size
 }
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.scv.core.{scv_rel_path, scv_worktree_path_safe}
@@ -36,7 +35,6 @@ use std.scv.store.{
 }
 use std.scv.compile_source_inventory.{
     CompileSourceInventoryEntryV1, compile_source_inventory_read_current_v1,
-    compile_source_inventory_identity_cmp_v1,
     compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_snapshot_cache_root_v1
 }
@@ -44,35 +42,6 @@ use std.scv.compile_source_inventory.{
 extern fn rt_getpid() -> i64
 
 val SCV_COMPILE_SOURCE_MAX_BYTES_V1: i64 = 64 * 1024 * 1024
-val SCV_COMPILE_METADATA_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
-
-struct ScvCompileSnapshotV1:
-    valid: bool
-    reason: text
-    revision_id: text
-    commit_id: text
-    tree_id: text
-    inventory_digest: text
-    inventory_count: i64
-    snapshot_root: text
-    provenance_path: text
-    receipt_path: text
-    source_drifted: bool
-
-fn scv_compile_snapshot_invalid_v1(reason: text) -> ScvCompileSnapshotV1:
-    ScvCompileSnapshotV1(
-        valid: false,
-        reason: reason,
-        revision_id: "",
-        commit_id: "",
-        tree_id: "",
-        inventory_digest: "",
-        inventory_count: 0,
-        snapshot_root: "",
-        provenance_path: "",
-        receipt_path: "",
-        source_drifted: false
-    )
 
 # Simple-owned text formats: the set `.gitattributes` forces to LF because the
 # indentation-sensitive parser reads them (`*.spl`, `*.shs`, `*.sdn`). Only
@@ -104,47 +73,6 @@ fn scv_compile_snapshot_utf8_refused_v1(rel: text, bytes: [u8]) -> bool:
     if val Err(_) = io_legacy_utf8(bytes):
         return true
     false
-
-fn scv_compile_snapshot_sorted_unique_v1(values: [text]) -> [text]:
-    var sorted = values
-    if sorted.len() > 1:
-        var start = sorted.len() / 2
-        while start > 0:
-            start = start - 1
-            scv_compile_snapshot_sift_down_v1(sorted, start, sorted.len())
-        var end = sorted.len()
-        while end > 1:
-            end = end - 1
-            val temporary = sorted[0]
-            sorted[0] = sorted[end]
-            sorted[end] = temporary
-            scv_compile_snapshot_sift_down_v1(sorted, 0, end)
-    var result: [text] = []
-    for value in sorted:
-        if result.len() == 0 or result[result.len() - 1] != value:
-            result = result.push(value)
-    result
-
-fn scv_compile_snapshot_sift_down_v1(
-    mut values: [text], root_index: i64, heap_len: i64
-):
-    var root = root_index
-    while true:
-        val left = root * 2 + 1
-        if left >= heap_len:
-            return
-        var largest = root
-        if compile_source_inventory_identity_cmp_v1(values[largest], values[left]) < 0:
-            largest = left
-        val right = left + 1
-        if right < heap_len and compile_source_inventory_identity_cmp_v1(values[largest], values[right]) < 0:
-            largest = right
-        if largest == root:
-            return
-        val temporary = values[root]
-        values[root] = values[largest]
-        values[largest] = temporary
-        root = largest
 
 # Snapshot sources are content-addressed BYTES. No read on this path decodes
 # text: the source read, and every later read (staged chunk, existing chunk,
@@ -248,39 +176,6 @@ fn scv_compile_snapshot_source_candidate_for_v1(root: text, source_root: text, p
     # A drive-relative selector cannot be safely joined to a checkout root.
     if platform == "windows" and selector.contains(":"): return ""
     if root.ends_with("/"): root + selector else: root + "/" + selector
-
-fn scv_compile_snapshot_revision_id_v1(
-    tree_id: text, inventory_digest: text
-) -> text:
-    "scv-revision-v1-" + sha256_text(
-        "simple/scv-compile-revision/v1|{tree_id}|{inventory_digest}")
-
-fn scv_compile_snapshot_provenance_v1(
-    revision_id: text, commit_id: text, tree_id: text,
-    inventory_digest: text, inventory_count: i64
-) -> text:
-    [
-        "simple-scv-compile-snapshot-v1",
-        "revision={revision_id}",
-        "commit={commit_id}",
-        "tree={tree_id}",
-        "inventory={inventory_digest}",
-        "count={inventory_count}"
-    ].join("\n")
-
-fn scv_compile_snapshot_receipt_v1(
-    provenance: text, revision_id: text
-) -> text:
-    provenance + "\nsnapshot=snapshots/{revision_id}"
-
-fn scv_compile_snapshot_read_text_v1(path: text) -> text:
-    if not file_exists(path):
-        return ""
-    val loaded = file_read_regular_no_follow_bounded(
-        path, SCV_COMPILE_METADATA_MAX_BYTES_V1)
-    if val Err(_) = loaded:
-        return ""
-    loaded.unwrap()
 
 fn scv_compile_snapshot_open_v1(
     root: text, snapshot_root: text, revision_id: text, commit_id: text,
@@ -844,139 +739,6 @@ fn scv_compile_snapshot_acquire_cost_v1(
         source_drifted: source_drifted
     )
 
-fn scv_compile_snapshot_recover_v1(cache_root: text) -> i64:
-    val snapshots_root = "{cache_root}/snapshots"
-    if not dir_exists(snapshots_root):
-        return 0
-    var removed = 0
-    for name in dir_list(snapshots_root):
-        if name.starts_with(".tmp."):
-            val parts = name.split(".")
-            val owner_pid = if parts.len() >= 4: parts[2].to_i64() else: nil
-            if owner_pid != nil and owner_pid! > 0 and not process_is_running(owner_pid!) and dir_remove("{snapshots_root}/{name}", true):
-                removed = removed + 1
-    removed
-
-fn scv_compile_snapshot_gc_v1(
-    cache_root: text, retained_revisions: [text], max_remove: i64
-) -> i64:
-    if max_remove <= 0:
-        return 0
-    val snapshots_root = "{cache_root}/snapshots"
-    if not dir_exists(snapshots_root):
-        return 0
-    val names = scv_compile_snapshot_sorted_unique_v1(dir_list(snapshots_root))
-    var removed = 0
-    for name in names:
-        if removed >= max_remove:
-            break
-        if name.starts_with(".") or retained_revisions.contains(name):
-            continue
-        val root = "{snapshots_root}/{name}"
-        val provenance = scv_compile_snapshot_read_text_v1(
-            "{root}/SCV_COMPILE_SNAPSHOT")
-        val receipt_path = "{cache_root}/receipts/{name}.receipt"
-        val receipt = scv_compile_snapshot_read_text_v1(receipt_path)
-        if (provenance.starts_with("simple-scv-compile-snapshot-v1\n") and
-                provenance.contains("\nrevision={name}\n") and
-                receipt == scv_compile_snapshot_receipt_v1(provenance, name) and
-                dir_remove(root, true)):
-            file_delete(receipt_path)
-            file_delete("{cache_root}/receipts/{name}.used")
-            removed = removed + 1
-    removed
-
-# SIMPLE_SCV_SNAPSHOT_MAX (default 4, matching the cache max-branches limit).
-fn scv_compile_snapshot_max_keep_v1() -> i64:
-    val raw = env_get("SIMPLE_SCV_SNAPSHOT_MAX")
-    if raw != "":
-        val parsed = raw.to_i64()
-        if parsed != nil and parsed! > 0:
-            return parsed!
-    4
-
-fn scv_compile_snapshot_min_age_v1() -> i64:
-    val raw = env_get("SIMPLE_SCV_SNAPSHOT_MIN_AGE_S")
-    if raw != "":
-        val parsed = raw.to_i64()
-        if parsed != nil and parsed! >= 0:
-            return parsed!
-    600
-
-# Records last use (epoch seconds) so retention is LRU, not first-publish.
-fn scv_compile_snapshot_touch_v1(cache_root: text, name: text):
-    val _written = scv_write_text("{cache_root}/receipts/{name}.used", "{time_now_seconds()}")
-
-fn scv_compile_snapshot_last_use_v1(cache_root: text, name: text) -> i64:
-    val used_path = "{cache_root}/receipts/{name}.used"
-    if file_exists(used_path):
-        val parsed = scv_compile_snapshot_read_text_v1(used_path).trim().to_i64()
-        if parsed != nil and parsed! > 0:
-            return parsed!
-    file_modified_time("{cache_root}/receipts/{name}.receipt")
-
-# Evicts least recently used snapshots (last use, then name) until at most
-# max_keep remain. `keep` and anything used within min_age_s (another lane
-# may be compiling from it) are never evicted; only snapshots that pass
-# scv_compile_snapshot_gc_v1's provenance+receipt check are removed, and an
-# unremovable entry does not count toward the cap being met.
-fn scv_compile_snapshot_retain_newest_v1(
-    cache_root: text, keep: text, max_keep: i64, min_age_s: i64
-) -> i64:
-    val snapshots_root = "{cache_root}/snapshots"
-    if max_keep <= 0 or not dir_exists(snapshots_root):
-        return 0
-    val young_after = time_now_seconds() - min_age_s
-    var names: [text] = []
-    var stamps: [i64] = []
-    var done: [bool] = []
-    for name in dir_list(snapshots_root):
-        if name.starts_with("."):
-            continue
-        names.push(name)
-        stamps.push(scv_compile_snapshot_last_use_v1(cache_root, name))
-        done.push(false)
-    var live = names.len()
-    var removed = 0
-    while live > max_keep:
-        var victim = -1
-        var index = 0
-        while index < names.len():
-            if not done[index] and names[index] != keep and
-                    (min_age_s <= 0 or stamps[index] <= young_after):
-                if (victim < 0 or stamps[index] < stamps[victim] or
-                        (stamps[index] == stamps[victim] and names[index] < names[victim])):
-                    victim = index
-            index = index + 1
-        if victim < 0:
-            break
-        var retained: [text] = []
-        for name in names:
-            if name != names[victim]:
-                retained.push(name)
-        if scv_compile_snapshot_gc_v1(cache_root, retained, 1) > 0:
-            removed = removed + 1
-            live = live - 1
-        done[victim] = true
-    removed
-
-fn scv_compile_snapshot_cleanup_v1(snapshot: ScvCompileSnapshotV1) -> bool:
-    if not snapshot.valid or snapshot.snapshot_root == "":
-        return false
-    val expected = scv_compile_snapshot_provenance_v1(
-        snapshot.revision_id, snapshot.commit_id, snapshot.tree_id,
-        snapshot.inventory_digest, snapshot.inventory_count)
-    if scv_compile_snapshot_read_text_v1(snapshot.provenance_path) != expected:
-        return false
-    val receipt = scv_compile_snapshot_receipt_v1(expected, snapshot.revision_id)
-    if (snapshot.receipt_path == "" or
-            scv_compile_snapshot_read_text_v1(snapshot.receipt_path) != receipt):
-        return false
-    if not dir_remove(snapshot.snapshot_root, true):
-        return false
-    file_delete(snapshot.receipt_path.replace(".receipt", ".used"))
-    file_delete(snapshot.receipt_path)
-
 export ScvCompileSnapshotV1
 export scv_compile_snapshot_revision_id_v1
 export scv_compile_snapshot_provenance_v1
@@ -987,6 +749,7 @@ export scv_compile_snapshot_acquire_cost_v1
 export scv_compile_snapshot_source_candidate_for_v1
 export scv_compile_snapshot_recover_v1
 export scv_compile_snapshot_gc_v1
+export scv_compile_snapshot_gc_authorized_v1
 export scv_compile_snapshot_retain_newest_v1
 export scv_compile_snapshot_cleanup_v1
 export scv_compile_snapshot_reuse_marks_v1

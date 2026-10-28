@@ -1,0 +1,325 @@
+# Server-only read access. JSON is the explicit GitHub REST interoperability
+# boundary; the gateway's own protocol is owned separately as native SDN.
+# REST contracts: https://docs.github.com/en/rest/git/refs
+# https://docs.github.com/en/rest/git/commits
+# https://docs.github.com/en/rest/git/blobs
+# This provider constructs only numeric repository routes and has no named-route
+# retry. gh owns its internal redirect policy, which is NOT qualified here.
+# Visible unsupported/redirect responses fail closed; three bounded invocations
+# are not a proof of three HTTP hops. Live endpoint qualification is pending.
+use app.scv.db.github_provider.{DbGithubTransport, DbGithubProcessReply, db_github_response}
+use app.io.mod.{process_run_bounded}
+use std.common.json.parser.{json_parse_strict_with_error}
+use std.common.json.types.{json_get_type, json_to_object}
+use std.common.base_encoding.base64.{base64_decode_bytes, base64_encode_bytes}
+use std.common.base_encoding.utilities.{base_encoding_bytes_to_text, base_encoding_text_to_bytes}
+use std.common.crypto.sha1.{sha1_u8_hex}
+
+struct ScvGithubRepositoryV1:
+    repository_id: text
+    host: text
+    owner: text
+    repository: text
+    github_repository_id: text
+
+struct ScvGithubReadPolicyV1:
+    allowlist: [ScvGithubRepositoryV1]
+    timeout_ms: i64
+    maximum_response_bytes: i64
+    maximum_blob_bytes: i64
+    maximum_requests: u64
+
+enum ScvGithubReadKindV1:
+    Ref
+    Commit
+    Blob
+
+enum ScvGithubVerificationV1:
+    RefOidFieldMatched
+    CommitOidFieldMatched
+    BlobGitSha1Verified
+
+struct ScvGithubReadRequestV1:
+    repository_id: text
+    kind: ScvGithubReadKindV1
+    selector: text
+    expected_oid: text
+
+struct ScvGithubReadResultV1:
+    repository_id: text
+    github_repository_id: text
+    kind: ScvGithubReadKindV1
+    selector: text
+    oid: text
+    tree_oid: text
+    parents: [text]
+    blob: [u8]
+    # Bounded process/API invocations, not HTTP hops inside gh.
+    requests: u64
+    verification: ScvGithubVerificationV1
+
+fn scv_gh_component_v1(value: text, host: bool) -> bool:
+    if value == "" or value.len() > 255 or value.starts_with("-") or value.starts_with(".") or value.ends_with(".") or value.contains(".."):
+        return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 45 or code == 46 or (not host and code == 95)): return false
+    true
+
+fn scv_gh_decimal_v1(value: text) -> bool:
+    if value == "" or value.len() > 16 or value.starts_with("0"): return false
+    var integer = 0u64
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if code < 48 or code > 57: return false
+        integer = integer * 10u64 + (code - 48) as u64
+    if integer > 9007199254740991u64: return false
+    true
+
+fn scv_gh_sha1_v1(value: text) -> bool:
+    if value.len() != 40: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn scv_gh_ref_v1(value: text) -> bool:
+    if value.len() > 512 or not (value.starts_with("refs/heads/") or value.starts_with("refs/tags/")): return false
+    if value.ends_with("/") or value.contains("//") or value.contains(".."): return false
+    for segment in value.split("/"):
+        if not scv_gh_component_v1(segment, false) or segment.ends_with(".lock"): return false
+    true
+
+fn scv_gateway_github_policy_validate_v1(policy: ScvGithubReadPolicyV1) -> Result<bool, text>:
+    if policy.allowlist.len() == 0 or policy.allowlist.len() > 128: return Err("GithubReadInvalidAllowlist")
+    if policy.timeout_ms <= 0 or policy.timeout_ms > 30000: return Err("GithubReadInvalidTimeout")
+    if policy.maximum_response_bytes < 1024 or policy.maximum_response_bytes > 2097152: return Err("GithubReadInvalidResponseBound")
+    if policy.maximum_blob_bytes <= 0 or policy.maximum_blob_bytes > 1048576: return Err("GithubReadInvalidBlobBound")
+    if policy.maximum_requests != 3u64: return Err("GithubReadInvalidRequestBound")
+    var ids: [text] = []
+    var identities: [text] = []
+    for repository in policy.allowlist:
+        if not scv_gh_component_v1(repository.repository_id, false): return Err("GithubReadInvalidLogicalRepository")
+        if not scv_gh_component_v1(repository.host, true) or not scv_gh_component_v1(repository.owner, false) or not scv_gh_component_v1(repository.repository, false): return Err("GithubReadInvalidRepositoryScope")
+        if not scv_gh_decimal_v1(repository.github_repository_id): return Err("GithubReadInvalidRepositoryIdentity")
+        if ids.contains(repository.repository_id): return Err("GithubReadAmbiguousRepository")
+        ids.push(repository.repository_id)
+        val identity = repository.host + "/" + repository.github_repository_id
+        if identities.contains(identity): return Err("GithubReadAmbiguousRepository")
+        identities.push(identity)
+    Ok(true)
+
+fn scv_gh_field_v1(object: any, key: text) -> Result<any, text>:
+    if json_get_type(object) != "object": return Err("GithubReadSchemaMismatch")
+    val fields: Dict<text, any> = json_to_object(object)
+    if not fields.has(key): return Err("GithubReadSchemaMismatch")
+    Ok(fields[key])
+
+fn scv_gh_text_v1(object: any, key: text) -> Result<text, text>:
+    val field = scv_gh_field_v1(object, key)?
+    if json_get_type(field) != "string": return Err("GithubReadSchemaMismatch")
+    val value: text = field.1
+    Ok(value)
+
+fn scv_gh_number_v1(object: any, key: text) -> Result<u64, text>:
+    val field = scv_gh_field_v1(object, key)?
+    if json_get_type(field) != "number": return Err("GithubReadSchemaMismatch")
+    val value: f64 = field.1
+    if value < 0 or value > 9007199254740991: return Err("GithubReadUnsafeNumber")
+    val integer = value as u64
+    if integer as f64 != value: return Err("GithubReadUnsafeNumber")
+    Ok(integer)
+
+fn scv_gh_request_v1(policy: ScvGithubReadPolicyV1, repository: ScvGithubRepositoryV1, transport: DbGithubTransport, endpoint: text, completed: u64) -> Result<any, text>:
+    if completed >= policy.maximum_requests: return Err("GithubReadRequestBudgetExceeded")
+    if transport.lease_held(): return Err("GithubNetworkForbiddenUnderLease")
+    val args = ["api", "--hostname", repository.host, "--method", "GET", "--include", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint]
+    val reply = transport.execute(args, policy.timeout_ms, policy.maximum_response_bytes)
+    # Existing response classifier bounds body+stderr and rejects non-200 status,
+    # visible redirects, timeout, quota exhaustion and malformed/deep JSON.
+    # It cannot detect redirects followed internally by gh before output.
+    val body = db_github_response(reply, policy.maximum_response_bytes)?
+    val (parsed, parse_error) = json_parse_strict_with_error(body)
+    if parse_error != "" or json_get_type(parsed) != "object": return Err("GithubReadMalformedJson")
+    Ok(parsed)
+
+fn scv_gh_repository_check_v1(value: any, expected: ScvGithubRepositoryV1) -> Result<bool, text>:
+    val id = scv_gh_number_v1(value, "id")?
+    if id.to_text() != expected.github_repository_id: return Err("GithubReadRepositoryIdentityMismatch")
+    if scv_gh_text_v1(value, "name")? != expected.repository: return Err("GithubReadRepositoryNameMismatch")
+    if scv_gh_text_v1(value, "full_name")? != expected.owner + "/" + expected.repository: return Err("GithubReadRepositoryNameMismatch")
+    val owner = scv_gh_field_v1(value, "owner")?
+    if scv_gh_text_v1(owner, "login")? != expected.owner: return Err("GithubReadRepositoryOwnerMismatch")
+    Ok(true)
+
+fn scv_gateway_github_blob_oid_v1(bytes: [u8]) -> text:
+    # Git SHA-1 is mandatory legacy interoperability, not a new secure digest.
+    sha1_u8_hex(base_encoding_text_to_bytes("blob " + bytes.len().to_text() + "\0") + bytes)
+
+fn scv_gh_blob_bytes_v1(content: text, maximum_bytes: i64) -> Result<[u8], text>:
+    if content.len() > ((maximum_bytes + 2) / 3) * 4 + 65536: return Err("GithubReadBlobBoundExceeded")
+    var clean: [u8] = []
+    val raw = content.bytes()
+    var index = 0
+    while index < raw.len():
+        val byte = raw[index]
+        if byte == 13u8:
+            if index + 1 >= raw.len() or raw[index + 1] != 10u8: return Err("GithubReadInvalidBase64")
+            index = index + 1
+        elif byte != 10u8:
+            if not ((byte >= 65u8 and byte <= 90u8) or (byte >= 97u8 and byte <= 122u8) or (byte >= 48u8 and byte <= 57u8) or byte == 43u8 or byte == 47u8 or byte == 61u8): return Err("GithubReadInvalidBase64")
+            clean.push(byte)
+        index = index + 1
+    if clean.len() % 4 != 0 or clean.len() > ((maximum_bytes + 2) / 3) * 4: return Err("GithubReadInvalidBase64")
+    val encoded = base_encoding_bytes_to_text(clean)
+    val bytes = base64_decode_bytes(encoded)
+    if bytes.len() > maximum_bytes: return Err("GithubReadBlobBoundExceeded")
+    # Shared decoder is intentionally lenient; exact re-encoding closes padding,
+    # nonzero pad bits, misplaced '=' and truncated-group acceptance here.
+    if base64_encode_bytes(bytes) != encoded: return Err("GithubReadInvalidBase64")
+    Ok(bytes)
+
+fn scv_gh_bound_repository_v1(policy: ScvGithubReadPolicyV1, request: ScvGithubReadRequestV1) -> Result<ScvGithubRepositoryV1, text>:
+    val policy_checked = scv_gateway_github_policy_validate_v1(policy)?
+    var repository_index = -1
+    var index = 0
+    while index < policy.allowlist.len():
+        if policy.allowlist[index].repository_id == request.repository_id: repository_index = index
+        index = index + 1
+    if repository_index < 0: return Err("GithubReadRepositoryDenied")
+    val repository = policy.allowlist[repository_index]
+    if request.expected_oid != "" and not scv_gh_sha1_v1(request.expected_oid): return Err("GithubReadUnsupportedObjectFormat")
+    match request.kind:
+        Ref:
+            if not scv_gh_ref_v1(request.selector): return Err("GithubReadInvalidRef")
+        Commit:
+            if not scv_gh_sha1_v1(request.selector): return Err("GithubReadUnsupportedObjectFormat")
+        Blob:
+            if not scv_gh_sha1_v1(request.selector): return Err("GithubReadUnsupportedObjectFormat")
+    match request.kind:
+        Ref: ()
+        _:
+            if request.expected_oid != "" and request.expected_oid != request.selector: return Err("GithubReadOidMismatch")
+    Ok(repository)
+
+fn scv_gh_kind_name_v1(kind: ScvGithubReadKindV1) -> text:
+    match kind:
+        Ref: "ref"
+        Commit: "commit"
+        Blob: "blob"
+
+fn scv_gateway_github_result_validate_v1(policy: ScvGithubReadPolicyV1, request: ScvGithubReadRequestV1, result: ScvGithubReadResultV1) -> Result<bool, text>:
+    """Validate source invariants independently; this is not remote/auth proof."""
+    val repository = scv_gh_bound_repository_v1(policy, request)?
+    if result.repository_id != request.repository_id or result.github_repository_id != repository.github_repository_id: return Err("GithubReadRepositoryIdentityMismatch")
+    if result.selector != request.selector or scv_gh_kind_name_v1(result.kind) != scv_gh_kind_name_v1(request.kind): return Err("GithubReadResultRequestMismatch")
+    if result.requests != 3u64 or result.requests > policy.maximum_requests: return Err("GithubReadRequestBudgetExceeded")
+    if not scv_gh_sha1_v1(result.oid): return Err("GithubReadInvalidObjectOid")
+    if request.expected_oid != "" and request.expected_oid != result.oid: return Err("GithubReadOidMismatch")
+    val verification = scv_gateway_github_verification_name_v1(result.verification)
+    match request.kind:
+        Ref:
+            if verification != "ref_oid_field_match": return Err("GithubReadVerificationMismatch")
+            if result.tree_oid != "" or result.parents.len() != 0 or result.blob.len() != 0: return Err("GithubReadResultShapeMismatch")
+        Commit:
+            if verification != "commit_sha_field_match": return Err("GithubReadVerificationMismatch")
+            if result.oid != request.selector: return Err("GithubReadOidMismatch")
+            if not scv_gh_sha1_v1(result.tree_oid): return Err("GithubReadInvalidTreeOid")
+            if result.blob.len() != 0: return Err("GithubReadResultShapeMismatch")
+            if result.parents.len() > 64: return Err("GithubReadParentBoundExceeded")
+            var parents: [text] = []
+            for parent in result.parents:
+                if not scv_gh_sha1_v1(parent): return Err("GithubReadInvalidParentOid")
+                if parents.contains(parent): return Err("GithubReadDuplicateParent")
+                parents.push(parent)
+        Blob:
+            if verification != "blob_git_sha1_verified": return Err("GithubReadVerificationMismatch")
+            if result.oid != request.selector: return Err("GithubReadOidMismatch")
+            if result.tree_oid != "" or result.parents.len() != 0: return Err("GithubReadResultShapeMismatch")
+            if result.blob.len() > policy.maximum_blob_bytes: return Err("GithubReadBlobBoundExceeded")
+            if scv_gateway_github_blob_oid_v1(result.blob) != result.oid: return Err("GithubReadBlobHashMismatch")
+    Ok(true)
+
+fn scv_gateway_github_read_v1(policy: ScvGithubReadPolicyV1, request: ScvGithubReadRequestV1, transport: DbGithubTransport) -> Result<ScvGithubReadResultV1, text>:
+    val repository = scv_gh_bound_repository_v1(policy, request)?
+    var suffix = ""
+    match request.kind:
+        Ref: suffix = "git/ref/" + request.selector[5:]
+        Commit: suffix = "git/commits/" + request.selector
+        Blob: suffix = "git/blobs/" + request.selector
+    val base = "repositories/" + repository.github_repository_id
+    val before = scv_gh_request_v1(policy, repository, transport, base, 0u64)?
+    val before_checked = scv_gh_repository_check_v1(before, repository)?
+    val object = scv_gh_request_v1(policy, repository, transport, base + "/" + suffix, 1u64)?
+    var oid = ""
+    var tree_oid = ""
+    var parents: [text] = []
+    var blob: [u8] = []
+    var verification = ScvGithubVerificationV1.RefOidFieldMatched
+    match request.kind:
+        Ref:
+            if scv_gh_text_v1(object, "ref")? != request.selector: return Err("GithubReadRefMismatch")
+            val referenced = scv_gh_field_v1(object, "object")?
+            if scv_gh_text_v1(referenced, "type")? != "commit": return Err("GithubReadUnsupportedRefTarget")
+            oid = scv_gh_text_v1(referenced, "sha")?
+        Commit:
+            oid = scv_gh_text_v1(object, "sha")?
+            val tree = scv_gh_field_v1(object, "tree")?
+            tree_oid = scv_gh_text_v1(tree, "sha")?
+            if not scv_gh_sha1_v1(tree_oid): return Err("GithubReadInvalidTreeOid")
+            val parent_field = scv_gh_field_v1(object, "parents")?
+            if json_get_type(parent_field) != "array": return Err("GithubReadSchemaMismatch")
+            val values: [any] = parent_field.1
+            if values.len() > 64: return Err("GithubReadParentBoundExceeded")
+            for value in values:
+                val parent = scv_gh_text_v1(value, "sha")?
+                if not scv_gh_sha1_v1(parent): return Err("GithubReadInvalidParentOid")
+                if parents.contains(parent): return Err("GithubReadDuplicateParent")
+                parents.push(parent)
+            verification = ScvGithubVerificationV1.CommitOidFieldMatched
+        Blob:
+            oid = scv_gh_text_v1(object, "sha")?
+            if scv_gh_text_v1(object, "encoding")? != "base64": return Err("GithubReadUnsupportedBlobEncoding")
+            val size = scv_gh_number_v1(object, "size")?
+            if size > policy.maximum_blob_bytes as u64: return Err("GithubReadBlobBoundExceeded")
+            blob = scv_gh_blob_bytes_v1(scv_gh_text_v1(object, "content")?, policy.maximum_blob_bytes)?
+            if blob.len() as u64 != size: return Err("GithubReadBlobSizeMismatch")
+            if scv_gateway_github_blob_oid_v1(blob) != oid: return Err("GithubReadBlobHashMismatch")
+            verification = ScvGithubVerificationV1.BlobGitSha1Verified
+    if not scv_gh_sha1_v1(oid): return Err("GithubReadInvalidObjectOid")
+    if request.expected_oid != "" and request.expected_oid != oid: return Err("GithubReadOidMismatch")
+    match request.kind:
+        Ref: ()
+        _:
+            if request.selector != oid: return Err("GithubReadOidMismatch")
+    val after = scv_gh_request_v1(policy, repository, transport, base, 2u64)?
+    val after_checked = scv_gh_repository_check_v1(after, repository)?
+    val result = ScvGithubReadResultV1(repository_id: repository.repository_id, github_repository_id: repository.github_repository_id, kind: request.kind, selector: request.selector, oid: oid, tree_oid: tree_oid, parents: parents, blob: blob, requests: 3u64, verification: verification)
+    val result_checked = scv_gateway_github_result_validate_v1(policy, request, result)?
+    Ok(result)
+
+fn scv_gateway_github_verification_name_v1(value: ScvGithubVerificationV1) -> text:
+    match value:
+        RefOidFieldMatched: "ref_oid_field_match"
+        CommitOidFieldMatched: "commit_sha_field_match"
+        BlobGitSha1Verified: "blob_git_sha1_verified"
+
+fn scv_gh_execute_v1(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    # Inherits server-owned gh authentication environment/config. Secrets are
+    # never taken from the client request, placed in args or returned in errors.
+    val (stdout, stderr, exit_code) = process_run_bounded("gh", args, timeout_ms, maximum_bytes)
+    DbGithubProcessReply(stdout: stdout, stderr: stderr, exit_code: exit_code)
+
+fn scv_gh_server_readonly_lease_v1() -> bool:
+    # This wrapper owns no store/SJ lease. Callers with a lease-state port must
+    # use read_v1 with their real DbGithubTransport instead of this wrapper.
+    false
+
+fn scv_gateway_github_read_live_v1(policy: ScvGithubReadPolicyV1, request: ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>:
+    scv_gateway_github_read_v1(policy, request, DbGithubTransport(execute: scv_gh_execute_v1, lease_held: scv_gh_server_readonly_lease_v1))
+
+export ScvGithubRepositoryV1, ScvGithubReadPolicyV1, ScvGithubReadKindV1
+export ScvGithubVerificationV1, ScvGithubReadRequestV1, ScvGithubReadResultV1
+export scv_gateway_github_policy_validate_v1, scv_gateway_github_blob_oid_v1
+export scv_gateway_github_read_v1, scv_gateway_github_read_live_v1, scv_gateway_github_verification_name_v1
+export scv_gateway_github_result_validate_v1

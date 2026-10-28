@@ -1021,7 +1021,7 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
   systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
     --property=KillMode=control-group \
@@ -1034,7 +1034,7 @@ elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
   # The watchdog must honor a Stage 3 process cap configured below the tree
@@ -1062,7 +1062,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 else
   "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -1071,7 +1071,7 @@ else
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 fi
 stage3_guard_pid=$!
 stage3_guard_tripped=0
@@ -1297,9 +1297,24 @@ SIMPLE_RT_OBJ_CACHE_DIR="$stage3_cache/rt-obj" \
 bootstrap_stage3_source_snapshot "$source_after" "$root"
 bootstrap_stage3_git_state "$root" "$git_after"
 bootstrap_stage3_tool_authority_snapshot "$tool_after" "$path" "$root"
-cmp -s "$source_before" "$source_after"
-cmp -s "$git_before" "$git_after"
-cmp -s "$tool_before" "$tool_after"
+if cmp -s "$source_before" "$source_after"; then :; else
+  source_cmp_status=$?
+  printf 'error: Stage 3 postbuild source snapshot comparison failed: %s differs from or cannot be compared with %s; Stage 3 was not admitted\n' \
+    "$source_before" "$source_after" >&2
+  exit "$source_cmp_status"
+fi
+if cmp -s "$git_before" "$git_after"; then :; else
+  git_cmp_status=$?
+  printf 'error: Stage 3 postbuild git state comparison failed: %s differs from or cannot be compared with %s; Stage 3 was not admitted\n' \
+    "$git_before" "$git_after" >&2
+  exit "$git_cmp_status"
+fi
+if cmp -s "$tool_before" "$tool_after"; then :; else
+  tool_cmp_status=$?
+  printf 'error: Stage 3 postbuild tool authority comparison failed: %s differs from or cannot be compared with %s; Stage 3 was not admitted\n' \
+    "$tool_before" "$tool_after" >&2
+  exit "$tool_cmp_status"
+fi
 
 BSTAGE3_ROOT=$root BSTAGE3_MANIFEST=$manifest BSTAGE3_PLATFORM=$platform
 BSTAGE3_BACKEND=$stage2_backend BSTAGE3_MODE=dynload BSTAGE3_SEED=$seed

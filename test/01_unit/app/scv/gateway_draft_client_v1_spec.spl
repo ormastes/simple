@@ -1,0 +1,51 @@
+# Authenticated client preflight and bounded-response tests; no network is faked.
+use std.spec.*
+use app.scv.gateway_draft_client_v1.*
+use std.scv.gateway_draft_protocol_v1.{ScvGatewayDraftRequestV1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+var draft_credential_calls_v1: i64 = 0
+
+fn draft_bad_credential_v1() -> Result<text, text>:
+    draft_credential_calls_v1 = draft_credential_calls_v1 + 1
+    Ok("bad header\r\ninjection")
+
+fn draft_error_credential_v1() -> Result<text, text>:
+    draft_credential_calls_v1 = draft_credential_calls_v1 + 1
+    Err("private credential provider detail")
+
+fn draft_client_config_v1() -> ScvGatewayDraftClientConfigV1:
+    ScvGatewayDraftClientConfigV1(endpoint: "http://127.0.0.1:8811/scv/draft/v1",
+        repository: "repo-alpha", principal_id: "principal-1", allow_loopback_http: true,
+        timeout_ms: 5000, tls_address: "")
+
+fn draft_client_request_v1() -> ScvGatewayDraftRequestV1:
+    val bytes: [u8] = [0u8, 255u8]
+    ScvGatewayDraftRequestV1(version: 1, id: "wire-1", repository: "repo-alpha",
+        method: "put", request_id: "retry-1", content_sha256: sha256_u8_hex(bytes), bytes: bytes)
+
+describe "SCV draft client preflight and credential handling v1":
+    it "rejects endpoint and repository pins before credential acquisition":
+        draft_credential_calls_v1 = 0
+        var config = draft_client_config_v1()
+        config.endpoint = "http://127.0.0.1:8811/other"
+        expect(scv_gateway_draft_client_call_v1(config, draft_client_request_v1(), draft_bad_credential_v1).is_err()).to_equal(true)
+        config = draft_client_config_v1()
+        var request = draft_client_request_v1()
+        request.repository = "other"
+        expect(scv_gateway_draft_client_call_v1(config, request, draft_bad_credential_v1).is_err()).to_equal(true)
+        expect(draft_credential_calls_v1).to_equal(0)
+
+    it "acquires one credential after preflight and rejects invalid header bytes":
+        draft_credential_calls_v1 = 0
+        expect(scv_gateway_draft_client_call_v1(draft_client_config_v1(), draft_client_request_v1(),
+            draft_bad_credential_v1).unwrap_err()).to_equal("draft_credentials_invalid")
+        expect(draft_credential_calls_v1).to_equal(1)
+
+    it "redacts credential-provider errors without retrying the provider":
+        draft_credential_calls_v1 = 0
+        val error = scv_gateway_draft_client_call_v1(draft_client_config_v1(), draft_client_request_v1(),
+            draft_error_credential_v1).unwrap_err()
+        expect(error).to_equal("draft_credentials_unavailable")
+        expect(error.contains("private credential")).to_equal(false)
+        expect(draft_credential_calls_v1).to_equal(1)

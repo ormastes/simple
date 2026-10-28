@@ -4,6 +4,7 @@
 # headroom. Monitor overshoot increases that charge; an unavailable current
 # measurement uses the lifetime peak conservatively, never a fabricated zero.
 use std.common.build_manager.memory_policy.{builder_memory_policy_valid_v1}
+use std.common.task_runner.memory_admission.{task_memory_charge_v1, task_memory_add_v1, task_memory_fits_v1}
 
 struct NativeGroupActiveChargeV1:
     memory_limit_bytes: i64
@@ -53,19 +54,21 @@ fn native_group_process_budget_v1(cpu_count: i64, candidate_threads: i64,
                 charge.effective_threads < 1 or charge.effective_threads > cpu_count:
             return Err("invalid active native group charge")
         active_threads = active_threads + charge.effective_threads
-        val admission_charge = if charge.memory_current_bytes > charge.memory_limit_bytes: charge.memory_current_bytes else: charge.memory_limit_bytes
-        active_host_cap = active_host_cap + admission_charge
-    val required_host = active_host_cap + candidate_limit_bytes + host_reserve_bytes
-    val required_commit = active_host_cap + candidate_limit_bytes + host_reserve_bytes
+        val admission_charge = task_memory_charge_v1(charge.memory_limit_bytes, charge.memory_current_bytes)
+        active_host_cap = task_memory_add_v1(active_host_cap, admission_charge)
+    val charged = task_memory_add_v1(active_host_cap, host_reserve_bytes)
+    val required_host = task_memory_add_v1(charged, candidate_limit_bytes)
+    if required_host < 0: return Err("native group process budget overflow")
+    val required_commit = required_host
     if active_threads + candidate_threads > cpu_count:
         return Ok(NativeGroupProcessBudgetV1(false, "CPU threads exhausted",
             available_memory_bytes, available_commit_bytes, required_host,
             required_commit, active_threads))
-    if required_host > available_memory_bytes:
+    if not task_memory_fits_v1(available_memory_bytes, charged, candidate_limit_bytes):
         return Ok(NativeGroupProcessBudgetV1(false, "available host/cgroup memory exhausted",
             available_memory_bytes, available_commit_bytes, required_host,
             required_commit, active_threads))
-    if commit_measured and required_commit > available_commit_bytes:
+    if commit_measured and not task_memory_fits_v1(available_commit_bytes, charged, candidate_limit_bytes):
         return Ok(NativeGroupProcessBudgetV1(false, "Windows system commit headroom exhausted",
             available_memory_bytes, available_commit_bytes, required_host,
             required_commit, active_threads))

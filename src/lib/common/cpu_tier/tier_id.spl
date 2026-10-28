@@ -1,0 +1,212 @@
+# CPU Tier Identification and Canonicalization
+# Defines architecture-specific tier levels, feature sets, and tier canonicalization.
+# Use: parse tier specs ("x86-64-v3+avx512vnni"), canonicalize (drop implied features,
+# sort/dedupe), and test admission (can a host support an artifact tier?).
+
+# Tier identity: architecture, base level, and feature set.
+# Canonical tuple: arch/base/features (sorted, deduplicated, implied features removed).
+pub struct TierId:
+    arch: text          # "x86_64", "aarch64", "riscv64"
+    base: text          # "x86-64", "x86-64-v2", "armv8-a", etc.
+    features: [text]    # Explicit features, sorted, deduplicated, no implied features.
+
+# Return the ordered list of tier levels for an architecture.
+pub fn tier_levels(arch: text) -> [text]:
+    match arch:
+        case "x86_64":
+            ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"]
+        case "aarch64":
+            ["armv8-a", "armv8.2-a", "armv9-a"]
+        case "riscv64":
+            ["rv64gc", "rv64gcv"]
+        case _:
+            []
+
+# Return the cumulative set of implied features for a tier level.
+# These features are automatically enabled by the base level and do not need explicit listing.
+pub fn tier_implied_features(arch: text, base: text) -> [text]:
+    match arch:
+        case "x86_64":
+            match base:
+                case "x86-64":
+                    []
+                case "x86-64-v2":
+                    ["cx16", "popcnt", "sahf", "sse3", "sse4.1", "sse4.2", "ssse3"]
+                case "x86-64-v3":
+                    ["avx", "avx2", "bmi", "bmi2", "cx16", "f16c", "fma", "lzcnt", "movbe", "popcnt", "sahf", "sse3", "sse4.1", "sse4.2", "ssse3", "xsave"]
+                case "x86-64-v4":
+                    ["avx", "avx2", "avx512bw", "avx512cd", "avx512dq", "avx512f", "avx512vl", "bmi", "bmi2", "cx16", "f16c", "fma", "lzcnt", "movbe", "popcnt", "sahf", "sse3", "sse4.1", "sse4.2", "ssse3", "xsave"]
+                case _:
+                    []
+        case "aarch64":
+            match base:
+                case "armv8-a":
+                    []
+                case "armv8.2-a":
+                    ["fp-armv8", "neon"]
+                case "armv9-a":
+                    ["fp-armv8", "neon"]
+                case _:
+                    []
+        case "riscv64":
+            match base:
+                case "rv64gc":
+                    []
+                case "rv64gcv":
+                    ["v"]
+                case _:
+                    []
+        case _:
+            []
+
+# Resolve tier name aliases to their canonical base level.
+pub fn tier_alias(arch: text, name: text) -> text:
+    match arch:
+        case "x86_64":
+            if name == "x86-64-v1":
+                "x86-64"
+            else:
+                name
+        case _:
+            name
+
+# Return the rank (index) of a base level within its architecture tier hierarchy.
+# Returns -1 if the base level is unknown.
+pub fn tier_rank(arch: text, base: text) -> i64:
+    val levels = tier_levels(arch)
+    var i: i64 = 0
+    while i < levels.len():
+        if levels[i] == base: return i
+        i = i + 1
+    return -1i64
+
+# Parse a tier specification string into a canonicalized TierId.
+# Spec format: "base" (use architectural baseline as explicit base) or "base+feat1+feat2..."
+# or "+feat1+feat2..." (use architectural baseline).
+# Returns Err with a description if the base level is unknown.
+pub fn tier_parse(arch: text, spec: text) -> Result<TierId, text>:
+    var base = ""
+    var features_raw: [text] = []
+
+    # Split spec by '+' to extract base and features.
+    val parts = spec.split("+")
+    if parts.len() > 0:
+        base = parts[0]
+        if base.len() == 0:
+            # Spec starts with '+', use architectural baseline.
+            val levels = tier_levels(arch)
+            if levels.len() > 0:
+                base = levels[0]
+            else:
+                return Err("unknown architecture: " + arch)
+        else:
+            # Resolve alias.
+            base = tier_alias(arch, base)
+
+        # Verify base is known.
+        if tier_rank(arch, base) < 0i64:
+            return Err("unknown base level: " + base)
+
+        # Collect explicit features (skip empty parts).
+        var i: i64 = 1i64
+        while i < parts.len():
+            val feat = parts[i]
+            if feat.len() > 0:
+                features_raw = features_raw.append(feat)
+            i = i + 1i64
+    else:
+        # Unlikely (split always returns at least [input]), but guard.
+        val levels = tier_levels(arch)
+        if levels.len() > 0:
+            base = levels[0]
+        else:
+            return Err("unknown architecture: " + arch)
+
+    # Canonicalize: drop implied, sort, dedupe.
+    val implied = tier_implied_features(arch, base)
+    var features_explicit: [text] = []
+    var i: i64 = 0i64
+    while i < features_raw.len():
+        val feat = features_raw[i]
+        # Check if this feature is NOT in the implied set.
+        var is_implied = false
+        var j: i64 = 0i64
+        while j < implied.len():
+            if implied[j] == feat:
+                is_implied = true
+                break
+            j = j + 1i64
+        if not is_implied:
+            features_explicit = features_explicit.append(feat)
+        i = i + 1i64
+
+    # Sort and dedupe explicit features.
+    features_explicit = features_explicit.sort()
+    var features_dedup: [text] = []
+    i = 0i64
+    while i < features_explicit.len():
+        if i == 0i64 or features_explicit[i] != features_dedup[features_dedup.len() - 1]:
+            features_dedup = features_dedup.append(features_explicit[i])
+        i = i + 1i64
+
+    Ok(TierId(arch: arch, base: base, features: features_dedup))
+
+# Convert a TierId to its text representation.
+# Format: "base" or "base+feat1+feat2..." (features sorted and deduplicated).
+pub fn tier_text(t: TierId) -> text:
+    if t.features.len() == 0:
+        return t.base
+    else:
+        var result = t.base
+        var i: i64 = 0i64
+        while i < t.features.len():
+            result = result + "+" + t.features[i]
+            i = i + 1i64
+        return result
+
+# Test if a host can run an artifact with the given tier.
+# Admission rule: same arch AND rank(artifact.base) <= rank(host.base) AND
+# every artifact feature is in host.features or implied by host.base.
+pub fn tier_admits(artifact: TierId, host: TierId) -> bool:
+    # Must be same architecture.
+    if artifact.arch != host.arch:
+        return false
+
+    # Artifact base must be at same level or lower (earlier in tier hierarchy).
+    val artifact_rank = tier_rank(artifact.arch, artifact.base)
+    val host_rank = tier_rank(host.arch, host.base)
+    if artifact_rank < 0i64 or host_rank < 0i64:
+        return false
+    if artifact_rank > host_rank:
+        return false
+
+    # Every explicit feature in artifact must be in host features or implied by host base.
+    val host_implied = tier_implied_features(host.arch, host.base)
+    var i: i64 = 0i64
+    while i < artifact.features.len():
+        val feat = artifact.features[i]
+        var found = false
+
+        # Check host explicit features.
+        var j: i64 = 0i64
+        while j < host.features.len():
+            if host.features[j] == feat:
+                found = true
+                break
+            j = j + 1i64
+
+        # Check host implied features.
+        if not found:
+            j = 0i64
+            while j < host_implied.len():
+                if host_implied[j] == feat:
+                    found = true
+                    break
+                j = j + 1i64
+
+        if not found:
+            return false
+
+        i = i + 1i64
+
+    return true

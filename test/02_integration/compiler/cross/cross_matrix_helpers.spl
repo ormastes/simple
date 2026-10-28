@@ -1,0 +1,115 @@
+"""
+Shared row checks for the cross-compile matrix specs
+(doc/03_plan/compiler/cross_compile_matrix_plan.md).
+
+Each helper returns "" when the row holds, or a one-line reason when it
+does not, so a spec failure names the exact gap (`expect(reason).to_equal("")`).
+The compiler is `$SIMPLE_XC_BIN`, falling back to `bin/simple`. Run the specs
+from the repository root: exe links look for `src/runtime/runtime.c` there.
+"""
+
+use std.io_runtime.{write_file, mkdir_p, file_exists, env_get_or, env_set, process_run_timeout}
+
+const XC_DIR: text = "build/tmp/cross"
+const XC_BUILD_MS: i64 = 900000
+
+pub fn xc_bin() -> text:
+    env_get_or("SIMPLE_XC_BIN", "bin/simple")
+
+pub fn xc_fixture(name: text) -> text:
+    """Write a fixture: "hello" (exe, prints xc-ok), "lib" (exports xc_add),
+    "shl" (exports xc_shl, a variable shift: BMI2 shlx on x86-64-v3+)."""
+    mkdir_p(XC_DIR)
+    val path = XC_DIR + "/" + name + ".spl"
+    if name == "hello":
+        write_file(path, "fn main():\n    print \"xc-ok\"\n")
+    elif name == "lib":
+        write_file(path, "pub fn xc_add(a: i64, b: i64) -> i64:\n    a + b\n")
+    else:
+        write_file(path, "pub fn xc_shl(a: i64, b: i64) -> i64:\n    a << b\n")
+    path
+
+pub fn xc_out(target: text, kind: text) -> text:
+    XC_DIR + "/" + target + "." + kind
+
+pub fn xc_build(target: text, kind: text, src: text, out: text, cpu: text) -> text:
+    """Run native-build for one matrix row. `cpu` is the LLVM CPU level
+    (e.g. "x86-64-v4"), passed through SIMPLE_NATIVE_CPU; "" clears it."""
+    env_set("SIMPLE_NATIVE_CPU", cpu)
+    var args = ["native-build", src, "--target", target]
+    if kind == "obj":
+        args.push("--emit-object")
+    elif kind == "ar":
+        args.push("--emit-archive")
+    elif kind == "so":
+        args.push("--emit-shared")
+    args.push("-o")
+    args.push(out)
+    val (stdout, stderr, rc) = process_run_timeout(xc_bin(), args, XC_BUILD_MS)
+    if rc != 0:
+        return "native-build rc={rc}: " + _last_error(stdout + "\n" + stderr)
+    if not file_exists(out):
+        return "native-build rc=0 but no artifact at " + out
+    ""
+
+pub fn xc_tool(tool: text, args: [text]) -> text:
+    val (stdout, stderr, rc) = process_run_timeout(tool, args, 60000)
+    stdout + stderr
+
+pub fn xc_check_format(art: text, format_text: text, machine_text: text) -> text:
+    val headers = xc_tool("llvm-readobj", ["--file-headers", art])
+    if not headers.contains(format_text):
+        return "expected format '" + format_text + "', readobj said: " + _first_line_with(headers, "Format:")
+    if not headers.contains(machine_text):
+        return "expected machine '" + machine_text + "'"
+    ""
+
+pub fn xc_check_symbol(art: text, symbol: text) -> text:
+    val syms = xc_tool("llvm-nm", [art])
+    if not syms.contains(symbol):
+        return "symbol " + symbol + " not defined in " + art
+    ""
+
+pub fn xc_check_export(art: text, symbol: text) -> text:
+    """Dynamic export: PE export table or ELF dynamic symbol table."""
+    val exports = xc_tool("llvm-readobj", ["--coff-exports", art]) + xc_tool("llvm-nm", ["-D", art])
+    if not exports.contains(symbol):
+        return "symbol " + symbol + " not exported by " + art
+    ""
+
+pub fn xc_check_entry(art: text) -> text:
+    """An exe carries an entry point: PE AddressOfEntryPoint or ELF Entry."""
+    val headers = xc_tool("llvm-readobj", ["--file-headers", art])
+    if headers.contains("AddressOfEntryPoint: 0x0\n") or headers.contains("Entry: 0x0\n"):
+        return "entry point is zero"
+    if headers.contains("AddressOfEntryPoint:") or headers.contains("Entry:"):
+        return ""
+    "no entry point field in headers"
+
+pub fn xc_check_disasm(art: text, needle: text) -> text:
+    val dis = xc_tool("llvm-objdump", ["-d", art])
+    if not dis.contains(needle):
+        return "instruction '" + needle + "' not found in disassembly of " + art
+    ""
+
+pub fn xc_runner(runner: text) -> text:
+    """"" when `runner` is on PATH, else a BLOCKED reason (never a skip)."""
+    val (stdout, stderr, rc) = process_run_timeout("where", [runner], 10000)
+    if rc != 0:
+        return "BLOCKED: " + runner + " not installed on this host"
+    ""
+
+fn _last_error(log: text) -> text:
+    var found = ""
+    for line in log.split("\n"):
+        if line.contains("error"):
+            found = line
+    if found == "":
+        return "(no error line)"
+    found
+
+fn _first_line_with(log: text, key: text) -> text:
+    for line in log.split("\n"):
+        if line.contains(key):
+            return line.trim()
+    "(no " + key + ")"

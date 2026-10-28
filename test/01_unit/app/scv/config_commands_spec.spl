@@ -1,0 +1,40 @@
+use std.spec.{describe, it, expect, step}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.value.{SdnValue}
+use app.scv.config_commands.{scv_config_command_v1, scv_config_command_result_v1}
+
+describe "REQ-001 native SCV configuration inspection":
+    it "rejects unknown commands before attempting any configuration read":
+        step("exercise")
+        val result = scv_config_command_v1("", ["accept"])
+        step("assert")
+        expect(result.exit_code).to_equal(1)
+        expect(result.output).to_contain("invalid_request")
+        expect(result.output).to_contain("publication_authorized: false")
+
+    it "rejects surplus arguments rather than treating a typo as a check":
+        step("exercise")
+        val result = scv_config_command_v1("", ["check", "--allow-unknown"])
+        step("assert")
+        expect(result.exit_code).to_equal(1)
+        expect(result.output).to_contain("invalid_request")
+
+    it "escapes diagnostics as SDN data without creating authority fields":
+        step("setup")
+        val diagnostic = "quote\"\npublication_authorized: true\n"
+        step("exercise")
+        val result = scv_config_command_result_v1(1, "configuration_unavailable", diagnostic)
+        val parsed = sdn_parse_strict_bytes_v1(result.output.bytes(), sdn_strict_limits_v1())
+        step("assert")
+        expect(result.exit_code).to_equal(1)
+        match parsed:
+            case Err(issue):
+                fail("Generated SDN must parse: {issue.code}")
+            case Ok(document):
+                match document.value:
+                    case SdnValue.Dict(fields):
+                        expect(fields.get("publication_authorized")).to_equal(Some(SdnValue.Bool(false)))
+                        expect(fields.get("detail")).to_equal(Some(SdnValue.String(diagnostic)))
+                    case _:
+                        fail("Configuration result must be an SDN mapping")

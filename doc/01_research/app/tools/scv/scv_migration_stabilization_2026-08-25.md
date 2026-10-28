@@ -208,7 +208,18 @@ WRITE mapping ...
 COMMIT operation=823
 ```
 
-On startup: complete transaction → verify/apply; incomplete → rollback/reconstruct.
+The target recovery behavior is to verify a completed transaction and resolve
+an incomplete transaction only with an ownership proof that identifies the
+expected publication.
+
+The current SCV WAL does not record the exact operation id before the mutable
+publisher runs, and the journal lock is released before that publisher runs.
+Recovery therefore cannot prove whether a changed `HEAD_OP` belongs to the
+pending transaction or whether an unchanged head means the writer has retired.
+Until publication shares an ownership protocol and the WAL binds the exact
+candidate operation, recovery must preserve every incomplete WAL and return an
+error without rewriting `HEAD_OP`, workspace metadata, or the WAL terminal
+state. Ambiguous and malformed records fail closed as well.
 
 Better: **make the database a materialized view of an append-only event log.**
 

@@ -535,8 +535,48 @@ pub unsafe extern "C" fn rt_file_read_text_rv(path: RuntimeValue) -> RuntimeValu
 /// (doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md).
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: RuntimeValue) -> i64 {
+    rt_file_atomic_write_impl(path, content, None)
+}
+
+/// Explicit-mode core-C twin. Windows owner-only writes use a protected
+/// DACL on the staging file before content is written.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_atomic_write_mode(path: RuntimeValue, content: RuntimeValue, mode: i32) -> i64 {
+    rt_file_atomic_write_impl(path, content, Some(mode))
+}
+
+fn atomic_write_staging_file(temp_path: &Path, content: &[u8], mode: Option<i32>) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    // A failed exclusive open never transfers ownership of an existing path.
+    let mut file = options.open(temp_path)?;
+    let write_result = (|| -> std::io::Result<()> {
+        file.write_all(content)?;
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode((mode as u32) & 0o7777))?;
+        }
+        #[cfg(windows)]
+        if let Some(mode) = mode {
+            let mut permissions = file.metadata()?.permissions();
+            permissions.set_readonly(mode & 0o200 == 0);
+            file.set_permissions(permissions)?;
+        }
+        file.sync_all()?;
+        Ok(())
+    })();
+    drop(file);
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    write_result
+}
+
+unsafe fn rt_file_atomic_write_impl(path: RuntimeValue, content: RuntimeValue, mode: Option<i32>) -> i64 {
     use crate::value::collections::{rt_string_data, rt_string_len};
-    use std::io::Write;
 
     let decode = |v: RuntimeValue| -> Option<Vec<u8>> {
         if v.is_nil() || v.0 == 0 {
@@ -579,6 +619,16 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
         }
     }
 
+    #[cfg(windows)]
+    if let Some(private_mode) = mode.filter(|value| value & 0o77 == 0) {
+        extern "C" {
+            fn rt_hosted_fs_private_atomic_write_utf8(path: *const u8, path_len: u64,
+                content: *const u8, content_len: u64, mode: i32) -> i32;
+        }
+        return i64::from(rt_hosted_fs_private_atomic_write_utf8(path_bytes.as_ptr(),
+            path_bytes.len() as u64, content_bytes.as_ptr(), content_bytes.len() as u64, private_mode) != 0);
+    }
+
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temp_path = std::path::PathBuf::from(format!(
         "{}.tmp.{}.{}",
@@ -587,22 +637,12 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
         SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
 
-    let write_result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
-        file.write_all(&content_bytes)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
+    if atomic_write_staging_file(&temp_path, &content_bytes, mode).is_err() {
         return 0;
     }
 
     #[cfg(unix)]
-    if let Some(mode) = existing_mode {
+    if let Some(mode) = existing_mode.filter(|_| mode.is_none()) {
         use std::os::unix::fs::PermissionsExt;
         if std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode)).is_err() {
             let _ = std::fs::remove_file(&temp_path);
@@ -647,6 +687,121 @@ pub unsafe extern "C" fn rt_file_write_text(
     invalidate_file_caches(path_str);
     std::fs::write(path_str, content_str).is_ok()
 }
+#[cfg(windows)]
+mod win_excl {
+    //! Windows twin of the POSIX `O_EXCL|O_NOFOLLOW` copy and `link()`+inode
+    //! recheck: C counterpart is `src/runtime/platform/runtime_win_excl_file.h`.
+    use std::fs::{File, OpenOptions};
+    use std::io::{Read, Write};
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use std::path::{Path, PathBuf};
+    use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    const SHARE_ALL: u32 = 0x7;
+
+    pub unsafe fn paths(sp: *const u8, sl: u64, dp: *const u8, dl: u64) -> Option<(PathBuf, PathBuf)> {
+        if sp.is_null() || dp.is_null() || sl == 0 || dl == 0 {
+            return None;
+        }
+        let s = std::slice::from_raw_parts(sp, sl as usize);
+        let d = std::slice::from_raw_parts(dp, dl as usize);
+        if s.contains(&0) || d.contains(&0) {
+            return None;
+        }
+        Some((PathBuf::from(std::str::from_utf8(s).ok()?), PathBuf::from(std::str::from_utf8(d).ok()?)))
+    }
+
+    fn file_id(f: &File) -> Option<(u32, u32, u32)> {
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
+            return None;
+        }
+        Some((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+    }
+
+    /// Open `p` without following a reparse point; it must be a regular file.
+    fn open_regular_no_follow(p: &Path) -> Option<File> {
+        let f = OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_ALL)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(p)
+            .ok()?;
+        let attrs = f.metadata().ok()?.file_attributes();
+        if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+            return None;
+        }
+        Some(f)
+    }
+
+    pub fn copy_create_excl_no_follow(src: &Path, dst: &Path) -> bool {
+        let mut input = match open_regular_no_follow(src) {
+            Some(f) => f,
+            None => return false,
+        };
+        let mut output = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(dst)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let mut buf = vec![0u8; 65536];
+        let mut ok = true;
+        loop {
+            match input.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if output.write_all(&buf[..n]).is_err() {
+                        ok = false;
+                        break;
+                    }
+                }
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        ok = ok && output.sync_all().is_ok();
+        drop(output);
+        drop(input);
+        if !ok {
+            let _ = std::fs::remove_file(dst);
+        }
+        ok
+    }
+
+    pub fn link_create_excl_no_follow(src: &Path, dst: &Path) -> bool {
+        let input = match open_regular_no_follow(src) {
+            Some(f) => f,
+            None => return false,
+        };
+        let src_id = match file_id(&input) {
+            Some(id) => id,
+            None => return false,
+        };
+        if std::fs::hard_link(src, dst).is_err() {
+            return false;
+        }
+        let ok = match open_regular_no_follow(dst) {
+            Some(f) => file_id(&f) == Some(src_id),
+            None => false,
+        };
+        if !ok {
+            let _ = std::fs::remove_file(dst);
+        }
+        ok
+    }
+}
+
 
 /// Copy `source` to `destination`, refusing to overwrite an existing
 /// destination and refusing to follow a symlink at either path.
@@ -664,7 +819,7 @@ pub unsafe extern "C" fn rt_file_write_text(
 /// regular file or symlink — fails with `EEXIST`/`ELOOP` before any data is
 /// touched); the bytes are copied and `fsync`ed; any failure along the way
 /// removes the partially-written destination before returning `false`.
-/// Unsupported on Windows, matching the C `#if defined(_WIN32)` branch.
+/// On Windows: source opened with FILE_FLAG_OPEN_REPARSE_POINT must be a regular file, destination is CREATE_NEW (`win_excl`), matching the C `runtime_win_excl_file.h`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_copy_create_excl_no_follow(
     source_ptr: *const u8,
@@ -672,7 +827,14 @@ pub unsafe extern "C" fn rt_file_copy_create_excl_no_follow(
     destination_ptr: *const u8,
     destination_len: u64,
 ) -> bool {
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match win_excl::paths(source_ptr, source_len, destination_ptr, destination_len) {
+            Some((s, d)) => win_excl::copy_create_excl_no_follow(&s, &d),
+            None => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (source_ptr, source_len, destination_ptr, destination_len);
         false
@@ -740,7 +902,7 @@ pub unsafe extern "C" fn rt_file_copy_create_excl_no_follow(
 /// (`lstat`, i.e. `symlink_metadata`, never following) and must be a regular
 /// file with the SAME device/inode as the originally-opened source — a
 /// mismatch (e.g. `source` was swapped between the open and the link) removes
-/// the destination and fails. Unsupported on Windows, matching the C `#if`.
+/// the destination and fails. On Windows the link is made with `CreateHardLinkW` and the file id is rechecked (`win_excl`).
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_link_create_excl_no_follow(
     source_ptr: *const u8,
@@ -748,7 +910,14 @@ pub unsafe extern "C" fn rt_file_link_create_excl_no_follow(
     destination_ptr: *const u8,
     destination_len: u64,
 ) -> bool {
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match win_excl::paths(source_ptr, source_len, destination_ptr, destination_len) {
+            Some((s, d)) => win_excl::link_create_excl_no_follow(&s, &d),
+            None => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (source_ptr, source_len, destination_ptr, destination_len);
         false
@@ -3236,6 +3405,83 @@ sandbox_lowering:
 
     // Similar-problem test: edge semantics shared with the C definition —
     // missing parent directories are created; an empty path is rejected.
+    #[cfg(windows)]
+    fn assert_owner_only_acl(path: &std::path::Path) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Security::{GetFileSecurityW, GetSecurityDescriptorControl,
+            GetSecurityDescriptorDacl, GetAce, IsWellKnownSid, WinCreatorOwnerRightsSid,
+            WinLocalSystemSid, ACCESS_ALLOWED_ACE,
+            DACL_SECURITY_INFORMATION, INHERITED_ACE, SE_DACL_PROTECTED};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            let mut required = 0;
+            GetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, std::ptr::null_mut(), 0, &mut required);
+            assert!(required > 0);
+            let mut storage = vec![0u64; (required as usize + 7) / 8];
+            let descriptor = storage.as_mut_ptr().cast();
+            assert_ne!(GetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor,
+                required, &mut required), 0);
+            let mut control = 0;
+            let mut revision = 0;
+            assert_ne!(GetSecurityDescriptorControl(descriptor, &mut control, &mut revision), 0);
+            assert_ne!(control & SE_DACL_PROTECTED, 0);
+            let mut present = 0;
+            let mut defaulted = 0;
+            let mut acl = std::ptr::null_mut();
+            assert_ne!(GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted), 0);
+            assert!(present != 0 && !acl.is_null());
+            assert_eq!((*acl).AceCount, 2);
+            for index in 0..(*acl).AceCount {
+                let mut raw = std::ptr::null_mut();
+                assert_ne!(GetAce(acl, u32::from(index), &mut raw), 0);
+                let ace = &*raw.cast::<ACCESS_ALLOWED_ACE>();
+                // winnt.h ACCESS_ALLOWED_ACE_TYPE = 0; avoid enabling the
+                // unrelated SystemServices feature just for this constant.
+                assert_eq!(ace.Header.AceType, 0);
+                assert_eq!(u32::from(ace.Header.AceFlags) & INHERITED_ACE, 0);
+                let sid = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+                assert!(IsWellKnownSid(sid, WinLocalSystemSid) != 0 ||
+                    IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rt_file_atomic_write_mode_collision_preserves_foreign_staging() {
+        let temp_dir = TempDir::new().unwrap();
+        let staged = temp_dir.path().join("occupied.tmp");
+        fs::write(&staged, "foreign sentinel").unwrap();
+        assert!(atomic_write_staging_file(&staged, b"must not replace", Some(0o600)).is_err());
+        assert_eq!(fs::read_to_string(&staged).unwrap(), "foreign sentinel");
+    }
+
+    #[test]
+    fn test_rt_file_atomic_write_mode_private_replacement_and_failures() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("private-token.txt");
+        fs::write(&file_path, "old inherited value").unwrap();
+        let path = rv_text(file_path.to_str().unwrap());
+        unsafe {
+            assert_eq!(rt_file_atomic_write_mode(path, rv_text("first synthetic token"), 0o600), 1);
+            assert_eq!(fs::read_to_string(&file_path).unwrap(), "first synthetic token");
+            #[cfg(windows)]
+            assert_owner_only_acl(&file_path);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(fs::metadata(&file_path).unwrap().permissions().mode() & 0o7777, 0o600);
+            }
+            assert_eq!(rt_file_atomic_write_mode(path, rv_text("second synthetic token"), 0o600), 1);
+            assert_eq!(fs::read_to_string(&file_path).unwrap(), "second synthetic token");
+            #[cfg(windows)]
+            assert_owner_only_acl(&file_path);
+            assert_eq!(rt_file_atomic_write_mode(rv_text(""), rv_text("refused"), 0o600), 0);
+            assert_eq!(rt_file_atomic_write_mode(rv_text(temp_dir.path().to_str().unwrap()), rv_text("refused"), 0o600), 0);
+        }
+        assert!(fs::read_dir(temp_dir.path()).unwrap().filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp.")));
+    }
+
     #[test]
     fn test_rt_file_atomic_write_creates_parents_and_rejects_empty_path() {
         let temp_dir = TempDir::new().unwrap();

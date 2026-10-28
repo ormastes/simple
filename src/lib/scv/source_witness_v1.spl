@@ -1,0 +1,134 @@
+# Source facts only. compiler.common.cache_contract owns semantic manifests.
+# Receipts are in-memory evidence; no durable publication or artifact admission.
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.snapshot_v2.{ScvSnapshotV2, scv_snapshot_path_valid_v2,
+    scv_snapshot_scope_complete_v2, scv_snapshot_file_index_v2,
+    scv_snapshot_sorted_v2, scv_snapshot_in_scope_v2, scv_snapshot_valid_v2}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_digest_valid_v1}
+use std.scv.store.{scv_content_id_for_u8}
+
+pub struct DirectoryWitnessV1:
+    snapshot_id: text
+    namespace: text
+    path_policy: text
+    directory: text
+    membership_digest: text
+    members: [text]
+    coverage: text
+
+pub struct ScvSourceWitnessV1:
+    snapshot_id: text
+    namespace: text
+    path_policy: text
+    query_kind: text
+    path: text
+    present: bool
+    observation_digest: text
+    coverage: text
+
+pub struct VerificationReceiptV1:
+    schema: i64
+    requested_snapshot_id: text
+    action_digest: text
+    source_witness_digest: text
+    verifier: text
+    receipt_id: text
+    source_only: bool
+    unsupported_inputs: [text]
+
+pub fn scv_snapshot_directory_v2(snapshot: ScvSnapshotV2,
+        directory: text) -> Result<DirectoryWitnessV1, text>:
+    if not scv_snapshot_path_valid_v2(directory): return Err("directory-path-invalid")
+    if not scv_snapshot_scope_complete_v2(snapshot, directory):
+        return Err("directory-coverage-unknown")
+    if scv_snapshot_file_index_v2(snapshot, directory) >= 0:
+        return Err("directory-is-file")
+    # Recursive membership in the declared source namespace; excludes byte digests.
+    # A body-only edit preserves this witness; additions/deletions/kind changes do not.
+    var members: [text] = []
+    for file in snapshot.files:
+        if file.path.starts_with(directory + "/"):
+            members = members.push("{file.path}|{file.kind}|{file.mode}")
+    val ordered = scv_snapshot_sorted_v2(members)
+    val digest = "sha256_" + sha256_text(["simple/scv-directory/v1", snapshot.namespace,
+        snapshot.path_policy, directory, "recursive-source-files-v1", ordered.join("\n")].join("\n"))
+    Ok(DirectoryWitnessV1(snapshot_id: snapshot.snapshot_id, namespace: snapshot.namespace,
+        path_policy: snapshot.path_policy, directory: directory, membership_digest: digest,
+        members: ordered, coverage: "complete"))
+
+pub fn scv_snapshot_lookup_v2(snapshot: ScvSnapshotV2,
+        path: text) -> Result<ScvSourceWitnessV1, text>:
+    if not scv_snapshot_path_valid_v2(path): return Err("lookup-path-invalid")
+    val index = scv_snapshot_file_index_v2(snapshot, path)
+    if index < 0 and not scv_snapshot_scope_complete_v2(snapshot, path):
+        return Err("lookup-coverage-unknown")
+    val present = index >= 0
+    if present:
+        val file = snapshot.files[index]
+        if file.content_id != scv_content_id_for_u8(file.bytes): return Err("lookup-frozen-object-corrupt")
+    val observation = if present:
+        val file = snapshot.files[index]
+        "sha256_" + sha256_text("simple/scv-source-file/v1|{file.path}|{file.kind}|{file.mode}|{file.content_id}|{file.bytes.len()}")
+    else:
+        "sha256_" + sha256_text("simple/scv-absent-file/v1|{snapshot.namespace}|{snapshot.path_policy}|{path}")
+    Ok(ScvSourceWitnessV1(snapshot_id: snapshot.snapshot_id, namespace: snapshot.namespace,
+        path_policy: snapshot.path_policy, query_kind: "exact-file-v1", path: path,
+        present: present, observation_digest: observation,
+        coverage: if present: "observed" else: "complete"))
+
+pub fn scv_snapshot_lookup_domain_v2(snapshot: ScvSnapshotV2, path: text,
+        required_namespace: text) -> Result<ScvSourceWitnessV1, text>:
+    if required_namespace != snapshot.namespace: return Err("lookup-source-domain-unknown")
+    scv_snapshot_lookup_v2(snapshot, path)
+
+pub fn scv_snapshot_directory_source_witness_v1(witness: DirectoryWitnessV1) -> ScvSourceWitnessV1:
+    ScvSourceWitnessV1(snapshot_id: witness.snapshot_id, namespace: witness.namespace,
+        path_policy: witness.path_policy, query_kind: "recursive-directory-v1",
+        path: witness.directory, present: true, observation_digest: witness.membership_digest,
+        coverage: witness.coverage)
+
+pub fn scv_source_witness_canonical_v1(witness: ScvSourceWitnessV1) -> text:
+    [witness.snapshot_id, witness.namespace, witness.path_policy, witness.query_kind,
+        witness.path, if witness.present: "present" else: "absent",
+        witness.observation_digest, witness.coverage].join("|")
+
+pub fn scv_verify_source_witnesses_v1(requested: ScvSnapshotV2,
+        action_digest: text, witnesses: [ScvSourceWitnessV1]) -> Result<VerificationReceiptV1, text>:
+    if not scv_snapshot_valid_v2(requested): return Err("verify-snapshot-invalid")
+    if not compile_source_inventory_digest_valid_v1(action_digest): return Err("verify-action-digest-invalid")
+    if witnesses.len() == 0: return Err("verify-source-read-set-empty")
+    var canonical: [text] = []
+    for witness in witnesses:
+        val prefix = "scv-snapshot-v2-sha256-"
+        if (not witness.snapshot_id.starts_with(prefix) or
+                not compile_source_inventory_digest_valid_v1(witness.snapshot_id.substring(prefix.len()))):
+            return Err("verify-origin-snapshot-id-invalid")
+        if witness.namespace != requested.namespace or witness.path_policy != requested.path_policy:
+            return Err("verify-source-domain-mismatch")
+        if not scv_snapshot_path_valid_v2(witness.path): return Err("verify-source-path-invalid")
+        if witness.query_kind == "exact-file-v1":
+            if witness.coverage != (if witness.present: "observed" else: "complete"):
+                return Err("verify-source-coverage-invalid")
+            val observed = scv_snapshot_lookup_v2(requested, witness.path)
+            if val Err(reason) = observed: return Err(reason)
+            val current = observed.unwrap()
+            if current.present != witness.present or current.observation_digest != witness.observation_digest:
+                return Err("verify-source-observation-changed:" + witness.path)
+        elif witness.query_kind == "recursive-directory-v1":
+            if witness.coverage != "complete" or not witness.present:
+                return Err("verify-directory-coverage-invalid")
+            val observed = scv_snapshot_directory_v2(requested, witness.path)
+            if val Err(reason) = observed: return Err(reason)
+            if observed.unwrap().membership_digest != witness.observation_digest:
+                return Err("verify-directory-membership-changed:" + witness.path)
+        else:
+            return Err("verify-source-query-kind-unsupported")
+        canonical = canonical.push(scv_source_witness_canonical_v1(witness))
+    val manifest_digest = "sha256_" + sha256_text("simple/scv-source-read-set/v1\n" + canonical.join("\n"))
+    val verifier = "scv-source-witness-verifier-v1"
+    val receipt_id = "scv-source-receipt-v1-sha256-" + sha256_text(
+        "simple/scv-source-receipt/v1|{requested.snapshot_id}|{action_digest}|{manifest_digest}|{verifier}")
+    Ok(VerificationReceiptV1(schema: 1, requested_snapshot_id: requested.snapshot_id,
+        action_digest: action_digest, source_witness_digest: manifest_digest,
+        verifier: verifier, receipt_id: receipt_id, source_only: true,
+        unsupported_inputs: requested.unsupported_inputs))

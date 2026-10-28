@@ -4,7 +4,7 @@ use app.io.mod (file_exists, file_read, dir_create, dir_walk)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
 use std.common.compress.gzip.{gzip_compress, gzip_decompress}
 use std.scv.core.{scv_objects_dir, scv_chunk_path, scv_object_path, scv_line_set_contains}
-use std.scv.maintenance.{scv_object_id_from_path, scv_gc_roots_reachable, scv_gc_quarantine}
+use std.scv.maintenance.{scv_object_id_from_path, scv_gc_roots_reachable_checked, scv_gc_quarantine}
 use std.scv.integrity.{scv_fsck}
 use std.scv.working_copy.{scv_snapshot}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
@@ -12,6 +12,9 @@ use std.scv.store.{scv_repo_exists, scv_i64_bytes_to_u8, scv_hash_text, scv_writ
 use std.scv.delta.{scv_delta_encode, scv_delta_decode, scv_delta_crc32, SCV_DELTA_MAX_DEPTH}
 use std.scv.alloc_bounds.{scv_bound_object_bytes}
 use std.scv.pack.{scv_append_bytes, scv_append_text_bytes, scv_pack_bytes_line, scv_pack_id_from_gzip_path, scv_pack_manifest_for_kind, scv_pack_payload_for_kind, scv_pack_payload_matches_manifest_bytes}
+
+use std.scv.pack_v2_gzip.{SCV_PACK_V2_STORED_BLOCK, scv_pack_v2_put_u32_le, scv_pack_v2_gzip_stored}
+export SCV_PACK_V2_STORED_BLOCK, scv_pack_v2_put_u32_le, scv_pack_v2_gzip_stored
 
 val SCV_PACK_V2_DELTA_WINDOW: i64 = 4
 
@@ -542,7 +545,9 @@ fn scv_pack_v2_load_payload(root: text, requested_pack: text) -> ([u8], text, te
 fn scv_pack_write_v2_reachable(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR repository not initialized\n"
-    val reachable = scv_gc_roots_reachable(root)
+    val reachable = match scv_gc_roots_reachable_checked(root):
+        Ok(value): value
+        Err(error): return error
     val pack_dir = "{scv_objects_dir(root)}/packs"
     dir_create(pack_dir, true)
     var manifest_rows: [text] = ["format: scv-pack-v1\n"]
@@ -716,11 +721,15 @@ fn scv_pack_v2_soak(root: text, iterations: i64) -> text:
         ms_snapshot = ms_snapshot + (current_time_ms() - t_snap)
         if snap.starts_with("ERROR") and first_bad == "":
             first_bad = "snapshot@{i}"
-        scv_write_chunk_u8(root, scv_text_to_u8("orphan soak {i}\n"))
+        match scv_write_chunk_u8(root, scv_text_to_u8("orphan soak {i}\n")):
+            Ok(_): ()
+            Err(error): return error
         # 2. pack (reachability-aware), fail-closed on any would-be loss
         val t_pack = current_time_ms()
         val write_out = scv_pack_write_v2_reachable(root)
         ms_pack = ms_pack + (current_time_ms() - t_pack)
+        if write_out.starts_with("ERROR"):
+            return write_out
         if not write_out.contains("lost=0"):
             lost = lost + 1
             if first_bad == "":
@@ -728,8 +737,12 @@ fn scv_pack_v2_soak(root: text, iterations: i64) -> text:
         # 3. gc: real quarantine of unreachables (min age 0 — a dry run would
         #    be vacuous), reusing maintenance.spl's GC, never a local copy
         val t_gc = current_time_ms()
-        val reachable = scv_gc_roots_reachable(root)
-        val (moved, _young, _qdir) = scv_gc_quarantine(root, reachable, 0, current_time_ms())
+        val reachable = match scv_gc_roots_reachable_checked(root):
+            Ok(value): value
+            Err(error): return error
+        val (moved, _young, _qdir) = match scv_gc_quarantine(root, reachable, 0, current_time_ms()):
+            Ok(value): value
+            Err(error): return error
         ms_gc = ms_gc + (current_time_ms() - t_gc)
         quarantined = quarantined + moved
         # 4. verify: every reachable object still readable, fsck still clean
@@ -759,57 +772,3 @@ fn scv_pack_v2_soak(root: text, iterations: i64) -> text:
     if lost > 0 or fsck_dirty > 0:
         return row + "FAIL — pack v2 GC soak broke at: {first_bad}\n"
     row + "PASS — pack v2 GC soak: {iterations} cycle(s), 0 reachable object(s) lost, fsck clean after every cycle\n"
-
-# ---------------------------------------------------------------------------
-# Stored-block gzip for the reachability-aware write path.
-#
-# Measured 2026-08-26 on this host: `gzip_compress` in
-# `src/lib/common/compress/gzip.spl` needs 110 SECONDS to compress a 16 KB pack
-# payload (manifest 3 ms, payload assembly 5 ms, gzip 110,234 ms). That makes a
-# bounded 50-cycle pack/GC soak cost hours and is a pre-existing perf defect of
-# the shared gzip encoder, NOT of the pack layer — it is recorded in
-# doc/08_tracking/bug/scv_gzip_compress_quadratic_2026-08-26.md rather than
-# worked around silently, and the shared encoder is deliberately not edited here.
-#
-# What this does instead is emit a VALID gzip stream made of DEFLATE stored
-# (BTYPE=00, uncompressed) blocks. Every gzip decoder — including this repo's
-# own `gzip_decompress`, round-trip-pinned by the spec — reads it. Only
-# `scv_pack_write_v2_reachable` uses it; `pack-write` (v1) and `pack-write-v2`
-# keep the shared encoder, so no existing pack, repo, or spec changes behaviour.
-
-val SCV_PACK_V2_STORED_BLOCK: i64 = 65535
-
-fn scv_pack_v2_put_u32_le(buf: [u8], value: i64) -> [u8]:
-    var out = buf
-    out.push((value & 0xFF).to_u8())
-    out.push(((value >> 8) & 0xFF).to_u8())
-    out.push(((value >> 16) & 0xFF).to_u8())
-    out.push(((value >> 24) & 0xFF).to_u8())
-    out
-
-fn scv_pack_v2_gzip_stored(payload: [u8]) -> [u8]:
-    var out: [u8] = []
-    for b in [0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF]:
-        out.push(b.to_u8())
-    var pos = 0
-    var wrote_block = false
-    while pos < payload.len():
-        val remaining = payload.len() - pos
-        val len = if remaining > SCV_PACK_V2_STORED_BLOCK: SCV_PACK_V2_STORED_BLOCK else: remaining
-        val final_block = if pos + len >= payload.len(): 1 else: 0
-        out.push(final_block.to_u8())
-        out.push((len & 0xFF).to_u8())
-        out.push(((len >> 8) & 0xFF).to_u8())
-        val nlen = (~len) & 0xFFFF
-        out.push((nlen & 0xFF).to_u8())
-        out.push(((nlen >> 8) & 0xFF).to_u8())
-        out = scv_append_bytes(out, payload[pos:pos + len])
-        pos = pos + len
-        wrote_block = true
-    if not wrote_block:
-        # empty payload still needs one final, empty stored block
-        for b in [0x01, 0x00, 0x00, 0xFF, 0xFF]:
-            out.push(b.to_u8())
-    out = scv_pack_v2_put_u32_le(out, scv_delta_crc32(payload))
-    out = scv_pack_v2_put_u32_le(out, payload.len() & 0xFFFFFFFF)
-    out

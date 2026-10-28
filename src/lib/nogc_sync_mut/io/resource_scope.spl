@@ -208,9 +208,10 @@ fn _run_in_cgroup_v2(scope: ExecutionResourceScope, scope_path: text, cmd: text,
 fn _limit_shell(scope: ExecutionResourceScope) -> text:
     if scope.budget.max_pids <= 0:
         return "/bin/sh"
-    for shell in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash", "/bin/ksh", "/usr/bin/ksh", "/bin/zsh", "/usr/bin/zsh"]:
-        if file_exists(shell):
-            return shell
+    # @workaround bug=phase2_resource_scope_shell_shadow_2026_10_28 recover=74c4f7c879b reason=Cached phase2 also resolves the loop-local shell as a function value
+    for candidate_shell_path in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash", "/bin/ksh", "/usr/bin/ksh", "/bin/zsh", "/usr/bin/zsh"]:
+        if file_exists(candidate_shell_path):
+            return candidate_shell_path
     ""
 
 # `ulimit -v` maps to RLIMIT_AS, which Darwin's kernel does not implement: EVERY
@@ -313,8 +314,9 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     val ancestor_cap = if memory_scoped: _ancestor_memory_max() else: 0
     val memory_bytes = if ancestor_cap > 0 and ancestor_cap < requested_memory: ancestor_cap else: requested_memory
     # Inside a scope the pid cap is TasksMax, so no `ulimit -u` and no bash needed.
-    val shell = if memory_scoped: "/bin/sh" else: _limit_shell(scope)
-    if shell == "":
+    # @workaround bug=phase2_resource_scope_shell_shadow_2026_10_28 recover=74c4f7c879b reason=Cached phase2 resolves the local shell argument as a global function value
+    val limit_shell_path = if memory_scoped: "/bin/sh" else: _limit_shell(scope)
+    if limit_shell_path == "":
         return ObservedProcessResult(
             stdout: "",
             stderr: "resource scope: max_pids={scope.budget.max_pids} requires a shell with `ulimit -u` (bash/ksh/zsh); none found, refusing to run unlimited",
@@ -344,7 +346,7 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     command = command + _shell_quote(cmd)
     for arg in args:
         command = command + " " + _shell_quote(arg)
-    val process = process_run_observed_bounded(shell, ["-c", command], scope.timeout_ms, scope.max_output_bytes)
+    val process = process_run_observed_bounded(limit_shell_path, ["-c", command], scope.timeout_ms, scope.max_output_bytes)
     var memscope: [text] = []
     if report != "" and file_exists(report):
         memscope = file_read_text(report).trim().split(":")
@@ -431,8 +433,9 @@ fn _without_line_prefix(content: text, prefix: text) -> text:
             kept.push(line)
     kept.join("\n")
 
+# @workaround bug=option_generic_inner_collapses_below_named_base_2026_10_20 reason=postfix optional preserves tuple metadata in the phase2 parser; remove after explicit Option<Tuple> metadata/native regression passes on a qualified PR5154 producer.
 pub fn resource_scope_systemd_metrics_v1(output: text, exit_code: i64, runtime_error: i64,
-        stdout_truncated: bool, stderr_truncated: bool) -> Option<(i64, i64)>:
+        stdout_truncated: bool, stderr_truncated: bool) -> (i64, i64)?:
     # This parses the actual systemctl observation, not an enforcement claim.
     # Incomplete/failed observations cannot certify even a displayed zero.
     if exit_code != 0 or runtime_error != 0 or stdout_truncated or stderr_truncated: return None

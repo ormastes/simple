@@ -1,0 +1,64 @@
+# Directly exercise eval_array_method so native method lowering cannot mask an
+# interpreter dispatch regression for array `set`.
+use compiler.frontend.core.ast_expr.{expr_int_lit, expr_float_lit, expr_string_lit, expr_bool_lit, expr_reset}
+use compiler.core.interpreter.eval_ops.{eval_array_method}
+use compiler.core.interpreter.eval.{eval_reset, eval_get_error}
+use compiler.core.interpreter.value.{val_reset, val_make_array, val_make_int, val_get_array, val_get_int, val_get_bool}
+use compiler.core.interpreter.ops.{ops_clear_error}
+
+describe "Interpreter array set method":
+    fn fresh():
+        expr_reset()
+        val_reset()
+        eval_reset()
+        ops_clear_error()
+
+    it "mutates the selected element and returns true":
+        fresh()
+        val receiver = val_make_array([val_make_int(5), val_make_int(3), val_make_int(1)])
+        val result = eval_array_method(receiver, "set", [expr_int_lit(1, -1), expr_int_lit(8, -1)])
+        expect(val_get_bool(result)).to_equal(true)
+        expect(val_get_int(val_get_array(receiver)[1])).to_equal(8)
+        expect(val_get_array(receiver).len()).to_equal(3)
+
+    it "normalizes negative indices from the end":
+        fresh()
+        val receiver = val_make_array([val_make_int(5), val_make_int(3), val_make_int(1)])
+        val last = eval_array_method(receiver, "set", [expr_int_lit(-1, -1), expr_int_lit(9, -1)])
+        expect(val_get_bool(last)).to_equal(true)
+        expect(val_get_int(val_get_array(receiver)[2])).to_equal(9)
+        val first = eval_array_method(receiver, "set", [expr_int_lit(-3, -1), expr_int_lit(7, -1)])
+        expect(val_get_bool(first)).to_equal(true)
+        expect(val_get_int(val_get_array(receiver)[0])).to_equal(7)
+
+    it "rejects negative and positive indices outside the array":
+        fresh()
+        val receiver = val_make_array([val_make_int(5), val_make_int(3), val_make_int(1)])
+        val too_negative = eval_array_method(receiver, "set", [expr_int_lit(-4, -1), expr_int_lit(9, -1)])
+        val too_large = eval_array_method(receiver, "set", [expr_int_lit(3, -1), expr_int_lit(9, -1)])
+        expect(val_get_bool(too_negative)).to_equal(false)
+        expect(val_get_bool(too_large)).to_equal(false)
+        expect(val_get_int(val_get_array(receiver)[0])).to_equal(5)
+        expect(val_get_int(val_get_array(receiver)[2])).to_equal(1)
+
+    it "rejects non-integer indices without changing the receiver":
+        fresh()
+        val receiver = val_make_array([val_make_int(5)])
+        val float_index = eval_array_method(receiver, "set", [expr_float_lit("0.0", -1), expr_int_lit(9, -1)])
+        val text_index = eval_array_method(receiver, "set", [expr_string_lit("0", -1), expr_int_lit(9, -1)])
+        val bool_index = eval_array_method(receiver, "set", [expr_bool_lit(1, -1), expr_int_lit(9, -1)])
+        expect(val_get_bool(float_index)).to_equal(false)
+        expect(val_get_bool(text_index)).to_equal(false)
+        expect(val_get_bool(bool_index)).to_equal(false)
+        expect(val_get_int(val_get_array(receiver)[0])).to_equal(5)
+
+    it "requires exactly an index and a value":
+        fresh()
+        val receiver = val_make_array([val_make_int(5)])
+        val missing = eval_array_method(receiver, "set", [expr_int_lit(0, -1)])
+        expect(missing).to_equal(-1)
+        expect(eval_get_error()).to_contain("expects exactly")
+        eval_reset()
+        val extra = eval_array_method(receiver, "set", [expr_int_lit(0, -1), expr_int_lit(9, -1), expr_int_lit(10, -1)])
+        expect(extra).to_equal(-1)
+        expect(eval_get_error()).to_contain("expects exactly")

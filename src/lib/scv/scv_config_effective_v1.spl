@@ -1,0 +1,130 @@
+"""Deterministic authority intersection and domain-tagged effective identity.
+
+The caller supplies host and old accepted constraints separately from local/CLI
+requests. Nothing here accepts a policy change or produces publication rights.
+"""
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.sdn.value.{SdnValue}
+use std.scv.scv_config_types_v1.*
+use std.scv.scv_config_fields_v1.*
+use std.scv.scv_config_schema_v1.{scv_config_schema_v1}
+
+fn config_text_lt_v1(left: text, right: text) -> bool:
+    var index = 0
+    while index < left.len() and index < right.len():
+        if left.byte_at(index) != right.byte_at(index): return left.byte_at(index) < right.byte_at(index)
+        index = index + 1
+    left.len() < right.len()
+
+fn config_sorted_v1(items: [text]) -> [text]:
+    var result: [text] = []
+    for item in items:
+        result.push(item)
+        var index = result.len() - 1
+        while index > 0 and config_text_lt_v1(result[index], result[index - 1]):
+            val previous = result[index - 1]
+            result[index - 1] = result[index]
+            result[index] = previous
+            index = index - 1
+    result
+
+fn config_frame_v1(tag: text, value: text) -> text:
+    tag + value.bytes().len().to_text() + ":" + value
+
+fn config_canonical_value_v1(value: SdnValue, depth: i64) -> Result<text, text>:
+    if depth > 16: return Err("canonical_depth: config")
+    match value:
+        case Null: Ok("n0:")
+        case Bool(item): Ok(if item: "b1:1" else: "b1:0")
+        case Int(item): Ok(config_frame_v1("i", item.to_text()))
+        case String(item): Ok(config_frame_v1("s", item))
+        case Array(items):
+            var body = ""
+            for item in items: body = body + config_canonical_value_v1(item, depth + 1)?
+            Ok(config_frame_v1("a", body))
+        case Dict(fields):
+            var body = ""
+            for name in config_sorted_v1(fields.keys()):
+                body = body + config_frame_v1("k", name) + config_canonical_value_v1(fields[name], depth + 1)?
+            Ok(config_frame_v1("d", body))
+        case _: Err("unsupported_canonical_value: config")
+
+fn config_constraint_validate_v1(value: ScvAuthorityConstraintsV1) -> Result<bool, text>:
+    if value.generation.len() == 0 or value.generation.len() > 256: return Err("invalid_policy_generation")
+    if value.max_worker_memory_bytes < 1 or value.max_worker_memory_bytes > 1073741824: return Err("invalid_policy_memory_limit")
+    if value.secure_algorithms.len() == 0 or value.secure_algorithms.len() > 2: return Err("invalid_policy_secure_algorithms")
+    var seen: [text] = []
+    for item in value.secure_algorithms:
+        if not ["sha256", "blake3_256"].contains(item) or seen.contains(item): return Err("invalid_policy_secure_algorithms")
+        seen.push(item)
+    if value.provider_ids.len() > 256: return Err("invalid_policy_provider_limit")
+    seen = []
+    for item in value.provider_ids:
+        if item.len() == 0 or item.len() > 256 or seen.contains(item): return Err("invalid_policy_provider_ids")
+        seen.push(item)
+    Ok(true)
+
+fn config_intersect_v1(left: [text], right: [text]) -> [text]:
+    var result: [text] = []
+    for item in left:
+        if right.contains(item): result.push(item)
+    config_sorted_v1(result)
+
+fn config_constraint_body_v1(value: ScvAuthorityConstraintsV1) -> text:
+    var body = config_frame_v1("g", value.generation)
+    body = body + (if value.network: "n1" else: "n0")
+    body = body + (if value.executable_providers: "e1" else: "e0")
+    body = body + (if value.llm_proposals: "l1" else: "l0")
+    body = body + config_frame_v1("m", value.max_worker_memory_bytes.to_text())
+    var algorithms = ""
+    for item in config_sorted_v1(value.secure_algorithms): algorithms = algorithms + config_frame_v1("s", item)
+    var providers = ""
+    for item in config_sorted_v1(value.provider_ids): providers = providers + config_frame_v1("p", item)
+    body + config_frame_v1("a", algorithms) + config_frame_v1("p", providers)
+
+pub fn scv_config_effective_v1(config: ScvConfigV1, host: ScvAuthorityConstraintsV1, old_policy: ScvAuthorityConstraintsV1, local: ScvAuthorityConstraintsV1, cli: ScvAuthorityConstraintsV1) -> Result<ScvEffectiveConfigV1, text>:
+    if not config.validated or config.schema_version != 1 or config.routes_sha256 == "": return Err("unvalidated_config: effective native config requires routes")
+    # Revalidate values even when a caller has built a struct directly. The
+    # validated flag is never a substitute for schema or old-policy checks.
+    val root: Dict<text, SdnValue> = {"schema_version": SdnValue.Int(1), "scv": SdnValue.Dict(config.settings)}
+    val settings = scv_config_schema_v1(SdnValue.Dict(root))?
+    for constraint in [host, old_policy, local, cli]: config_constraint_validate_v1(constraint)?
+    var hashes: Dict<text, SdnValue> = {}
+    var solvers: Dict<text, SdnValue> = {}
+    match settings["hashes"]:
+        case Dict(fields): hashes = fields
+        case _: return Err("wrong_type: hashes")
+    match settings["solvers"]:
+        case Dict(fields): solvers = fields
+        case _: return Err("wrong_type: solvers")
+    var algorithms = scv_config_texts_v1(hashes["secure_allowed"], "secure_allowed", ["sha256", "blake3_256"])?
+    var providers = host.provider_ids
+    var memory = scv_config_int_v1(solvers["isolated_worker_memory_bytes"], "isolated_worker_memory_bytes", 1, 1073741824)?
+    var network = true
+    var executable = true
+    var llm = scv_config_bool_v1(solvers["llm_proposals"], "llm_proposals")?
+    for constraint in [host, old_policy, local, cli]:
+        algorithms = config_intersect_v1(algorithms, constraint.secure_algorithms)
+        providers = config_intersect_v1(providers, constraint.provider_ids)
+        if constraint.max_worker_memory_bytes < memory: memory = constraint.max_worker_memory_bytes
+        network = network and constraint.network
+        executable = executable and constraint.executable_providers
+        llm = llm and constraint.llm_proposals
+    if algorithms.len() == 0: return Err("empty_authority_intersection: secure algorithms")
+    val durable = scv_config_text_v1(hashes["durable_default"], "durable_default")?
+    if not algorithms.contains(durable): return Err("denied_durable_algorithm: " + durable)
+    # Exact raw-byte identities are exposed separately. The effective identity
+    # binds canonical typed values, route semantics and every authority input.
+    var body = "scv.effective-config.v1\n" + config_canonical_value_v1(SdnValue.Dict(settings), 0)?
+    var route_bodies: [text] = []
+    for route in config.routes:
+        val route_body = config_frame_v1("i", route.id) + config_frame_v1("d", route.domain) + config_frame_v1("p", route.path) + config_frame_v1("s", route.profile)
+        route_bodies.push(route_body)
+    for route_body in config_sorted_v1(route_bodies): body = body + config_frame_v1("r", route_body)
+    for constraint in [host, old_policy, local, cli]: body = body + config_frame_v1("c", config_constraint_body_v1(constraint))
+    Ok(ScvEffectiveConfigV1(source_sha256: config.source_sha256, routes_sha256: config.routes_sha256,
+        policy_generation: old_policy.generation, network: network, executable_providers: executable,
+        llm_proposals: llm, secure_algorithms: algorithms, provider_ids: providers,
+        max_worker_memory_bytes: memory, canonical_sha256: sha256_u8_hex(body.bytes())))
+
+export scv_config_effective_v1

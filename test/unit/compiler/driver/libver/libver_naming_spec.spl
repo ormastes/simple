@@ -1,0 +1,159 @@
+"""
+## Purpose and audience
+
+As a build or package manager, I name library artifacts consistently across
+platforms and parse file names back to their identity components. This spec
+is the manual for that naming contract (AC-3).
+
+## Operator workflow
+
+Run: bin/simple test test/unit/compiler/driver/libver/libver_naming_spec.spl
+
+## Verification guidance
+
+Each naming function produces names that round-trip through their corresponding
+parse function. Platform-specific extensions (dll/dylib/so) are tested over
+known triples. Garbage names return None.
+"""
+
+# @manual_section: library artifact naming
+
+use compiler.driver.libver.naming.{
+    LibNameParts,
+    libver_known_triples,
+    libver_dylib_ext,
+    name_stdlib,
+    name_backend,
+    name_tier_dylib,
+    parse_stdlib_name,
+    parse_backend_name,
+    parse_tier_dylib_name
+}
+use std.spec.step
+
+describe "Naming stdlib archives":
+    # @req AC-3
+    it "name_stdlib produces predictable archive names":
+        step("Build stdlib archive name")
+        val name = name_stdlib("1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2")
+        expect(name).to_equal("libsimple_std-1.0.0-x86_64-unknown-linux-gnu-x86-64-v2.a")
+
+    # @req AC-3
+    it "name_stdlib works for all known triples":
+        step("Generate names for different platforms")
+        expect(name_stdlib("1.0.0", "x86_64-pc-windows-gnu", "x86-64-v3")).to_equal("libsimple_std-1.0.0-x86_64-pc-windows-gnu-x86-64-v3.a")
+        expect(name_stdlib("1.0.0", "aarch64-apple-darwin", "armv8-a")).to_equal("libsimple_std-1.0.0-aarch64-apple-darwin-armv8-a.a")
+
+describe "Naming backend libraries":
+    # @req AC-3
+    it "name_backend produces platform-specific extensions":
+        step("Name backend for Linux (so)")
+        expect(name_backend("crypto", "x86_64-unknown-linux-gnu", 2)).to_equal("backend_crypto-x86_64-unknown-linux-gnu-v2.so")
+
+    # @req AC-3
+    it "name_backend uses dll for Windows":
+        step("Name backend for Windows")
+        expect(name_backend("crypto", "x86_64-pc-windows-gnu", 3)).to_equal("backend_crypto-x86_64-pc-windows-gnu-v3.dll")
+
+    # @req AC-3
+    it "name_backend uses dylib for macOS":
+        step("Name backend for macOS")
+        expect(name_backend("crypto", "aarch64-apple-darwin", 2)).to_equal("backend_crypto-aarch64-apple-darwin-v2.dylib")
+
+    # @req AC-3
+    it "name_backend uses so for FreeBSD":
+        step("Name backend for FreeBSD")
+        expect(name_backend("crypto", "x86_64-unknown-freebsd", 1)).to_equal("backend_crypto-x86_64-unknown-freebsd-v1.so")
+
+describe "Naming tier dylibs":
+    # @req AC-3
+    it "name_tier_dylib produces platform-specific tier library names":
+        step("Name a tier dylib for Linux")
+        val name = name_tier_dylib("std", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2")
+        expect(name).to_equal("libstd-1.0.0-x86_64-unknown-linux-gnu-x86-64-v2.so")
+
+    # @req AC-3
+    it "name_tier_dylib uses dll for Windows":
+        step("Name tier dylib for Windows")
+        expect(name_tier_dylib("std", "1.0.0", "x86_64-pc-windows-gnu", "x86-64-v3")).to_equal("libstd-1.0.0-x86_64-pc-windows-gnu-x86-64-v3.dll")
+
+    # @req AC-3
+    it "name_tier_dylib uses dylib for macOS":
+        step("Name tier dylib for macOS")
+        expect(name_tier_dylib("std", "1.0.0", "aarch64-apple-darwin", "armv8-a")).to_equal("libstd-1.0.0-aarch64-apple-darwin-armv8-a.dylib")
+
+describe "Parsing stdlib archive names":
+    # @req AC-3
+    it "parse_stdlib_name round-trips a stdlib name":
+        step("Parse the name we just created")
+        val original = name_stdlib("1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2")
+        val parsed = parse_stdlib_name(original)
+        expect(parsed.is_some()).to_equal(true)
+        var parts = parsed ?? LibNameParts(name: "", semver: "", abi: 0, triple: "", tier: "")
+        expect(parts.name).to_equal("simple_std")
+        expect(parts.semver).to_equal("1.0.0")
+        expect(parts.triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(parts.tier).to_equal("x86-64-v2")
+
+    # @req AC-3
+    it "parse_stdlib_name rejects garbage":
+        step("Try to parse an invalid name")
+        expect(parse_stdlib_name("garbage.a")).to_equal(None)
+
+describe "Parsing backend library names":
+    # @req AC-3
+    it "parse_backend_name round-trips a backend name":
+        step("Parse a backend library name")
+        val original = name_backend("crypto", "x86_64-unknown-linux-gnu", 2)
+        val parsed = parse_backend_name(original)
+        expect(parsed.is_some()).to_equal(true)
+        var parts = parsed ?? LibNameParts(name: "", semver: "", abi: 0, triple: "", tier: "")
+        expect(parts.name).to_equal("crypto")
+        expect(parts.abi).to_equal(2)
+        expect(parts.triple).to_equal("x86_64-unknown-linux-gnu")
+
+    # @req AC-3
+    it "parse_backend_name rejects names without backend_ prefix":
+        step("Try to parse a non-backend name")
+        expect(parse_backend_name("libcrypto-x86_64-unknown-linux-gnu-v2.so")).to_equal(None)
+
+    # @req AC-3
+    it "parse_backend_name rejects garbage":
+        expect(parse_backend_name("garbage.so")).to_equal(None)
+
+describe "Parsing tier dylib names":
+    # @req AC-3
+    it "parse_tier_dylib_name round-trips a tier dylib name":
+        step("Parse a tier dylib name")
+        val original = name_tier_dylib("std", "1.0.0", "x86_64-unknown-linux-gnu", "x86-64-v2")
+        val parsed = parse_tier_dylib_name(original)
+        expect(parsed.is_some()).to_equal(true)
+        var parts = parsed ?? LibNameParts(name: "", semver: "", abi: 0, triple: "", tier: "")
+        expect(parts.name).to_equal("std")
+        expect(parts.semver).to_equal("1.0.0")
+        expect(parts.triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(parts.tier).to_equal("x86-64-v2")
+
+    # @req AC-3
+    it "parse_tier_dylib_name handles different platforms":
+        step("Parse a Windows tier dylib name")
+        val original = name_tier_dylib("std", "1.0.0", "aarch64-pc-windows-gnu", "x86-64-v3")
+        val parsed = parse_tier_dylib_name(original)
+        expect(parsed.is_some()).to_equal(true)
+        var parts = parsed ?? LibNameParts(name: "", semver: "", abi: 0, triple: "", tier: "")
+        expect(parts.triple).to_equal("aarch64-pc-windows-gnu")
+
+    # @req AC-3
+    it "parse_tier_dylib_name rejects garbage":
+        expect(parse_tier_dylib_name("garbage.so")).to_equal(None)
+
+describe "Known triples coverage":
+    # @req AC-3
+    it "libver_known_triples includes all supported platforms":
+        step("Check that known_triples includes primary targets")
+        val triples = libver_known_triples()
+        expect(triples).to_contain("x86_64-unknown-linux-gnu")
+        expect(triples).to_contain("x86_64-pc-windows-gnu")
+        expect(triples).to_contain("aarch64-apple-darwin")
+        expect(triples).to_contain("x86_64-unknown-freebsd")
+        expect(triples).to_contain("x86_64-unknown-simpleos")

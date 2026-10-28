@@ -1,0 +1,55 @@
+"""Typed dynamic SCV provider transaction; no static Wasm provider imports.
+
+The mapping stays retained through load/parse/free. The native bridge owns
+bounded C-string input copies and copies the returned bytes before free(handle).
+"""
+use std.nogc_sync_mut.sffi.dynamic.{DynLib, sffi_lib_path}
+
+# @workaround bug=BUG-GNU-PHASE2-HOST-ALIAS-LINK-20261027 reason=resolve-optional-provider-dynamically-with-exact-typed-abi-and-owned-output
+@unsafe(reason: "contract: exact typed provider pointers and valid borrowed byte ranges; zero means failure; nonzero transfers output ownership for rt_free", capabilities: [ffi, raw_ptr])
+extern fn spl_scv_wasm_parse_blob_copy(load_fn: i64, parse_fn: i64, free_fn: i64,
+    grammar_ptr: i64, grammar_len: i64, source_ptr: i64, source_len: i64) -> i64
+@unsafe(reason: "copies the bridge-owned NUL-terminated output", capabilities: [ffi, raw_ptr])
+extern fn rt_cstring_to_text(ptr: i64) -> text
+@unsafe(reason: "releases the bridge-owned runtime allocation", capabilities: [ffi, raw_ptr])
+extern fn rt_free(ptr: i64)
+
+@unsafe(reason: "invokes an unverified provider through its exact typed ABI", capabilities: [ffi, raw_ptr])
+pub fn scv_wasm_provider_parse_blob(grammar_path: text, source: text, source_len: i64) -> text:
+    if source_len < 0 or source_len > 16777216 or source_len != source.bytes().len():
+        return ""
+    val grammar_len = grammar_path.bytes().len()
+    if grammar_len <= 0 or grammar_len > 1048576:
+        return ""
+    var library = match DynLib.load_checked(sffi_lib_path("scv_wasm")):
+        case Ok(lib): lib
+        case Err(_): return ""
+    val load_fn = match library.sym_checked("wasm_rt_load"):
+        case Ok(address): address
+        case Err(_):
+            library.close()
+            return ""
+    val parse_fn = match library.sym_checked("wasm_rt_parse_all"):
+        case Ok(address): address
+        case Err(_):
+            library.close()
+            return ""
+    val free_fn = match library.sym_checked("wasm_rt_free"):
+        case Ok(address): address
+        case Err(_):
+            library.close()
+            return ""
+    if not library.begin_raw_call():
+        library.close()
+        return ""
+    val owned_output = spl_scv_wasm_parse_blob_copy(load_fn, parse_fn, free_fn,
+        grammar_path.ptr(), grammar_len, source.ptr(), source_len)
+    var blob = ""
+    if owned_output > 0:
+        blob = rt_cstring_to_text(owned_output)
+        rt_free(owned_output)
+    library.end_raw_call()
+    library.close()
+    blob
+
+export scv_wasm_provider_parse_blob

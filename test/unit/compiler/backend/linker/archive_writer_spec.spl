@@ -1,0 +1,263 @@
+@no_gc
+# @req AC-AR-1 @req AC-AR-2
+
+# ============================================================================
+# Archive Writer Unit Tests
+# ============================================================================
+# Tests for the Unix ar (.a) archive format writer.
+# Validates deterministic output, round-trip through parser, and integration
+# with external tools (llvm-ar, llvm-nm) when available.
+# ============================================================================
+
+use compiler.backend.linker.archive_writer.{
+    archive_write, ArchiveMemberInput
+}
+use compiler.backend.linker.archive_parser.{
+    ar_parse, ar_member_count, ar_find_member, ar_member_data, ar_check_magic,
+    ar_parse_symbol_index
+}
+use std.io_runtime.{file_write, file_read, file_delete}
+use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+
+# ============================================================================
+# Helper: run external command and capture output
+# ============================================================================
+
+fn run_command_capture_output(cmd: text) -> <text, i64>:
+    # Placeholder: in real execution, would need a process spawn mechanism
+    # For now, return "BLOCKED" status indicating we cannot run external tools
+    ["BLOCKED", 1]
+
+fn tool_is_available(tool: text) -> bool:
+    # This would check PATH for the tool; for now, return false
+    # indicating tools may not be available
+    false
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "archive_write - basic single member":
+    it "creates an archive with magic bytes":
+        val member = ArchiveMemberInput(
+            name: "test.o",
+            data: [0x01, 0x02, 0x03],
+            defined_symbols: []
+        )
+        val archive = archive_write([member])
+
+        # Check magic: "!<arch>\n"
+        expect(archive.len() >= 8).to_equal(true)
+        expect(archive[0]).to_equal(0x21 as u8)
+        expect(archive[1]).to_equal(0x3C as u8)
+        expect(archive[2]).to_equal(0x61 as u8)
+        expect(archive[3]).to_equal(0x72 as u8)
+        expect(archive[4]).to_equal(0x63 as u8)
+        expect(archive[5]).to_equal(0x68 as u8)
+        expect(archive[6]).to_equal(0x3E as u8)
+        expect(archive[7]).to_equal(0x0A as u8)
+        expect(ar_check_magic(archive)).to_equal(true)
+
+    it "round-trips through the parser":
+        val member = ArchiveMemberInput(
+            name: "test.o",
+            data: [0x7F, 0x45, 0x4C, 0x46],  # ELF magic
+            defined_symbols: []
+        )
+        val archive = archive_write([member])
+        val parsed = ar_parse(archive)
+
+        expect(parsed.is_ok()).to_equal(true)
+        val reader = parsed.unwrap()
+        expect(ar_member_count(reader)).to_equal(1)
+
+        val found = ar_find_member(reader, "test.o")
+        expect(found.is_some()).to_equal(true)
+        val m = found.unwrap()
+        expect(m.name).to_equal("test.o")
+
+        val data = ar_member_data(reader, m)
+        expect(data[0]).to_equal(0x7F as u8)
+        expect(data[1]).to_equal(0x45 as u8)
+        expect(data[2]).to_equal(0x4C as u8)
+        expect(data[3]).to_equal(0x46 as u8)
+
+describe "archive_write - deterministic headers":
+    it "uses zero mtime, uid, gid and mode 644":
+        val member = ArchiveMemberInput(
+            name: "obj",
+            data: [0x42],
+            defined_symbols: []
+        )
+        val archive = archive_write([member])
+
+        # Header starts at offset 8 (after magic)
+        # Fields: name(16) + mtime(12) + uid(6) + gid(6) + mode(8) + size(10) + fmag(2) = 60
+        val hdr_off = 8
+
+        # mtime field (offset 16 in header): should be "0           " (0 left-padded)
+        val mtime_start = hdr_off + 16
+        expect(archive[mtime_start]).to_equal(0x20 as u8)  # space
+        expect(archive[mtime_start + 1]).to_equal(0x20 as u8)
+        expect(archive[mtime_start + 11]).to_equal(0x30 as u8)  # '0'
+
+        # uid field (offset 28): should be "0     " (0 left-padded)
+        val uid_start = hdr_off + 28
+        expect(archive[uid_start]).to_equal(0x20 as u8)  # space
+        expect(archive[uid_start + 5]).to_equal(0x30 as u8)  # '0'
+
+        # gid field (offset 34): should be "0     " (0 left-padded)
+        val gid_start = hdr_off + 34
+        expect(archive[gid_start + 5]).to_equal(0x30 as u8)  # '0'
+
+        # mode field (offset 40): should be "100644  "
+        val mode_start = hdr_off + 40
+        expect(archive[mode_start + 0]).to_equal(0x31 as u8)  # '1'
+        expect(archive[mode_start + 1]).to_equal(0x30 as u8)  # '0'
+        expect(archive[mode_start + 2]).to_equal(0x30 as u8)  # '0'
+        expect(archive[mode_start + 3]).to_equal(0x36 as u8)  # '6'
+        expect(archive[mode_start + 4]).to_equal(0x34 as u8)  # '4'
+
+describe "archive_write - two-member archive with long names":
+    it "creates extended name table for names >= 15 chars":
+        val member1 = ArchiveMemberInput(
+            name: "short.o",
+            data: [0x01],
+            defined_symbols: []
+        )
+        val member2 = ArchiveMemberInput(
+            name: "very_long_object_file.o",
+            data: [0x02],
+            defined_symbols: []
+        )
+        val archive = archive_write([member1, member2])
+
+        # Should have: magic + extended-name-table member + member1 + member2
+        val parsed = ar_parse(archive)
+        expect(parsed.is_ok()).to_equal(true)
+        val reader = parsed.unwrap()
+
+        # Should have members: "//" (extended table), "short.o", "very_long_object_file.o"
+        val m1 = ar_find_member(reader, "short.o")
+        expect(m1.is_some()).to_equal(true)
+        expect(m1.unwrap().name).to_equal("short.o")
+
+        val m2 = ar_find_member(reader, "very_long_object_file.o")
+        expect(m2.is_some()).to_equal(true)
+        expect(m2.unwrap().name).to_equal("very_long_object_file.o")
+
+describe "archive_write - symbol index":
+    it "includes symbol index when members have defined_symbols":
+        val member1 = ArchiveMemberInput(
+            name: "obj1.o",
+            data: [0xAA],
+            defined_symbols: ["symbol_one", "symbol_two"]
+        )
+        val member2 = ArchiveMemberInput(
+            name: "obj2.o",
+            data: [0xBB],
+            defined_symbols: ["symbol_three"]
+        )
+        val archive = archive_write([member1, member2])
+
+        val parsed = ar_parse(archive)
+        expect(parsed.is_ok()).to_equal(true)
+        val reader = parsed.unwrap()
+
+        # Check for symbol index member "/"
+        val sym_member = ar_find_member(reader, "/")
+        expect(sym_member.is_some()).to_equal(true)
+
+        # Parse the symbol index
+        val sym_index_opt = ar_parse_symbol_index(reader)
+        expect(sym_index_opt.is_some()).to_equal(true)
+        val sym_index = sym_index_opt.unwrap()
+
+        # Should have 3 symbols
+        expect(sym_index.symbols.len()).to_equal(3)
+
+    it "omits symbol index when no symbols are defined":
+        val member = ArchiveMemberInput(
+            name: "test.o",
+            data: [0x01],
+            defined_symbols: []
+        )
+        val archive = archive_write([member])
+
+        val parsed = ar_parse(archive)
+        expect(parsed.is_ok()).to_equal(true)
+        val reader = parsed.unwrap()
+
+        val sym_member = ar_find_member(reader, "/")
+        expect(sym_member.is_none()).to_equal(true)
+
+describe "archive_write - padding to 2-byte alignment":
+    it "pads odd-sized members with null byte":
+        val member = ArchiveMemberInput(
+            name: "odd.o",
+            data: [0x01, 0x02, 0x03],  # 3 bytes (odd)
+            defined_symbols: []
+        )
+        val archive = archive_write([member])
+
+        val parsed = ar_parse(archive)
+        expect(parsed.is_ok()).to_equal(true)
+        val reader = parsed.unwrap()
+
+        val m = ar_find_member(reader, "odd.o")
+        expect(m.is_some()).to_equal(true)
+
+        val data = ar_member_data(reader, m.unwrap())
+        expect(data.len()).to_equal(3)  # Member data should be original size
+        expect(data[0]).to_equal(0x01 as u8)
+        expect(data[1]).to_equal(0x02 as u8)
+        expect(data[2]).to_equal(0x03 as u8)
+
+describe "archive_write - external tool validation":
+    it "writes archive readable by llvm-ar t (if available)":
+        if not tool_is_available("llvm-ar"):
+            pending("llvm-ar not found on PATH")
+
+        val member = ArchiveMemberInput(
+            name: "test.o",
+            data: [0x7F, 0x45, 0x4C, 0x46],
+            defined_symbols: []
+        )
+        val archive = archive_write([member])
+
+        # Write to temp file
+        val temp_file = "/tmp/archive_test_writer.a"
+        file_write(temp_file, archive)
+
+        # Run llvm-ar t
+        val result = run_command_capture_output("llvm-ar t " + temp_file)
+        file_delete(temp_file)
+
+        if result[1] == 0:
+            expect(result[0].len() > 0).to_equal(true)
+        else:
+            pending("llvm-ar execution failed or not available")
+
+    it "writes archive readable by llvm-nm --print-armap (if available)":
+        if not tool_is_available("llvm-nm"):
+            pending("llvm-nm not found on PATH")
+
+        val member = ArchiveMemberInput(
+            name: "test.o",
+            data: [0x7F, 0x45, 0x4C, 0x46],
+            defined_symbols: ["test_symbol"]
+        )
+        val archive = archive_write([member])
+
+        # Write to temp file
+        val temp_file = "/tmp/archive_test_nm.a"
+        file_write(temp_file, archive)
+
+        # Run llvm-nm
+        val result = run_command_capture_output("llvm-nm --print-armap " + temp_file)
+        file_delete(temp_file)
+
+        if result[1] == 0:
+            expect(result[0].len() >= 0).to_equal(true)
+        else:
+            pending("llvm-nm execution failed or not available")

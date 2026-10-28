@@ -3078,6 +3078,19 @@ fn returns_c_string(func_name: &str) -> bool {
 ///
 pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
+        // Cache authority text crosses the native ABI as pointer/length pairs.
+        // Keep in sync with runtime_sffi.rs and 50.mir/text_extern_abi.spl.
+        "rt_cache_host_open_root_v1" => Some(&[0]),
+        "rt_cache_host_open_read_v1" => Some(&[1]),
+        "rt_cache_host_open_child_v1" => Some(&[1]),
+        "rt_cache_host_open_cas_kind_v1" => Some(&[1]),
+        "rt_cache_host_open_cas_shard_v1" => Some(&[1]),
+        "rt_cache_host_open_cas_leaf_v1" => Some(&[1]),
+        "rt_cache_host_open_pinned_cas_v1" => Some(&[1, 2]),
+        "rt_cache_host_publish_noreplace_v1" => Some(&[1]),
+        "rt_cache_host_publish_retained_noreplace_v2" => Some(&[1]),
+        "rt_cache_host_quarantine_v1" => Some(&[2]),
+
         "rt_linux_group_available_capacity_v1" => Some(&[0]),
         "rt_linux_group_parent_acquire_v1" => Some(&[0, 1]),
         "rt_linux_group_launch_broker_v1" => Some(&[0, 1]),

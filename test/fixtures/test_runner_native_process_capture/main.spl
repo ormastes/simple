@@ -1,0 +1,57 @@
+# Native executable regression, deliberately independent of the test runner.
+# @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=Validate the deployed compiler against the explicit native capture facade until ordinary text process ABI is qualified
+use std.nogc_sync_mut.io.process_ops.{process_run, process_run_bounded}
+
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope_with_budget, run_in_execution_resource_scope}
+use std.common.perf.execution_metrics.{ResourceBudget, TerminationCause}
+
+fn verify_capture(ok: bool, name: text) -> i64:
+    if ok:
+        print "PASS {name}"
+        return 0
+    print "FAIL {name}"
+    1
+
+fn main() -> i64:
+    var failures = 0
+    val ordinary: (text, text, i64) = process_run("/bin/sh", ["-c", "printf '%s' \"$1\"; printf '%s' diagnostic >&2; exit 7", "probe", "space ' quote 한글"])
+    print "ordinary exit={ordinary.2} stdout={ordinary.0} stderr={ordinary.1}"
+    # The original native unbounded provider does not capture stderr. Keep
+    # this ABI regression independent of that existing provider limitation.
+    failures = failures + verify_capture(ordinary.0 == "space ' quote 한글" and ordinary.2 == 7, "unbounded-argv-utf8-exit")
+    val bounded: (text, text, i64) = process_run_bounded("/bin/sh", ["-c", "printf '%s|%s' \"$1\" \"$2\"; printf bounded-diagnostic >&2", "probe", "", "a b"], 2000, 4096)
+    failures = failures + verify_capture(bounded.0 == "|a b" and bounded.1 == "bounded-diagnostic" and bounded.2 == 0, "bounded-empty-spaced-arguments-stderr")
+    val no_args: (text, text, i64) = process_run_bounded("/usr/bin/true", [], 2000, 4096)
+    failures = failures + verify_capture(no_args.0 == "" and no_args.1 == "" and no_args.2 == 0, "empty-argv")
+    val missing: (text, text, i64) = process_run_bounded("/nonexistent/simple-native-capture-probe", [], 2000, 4096)
+    failures = failures + verify_capture(missing.2 != 0, "missing-command-fails")
+    val empty: (text, text, i64) = process_run_bounded("", [], 2000, 4096)
+    failures = failures + verify_capture(empty.2 != 0, "empty-command-fails")
+    val timed: (text, text, i64) = process_run_bounded("/bin/sh", ["-c", "sleep 2"], 50, 4096)
+    print "timeout exit={timed.2} stderr={timed.1}"
+    failures = failures + verify_capture(timed.2 != 0 and (timed.1.lower().contains("timed out") or timed.1.lower().contains("timeout")), "timeout-fails")
+    val capped: (text, text, i64) = process_run_bounded("/bin/sh", ["-c", "printf 12345678901234567890123456789012; printf 12345678901234567890123456789012 >&2"], 2000, 8)
+    val truncated = "1234\n[output truncated: 24 bytes omitted]\n9012"
+    failures = failures + verify_capture(capped.0 == truncated and capped.1 == truncated and capped.2 == 0, "stdout-stderr-capture-limit")
+    # Exercise the runner's Unix limit wrapper, not only its process facade.
+    val limited = execution_resource_scope_with_budget(ExecutionResourceClass.Unit,
+        ResourceBudget(max_wall_ms: 2000, max_cpu_ms: 2000, max_pids: 128, max_fds: 256,
+            max_tree_charge_bytes: 0, max_direct_child_rss_bytes: 0, max_io_read_bytes: 0, max_io_write_bytes: 0), 4096)
+    val scoped = run_in_execution_resource_scope(limited, "/bin/sh",
+        ["-c", "printf '%s|%s' \"$1\" \"$2\"; printf scope-diagnostic >&2; exit 7", "probe", "", "space ' quote 한글"])
+    print "scope exit={scoped.process.usage.exit_code} stdout={scoped.process.stdout} stderr={scoped.process.stderr}"
+    failures = failures + verify_capture(scoped.process.stdout == "|space ' quote 한글" and scoped.process.stderr == "scope-diagnostic" and scoped.process.usage.exit_code == 7, "scope-pid-cap-argv-stderr-exit")
+    val no_pids = execution_resource_scope_with_budget(ExecutionResourceClass.Unit,
+        ResourceBudget(max_wall_ms: 2000, max_cpu_ms: 0, max_pids: 0, max_fds: 256,
+            max_tree_charge_bytes: 0, max_direct_child_rss_bytes: 0, max_io_read_bytes: 0, max_io_write_bytes: 0), 4096)
+    val scoped_empty = run_in_execution_resource_scope(no_pids, "/usr/bin/true", [])
+    failures = failures + verify_capture(scoped_empty.process.stdout == "" and scoped_empty.process.stderr == "" and scoped_empty.process.usage.exit_code == 0, "scope-no-pid-cap-empty-argv")
+    val scoped_missing = run_in_execution_resource_scope(limited, "/nonexistent/simple-native-scope-probe", [])
+    failures = failures + verify_capture(scoped_missing.process.usage.exit_code != 0, "scope-missing-command-fails")
+    val short_scope = execution_resource_scope_with_budget(ExecutionResourceClass.Unit,
+        ResourceBudget(max_wall_ms: 50, max_cpu_ms: 0, max_pids: 0, max_fds: 0,
+            max_tree_charge_bytes: 0, max_direct_child_rss_bytes: 0, max_io_read_bytes: 0, max_io_write_bytes: 0), 4096)
+    val scoped_timeout = run_in_execution_resource_scope(short_scope, "/bin/sh", ["-c", "sleep 2"])
+    failures = failures + verify_capture(scoped_timeout.process.usage.exit_code != 0 and scoped_timeout.process.usage.termination == TerminationCause.WallTimeout, "scope-timeout-classification")
+    print "PROCESS_CAPTURE_REGRESSION failures={failures}"
+    if failures > 0: 1 else: 0

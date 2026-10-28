@@ -1,0 +1,56 @@
+# Accepted routing selects this public adapter. It is not wired into a CLI,
+# installed plugin loader, native worker, publisher, or validation authority.
+use std.scv.solver_contract_v1.*
+use std.scv.solver_source_v1.*
+use std.scv.solver_simple_v1.*
+use std.scv.solver_host_v1.{solver_host_preflight_v1, solver_host_result_v1}
+use std.scv.solver_budget_v1.*
+
+struct SimpleSourceSolveV1:
+    result: SolveResultV1
+    inputs: SourceSimpleMergeInputV1
+    candidate: SourceFileV1?
+
+fn solver_budget_simple_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, input: SourceSimpleMergeInputV1) -> SolverBudgetV1:
+    var next = solver_budget_source_v1(request, policy, input.raw)
+    if next.limited: return next
+    if input.edits.len() > 128:
+        next.limited = true
+        return next
+    next = solver_budget_charge_v1(next, input.edits.len() * input.edits.len())
+    for edit in input.edits:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [edit.operation_id, edit.producer_id, edit.file_uid, edit.entity_uid, edit.identity_map_revision, edit.base_revision, edit.side_revision, edit.expected_base_digest])
+        next = solver_budget_charge_v1(next, edit.replacement.len())
+        if next.limited: return next
+        # Reserve repeated reconstruction/hash copying and selection work.
+        # Raw byte lengths are already bounded, so these products cannot wrap.
+        next = solver_budget_charge_v1(next, input.raw.base.bytes.len() * 4)
+        if next.limited: return next
+        next = solver_budget_charge_v1(next, edit.replacement.len() * (input.edits.len() + 4))
+    next
+
+fn solve_simple_source_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, input: SourceSimpleMergeInputV1) -> SimpleSourceSolveV1:
+    """Bind immutable Simple edits before replay; retain all original bytes."""
+    val budget = solver_budget_simple_v1(request, policy, input)
+    var refusal = "resource_limited"
+    if not budget.limited: refusal = solver_host_preflight_v1(request, policy, "source.simple", budget.spent, budget.spent)
+    if request.cancelled: refusal = "cancelled"
+    if refusal != "":
+        return SimpleSourceSolveV1(result: solver_host_result_v1(request, policy, refusal, nil, [], budget.spent, budget.spent), inputs: input, candidate: nil)
+    val binding = request.binding
+    val raw = input.raw
+    if (binding.base_model_id != source_file_digest_v1(raw.base) or
+        binding.left_model_id != source_file_digest_v1(raw.left) or
+        binding.right_model_id != source_file_digest_v1(raw.right) or
+        binding.base_revision != raw.base.revision or binding.left_revision != raw.left.revision or binding.right_revision != raw.right.revision or
+        binding.expected_root != source_file_digest_v1(raw.base) or
+        binding.operation_bundle_digest != source_simple_operations_digest_v1(input)):
+        return SimpleSourceSolveV1(result: solver_host_result_v1(request, policy, "failed", nil, [], budget.spent, budget.spent), inputs: input, candidate: nil)
+    val proposal = source_simple_merge_v1(input, binding.identity_map_revision)
+    if val candidate = proposal.candidate:
+        return SimpleSourceSolveV1(result: solver_host_result_v1(request, policy, "proposed", source_file_digest_v1(candidate), [], budget.spent, budget.spent), inputs: input, candidate: candidate)
+    val conflict = SolverConflictV1(domain: binding.domain, code: proposal.conflict_code, subject: raw.base.file_uid, input_key: solver_result_key_v1(request, policy))
+    SimpleSourceSolveV1(result: solver_host_result_v1(request, policy, "conflicted", nil, [conflict], budget.spent, budget.spent), inputs: input, candidate: nil)
+
+export SimpleSourceSolveV1, solve_simple_source_v1

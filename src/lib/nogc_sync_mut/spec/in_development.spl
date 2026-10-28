@@ -126,22 +126,25 @@ fn spec_tags(source: text) -> [text]:
     # contains_key + bracket assign only: Dict.len()/.get() are unreliable
     # under native codegen (doc/07_guide/language/dict_native_pitfalls.md).
     var seen: dict<text, bool> = {}
-    val n = source.len()
-    val plen = TAG_PREFIX.len()
-    var i = 0
-    while i + plen <= n:
-        if source.char_code_at(i) == 64 and source.slice(i, i + plen) == TAG_PREFIX:
-            var j = i + plen
-            while j < n and _is_tag_char(source.char_code_at(j)):
-                j = j + 1
-            if j > i + plen:
-                val name = source.slice(i + plen, j)
-                if not seen.contains_key(name):
-                    seen[name] = true
-                    out.push(name)
-            i = j
-        else:
-            i = i + 1
+    # Split at the ASCII marker first. The old whole-source loop mixed
+    # character-indexed `char_code_at` with byte-offset slicing, so a Unicode
+    # prefix moved the extracted name's offset. Each post-marker part begins
+    # at offset zero; legal tag characters are ASCII, making their byte and
+    # character offsets identical. byte_at is O(1) and stops at the first
+    # non-ASCII byte, preserving the [A-Za-z0-9_-] grammar.
+    val parts = source.split(TAG_PREFIX)
+    var part_index = 1
+    while part_index < parts.len():
+        val part = parts[part_index]
+        var tag_bytes = 0
+        while tag_bytes < part.len() and _is_tag_char(part.byte_at(tag_bytes)):
+            tag_bytes = tag_bytes + 1
+        if tag_bytes > 0:
+            val name = part.slice(0, tag_bytes)
+            if not seen.contains_key(name):
+                seen[name] = true
+                out.push(name)
+        part_index = part_index + 1
     out
 
 fn source_has_tag(source: text, tag: text) -> bool:

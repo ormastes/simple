@@ -1,0 +1,115 @@
+# Pure admitted Simple entity-edit replay. Entity IDs and ranges come from the
+# accepted operation bundle, never a name/hash similarity guess. This adapter
+# neither parses Simple nor attests that an entity label describes its bytes.
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.scv.solver_contract_v1.{solver_frame_v1}
+use std.scv.solver_source_v1.*
+
+struct SourceEntityEditV1:
+    operation_id: text
+    producer_id: text
+    file_uid: text
+    entity_uid: text
+    identity_map_revision: text
+    base_revision: text
+    side_revision: text
+    start_byte: i64
+    end_byte: i64
+    expected_base_digest: text
+    replacement: [u8]
+
+struct SourceSimpleMergeInputV1:
+    raw: SourceMergeInputV1
+    edits: [SourceEntityEditV1]
+
+fn source_simple_operations_digest_v1(input: SourceSimpleMergeInputV1) -> text:
+    var encoded = "scv-simple-entity-edits-v1" + solver_frame_v1(source_operations_digest_v1(input.raw.moves))
+    for edit in input.edits:
+        for value in [edit.operation_id, edit.producer_id, edit.file_uid, edit.entity_uid, edit.identity_map_revision, edit.base_revision, edit.side_revision, "{edit.start_byte}", "{edit.end_byte}", edit.expected_base_digest, sha256_u8_hex(edit.replacement)]:
+            encoded = encoded + solver_frame_v1(value)
+    sha256_text(encoded)
+
+fn source_simple_edit_valid_v1(input: SourceSimpleMergeInputV1, edit: SourceEntityEditV1, identity_map: text) -> bool:
+    val raw = input.raw
+    if edit.operation_id == "" or edit.producer_id == "" or edit.entity_uid == "" or identity_map == "": return false
+    if edit.file_uid != raw.base.file_uid or edit.base_revision != raw.base.revision or edit.identity_map_revision != identity_map: return false
+    if raw.left.revision == raw.right.revision: return false
+    if edit.side_revision != raw.left.revision and edit.side_revision != raw.right.revision: return false
+    if edit.start_byte < 0 or edit.end_byte < edit.start_byte or edit.end_byte > raw.base.bytes.len(): return false
+    sha256_u8_hex(raw.base.bytes[edit.start_byte:edit.end_byte]) == edit.expected_base_digest
+
+fn source_simple_ranges_conflict_v1(a: SourceEntityEditV1, b: SourceEntityEditV1) -> bool:
+    # Adjacent nonempty replacements are disjoint. An insertion on either edge
+    # of another operation requires a deliberate ordering rule and is refused.
+    if a.start_byte == a.end_byte or b.start_byte == b.end_byte:
+        return a.start_byte <= b.end_byte and b.start_byte <= a.end_byte
+    a.start_byte < b.end_byte and b.start_byte < a.end_byte
+
+fn source_simple_replay_v1(base: [u8], edits: [SourceEntityEditV1]) -> [u8]:
+    # Call only after range/overlap validation. Choosing the smallest base
+    # position makes output independent of producer traversal order. Equal
+    # positions have already been rejected, including point insertions.
+    var used: [bool] = []
+    for edit in edits: used.push(false)
+    var completed = 0
+    var output: [u8] = []
+    var cursor = 0
+    while completed < edits.len():
+        var selected = -1
+        var index = 0
+        while index < edits.len():
+            if not used[index]:
+                if selected < 0: selected = index
+                elif edits[index].start_byte < edits[selected].start_byte: selected = index
+            index = index + 1
+        val edit = edits[selected]
+        output = output + base[cursor:edit.start_byte] + edit.replacement
+        cursor = edit.end_byte
+        used[selected] = true
+        completed = completed + 1
+    output + base[cursor:]
+
+fn source_simple_merge_v1(input: SourceSimpleMergeInputV1, identity_map: text) -> SourceProposalV1:
+    """Replay bounded admitted entity operations; produce a source draft only."""
+    # Public pure adapter is bounded too; the host additionally accounts bytes
+    # and operation payloads before hashing or executing any of these loops.
+    if input.edits.len() > 128 or input.raw.moves.len() > 128:
+        return SourceProposalV1(candidate: nil, conflict_code: "SIMPLE_OPERATION_LIMIT")
+    val raw = input.raw
+    val metadata_conflict = source_metadata_conflict_v1(raw)
+    if metadata_conflict != "": return SourceProposalV1(candidate: nil, conflict_code: metadata_conflict)
+    if raw.base.kind != "regular" or not raw.base.path.ends_with(".spl") or not raw.left.path.ends_with(".spl") or not raw.right.path.ends_with(".spl"):
+        return SourceProposalV1(candidate: nil, conflict_code: "SIMPLE_PROFILE_MISMATCH")
+    # Preserve the integration ladder's exact equal/unchanged byte rules even
+    # without structural operations. This fallback never resolves two distinct
+    # concurrent byte edits and does not infer an entity identity.
+    if input.edits.len() == 0: return source_merge_v1(raw)
+    var operation_ids: [text] = []
+    for move in raw.moves: operation_ids.push(move.operation_id)
+    var left: [SourceEntityEditV1] = []
+    var right: [SourceEntityEditV1] = []
+    var prior: [SourceEntityEditV1] = []
+    for edit in input.edits:
+        if operation_ids.contains(edit.operation_id):
+            return SourceProposalV1(candidate: nil, conflict_code: "SIMPLE_DUPLICATE_OPERATION")
+        operation_ids.push(edit.operation_id)
+        if not source_simple_edit_valid_v1(input, edit, identity_map):
+            return SourceProposalV1(candidate: nil, conflict_code: "SIMPLE_EDIT_PRECONDITION")
+        for other in prior:
+            if edit.entity_uid == other.entity_uid:
+                return SourceProposalV1(candidate: nil, conflict_code: "SIMPLE_ENTITY_CONFLICT")
+            if source_simple_ranges_conflict_v1(edit, other):
+                return SourceProposalV1(candidate: nil, conflict_code: "SIMPLE_RANGE_CONFLICT")
+        prior.push(edit)
+        if edit.side_revision == raw.left.revision: left.push(edit)
+        else: right.push(edit)
+    if source_simple_replay_v1(raw.base.bytes, left) != raw.left.bytes or source_simple_replay_v1(raw.base.bytes, right) != raw.right.bytes:
+        return SourceProposalV1(candidate: nil, conflict_code: "SIMPLE_SIDE_RECONSTRUCTION")
+    var path = raw.left.path
+    if raw.left.path == raw.base.path: path = raw.right.path
+    val revision = sha256_text("scv-simple-source-proposal-v1" + solver_frame_v1(source_file_digest_v1(raw.base)) + solver_frame_v1(source_file_digest_v1(raw.left)) + solver_frame_v1(source_file_digest_v1(raw.right)) + solver_frame_v1(identity_map) + solver_frame_v1(source_simple_operations_digest_v1(input)))
+    val candidate = SourceFileV1(file_uid: raw.base.file_uid, revision: revision, path: path, kind: raw.base.kind, mode: raw.base.mode, bytes: source_simple_replay_v1(raw.base.bytes, input.edits))
+    SourceProposalV1(candidate: candidate, conflict_code: "")
+
+export SourceEntityEditV1, SourceSimpleMergeInputV1
+export source_simple_operations_digest_v1, source_simple_merge_v1

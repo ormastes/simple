@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+For compiler and driver maintainers who ship Simple programs to Windows on
+ARM. I want `native-build --target aarch64-pc-windows-gnu` on an x86_64 host
+to give me an ARM64 PE executable, a COFF object, a static archive and a DLL,
+all produced with clang + lld from llvm-mingw (never MSVC, never GCC).
+## Operator workflow
+From the repository root, with LLVM tools on PATH:
+`SIMPLE_XC_BIN=<compiler> bin/simple test test/02_integration/compiler/cross/aarch64_windows_cross_spec.spl`.
+Each row builds a tiny fixture under `build/tmp/cross/` and inspects the
+artifact with llvm-readobj / llvm-nm.
+## Compatibility and limitations
+Running the exe needs an ARM64 Windows host or `qemu-aarch64` user mode; on
+hosts without either the run row reports BLOCKED and fails (it is never
+skipped). Matrix and evidence: doc/03_plan/compiler/cross_compile_matrix_plan.md.
+## Verification guidance and troubleshooting
+A failing row prints the native-build error line or the readobj field that
+did not match. Rebuild by hand with the command in the matrix doc.
+"""
+# @manual_section: cross-compile-aarch64-windows
+# @req: REQ-XC-001
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use .cross_matrix_helpers.{xc_fixture, xc_out, xc_build, xc_check_format, xc_check_symbol, xc_check_entry, xc_check_export, xc_runner}
+
+const T: text = "aarch64-pc-windows-gnu"
+
+describe "aarch64 Windows (llvm-mingw) cross-compile":
+    it "links an ARM64 PE executable with an entry point":
+        # NOTE: RED — BUG-XC-CROSS-EXE-LINK (hosted link plan refuses cross targets on a Windows host).
+        step("build fixture")
+        val out = xc_out(T, "exe") + ".exe"
+        expect(xc_build(T, "exe", xc_fixture("hello"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "COFF-ARM64", "IMAGE_FILE_MACHINE_ARM64")).to_equal("")
+        expect(xc_check_entry(out)).to_equal("")
+
+    it "runs the ARM64 executable and prints xc-ok":
+        step("find runner")
+        expect(xc_runner("qemu-aarch64")).to_equal("")
+
+    it "emits a COFF ARM64 object that defines xc_add":
+        step("build fixture")
+        val out = xc_out(T, "obj")
+        expect(xc_build(T, "obj", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "COFF-ARM64", "IMAGE_FILE_MACHINE_ARM64")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "emits a static archive of ARM64 members that defines xc_add":
+        step("build fixture")
+        val out = xc_out(T, "a")
+        expect(xc_build(T, "ar", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "COFF-ARM64", "IMAGE_FILE_MACHINE_ARM64")).to_equal("")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "links an ARM64 DLL that exports xc_add":
+        # NOTE: RED — BUG-XC-SHARED-LINK-DFLAG (shared link routes to MSVC lld-link and passes /DSPL_SHARED_LIBRARY as a file).
+        step("build fixture")
+        val out = xc_out(T, "dll")
+        expect(xc_build(T, "so", xc_fixture("lib"), out, "")).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "COFF-ARM64", "IMAGE_FILE_MACHINE_ARM64")).to_equal("")
+        expect(xc_check_export(out, "xc_add")).to_equal("")

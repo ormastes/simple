@@ -1,0 +1,61 @@
+# Native read-only SDN gateway client. Credentials are acquired once from the
+# caller's runtime owner facade, never persisted in config or protocol bytes.
+use std.scv.gateway_protocol_v1.{ScvGatewayRequestV1, ScvGatewayResponseV1,
+    scv_gateway_request_encode_v1, scv_gateway_response_decode_v1,
+    scv_gateway_payload_hex_decode_v1, SCV_GATEWAY_MAX_RESPONSE_BYTES_V1}
+use std.nogc_sync_mut.http_client.bounded_endpoint_v1.{BoundedHttpTargetV1,
+    bounded_http_target_v1, bounded_http_bearer_valid_v1}
+use std.nogc_sync_mut.http_client.bounded_transport_v1.{bounded_http_post_v1}
+use std.common.base_encoding.utilities.{text_to_bytes_linear}
+use std.common.crypto.sha1.{sha1_u8_hex}
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+
+pub struct ScvGatewayClientConfigV1:
+    endpoint: text
+    repository: text
+    allow_loopback_http: bool
+    timeout_ms: i64
+    tls_address: text
+
+pub fn scv_gateway_client_target_v1(config: ScvGatewayClientConfigV1) -> Result<BoundedHttpTargetV1, text>:
+    if config.timeout_ms < 1 or config.timeout_ms > 60000: return Err("gateway_timeout_invalid")
+    val target = bounded_http_target_v1(config.endpoint, config.tls_address, config.allow_loopback_http)?
+    if target.path != "/scv/v1": return Err("gateway_path_invalid")
+    Ok(target)
+
+pub fn scv_gateway_client_decode_v1(source: text, request: ScvGatewayRequestV1,
+        repository: text) -> Result<ScvGatewayResponseV1, text>:
+    val response = match scv_gateway_response_decode_v1(source, request, repository):
+        case Ok(value): value
+        case Err(_): return Err("gateway_response_invalid")
+    if response.status == "ok" and request.method == "read_blob":
+        # The protocol's sender-chosen payload SHA proves source integrity.
+        # Independently bind raw blob bytes to the requested Git object ID.
+        val bytes = scv_gateway_payload_hex_decode_v1(response.payload)?
+        val object = text_to_bytes_linear("blob " + bytes.len().to_text() + "\0") + bytes
+        val actual = if request.ref_or_oid.len() == 40: sha1_u8_hex(object) else: sha256_u8_fast_hex(object)
+        if actual != request.ref_or_oid: return Err("gateway_blob_oid_mismatch")
+    # Ref/commit metadata is subject/field matched; it is not a claim that a
+    # canonical raw commit hash or protected publication has been verified.
+    Ok(response)
+
+pub fn scv_gateway_client_call_v1(config: ScvGatewayClientConfigV1,
+        request: ScvGatewayRequestV1,
+        credentials: fn() -> Result<text, text>) -> Result<ScvGatewayResponseV1, text>:
+    val target = scv_gateway_client_target_v1(config)?
+    val wire = match scv_gateway_request_encode_v1(request, config.repository):
+        case Ok(value): value
+        case Err(_): return Err("gateway_request_invalid")
+    # Exactly one acquisition, only after endpoint and immutable subject checks.
+    val token = match credentials():
+        case Ok(value): value
+        case Err(_): return Err("gateway_credentials_unavailable")
+    if not bounded_http_bearer_valid_v1(token): return Err("gateway_credentials_invalid")
+    val source = match bounded_http_post_v1(target, token, wire, config.timeout_ms,
+            SCV_GATEWAY_MAX_RESPONSE_BYTES_V1):
+        case Ok(value): value
+        case Err(_): return Err("gateway_transport_failed")
+    scv_gateway_client_decode_v1(source, request, config.repository)
+
+export ScvGatewayClientConfigV1, scv_gateway_client_target_v1
+export scv_gateway_client_decode_v1, scv_gateway_client_call_v1

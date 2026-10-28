@@ -16,6 +16,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 WORKER = (ROOT / "scripts/bootstrap/lib/stage3-native-build-worker.sh").read_text()
 RESUME = (ROOT / "scripts/bootstrap/resume-stage3-from-admitted.sh").read_text()
+POLICY = ["--source", "/frozen/k1", "--source", "/frozen/cuda disabled",
+          "--source", "src/compiler", "--source", "src/app", "--source", "src/lib",
+          "--entry-closure"]
 PREFIX = WORKER[:WORKER.index('BOOTSTRAP_STAGE3_FACADE_PATH=')]
 RECIPE = WORKER[WORKER.index('bootstrap_stage3_run_transcribed "$transcript"'):]
 LANE = RESUME[RESUME.index('stage3_lowering_lane=per-file'):RESUME.index('stage3_cold_init_env=')]
@@ -24,20 +27,15 @@ DIGEST_END = RESUME.index('src/app/cli/bootstrap_main.spl)', DIGEST_START)
 DIGEST = RESUME[DIGEST_START:DIGEST_END + len('src/app/cli/bootstrap_main.spl)')]
 
 
-def worker_args(count=32, lane="per-file"):
-    args = ["/fixture/transcript", "/fixture/root", "/fixture/log",
+def worker_args(lane="per-file"):
+    args = ["/fixture/transcript", str(ROOT), "/fixture/log",
             "/fixture/home", "/fixture/tmp", "/usr/bin:/bin",
             "/fixture/admitted", "aarch64-apple-darwin", "llvm", "10", "600",
             "/fixture/cache with space", "/fixture/runtime", "/fixture/candidate",
             "/fixture/progress", "/fixture/phase", "/fixture/memory", "fixture-id",
             "native", "none", "4194304", "", "", "", "4096", "v1",
             "/fixture/admission", "a" * 64]
-    if count >= 30:
-        args += ["", ""]
-    if count >= 31:
-        args += ["1000"]
-    if count == 32:
-        args += [lane]
+    args += ["", "", "1000", lane, "enforce", "--stage3-source-policy-v1", *POLICY]
     return args
 
 
@@ -53,23 +51,21 @@ class WorkerLoweringLane(unittest.TestCase):
             vector = record.read_bytes().split(b"\0")[:-1] if record.exists() else None
             return result, vector
 
-    def worker(self, count=32, lane="per-file", whole_program=None):
+    def worker(self, lane="per-file", whole_program=None):
         recorder = 'bootstrap_stage3_run_transcribed() { shift 6; printf "%s\\0" "$@" >"$CONTROL_RECORD"; };\n'
         timeout = 'timeout_args=\n[ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"\n'
         return self.record(PREFIX + recorder + timeout + RECIPE,
-                           worker_args(count, lane), whole_program)
+                           worker_args(lane), whole_program)
 
-    def test_legacy_vectors_remain_identical(self):
-        vectors = []
-        for count in (28, 30, 31):
+    def test_legacy_calls_without_authenticated_policy_are_rejected(self):
+        recorder = 'bootstrap_stage3_run_transcribed() { printf "%s\\0" "$@" >"$CONTROL_RECORD"; };\n'
+        timeout = 'timeout_args=\n[ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"\n'
+        for count in (28, 30, 31, 32):
             with self.subTest(count=count):
-                result, vector = self.worker(count, whole_program="1")
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(vector.count(b"SIMPLE_BOOTSTRAP=1"), 1)
-                self.assertFalse(any(v.startswith(b"SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=") for v in vector))
-                vectors.append(vector)
-        self.assertEqual(vectors[0], vectors[1])
-        self.assertEqual(vectors[1], vectors[2])
+                result, vector = self.record(PREFIX + recorder + timeout + RECIPE,
+                                             worker_args()[:count], whole_program="1")
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertIsNone(vector)
 
     def test_explicit_lanes_reach_actual_recipe(self):
         for lane, flag, whole in (("per-file", b"SIMPLE_BOOTSTRAP=", False),
@@ -107,10 +103,11 @@ class WorkerLoweringLane(unittest.TestCase):
         self.assertFalse(variables - values.keys() - {"stage3_bootstrap_flag", "stage3_whole_program_env",
                                                              "stage3_per_file_env"})
         assignments = "\n".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
+        policy_args = "set -- " + shlex.join(POLICY) + "\n"
         recorder = 'bootstrap_stage3_args_sha256() { printf "%s\\0" "$@" >"$CONTROL_RECORD"; };\n'
         for lane, whole in (("per-file", None), ("whole-program", "1")):
             with self.subTest(lane=lane):
-                result, expected = self.record("set -eu\n" + assignments + "\n" + LANE + recorder + DIGEST, whole_program=whole)
+                result, expected = self.record("set -eu\n" + policy_args + assignments + "\n" + LANE + recorder + DIGEST, whole_program=whole)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 worker_result, actual = self.worker(lane=lane)
                 self.assertEqual(worker_result.returncode, 0, worker_result.stderr)

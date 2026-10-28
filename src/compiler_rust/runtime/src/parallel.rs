@@ -357,6 +357,44 @@ pub extern "C" fn rt_par_launch(kernel_ptr: u64, gx: i64, gy: i64, gz: i64, lx: 
 // Atomic Operations (same interface as GPU backend)
 // =============================================================================
 
+/// Reports whether a live raw i64 atomic cell uses the supported lock-free ABI.
+///
+/// The input must name caller-owned atomic storage. A null or misaligned
+/// address, or a layout that cannot fit the map's 8-byte cells, returns 0.
+/// Rust exposes `AtomicI64` only on targets with 64-bit atomic support; Rust
+/// atomic types are lock-free when available, but this says nothing about
+/// wait-freedom of an operation or the progress of a whole data structure.
+#[no_mangle]
+pub unsafe extern "C" fn rt_par_atomic_i64_is_lock_free(ptr: *mut i64) -> i64 {
+    use std::mem::{align_of, size_of};
+
+    if ptr.is_null() || (ptr as usize) % align_of::<AtomicI64>() != 0 {
+        return 0;
+    }
+    if size_of::<AtomicI64>() != 8 || align_of::<AtomicI64>() > 8 {
+        return 0;
+    }
+
+    #[cfg(target_has_atomic = "64")]
+    {
+        1
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    {
+        0
+    }
+}
+
+/// Sequentially consistent load for a caller-owned raw atomic i64 cell.
+///
+/// The pointer must name live, correctly aligned storage whose layout has
+/// already passed `rt_par_atomic_i64_is_lock_free` for this provider.
+#[no_mangle]
+pub unsafe extern "C" fn rt_par_atomic_load_i64(ptr: *mut i64) -> i64 {
+    let atomic = &*(ptr as *const AtomicI64);
+    atomic.load(Ordering::SeqCst)
+}
+
 /// Atomic add for i64.
 #[no_mangle]
 pub unsafe extern "C" fn rt_par_atomic_add_i64(ptr: *mut i64, value: i64) -> i64 {
@@ -486,5 +524,83 @@ mod tests {
             assert_eq!(old, 10);
             assert_eq!(value, 15);
         }
+    }
+
+    #[test]
+    fn test_atomic_i64_lock_free_capability_abi() {
+        use std::mem::{align_of, size_of};
+
+        assert_eq!(unsafe { rt_par_atomic_i64_is_lock_free(std::ptr::null_mut()) }, 0);
+
+        let mut storage = [0u8; 16];
+        let base = storage.as_mut_ptr() as usize;
+        let alignment = align_of::<AtomicI64>();
+        if alignment > 1 {
+            let mut misaligned = base + 1;
+            while misaligned % alignment == 0 {
+                misaligned += 1;
+            }
+            assert_eq!(unsafe { rt_par_atomic_i64_is_lock_free(misaligned as *mut i64) }, 0);
+        }
+
+        let value = AtomicI64::new(7);
+        let ptr = &value as *const AtomicI64 as *mut i64;
+        let expected = if size_of::<AtomicI64>() == 8 && alignment <= 8 {
+            #[cfg(target_has_atomic = "64")]
+            {
+                1
+            }
+            #[cfg(not(target_has_atomic = "64"))]
+            {
+                0
+            }
+        } else {
+            0
+        };
+        assert_eq!(unsafe { rt_par_atomic_i64_is_lock_free(ptr) }, expected);
+    }
+
+    #[test]
+    fn test_atomic_load_i64_seqcst_parity_under_contention() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        const THREADS: usize = 8;
+        const ITERATIONS: i64 = 20_000;
+        let value = Arc::new(AtomicI64::new(0));
+        let address = Arc::as_ptr(&value) as usize;
+        let target = THREADS as i64 * ITERATIONS;
+        assert_eq!(unsafe { rt_par_atomic_load_i64(address as *mut i64) }, 0);
+        let gate = Arc::new(Barrier::new(THREADS + 1));
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let value = Arc::clone(&value);
+                let gate = Arc::clone(&gate);
+                thread::spawn(move || {
+                    let ptr = Arc::as_ptr(&value) as *mut i64;
+                    gate.wait();
+                    for _ in 0..ITERATIONS {
+                        unsafe { rt_par_atomic_add_i64(ptr, 1); }
+                    }
+                })
+            })
+            .collect();
+
+        gate.wait();
+        let mut previous = 0;
+        for _ in 0..20_000_000 {
+            if previous == target {
+                break;
+            }
+            let current = unsafe { rt_par_atomic_load_i64(address as *mut i64) };
+            assert!(current >= previous, "SeqCst load regressed from {previous} to {current}");
+            previous = current;
+        }
+        assert_eq!(previous, target, "reader did not observe the final SeqCst value");
+        for worker in workers {
+            worker.join().expect("atomic writer thread");
+        }
+        assert_eq!(unsafe { rt_par_atomic_load_i64(address as *mut i64) }, target);
+        assert_eq!(value.load(Ordering::SeqCst), target);
     }
 }

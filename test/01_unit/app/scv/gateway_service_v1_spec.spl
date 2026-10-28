@@ -1,0 +1,221 @@
+# Source-ready checks. Execution is explicitly deferred to admitted Phase 3.
+# Injected providers establish routing and framing, never live GitHub proof.
+use std.spec.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.scv.gateway_protocol_v1.*
+use app.scv.gateway_config_v1.*
+use app.scv.gateway_service_v1.*
+use app.scv.gateway_commands_v1.*
+use app.scv.gateway_github_v1.*
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpMethod}
+
+fn setup_gateway_config_source_v1() -> text:
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "repository": SdnValue.String("source"),
+        "listen_host": SdnValue.String("127.0.0.1"), "listen_port": SdnValue.Int(8877),
+        "bearer_token_env": SdnValue.String("SCV_GATEWAY_TOKEN"),
+        "github_host": SdnValue.String("github.com"), "github_owner": SdnValue.String("owner"),
+        "github_repository": SdnValue.String("repo"), "github_repository_id": SdnValue.String("42")}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn setup_gateway_config_v1() -> ScvGatewayConfigV1:
+    match scv_gateway_config_parse_v1(setup_gateway_config_source_v1().bytes()):
+        case Ok(config): config
+        case Err(reason):
+            fail(reason)
+            # This fallback is unreachable after the explicit failed assertion.
+            ScvGatewayConfigV1(repository: "", listen_host: "", listen_port: 0,
+                bearer_token_env: "", github: ScvGithubReadPolicyV1(allowlist: [],
+                timeout_ms: 0, maximum_response_bytes: 0, maximum_blob_bytes: 0, maximum_requests: 0u64))
+
+fn setup_gateway_request_v1(method: text) -> ScvGatewayRequestV1:
+    var selector = if method == "read_ref": "refs/heads/main" else: "1111111111111111111111111111111111111111"
+    if method == "read_blob": selector = "506cd141ad4a679eee22d6a21dd267cca5734b92"
+    ScvGatewayRequestV1(version: 1, id: "read-1", repository: "source", method: method,
+        ref_or_oid: if method == "capabilities": "" else: selector)
+
+fn setup_gateway_text_v1(value: Result<text, text>) -> text:
+    match value:
+        case Ok(item): item
+        case Err(reason):
+            fail(reason)
+            ""
+
+fn setup_gateway_http_v1(request: ScvGatewayRequestV1) -> HttpRequest:
+    var http = HttpRequest.new(HttpMethod.Post, "/scv/v1")
+    http.headers = [("Content-Type", "application/sdn"),
+        ("Authorization", "Bearer abcdefghijklmnopqrstuvwxyz012345")]
+    http.body = setup_gateway_text_v1(scv_gateway_request_encode_v1(request, "source"))
+    http
+
+fn setup_gateway_no_read_v1(policy: ScvGithubReadPolicyV1,
+        request: ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>:
+    Err("fixture_provider_must_not_run")
+
+fn setup_gateway_read_v1(policy: ScvGithubReadPolicyV1,
+        request: ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>:
+    expect(policy.allowlist[0].github_repository_id).to_equal("42")
+    expect(request.repository_id).to_equal("source")
+    var verification = ScvGithubVerificationV1.RefOidFieldMatched
+    if request.kind == ScvGithubReadKindV1.Commit: verification = ScvGithubVerificationV1.CommitOidFieldMatched
+    if request.kind == ScvGithubReadKindV1.Blob: verification = ScvGithubVerificationV1.BlobGitSha1Verified
+    Ok(ScvGithubReadResultV1(repository_id: request.repository_id, github_repository_id: "42",
+        kind: request.kind, selector: request.selector,
+        oid: if request.kind == ScvGithubReadKindV1.Ref: "1111111111111111111111111111111111111111" else: request.selector,
+        tree_oid: if request.kind == ScvGithubReadKindV1.Commit: "2222222222222222222222222222222222222222" else: "", parents: [],
+        blob: if request.kind == ScvGithubReadKindV1.Blob: [0u8, 255u8, 10u8] else: [], requests: 3u64, verification: verification))
+
+fn setup_gateway_secret_error_v1(policy: ScvGithubReadPolicyV1,
+        request: ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>:
+    Err("untrusted stderr secret=do_not_reflect")
+
+fn setup_gateway_forged_v1(mode: text, policy: ScvGithubReadPolicyV1,
+        request: ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>:
+    var result = setup_gateway_read_v1(policy, request)?
+    if mode == "numeric_repository": result.github_repository_id = "43"
+    if mode == "verification": result.verification = ScvGithubVerificationV1.RefOidFieldMatched
+    if mode == "blob_bytes": result.blob = [1u8, 255u8, 10u8]
+    if mode == "selector": result.selector = "2222222222222222222222222222222222222222"
+    if mode == "tree": result.tree_oid = "not_an_oid"
+    if mode == "parents": result.parents = ["bad_parent"]
+    if mode == "count": result.requests = 4u64
+    Ok(result)
+
+describe "read-only native gateway service v1":
+    it "loads the exact native schema and rejects listener or configuration escalation":
+        step("Read the bounded repository mapping without a plaintext credential")
+        val config = setup_gateway_config_v1()
+        expect(config.listen_host).to_equal("127.0.0.1")
+        expect(config.github.allowlist[0].repository_id).to_equal("source")
+        expect(config.github.allowlist[0].github_repository_id).to_equal("42")
+        val source = setup_gateway_config_source_v1()
+        expect(scv_gateway_config_parse_v1(source.replace("127.0.0.1", "0.0.0.0").bytes()).is_err()).to_be(true)
+        expect(scv_gateway_config_parse_v1((source + "\nsecret: plaintext\n").bytes()).is_err()).to_be(true)
+        expect(scv_gateway_config_parse_v1((source + "\nversion: 1\n").bytes()).is_err()).to_be(true)
+        expect(scv_gateway_config_parse_v1(source.replace("github.com", "attacker.example").bytes()).is_err()).to_be(true)
+
+    it "rejects unsafe environment references and bearer spellings":
+        step("Accept only a bounded secret reference and a header-safe bearer")
+        expect(scv_gateway_env_name_valid_v1("SCV_GATEWAY_TOKEN")).to_be(true)
+        for value in ["", "0TOKEN", "TOKEN;exec", "TOKEN\nOTHER"]:
+            expect(scv_gateway_env_name_valid_v1(value)).to_be(false)
+        expect(scv_gateway_bearer_valid_v1("abcdefghijklmnopqrstuvwxyz012345")).to_be(true)
+        for value in ["", "short", "abcdefghijklmnopqrstuvwxyz012345\r\nInjected: yes"]:
+            expect(scv_gateway_bearer_valid_v1(value)).to_be(false)
+
+    it "authenticates capabilities and rejects duplicate authorization":
+        step("Authenticate every request before protocol decoding or provider use")
+        val config = setup_gateway_config_v1()
+        val request = setup_gateway_request_v1("capabilities")
+        var http = setup_gateway_http_v1(request)
+        val token = "abcdefghijklmnopqrstuvwxyz012345"
+        val response = scv_gateway_handle_v1(config, token, http, setup_gateway_no_read_v1)
+        expect(response.status_code()).to_equal(200)
+        val decoded = scv_gateway_response_decode_v1(response.body, request, "source")
+        expect(decoded.is_ok()).to_be(true)
+        http.headers.push(("authorization", "Bearer " + token))
+        expect(scv_gateway_handle_v1(config, token, http, setup_gateway_no_read_v1).status_code()).to_equal(401)
+        http.headers = [("Content-Type", "application/sdn")]
+        http.body = "invalid and secret-looking body"
+        val denied = scv_gateway_handle_v1(config, token, http, setup_gateway_no_read_v1)
+        expect(denied.status_code()).to_equal(401)
+        expect(denied.body.contains("secret-looking")).to_be(false)
+
+    it "returns bound native read results and preserves binary blob bytes":
+        step("Map each fixed provider read to its native response")
+        val config = setup_gateway_config_v1()
+        for method in ["read_ref", "read_commit", "read_blob"]:
+            val request = setup_gateway_request_v1(method)
+            val response = scv_gateway_dispatch_v1(config, request, setup_gateway_read_v1)
+            expect(response.status).to_equal("ok")
+            expect(response.publication).to_equal("not_publication")
+            expect(response.repository).to_equal(request.repository)
+            expect(scv_gateway_response_validate_v1(response, request, "source").is_ok()).to_be(true)
+            if method == "read_blob":
+                expect(response.payload).to_equal("00ff0a")
+            if method == "read_commit":
+                expect(response.object_kind).to_equal("commit")
+
+    it "rejects media ambiguity, query arguments, wrong methods and oversized bodies":
+        step("Reject transport-policy violations before decoding native content")
+        val config = setup_gateway_config_v1()
+        val request = setup_gateway_request_v1("capabilities")
+        val token = "abcdefghijklmnopqrstuvwxyz012345"
+        var http = setup_gateway_http_v1(request)
+        http.headers.push(("Content-Type", "application/sdn"))
+        expect(scv_gateway_handle_v1(config, token, http, setup_gateway_no_read_v1).status_code()).to_equal(400)
+        http = setup_gateway_http_v1(request)
+        http.query = "repository=other"
+        expect(scv_gateway_handle_v1(config, token, http, setup_gateway_no_read_v1).status_code()).to_equal(400)
+        http = setup_gateway_http_v1(request)
+        http.method = HttpMethod.Get
+        expect(scv_gateway_handle_v1(config, token, http, setup_gateway_no_read_v1).status_code()).to_equal(400)
+        http = setup_gateway_http_v1(request)
+        val parts = [for index in 0..4097: "a"]
+        http.body = parts.join("")
+        expect(scv_gateway_handle_v1(config, token, http, setup_gateway_no_read_v1).status_code()).to_equal(400)
+
+    it "independently rejects forged successful provider values":
+        step("Verify repository identity, typed claims and actual Git blob bytes before envelope hashing")
+        val config = setup_gateway_config_v1()
+        for mode in ["numeric_repository", "verification", "blob_bytes", "selector", "count"]:
+            val request = setup_gateway_request_v1("read_blob")
+            val read = \policy, upstream: setup_gateway_forged_v1(mode, policy, upstream)
+            val response = scv_gateway_dispatch_v1(config, request, read)
+            expect(response.status).to_equal("error")
+            expect(response.error).to_equal("gateway_provider_result_rejected")
+            expect(response.payload).to_equal("")
+            expect(response.payload_id).to_equal("")
+        for mode in ["tree", "parents"]:
+            val request = setup_gateway_request_v1("read_commit")
+            val read = \policy, upstream: setup_gateway_forged_v1(mode, policy, upstream)
+            expect(scv_gateway_dispatch_v1(config, request, read).status).to_equal("error")
+
+    it "denies cross-repository requests and write methods before provider use":
+        step("Keep repository authorization independent of request method")
+        val config = setup_gateway_config_v1()
+        var request = setup_gateway_request_v1("capabilities")
+        request.repository = "other"
+        expect(scv_gateway_dispatch_v1(config, request, setup_gateway_no_read_v1).status).to_equal("denied")
+        request = setup_gateway_request_v1("read_ref")
+        request.method = "publish"
+        expect(scv_gateway_dispatch_v1(config, request, setup_gateway_no_read_v1).status).to_equal("denied")
+        request = setup_gateway_request_v1("read_ref")
+        request.ref_or_oid = "refs/heads/../main"
+        expect(scv_gateway_dispatch_v1(config, request, setup_gateway_no_read_v1).status).to_equal("denied")
+
+    it "redacts provider errors into a valid native failure envelope":
+        step("Discard raw upstream diagnostics before response encoding")
+        val config = setup_gateway_config_v1()
+        val request = setup_gateway_request_v1("read_blob")
+        val response = scv_gateway_dispatch_v1(config, request, setup_gateway_secret_error_v1)
+        expect(response.status).to_equal("error")
+        expect(response.error).to_equal("gateway_upstream_read_failed")
+        expect(response.payload).to_equal("")
+        expect(scv_gateway_response_validate_v1(response, request, "source").is_ok()).to_be(true)
+
+    it "bounds the socket owner and refuses unqualified production startup":
+        step("Inspect configured transport limits without opening a listener")
+        match scv_gateway_server_policy_v1("unit fixture"):
+            case Err(reason): fail(reason)
+            case Ok(policy):
+                expect(policy.max_body).to_equal(4096)
+                expect(policy.max_header_count).to_equal(16)
+                expect(policy.max_connections).to_equal(4)
+                expect(policy.read_timeout_ms).to_equal(5000)
+                expect(policy.write_timeout_ms).to_equal(5000)
+                expect(policy.max_response_bytes).to_equal(2113536)
+        val result = scv_gateway_serve_v1(setup_gateway_config_v1(), "abcdefghijklmnopqrstuvwxyz012345", false, "")
+        expect(result.is_err()).to_be(true)
+        expect(scv_gateway_command_v1(["serve", "--config", "unused.sdn"]).output).to_contain("tls_unavailable")
+        expect(scv_gateway_command_v1(["serve", "--execute", "arbitrary"]).exit_code).to_equal(1)
+
+    it "rejects client CLI write methods, missing selectors and duplicate options before IO":
+        step("Keep native client commands inside the four-method read contract")
+        val common = ["read", "--endpoint", "http://127.0.0.1:8877/scv/v1", "--repository", "source",
+            "--id", "read-1", "--token-env", "SCV_GATEWAY_TOKEN"]
+        expect(scv_gateway_command_v1(common + ["--method", "publish"]).exit_code).to_equal(1)
+        expect(scv_gateway_command_v1(common + ["--method", "read_blob"]).exit_code).to_equal(1)
+        expect(scv_gateway_command_v1(common + ["--method", "capabilities", "--selector", "unexpected"]).exit_code).to_equal(1)
+        expect(scv_gateway_command_v1(common + ["--method", "capabilities", "--id", "duplicate"]).exit_code).to_equal(1)

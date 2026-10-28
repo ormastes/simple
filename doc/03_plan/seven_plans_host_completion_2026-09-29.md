@@ -1,5 +1,36 @@
 # Completion plan for the seven requested items, by host
 
+## 2026-10-27 item 3/7 shared-interface refinement
+
+The user requested consistent typed DataFrame optimization, switchable
+containers, lockless maps, async references and resource/index factories.
+The [shared capability contract](../04_architecture/compiler/collection_backend_capabilities.md)
+and [TDD matrix](sys_test/collection_backend_capabilities.md) now govern their
+intersection. This updates planning only; all existing host/evidence states
+remain unchanged. Existing selected requirements are retained.
+
+- Item 3 may choose a qualified index backend and column layout independently
+  of its logical query operation. Typed columns, missing values, duplicate/order
+  rules, callbacks and ownership must remain equivalent to reference execution.
+- Item 7's Auto/Linear/Hash/Ordered tags and `.sprof` observations do not imply
+  lockless progress. The common capability description distinguishes algorithm,
+  backend, measurement, constructor selection and supported live transitions.
+- Static-only, profiling-disabled/unavailable and unsupported-switch states
+  must be visible through the same interface/explain record. No new annotation
+  is claimed implemented. An explicit strict requirement fails if unavailable;
+  advisory Auto may retain Original with a reason.
+- Native DashMap/legacy map and active legacy capture use locks. They cannot
+  silently back the strict map/resource profile. Native and future pure-Simple
+  implementations share conformance tests while qualifying providers separately.
+- ResourceFactory/AsyncRef and IndexRefFactory reuse the
+  [async architecture](../04_architecture/language/async_infrastructure.md)
+  owners. No duplicate scheduler, generic pointer factory, or second cache
+  authority is introduced. Existing defaults and S1 → S2 → S3 remain binding.
+
+This refinement adds CBC-01–12 to item 3 AC02/03/06–11 and item 7 AC01–08;
+implementation starts with real failing tests, then minimal changes and focused
+green evidence. Neither source inspection nor a planned scenario closes a gate.
+
 ## 2026-10-25 reconciliation against `release/1.0.0` (PRs #4498-#4604)
 
 Reconciled at `origin/release/1.0.0` @ `73c4aef632a` (merge of #4600). This

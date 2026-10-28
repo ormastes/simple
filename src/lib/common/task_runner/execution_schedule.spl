@@ -1,0 +1,227 @@
+# Provenance-free parent scheduling state shared by build and test adapters.
+# Callers retain their domain-specific identity, transport and result checks.
+
+struct TaskExecutionScheduleV1:
+    statuses: [text]
+    host_ids: [text]
+    next_pending: i64
+    host_active: Dict<text, i64>
+    error: text
+
+struct TaskExecutionSelectionV1:
+    indices: [i64]
+    error: text
+
+fn task_execution_schedule_v1(statuses: [text], host_ids: [text],
+        error: text = "") -> TaskExecutionScheduleV1:
+    var state = TaskExecutionScheduleV1(statuses: statuses, host_ids: host_ids,
+        next_pending: 0, host_active: {}, error: error)
+    if error != "": return state
+    if statuses.len() != host_ids.len():
+        state.error = "execution schedule status/host length mismatch"
+        return state
+    for i in 0..statuses.len():
+        val status = statuses[i]
+        if status != "PENDING" and status != "RUNNING" and status != "REAPED" and
+                status != "SUCCEEDED" and status != "FAILED" and status != "UNRESOLVED" and
+                status != "BLOCKED":
+            state.error = "execution schedule has unknown status at index {i}"
+            return state
+        if status == "RUNNING" or status == "REAPED":
+            val host = host_ids[i]
+            if host == "":
+                state.error = "active execution has no host at index {i}"
+                return state
+            state.host_active[host] = (state.host_active[host] ?? 0) + 1
+    while state.next_pending < statuses.len() and statuses[state.next_pending] != "PENDING":
+        state.next_pending = state.next_pending + 1
+    state
+
+fn task_execution_next_pending_v1(state: TaskExecutionScheduleV1, start: i64) -> i64:
+    # Domain adapters may apply their own eligibility predicate without
+    # materializing or scanning a complete DAG bitmap on every poll.
+    if state.error != "" or start < 0 or state.next_pending < 0: return -1
+    var index = if start > state.next_pending: start else: state.next_pending
+    while index < state.statuses.len():
+        if state.statuses[index] == "PENDING": return index
+        index = index + 1
+    -1
+
+fn task_execution_ready_v1(state: TaskExecutionScheduleV1, eligible: [bool],
+        available: i64) -> TaskExecutionSelectionV1:
+    var selection = TaskExecutionSelectionV1(indices: [], error: state.error)
+    if state.error != "": return selection
+    if eligible.len() != state.statuses.len():
+        selection.error = "execution eligibility length mismatch"
+        return selection
+    if available < 0:
+        selection.error = "execution availability is negative"
+        return selection
+    if state.next_pending < 0 or state.next_pending > state.statuses.len():
+        selection.error = "execution pending cursor out of range"
+        return selection
+    var i = task_execution_next_pending_v1(state, state.next_pending)
+    while i >= 0 and selection.indices.len() < available:
+        if eligible[i]:
+            selection.indices = selection.indices.push(i)
+        if selection.indices.len() < available:
+            i = task_execution_next_pending_v1(state, i + 1)
+    selection
+
+fn task_execution_host_active_v1(state: TaskExecutionScheduleV1, host: text) -> i64:
+    if state.error != "" or host == "": return 0
+    state.host_active[host] ?? 0
+
+fn task_execution_dispatch_v1(state: TaskExecutionScheduleV1, index: i64,
+        host: text, host_slots: i64) -> TaskExecutionScheduleV1:
+    var next = state
+    if next.error != "": return next
+    if index < 0 or index >= next.statuses.len():
+        next.error = "execution dispatch index out of range"
+        return next
+    if host == "" or host_slots <= 0:
+        next.error = "execution dispatch host or slot limit is invalid"
+        return next
+    if next.statuses[index] != "PENDING":
+        next.error = "execution dispatch requires pending work"
+        return next
+    if task_execution_host_active_v1(next, host) >= host_slots:
+        next.error = "execution dispatch host is full"
+        return next
+    next.statuses[index] = "RUNNING"
+    next.host_ids[index] = host
+    next.host_active[host] = task_execution_host_active_v1(next, host) + 1
+    while next.next_pending < next.statuses.len() and
+            next.statuses[next.next_pending] != "PENDING":
+        next.next_pending = next.next_pending + 1
+    next
+
+fn task_execution_reap_v1(state: TaskExecutionScheduleV1,
+        index: i64) -> TaskExecutionScheduleV1:
+    var next = state
+    if next.error != "": return next
+    if index < 0 or index >= next.statuses.len():
+        next.error = "execution reap index out of range"
+        return next
+    if next.statuses[index] != "RUNNING":
+        next.error = "execution reap requires running work"
+        return next
+    next.statuses[index] = "REAPED"
+    next
+
+fn _task_execution_release_host_v1(state: TaskExecutionScheduleV1,
+        index: i64) -> TaskExecutionScheduleV1:
+    var next = state
+    val host = next.host_ids[index]
+    if host == "":
+        next.error = "active execution has no host to release"
+        return next
+    val active = task_execution_host_active_v1(next, host)
+    if active <= 0:
+        next.error = "active execution host charge is missing"
+        return next
+    elif active == 1:
+        next.host_active.remove(host)
+    else:
+        next.host_active[host] = active - 1
+    next
+
+fn task_execution_spawn_denied_v1(state: TaskExecutionScheduleV1,
+        index: i64) -> TaskExecutionScheduleV1:
+    var next = state
+    if next.error != "": return next
+    if index < 0 or index >= next.statuses.len():
+        next.error = "execution spawn-denied index out of range"
+        return next
+    if next.statuses[index] != "RUNNING":
+        next.error = "execution spawn-denied requires reserved work"
+        return next
+    # The adapter may use this rollback only after transport proves no child
+    # was acquired; a live or uncertain process must remain reserved/reaped.
+    next = _task_execution_release_host_v1(next, index)
+    if next.error != "": return next
+    next.statuses[index] = "PENDING"
+    next.host_ids[index] = ""
+    if index < next.next_pending: next.next_pending = index
+    next
+
+fn task_execution_block_v1(state: TaskExecutionScheduleV1,
+        index: i64) -> TaskExecutionScheduleV1:
+    var next = state
+    if next.error != "": return next
+    if index < 0 or index >= next.statuses.len():
+        next.error = "execution block index out of range"
+        return next
+    if next.statuses[index] != "PENDING":
+        next.error = "execution block requires pending work"
+        return next
+    next.statuses[index] = "BLOCKED"
+    while next.next_pending < next.statuses.len() and
+            next.statuses[next.next_pending] != "PENDING":
+        next.next_pending = next.next_pending + 1
+    next
+
+fn task_execution_cache_accept_v1(state: TaskExecutionScheduleV1,
+        index: i64, host: text) -> TaskExecutionScheduleV1:
+    """Accept validated cached work without reserving or releasing a host."""
+    var next = state
+    if next.error != "": return next
+    if index < 0 or index >= next.statuses.len():
+        next.error = "execution cache index out of range"
+        return next
+    if next.statuses[index] != "PENDING":
+        next.error = "execution cache accept requires pending work"
+        return next
+    if host == "":
+        next.error = "execution cache accept requires a host identity"
+        return next
+    next.statuses[index] = "SUCCEEDED"
+    next.host_ids[index] = host
+    while next.next_pending < next.statuses.len() and
+            next.statuses[next.next_pending] != "PENDING":
+        next.next_pending = next.next_pending + 1
+    next
+
+fn task_execution_finish_v1(state: TaskExecutionScheduleV1,
+        index: i64, status: text) -> TaskExecutionScheduleV1:
+    var next = state
+    if next.error != "": return next
+    if index < 0 or index >= next.statuses.len():
+        next.error = "execution finish index out of range"
+        return next
+    if status != "SUCCEEDED" and status != "FAILED" and status != "UNRESOLVED":
+        next.error = "execution finish status is not terminal"
+        return next
+    if next.statuses[index] != "REAPED":
+        next.error = "execution finish requires reaped work"
+        return next
+    next = _task_execution_release_host_v1(next, index)
+    if next.error != "": return next
+    next.statuses[index] = status
+    next
+
+fn task_execution_retry_v1(state: TaskExecutionScheduleV1,
+        index: i64) -> TaskExecutionScheduleV1:
+    var next = state
+    if next.error != "": return next
+    if index < 0 or index >= next.statuses.len():
+        next.error = "execution retry index out of range"
+        return next
+    if next.statuses[index] != "REAPED":
+        next.error = "execution retry requires reaped work"
+        return next
+    # Retry is valid only after the adapter fully collected and reaped child.
+    next = _task_execution_release_host_v1(next, index)
+    if next.error != "": return next
+    next.statuses[index] = "PENDING"
+    next.host_ids[index] = ""
+    if index < next.next_pending: next.next_pending = index
+    next
+
+export TaskExecutionScheduleV1, TaskExecutionSelectionV1
+export task_execution_schedule_v1, task_execution_ready_v1
+export task_execution_next_pending_v1
+export task_execution_host_active_v1, task_execution_dispatch_v1
+export task_execution_reap_v1, task_execution_finish_v1, task_execution_retry_v1
+export task_execution_spawn_denied_v1, task_execution_block_v1
+export task_execution_cache_accept_v1

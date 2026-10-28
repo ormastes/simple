@@ -1,0 +1,42 @@
+#!/bin/sh
+# bundle-llvm-runtime-dlls.shs — make a Windows stage exe independent of PATH order.
+#
+# Usage: sh scripts/setup/bundle-llvm-runtime-dlls.shs <exe> <llvm-bin-dir> [<out-dir>]
+#
+# A stage compiler links libLLVM-23.dll through the import library of the LLVM
+# prefix platform-detect.shs selected (MSYS2 CLANG64: full target set). The
+# llvm-mingw libLLVM-23.dll is a PARTIAL build (no AMDGPU/AVR/BPF/RISCV/Wasm/...
+# initializers), so with llvm-mingw bin first on PATH the exe dies with
+# 0xC0000139 (entry point not found). Windows searches the exe directory before
+# PATH, so copying the matching DLL closure next to the exe removes the runtime
+# dependency on PATH order and on an MSYS2 install.
+#
+# Fail-closed: every libLLVM-23.dll import of <exe> must be exported by the DLL
+# being bundled, else exit 1. Needs llvm-objdump (llvm-mingw bin on PATH).
+# Verdict is the last stdout line: PASS (0) / FAIL (1) / ERROR (2).
+set -u
+exe=${1:?exe}; src=${2:?llvm bin dir}; out=${3:-$(dirname "$exe")}
+command -v llvm-objdump >/dev/null 2>&1 || { echo "ERROR — nothing was checked: llvm-objdump not on PATH"; exit 2; }
+[ -f "$exe" ] && [ -f "$src/libLLVM-23.dll" ] || { echo "ERROR — nothing was checked: exe or $src/libLLVM-23.dll missing"; exit 2; }
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT
+llvm-objdump -p "$exe" | awk '/DLL Name:/{f=($3=="libLLVM-23.dll");next} f&&$1~/^[0-9]+$/&&NF==2{print $2}' | sort -u > "$tmp/imp"
+llvm-objdump -p "$src/libLLVM-23.dll" | awk '/^Export Table:/{f=1;next} f&&NF>=3&&$1~/^[0-9]+$/{print $3}' | sort -u > "$tmp/exp"
+n=$(wc -l < "$tmp/imp" | tr -d ' ')
+[ "$n" -gt 0 ] || { echo "ERROR — nothing was checked: $exe imports no libLLVM-23.dll symbols"; exit 2; }
+miss=$(comm -23 "$tmp/imp" "$tmp/exp" | wc -l | tr -d ' ')
+[ "$miss" -eq 0 ] || { echo "FAIL — $miss of $n libLLVM-23.dll imports missing from $src/libLLVM-23.dll: $(comm -23 "$tmp/imp" "$tmp/exp" | head -5 | tr '\n' ' ')..."; exit 1; }
+# Transitive closure of non-system DLLs that actually exist in $src.
+todo="libLLVM-23.dll libunwind.dll"; done=""; copied=0
+while [ -n "$todo" ]; do
+  set -- $todo; d=$1; shift; todo="$*"
+  case " $done " in *" $d "*) continue ;; esac
+  done="$done $d"
+  [ -f "$src/$d" ] || continue
+  cp -f "$src/$d" "$out/$d" || { echo "ERROR — cannot copy $d to $out"; exit 2; }
+  copied=$((copied + 1))
+  for dep in $(llvm-objdump -p "$src/$d" | sed -n 's/.*DLL Name: //p' | tr -d '\r'); do
+    case "$dep" in api-ms-win-*|[Kk][Ee][Rr][Nn][Ee][Ll]32.dll|[Nn][Tt][Dd][Ll][Ll].dll) ;; *) todo="$todo $dep" ;; esac
+  done
+done
+echo "PASS — $n libLLVM-23.dll imports satisfied, $copied DLL(s) bundled into $out"

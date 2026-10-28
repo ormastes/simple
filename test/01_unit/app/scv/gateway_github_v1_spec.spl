@@ -1,0 +1,317 @@
+# Source-authored injected-provider scenarios. No live access/native execution.
+use std.spec.*
+use app.scv.gateway_github_v1.*
+use app.scv.db.github_provider.{DbGithubTransport, DbGithubProcessReply}
+use std.common.json.types.{json_object, json_array, json_number, json_string}
+use std.common.json.serializer.{json_stringify}
+
+var scv_gh_fixture_mode = ""
+var scv_gh_fixture_calls = 0
+var scv_gh_fixture_endpoints: [text] = []
+
+fn setup_scv_gh_policy(mode: text) -> ScvGithubReadPolicyV1:
+    scv_gh_fixture_mode = mode
+    scv_gh_fixture_calls = 0
+    scv_gh_fixture_endpoints = []
+    val repository = ScvGithubRepositoryV1(repository_id: "project", host: "github.com", owner: "owner", repository: "repo", github_repository_id: "42")
+    ScvGithubReadPolicyV1(allowlist: [repository], timeout_ms: 1000, maximum_response_bytes: 16384, maximum_blob_bytes: 4096, maximum_requests: 3u64)
+
+fn setup_scv_gh_request(kind: ScvGithubReadKindV1) -> ScvGithubReadRequestV1:
+    var selector = "refs/heads/main"
+    match kind:
+        Ref: ()
+        Commit: selector = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        Blob: selector = "dd729764d359d78852d453b4508d1f127eb9c61a"
+    ScvGithubReadRequestV1(repository_id: "project", kind: kind, selector: selector, expected_oid: "")
+
+fn setup_scv_gh_no_lease() -> bool:
+    false
+
+fn setup_scv_gh_held_lease() -> bool:
+    true
+
+fn setup_scv_gh_lease_after_identity() -> bool:
+    scv_gh_fixture_calls >= 1
+
+fn setup_scv_gh_reply(value: any) -> DbGithubProcessReply:
+    DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n" + json_stringify(value), stderr: "", exit_code: 0)
+
+fn setup_scv_gh_execute(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    expect(args.len()).to_equal(11)
+    expect(args[0]).to_equal("api")
+    expect(args[1]).to_equal("--hostname")
+    expect(args[2]).to_equal("github.com")
+    expect(args[3]).to_equal("--method")
+    expect(args[4]).to_equal("GET")
+    expect(args[5]).to_equal("--include")
+    expect(args[6]).to_equal("-H")
+    expect(args[7]).to_equal("Accept: application/vnd.github+json")
+    expect(args[8]).to_equal("-H")
+    expect(args[9]).to_equal("X-GitHub-Api-Version: 2022-11-28")
+    expect(timeout_ms).to_equal(1000)
+    expect(maximum_bytes).to_equal(16384)
+    val endpoint = args[10]
+    expect(endpoint.starts_with("repositories/42")).to_equal(true)
+    expect(endpoint.contains("repos/owner/repo")).to_equal(false)
+    scv_gh_fixture_calls = scv_gh_fixture_calls + 1
+    scv_gh_fixture_endpoints.push(endpoint)
+    if scv_gh_fixture_mode == "timeout":
+        return DbGithubProcessReply(stdout: "", stderr: "sensitive upstream token\nTIMEOUT\n", exit_code: -1)
+    if scv_gh_fixture_mode == "denied":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 403 Forbidden\n\nsensitive upstream token", stderr: "secret", exit_code: 1)
+    if scv_gh_fixture_mode == "rate_limited":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 429 Too Many Requests\nRetry-After: 60\n\nsecret", stderr: "", exit_code: 1)
+    if scv_gh_fixture_mode == "redirect":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 301 Moved\nLocation: https://attacker.invalid/\n\nsecret", stderr: "", exit_code: 0)
+    if scv_gh_fixture_mode == "bound":
+        return DbGithubProcessReply(stdout: "x".repeat(16384), stderr: "", exit_code: 0)
+    if scv_gh_fixture_mode == "duplicate_json":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + "{\"id\":42,\"id\":99}", stderr: "", exit_code: 0)
+    if scv_gh_fixture_mode == "deep_json":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + "[".repeat(25) + "0" + "]".repeat(25), stderr: "", exit_code: 0)
+    if endpoint == "repositories/42":
+        var repository_id = 42.0
+        var owner = "owner"
+        if scv_gh_fixture_mode == "wrong_repository" or (scv_gh_fixture_mode == "changed_repository" and scv_gh_fixture_calls == 3): repository_id = 99.0
+        if scv_gh_fixture_mode == "unsafe_repository_number": repository_id = 9007199254740992.0
+        if scv_gh_fixture_mode == "wrong_owner": owner = "attacker"
+        return setup_scv_gh_reply(json_object({"id": json_number(repository_id), "name": json_string("repo"), "full_name": json_string("owner/repo"), "owner": json_object({"login": json_string(owner)}), "url": json_string("https://attacker.invalid/never-follow-this")}))
+    if scv_gh_fixture_mode == "unsupported_numeric_route":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 404 Not Found\n\nsecret", stderr: "", exit_code: 1)
+    if endpoint == "repositories/42/git/ref/heads/main":
+        var target_type = "commit"
+        var ref = "refs/heads/main"
+        if scv_gh_fixture_mode == "annotated_tag": target_type = "tag"
+        if scv_gh_fixture_mode == "wrong_ref": ref = "refs/heads/other"
+        return setup_scv_gh_reply(json_object({"ref": json_string(ref), "object": json_object({"type": json_string(target_type), "sha": json_string("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "url": json_string("https://attacker.invalid/object")} )}))
+    if endpoint == "repositories/42/git/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":
+        var oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        if scv_gh_fixture_mode == "wrong_commit_oid": oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val parent = json_object({"sha": json_string("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")})
+        var parents = [parent]
+        if scv_gh_fixture_mode == "duplicate_parent": parents = [parent, parent]
+        return setup_scv_gh_reply(json_object({"sha": json_string(oid), "tree": json_object({"sha": json_string("cccccccccccccccccccccccccccccccccccccccc")}), "parents": json_array(parents)}))
+    if endpoint == "repositories/42/git/blobs/dd729764d359d78852d453b4508d1f127eb9c61a":
+        var size = 4.0
+        var content = "AP+A\nCg==\r\n"
+        var encoding = "base64"
+        if scv_gh_fixture_mode == "wrong_size": size = 3.0
+        if scv_gh_fixture_mode == "too_large": size = 4097.0
+        if scv_gh_fixture_mode == "wrong_encoding": encoding = "utf-8"
+        if scv_gh_fixture_mode == "invalid_base64": content = "AP!ACg=="
+        if scv_gh_fixture_mode == "noncanonical_pad_bits": content = "AB=="
+        if scv_gh_fixture_mode == "misplaced_padding": content = "AA==AA=="
+        if scv_gh_fixture_mode == "truncated_base64": content = "AP+A!"
+        if scv_gh_fixture_mode == "bare_cr": content = "AP+A\rCg=="
+        if scv_gh_fixture_mode == "wrong_blob_bytes": content = "AAAAAA=="
+        return setup_scv_gh_reply(json_object({"sha": json_string("dd729764d359d78852d453b4508d1f127eb9c61a"), "size": json_number(size), "encoding": json_string(encoding), "content": json_string(content)}))
+    if endpoint == "repositories/42/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391":
+        return setup_scv_gh_reply(json_object({"sha": json_string("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"), "size": json_number(0), "encoding": json_string("base64"), "content": json_string("")}))
+    fail("Unexpected provider endpoint")
+    DbGithubProcessReply(stdout: "", stderr: "", exit_code: 99)
+
+fn exercise_scv_gh_read(policy: ScvGithubReadPolicyV1, request: ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>:
+    scv_gateway_github_read_v1(policy, request, DbGithubTransport(execute: setup_scv_gh_execute, lease_held: setup_scv_gh_no_lease))
+
+describe "SCV server-only bounded GitHub read provider V1":
+    it "reads an allowlisted numeric repository ref without following response URLs":
+        val policy = setup_scv_gh_policy("ref")
+        val result = exercise_scv_gh_read(policy, setup_scv_gh_request(ScvGithubReadKindV1.Ref)).unwrap()
+        expect(result.repository_id).to_equal("project")
+        expect(result.github_repository_id).to_equal("42")
+        expect(result.oid).to_equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        expect(result.requests).to_equal(3u64)
+        expect(scv_gateway_github_verification_name_v1(result.verification)).to_equal("ref_oid_field_match")
+        expect(scv_gh_fixture_endpoints).to_equal(["repositories/42", "repositories/42/git/ref/heads/main", "repositories/42"])
+
+    it "returns commit metadata with explicit SHA-field verification and ordered parents":
+        val policy = setup_scv_gh_policy("commit")
+        val result = exercise_scv_gh_read(policy, setup_scv_gh_request(ScvGithubReadKindV1.Commit)).unwrap()
+        expect(result.oid).to_equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        expect(result.tree_oid).to_equal("cccccccccccccccccccccccccccccccccccccccc")
+        expect(result.parents).to_equal(["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
+        expect(result.blob.len()).to_equal(0)
+        expect(scv_gateway_github_verification_name_v1(result.verification)).to_equal("commit_sha_field_match")
+        expect(scv_gh_fixture_calls).to_equal(3)
+
+    it "validates and returns NUL, FF and non-UTF8 bytes using an independent Git blob golden OID":
+        # Golden generated with git hash-object --stdin for bytes 00 ff 80 0a;
+        # fixture generation is not execution of this authored scenario.
+        val policy = setup_scv_gh_policy("blob")
+        val result = exercise_scv_gh_read(policy, setup_scv_gh_request(ScvGithubReadKindV1.Blob)).unwrap()
+        expect(result.blob).to_equal([0u8, 255u8, 128u8, 10u8])
+        expect(result.oid).to_equal("dd729764d359d78852d453b4508d1f127eb9c61a")
+        expect(scv_gateway_github_verification_name_v1(result.verification)).to_equal("blob_git_sha1_verified")
+        expect(scv_gh_fixture_calls).to_equal(3)
+
+    it "treats an empty blob as valid only after its exact Git object hash is checked":
+        val policy = setup_scv_gh_policy("empty")
+        var request = setup_scv_gh_request(ScvGithubReadKindV1.Blob)
+        request.selector = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        val result = exercise_scv_gh_read(policy, request).unwrap()
+        expect(result.blob).to_equal([])
+        expect(result.oid).to_equal(request.selector)
+        expect(scv_gh_fixture_calls).to_equal(3)
+
+    it "denies unknown logical repositories before invoking any process":
+        val policy = setup_scv_gh_policy("denied")
+        var request = setup_scv_gh_request(ScvGithubReadKindV1.Ref)
+        request.repository_id = "https://attacker.invalid/repo"
+        expect(exercise_scv_gh_read(policy, request).unwrap_err()).to_equal("GithubReadRepositoryDenied")
+        expect(scv_gh_fixture_calls).to_equal(0)
+
+    it "rejects injected ref URLs, query fragments and unsupported Git ref spellings before IO":
+        for selector in ["https://attacker.invalid/", "refs/heads/main?x=1", "refs/heads/../main", "refs/heads/-option", "refs/heads/topic.lock", "refs/heads/", "refs/heads/main\nsecret"]:
+            val policy = setup_scv_gh_policy("ref")
+            var request = setup_scv_gh_request(ScvGithubReadKindV1.Ref)
+            request.selector = selector
+            expect(exercise_scv_gh_read(policy, request).unwrap_err()).to_equal("GithubReadInvalidRef")
+            expect(scv_gh_fixture_calls).to_equal(0)
+
+    it "reports SHA256 and malformed object selectors unsupported before IO":
+        for selector in ["a".repeat(64), "A".repeat(40), "--hostname=attacker.invalid", "../blob"]:
+            val policy = setup_scv_gh_policy("blob")
+            var request = setup_scv_gh_request(ScvGithubReadKindV1.Blob)
+            request.selector = selector
+            expect(exercise_scv_gh_read(policy, request).unwrap_err()).to_equal("GithubReadUnsupportedObjectFormat")
+            expect(scv_gh_fixture_calls).to_equal(0)
+
+    it "rejects mismatched expected immutable OIDs before IO and stale ref pins after observation":
+        val policy = setup_scv_gh_policy("commit")
+        var request = setup_scv_gh_request(ScvGithubReadKindV1.Commit)
+        request.expected_oid = "b".repeat(40)
+        expect(exercise_scv_gh_read(policy, request).unwrap_err()).to_equal("GithubReadOidMismatch")
+        expect(scv_gh_fixture_calls).to_equal(0)
+        val ref_policy = setup_scv_gh_policy("ref")
+        var ref_request = setup_scv_gh_request(ScvGithubReadKindV1.Ref)
+        ref_request.expected_oid = "b".repeat(40)
+        expect(exercise_scv_gh_read(ref_policy, ref_request).unwrap_err()).to_equal("GithubReadOidMismatch")
+        expect(scv_gh_fixture_calls).to_equal(2)
+
+    it "rejects wrong repository, owner and unsafe numeric identities":
+        for mode in ["wrong_repository", "wrong_owner", "unsafe_repository_number"]:
+            val policy = setup_scv_gh_policy(mode)
+            expect(exercise_scv_gh_read(policy, setup_scv_gh_request(ScvGithubReadKindV1.Ref)).is_err()).to_equal(true)
+            expect(scv_gh_fixture_calls).to_equal(1)
+
+    it "never returns a read when the final repository identity check changes":
+        val policy = setup_scv_gh_policy("changed_repository")
+        expect(exercise_scv_gh_read(policy, setup_scv_gh_request(ScvGithubReadKindV1.Ref)).unwrap_err()).to_equal("GithubReadRepositoryIdentityMismatch")
+        expect(scv_gh_fixture_calls).to_equal(3)
+
+    it "fails closed when numeric-ID Git routes are unavailable without a named-route retry":
+        val policy = setup_scv_gh_policy("unsupported_numeric_route")
+        expect(exercise_scv_gh_read(policy, setup_scv_gh_request(ScvGithubReadKindV1.Ref)).unwrap_err()).to_equal("GithubUnavailableOrHidden")
+        expect(scv_gh_fixture_endpoints).to_equal(["repositories/42", "repositories/42/git/ref/heads/main"])
+
+    it "classifies timeout, denial, rate limits, redirects and output caps without leaking upstream bodies":
+        val cases = [("timeout", "GithubTimeoutRetryable"), ("denied", "GithubPermissionDenied"), ("rate_limited", "GithubRateLimitedRetryable"), ("redirect", "GithubUnexpectedResponse"), ("bound", "GithubResponseBoundExceeded")]
+        for entry in cases:
+            val policy = setup_scv_gh_policy(entry.0)
+            expect(exercise_scv_gh_read(policy, setup_scv_gh_request(ScvGithubReadKindV1.Ref)).unwrap_err()).to_equal(entry.1)
+            expect(scv_gh_fixture_calls).to_equal(1)
+
+    it "rejects duplicate decoded JSON keys and excessive nesting before interpreting data":
+        val duplicate = setup_scv_gh_policy("duplicate_json")
+        expect(exercise_scv_gh_read(duplicate, setup_scv_gh_request(ScvGithubReadKindV1.Ref)).unwrap_err()).to_equal("GithubReadMalformedJson")
+        val deep = setup_scv_gh_policy("deep_json")
+        expect(exercise_scv_gh_read(deep, setup_scv_gh_request(ScvGithubReadKindV1.Ref)).unwrap_err()).to_equal("GithubJsonDepthExceeded")
+
+    it "rejects malformed base64, noncanonical padding, size/hash mismatches and unknown encodings":
+        val cases = [("invalid_base64", "GithubReadInvalidBase64"), ("noncanonical_pad_bits", "GithubReadInvalidBase64"), ("misplaced_padding", "GithubReadInvalidBase64"), ("truncated_base64", "GithubReadInvalidBase64"), ("bare_cr", "GithubReadInvalidBase64"), ("wrong_size", "GithubReadBlobSizeMismatch"), ("too_large", "GithubReadBlobBoundExceeded"), ("wrong_blob_bytes", "GithubReadBlobHashMismatch"), ("wrong_encoding", "GithubReadUnsupportedBlobEncoding")]
+        for entry in cases:
+            val policy = setup_scv_gh_policy(entry.0)
+            expect(exercise_scv_gh_read(policy, setup_scv_gh_request(ScvGithubReadKindV1.Blob)).unwrap_err()).to_equal(entry.1)
+            expect(scv_gh_fixture_calls).to_equal(2)
+
+    it "rejects unexpected ref target kinds, wrong references, wrong commit OIDs and duplicate parents":
+        val cases = [("annotated_tag", "GithubReadUnsupportedRefTarget"), ("wrong_ref", "GithubReadRefMismatch")]
+        for entry in cases:
+            val policy = setup_scv_gh_policy(entry.0)
+            expect(exercise_scv_gh_read(policy, setup_scv_gh_request(ScvGithubReadKindV1.Ref)).unwrap_err()).to_equal(entry.1)
+        val oid_policy = setup_scv_gh_policy("wrong_commit_oid")
+        expect(exercise_scv_gh_read(oid_policy, setup_scv_gh_request(ScvGithubReadKindV1.Commit)).unwrap_err()).to_equal("GithubReadOidMismatch")
+        val parent_policy = setup_scv_gh_policy("duplicate_parent")
+        expect(exercise_scv_gh_read(parent_policy, setup_scv_gh_request(ScvGithubReadKindV1.Commit)).unwrap_err()).to_equal("GithubReadDuplicateParent")
+
+    it "checks the lease port before every request, including after repository discovery":
+        val policy = setup_scv_gh_policy("ref")
+        val request = setup_scv_gh_request(ScvGithubReadKindV1.Ref)
+        expect(scv_gateway_github_read_v1(policy, request, DbGithubTransport(execute: setup_scv_gh_execute, lease_held: setup_scv_gh_held_lease)).unwrap_err()).to_equal("GithubNetworkForbiddenUnderLease")
+        expect(scv_gh_fixture_calls).to_equal(0)
+        expect(scv_gateway_github_read_v1(policy, request, DbGithubTransport(execute: setup_scv_gh_execute, lease_held: setup_scv_gh_lease_after_identity)).unwrap_err()).to_equal("GithubNetworkForbiddenUnderLease")
+        expect(scv_gh_fixture_calls).to_equal(1)
+
+    it "rejects ambiguous allowlists, unsafe process bounds and invalid server-owned route components":
+        var policy = setup_scv_gh_policy("ref")
+        policy.maximum_requests = 2u64
+        expect(scv_gateway_github_policy_validate_v1(policy).unwrap_err()).to_equal("GithubReadInvalidRequestBound")
+        policy.maximum_requests = 3u64
+        policy.allowlist = [policy.allowlist[0], policy.allowlist[0]]
+        expect(scv_gateway_github_policy_validate_v1(policy).unwrap_err()).to_equal("GithubReadAmbiguousRepository")
+        var unsafe = setup_scv_gh_policy("ref")
+        var repository = unsafe.allowlist[0]
+        repository.host = "github.com;echo-secret"
+        unsafe.allowlist = [repository]
+        expect(scv_gateway_github_policy_validate_v1(unsafe).unwrap_err()).to_equal("GithubReadInvalidRepositoryScope")
+        expect(scv_gh_fixture_calls).to_equal(0)
+
+    it "independently validates exact repository, selector, kind, verification and invocation count on callback results":
+        val policy = setup_scv_gh_policy("ref")
+        val request = setup_scv_gh_request(ScvGithubReadKindV1.Ref)
+        val original = exercise_scv_gh_read(policy, request).unwrap()
+        var forged = original
+        forged.repository_id = "different"
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadRepositoryIdentityMismatch")
+        forged = original
+        forged.github_repository_id = "99"
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadRepositoryIdentityMismatch")
+        forged = original
+        forged.selector = "refs/heads/other"
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadResultRequestMismatch")
+        forged = original
+        forged.kind = ScvGithubReadKindV1.Blob
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadResultRequestMismatch")
+        forged = original
+        forged.verification = ScvGithubVerificationV1.BlobGitSha1Verified
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadVerificationMismatch")
+        forged = original
+        forged.requests = 1u64
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadRequestBudgetExceeded")
+        expect(scv_gh_fixture_calls).to_equal(3)
+
+    it "independently recomputes callback blob SHA1 and rejects incompatible result shapes and limits":
+        val policy = setup_scv_gh_policy("blob")
+        val request = setup_scv_gh_request(ScvGithubReadKindV1.Blob)
+        val original = exercise_scv_gh_read(policy, request).unwrap()
+        var forged = original
+        forged.blob = [1u8]
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadBlobHashMismatch")
+        forged = original
+        forged.parents = ["a".repeat(40)]
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadResultShapeMismatch")
+        forged = original
+        forged.oid = "a".repeat(64)
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadInvalidObjectOid")
+        var narrow = policy
+        narrow.maximum_blob_bytes = 3
+        expect(scv_gateway_github_result_validate_v1(narrow, request, original).unwrap_err()).to_equal("GithubReadBlobBoundExceeded")
+        expect(scv_gh_fixture_calls).to_equal(3)
+
+    it "independently validates commit tree and ordered parent identities on callback results":
+        val policy = setup_scv_gh_policy("commit")
+        val request = setup_scv_gh_request(ScvGithubReadKindV1.Commit)
+        val original = exercise_scv_gh_read(policy, request).unwrap()
+        var forged = original
+        forged.tree_oid = "not-a-git-oid"
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadInvalidTreeOid")
+        forged = original
+        forged.parents = ["b".repeat(40), "b".repeat(40)]
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadDuplicateParent")
+        forged = original
+        forged.parents = ["not-a-parent"]
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadInvalidParentOid")
+        forged = original
+        forged.oid = "b".repeat(40)
+        expect(scv_gateway_github_result_validate_v1(policy, request, forged).unwrap_err()).to_equal("GithubReadOidMismatch")
+        expect(scv_gh_fixture_calls).to_equal(3)

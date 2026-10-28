@@ -9,7 +9,7 @@
 use std.spec.step
 
 use std.spec
-use app.test_daemon.light_protocol.{unrun_reason, unrun_verdict_line, ran_verdict_line, is_load_failure, has_verdict_line, timeout_verdict_line, no_response_verdict_line}
+use app.test_daemon.light_protocol.{unrun_reason, unrun_verdict_line, ran_verdict_line, is_unrun_failure, process_failure_verdict_line, has_verdict_line, timeout_verdict_line, no_response_verdict_line}
 
 # @req REQ-SSPEC-APP
 describe "every spec file a test run touches reports a machine-readable verdict":
@@ -76,20 +76,44 @@ describe "every spec file a test run touches reports a machine-readable verdict"
 
         step("A spec that simply declares nothing is an authoring gap, not an outage")
         expect(unrun_reason("Results: 0 total, 0 passed, 0 failed")).to_equal("zero-examples")
+        expect(unrun_reason("--assert-ran: no BDD examples executed")).to_equal("zero-examples")
 
-    it "treats only a load failure as a load failure":
+    it "routes only no-execution outcomes to the unrun verdict":
         # @req REQ-SSPEC-APP
-        step("treats only a load failure as a load failure")
+        step("routes only no-execution outcomes to the unrun verdict")
         """
         A spec that ran and got the wrong answer must NOT be reported as
         unloadable -- that would hide a real product defect behind an
         infrastructure label.
         """
         step("A load diagnostic is a load failure")
-        assert_true(is_load_failure("error: semantic: Cannot resolve module: std.x.y"))
+        assert_true(is_unrun_failure("error: semantic: Cannot resolve module: std.x.y"))
+
+        step("A selected spec with zero authenticated examples stays unrun and red")
+        assert_true(is_unrun_failure("--assert-ran: no BDD examples executed"))
+        val empty = unrun_verdict_line("test/empty_spec.spl", "zero-examples")
+        assert_contains(empty, "declared>=1")
+        assert_contains(empty, "executed=0")
+        assert_contains(empty, "failed=1")
+        assert_contains(empty, "dropped=1")
+        assert_contains(empty, "reason=zero-examples")
+
+        step("Missing structured evidence is an unrun infrastructure failure")
+        assert_true(is_unrun_failure("test-runner: structured BDD evidence unavailable (Process exited with code 7)"))
 
         step("A failed assertion is not")
-        assert_false(is_load_failure("expected 0 to equal 999"))
+        assert_false(is_unrun_failure("expected 0 to equal 999"))
+        assert_false(is_unrun_failure("test-runner: authenticated BDD assertion failure: Cannot resolve module: bad.matcher (process exit 1)"))
+        assert_false(is_unrun_failure("test-runner: BDD process failure after authenticated pass (exit 1)"))
+
+        step("A process failure after authenticated passing examples stays executed, but ERROR")
+        val process_failed = process_failure_verdict_line("test/after_pass_spec.spl", 8)
+        assert_contains(process_failed, "outcome=ERROR")
+        assert_contains(process_failed, "executed=8")
+        assert_contains(process_failed, "passed=8")
+        assert_contains(process_failed, "failed=0")
+        assert_contains(process_failed, "dropped=0")
+        assert_contains(process_failed, "process_error=1")
 
     # @manual_section Specs that DID run report their real counts
     it "reports the executed counts for a spec the aggregating lane actually ran":

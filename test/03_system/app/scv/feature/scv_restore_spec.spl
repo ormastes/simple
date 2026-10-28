@@ -5,13 +5,25 @@
 
 use std.spec.step
 
-use app.io.mod (process_run)
+use app.io.mod (process_run, file_write, file_read, file_delete, file_exists)
+use std.scv.store.{scv_init_repo, scv_current_op, scv_read_workspace_commit, scv_commit_change, scv_hash_text, scv_write_text, scv_write_file_object_from_bytes}
+use std.scv.core.{scv_object_path, scv_state_private}
+use std.scv.restore_preflight.{scv_restore_preflight}
+use std.scv.working_copy.{scv_snapshot}
 
 fn _scv_restore_doc_script(script: text) -> text:
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
     "{out}{err}\nexit={code}\n"
 
+fn _scv_restore_test_file_object(root: text, rel: text, content: text) -> (text, text):
+    match scv_write_file_object_from_bytes(root, rel, content.bytes(), 0):
+        Ok(value): value
+        Err(error):
+            expect(error).to_equal("")
+            ("", "")
+
 describe "REQ-004 restore operation views":
+    # @manual scenario evidence show
     it "restores exact files and deletes tracked paths absent from the target tree":
         # @req REQ-SSPEC-SYSTEM
         # @req REQ-004
@@ -20,5 +32,260 @@ describe "REQ-004 restore operation views":
         step("restores exact files and deletes tracked paths absent from the target tree")
         val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-restore.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'later\\n' > b.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\"\ntest ! -e b.txt\nprintf 'a=%s\\n' \"$(cat a.txt | tr '\\n' '|')\"\n"
         val out = _scv_restore_doc_script(script)
+        expect(out).to_contain("exit=0")
         expect(out).to_contain("restored 1")
         expect(out).to_contain("a=base|")
+
+describe "SCV restore preflight":
+    # @manual scenario evidence show
+    it "should validate the complete target without changing repository or worktree bytes":
+        # @req REQ-004
+        step("setup a target and a later working view")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-check.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(file_write("{root}/a", "base bytes")).to_equal(true)
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val target = scv_current_op(root)
+        expect(file_write("{root}/a", "later bytes")).to_equal(true)
+        expect(file_write("{root}/b", "later file")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        step("capture every user-visible subject")
+        val before_head = file_read("{root}/.scv/HEAD_OP")
+        val before_workspace = file_read("{root}/.scv/meta/workspaces.sdn")
+        val before_bookmarks = file_read("{root}/.scv/meta/bookmarks.sdn")
+        val before_index = file_read("{root}/.scv/meta/status_index.sdn")
+        val before_wal = file_read("{root}/.scv/journal/wal.log")
+        val before_a = file_read("{root}/a")
+        val before_b = file_read("{root}/b")
+        step("validate target without publishing it")
+        val result = scv_restore_preflight(root, target)
+        step("assert no state changed and no publication guarantee was implied")
+        expect(result).to_contain("preflight complete")
+        expect(result).to_contain("operation_id_integrity=unavailable")
+        expect(result).to_contain("mutation=unsupported")
+        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(before_head)
+        expect(file_read("{root}/.scv/meta/workspaces.sdn")).to_equal(before_workspace)
+        expect(file_read("{root}/.scv/meta/bookmarks.sdn")).to_equal(before_bookmarks)
+        expect(file_read("{root}/.scv/meta/status_index.sdn")).to_equal(before_index)
+        expect(file_read("{root}/.scv/journal/wal.log")).to_equal(before_wal)
+        expect(file_read("{root}/a")).to_equal(before_a)
+        expect(file_read("{root}/b")).to_equal(before_b)
+        val (repo, _, repo_code) = process_run("pwd", [])
+        expect(repo_code).to_equal(0)
+        val cli_command = "cd '{root}' && SIMPLE_LIB='{repo.trim()}/src' '{repo.trim()}/bin/simple' run '{repo.trim()}/src/app/scv/main.spl' restore-op --check '{target}'"
+        val (cli_out, _, cli_code) = process_run("/bin/sh", ["-c", cli_command])
+        expect(cli_code).to_equal(0)
+        expect(cli_out).to_contain("mutation=unsupported")
+        val invalid_cli = "cd '{root}' && SIMPLE_LIB='{repo.trim()}/src' '{repo.trim()}/bin/simple' run '{repo.trim()}/src/app/scv/main.spl' restore-op --check '{target}' extra"
+        val (invalid_out, _, invalid_code) = process_run("/bin/sh", ["-c", invalid_cli])
+        expect(invalid_code).to_equal(1)
+        expect(invalid_out).to_contain("restore-op --check requires exactly one operation id")
+
+    it "should reject deleting a dirty tracked file while leaving it untouched":
+        # @req REQ-004
+        step("setup tracked file and target without it")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-dirty-delete.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "base")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val target = scv_current_op(root)
+        expect(file_write("{root}/b", "tracked before delete")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val before_head = file_read("{root}/.scv/HEAD_OP")
+        expect(file_write("{root}/b", "unsaved user edit")).to_equal(true)
+        step("check deletion target")
+        val result = scv_restore_preflight(root, target)
+        step("preserve the unsaved bytes and report the exact conflict")
+        expect(result).to_contain("ERROR dirty tracked path absent from target: b")
+        expect(file_read("{root}/b")).to_equal("unsaved user edit")
+        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(before_head)
+
+    it "should reject a changed-size tracked overwrite without replacing the file":
+        # @req REQ-004
+        step("setup a target and a later tracked version")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-dirty-overwrite.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "base")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val target = scv_current_op(root)
+        expect(file_write("{root}/a", "later tracked version")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val before_head = file_read("{root}/.scv/HEAD_OP")
+        expect(file_write("{root}/a", "unsaved edit with a different length")).to_equal(true)
+        step("check the dirty overwrite")
+        val result = scv_restore_preflight(root, target)
+        step("preserve bytes and head")
+        expect(result).to_equal("ERROR dirty tracked path: a\n")
+        expect(file_read("{root}/a")).to_equal("unsaved edit with a different length")
+        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(before_head)
+
+    it "should reject an untracked destination collision without replacing the file":
+        # @req REQ-004
+        step("create a target containing a path absent from the current index")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-untracked.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "base")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        expect(file_write("{root}/b", "target bytes")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val target = scv_current_op(root)
+        expect(file_delete("{root}/b")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        expect(file_write("{root}/b", "untracked user data")).to_equal(true)
+        step("check the target collision")
+        val result = scv_restore_preflight(root, target)
+        step("preserve the untracked bytes")
+        expect(result).to_contain("ERROR untracked target collision: b")
+        expect(file_read("{root}/b")).to_equal("untracked user data")
+
+    it "should refuse an unresolved WAL without replaying or changing repository state":
+        # @req REQ-004
+        step("setup and create an unresolved snapshot transaction")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-pending-wal.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "base")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val target = scv_current_op(root)
+        val head = file_read("{root}/.scv/HEAD_OP")
+        val workspace = file_read("{root}/.scv/meta/workspaces.sdn")
+        expect(file_write("{root}/.scv/journal/wal.log", "BEGIN op=interrupted\nSET path=HEAD_OP old={head.trim()}\nSET path=meta/workspaces.sdn old=default%3A%20base\nNEW commit=commit_missing\n")).to_equal(true)
+        step("preflight without invoking WAL recovery")
+        val result = scv_restore_preflight(root, target)
+        step("keep the unresolved record and views unchanged")
+        expect(result).to_contain("ERROR repository WAL pending")
+        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(head)
+        expect(file_read("{root}/.scv/meta/workspaces.sdn")).to_equal(workspace)
+        expect(file_read("{root}/.scv/journal/wal.log")).to_contain("BEGIN op=interrupted")
+
+    it "should reject a current HEAD/workspace mismatch without repairing either view":
+        # @req REQ-004
+        step("setup a valid operation view")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-head-drift.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "base")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val target = scv_current_op(root)
+        val head = file_read("{root}/.scv/HEAD_OP")
+        expect(file_write("{root}/.scv/meta/workspaces.sdn", "default: commit_drift\n")).to_equal(true)
+        step("check a target while mutable view metadata disagrees")
+        val result = scv_restore_preflight(root, target)
+        step("report the mismatch without repairing metadata")
+        expect(result).to_equal("ERROR current HEAD/workspace view mismatch\n")
+        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(head)
+        expect(file_read("{root}/.scv/meta/workspaces.sdn")).to_equal("default: commit_drift\n")
+
+    it "should reject a missing target operation without touching the repository":
+        # @req REQ-004
+        step("setup an initialized repository")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-missing-op.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        val head = file_read("{root}/.scv/HEAD_OP")
+        step("check an absent operation")
+        val result = scv_restore_preflight(root, "op_missing")
+        step("report the absence without changing the head")
+        expect(result).to_equal("ERROR missing operation\n")
+        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(head)
+
+    it "should reject corrupt target bytes before any worktree write":
+        # @req REQ-004
+        step("setup and save a target operation")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-corrupt.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "target bytes")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val target = scv_current_op(root)
+        val target_bytes = file_read("{root}/a")
+        val target_op_content = file_read("{root}/.scv/HEAD_OP")
+        val chunk = file_read("{root}/.scv/meta/status_index.sdn").split("|")[2]
+        expect(file_delete("{root}/.scv/objects/chunks/{chunk}.blob")).to_equal(true)
+        step("check a target whose immutable chunk is missing")
+        val result = scv_restore_preflight(root, target)
+        step("fail closed and preserve worktree bytes")
+        expect(result).to_contain("ERROR missing chunk: {chunk}")
+        expect(file_read("{root}/a")).to_equal(target_bytes)
+        expect(file_read("{root}/.scv/HEAD_OP")).to_equal(target_op_content)
+
+    it "should reject file and descendant target paths before describing restore":
+        # @req REQ-004
+        step("setup a working view and two valid file objects")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-path-shape.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "current")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val head = scv_current_op(root)
+        val parent = scv_read_workspace_commit(root)
+        val change = scv_commit_change(root, parent)
+        val (file_a, chunk_a) = _scv_restore_test_file_object(root, "a", "outer")
+        val (file_ab, chunk_ab) = _scv_restore_test_file_object(root, "a/b", "inner")
+        step("construct a content-addressed but non-materializable target tree")
+        val tree_content = "a|{file_a}|{chunk_a}|5|0\na/b|{file_ab}|{chunk_ab}|5|0\n"
+        val tree = scv_hash_text("tree", tree_content)
+        expect(scv_write_text(scv_object_path(root, "trees", tree), tree_content)).to_equal(true)
+        val commit_content = "change: {change}\nparents: {parent}\ntree: {tree}\nstate: {scv_state_private()}\n"
+        val commit = scv_hash_text("commit", commit_content)
+        expect(scv_write_text(scv_object_path(root, "commits", commit), commit_content)).to_equal(true)
+        val bookmarks = file_read("{root}/.scv/meta/bookmarks.sdn")
+        val view_content = "heads:\n{commit}\nbookmarks:\n{bookmarks}workspaces:\ndefault: {commit}\n"
+        val view = scv_hash_text("view", view_content)
+        expect(scv_write_text(scv_object_path(root, "operations", view), view_content)).to_equal(true)
+        val operation = "op_restore_path_shape"
+        expect(scv_write_text(scv_object_path(root, "operations", operation), "parents: {head}\nview: {view}\nmetadata: path-shape-test\n")).to_equal(true)
+        step("preflight and preserve the current operation")
+        val result = scv_restore_preflight(root, operation)
+        expect(result).to_equal("ERROR target path conflicts with file ancestor: a\n")
+        expect(scv_current_op(root)).to_equal(head)
+
+    it "should reject a missing target leaf beneath a symlink ancestor":
+        # @req REQ-004
+        step("setup a repository and an external directory")
+        val (out, _, code) = process_run("mktemp", ["-d", "/tmp/scv-restore-symlink-parent.XXXXXX"])
+        expect(code).to_equal(0)
+        val root = out.trim()
+        expect(scv_init_repo(root)).to_equal("initialized\n")
+        expect(file_write("{root}/a", "current")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val head = scv_current_op(root)
+        val parent = scv_read_workspace_commit(root)
+        val change = scv_commit_change(root, parent)
+        val (outside_out, _, outside_code) = process_run("mktemp", ["-d", "/tmp/scv-restore-outside.XXXXXX"])
+        expect(outside_code).to_equal(0)
+        val outside = outside_out.trim()
+        val (_, _, link_code) = process_run("ln", ["-s", outside, "{root}/linked"])
+        expect(link_code).to_equal(0)
+        val (file_id, chunk) = _scv_restore_test_file_object(root, "linked/leaf", "target")
+        step("construct a valid target with an absent leaf below the symlink")
+        val tree_content = "linked/leaf|{file_id}|{chunk}|6|0\n"
+        val tree = scv_hash_text("tree", tree_content)
+        expect(scv_write_text(scv_object_path(root, "trees", tree), tree_content)).to_equal(true)
+        val commit_content = "change: {change}\nparents: {parent}\ntree: {tree}\nstate: {scv_state_private()}\n"
+        val commit = scv_hash_text("commit", commit_content)
+        expect(scv_write_text(scv_object_path(root, "commits", commit), commit_content)).to_equal(true)
+        val bookmarks = file_read("{root}/.scv/meta/bookmarks.sdn")
+        val view_content = "heads:\n{commit}\nbookmarks:\n{bookmarks}workspaces:\ndefault: {commit}\n"
+        val view = scv_hash_text("view", view_content)
+        expect(scv_write_text(scv_object_path(root, "operations", view), view_content)).to_equal(true)
+        val operation = "op_restore_symlink_parent"
+        expect(scv_write_text(scv_object_path(root, "operations", operation), "parents: {head}\nview: {view}\nmetadata: symlink-parent-test\n")).to_equal(true)
+        step("preflight without reading or creating the external leaf")
+        val result = scv_restore_preflight(root, operation)
+        expect(result).to_contain("ERROR unsafe target parent: linked")
+        expect(file_exists("{outside}/leaf")).to_equal(false)
+        expect(scv_current_op(root)).to_equal(head)

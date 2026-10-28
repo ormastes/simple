@@ -21,6 +21,7 @@ use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
     file_is_regular_no_follow}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use compiler.core.cfg_platform.{cfg_guard_context_identity_v1}
+use std.common.cpu_tier.{tier_parse, tier_alias, tier_rank}
 use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1, digest_v1_new, digest_v1_text, digest_v1_parse}
 use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_interface_fold}
 use compiler.driver.cache.reverse_reference_receipt.{
@@ -642,6 +643,50 @@ pub fn native_build_cache_lane() -> text:
         return "default"
     lane
 
+# Canonicalize a tier specification into a cache key component.
+# Returns "cpu=<base>;features=<f1,f2,...>" with canonicalized base and sorted
+# explicit (non-implied) features. On parse error, returns "cpu=invalid".
+pub fn native_build_cache_scope_tier_fields(arch: text, tier_spec: text) -> text:
+    if tier_spec == "":
+        return ""
+    match tier_parse(arch, tier_spec):
+        case Ok(tier_id):
+            if tier_id.features.len() == 0:
+                "cpu={tier_id.base}"
+            else:
+                val joined = tier_id.features.join(",")
+                "cpu={tier_id.base};features={joined}"
+        case Err(_):
+            "cpu=invalid"
+
+# Canonical (cpu, features) pair used inside the cache scope key.
+pub struct NativeCacheTierCanon:
+    cpu: text
+    features: [text]
+
+# When target_cpu names a known CPU-tier level (x86-64..v4, armv8-a.., rv64gc..),
+# fold aliases and drop features the level already implies, so equal tiers share
+# one cache key (cpu_tier_multibuild.md section 1). Anything else, including
+# negative "-feat" features, is left exactly as given.
+pub fn native_build_cache_canonical_tier(cpu: text, features: [text]) -> NativeCacheTierCanon:
+    for arch in ["x86_64", "aarch64", "riscv64"]:
+        if tier_rank(arch, tier_alias(arch, cpu)) >= 0:
+            var spec = cpu
+            for feature in features:
+                if feature.starts_with("-"):
+                    return NativeCacheTierCanon(cpu: cpu, features: features)
+                val name = if feature.starts_with("+"): feature.substring(1, feature.len()) else: feature
+                spec = spec + "+" + name
+            match tier_parse(arch, spec):
+                case Ok(tier_id):
+                    var canon: [text] = []
+                    for name in tier_id.features:
+                        canon = canon.append("+" + name)
+                    return NativeCacheTierCanon(cpu: tier_id.base, features: canon)
+                case Err(_):
+                    return NativeCacheTierCanon(cpu: cpu, features: features)
+    NativeCacheTierCanon(cpu: cpu, features: features)
+
 fn native_build_cache_scope_key(
     backend: text?, target_cpu: text?, target_features: [text],
     optimization: i32, compiler_identity: text,
@@ -651,11 +696,12 @@ fn native_build_cache_scope_key(
     val backend_text = match backend:
         case Some(name): name
         case nil: "smf"
-    val cpu_text = match target_cpu:
-        case Some(cpu): cpu
-        case nil: "native"
+    val canon = match target_cpu:
+        case Some(cpu): native_build_cache_canonical_tier(cpu, target_features)
+        case nil: NativeCacheTierCanon(cpu: "native", features: target_features)
+    val cpu_text = canon.cpu
     var feature_text = ""
-    for feature in target_features:
+    for feature in canon.features:
         feature_text = feature_text + cache_key_frame(feature)
     val lane = native_build_cache_lane()
     # Built-in providers remain compiler-bound until their admitted receipt is

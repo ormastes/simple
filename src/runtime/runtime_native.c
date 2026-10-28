@@ -27,6 +27,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
+#include "platform/runtime_windows_private_atomic.h"
 #include "simple_gui_html_provider_abi_v1.h"
 #include "simple_gui_event_provider_abi_v1.h"
 
@@ -903,6 +904,18 @@ int64_t rt_current_task_id(void) {
  * definitions: on COFF, Rust may alias rt_par_* to rt_gpu_* COMDATs which
  * the core-C GPU trap provider replaces. Each CPU entry needs a live owner.
  * BEGIN CORE PAR ATOMICS */
+int64_t rt_par_atomic_i64_is_lock_free(int64_t* ptr) {
+    if (ptr == NULL || sizeof(_Atomic int64_t) != sizeof(int64_t) ||
+        _Alignof(_Atomic int64_t) > sizeof(int64_t) ||
+        (uintptr_t)ptr % _Alignof(_Atomic int64_t) != 0)
+        return 0;
+    return atomic_is_lock_free((const volatile _Atomic int64_t*)ptr) ? 1 : 0;
+}
+
+int64_t rt_par_atomic_load_i64(int64_t* ptr) {
+    return atomic_load_explicit((const volatile _Atomic int64_t*)ptr, memory_order_seq_cst);
+}
+
 int64_t rt_par_atomic_add_i64(int64_t* ptr, int64_t value) {
     return atomic_fetch_add_explicit((_Atomic int64_t*)ptr, value, memory_order_seq_cst);
 }
@@ -13023,6 +13036,7 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
  * worker above this point -- and every later user in this file -- can use it.
  * This file used to carry a forward-declared, separately-defined copy. */
 #include "platform/runtime_win_long_path.h"
+#include "platform/runtime_win_excl_file.h"
 #endif
 static int rt_bucket2_fsync_path(const char* path) {
     if (!path) return 0;
@@ -16162,6 +16176,14 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
         }
     }
     free(parent);
+#if defined(_WIN32)
+    if (have_mode && (mode & 0077) == 0) {
+        int ok = rt_win_private_atomic_write(path, content_string->data,
+            (size_t)content_string->len, (int)mode);
+        free(path);
+        return ok ? 1 : 0;
+    }
+#endif
     size_t path_len = strlen(path);
     char* temp_path = (char*)rt_observed_malloc_v1(path_len + 64);
     if (!temp_path) {
@@ -16213,8 +16235,9 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
 #endif
     }
 #if defined(_WIN32)
-    /* Win32 CRT permissions express exactly one bit -- read-only -- so the
-     * POSIX mode is honoured to the only extent the platform allows: the
+    /* Owner-only modes use the protected-DACL provider above. For other
+     * modes retain the pre-existing CRT mapping: permissions express exactly
+     * one bit -- read-only -- so the POSIX mode is honoured only as follows: the
      * owner-write bit maps to _S_IWRITE, everything else (group/other,
      * setuid, sticky) has no Win32 equivalent and is silently not applied.
      * Applied to the TEMP file, before the move, for the same
@@ -17544,7 +17567,18 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
 int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    if (!source || !destination || source_len <= 0 || destination_len <= 0 ||
+            memchr(source, 0, (size_t)source_len) != NULL ||
+            memchr(destination, 0, (size_t)destination_len) != NULL) return 0;
+#if defined(_WIN32)
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    return rt_win_file_copy_create_excl_no_follow(src, dst);
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -17594,7 +17628,18 @@ int rt_file_copy_create_excl_no_follow(
 int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    if (!source || !destination || source_len <= 0 || destination_len <= 0 ||
+            memchr(source, 0, (size_t)source_len) != NULL ||
+            memchr(destination, 0, (size_t)destination_len) != NULL) return 0;
+#if defined(_WIN32)
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    return rt_win_file_link_create_excl_no_follow(src, dst);
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else

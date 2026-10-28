@@ -1,11 +1,11 @@
-# Todo Database - Read/validate wrapper for todo_db.sdn
+# Todo Database - Read/validate wrapper and preserving append for todo_db.sdn
 #
 # The todo_scan app currently writes directly via file_write(),
 # bypassing the shared database library. This module provides
 # read-only access and validation for check-dbs/fix-dbs commands.
 #
-# NOTE: Write path migration is out of scope. This module only
-# reads and validates existing todo_db.sdn files.
+# The scanner write-path migration remains out of scope. The narrow append API
+# below serializes new blocked records without regenerating legacy payloads.
 #
 # Usage:
 #   use std.database.todo.{TodoDatabase, load_todo_database}
@@ -153,3 +153,73 @@ class TodoDatabase:
 # ============================================================================
 # Exports
 # ============================================================================
+
+use nogc_sync_mut.database.atomic.{FileLock}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.io_runtime.{read_file_text_result}
+use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
+use std.convert (try_parse_int)
+
+# Serialize only the new row; never parse and regenerate existing TODO payloads.
+fn append_todo_preserving_legacy(path: text, row: SdnRow) -> bool:
+    var lock: FileLock = FileLock.for_file(path)
+    if not lock.try_acquire(5000): return false
+    val published = _todo_append_locked(path, row)
+    lock.release()
+    published
+
+fn _todo_append_locked(path: text, row: SdnRow) -> bool:
+    # A pending WAL is authoritative. Do not bypass or discard its records.
+    if file_exists(path + ".wal"):
+        val wal: text = match read_file_text_result(path + ".wal"):
+            case Ok(value): value
+            case Err(_): return false
+        if wal.trim() != "": return false
+    val original: text = match read_file_text_result(path):
+        case Ok(value): value
+        case Err(_): return false
+    if original.len() > 33554432: return false
+    var body: text = original
+    if original.starts_with("#sdn-crc32:"):
+        val newline = original.index_of("\n")
+        if newline < 0: return false
+        val expected = try_parse_int(original.substring(11, newline).trim())
+        body = original.substring(newline + 1)
+        if expected == nil or crc32_text(body) != (expected ?? -1): return false
+    val columns: [text] = ["id", "keyword", "area", "priority", "description", "file", "line", "issue", "blocked", "status", "valid"]
+    val id: text = row.get("id") ?? ""
+    if id == "": return false
+    for character in id.chars():
+        if not "0123456789".contains(character): return false
+    for column in columns:
+        val field = row.get(column)
+        if field == nil: return false
+        val value: text = field ?? ""
+        if value != value.trim() or value.contains("\n") or value.contains("\r") or value.contains("\0") or value.contains("\""): return false
+    val valid: text = row.get("valid") ?? ""
+    val status: text = row.get("status") ?? ""
+    if valid != "true" or status != "blocked": return false
+    for raw in body.split("\n"):
+        val line: text = raw.trim()
+        if line.starts_with(id + ",") or line.starts_with("\"" + id + "\","): return false
+    var pending: SdnTable = SdnTable.new("todos", columns)
+    if not pending.add_row(row): return false
+    val encoded: text = pending.to_sdn()
+    val separator = encoded.index_of("\n")
+    if separator < 0: return false
+    val header = encoded.substring(0, separator)
+    var rows = encoded.substring(separator + 1)
+    val anchored = "\n" + body
+    val crlf = "\n" + header + "\r\n"
+    val lf = "\n" + header + "\n"
+    val crlf_count = anchored.split(crlf).len() - 1
+    val lf_count = anchored.split(lf).len() - 1
+    if crlf_count + lf_count != 1: return false
+    var updated: text = ""
+    if crlf_count == 1:
+        rows = rows.replace("\n", "\r\n")
+        updated = anchored.replace(crlf, crlf + rows).substring(1)
+    else:
+        updated = anchored.replace(lf, lf + rows).substring(1)
+    val checksum = crc32_text(updated)
+    file_atomic_write(path, "#sdn-crc32:{checksum}\n" + updated)

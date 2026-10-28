@@ -31,6 +31,7 @@ use std.nogc_sync_mut.test_runner.resource_policy.{test_default_max_procs, test_
 use std.test_runner.native_compile_contract.{native_test_source_roots_error}
 use std.test_runner.native_compile_contract.{native_test_library_mode_error, native_test_library_lanes_error, native_test_library_resume_error}
 use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
+use std.common.float_class_pure.{is_inf_f64}
 
 # =========================================================================
 # Mode String Parsing
@@ -91,6 +92,25 @@ fn _test_arg_is_numeric_option(arg: text) -> bool:
 fn _test_arg_is_signed_number(value: text) -> bool:
     value.len() > 1 and ((value[1:2] >= "0" and value[1:2] <= "9") or value[1:2] == ".")
 
+fn _test_arg_is_decimal_number(value: text) -> bool:
+    if value == "": return false
+    var i = 0
+    if value.starts_with("-"): i = 1
+    if i >= value.len(): return false
+    var seen_dot = false
+    var seen_digit = false
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if ch == ".":
+            if seen_dot: return false
+            seen_dot = true
+        elif ch >= "0" and ch <= "9":
+            seen_digit = true
+        else:
+            return false
+        i = i + 1
+    seen_digit
+
 fn _test_arg_has_empty_equals_value(arg: text) -> bool:
     (
         arg == "--max-mem=" or arg == "--worker-memory-mb=" or arg == "--max-procs=" or arg == "--execution-mode=" or
@@ -138,6 +158,10 @@ fn test_args_validation_error(args: [text]) -> text:
             if value == "" or (value.starts_with("-") and
                 (not _test_arg_is_numeric_option(arg) or not _test_arg_is_signed_number(value))):
                 return "missing value for {arg}"
+            if (arg == "--cpu-threshold" or arg == "--mem-threshold") and not _test_arg_is_decimal_number(value):
+                return "invalid value for {arg}: {value}"
+            if (arg == "--cpu-threshold" or arg == "--mem-threshold") and is_inf_f64(parse_f64(value)):
+                return "invalid value for {arg}: {value} (outside finite f64 range)"
             if arg == "--format" and value == "json":
                 return "JSON test output is retired; use --format sdn"
             if arg == "--format" and value != "text" and value != "sdn" and value != "doc":
@@ -172,6 +196,26 @@ fn test_args_validation_error(args: [text]) -> text:
             val value = arg.substring(12)
             if not test_max_procs_value_valid(value):
                 return "invalid value for --max-procs: {value} (expected a nonnegative integer)"
+            i = i + 1
+            continue
+
+        if arg.starts_with("--cpu-threshold="):
+            val value = arg.substring(16)
+            if value == "": return "missing value for --cpu-threshold"
+            if not _test_arg_is_decimal_number(value):
+                return "invalid value for --cpu-threshold: {value}"
+            if is_inf_f64(parse_f64(value)):
+                return "invalid value for --cpu-threshold: {value} (outside finite f64 range)"
+            i = i + 1
+            continue
+
+        if arg.starts_with("--mem-threshold="):
+            val value = arg.substring(16)
+            if value == "": return "missing value for --mem-threshold"
+            if not _test_arg_is_decimal_number(value):
+                return "invalid value for --mem-threshold: {value}"
+            if is_inf_f64(parse_f64(value)):
+                return "invalid value for --mem-threshold: {value} (outside finite f64 range)"
             i = i + 1
             continue
 
@@ -262,6 +306,8 @@ fn test_args_validation_error(args: [text]) -> text:
             options.sdoctest or options.path.ends_with(".md"), options.spl_doctest or options.whole)
     ""
 
+# Parse arguments after validating them with `test_args_validation_error`.
+# Runtime entrypoints must keep that gate ahead of this low-level conversion.
 fn parse_test_args(args: [text]) -> TestOptions:
     var path = ""
     # Every positional target, in order. `path` keeps the first one for the
@@ -808,42 +854,29 @@ fn parse_test_args(args: [text]) -> TestOptions:
 # =========================================================================
 
 fn parse_f64(s: text) -> f64:
-    """Parse float from string (simple implementation)"""
+    """Parse a validated decimal threshold without losing sign or digit place."""
     var result = 0.0
-    var decimal_part = 0.0
-    var decimal_divisor = 1.0
     var seen_dot = false
-
-    for i in 0..s.len():
+    var decimal_divisor = 1.0
+    var negative = false
+    var i = 0
+    if s.starts_with("-"):
+        negative = true
+        i = 1
+    while i < s.len():
         val ch = s[i:i + 1]
-
         if ch == ".":
             seen_dot = true
         else:
-            val is_digit = ch >= "0" and ch <= "9"
-            if is_digit:
-                var digit = 0
-                if ch == "0": digit = 0
-                if ch == "1": digit = 1
-                if ch == "2": digit = 2
-                if ch == "3": digit = 3
-                if ch == "4": digit = 4
-                if ch == "5": digit = 5
-                if ch == "6": digit = 6
-                if ch == "7": digit = 7
-                if ch == "8": digit = 8
-                if ch == "9": digit = 9
+            val digit = (ch.char_code_at(0) - 48) as f64
+            if seen_dot:
+                decimal_divisor = decimal_divisor * 10.0
+                result = result + (digit / decimal_divisor)
+            else:
+                result = result * 10.0 + digit
+        i = i + 1
 
-                if seen_dot:
-                    decimal_divisor = decimal_divisor * 10.0
-                    decimal_part = decimal_part + (digit * 1.0)
-                else:
-                    result = result * 10.0 + (digit * 1.0)
-
-    if seen_dot:
-        result = result + (decimal_part / decimal_divisor)
-
-    result
+    if negative: -result else: result
 
 fn _is_fork_available() -> bool:
     """Auto-detect fork availability. fork() is Linux-only.

@@ -1,0 +1,52 @@
+# Pure production reducer preview through the host; no admission/persistence.
+use std.spec.*
+use std.scv.solver_contract_v1.*
+use std.scv.solver_db_adapters_v1.*
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_digest}
+use std.scv.db_reducer.{db_empty_state, db_field_value}
+use std.scv.db_patch.{DbValue, db_value_bytes}
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.scv.db_apply_fixture.{setup_item2_apply_policy, setup_item2_apply_merge, setup_item2_apply_patch}
+use test.fixtures.scv.solver_host_v1_fixture.{setup_scv_policy}
+
+fn setup_scv_rows_host_request_v1() -> (SolveRequestV1, DbPolicyConfig):
+    val state = db_empty_state()
+    val patch = setup_item2_apply_patch(1u64, "")
+    var config = DbPolicyConfig(revision: "", admission: setup_item2_apply_policy(), merge: setup_item2_apply_merge())
+    config.revision = db_policy_digest(config).unwrap()
+    val state_id = sha256_text(db_snapshot_encode(state).unwrap())
+    val config_id = db_policy_digest(config).unwrap()
+    val binding = SolveBindingV1(repository: config.merge.repository, namespace: config.merge.namespace, domain: "db.rows", base_revision: state.revision, left_revision: patch.payload_digest, right_revision: config_id, base_model_id: state_id, left_model_id: sha256_text(db_patch_encode(patch).unwrap()), right_model_id: config_id, expected_root: state_id, schema_revision: config.merge.schema_revision, policy_revision: config_id, routing_revision: "accepted-db-rows-route", identity_map_revision: "accepted-db-identity-map", parser_lock_digest: "accepted-patch-parser-pin", solver_lock_digest: "accepted-reducer-pin", profile_digest: "rows-v1-profile", configuration_digest: config_id, operation_bundle_digest: patch.payload_digest, authorization_scope: "draft-db-rows")
+    (SolveRequestV1(request_id: "rows-host-request", binding: binding, logical_work_budget: 10000000, memory_budget: 10000000, cancelled: false), config)
+
+describe "DB rows retain the existing pure reducer boundary":
+    it "returns a real row preview while leaving admission and execution qualification required":
+        step("setup")
+        val (request, config) = setup_scv_rows_host_request_v1()
+        val patch = setup_item2_apply_patch(1u64, "")
+        val state = db_empty_state()
+        step("exercise")
+        val solved = solve_db_rows_v1(request, setup_scv_policy(request.binding), state, patch, config).unwrap()
+        step("assert")
+        val preview = solved.preview.unwrap()
+        expect(solved.result.status).to_equal("needs_inputs")
+        expect(solved.result.deterministic_result_key).to_equal("")
+        expect(preview.authorization_status).to_equal("UNVERIFIED_PREVIEW")
+        expect(preview.proposed.rows.len()).to_equal(1)
+        expect(db_value_bytes(db_field_value(preview.proposed.rows[0].fields, "title")).unwrap()).to_equal(db_value_bytes(DbValue.Text("bug-1")).unwrap())
+        expect(solved.state.rows.len()).to_equal(0)
+        expect(solved.patch.signature).to_equal(patch.signature)
+        expect(solved.result.required_checks[4].check_id).to_equal("db.rows:patch-signature-admission")
+
+    it "accounts accepted policy metadata before canonical hashing or reducer work":
+        step("setup")
+        val (request, original) = setup_scv_rows_host_request_v1()
+        var config = original
+        config.admission.keys[0].role = "r".repeat(200000)
+        val solved = solve_db_rows_v1(request, setup_scv_policy(request.binding), db_empty_state(), setup_item2_apply_patch(1u64, ""), config).unwrap()
+        step("assert")
+        expect(solved.result.status).to_equal("resource_limited")
+        expect(solved.preview).to_be_nil()
+        expect(solved.result.deterministic_result_key).to_equal("")

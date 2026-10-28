@@ -23,6 +23,13 @@ directories such as `.scv`, `.git`, `.jj`, and `.simple`.
 
 Owns content-addressed byte objects, file objects, tree objects, commit objects, change objects, and operation objects. Byte identity is computed from raw bytes using Simple hash facilities.
 
+### Restore Preflight Capsule: `src/lib/scv/restore_preflight.spl`
+
+Owns the read-only `restore-op --check <op>` advisory. It validates target
+objects and checked current-view consistency but does not perform recovery or
+publish worktree/ref changes. The older restore mutator remains sequential;
+this capsule does not claim a shared mutation lease or whole-view atomicity.
+
 ### Working Copy Capsule: `src/lib/scv/working_copy.spl`
 
 Owns repo scan, ignore rules, status index, snapshot creation, and restore-to-view workflows.

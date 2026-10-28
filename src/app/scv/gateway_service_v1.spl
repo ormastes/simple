@@ -1,0 +1,203 @@
+"""Read-only native SDN gateway over an explicitly admitted loopback listener.
+
+No write, settlement, publication, GitHub URL or command input is accepted.
+The server's TLS owner is unavailable; production startup fails closed.
+"""
+use app.scv.gateway_config_v1.{ScvGatewayConfigV1, scv_gateway_bearer_valid_v1}
+use app.scv.gateway_github_v1.{ScvGithubReadPolicyV1, ScvGithubReadRequestV1, ScvGithubReadResultV1, ScvGithubReadKindV1, scv_gateway_github_read_live_v1, scv_gateway_github_verification_name_v1, scv_gateway_github_policy_validate_v1, scv_gateway_github_result_validate_v1}
+use std.scv.gateway_protocol_v1.{ScvGatewayRequestV1, ScvGatewayResponseV1, scv_gateway_request_decode_v1, scv_gateway_request_validate_v1, scv_gateway_response_encode_v1, scv_gateway_response_ok_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus, HttpMethod}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, plaintext_development_capability}
+use std.nogc_sync_mut.http_server.router.{Router}
+
+fn _gateway_http_v1(status: HttpStatus, body: text) -> HttpResponse:
+    HttpResponse(status: status, body: body, headers: [
+        ("Content-Type", "application/sdn"), ("Cache-Control", "no-store")])
+
+fn _gateway_failure_v1(request: ScvGatewayRequestV1, status: text, code: text) -> ScvGatewayResponseV1:
+    ScvGatewayResponseV1(version: 1, id: request.id, repository: request.repository,
+        method: request.method, ref_or_oid: request.ref_or_oid, status: status,
+        oid: "", object_kind: "", payload_id: "", payload_encoding: "hex",
+        payload: "", error: code, publication: "not_publication")
+
+fn _gateway_response_http_v1(request: ScvGatewayRequestV1, response: ScvGatewayResponseV1,
+        repository: text, status: HttpStatus) -> HttpResponse:
+    match scv_gateway_response_encode_v1(response, request, repository):
+        case Ok(body): _gateway_http_v1(status, body)
+        case Err(_): _gateway_unbound_error_v1(repository, HttpStatus.InternalError, "gateway_response_rejected")
+
+# Before decoding there is no trusted request ID to echo. A native full-schema
+# error uses an explicit unbound ID. HTTP non-success prevents client admission.
+fn _gateway_unbound_error_v1(repository: text, status: HttpStatus, code: text) -> HttpResponse:
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "id": SdnValue.String("unbound"),
+        "repository": SdnValue.String(repository), "method": SdnValue.String("capabilities"),
+        "ref_or_oid": SdnValue.String(""), "status": SdnValue.String("error"),
+        "oid": SdnValue.String(""), "object_kind": SdnValue.String(""),
+        "payload_id": SdnValue.String(""), "payload_encoding": SdnValue.String("hex"),
+        "payload": SdnValue.String(""), "error": SdnValue.String(code),
+        "publication": SdnValue.String("not_publication")}
+    _gateway_http_v1(status, sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn scv_gateway_authorized_v1(http: HttpRequest, token: text) -> bool:
+    if not scv_gateway_bearer_valid_v1(token): return false
+    var count = 0
+    var supplied = ""
+    for header in http.headers:
+        if header.0.to_lower() == "authorization":
+            count = count + 1
+            supplied = header.1
+    if count != 1 or supplied.len() > 263: return false
+    val expected = "Bearer " + token
+    var differences = if expected.len() == supplied.len(): 0 else: 1
+    # Fixed traversal avoids early exit on a matching bearer prefix.
+    for index in 0..263:
+        val left = if index < expected.len(): expected.char_code_at(index) else: 0
+        val right = if index < supplied.len(): supplied.char_code_at(index) else: 0
+        if left != right: differences = differences + 1
+    differences == 0
+
+fn _gateway_content_type_valid_v1(http: HttpRequest) -> bool:
+    var count = 0
+    var accepted = false
+    for header in http.headers:
+        if header.0.to_lower() == "content-type":
+            count = count + 1
+            accepted = header.1.to_lower() == "application/sdn"
+    count == 1 and accepted
+
+fn _gateway_capabilities_v1() -> [u8]:
+    val fields: Dict<text, SdnValue> = {
+        "methods": SdnValue.Array([SdnValue.String("capabilities"), SdnValue.String("read_ref"),
+            SdnValue.String("read_commit"), SdnValue.String("read_blob")]),
+        "object_formats": SdnValue.Array([SdnValue.String("sha1")]),
+        "payload_integrity": SdnValue.String("sha256"),
+        "payload_encoding": SdnValue.String("hex"),
+        "max_request_bytes": SdnValue.Int(4096), "max_blob_bytes": SdnValue.Int(1048576),
+        "max_github_requests": SdnValue.Int(3),
+        "transport": SdnValue.String("loopback_plaintext_development"),
+        "commit_verification": SdnValue.String("oid_field_match_only"),
+        "publication": SdnValue.String("not_publication")}
+    sdn_encode_canonical(SdnValue.Dict(fields)).bytes()
+
+fn _gateway_result_payload_v1(result: ScvGithubReadResultV1) -> [u8]:
+    if result.kind == ScvGithubReadKindV1.Blob: return result.blob
+    var fields: Dict<text, SdnValue> = {
+        "oid": SdnValue.String(result.oid),
+        "verification": SdnValue.String(scv_gateway_github_verification_name_v1(result.verification))}
+    if result.kind == ScvGithubReadKindV1.Ref:
+        fields["ref"] = SdnValue.String(result.selector)
+    else:
+        fields["tree_oid"] = SdnValue.String(result.tree_oid)
+        var parents: [SdnValue] = []
+        for parent in result.parents: parents.push(SdnValue.String(parent))
+        fields["parents"] = SdnValue.Array(parents)
+    sdn_encode_canonical(SdnValue.Dict(fields)).bytes()
+
+fn _gateway_success_v1(request: ScvGatewayRequestV1, oid: text, kind: text,
+        bytes: [u8]) -> ScvGatewayResponseV1:
+    match scv_gateway_response_ok_v1(request, request.repository, oid, kind, bytes):
+        case Ok(response): response
+        case Err(_): _gateway_failure_v1(request, "error", "gateway_response_rejected")
+
+fn scv_gateway_dispatch_v1(config: ScvGatewayConfigV1, request: ScvGatewayRequestV1,
+        read: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>) -> ScvGatewayResponseV1:
+    if request.repository != config.repository:
+        return _gateway_failure_v1(request, "denied", "gateway_repository_denied")
+    if config.github.allowlist.len() != 1 or config.github.allowlist[0].repository_id != request.repository:
+        return _gateway_failure_v1(request, "denied", "gateway_repository_denied")
+    match scv_gateway_request_validate_v1(request, config.repository):
+        case Err(_): return _gateway_failure_v1(request, "denied", "gateway_invalid_request")
+        case Ok(_): pass
+    if request.method == "capabilities":
+        return _gateway_success_v1(request, "", "capabilities", _gateway_capabilities_v1())
+    var kind = ScvGithubReadKindV1.Ref
+    var object_kind = "ref"
+    if request.method == "read_commit":
+        kind = ScvGithubReadKindV1.Commit
+        object_kind = "commit"
+    elif request.method == "read_blob":
+        kind = ScvGithubReadKindV1.Blob
+        object_kind = "blob"
+    elif request.method != "read_ref":
+        return _gateway_failure_v1(request, "denied", "gateway_method_denied")
+    val upstream = ScvGithubReadRequestV1(repository_id: request.repository, kind: kind,
+        selector: request.ref_or_oid,
+        expected_oid: if kind == ScvGithubReadKindV1.Ref: "" else: request.ref_or_oid)
+    match read(config.github, upstream):
+        case Err(reason):
+            if reason == "GithubUnavailableOrHidden":
+                return _gateway_failure_v1(request, "not_found", "gateway_object_unavailable")
+            # Provider diagnostics are deliberately not reflected into the wire.
+            _gateway_failure_v1(request, "error", "gateway_upstream_read_failed")
+        case Ok(result):
+            # Validate imported callback values independently of the producer.
+            # SHA-256 envelope integrity cannot prove a GitHub repository or
+            # blob identity; the provider owner checks those exact invariants.
+            match scv_gateway_github_result_validate_v1(config.github, upstream, result):
+                case Err(_): return _gateway_failure_v1(request, "error", "gateway_provider_result_rejected")
+                case Ok(_): pass
+            val bytes = _gateway_result_payload_v1(result)
+            if bytes.len() > 1048576:
+                return _gateway_failure_v1(request, "error", "gateway_payload_bound")
+            _gateway_success_v1(request, result.oid, object_kind, bytes)
+
+fn scv_gateway_handle_v1(config: ScvGatewayConfigV1, token: text, http: HttpRequest,
+        read: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>) -> HttpResponse:
+    if not scv_gateway_authorized_v1(http, token):
+        return _gateway_unbound_error_v1(config.repository, HttpStatus.Unauthorized, "gateway_authentication_required")
+    if http.method != HttpMethod.Post or http.path != "/scv/v1" or http.query != "":
+        return _gateway_unbound_error_v1(config.repository, HttpStatus.BadRequest, "gateway_endpoint_denied")
+    if http.body.len() > 4096 or not _gateway_content_type_valid_v1(http):
+        return _gateway_unbound_error_v1(config.repository, HttpStatus.BadRequest, "gateway_request_rejected")
+    match scv_gateway_request_decode_v1(http.body, config.repository):
+        case Err(_): _gateway_unbound_error_v1(config.repository, HttpStatus.BadRequest, "gateway_invalid_request")
+        case Ok(request):
+            val response = scv_gateway_dispatch_v1(config, request, read)
+            _gateway_response_http_v1(request, response, config.repository, HttpStatus.Ok)
+
+fn scv_gateway_server_policy_v1(reason: text) -> Result<SecureServerPolicy, text>:
+    val capability = plaintext_development_capability(reason)?
+    var policy = SecureServerPolicy.plaintext_dev(capability)
+    policy.max_request_line = 256
+    policy.max_header_count = 16
+    policy.max_header_line = 1024
+    policy.max_body = 4096
+    policy.max_read_iters = 18
+    policy.read_timeout_ms = 5000
+    policy.write_timeout_ms = 5000
+    policy.max_connections = 4
+    policy.max_response_bytes = 2113536
+    Ok(policy)
+
+fn scv_gateway_serve_v1(config: ScvGatewayConfigV1, token: text,
+        development_loopback: bool, reason: text) -> Result<(), text>:
+    if not development_loopback: return Err("gateway_tls_unavailable_production_refused")
+    if config.listen_host != "127.0.0.1": return Err("gateway_loopback_listener_required")
+    if config.listen_port < 1024 or config.listen_port > 65535: return Err("gateway_invalid_port")
+    if config.github.allowlist.len() != 1: return Err("gateway_repository_policy_rejected")
+    if config.github.allowlist[0].repository_id != config.repository: return Err("gateway_repository_policy_rejected")
+    if config.github.allowlist[0].host != "github.com": return Err("gateway_repository_policy_rejected")
+    if (config.github.timeout_ms != 5000 or config.github.maximum_response_bytes != 2097152 or
+            config.github.maximum_blob_bytes != 1048576 or config.github.maximum_requests != 3u64):
+        return Err("gateway_repository_policy_rejected")
+    scv_gateway_github_policy_validate_v1(config.github)?
+    if not scv_gateway_bearer_valid_v1(token): return Err("gateway_credential_unavailable")
+    if reason.len() == 0 or reason.len() > 256: return Err("gateway_development_reason_required")
+    for code in reason.bytes():
+        if code < 32 or code > 126: return Err("gateway_development_reason_required")
+    val capability = plaintext_development_capability(reason)?
+    val policy = scv_gateway_server_policy_v1(reason)?
+    var router = Router.new()
+    # A single fallback ensures all parsed requests cross the authentication
+    # boundary, including unsupported HTTP methods and unknown endpoints.
+    router.set_not_found(\http:
+        scv_gateway_handle_v1(config, token, http, scv_gateway_github_read_live_v1))
+    var server = SimpleHttpServer.new(config.listen_host, config.listen_port, router)
+    server = server.with_policy(policy)
+    server.start_plaintext(capability)
+
+export scv_gateway_authorized_v1, scv_gateway_dispatch_v1, scv_gateway_handle_v1
+export scv_gateway_server_policy_v1, scv_gateway_serve_v1

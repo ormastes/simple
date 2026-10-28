@@ -1,0 +1,139 @@
+"""
+## Purpose and audience
+Verify the provenance-free shared execution scheduling state used by build and
+test adapters. The caller owns transport, evidence validation, and result commit.
+## Operator workflow
+Run this spec with the Simple test runner and read each scenario verdict.
+## Compatibility and limitations
+The schedule value is parent-owned; it does not synchronize concurrent writers.
+Design: doc/05_design/test_build_shared_execution_schedule.md
+"""
+use std.spec.*
+use std.common.task_runner.execution_schedule.{
+    task_execution_schedule_v1, task_execution_ready_v1, task_execution_next_pending_v1,
+    task_execution_host_active_v1, task_execution_dispatch_v1,
+    task_execution_reap_v1, task_execution_finish_v1,
+    task_execution_retry_v1, task_execution_spawn_denied_v1,
+    task_execution_block_v1, task_execution_cache_accept_v1
+}
+
+describe "shared execution schedule":
+    it "iterates pending work without rescanning a completed prefix":
+        val state = task_execution_schedule_v1(
+            ["SUCCEEDED", "PENDING", "RUNNING", "PENDING"], ["local", "", "local", ""])
+        expect(task_execution_next_pending_v1(state, 0)).to_equal(1)
+        expect(task_execution_next_pending_v1(state, 2)).to_equal(3)
+        expect(task_execution_next_pending_v1(state, 4)).to_equal(-1)
+        expect(task_execution_next_pending_v1(state, -1)).to_equal(-1)
+
+    it "selects eligible pending work in stable order within the cap":
+        val state = task_execution_schedule_v1(
+            ["PENDING", "PENDING", "PENDING"], ["", "", ""])
+        val selected = task_execution_ready_v1(state, [true, true, true], 2)
+        expect(selected.error).to_equal("")
+        expect(selected.indices).to_equal([0, 1])
+        val filtered = task_execution_ready_v1(state, [false, true, true], 2)
+        expect(filtered.indices).to_equal([1, 2])
+
+    it "reserves before spawn and keeps reaped work charged until acceptance":
+        var state = task_execution_schedule_v1(["PENDING", "PENDING"], ["", ""])
+        state = task_execution_dispatch_v1(state, 0, "local", 1)
+        expect(task_execution_host_active_v1(state, "local")).to_equal(1)
+        state = task_execution_reap_v1(state, 0)
+        expect(task_execution_host_active_v1(state, "local")).to_equal(1)
+        val denied = task_execution_dispatch_v1(state, 1, "local", 1)
+        expect(denied.error).to_contain("full")
+
+    it "releases in out-of-order completion while preserving independent statuses":
+        var state = task_execution_schedule_v1(
+            ["PENDING", "PENDING", "PENDING"], ["", "", ""])
+        state = task_execution_dispatch_v1(state, 0, "local", 2)
+        state = task_execution_dispatch_v1(state, 1, "local", 2)
+        state = task_execution_reap_v1(state, 1)
+        state = task_execution_finish_v1(state, 1, "SUCCEEDED")
+        expect(state.statuses).to_equal(["RUNNING", "SUCCEEDED", "PENDING"])
+        expect(task_execution_host_active_v1(state, "local")).to_equal(1)
+        state = task_execution_reap_v1(state, 0)
+        state = task_execution_finish_v1(state, 0, "FAILED")
+        expect(state.statuses).to_equal(["FAILED", "SUCCEEDED", "PENDING"])
+        expect(task_execution_host_active_v1(state, "local")).to_equal(0)
+
+    it "rewinds the cursor for a reaped retry and requires reap before retry":
+        var state = task_execution_schedule_v1(
+            ["PENDING", "PENDING"], ["", ""])
+        state = task_execution_dispatch_v1(state, 0, "local", 2)
+        state = task_execution_dispatch_v1(state, 1, "local", 2)
+        val before_reap = task_execution_retry_v1(state, 0)
+        expect(before_reap.error).to_contain("reaped")
+        state = task_execution_reap_v1(state, 0)
+        state = task_execution_retry_v1(state, 0)
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["PENDING", "RUNNING"])
+        expect(state.next_pending).to_equal(0)
+        expect(task_execution_host_active_v1(state, "local")).to_equal(1)
+        expect(task_execution_ready_v1(state, [true, true], 2).indices).to_equal([0])
+
+    it "returns a denied spawn reservation to pending without claiming reap":
+        var state = task_execution_schedule_v1(["PENDING"], [""])
+        state = task_execution_dispatch_v1(state, 0, "local", 1)
+        state = task_execution_spawn_denied_v1(state, 0)
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["PENDING"])
+        expect(state.host_ids).to_equal([""])
+        expect(task_execution_host_active_v1(state, "local")).to_equal(0)
+        val bad = task_execution_spawn_denied_v1(state, 0)
+        expect(bad.error).to_contain("reserved")
+
+    it "blocks pending work without charging a host or selecting it":
+        var state = task_execution_schedule_v1(
+            ["PENDING", "PENDING"], ["", ""])
+        state = task_execution_block_v1(state, 0)
+        expect(state.statuses).to_equal(["BLOCKED", "PENDING"])
+        expect(state.next_pending).to_equal(1)
+        expect(task_execution_ready_v1(state, [true, true], 2).indices).to_equal([1])
+        expect(task_execution_host_active_v1(state, "local")).to_equal(0)
+
+    it "accepts validated cache state without host charge and rejects active work":
+        var state = task_execution_schedule_v1(["PENDING", "PENDING"], ["", ""])
+        state = task_execution_dispatch_v1(state, 1, "local", 1)
+        val active_cache = task_execution_cache_accept_v1(state, 1, "local")
+        expect(active_cache.error).to_contain("pending")
+        expect(task_execution_host_active_v1(active_cache, "local")).to_equal(1)
+        state = task_execution_cache_accept_v1(state, 0, "local")
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["SUCCEEDED", "RUNNING"])
+        expect(state.next_pending).to_equal(1)
+        expect(task_execution_host_active_v1(state, "local")).to_equal(1)
+
+    it "rejects malformed snapshots and readiness inputs":
+        expect(task_execution_schedule_v1(["PENDING"], []).error).to_contain("length")
+        expect(task_execution_schedule_v1(["UNKNOWN"], [""]).error).to_contain("unknown")
+        expect(task_execution_schedule_v1(["RUNNING"], [""]).error).to_contain("no host")
+        val state = task_execution_schedule_v1(["PENDING"], [""])
+        expect(task_execution_ready_v1(state, [], 1).error).to_contain("length")
+        expect(task_execution_ready_v1(state, [true], -1).error).to_contain("negative")
+        expect(task_execution_ready_v1(state, [true], 0).indices).to_equal([])
+
+    it "fails closed on repeated reap and finish transitions":
+        var state = task_execution_schedule_v1(["PENDING"], [""])
+        state = task_execution_dispatch_v1(state, 0, "local", 1)
+        state = task_execution_reap_v1(state, 0)
+        val duplicate_reap = task_execution_reap_v1(state, 0)
+        expect(duplicate_reap.error).to_contain("running")
+        state = task_execution_finish_v1(state, 0, "SUCCEEDED")
+        val duplicate_finish = task_execution_finish_v1(state, 0, "FAILED")
+        expect(duplicate_finish.error).to_contain("reaped")
+
+    it "does not release a missing host charge or publish a terminal state":
+        var state = task_execution_schedule_v1(["PENDING"], [""])
+        state = task_execution_dispatch_v1(state, 0, "local", 1)
+        state = task_execution_reap_v1(state, 0)
+        state.host_active.remove("local")
+        val finished = task_execution_finish_v1(state, 0, "SUCCEEDED")
+        expect(finished.error).to_contain("charge is missing")
+        expect(finished.statuses).to_equal(["REAPED"])
+        expect(task_execution_host_active_v1(finished, "local")).to_equal(0)
+
+        val retried = task_execution_retry_v1(state, 0)
+        expect(retried.error).to_contain("charge is missing")
+        expect(retried.statuses).to_equal(["REAPED"])

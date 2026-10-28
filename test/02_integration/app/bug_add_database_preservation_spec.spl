@@ -1,0 +1,134 @@
+"""
+## Purpose and audience
+Purpose: pin the bug-add command's handling of missing, valid, duplicate, and
+unreadable bug databases through isolated temporary project roots.
+Audience: engineers maintaining the bug tracking CLI and its SDN writer.
+## Operator workflow
+Run this focused spec with the Phase 1 interpreter command used by the
+qualification lane. Each scenario starts a real `src/app/bug_add/main.spl`
+process with its working directory set to a PID-scoped `/tmp` project.
+## Compatibility and limitations
+The scenarios use host process and symlink operations and target the current
+host. They never read or write the repository's canonical bug database.
+"""
+# Lifecycle: doc/01_research/local/pure_simple_cli_completeness.md ; doc/03_plan/agent_tasks/pure_simple_cli_completeness.md
+# @manual_section: bug-add-database-preservation
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.io.process_ops.{shell}
+use std.io_runtime.{env_get}
+
+extern fn rt_getpid() -> i64
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn fixture_read(path: text) -> text:
+    val result = rt_file_read_text(path)
+    result ?? ""
+
+fn fixture_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn fixture_root() -> text:
+    "/tmp/bug_add_db_preservation_{rt_getpid()}"
+
+fn fixture_db_path(root: text) -> text:
+    "{root}/doc/08_tracking/bug/bug_db.sdn"
+
+fn run_bug_add(root: text, capture_tag: text, bug_id: text, title: text) -> (i64, text):
+    val command = "repo=$PWD; simple_bin=$SIMPLE_BINARY; if [ -z \"$simple_bin\" ]; then exit 125; fi; cd {root} && SIMPLE_PROJECT_ROOT={root} SIMPLE_LIB=\"$repo/src\" \"$simple_bin\" run \"$repo/src/app/bug_add/main.spl\" --id={bug_id} --severity=p2 --title='{title}' --file=src/app/bug_add/main.spl --date=2026-10-27"
+    val result = shell(command)
+    val capture_root = env_get("SIMPLE_BUGDB_CAPTURE_ROOT")
+    expect(capture_root != "").to_equal(true)
+    expect(fixture_write("{capture_root}/{capture_tag}.stdout.log", result.stdout)).to_equal(true)
+    expect(fixture_write("{capture_root}/{capture_tag}.stderr.log", result.stderr)).to_equal(true)
+    (result.exit_code, result.stdout + "\n" + result.stderr)
+
+fn prepare_project(root: text):
+    val result = shell("rm -rf {root} && mkdir -p {root}/doc/08_tracking/bug")
+    expect(result.exit_code).to_equal(0)
+
+fn prepare_root_without_database_parent(root: text):
+    val result = shell("rm -rf {root} && mkdir -p {root}")
+    expect(result.exit_code).to_equal(0)
+
+fn remove_project(root: text):
+    val result = shell("rm -rf {root}")
+    expect(result.exit_code).to_equal(0)
+
+describe "bug-add database preservation":
+    # @manual scenario evidence
+    it "creates a missing database and preserves unrelated rows on later writes":
+        # @req REQ-SSPEC-INTEGRATION
+        step("Verify: a successful add keeps existing unrelated database rows")
+        val root = fixture_root() + "/valid"
+        prepare_project(root)
+
+        val (first_rc, first_output) = run_bug_add(root, "valid-first", "unrelated_survivor", "Unrelated survivor")
+        expect(first_rc).to_equal(0)
+        expect(first_output.contains("Added bug unrelated_survivor")).to_equal(true)
+        val after_first = fixture_read(fixture_db_path(root))
+        expect(after_first.contains("unrelated_survivor, P2, open, Unrelated survivor")).to_equal(true)
+
+        val (second_rc, second_output) = run_bug_add(root, "valid-second", "new_record", "New record")
+        expect(second_rc).to_equal(0)
+        expect(second_output.contains("Added bug new_record")).to_equal(true)
+        val after_second = fixture_read(fixture_db_path(root))
+        expect(after_second.contains("unrelated_survivor, P2, open, Unrelated survivor")).to_equal(true)
+        expect(after_second.contains("new_record, P2, open, New record")).to_equal(true)
+
+        # Duplicate rejection must not trigger a save or replace any bytes.
+        val (duplicate_rc, duplicate_output) = run_bug_add(root, "valid-duplicate", "unrelated_survivor", "Replacement rejected")
+        expect(duplicate_rc == 0).to_equal(false)
+        expect(duplicate_output.contains("failed to add bug (id may already exist)")).to_equal(true)
+        expect(fixture_read(fixture_db_path(root))).to_equal(after_second)
+        remove_project(root)
+
+    # @manual scenario evidence
+    it "rejects an unreadable existing database without changing its bytes":
+        # @req REQ-SSPEC-INTEGRATION
+        step("Verify: an invalid existing database is preserved on rejection")
+        val root = fixture_root() + "/malformed"
+        prepare_project(root)
+        val db_path = fixture_db_path(root)
+        val malformed = "#sdn-crc32:garbage\nbugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    survivor, P2, open, Must remain, fixture.spl, 1, fixture, 2026-10-27, 2026-10-27, true\n"
+        expect(fixture_write(db_path, malformed)).to_equal(true)
+        val before = fixture_read(db_path)
+
+        val (malformed_rc, malformed_output) = run_bug_add(root, "malformed", "must_not_replace", "Must not replace")
+        expect(malformed_rc == 0).to_equal(false)
+        expect(malformed_output.contains("failed to create bug database without replacing an existing path")).to_equal(true)
+        expect(fixture_read(db_path)).to_equal(before)
+        remove_project(root)
+
+    # @manual scenario evidence
+    it "treats a dangling database symlink as an existing path entry":
+        # @req REQ-SSPEC-INTEGRATION
+        step("Verify: bug-add does not replace a dangling database symlink")
+        val root = fixture_root() + "/dangling"
+        prepare_project(root)
+        val db_path = fixture_db_path(root)
+        val target = "{root}/missing-target.sdn"
+        val link_result = shell("ln -s {target} {db_path}")
+        expect(link_result.exit_code).to_equal(0)
+
+        val (link_rc, link_output) = run_bug_add(root, "dangling-link", "must_not_replace_link", "Must not replace link")
+        expect(link_rc == 0).to_equal(false)
+        expect(link_output.contains("failed to create bug database without replacing an existing path")).to_equal(true)
+        val remains_link = shell("test -L {db_path}")
+        expect(remains_link.exit_code).to_equal(0)
+        remove_project(root)
+
+    # @manual scenario evidence
+    it "fails closed when the database parent cannot be created":
+        # @req REQ-SSPEC-INTEGRATION
+        step("Verify: an exclusive initial publish does not create a missing parent")
+        val root = fixture_root() + "/missing-parent"
+        prepare_root_without_database_parent(root)
+        val (missing_parent_rc, missing_parent_output) = run_bug_add(root, "missing-parent", "must_not_create_without_parent", "Must not create without parent")
+        expect(missing_parent_rc == 0).to_equal(false)
+        expect(missing_parent_output.contains("failed to create bug database without replacing an existing path")).to_equal(true)
+        val still_missing = shell("test ! -e {fixture_db_path(root)} && test ! -L {fixture_db_path(root)}")
+        expect(still_missing.exit_code).to_equal(0)
+        remove_project(root)

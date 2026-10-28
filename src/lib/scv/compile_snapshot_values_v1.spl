@@ -1,0 +1,113 @@
+# Shared snapshot values and metadata helpers; no filesystem deletion authority.
+use app.io.mod.{file_exists, file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.{compile_source_inventory_identity_cmp_v1}
+
+val SCV_COMPILE_METADATA_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
+
+export ScvCompileSnapshotV1, scv_compile_snapshot_invalid_v1
+export scv_compile_snapshot_sorted_unique_v1, scv_compile_snapshot_revision_id_v1
+export scv_compile_snapshot_provenance_v1, scv_compile_snapshot_receipt_v1
+export scv_compile_snapshot_read_text_v1
+
+struct ScvCompileSnapshotV1:
+    valid: bool
+    reason: text
+    revision_id: text
+    commit_id: text
+    tree_id: text
+    inventory_digest: text
+    inventory_count: i64
+    snapshot_root: text
+    provenance_path: text
+    receipt_path: text
+    source_drifted: bool
+
+fn scv_compile_snapshot_invalid_v1(reason: text) -> ScvCompileSnapshotV1:
+    ScvCompileSnapshotV1(
+        valid: false,
+        reason: reason,
+        revision_id: "",
+        commit_id: "",
+        tree_id: "",
+        inventory_digest: "",
+        inventory_count: 0,
+        snapshot_root: "",
+        provenance_path: "",
+        receipt_path: "",
+        source_drifted: false
+    )
+
+fn scv_compile_snapshot_sorted_unique_v1(values: [text]) -> [text]:
+    var sorted = values
+    if sorted.len() > 1:
+        var start = sorted.len() / 2
+        while start > 0:
+            start = start - 1
+            scv_compile_snapshot_sift_down_v1(sorted, start, sorted.len())
+        var end = sorted.len()
+        while end > 1:
+            end = end - 1
+            val temporary = sorted[0]
+            sorted[0] = sorted[end]
+            sorted[end] = temporary
+            scv_compile_snapshot_sift_down_v1(sorted, 0, end)
+    var result: [text] = []
+    for value in sorted:
+        if result.len() == 0 or result[result.len() - 1] != value:
+            result = result.push(value)
+    result
+
+fn scv_compile_snapshot_sift_down_v1(
+    mut values: [text], root_index: i64, heap_len: i64
+):
+    var root = root_index
+    while true:
+        val left = root * 2 + 1
+        if left >= heap_len:
+            return
+        var largest = root
+        if compile_source_inventory_identity_cmp_v1(values[largest], values[left]) < 0:
+            largest = left
+        val right = left + 1
+        if right < heap_len and compile_source_inventory_identity_cmp_v1(values[largest], values[right]) < 0:
+            largest = right
+        if largest == root:
+            return
+        val temporary = values[root]
+        values[root] = values[largest]
+        values[largest] = temporary
+        root = largest
+
+fn scv_compile_snapshot_revision_id_v1(
+    tree_id: text, inventory_digest: text
+) -> text:
+    "scv-revision-v1-" + sha256_text(
+        "simple/scv-compile-revision/v1|{tree_id}|{inventory_digest}")
+
+fn scv_compile_snapshot_provenance_v1(
+    revision_id: text, commit_id: text, tree_id: text,
+    inventory_digest: text, inventory_count: i64
+) -> text:
+    [
+        "simple-scv-compile-snapshot-v1",
+        "revision={revision_id}",
+        "commit={commit_id}",
+        "tree={tree_id}",
+        "inventory={inventory_digest}",
+        "count={inventory_count}"
+    ].join("\n")
+
+fn scv_compile_snapshot_receipt_v1(
+    provenance: text, revision_id: text
+) -> text:
+    provenance + "\nsnapshot=snapshots/{revision_id}"
+
+fn scv_compile_snapshot_read_text_v1(path: text) -> text:
+    if not file_exists(path):
+        return ""
+    val loaded = file_read_regular_no_follow_bounded(
+        path, SCV_COMPILE_METADATA_MAX_BYTES_V1)
+    if val Err(_) = loaded:
+        return ""
+    loaded.unwrap()

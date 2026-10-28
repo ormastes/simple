@@ -40,6 +40,12 @@ struct DbGitCandidatePublication:
     candidate_oid: text
     observed_head: text
 
+struct DbGitCandidateTopicAttempt:
+    # `acknowledged` is only the local process exit result. The gateway must
+    # read back the exact repository/ref/OID before reporting publication.
+    code: text
+    candidate_oid: text
+
 # Private in-process ownership. Public struct fields never authorize cleanup or
 # publication. Durable recovery imports require a separate authenticated owner.
 var _db_candidate_owned_scratch: [HostFinalPath] = []
@@ -321,12 +327,45 @@ fn db_git_candidate_publish(candidate: DbGitPreparedCandidate, lease_held: fn() 
         code = if after.observed_head == candidate.expected_head: "not_published" else: "stale_head"
     Ok(DbGitCandidatePublication(code: code, candidate_oid: candidate.candidate_oid, observed_head: after.observed_head))
 
+fn _db_candidate_topic_ref_valid(topic_ref: text) -> bool:
+    if topic_ref.len() != 47 or not topic_ref.starts_with("refs/heads/scv/"): return false
+    val identifier = topic_ref[15:]
+    if identifier.len() != 32: return false
+    for i in 0..identifier.len():
+        val c = identifier.char_code_at(i)
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)): return false
+    true
+
+# Create one deterministic SCV topic branch without a general force update.
+# The explicit empty expected value is Git's atomic "ref must not exist"
+# lease condition. Do not replace this with --force, a + refspec, or a
+# non-force push: a concurrent creation must be rejected even if it is an
+# ancestor of this candidate. A return value never proves remote publication;
+# the gateway performs authenticated exact-ref/OID readback after this attempt.
+fn db_git_candidate_publish_topic_create(candidate: DbGitPreparedCandidate,
+        topic_ref: text, lease_held: fn() -> bool) -> Result<DbGitCandidateTopicAttempt, text>:
+    if not _db_candidate_topic_ref_valid(topic_ref): return Err("CandidateTopicRefDenied")
+    _db_candidate_verify(candidate)?
+    _db_candidate_network_config_safe(candidate.scratch)?
+    if lease_held(): return Err("CandidateNetworkForbiddenUnderLease")
+    val effect = _db_candidate_run(candidate.scratch, ["push", "--porcelain", "--no-verify",
+        "--force-with-lease={topic_ref}:", "--", candidate.remote,
+        "{candidate.candidate_oid}:{topic_ref}"])
+    if lease_held():
+        return Ok(DbGitCandidateTopicAttempt(code: "transport_unknown",
+            candidate_oid: candidate.candidate_oid))
+    val code = match effect:
+        case Ok(_): "acknowledged"
+        case Err(_): "transport_unknown"
+    Ok(DbGitCandidateTopicAttempt(code: code, candidate_oid: candidate.candidate_oid))
+
 fn db_git_candidate_cleanup(candidate: DbGitPreparedCandidate) -> Result<bool, text>:
     if not _db_candidate_registered(candidate):
         return Err("CandidateNotOwned")
     _db_candidate_cleanup_owned(candidate.scratch)
 
 export DbGitCandidateFile, DbGitCandidateRequest, DbGitPreparedCandidate, DbGitCandidatePublication
+export DbGitCandidateTopicAttempt, db_git_candidate_publish_topic_create
 export db_git_candidate_validate, db_git_candidate_prepare, db_git_candidate_publish, db_git_candidate_cleanup
 
 # Preserve exact commit bytes for restart: commit-tree timestamps cannot be

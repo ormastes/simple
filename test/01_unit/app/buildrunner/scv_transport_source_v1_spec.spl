@@ -1,0 +1,82 @@
+"""Exercise real transport input copies with a nonspawning process port.
+
+No OS worker/compiler is launched. These assert staged bytes and refusal before
+spawn; they are not execution, sandbox, timing or native qualification evidence.
+"""
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.transport.{builder_transport_start_v1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildInputV1}
+use app.io.file_ops.{secure_temp_dir_raw, file_atomic_write, file_read, file_hash_sha256}
+use app.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.buildrunner.scv_cli_fixture_v1.{setup_scv_cli_task_v1}
+
+var scv_copy_spawn_count = 0
+
+fn scv_copy_no_spawn(program: text, digest: text, args: [text], root: text) -> Result<i64, text>:
+    scv_copy_spawn_count = scv_copy_spawn_count + 1
+    Ok(31337)
+
+fn scv_copy_no_wait(token: i64, timeout: i64) -> Result<i64, text>: Err("no process exists")
+fn scv_copy_no_terminate(token: i64) -> Result<bool, text>: Err("no process exists")
+fn scv_copy_directory(path: text) -> bool: path != ""
+
+fn scv_copy_port() -> BuilderProcessPortV1:
+    BuilderProcessPortV1(scv_copy_no_spawn, scv_copy_no_wait, scv_copy_no_terminate, scv_copy_directory)
+
+fn setup_scv_copy_fixture() -> (text, BuildTaskV1, BuildHostV1):
+    val root = secure_temp_dir_raw("/tmp", "scv-source-copy-")
+    expect(root.len()).to_be_greater_than(0)
+    for path in ["live/src", "frozen/src", "state", "live/task-context", "live/tools"]:
+        expect(dir_create_all(root + "/" + path)).to_equal(true)
+    expect(file_atomic_write(root + "/live/src/main.spl", "live edited source\n")).to_equal(true)
+    expect(file_atomic_write(root + "/frozen/src/main.spl", "frozen source\n")).to_equal(true)
+    expect(file_atomic_write(root + "/live/task-context/compile.sdn", "ordinary context bytes\n")).to_equal(true)
+    expect(file_atomic_write(root + "/live/tools/compiler", "counting port producer\n")).to_equal(true)
+    var task = setup_scv_cli_task_v1()
+    task.producer_digest = file_hash_sha256(root + "/live/tools/compiler")
+    task.inputs = [BuildInputV1(path: "src/main.spl", digest: sha256_text("frozen source\n")),
+        BuildInputV1(path: "task-context/compile.sdn", digest: sha256_text("ordinary context bytes\n"))]
+    val host = BuildHostV1(id: "local", transport: "local", endpoint: "", workspace: root,
+        worker_program: root + "/live/tools/compiler", worker_digest: task.producer_digest, slots: 1)
+    scv_copy_spawn_count = 0
+    (root, task, host)
+
+describe "Existing transport selects exact frozen source inputs":
+    it "copies selected bytes from frozen root and ordinary inputs from their original root":
+        val (root, task, host) = setup_scv_copy_fixture()
+        val attempt = builder_transport_start_v1(task, host, root + "/live", root + "/state", scv_copy_port(), root + "/frozen", ["src/main.spl"])
+        expect(attempt.error).to_equal("")
+        expect(file_read(attempt.local_root + "/work/src/main.spl")).to_equal("frozen source\n")
+        expect(file_read(attempt.local_root + "/work/task-context/compile.sdn")).to_equal("ordinary context bytes\n")
+        expect(file_hash_sha256(attempt.local_root + "/producer.exe")).to_equal(task.producer_digest)
+        expect(scv_copy_spawn_count).to_equal(1)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "refuses altered frozen bytes before calling the spawn port":
+        val (root, task, host) = setup_scv_copy_fixture()
+        expect(file_atomic_write(root + "/frozen/src/main.spl", "tampered frozen bytes\n")).to_equal(true)
+        val attempt = builder_transport_start_v1(task, host, root + "/live", root + "/state", scv_copy_port(), root + "/frozen", ["src/main.spl"])
+        expect(attempt.error).to_contain("source digest mismatch")
+        expect(scv_copy_spawn_count).to_equal(0)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "rejects incomplete duplicate unmatched and traversing frozen selectors":
+        val (root, task, host) = setup_scv_copy_fixture()
+        for paths in [[], ["src/main.spl", "src/main.spl"], ["missing.spl"], ["../escape"]]:
+            val attempt = builder_transport_start_v1(task, host, root + "/live", root + "/state", scv_copy_port(), root + "/frozen", paths)
+            expect(attempt.error != "").to_equal(true)
+        expect(scv_copy_spawn_count).to_equal(0)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "keeps default transport source selection unchanged":
+        val (root, original, host) = setup_scv_copy_fixture()
+        var task = original
+        task.inputs[0] = BuildInputV1(path: "src/main.spl", digest: sha256_text("live edited source\n"))
+        val attempt = builder_transport_start_v1(task, host, root + "/live", root + "/state", scv_copy_port())
+        expect(attempt.error).to_equal("")
+        expect(file_read(attempt.local_root + "/work/src/main.spl")).to_equal("live edited source\n")
+        expect(scv_copy_spawn_count).to_equal(1)
+        expect(dir_remove_all(root)).to_equal(true)

@@ -10,6 +10,7 @@
 # This module imports only the context/option types so the parse lane stays
 # off the back-half closure. The original homes re-export both names.
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_tldr_import_flag_v1.{tldr_imports_enabled_v1}
 use compiler.common.driver_core_types.{CompileMode, CompileOptions}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
@@ -20,6 +21,7 @@ use compiler.driver.driver_streaming_surface_policy.{
     driver_low_memory_streaming_requested_values,
     driver_streaming_entry_ready_values
 }
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_unit_active_v1}
 
 # Keep the nullable façade at this decision boundary: unset and explicit-empty
 # are equivalent for the current flags, but callers retain the option shape so
@@ -81,6 +83,13 @@ pub fn driver_source_matches_entry(
         module_name == "app.cli.bootstrap_main"
 
 pub fn driver_streaming_surface_route(ctx: CompileContext) -> i64:
+    # The frozen TLDR Check caller carries surfaces through phase 3 just like
+    # the native streaming route. All carrier/reclaim decisions use this gate.
+    if tldr_imports_enabled_v1() and ctx.options.mode == CompileMode.Check:
+        if ctx.config.contains_key("coverage"): return -3
+        if driver_config_text_or(ctx, "mcdc_mode", "off") != "off": return -4
+        if ctx.options.backend == "vhdl": return -5
+        return 1
     val requested = driver_streaming_surface_requested_values(
         driver_env_get_opt("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "",
         driver_env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
@@ -91,7 +100,8 @@ pub fn driver_streaming_surface_route(ctx: CompileContext) -> i64:
                 driver_source_entry_closure_enabled(ctx)),
             ctx.config.contains_key("coverage"),
             driver_config_text_or(ctx, "mcdc_mode", "off") == "off",
-            ctx.options.backend == "vhdl")
+            ctx.options.backend == "vhdl") or
+        native_file_worker_unit_active_v1()
     # compiler_source_entry is published before phase routing by ordinary
     # native-build as well as bootstrap. Do not require a bootstrap-only flag
     # to honor an explicit request for bounded per-file parser ownership.

@@ -1,0 +1,137 @@
+# SCV host capture V1: read-only source admission plus fail-closed mutations.
+#
+# The current filesystem layer can open a file beneath a retained root without
+# following links, but does not expose descriptor-relative mutation. Copy, move
+# and delete therefore refuse without touching user paths. Read-only capture
+# places admitted bytes into the existing SCV content-addressed chunk owner and
+# verifies the object by reading it back. No event-journal durability claim is
+# made by this bounded API.
+
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+use std.common.io.read_only_file_view.{read_only_file_view_read_beneath_bounded_v1}
+use std.nogc_sync_mut.io.path_identity.{path_entry_present, path_final_existing}
+use app.io.mod.{file_is_regular_no_follow, file_read_regular_no_follow_bounded_bytes}
+use std.scv.core.{scv_chunk_path}
+use std.scv.store.{scv_content_id_for_u8, scv_repo_exists, scv_write_chunk_u8}
+
+val SCV_HOST_CAPTURE_MAX_BYTES_V1: i64 = 16777216
+
+struct ScvHostOperationReceiptV1:
+    status: text
+    op_id: text
+    kind: text
+    source: text
+    destination: text
+    object_id: text
+    before_sha256: text
+    after_sha256: text
+    byte_count: i64
+    archive_path: text
+    detail: text
+
+fn _host_receipt_v1(status: text, op_id: text, kind: text, source: text,
+                    destination: text, object_id: text, before_sha256: text,
+                    after_sha256: text, byte_count: i64, archive_path: text,
+                    detail: text) -> ScvHostOperationReceiptV1:
+    ScvHostOperationReceiptV1(status: status, op_id: op_id, kind: kind,
+        source: source, destination: destination, object_id: object_id,
+        before_sha256: before_sha256, after_sha256: after_sha256,
+        byte_count: byte_count, archive_path: archive_path, detail: detail)
+
+fn _host_id_valid_v1(value: text) -> bool:
+    if value == "" or value.len() > 80: return false
+    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+    for index in 0..value.len():
+        if not allowed.contains(value[index:index + 1]): return false
+    true
+
+fn _host_relative_valid_v1(value: text) -> bool:
+    if value == "" or value.starts_with("/") or value.contains("\\") or value.contains(":") or value.contains("\0"):
+        return false
+    for component in value.split("/"):
+        if component == "" or component == "." or component == ".." or component == ".scv":
+            return false
+        val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        for index in 0..component.len():
+            if not allowed.contains(component[index:index + 1]): return false
+    true
+
+fn _host_store_dirs_valid_v1(root: text) -> bool:
+    val control = "{root}/.scv"
+    val objects = "{control}/objects"
+    val chunks = "{objects}/chunks"
+    val control_real = match path_final_existing(control):
+        Ok(value): value.path
+        Err(_): return false
+    if control_real != control: return false
+    val objects_real = match path_final_existing(objects):
+        Ok(value): value.path
+        Err(_): return false
+    if objects_real != objects: return false
+    val chunks_real = match path_final_existing(chunks):
+        Ok(value): value.path
+        Err(_): return false
+    chunks_real == chunks
+
+fn _host_capture_refusal_v1(op_id: text, kind: text, source: text, destination: text) -> ScvHostOperationReceiptV1:
+    _host_receipt_v1("unsupported", op_id, kind, source, destination, "", "", "", 0, "",
+        "descriptor_relative_mutation_unavailable; no host path was changed")
+
+fn scv_host_capture_read_v1(root: text, source: text) -> ScvHostOperationReceiptV1:
+    if root == "" or not _host_relative_valid_v1(source):
+        return _host_receipt_v1("failed", "", "capture", source, "", "", "", "", 0, "",
+            "workspace root or relative source path is invalid")
+    val canonical_root = match path_final_existing(root):
+        Ok(value): value.path
+        Err(error): return _host_receipt_v1("failed", "", "capture", source, "", "", "", "", 0, "",
+            "workspace root resolution failed: {error}")
+    val scv_path = "{canonical_root}/.scv"
+    val canonical_scv = match path_final_existing(scv_path):
+        Ok(value): value.path
+        Err(error): return _host_receipt_v1("failed", "", "capture", source, "", "", "", "", 0, "",
+            "SCV control directory resolution failed: {error}")
+    if canonical_scv != scv_path or not scv_repo_exists(canonical_root) or not _host_store_dirs_valid_v1(canonical_root):
+        return _host_receipt_v1("failed", "", "capture", source, "", "", "", "", 0, "",
+            "SCV workspace or content-store ancestors are absent or not real canonical directories")
+    val bytes = match read_only_file_view_read_beneath_bounded_v1(canonical_root, source, SCV_HOST_CAPTURE_MAX_BYTES_V1):
+        Ok(value): value
+        Err(error): return _host_receipt_v1("failed", "", "capture", source, "", "", "", "", 0, "",
+            "source admission failed: {error}")
+    val sha = sha256_u8_fast_hex(bytes)
+    val expected_id = scv_content_id_for_u8(bytes)
+    val expected_path = scv_chunk_path(canonical_root, expected_id)
+    val expected_entry = match path_entry_present(expected_path):
+        Ok(value): value
+        Err(error): return _host_receipt_v1("failed", "", "capture", source, "", "", sha, "", bytes.len(), "",
+            "content-store leaf preflight failed: {error}")
+    if expected_entry and not file_is_regular_no_follow(expected_path):
+        return _host_receipt_v1("capture_write_failed", "", "capture", source, "", "", sha, "", bytes.len(), "",
+            "existing content-store leaf is not a regular file")
+    val object_id = match scv_write_chunk_u8(canonical_root, bytes):
+        Ok(value): value
+        Err(error): return _host_receipt_v1("capture_write_failed", "", "capture", source, "", "", sha, "", bytes.len(), "",
+            "SCV chunk owner refused capture: {error}")
+    if not _host_store_dirs_valid_v1(canonical_root) or not file_is_regular_no_follow(scv_chunk_path(canonical_root, object_id)):
+        return _host_receipt_v1("captured_not_verified", "", "capture", source, "", object_id, sha, "", bytes.len(), "",
+            "content-store directory identity changed during capture")
+    val object_bytes = match file_read_regular_no_follow_bounded_bytes(scv_chunk_path(canonical_root, object_id), SCV_HOST_CAPTURE_MAX_BYTES_V1):
+        Ok(value): value
+        Err(error): return _host_receipt_v1("captured_not_verified", "", "capture", source, "", object_id, sha, "", bytes.len(), "",
+            "chunk was written but readback failed: {error}")
+    if object_bytes != bytes or sha256_u8_fast_hex(object_bytes) != sha:
+        return _host_receipt_v1("captured_not_verified", "", "capture", source, "", object_id, sha,
+            sha256_u8_fast_hex(object_bytes), bytes.len(), "", "chunk readback did not match admitted source bytes")
+    _host_receipt_v1("captured_not_durable", "", "capture", source, "", object_id, sha, sha,
+        bytes.len(), "", "exact_chunk_readback; durability_not_claimed; journal_not_claimed")
+
+fn scv_host_copy_v1(root: text, op_id: text, source: text, destination: text) -> ScvHostOperationReceiptV1:
+    _host_capture_refusal_v1(op_id, "copy", source, destination)
+
+fn scv_host_move_v1(root: text, op_id: text, source: text, destination: text) -> ScvHostOperationReceiptV1:
+    _host_capture_refusal_v1(op_id, "move", source, destination)
+
+fn scv_host_delete_v1(root: text, op_id: text, path: text) -> ScvHostOperationReceiptV1:
+    _host_capture_refusal_v1(op_id, "delete", path, "")
+
+export ScvHostOperationReceiptV1
+export scv_host_capture_read_v1, scv_host_copy_v1, scv_host_move_v1, scv_host_delete_v1

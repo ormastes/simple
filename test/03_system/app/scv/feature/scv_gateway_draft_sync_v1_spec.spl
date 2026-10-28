@@ -1,0 +1,98 @@
+# @req REQ-SCV-GATEWAY-DRAFT-SYNC-001
+# @cover src/app/scv/gateway_draft_service_v1.spl 80%
+# @cover src/app/scv/gateway_draft_client_v1.spl 80%
+# Real loopback HTTP through the production service handler and native bounded client.
+use std.spec.*
+use app.scv.gateway_draft_service_v1.*
+use app.scv.gateway_draft_client_v1.*
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1, scv_draft_blob_get_v1}
+use std.scv.gateway_draft_protocol_v1.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer}
+use std.nogc_sync_mut.io.tcp.{TcpListener}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, directory_fsync}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.concurrent.thread.{thread_spawn_with_args}
+
+val SCV_DRAFT_LIVE_TOKEN = "abcdefghijklmnopqrstuvwxyz012345"
+
+fn scv_draft_live_credential_v1() -> Result<text, text>:
+    Ok(SCV_DRAFT_LIVE_TOKEN)
+
+fn scv_draft_live_config_v1(root: text) -> ScvGatewayDraftConfigV1:
+    val grant = ScvGatewayDraftGrantConfigV1(repository: "repo-alpha", principal_id: "principal-1",
+        bearer_token_env: "SCV_DRAFT_LIVE_TOKEN", can_read: true, can_write: true)
+    ScvGatewayDraftConfigV1(listen_host: "127.0.0.1", listen_port: 0, store_root: root, grants: [grant])
+
+fn scv_draft_live_grant_v1() -> ScvGatewayDraftGrantV1:
+    ScvGatewayDraftGrantV1(repository: "repo-alpha", principal_id: "principal-1",
+        bearer_token: SCV_DRAFT_LIVE_TOKEN, can_read: true, can_write: true)
+
+fn scv_draft_live_client_v1(endpoint: text) -> ScvGatewayDraftClientConfigV1:
+    ScvGatewayDraftClientConfigV1(endpoint: endpoint, repository: "repo-alpha", principal_id: "principal-1",
+        allow_loopback_http: true, timeout_ms: 5000, tls_address: "")
+
+fn scv_draft_live_exchange_v1(root: text, request: ScvGatewayDraftRequestV1) -> Result<ScvGatewayDraftResponseV1, text>:
+    var listener = match TcpListener.bind("127.0.0.1:0"):
+        case Ok(value): value
+        case Err(_): return Err("live_bind_failed")
+    val address = match listener.local_addr():
+        case Ok(value): value
+        case Err(_):
+            val _ = listener.close()
+            return Err("live_address_failed")
+    val port = address.split(":")[1]
+    val config = scv_draft_live_config_v1(root)
+    val grant = scv_draft_live_grant_v1()
+    val router = scv_gateway_draft_router_v1(config, [grant])
+    var server = SimpleHttpServer.new("127.0.0.1", 0, router)
+    server = server.with_policy(scv_gateway_draft_server_policy_v1("system BDD loopback fixture")?)
+    val worker = thread_spawn_with_args(server, listener, \server_value, listener_value:
+        var owned_server: SimpleHttpServer = server_value
+        var owned_listener: TcpListener = listener_value
+        match owned_listener.accept_timeout(6000):
+            case Err(_): -1
+            case Ok(connection):
+                if not owned_server.admission.try_acquire():
+                    val _ = connection.close()
+                    -1
+                else:
+                    SimpleHttpServer.handle_connection_admitted(owned_server, connection)
+                    0
+    )
+    val client_config = scv_draft_live_client_v1("http://127.0.0.1:{port}/scv/draft/v1")
+    val result = scv_gateway_draft_client_call_v1(client_config, request, scv_draft_live_credential_v1)
+    val joined = worker.join()
+    val _ = listener.close()
+    if joined != 0: return Err("live_server_failed")
+    result
+
+describe "SCV native bounded draft transfer over loopback HTTP":
+    # @manual scenario evidence
+    it "persists and reads binary draft bytes through the native client and actual server socket":
+        # @req REQ-SCV-GATEWAY-DRAFT-SYNC-001
+        step("setup a private pre-provisioned draft root and one host-mapped grant")
+        val root = secure_temp_dir_raw("/tmp", "scv-draft-live-v1-")
+        expect(root.len()).to_be_greater_than(0)
+        expect(directory_fsync(root)).to_equal(true)
+        expect(directory_fsync("/tmp")).to_equal(true)
+        val bytes: [u8] = [0u8, 255u8, 10u8, 128u8]
+        val digest = sha256_u8_hex(bytes)
+        val put = ScvGatewayDraftRequestV1(version: 1, id: "live-1", repository: "repo-alpha",
+            method: "put", request_id: "retry-live-1", content_sha256: digest, bytes: bytes)
+        step("exercise a real bounded HTTP PUT and retain its durable receipt")
+        val receipt = scv_draft_live_exchange_v1(root, put).unwrap()
+        expect(receipt.status).to_equal("ok")
+        expect(receipt.principal_id).to_equal("principal-1")
+        expect(receipt.state).to_equal("local_durable")
+        expect(receipt.content_sha256).to_equal(digest)
+        step("retry the exact PUT, then fetch the same digest over a new socket")
+        expect(scv_draft_live_exchange_v1(root, put).unwrap()).to_equal(receipt)
+        val get = ScvGatewayDraftRequestV1(version: 1, id: "live-2", repository: "repo-alpha",
+            method: "get", request_id: "read-live-1", content_sha256: digest, bytes: [])
+        val readback = scv_draft_live_exchange_v1(root, get).unwrap()
+        expect(readback.state).to_equal("local_readback")
+        expect(readback.payload).to_equal(bytes)
+        expect(scv_draft_blob_get_v1(root, ScvDraftBlobAdmittedScopeV1(repository_id: "repo-alpha",
+            principal_id: "principal-1", can_read: true, can_write: true), digest).unwrap()).to_equal(bytes)
+        expect(dir_remove_all(root)).to_equal(true)

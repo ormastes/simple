@@ -1,0 +1,52 @@
+schema = "simple.parallel-atomic-i64-lock-free-evidence.v1"
+status = "focused-provider-pass-simple-import-unrun"
+source_base_commit = "dc0deaa6b57c85cb80cc2a09fed649b621157a3d"
+source_patch_sha256 = "52613f3b8bcedf980b1ead907e3e4c29a1dfc7b594c4357c430cd57ee626b046"
+host_architecture = "aarch64"
+simple_ffi_import = "UNRUN"
+unsupported_no_atomic64_build = "UNQUALIFIED"
+unsupported_no_atomic64_note = "The new Rust hook returns 0 when target_has_atomic=64 is absent, but parallel.rs already imports and uses AtomicI64 unconditionally; this change does not claim the full module builds on targets without 64-bit atomics."
+output_provenance = "Terminal output captured in the agent session only; no raw log file was persisted."
+
+abi:
+  symbol: "rt_par_atomic_i64_is_lock_free"
+  c_signature: "int64_t (int64_t*)"
+  rust_signature: "unsafe extern C fn(*mut i64) -> i64"
+  simple_signature: "extern fn(addr: i64) -> i64"
+  result: "1=supported, 0=null/misaligned/unsupported layout or target"
+  pointer_contract: "Caller supplies a live atomic i64 cell; the capability hook does not dereference it."
+  providers:
+    - "C11 atomic_is_lock_free in src/runtime/runtime_native.c; declared in runtime.h"
+    - "Rust target_has_atomic=64 with AtomicI64 layout check; #[no_mangle] and lib.rs re-export"
+    - "Simple unsafe FFI declaration in nogc_sync_mut.atomic; re-exported by nogc_async_mut.atomic"
+
+red_run:
+  argv: "cc -std=gnu11 -Werror=implicit-function-declaration -Isrc/runtime -fsyntax-only test/01_unit/runtime/core_parallel_atomics_test.c"
+  exit_code: 1
+  diagnostic: "implicit declaration of function ‘rt_par_atomic_i64_is_lock_free’"
+  interpretation: "Test-first compile failed while the runtime header/provider symbol was absent."
+
+c_green_run:
+  argv: "cc -O0 -std=gnu11 -Werror=implicit-function-declaration -Isrc/runtime -ffunction-sections -fdata-sections src/runtime/runtime_native.c test/01_unit/runtime/core_parallel_atomics_test.c -Wl,--gc-sections -pthread -o /tmp/par-atomic-i64-capability-test && /tmp/par-atomic-i64-capability-test"
+  exit_code: 0
+  output: "PASS core parallel atomics: lock-free capability ABI, null/alignment rejection, old values, cmpxchg failure, signed boundaries, 160000 contended increments"
+  binary_sha256: "b359a5a327ad7dca6e5b7bcb297ddcfe937798f1c330f4bf77225600cdde5ca9"
+  assertions:
+    - "NULL returns 0"
+    - "A misaligned address returns 0 when the target has a stricter-than-byte atomic alignment"
+    - "A live atomic cell result equals C11 atomic_is_lock_free after raw 8-byte layout checks"
+    - "Existing raw atomic old-value and 160000 contended-increment assertions still pass"
+
+rust_green_run:
+  argv: "cargo test --manifest-path src/compiler_rust/runtime/Cargo.toml --lib parallel::tests::test_atomic_i64_lock_free_capability_abi -- --exact"
+  exit_code: 0
+  result: "1 passed; 0 failed; 1447 filtered out"
+  build_warnings: "33 existing runtime crate warnings; no warning attributed to the new hook"
+  assertions:
+    - "NULL returns 0"
+    - "A misaligned address returns 0 when align_of::<AtomicI64>() > 1"
+    - "A live cell returns 1 only when the target advertises 64-bit atomics and AtomicI64 is size 8/alignment at most 8"
+
+format_checks:
+  rustfmt: "rustfmt --check src/compiler_rust/runtime/src/parallel.rs; exit 0"
+  diff_check: "git -c core.whitespace=cr-at-eol diff --check; exit 0"

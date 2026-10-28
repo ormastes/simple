@@ -196,3 +196,48 @@ For a failing live run, stop at the first trustworthy boundary, preserve the
 receipt, fix the pure-Simple owner, and verify a distinct root-cause cycle. The
 lane has a maximum of three distinct fix/verify cycles. Do not rerun an identical
 failed command; after the third cycle, stop and report the remaining blocker.
+
+## Four executable Hello linkage sanity
+
+When a campaign requests four Hello linkage checks, build and execute four
+separate binaries: one directly from source, one linked from two objects, one
+linked with a static library, and one linked with a shared library. Use the four-binary sanity matrix for Phase 1, 2, or 3; confirm the
+selected compiler, runtime, link inputs, and expected output before launching it. Do not substitute the
+four different frontend probes (`p2_add`, MIR retention, module naming, and
+positional Hello) for this linkage matrix.
+
+Invoke `scripts/bootstrap/hello-sanity-matrix.shs` from Bash or the
+`hello-sanity-matrix.cmd` entrypoint from Windows with `--compiler`,
+`--phase 1|2|3`, `--source-root`, `--runtime-path`, and a new `--output`
+directory. Use the compiler belonging to the phase being checked.
+
+The four independent jobs may read the same frozen source and producer in
+parallel. Give each job distinct output and log paths; isolate writable caches
+only where concurrent writers would conflict. Retain the compiler and runtime
+identities, link inputs and commands, exit statuses, and each executable's
+actual output. A library or object build alone is not an executable Hello pass.
+Run Hello through the interpreter owned by the selected compiler where available.
+Phase 2 skips this case by configuration and reports `SKIPPED`; a separate CLI
+is not evidence for that compiler. Other phases report an unavailable interpreter
+as unsupported rather than passing it.
+The phase capability configuration is:
+
+| Phase | Interpreter | BuildRunner |
+| --- | --- | --- |
+| 1 | Required; seed `run` with `SIMPLE_EXECUTION_MODE=interpret` | Skipped |
+| 2 | Skipped; minimal compiler has no `run` | Required |
+| 3 | Required; qualify a full CLI built by the exact phase 3 compiler | Required |
+
+The native matrix reports BuildRunner as `UNRUN` when required: separate
+BuildRunner tasks must execute and verify the four forms for both backends.
+For Phase 2, a matrix `PASS` (and exit code 0) certifies only its four native
+Hello lanes plus the configured interpreter skip. It does not mean the Phase 2
+sanity gate or compiler phase is complete while BuildRunner remains `UNRUN`.
+The current native matrix cannot yet accept a separately receipt-bound phase 3
+full CLI, so a minimal compiler's rejected interpreter case remains unsupported;
+phase 3 interpreter qualification is pending that owner integration. Bind the
+full CLI to its phase 3 producer, source and runtime, then use the reviewed
+full-CLI sanity before interpreter execution. Never borrow an ambient CLI.
+
+For Phase 2, retain a separate four-lane result for each requested LLVM and
+Cranelift backend. These diagnostics do not replace formal admission receipts.

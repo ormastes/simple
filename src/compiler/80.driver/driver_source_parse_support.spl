@@ -1,0 +1,455 @@
+# CompilerDriver phase-2 source parsing.
+
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use std.io_runtime.{env_set, exit}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_native_objectless_proof.{driver_native_parser_can_persist_objectless, driver_native_objectless_proof_key, driver_native_retained_objectless_proofs}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.native_source_interface_index.{NativeSourceInterfaceIndexV1}
+use compiler.driver.cache.native_module_input_fact_snapshots.{native_module_input_fact_snapshots_v1}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
+use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v1}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.driver_core_modes.{CompileMode}
+use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1, parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1,
+    parse_full_frontend_target_receipted_in_borrowed_scope_v1}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1,
+    parse_full_frontend_uncached_in_borrowed_scope_with_advisory_policy_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
+use compiler.frontend.core.parser_preprocessor.{pp_declare_parse_scope}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
+use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
+use compiler.frontend.effect_registry.{effect_registry_promote_transient_owner}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_promote_transient_owner}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_promote_transient_owner}
+use compiler.core.ast.{ast_reset, ast_prepare_persistent_owner_v1}
+use compiler.core.ast_coverage_inventory.{
+    compiler_coverage_inventory_promote_transient_owner,
+    compiler_coverage_inventory_release_parse_scratch}
+use compiler.frontend.desugar.placeholder_lambda.{placeholder_release_parse_scratch}
+use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
+use compiler.core.parser.{par_had_error_get}
+use compiler.core.parser.{parser_promote_transient_owners, parser_initialization_generation_v1}
+use compiler.core.parser_decls.{parser_declaration_metadata_promote_transient_owner}
+use compiler.frontend.resource_registry.{resource_registry_promote_transient_owner}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_selected_v1,
+    worker_surface_seed_v1, worker_surface_closure_v1, worker_surface_ready_v1,
+    worker_surface_restrict_claims_v1, worker_surface_text_v1, worker_surface_counters_v1,
+    worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
+    worker_hir_restrict_loads_v1, source_path_by_canonical_map_v1,
+    worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_v1}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1, unit_tldr_imports_enabled_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{UnitTldrPlanV1, unit_tldr_plan_v1, unit_tldr_empty_plan_v1,
+    unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1, unit_tldr_log_line_v1}
+use compiler.driver.driver_tldr_import_route_v1.{TldrFrozenRoutePlanV1, tldr_route_frozen_inputs_v1}
+use compiler.driver.driver_tldr_frozen_surface_route_v1.{tldr_frozen_surface_lane_error_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mono_pending_publish_v1,
+    native_file_worker_unit_active_v1, native_file_worker_batch_v1, NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1}
+use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
+use compiler.driver.cache.phase_compatibility_admission.{
+    driver_import_phase2_frontend_v1, driver_stage_phase2_frontend_frozen_raw_v1
+}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses,
+    frontend_cache_native_digest_unavailable}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurfaceBuilder,
+    ModuleSurfacesByName,
+    ModuleSurfaceParserOwner,
+    module_surface_canonical_path,
+    module_surface_from_owner,
+    module_surface_promote,
+    module_surfaces_promote,
+    module_surfaces_promote_reason,
+    module_surfaces_retained_alignment_error
+}
+use compiler.driver.driver_source_loading.{
+    _driver_physical_source_key,
+    _driver_text_bucket_index,
+    _driver_unique_physical_sources
+}
+use compiler.driver.driver_log_helpers.{
+    log_debug,
+    log_phase,
+    log_module_surface_released,
+    log_module_surface_stage,
+    log_build_progress
+}
+use compiler.driver.driver_cache_scope_policy_v1.{driver_frontend_cache_scope_publish_allowed_v1}
+use compiler.driver.driver_phase_gates.{
+    driver_streaming_surface_enabled,
+    driver_source_entry_request,
+    driver_source_entry_closure_enabled,
+    driver_source_matches_entry,
+    bootstrap_entry_source_index
+}
+use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.io_runtime.{file_exists}
+use compiler.common.structural_contracts.offload_profile.{OffloadDecision, validate_offload_profile}
+use compiler.common.structural_contracts.frontend_offload_switch.{
+    FrontendOffloadInputs, FrontendOffloadSwitch, resolve_frontend_offload,
+    frontend_offload_decision, frontend_offload_profile,
+    FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE, frontend_offload_receipt_line
+}
+
+@unsafe(reason: "raw stdout flush ABI", capabilities: [ffi])
+extern fn rt_stdout_flush()
+@unsafe(reason: "raw transient-array scope begin ABI", capabilities: [ffi])
+extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+@unsafe(reason: "raw transient-array scope end ABI", capabilities: [ffi])
+extern fn rt_transient_array_scope_end() -> bool
+
+@always_inline
+fn _sffi_exit(code: i64):
+    unsafe(capabilities: [ffi]):
+        exit(code)
+
+@always_inline
+fn _sffi_stdout_flush():
+    unsafe(capabilities: [ffi]):
+        rt_stdout_flush()
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    sosix_env_get_nullable(key)
+
+@always_inline
+fn _sffi_env_set(key: text, value: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        env_set(key, value)
+
+@always_inline
+fn _sffi_transient_array_scope_begin() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_begin()
+
+@always_inline
+fn _sffi_transient_array_scope_pause() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_pause()
+
+@always_inline
+fn _sffi_transient_array_scope_end() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_end()
+
+# @workaround bug=phase2_private_sffi_cross_owner_export_unresolved_2026-10-27 reason=private_inline_sffi_exports_are_unresolved_across_the_bootstrap_module_boundary
+pub fn driver_parse_exit_v1(code: i64):
+    _sffi_exit(code)
+
+pub fn driver_parse_stdout_flush_v1():
+    _sffi_stdout_flush()
+
+pub fn driver_parse_env_get_v1(key: text) -> text?:
+    _sffi_env_get(key)
+
+pub fn driver_parse_env_set_v1(key: text, value: text) -> bool:
+    _sffi_env_set(key, value)
+
+pub fn driver_parse_transient_scope_begin_v1() -> bool:
+    _sffi_transient_array_scope_begin()
+
+pub fn driver_parse_transient_scope_pause_v1() -> bool:
+    _sffi_transient_array_scope_pause()
+
+pub fn driver_parse_transient_scope_end_v1() -> bool:
+    _sffi_transient_array_scope_end()
+
+
+# The front-end cache lives in 10.frontend and must not import 80.driver, so
+# the driver PUBLISHES the scope it may cache under and the frontend reads it.
+# No scope published => the frontend cache is off. That is deliberate: a
+# frontend that cannot see the driver's scope has no way to know what it would
+# be sharing entries with, and guessing is how a stale-parser hit becomes a
+# wrong module.
+#
+# The scope folds native_build_cache_scope_key (lane from SIMPLE_CACHE_SCOPE)
+# over native_build_frontend_identity(), which folds the interpreter and the
+# parser/cache source tree. HIR/MIR/backend edits cannot change a ParserModule,
+# so they deliberately preserve valid parse entries. Unknown identity remains
+# per-process and therefore reuses nothing: fail closed.
+
+# ===== Parse sharding =======================================================
+#
+# SIMPLE_PARSE_SHARD="<index>/<count>" (set from --parse-shard=, which only the
+# orchestrator passes). A shard child parses ONLY the modules it owns, which
+# stores their front-end cache entries, and then exits 0 before HIR. The real
+# build that follows hits every entry.
+#
+# Ownership is a pure function of the module PATH, not of its position in the
+# discovered source list. That matters for determinism: the closure walk can
+# legitimately yield the same set in a different order between processes, and a
+# position-based split would then have two shards parse the same file and a
+# third parse none. A path hash cannot drift that way, and needs no sorted
+# index (which would be O(n^2) over 662 interpreted-Simple modules).
+#
+# The path hash lives in driver_parse_shard_hash.spl (XXH3-64), shared with
+# the HIR shards.
+
+var _driver_parse_shard_memo: text = "@@unset@@"
+
+fn _driver_parse_shard_spec() -> text:
+    if _driver_parse_shard_memo != "@@unset@@":
+        return _driver_parse_shard_memo
+    _driver_parse_shard_memo = _sffi_env_get("SIMPLE_PARSE_SHARD") ?? ""
+    _driver_parse_shard_memo
+
+pub fn driver_parse_shard_active() -> bool:
+    _driver_parse_shard_spec() != ""
+
+# A malformed spec owns EVERYTHING rather than nothing. A shard that silently
+# parses no files would look like a fast success and leave the cache empty,
+# which is the failure mode that is hardest to notice.
+fn _driver_parse_shard_owns_static(path: text) -> bool:
+    val spec = _driver_parse_shard_spec()
+    if spec == "":
+        return true
+    val slash = spec.index_of("/")
+    if slash <= 0:
+        return true
+    val index = spec.substring(0, slash).to_i64() ?? -1
+    val count = spec.substring(slash + 1, spec.len()).to_i64() ?? 0
+    if count <= 0 or index < 0 or index >= count:
+        return true
+    (driver_parse_shard_hash(path) % count) == index
+
+# ----- Shared work queue (replaces the static split when the orchestrator
+# publishes SIMPLE_PARSE_SHARD_QUEUE) ------------------------------------------
+#
+# A static hash split has a TAIL: the 8-way stage build always ended with one
+# or two shards still parsing while the other six sat idle, because the split
+# is by module count and modules are not equal (fp7, 2026-08-21: shards
+# finished 73..94 modules apart and the last one gated the whole phase). With
+# a queue every shard walks the same source list and CLAIMS each module it
+# reaches; whoever claims first parses it, everyone else skips. Work stays
+# balanced to within one module.
+#
+# Claim = a marker file under the queue dir, created with an exclusive create
+# (O_CREAT|O_EXCL / CREATE_NEW): exactly one process can create a given path,
+# so the create IS the claim and no shared lock is needed. (rt_dir_create
+# returns true on EEXIST and rename(2) overwrites, so neither is an atomic
+# claim on its own.) The former flock'd critical section serialized every
+# shard on one lock file for every module.
+#
+# Output is unchanged by construction: a claimed module is parsed by exactly
+# one shard into the same content-keyed cache entry the static split would
+# have produced, and any module that is never claimed (a shard died, the lock
+# timed out) is simply parsed by the real build. The partition is no longer
+# a pure function of the path -- WHICH shard parses a module now depends on
+# timing -- but the union still is, and only the union reaches the cache.
+#
+# A failed create of a marker that does not exist (queue dir unwritable)
+# degrades to the static split for that module rather than to "owns nothing"
+# (same fail-closed reasoning as the malformed-spec case).
+
+var _driver_parse_shard_queue_memo: text = "@@unset@@"
+var _driver_parse_shard_claimed: i64 = 0
+
+fn _driver_parse_shard_queue_dir() -> text:
+    if _driver_parse_shard_queue_memo != "@@unset@@":
+        return _driver_parse_shard_queue_memo
+    _driver_parse_shard_queue_memo = _sffi_env_get("SIMPLE_PARSE_SHARD_QUEUE") ?? ""
+    _driver_parse_shard_queue_memo
+
+pub fn driver_parse_shard_claimed() -> i64:
+    _driver_parse_shard_claimed
+
+fn _driver_parse_shard_claim(queue_dir: text, path: text) -> bool:
+    # Path hash + length: the marker name must agree across processes (same
+    # reason the hash is spelled out above) and a collision only costs one
+    # module its shard slot -- the real build still parses it.
+    val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.len()}.claim"
+    if file_exists(marker):
+        return false
+    val claimed = file_create_exclusive(marker, _driver_parse_shard_spec())
+    if not claimed and not file_exists(marker):
+        return _driver_parse_shard_owns_static(path)
+    if claimed:
+        _driver_parse_shard_claimed = _driver_parse_shard_claimed + 1
+    claimed
+
+fn _driver_parse_shard_owns(path: text) -> bool:
+    if _driver_parse_shard_spec() == "":
+        return true
+    val queue_dir = _driver_parse_shard_queue_dir()
+    if queue_dir == "":
+        return _driver_parse_shard_owns_static(path)
+    _driver_parse_shard_claim(queue_dir, path)
+
+# Public seams for the --parse-fibers child (driver_parse_fibers_entry.spl):
+# the same claim-queue ownership and frontend cache-scope publication the
+# entry-closure parse loop uses, so fiber parses land on identical cache keys.
+pub fn driver_parse_shard_owns_v1(path: text) -> bool:
+    _driver_parse_shard_owns(path)
+
+pub fn driver_publish_frontend_cache_scope_v1(ctx: CompileContext) -> bool:
+    _driver_publish_frontend_cache_scope(ctx)
+
+fn _driver_publish_frontend_cache_scope(ctx: CompileContext) -> bool:
+    # The shared parse store is opt-in and carries no caller-supplied parser
+    # identity. The manager seals the absolute Stage2 source root and its
+    # file-hex authority; verify the parser subset before publishing identity,
+    # even when the private frontend scope was already provided.
+    if (_sffi_env_get("SIMPLE_SHARED_PARSE_CAS_ROOT") ?? "") != "":
+        val parser_digest = native_build_frontend_portable_source_digest_v1(
+            _sffi_env_get("SIMPLE_SHARED_PARSE_SOURCE_ROOT") ?? "",
+            _sffi_env_get("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH") ?? "",
+            _sffi_env_get("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST") ?? "")
+        if not _sffi_env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", parser_digest):
+            return false
+    # An inherited scope (e.g. pre-published by the native-build orchestrator)
+    # only skips computing the scope; phase-2 staging/import below always run.
+    if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") == "":
+        val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity())
+        if not _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope):
+            return false
+    if not driver_stage_phase2_frontend_frozen_raw_v1(ctx.runtime_std_cfg_source_identity_by_path):
+        dtrace("[M3] frontend compatibility frozen-identity-stage-failed")
+        return false
+    val imported = driver_import_phase2_frontend_v1()
+    if imported.starts_with("manifest-rejected:") or imported == "manifest-unreadable":
+        dtrace("[M3] frontend compatibility {imported}")
+    true
+
+pub fn driver_promote_frontend_registry_owners() -> bool:
+    val aspect_ok = aspect_registry_promote_transient_owner()
+    val effect_ok = effect_registry_promote_transient_owner()
+    val rt_criticality_ok = rt_criticality_promote_transient_owner()
+    val layer_ok = layer_eq_registry_promote_transient_owner()
+    aspect_ok and effect_ok and rt_criticality_ok and layer_ok
+
+# Shared by the production retained-parser boundary and its native reference.
+# Call only after pause, while every escaped root still has a live owner.
+pub fn driver_promote_retained_frontend_owners_v1(parser_entered: bool) -> bool:
+    val registry_ok = if parser_entered: driver_promote_frontend_registry_owners() else: true
+    val parser_ok = if parser_entered: parser_promote_transient_owners() else: true
+    val declaration_ok = if parser_entered: parser_declaration_metadata_promote_transient_owner() else: true
+    val resource_ok = if parser_entered: resource_registry_promote_transient_owner() else: true
+    val cache_ok = frontend_parse_cache_promote_transient_owner()
+    val shared_ok = frontend_shared_parse_promote_transient_owner_v1()
+    val coverage_ok = compiler_coverage_inventory_promote_transient_owner()
+    if not (registry_ok and parser_ok and declaration_ok and resource_ok and cache_ok and shared_ok and coverage_ok):
+        eprint("[owner-promote] registry={registry_ok} parser={parser_ok} declaration={declaration_ok} resource={resource_ok} cache={cache_ok} shared={shared_ok} coverage={coverage_ok} entered={parser_entered}")
+    registry_ok and parser_ok and declaration_ok and resource_ok and cache_ok and shared_ok and coverage_ok
+
+# Marks the one recoverable failure of add_streaming_module_surface: the source
+# did not parse. Every other Err from it is an internal invariant break.
+val _STREAM_PARSE_ERROR_PREFIX: text = "parse error in "
+
+class ParsedEntryModuleBox:
+    value: ParserModule
+
+    static fn new(value: ParserModule) -> ParsedEntryModuleBox:
+        ParsedEntryModuleBox(value: value)
+
+# Env-gated driver trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
+# [DRV]/[BOOTSTRAP-PHASE] loading/lowering probe trail.
+pub fn dtrace(msg: text) -> ():
+    if (_sffi_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
+        eprint(msg)
+
+# cli is "" because the CLI layer only sets SIMPLE_FRONTEND_OFFLOAD; config is
+# "" because this driver imports no project-config reader (design: no new parser).
+fn _driver_frontend_offload_switch_for(env_value: text, fallback_value: text) -> Result<FrontendOffloadSwitch, text>:
+    resolve_frontend_offload(FrontendOffloadInputs(
+        cli: "", env: env_value, config: "",
+        fallback_cli: "", fallback_env: fallback_value, fallback_config: ""))
+
+pub fn driver_frontend_offload_switch() -> Result<FrontendOffloadSwitch, text>:
+    _driver_frontend_offload_switch_for(
+        _sffi_env_get("SIMPLE_FRONTEND_OFFLOAD") ?? "",
+        _sffi_env_get("SIMPLE_FRONTEND_OFFLOAD_FALLBACK") ?? "")
+
+fn _driver_frontend_offload_decide(switch: FrontendOffloadSwitch) -> Result<OffloadDecision, text>:
+    frontend_offload_decision(switch, FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE)
+
+# Pure per-input twin of driver_frontend_offload_decision(): no env read, no
+# memo, returns the exact receipt line the driver traces for those inputs.
+pub fn driver_frontend_offload_receipt_for(env_value: text, fallback_value: text) -> Result<text, text>:
+    val switch_result = _driver_frontend_offload_switch_for(env_value, fallback_value)
+    if switch_result.is_err():
+        return Err(switch_result.unwrap_err())
+    val switch = switch_result.unwrap()
+    val decision_result = _driver_frontend_offload_decide(switch)
+    if decision_result.is_err():
+        return Err(decision_result.unwrap_err())
+    Ok(frontend_offload_receipt_line(decision_result.unwrap(), switch.source))
+
+var _driver_frontend_offload_receipt_memo: text = "@@unset@@"
+
+pub fn driver_frontend_offload_decision() -> Result<OffloadDecision, text>:
+    val switch_result = driver_frontend_offload_switch()
+    if switch_result.is_err():
+        return Err(switch_result.unwrap_err())
+    val switch = switch_result.unwrap()
+    # Build and validate the per-stage profile the switch resolves into. Wave 0
+    # selects no stage from it, but an invalid profile must fail the compile here
+    # rather than surface later as a wrong stage mode.
+    match validate_offload_profile(frontend_offload_profile(switch)):
+        Ok(()) -> ()
+        Err(message) -> return Err("frontend_offload_invalid_profile: " + message)
+    val decision_result = _driver_frontend_offload_decide(switch)
+    if decision_result.is_err():
+        return Err(decision_result.unwrap_err())
+    val decision = decision_result.unwrap()
+    if _driver_frontend_offload_receipt_memo == "@@unset@@":
+        _driver_frontend_offload_receipt_memo = frontend_offload_receipt_line(decision, switch.source)
+        dtrace(_driver_frontend_offload_receipt_memo)
+    Ok(decision)
+
+pub fn driver_end_transient_parse_scope() -> bool:
+    # ORDER IS LOAD-BEARING. End the transient array scope BEFORE replacing
+    # ANY process-lifetime frontend owner. lexer_release_parse_source_globals()
+    # allocates fresh empty arrays just like ast_reset(); doing either while
+    # the scope is active stamps those replacements with the dying scope id and
+    # hands the next source dangling globals.
+    #
+    # ast_reset() (re)allocates process-lifetime arena state: every
+    # `if X == nil: X = []` guard in ast_reset/expr_reset/stmt_reset/_ast_slots_
+    # ensure fires here in native binaries, which zero-initialise module arrays.
+    # rt_core_register_scoped_immortal() stamps EVERY array born while a
+    # transient array scope is active with that scope's id, and
+    # _sffi_transient_array_scope_end() then free()s those objects and erases them
+    # from the immortal pointer registry. Resetting first therefore handed the
+    # NEXT file a dead arena -- rt_array_len returns 0/-1, rt_array_push is
+    # silently dropped, rt_array_clear is a silent no-op -- for the rest of the
+    # process. That is the `[stmt_get_tag] OOB ... arena_len=0` /
+    # `[flat-bridge] missing stmt tag` flood that aborted Stage 4 phase 3.
+    # Ending the scope first means the reset's allocations are born OUTSIDE any
+    # scope and stay process-immortal, while the per-file parse garbage that the
+    # scope actually owns is still reclaimed exactly as before.
+    # See doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
+    val ended = _sffi_transient_array_scope_end()
+    compiler_coverage_inventory_release_parse_scratch()
+    placeholder_release_parse_scratch()
+    lexer_release_parse_source_globals()
+    # The token interner retains short strings born in the just-ended parser
+    # scope. Replace the whole owner only after that scope is closed so the new
+    # dictionary is process-lived; resetting inside `lex_init_with_path` would
+    # allocate the next global owner inside the next transient scope and leave
+    # another dangling dictionary at teardown.
+    core_token_text_intern_reset()
+    ast_reset()
+    ended
+
+use compiler.common.diagnostics.span.{Span}
+
+# Shared implementation hooks; state stays in this one support owner.
+export driver_parse_shard_active, driver_parse_shard_claimed, driver_parse_shard_owns_v1, driver_publish_frontend_cache_scope_v1
+export driver_promote_frontend_registry_owners, driver_promote_retained_frontend_owners_v1, dtrace, driver_frontend_offload_switch
+export driver_frontend_offload_receipt_for, driver_frontend_offload_decision, driver_end_transient_parse_scope, rt_transient_heap_promote
+export driver_parse_exit_v1, driver_parse_stdout_flush_v1, driver_parse_env_get_v1, driver_parse_env_set_v1
+export driver_parse_transient_scope_begin_v1, driver_parse_transient_scope_pause_v1, driver_parse_transient_scope_end_v1, _driver_parse_shard_owns
+export _driver_publish_frontend_cache_scope, _STREAM_PARSE_ERROR_PREFIX

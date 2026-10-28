@@ -2211,6 +2211,17 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_linux_group_poll_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_cancel_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_collect_v1", &[I64], &[I64]),
+    // Cache authority machine signatures after semantic text expansion.
+    RuntimeFuncSpec::new("rt_cache_host_open_root_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_read_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_child_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_cas_kind_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_cas_shard_v1", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_cas_leaf_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_pinned_cas_v1", &[I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_publish_noreplace_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_publish_retained_noreplace_v2", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_quarantine_v1", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_stat", &[I64, I64], &[I64]),  // path_ptr, path_len -> i64 (mtime seconds)
     // =========================================================================
     // File I/O Operations

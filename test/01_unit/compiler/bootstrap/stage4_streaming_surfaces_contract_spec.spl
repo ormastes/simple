@@ -1,3 +1,4 @@
+use test.helpers.compiler_source_parse_owners.{source_parse_implementation_v1}
 # Purpose and audience: executable specification evidence for the owning engineering team.
 # @req REQ-SSPEC-UNIT
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
@@ -24,7 +25,6 @@ val LOWERING_TYPES = "src/compiler/20.hir/hir_lowering/types.spl"
 val LOWERING_HELPERS = "src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl"
 val BOOTSTRAP_HIR_STORE = "src/compiler/20.hir/hir_lowering/_Items/bootstrap_hir_store.spl"
 val PHASE_GATES = "src/compiler/80.driver/driver_phase_gates.spl"
-val SOURCE_PARSING = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
 val HIR_LOWERING = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
 val HIR_SUPPORT = "src/compiler/80.driver/driver_hir_pipeline_support.spl"
 val PRODUCER = "scripts/bootstrap/bootstrap-from-scratch.sh"
@@ -47,7 +47,7 @@ fn streaming_selector() -> text:
     gates.substring(start, end) + "\n" + file_read(STREAMING_POLICY)
 
 fn streaming_surface_helper() -> text:
-    val driver = file_read(SOURCE_PARSING)
+    val driver = source_parse_implementation_v1()
     val start = driver.index_of("    me add_streaming_module_surface(")
     val end = driver.index_of("me parse_all_streaming_surfaces_in_place_impl() -> bool:")
     if start < 0 or end <= start:
@@ -184,7 +184,7 @@ describe "Stage4 streaming surface ownership":
         expect(stage3_block).to_contain("MALLOC_TRIM_THRESHOLD_=0")
         expect(hash_block).to_contain("\"SIMPLE_NATIVE_ARENA_DECLS=1\"")
         expect(stage3_block).to_contain("SIMPLE_NATIVE_ARENA_DECLS=1")
-        val parsing = file_read(SOURCE_PARSING)
+        val parsing = source_parse_implementation_v1()
         expect(parsing).to_not_contain("rt_env_set(\"SIMPLE_NATIVE_ARENA_DECLS\"")
 
     it "builds the retained surface inside the parser scope, then pauses, promotes, reclaims, and publishes":
@@ -193,13 +193,13 @@ describe "Stage4 streaming surface ownership":
         # persistent builder is mutated (builder allocations are not made
         # persistent by a pause).
         val body = streaming_surface_helper()
-        val begin = body.index_of("if not _sffi_transient_array_scope_begin():")
+        val begin = body.index_of("if not driver_parse_transient_scope_begin_v1():")
         # 65b0304d3a2 renamed the scoped selected-policy parse entry.
         val parse = body.index_of("self.parse_full_frontend_in_borrowed_scope_selected_v1(", begin)
         val owner = body.index_of("ModuleSurfaceParserOwner.new(module)", parse)
         val build = body.index_of("module_surface_from_owner(", owner)
         val surface_unwrap = body.index_of("val surface = surface_result.unwrap()", build)
-        val pause = body.index_of("if not _sffi_transient_array_scope_pause():", surface_unwrap)
+        val pause = body.index_of("if not driver_parse_transient_scope_pause_v1():", surface_unwrap)
         val promote = body.index_of("if not module_surface_promote(surface):", pause)
         val reclaim = body.index_of("if not driver_end_transient_parse_scope():", promote)
         val publish = body.index_of("builder.add_surface_canonical_identity(", reclaim)
@@ -334,7 +334,7 @@ describe "Stage4 streaming surface ownership":
     it "clears parser roots after ending a transient scope":
         # 9083fa7ce6e: the scope ends BEFORE any process-lifetime frontend
         # owner is replaced, so the replacements are born outside the scope.
-        val driver = file_read(SOURCE_PARSING)
+        val driver = source_parse_implementation_v1()
         val start = driver.index_of("pub fn driver_end_transient_parse_scope() -> bool:")
         val end = driver.index_of("impl CompilerDriver:", start)
         expect(start).to_be_greater_than(0)

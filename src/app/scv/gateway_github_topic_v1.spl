@@ -1,0 +1,406 @@
+# GitHub topic publication is an authenticated host-side effect. Client input
+# supplies only the immutable candidate request; the host policy selects the
+# repository/remote and the derived topic ref. A topic ref is not acceptance.
+use app.scv.db.git_candidate.{DbGitPreparedCandidate, DbGitCandidateTopicAttempt,
+    db_git_candidate_publish_topic_create, db_git_candidate_cleanup}
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1,
+    ScvDraftBlobRequestV1, ScvDraftBlobReceiptV1, scv_draft_blob_put_v1}
+use app.scv.gateway_github_v1.{ScvGithubReadPolicyV1, ScvGithubReadRequestV1,
+    ScvGithubReadResultV1,
+    scv_gateway_github_read_live_v1}
+use app.scv.gateway_github_publish_v2.{ScvGatewayGithubPublishPolicyV2,
+    ScvGatewayGithubPublishRequestV2, scv_gateway_github_publish_candidate_for_outbox_v2}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use app.io.mod.{process_run_bounded, process_bounded_timed_out}
+use std.common.json.parser.{json_parse_strict_with_error}
+use std.common.json.types.{json_get_type, json_to_object}
+
+pub struct ScvGithubTopicRefObservationV1:
+    repository_id: text
+    github_repository_id: text
+    selector: text
+    exists: bool
+    oid: text
+
+pub struct ScvGatewayGithubTopicPortV1:
+    # This is the only injectable external-I/O boundary. Production callers
+    # bind it to the authenticated fixed-repository GitHub reader and the
+    # candidate-owner Git transport; tests bind isolated local fixtures.
+    read_candidate: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>
+    read_ref: fn(ScvGithubReadPolicyV1, text, fn() -> bool) -> Result<ScvGithubTopicRefObservationV1, text>
+    create_ref: fn(DbGitPreparedCandidate, text, fn() -> bool) -> Result<DbGitCandidateTopicAttempt, text>
+
+pub struct ScvGatewayGithubTopicResultV1:
+    state: text
+    publication: text
+    repository_id: text
+    principal_id: text
+    request_id: text
+    base_ref: text
+    expected_base_head: text
+    topic_ref: text
+    candidate_oid: text
+    content_sha256: text
+    transport: text
+
+fn _scv_gh_topic_request_id_v1(value: text) -> bool:
+    if value == "" or value.len() > 128: return false
+    for code in value.bytes():
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or
+                (code >= 97 and code <= 122) or [45, 46, 95].contains(code.to_i64())):
+            return false
+    true
+
+fn _scv_gh_topic_ref_v1(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2) -> text:
+    val subject = "scv-gateway-github-topic-v2\n{policy.repository.repository_id.len()}:{policy.repository.repository_id}\n{scope.principal_id.len()}:{scope.principal_id}\n{request.request_id.len()}:{request.request_id}\n"
+    "refs/heads/scv/" + sha256_text(subject)[0:32]
+
+fn _scv_gh_topic_scope_v1(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1,
+        request: ScvGatewayGithubPublishRequestV2) -> Result<bool, text>:
+    # Host admission precedes every GitHub and outbox lookup. Capability fields
+    # are produced by the authenticated gateway handler, never client JSON.
+    if scope.repository_id != policy.repository.repository_id or
+       scope.principal_id != policy.principal_id or request.repository_id != scope.repository_id:
+        return Err("SCV_GH_TOPIC_SCOPE")
+    if not scope.can_write or not policy.allow_topic_publish:
+        return Err("SCV_GH_TOPIC_WRITE_DENIED")
+    if not _scv_gh_topic_request_id_v1(request.request_id):
+        return Err("SCV_GH_TOPIC_REQUEST")
+    Ok(true)
+
+fn _scv_gh_topic_observation_v1(policy: ScvGatewayGithubPublishPolicyV2,
+        selector: text, observation: ScvGithubTopicRefObservationV1) -> Result<bool, text>:
+    if observation.repository_id != policy.repository.repository_id or
+       observation.github_repository_id != policy.repository.github_repository_id or
+       observation.selector != selector:
+        return Err("SCV_GH_TOPIC_READBACK_IDENTITY")
+    if observation.exists:
+        if observation.oid.len() != 40: return Err("SCV_GH_TOPIC_READBACK_OID")
+        for code in observation.oid.bytes():
+            if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+                return Err("SCV_GH_TOPIC_READBACK_OID")
+    elif observation.oid != "":
+        return Err("SCV_GH_TOPIC_READBACK_SHAPE")
+    Ok(true)
+
+fn _scv_gh_topic_intent_v1(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1,
+        request: ScvGatewayGithubPublishRequestV2, content_sha256: text,
+        topic_ref: text) -> Result<[u8], text>:
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "record_type": SdnValue.String("scv_github_topic_intent"),
+        "state": SdnValue.String("topic_push_intent"),
+        "publication": SdnValue.String("not_acceptance"),
+        "repository_id": SdnValue.String(policy.repository.repository_id),
+        "github_host": SdnValue.String(policy.repository.host),
+        "github_owner": SdnValue.String(policy.repository.owner),
+        "github_repository": SdnValue.String(policy.repository.repository),
+        "github_repository_id": SdnValue.String(policy.repository.github_repository_id),
+        "principal_id": SdnValue.String(scope.principal_id),
+        "request_id": SdnValue.String(request.request_id),
+        "base_ref": SdnValue.String(request.base_ref),
+        "expected_base_head": SdnValue.String(request.expected_base_head),
+        "topic_ref": SdnValue.String(topic_ref),
+        "candidate_oid": SdnValue.String(request.candidate_oid),
+        "prepared_content_sha256": SdnValue.String(content_sha256)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)).bytes()
+    if bytes.len() > 65536: return Err("SCV_GH_TOPIC_STATE_BOUND")
+    Ok(bytes)
+
+fn _scv_gh_topic_state_request_id_v1(state: text, policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1,
+        request: ScvGatewayGithubPublishRequestV2) -> text:
+    "topic-{state}-" + sha256_text("scv-github-topic-state-v1\n{policy.repository.repository_id}\n{scope.principal_id}\n{request.request_id}\n")
+
+fn _scv_gh_topic_store_v1(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request_id: text,
+        bytes: [u8]) -> Result<ScvDraftBlobReceiptV1, text>:
+    val digest = sha256_u8_hex(bytes)
+    val receipt = scv_draft_blob_put_v1(policy.outbox_root, scope,
+        ScvDraftBlobRequestV1(repository_id: scope.repository_id,
+            principal_id: scope.principal_id, request_id: request_id,
+            content_sha256: digest, bytes: bytes))?
+    if receipt.state != "local_durable" or receipt.repository_id != scope.repository_id or
+       receipt.principal_id != scope.principal_id or receipt.request_id != request_id or
+       receipt.content_sha256 != digest or receipt.byte_count != bytes.len() as i64:
+        return Err("SCV_GH_TOPIC_DURABILITY")
+    Ok(receipt)
+
+fn _scv_gh_topic_json_field_v1(object: any, key: text) -> Result<any, text>:
+    if json_get_type(object) != "object": return Err("SCV_GH_TOPIC_RESPONSE_SCHEMA")
+    val fields: Dict<text, any> = json_to_object(object)
+    if not fields.has(key): return Err("SCV_GH_TOPIC_RESPONSE_SCHEMA")
+    Ok(fields[key])
+
+fn _scv_gh_topic_json_text_v1(object: any, key: text) -> Result<text, text>:
+    val field = _scv_gh_topic_json_field_v1(object, key)?
+    if json_get_type(field) != "string": return Err("SCV_GH_TOPIC_RESPONSE_SCHEMA")
+    val value: text = field.1
+    Ok(value)
+
+fn _scv_gh_topic_json_depth_v1(value: text) -> Result<bool, text>:
+    var depth = 0
+    var quoted = false
+    var escaped = false
+    for code in value.bytes():
+        if quoted:
+            if escaped: escaped = false
+            elif code == 92u8: escaped = true
+            elif code == 34u8: quoted = false
+        elif code == 34u8: quoted = true
+        elif code == 123u8 or code == 91u8:
+            depth = depth + 1
+            if depth > 24: return Err("SCV_GH_TOPIC_RESPONSE_DEPTH")
+        elif code == 125u8 or code == 93u8:
+            depth = depth - 1
+            if depth < 0: return Err("SCV_GH_TOPIC_RESPONSE_JSON")
+    if quoted or depth != 0: return Err("SCV_GH_TOPIC_RESPONSE_JSON")
+    Ok(true)
+
+fn _scv_gh_topic_selector_valid_v1(selector: text) -> bool:
+    if selector.len() > 512 or not selector.starts_with("refs/heads/") or
+       selector.ends_with("/") or selector.contains("//") or selector.contains(".."):
+        return false
+    for segment in selector.split("/"):
+        if segment == "" or segment.starts_with(".") or segment.starts_with("-") or
+           segment.ends_with(".") or segment.ends_with(".lock"):
+            return false
+        for code in segment.bytes():
+            if not ((code >= 48u8 and code <= 57u8) or (code >= 65u8 and code <= 90u8) or
+                    (code >= 97u8 and code <= 122u8) or [45u8, 46u8, 95u8].contains(code)):
+                return false
+    true
+
+fn _scv_gh_topic_http_v1(policy: ScvGithubReadPolicyV1, endpoint: text,
+        lease_held: fn() -> bool) -> Result<(i64, text), text>:
+    if lease_held(): return Err("SCV_GH_TOPIC_NETWORK_LEASE")
+    val allowlist = policy.allowlist
+    if allowlist.len() != 1: return Err("SCV_GH_TOPIC_POLICY")
+    val repository = allowlist[0]
+    val args = ["api", "--hostname", repository.host, "--method", "GET", "--include",
+        "-H", "Accept: application/vnd.github+json",
+        "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint]
+    val (stdout, stderr, exit_code) = process_run_bounded("gh", args,
+        policy.timeout_ms, policy.maximum_response_bytes)
+    if process_bounded_timed_out(exit_code, stderr): return Err("SCV_GH_TOPIC_TIMEOUT")
+    if stdout.len() >= policy.maximum_response_bytes or stderr.len() >= policy.maximum_response_bytes:
+        return Err("SCV_GH_TOPIC_RESPONSE_BOUND")
+    val normalized = stdout.replace("\r\n", "\n")
+    val lines = normalized.split("\n")
+    if lines.len() == 0 or not lines[0].starts_with("HTTP/"):
+        return Err("SCV_GH_TOPIC_HTTP_STATUS")
+    val parts = lines[0].split(" ")
+    if parts.len() < 2: return Err("SCV_GH_TOPIC_HTTP_STATUS")
+    val status = if parts[1] == "200": 200 else: if parts[1] == "404": 404 else: 0
+    if status == 0: return Err("SCV_GH_TOPIC_HTTP_STATUS")
+    var in_headers = true
+    var body_lines: [text] = []
+    for index in 1..lines.len():
+        if in_headers:
+            if lines[index] == "": in_headers = false
+        else:
+            body_lines.push(lines[index])
+    if in_headers: return Err("SCV_GH_TOPIC_HTTP_BODY")
+    if status != 200 and status != 404: return Err("SCV_GH_TOPIC_HTTP_STATUS")
+    if status == 200 and exit_code != 0: return Err("SCV_GH_TOPIC_HTTP_STATUS")
+    Ok((status, body_lines.join("\n")))
+
+fn _scv_gh_topic_repo_identity_v1(policy: ScvGithubReadPolicyV1,
+        lease_held: fn() -> bool) -> Result<bool, text>:
+    if policy.allowlist.len() != 1: return Err("SCV_GH_TOPIC_POLICY")
+    val repository = policy.allowlist[0]
+    val (status, body) = _scv_gh_topic_http_v1(policy,
+        "repositories/{repository.github_repository_id}", lease_held)?
+    if status != 200: return Err("SCV_GH_TOPIC_REPOSITORY_UNAVAILABLE")
+    _scv_gh_topic_json_depth_v1(body)?
+    val (parsed, parse_error) = json_parse_strict_with_error(body)
+    if parse_error != "" or json_get_type(parsed) != "object": return Err("SCV_GH_TOPIC_RESPONSE_JSON")
+    val id_value = _scv_gh_topic_json_field_v1(parsed, "id")?
+    if json_get_type(id_value) != "number": return Err("SCV_GH_TOPIC_RESPONSE_SCHEMA")
+    val numeric_id: f64 = id_value.1
+    if numeric_id < 1 or numeric_id > 9007199254740991:
+        return Err("SCV_GH_TOPIC_RESPONSE_ID")
+    val integer_id = numeric_id as u64
+    if integer_id as f64 != numeric_id or integer_id.to_text() != repository.github_repository_id:
+        return Err("SCV_GH_TOPIC_REPOSITORY_IDENTITY")
+    if _scv_gh_topic_json_text_v1(parsed, "name")? != repository.repository or
+       _scv_gh_topic_json_text_v1(parsed, "full_name")? != "{repository.owner}/{repository.repository}":
+        return Err("SCV_GH_TOPIC_REPOSITORY_IDENTITY")
+    val owner = _scv_gh_topic_json_field_v1(parsed, "owner")?
+    if _scv_gh_topic_json_text_v1(owner, "login")? != repository.owner:
+        return Err("SCV_GH_TOPIC_REPOSITORY_IDENTITY")
+    Ok(true)
+
+pub fn scv_gateway_github_topic_read_ref_live_v1(policy: ScvGithubReadPolicyV1,
+        selector: text, lease_held: fn() -> bool) -> Result<ScvGithubTopicRefObservationV1, text>:
+    if policy.allowlist.len() != 1: return Err("SCV_GH_TOPIC_POLICY")
+    val repository = policy.allowlist[0]
+    if repository.host != "github.com" or not selector.starts_with("refs/heads/"):
+        return Err("SCV_GH_TOPIC_READ_SCOPE")
+    if not _scv_gh_topic_selector_valid_v1(selector): return Err("SCV_GH_TOPIC_READ_SCOPE")
+    _scv_gh_topic_repo_identity_v1(policy, lease_held)?
+    val endpoint = "repositories/{repository.github_repository_id}/git/ref/{selector[5:]}"
+    val (status, body) = _scv_gh_topic_http_v1(policy, endpoint, lease_held)?
+    var exists = false
+    var oid = ""
+    if status == 200:
+        _scv_gh_topic_json_depth_v1(body)?
+        val (parsed, parse_error) = json_parse_strict_with_error(body)
+        if parse_error != "" or json_get_type(parsed) != "object": return Err("SCV_GH_TOPIC_RESPONSE_JSON")
+        if _scv_gh_topic_json_text_v1(parsed, "ref")? != selector:
+            return Err("SCV_GH_TOPIC_READBACK_IDENTITY")
+        val object = _scv_gh_topic_json_field_v1(parsed, "object")?
+        if _scv_gh_topic_json_text_v1(object, "type")? != "commit":
+            return Err("SCV_GH_TOPIC_READBACK_TYPE")
+        oid = _scv_gh_topic_json_text_v1(object, "sha")?
+        if oid.len() != 40: return Err("SCV_GH_TOPIC_READBACK_OID")
+        for code in oid.bytes():
+            if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+                return Err("SCV_GH_TOPIC_READBACK_OID")
+        exists = true
+    _scv_gh_topic_repo_identity_v1(policy, lease_held)?
+    Ok(ScvGithubTopicRefObservationV1(repository_id: repository.repository_id,
+        github_repository_id: repository.github_repository_id, selector: selector,
+        exists: exists, oid: oid))
+
+fn _scv_gh_topic_result_v1(state: text, transport: text,
+        policy: ScvGatewayGithubPublishPolicyV2, scope: ScvDraftBlobAdmittedScopeV1,
+        request: ScvGatewayGithubPublishRequestV2, content_sha256: text,
+        topic_ref: text) -> ScvGatewayGithubTopicResultV1:
+    ScvGatewayGithubTopicResultV1(state: state, publication: "not_acceptance",
+        repository_id: policy.repository.repository_id, principal_id: scope.principal_id,
+        request_id: request.request_id, base_ref: request.base_ref,
+        expected_base_head: request.expected_base_head, topic_ref: topic_ref,
+        candidate_oid: request.candidate_oid, content_sha256: content_sha256,
+        transport: transport)
+
+pub fn scv_gateway_github_topic_publish_v1(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
+        expected_content_sha256: text, port: ScvGatewayGithubTopicPortV1,
+        lease_held: fn() -> bool) -> Result<ScvGatewayGithubTopicResultV1, text>:
+    _scv_gh_topic_scope_v1(policy, scope, request)?
+    val topic_ref = _scv_gh_topic_ref_v1(policy, scope, request)
+    # This owner proves the exact durable preparation envelope, re-establishes
+    # its draft-store receipt, and returns only a genuinely registered candidate.
+    val candidate = scv_gateway_github_publish_candidate_for_outbox_v2(policy,
+        scope, request, expected_content_sha256, port.read_candidate, lease_held)?
+    var transport = "not_attempted"
+    var state = "upstream_unknown"
+    val intent = match _scv_gh_topic_intent_v1(policy, scope, request,
+            expected_content_sha256, topic_ref):
+        case Ok(value): value
+        case Err(reason):
+            db_git_candidate_cleanup(candidate)?
+            return Err(reason)
+    val intent_request_id = _scv_gh_topic_state_request_id_v1("intent", policy, scope, request)
+    val durable_intent = _scv_gh_topic_store_v1(policy, scope, intent_request_id, intent)
+    match durable_intent:
+        case Err(reason):
+            db_git_candidate_cleanup(candidate)?
+            return Err(reason)
+        case Ok(_): pass
+
+    # A known different target is never replaced. Exact prior publication is
+    # idempotent. An unreadable target remains unknown and is never overwritten.
+    val before_topic = port.read_ref(policy.github, topic_ref, lease_held)
+    match before_topic:
+        case Err(_):
+            db_git_candidate_cleanup(candidate)?
+            state = "upstream_unknown"
+        case Ok(observation):
+            val observation_valid = _scv_gh_topic_observation_v1(policy, topic_ref, observation)
+            match observation_valid:
+                case Err(reason):
+                    db_git_candidate_cleanup(candidate)?
+                    return Err(reason)
+                case Ok(_): pass
+            if observation.exists:
+                state = if observation.oid == request.candidate_oid: "topic_branch_published" else: "topic_ref_conflict"
+                db_git_candidate_cleanup(candidate)?
+            else:
+                # Check the configured base as late as possible before the
+                # conditional create. This is preflight, not an atomic CAS.
+                val before_base = port.read_ref(policy.github, request.base_ref, lease_held)
+                match before_base:
+                    case Ok(base):
+                        val base_valid = _scv_gh_topic_observation_v1(policy, request.base_ref, base)
+                        match base_valid:
+                            case Err(reason):
+                                db_git_candidate_cleanup(candidate)?
+                                return Err(reason)
+                            case Ok(_): pass
+                        if not base.exists or base.oid != request.expected_base_head:
+                            state = "base_changed"
+                            db_git_candidate_cleanup(candidate)?
+                        else:
+                            if lease_held():
+                                db_git_candidate_cleanup(candidate)?
+                                return Err("SCV_GH_TOPIC_NETWORK_LEASE")
+                            val pushed = port.create_ref(candidate, topic_ref, lease_held)
+                            transport = match pushed:
+                                case Ok(attempt): attempt.code
+                                case Err(_): "transport_unknown"
+                            if lease_held():
+                                state = "upstream_unknown"
+                            else:
+                                val after_topic = port.read_ref(policy.github, topic_ref, lease_held)
+                                match after_topic:
+                                    case Ok(observed):
+                                        val after_valid = _scv_gh_topic_observation_v1(policy, topic_ref, observed)
+                                        match after_valid:
+                                            case Err(reason):
+                                                db_git_candidate_cleanup(candidate)?
+                                                return Err(reason)
+                                            case Ok(_): pass
+                                        if observed.exists and observed.oid == request.candidate_oid:
+                                            state = "topic_branch_published"
+                                        elif observed.exists:
+                                            state = "topic_ref_conflict"
+                                        else:
+                                            state = "upstream_unknown"
+                                    case Err(_): state = "upstream_unknown"
+                            db_git_candidate_cleanup(candidate)?
+                    case Err(_):
+                        state = "upstream_unknown"
+                        db_git_candidate_cleanup(candidate)?
+
+    val result = _scv_gh_topic_result_v1(state, transport, policy, scope,
+        request, expected_content_sha256, topic_ref)
+    val result_text = sdn_encode_canonical(SdnValue.Dict({
+        "version": SdnValue.Int(1), "record_type": SdnValue.String("scv_github_topic_result"),
+        "state": SdnValue.String(result.state), "publication": SdnValue.String(result.publication),
+        "repository_id": SdnValue.String(result.repository_id),
+        "principal_id": SdnValue.String(result.principal_id),
+        "request_id": SdnValue.String(result.request_id),
+        "topic_ref": SdnValue.String(result.topic_ref),
+        "candidate_oid": SdnValue.String(result.candidate_oid),
+        "prepared_content_sha256": SdnValue.String(result.content_sha256)})).bytes()
+    val result_request_id = _scv_gh_topic_state_request_id_v1(state, policy, scope, request)
+    _scv_gh_topic_store_v1(policy, scope, result_request_id, result_text)?
+    Ok(result)
+
+pub fn scv_gateway_github_topic_git_create_v1(candidate: DbGitPreparedCandidate,
+        topic_ref: text, lease_held: fn() -> bool) -> Result<DbGitCandidateTopicAttempt, text>:
+    db_git_candidate_publish_topic_create(candidate, topic_ref, lease_held)
+
+pub fn scv_gateway_github_topic_publish_live_v1(policy: ScvGatewayGithubPublishPolicyV2,
+        scope: ScvDraftBlobAdmittedScopeV1, request: ScvGatewayGithubPublishRequestV2,
+        expected_content_sha256: text, lease_held: fn() -> bool) -> Result<ScvGatewayGithubTopicResultV1, text>:
+    val canonical_remote = "https://github.com/{policy.repository.owner}/{policy.repository.repository}"
+    if policy.repository.host != "github.com" or policy.remote != canonical_remote:
+        return Err("SCV_GH_TOPIC_REMOTE_DENIED")
+    val port = ScvGatewayGithubTopicPortV1(
+        read_candidate: scv_gateway_github_read_live_v1,
+        read_ref: scv_gateway_github_topic_read_ref_live_v1,
+        create_ref: scv_gateway_github_topic_git_create_v1)
+    scv_gateway_github_topic_publish_v1(policy, scope, request,
+        expected_content_sha256, port, lease_held)
+
+export ScvGithubTopicRefObservationV1, ScvGatewayGithubTopicPortV1
+export ScvGatewayGithubTopicResultV1, scv_gateway_github_topic_publish_v1
+export scv_gateway_github_topic_git_create_v1
+export scv_gateway_github_topic_read_ref_live_v1, scv_gateway_github_topic_publish_live_v1

@@ -241,38 +241,35 @@ fn _test_output_file_result(value: TestFileResult) -> SdnValue:
 
 fn _test_output_group_summaries(files: [TestFileResult]) -> SdnValue:
     var names: [text] = []
-    var passed: [i64] = []
-    var failed: [i64] = []
-    var skipped: [i64] = []
-    var pending: [i64] = []
+    # @workaround bug=phase2_runner_indexed_group_accumulation_2026_10_28 recover=334f5c009cc reason=Cached native lowering drops self-referential indexed stores; split dictionary reads and writes preserve counters
+    var passed: Dict<text, i64> = {}
+    var failed: Dict<text, i64> = {}
+    var skipped: Dict<text, i64> = {}
+    var pending: Dict<text, i64> = {}
     for file in files:
         val group = test_file_group(file.path)
-        var index = -1
-        var i = 0
-        while i < names.len():
-            if names[i] == group: index = i
-            i += 1
-        if index < 0:
+        if not passed.contains_key(group):
             names.push(group)
-            passed.push(0)
-            failed.push(0)
-            skipped.push(0)
-            pending.push(0)
-            index = names.len() - 1
-        passed[index] += file.passed
-        failed[index] += file.failed
-        skipped[index] += file.skipped
-        pending[index] += file.pending
+            passed[group] = 0
+            failed[group] = 0
+            skipped[group] = 0
+            pending[group] = 0
+        val next_passed = passed[group] + file.passed
+        passed[group] = next_passed
+        val next_failed = failed[group] + file.failed
+        failed[group] = next_failed
+        val next_skipped = skipped[group] + file.skipped
+        skipped[group] = next_skipped
+        val next_pending = pending[group] + file.pending
+        pending[group] = next_pending
     var rows: [SdnValue] = []
-    var i = 0
-    while i < names.len():
-        val denominator = passed[i] + failed[i] + pending[i]
+    for name in names:
+        val denominator = passed[name] + failed[name] + pending[name]
         rows.push(_test_output_record(
             ["name", "passed", "failed", "skipped", "pending", "done_pct"],
-            [_test_output_text(names[i]), SdnValue.Int(passed[i]), SdnValue.Int(failed[i]),
-                SdnValue.Int(skipped[i]), SdnValue.Int(pending[i]),
-                SdnValue.Int(if denominator > 0: passed[i] * 100 / denominator else: 0)]))
-        i += 1
+            [_test_output_text(name), SdnValue.Int(passed[name]), SdnValue.Int(failed[name]),
+                SdnValue.Int(skipped[name]), SdnValue.Int(pending[name]),
+                SdnValue.Int(if denominator > 0: passed[name] * 100 / denominator else: 0)]))
     SdnValue.Array(rows)
 
 fn _test_output_spec_result(value: TestRunResult) -> SdnValue:

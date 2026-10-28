@@ -1,0 +1,304 @@
+# @req REQ-LOCKLESS-MAP-001
+# Fixed-capacity CAS directory and shared result-slot contract.
+
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64, MapError}
+use std.nogc_async_mut.async.async_ref.{AsyncRefError, AsyncRefStateI64, AsyncWakeScanI64}
+use std.nogc_async_mut.concurrent.{Barrier, barrier_new}
+use std.concurrent.thread.{thread_spawn_with_args}
+use std.common.contracts.execution.simple_ring_async_v1.{RingGeneration, RingToken, TaskPollResult}
+
+fn _close_lockless_test_map(map: LocklessMapI64):
+    unsafe(capabilities: [ffi]): map.close_quiescent()
+
+describe "LocklessMapI64":
+    it "rejects invalid capacities before allocating the epoch":
+        unsafe(capabilities: [ffi]):
+            match LocklessMapI64.create(0, 1, 1, 1):
+                case Err(MapError.InvalidCapacity): ()
+                case Err(error): fail("wrong zero-capacity result: {error}")
+                case Ok(_): fail("zero key capacity was accepted")
+            match LocklessMapI64.create(8, 8, 8, 0):
+                case Err(MapError.InvalidCapacity): ()
+                case Err(error): fail("wrong zero-waiter result: {error}")
+                case Ok(_): fail("zero waiter capacity was accepted")
+            match LocklessMapI64.create(9223372036854775807i64, 8, 8, 8):
+                case Err(MapError.InvalidCapacity): ()
+                case Err(error): fail("overflowing arena size was accepted: {error}")
+                case Ok(_): fail("overflowing arena size was accepted")
+
+    it "retains zero and both signed i64 boundaries as ordinary exact keys":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(16, 16, 16, 4):
+                case Ok(value): value
+                case Err(error): fail("map construction failed: {error}")
+            val minimum = -9223372036854775807i64 - 1i64
+            val maximum = 9223372036854775807i64
+            val zero_ref = map.request(0, 10)
+            val min_ref = map.request(minimum, 11)
+            val max_ref = map.request(maximum, 12)
+            match zero_ref:
+                case Ok(_): ()
+                case Err(error): fail("zero key was rejected: {error}")
+            match min_ref:
+                case Ok(_): ()
+                case Err(error): fail("minimum key was rejected: {error}")
+            match max_ref:
+                case Ok(_): ()
+                case Err(error): fail("maximum key was rejected: {error}")
+            expect(map.find(0).is_some()).to_equal(true)
+            expect(map.find(minimum).is_some()).to_equal(true)
+            expect(map.find(maximum).is_some()).to_equal(true)
+            expect(map.find(1).is_none()).to_equal(true)
+            _close_lockless_test_map(map)
+
+    it "probes past equal initial buckets and compares the full key":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(8, 8, 8, 4):
+                case Ok(value): value
+                case Err(error): fail("map construction failed: {error}")
+            # The integer-key profile uses key modulo capacity as its first bucket.
+            val first = match map.request(3, 30):
+                case Ok(value): value
+                case Err(error): fail("first colliding key failed: {error}")
+            val second = match map.request(11, 31):
+                case Ok(value): value
+                case Err(error): fail("second colliding key failed: {error}")
+            val third = match map.request(19, 32):
+                case Ok(value): value
+                case Err(error): fail("third colliding key failed: {error}")
+            expect(first.same_reference(second)).to_equal(false)
+            expect(second.same_reference(third)).to_equal(false)
+            expect(map.find(3).unwrap().same_reference(first)).to_equal(true)
+            expect(map.find(11).unwrap().same_reference(second)).to_equal(true)
+            expect(map.find(19).unwrap().same_reference(third)).to_equal(true)
+            expect(map.find(27).is_none()).to_equal(true)
+            _close_lockless_test_map(map)
+
+    it "returns the stable same-key slot and rejects a conflicting recipe":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(8, 8, 8, 4):
+                case Ok(value): value
+                case Err(error): fail("map construction failed: {error}")
+            val first = map.request(42, 900).unwrap()
+            val second = map.request(42, 900).unwrap()
+            expect(first.same_reference(second)).to_equal(true)
+            match map.request(42, 901):
+                case Err(MapError.RecipeConflict): ()
+                case Err(error): fail("wrong conflicting-recipe result: {error}")
+                case Ok(_): fail("same key admitted a conflicting recipe")
+            _close_lockless_test_map(map)
+
+    it "fails at fixed key capacity without replacing an existing slot":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(2, 4, 4, 4):
+                case Ok(value): value
+                case Err(error): fail("map construction failed: {error}")
+            val first = map.request(1, 1).unwrap()
+            map.request(2, 2).unwrap()
+            match map.request(3, 3):
+                case Err(MapError.Full): ()
+                case Err(error): fail("wrong full-map result: {error}")
+                case Ok(_): fail("fixed-capacity map silently grew")
+            expect(map.find(1).unwrap().same_reference(first)).to_equal(true)
+            _close_lockless_test_map(map)
+
+    it "bounds descriptor and waiter storage and reserves terminal space per descriptor":
+        unsafe(capabilities: [ffi]):
+            match LocklessMapI64.create(4, 4, 1, 1):
+                case Err(MapError.InvalidCapacity): ()
+                case Err(error): fail("wrong insufficient-outcome-capacity result: {error}")
+                case Ok(value):
+                    _close_lockless_test_map(value)
+                    fail("admitted descriptors without enough terminal outcome slots")
+            val descriptor_map = match LocklessMapI64.create(8, 1, 2, 2):
+                case Ok(value): value
+                case Err(error): fail("descriptor-capacity map failed: {error}")
+            descriptor_map.request(1, 1).unwrap()
+            match descriptor_map.request(2, 2):
+                case Err(MapError.DescriptorFull): ()
+                case Err(error): fail("wrong descriptor exhaustion result: {error}")
+                case Ok(_): fail("descriptor arena silently grew")
+
+            val map = match LocklessMapI64.create(4, 4, 4, 1):
+                case Ok(value): value
+                case Err(error): fail("bounded outcome map failed: {error}")
+            val first = map.request(11, 11).unwrap()
+            val second = map.request(12, 12).unwrap()
+            val token = RingToken(
+                ring_id: 900u64, slot: 1u64,
+                generation: RingGeneration(value: 1u64))
+            first.subscribe(token).unwrap()
+            val another_token = RingToken(
+                ring_id: 900u64, slot: 2u64,
+                generation: RingGeneration(value: 1u64))
+            match first.subscribe(another_token):
+                case Err(AsyncRefError.WaiterFull): ()
+                case Err(error): fail("wrong waiter exhaustion result: {error}")
+                case Ok(_): fail("waiter arena silently grew")
+            expect(first.try_start()).to_equal(true)
+            expect(first.complete(110).unwrap()).to_equal(true)
+            expect(second.try_start()).to_equal(true)
+            expect(second.complete(120).unwrap()).to_equal(true)
+            match second.try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(120)
+                case state: fail("reserved terminal outcome did not publish: {state}")
+            _close_lockless_test_map(descriptor_map)
+            _close_lockless_test_map(map)
+
+    it "preserves all bits in u64 ring tokens on its i64 raw-cell ABI":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(2, 2, 2, 1):
+                case Ok(value): value
+                case Err(error): fail("map construction failed: {error}")
+            val reference = map.request(5, 5).unwrap()
+            val token = RingToken(
+                ring_id: 9223372036854775809u64,
+                slot: 9223372036854775810u64,
+                generation: RingGeneration(value: 9223372036854775811u64))
+            val subscription = reference.subscribe(token).unwrap()
+            match subscription.poll():
+                case TaskPollResult.Pending(observed):
+                    expect(observed.ring_id).to_equal(token.ring_id)
+                    expect(observed.slot).to_equal(token.slot)
+                    expect(observed.generation.value).to_equal(token.generation.value)
+                case _: fail("new subscription was not pending")
+            _close_lockless_test_map(map)
+
+    it "admits three thousand distinct keys and preserves each exact result slot":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(4096, 4096, 4096, 1):
+                case Ok(value): value
+                case Err(error): fail("3000-key map construction failed: {error}")
+            var key = 0
+            while key < 3000:
+                match map.request(key - 1500, key + 1):
+                    case Ok(_): ()
+                    case Err(error): fail("key {key} rejected: {error}")
+                key = key + 1
+            key = 0
+            while key < 3000:
+                val expected_key = key - 1500
+                expect(map.find(expected_key).is_some()).to_equal(true)
+                key = key + 1
+            expect(map.find(3000).is_none()).to_equal(true)
+            _close_lockless_test_map(map)
+
+    it "serves three thousand distinct keys from synchronized native requesters":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(4096, 4096, 4096, 1):
+                case Ok(value): value
+                case Err(error): fail("3000-key concurrent map construction failed: {error}")
+            val workers = 8
+            val requests_per_worker = 375
+            val scope = unsafe(capabilities: [ffi]): map.scope_address()
+            val gate = barrier_new(workers)
+            var handles = []
+            var worker = 0
+            while worker < workers:
+                handles.push(thread_spawn_with_args(scope, worker, \scope_address, worker_id:
+                    val worker_map = unsafe(capabilities: [ffi]):
+                        LocklessMapI64.from_scope_address(scope_address).unwrap()
+                    gate.wait()
+                    var admitted = 0
+                    var offset = 0
+                    while offset < requests_per_worker:
+                        val key = worker_id * requests_per_worker + offset
+                        match worker_map.request(key, key + 5000):
+                            case Ok(_): admitted = admitted + 1
+                            case Err(_): admitted = admitted - 100000
+                        offset = offset + 1
+                    admitted
+                ))
+                worker = worker + 1
+            var admitted_total = 0
+            for handle in handles:
+                admitted_total = admitted_total + handle.join().unwrap()
+            gate.free()
+            expect(admitted_total).to_equal(3000)
+            var key = 0
+            while key < 3000:
+                expect(map.contains_key(key)).to_equal(true)
+                key = key + 1
+            _close_lockless_test_map(map)
+
+    it "retains three thousand distinct same-key waiter interests until owner drain":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(2, 2, 2, 3000):
+                case Ok(value): value
+                case Err(error): fail("3000-waiter map construction failed: {error}")
+            val reference = map.request(71, 710).unwrap()
+            var slot = 0
+            while slot < 3000:
+                val token = RingToken(
+                    ring_id: 990u64,
+                    slot: (slot + 1) as u64,
+                    generation: RingGeneration(value: 1u64))
+                match reference.subscribe(token):
+                    case Ok(_): ()
+                    case Err(error): fail("waiter {slot} failed to subscribe: {error}")
+                slot = slot + 1
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.complete(71).unwrap()).to_equal(true)
+            var cursor = reference.wake_cursor().unwrap()
+            var observed = 0
+            while true:
+                match cursor.next_pending(64):
+                    case AsyncWakeScanI64.Wake(wake):
+                        expect(wake.token.ring_id).to_equal(990u64)
+                        observed = observed + 1
+                        cursor = wake.next
+                    case AsyncWakeScanI64.More(next_cursor): cursor = next_cursor
+                    case AsyncWakeScanI64.Done: break
+                    case AsyncWakeScanI64.Invalid: fail("wake cursor contained an invalid waiter handle")
+            expect(observed).to_equal(3000)
+            _close_lockless_test_map(map)
+
+    it "allows exactly one producer start under synchronized native requesters":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(8, 64, 64, 8):
+                case Ok(value): value
+                case Err(error): fail("contended map construction failed: {error}")
+            val workers = 8
+            val requests_per_worker = 375
+            val scope = unsafe(capabilities: [ffi]): map.scope_address()
+            val gate = barrier_new(workers)
+            var handles = []
+            var worker = 0
+            while worker < workers:
+                handles.push(thread_spawn_with_args(scope, worker, \scope_address, worker_id:
+                    val worker_map = unsafe(capabilities: [ffi]):
+                        LocklessMapI64.from_scope_address(scope_address).unwrap()
+                    gate.wait()
+                    var starts = 0
+                    var request = 0
+                    while request < requests_per_worker:
+                        match worker_map.request(1234, 55):
+                            case Ok(reference):
+                                if reference.try_start(): starts = starts + 1
+                            case Err(_): starts = starts + 100000
+                        request = request + 1
+                    starts
+                ))
+                worker = worker + 1
+            var total_starts = 0
+            for handle in handles:
+                total_starts = total_starts + handle.join().unwrap()
+            gate.free()
+            expect(total_starts).to_equal(1)
+            expect(map.find(1234).is_some()).to_equal(true)
+            _close_lockless_test_map(map)
+
+    it "never starts an already failed result slot again":
+        unsafe(capabilities: [ffi]):
+            val map = match LocklessMapI64.create(2, 2, 2, 1):
+                case Ok(value): value
+                case Err(error): fail("map construction failed: {error}")
+            val reference = map.request(99, 1).unwrap()
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.fail(7).unwrap()).to_equal(true)
+            expect(reference.try_start()).to_equal(false)
+            match reference.try_ready():
+                case AsyncRefStateI64.Failed(code): expect(code).to_equal(7)
+                case state: fail("expected immutable failure state, got {state}")
+            _close_lockless_test_map(map)

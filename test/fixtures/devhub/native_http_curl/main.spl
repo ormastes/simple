@@ -1,0 +1,38 @@
+use std.common.http_curl.{curl_request_text, curl_request_text_with_program}
+use std.env.{env_get}
+use std.io_runtime.{time_now_unix_micros}
+
+fn main() -> i64:
+    val endpoint = env_get("DEVHUB_HTTP_LOOPBACK_URL")
+    assert(endpoint != "")
+    val form: (i64, text, text) = curl_request_text_with_program("curl", "POST", endpoint + "/form",
+        ["Content-Type: application/x-www-form-urlencoded"], "client_secret=caf%C3%A9&scope=x%20y")
+    print "native form status={form.0} error={form.2}"
+    assert(form.0 == 200)
+    assert(form.1 == "form accepted")
+    assert(form.2 == "")
+    val utf8: (i64, text, text) = curl_request_text("POST", endpoint + "/utf8",
+        ["Content-Type: text/plain; charset=utf-8"], "café日本🙂")
+    print "native UTF-8 status={utf8.0} error={utf8.2}"
+    assert(utf8.0 == 200)
+    assert(utf8.1 == "utf8 accepted")
+    val redirect: (i64, text, text) = curl_request_text("POST", endpoint + "/redirect", [], "not forwarded")
+    assert(redirect.0 == 302)
+    val get: (i64, text, text) = curl_request_text("GET", endpoint + "/empty-get", ["Authorization: Bearer fixture-token"], "")
+    assert(get.0 == 200 and get.1 == "get accepted")
+    val oversized: (i64, text, text) = curl_request_text("POST", endpoint + "/oversized", [], "")
+    assert(oversized.0 == 0 and oversized.2 != "")
+    val started = time_now_unix_micros()
+    val stalled: (i64, text, text) = curl_request_text("POST", endpoint + "/stall", [], "")
+    val elapsed_ms = (time_now_unix_micros() - started) / 1000
+    print "native stalled HTTP elapsed_ms={elapsed_ms}"
+    assert(stalled.0 == 0 and stalled.2 != "")
+    assert(elapsed_ms >= 25000 and elapsed_ms < 45000)
+    val injection: (i64, text, text) = curl_request_text("POST", endpoint + "/rejected",
+        ["Content-Type: text/plain\r\nX-Injected: yes"], "ignored")
+    assert(injection.0 == 0 and injection.2 != "")
+    val bad_scheme: (i64, text, text) = curl_request_text("POST", "file:///not-http", [], "ignored")
+    assert(bad_scheme.0 == 0 and bad_scheme.2 != "")
+    print "PASS native curl form, UTF-8, header-injection and URL admission"
+    print "PASS native HTTP response-size and elapsed-time bounds"
+    0

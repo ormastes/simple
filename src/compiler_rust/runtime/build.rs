@@ -50,6 +50,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_rocm.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_signal.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_fs.c");
+    println!("cargo:rerun-if-changed=../../runtime/platform/runtime_windows_private_atomic.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_font.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
