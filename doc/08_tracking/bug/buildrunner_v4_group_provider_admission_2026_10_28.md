@@ -83,3 +83,40 @@ or V4 capability change occurred. Migration prevention, V4 receipt/ACK
 integration, and live escaping-descendant proof remain outstanding. Failures
 before clone can still leave empty directory/output artifacts; broker exit
 after a later cleanup failure still needs persistent ownership design.
+
+## Pending cleanup retry follow-up (2026-10-28)
+
+Baseline: release/1.0.0 `b9b6f3102e1`, including PR #5190's start ownership
+prerequisite. A timeout latched `timed_out` before writing `cgroup.kill`.
+If that write failed while the leader remained alive, subsequent polls skipped
+the timeout branch and could return a normal running observation without ever
+retrying cleanup. Explicit cancellation likewise retained its intent flag but
+did not retry a failed write during subsequent polling.
+
+The internal owner now tracks `kill_pending` separately from timeout and
+cancellation intent. Every kill attempt sets it; only a successful write
+clears it. Polling retries pending cleanup independently of the timeout latch.
+Persistent write failures remain errors from both poll and collect, retaining
+all ownership descriptors. Successful delivery is not tree-empty evidence:
+collection still requires leader reap, population zero and group removal.
+The public receipt layout and V4 capability/admission guards are unchanged.
+
+The focused `check-linux-group-start-ownership.shs` fixture now covers timeout
+and cancellation failure across three subsequent poll/collect attempts,
+automatic recovery without resetting intent or sending another cancel,
+nonterminal successful delivery, live leader and surviving descendant
+collection refusal, final collection and descriptor closure. The regression
+failed against the old owner at the repeated-error assertion, then passed
+with the fix on native Linux aarch64 in an isolated Docker container. Evidence
+is `/private/tmp/linux-group-cleanup-retry-20261028/` (`red.stderr`,
+`green.stdout`, `green.status`). These were two verification cycles; no
+Phase2 rebuild, live containment qualification or Pure Simple/SPipe admission
+was attempted. Luna's independent exact-diff review found no P0/P1 blocker.
+
+The clock-read-first polling order is preserved: a failed monotonic-clock
+read returns EIO before retrying pending cleanup, retaining ownership and
+pending intent. This can delay retry until the clock succeeds; it does not
+claim successful cleanup. Permanent kill failure still requires an external
+ownership/persistence design before broker exit can be safe. Credential
+containment, V4 receipt/ACK integration and the actual BuildRunner Hello gate
+remain open.
