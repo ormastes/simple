@@ -1,0 +1,84 @@
+# Strict endpoint policy for a bounded native HTTP exchange. No DNS lookup.
+pub struct BoundedHttpTargetV1:
+    tls: bool
+    host: text
+    port: i64
+    address: text
+    path: text
+
+pub fn bounded_http_ipv4_v1(address: text) -> bool:
+    val parts = address.split(".")
+    if parts.len() != 4: return false
+    for part in parts:
+        if part == "" or part.len() > 3: return false
+        if part.len() > 1 and part.starts_with("0"): return false
+        var value: i64 = 0
+        for ch in part.bytes():
+            if ch < 48 or ch > 57: return false
+            value = value * 10 + (ch as i64) - 48
+        if value > 255: return false
+    true
+
+fn bounded_http_host_v1(host: text) -> bool:
+    if host == "" or host.len() > 253: return false
+    for label in host.split("."):
+        if label == "" or label.len() > 63: return false
+        if label.starts_with("-") or label.ends_with("-"): return false
+        for ch in label.bytes():
+            if not ((ch >= 97 and ch <= 122) or (ch >= 48 and ch <= 57) or ch == 45): return false
+    true
+
+pub fn bounded_http_target_validate_v1(target: BoundedHttpTargetV1) -> Result<(), text>:
+    if not bounded_http_host_v1(target.host) or not bounded_http_ipv4_v1(target.address):
+        return Err("http_endpoint_invalid")
+    if target.port < 1 or target.port > 65535: return Err("http_endpoint_invalid")
+    if not target.tls and (target.host != "127.0.0.1" or target.address != "127.0.0.1"):
+        return Err("http_insecure_remote_refused")
+    if not target.path.starts_with("/") or target.path.len() > 256:
+        return Err("http_endpoint_invalid")
+    for segment in target.path.split("/"):
+        if segment == "." or segment == "..": return Err("http_endpoint_invalid")
+    for ch in target.path.bytes():
+        if not ((ch >= 97 and ch <= 122) or (ch >= 65 and ch <= 90) or
+                (ch >= 48 and ch <= 57) or ch == 47 or ch == 45 or ch == 95 or ch == 46):
+            return Err("http_endpoint_invalid")
+    Ok(())
+
+pub fn bounded_http_target_v1(endpoint: text, tls_address: text,
+        allow_loopback_http: bool) -> Result<BoundedHttpTargetV1, text>:
+    if endpoint.len() > 1024: return Err("http_endpoint_invalid")
+    val tls = endpoint.starts_with("https://")
+    if not tls and not endpoint.starts_with("http://"): return Err("http_scheme_refused")
+    val rest = endpoint.substring(if tls: 8 else: 7)
+    val slash = rest.index_of("/")
+    if slash <= 0: return Err("http_endpoint_invalid")
+    val authority = rest.substring(0, slash)
+    val path = rest.substring(slash)
+    var host = authority
+    var port: i64 = if tls: 443 else: 80
+    val colon = authority.index_of(":")
+    if colon >= 0:
+        host = authority.substring(0, colon)
+        val digits = authority.substring(colon + 1)
+        if digits == "" or digits.len() > 5 or (digits.len() > 1 and digits.starts_with("0")):
+            return Err("http_endpoint_invalid")
+        port = 0
+        for ch in digits.bytes():
+            if ch < 48 or ch > 57: return Err("http_endpoint_invalid")
+            port = port * 10 + (ch as i64) - 48
+    if not tls and not allow_loopback_http: return Err("http_loopback_opt_in_required")
+    if not tls and tls_address != "" and tls_address != "127.0.0.1":
+        return Err("http_endpoint_invalid")
+    val target = BoundedHttpTargetV1(tls: tls, host: host, port: port,
+        address: if tls: tls_address else: "127.0.0.1", path: path)
+    bounded_http_target_validate_v1(target)?
+    Ok(target)
+
+pub fn bounded_http_bearer_valid_v1(token: text) -> bool:
+    if token.len() < 1 or token.len() > 4096: return false
+    for ch in token.bytes():
+        if ch <= 32 or ch >= 127: return false
+    true
+
+export BoundedHttpTargetV1, bounded_http_target_v1, bounded_http_target_validate_v1
+export bounded_http_bearer_valid_v1, bounded_http_ipv4_v1

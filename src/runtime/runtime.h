@@ -1527,8 +1527,13 @@ char*    spl_strdup(const char* s);
 
 /* ===== Atomic Handles ===== */
 
-/* CPU parallel raw-pointer atomics: valid aligned i64 storage, SeqCst,
- * previous-value returns (also on compare-exchange failure). */
+/* CPU parallel raw-pointer atomics: valid aligned i64 storage and SeqCst.
+ * RMW operations return the previous value (also on failed compare-exchange);
+ * load returns the observed scalar value. */
+/* Capability query accepts a live caller-owned atomic i64 cell. Returns 1
+ * only when the target's raw 8-byte cell layout is supported lock-free. */
+int64_t  rt_par_atomic_i64_is_lock_free(int64_t* ptr);
+int64_t  rt_par_atomic_load_i64(int64_t* ptr);
 int64_t  rt_par_atomic_add_i64(int64_t* ptr, int64_t value);
 int64_t  rt_par_atomic_sub_i64(int64_t* ptr, int64_t value);
 int64_t  rt_par_atomic_xchg_i64(int64_t* ptr, int64_t value);

@@ -1,0 +1,116 @@
+# Exact-byte source proposals. No parser/compiler or filesystem dependency.
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.scv.solver_contract_v1.{solver_frame_v1}
+
+struct SourceFileV1:
+    file_uid: text
+    revision: text
+    path: text
+    kind: text
+    mode: text
+    bytes: [u8]
+
+# The host's separately approved operation digest must bind this entire record.
+# A producer label alone is never verification of an operation.
+struct SourceMoveEvidenceV1:
+    operation_id: text
+    producer_id: text
+    file_uid: text
+    base_revision: text
+    side_revision: text
+    from_path: text
+    to_path: text
+    expected_base_bytes_digest: text
+    expected_side_bytes_digest: text
+
+struct SourceMergeInputV1:
+    base: SourceFileV1
+    left: SourceFileV1
+    right: SourceFileV1
+    moves: [SourceMoveEvidenceV1]
+
+struct SourceProposalV1:
+    candidate: SourceFileV1?
+    conflict_code: text
+
+fn source_file_digest_v1(file: SourceFileV1) -> text:
+    var encoded = "scv-source-file-v1"
+    for value in [file.file_uid, file.revision, file.path, file.kind, file.mode, sha256_u8_hex(file.bytes)]:
+        encoded = encoded + solver_frame_v1(value)
+    sha256_text(encoded)
+
+fn source_operations_digest_v1(moves: [SourceMoveEvidenceV1]) -> text:
+    var encoded = "scv-source-move-bundle-v1"
+    for move in moves:
+        for value in [move.operation_id, move.producer_id, move.file_uid, move.base_revision, move.side_revision, move.from_path, move.to_path, move.expected_base_bytes_digest, move.expected_side_bytes_digest]:
+            encoded = encoded + solver_frame_v1(value)
+    sha256_text(encoded)
+
+fn source_move_matches_v1(base: SourceFileV1, side: SourceFileV1, move: SourceMoveEvidenceV1) -> bool:
+    (move.operation_id != "" and move.producer_id != "" and
+     move.file_uid == base.file_uid and side.file_uid == base.file_uid and
+     move.base_revision == base.revision and move.side_revision == side.revision and
+     move.from_path == base.path and move.to_path == side.path and
+     move.expected_base_bytes_digest == sha256_u8_hex(base.bytes) and
+     move.expected_side_bytes_digest == sha256_u8_hex(side.bytes))
+
+fn source_move_supported_v1(input: SourceMergeInputV1, side: SourceFileV1) -> bool:
+    if side.path == input.base.path: return true
+    var matches = 0
+    for move in input.moves:
+        if source_move_matches_v1(input.base, side, move): matches = matches + 1
+    matches == 1
+
+fn source_metadata_conflict_v1(input: SourceMergeInputV1) -> text:
+    """Check identity, file metadata and every admitted move before byte solving."""
+    val base = input.base
+    val left = input.left
+    val right = input.right
+    if base.file_uid == "" or base.file_uid != left.file_uid or base.file_uid != right.file_uid:
+        return "SOURCE_IDENTITY_MISMATCH"
+    if base.kind != left.kind or base.kind != right.kind or base.mode != left.mode or base.mode != right.mode:
+        return "SOURCE_KIND_MODE_CHANGE"
+    if not source_move_supported_v1(input, left) or not source_move_supported_v1(input, right):
+        return "SOURCE_MOVE_EVIDENCE_REQUIRED"
+    # Reject unused/forged operation records as well as missing required ones.
+    var operation_ids: [text] = []
+    for move in input.moves:
+        if operation_ids.contains(move.operation_id):
+            return "SOURCE_DUPLICATE_OPERATION"
+        operation_ids.push(move.operation_id)
+        if not source_move_matches_v1(base, left, move) and not source_move_matches_v1(base, right, move):
+            return "SOURCE_OPERATION_PRECONDITION"
+    if left.path != right.path and left.path != base.path and right.path != base.path:
+        return "SOURCE_DIVERGENT_MOVES"
+    ""
+
+fn source_merge_v1(input: SourceMergeInputV1) -> SourceProposalV1:
+    """Combine an evidenced move with a one-sided byte edit; preserve uncertainty."""
+    val conflict = source_metadata_conflict_v1(input)
+    if conflict != "": return SourceProposalV1(candidate: nil, conflict_code: conflict)
+    val base = input.base
+    val left = input.left
+    val right = input.right
+    var path = left.path
+    if left.path != right.path:
+        if left.path == base.path: path = right.path
+        elif right.path != base.path:
+            return SourceProposalV1(candidate: nil, conflict_code: "SOURCE_DIVERGENT_MOVES")
+    var bytes = left.bytes
+    if left.bytes != right.bytes:
+        if left.bytes == base.bytes: bytes = right.bytes
+        elif right.bytes != base.bytes:
+            return SourceProposalV1(candidate: nil, conflict_code: "SOURCE_BYTE_CONFLICT")
+    # This revision is a proposal identity only, never an accepted-history ID.
+    val revision = sha256_text("scv-source-proposal-v1" + solver_frame_v1(source_file_digest_v1(base)) + solver_frame_v1(source_file_digest_v1(left)) + solver_frame_v1(source_file_digest_v1(right)) + solver_frame_v1(source_operations_digest_v1(input.moves)))
+    SourceProposalV1(candidate: SourceFileV1(file_uid: base.file_uid, revision: revision, path: path, kind: base.kind, mode: base.mode, bytes: bytes), conflict_code: "")
+
+fn source_copy_proposal_v1(original: SourceFileV1, new_uid: text, new_path: text) -> Result<SourceFileV1, text>:
+    """A caller must allocate a distinct copy identity before requesting a copy."""
+    if new_uid == "" or new_uid == original.file_uid or new_path == "" or new_path == original.path:
+        return Err("SOURCE_COPY_DISTINCT_IDENTITY_REQUIRED")
+    Ok(SourceFileV1(file_uid: new_uid, revision: original.revision, path: new_path, kind: original.kind, mode: original.mode, bytes: original.bytes))
+
+export SourceFileV1, SourceMoveEvidenceV1, SourceMergeInputV1, SourceProposalV1
+export source_file_digest_v1, source_operations_digest_v1, source_merge_v1, source_copy_proposal_v1
+export source_metadata_conflict_v1

@@ -1297,9 +1297,24 @@ SIMPLE_RT_OBJ_CACHE_DIR="$stage3_cache/rt-obj" \
 bootstrap_stage3_source_snapshot "$source_after" "$root"
 bootstrap_stage3_git_state "$root" "$git_after"
 bootstrap_stage3_tool_authority_snapshot "$tool_after" "$path" "$root"
-cmp -s "$source_before" "$source_after"
-cmp -s "$git_before" "$git_after"
-cmp -s "$tool_before" "$tool_after"
+if cmp -s "$source_before" "$source_after"; then :; else
+  source_cmp_status=$?
+  printf 'error: Stage 3 postbuild source snapshot comparison failed: %s differs from or cannot be compared with %s; Stage 3 was not admitted\n' \
+    "$source_before" "$source_after" >&2
+  exit "$source_cmp_status"
+fi
+if cmp -s "$git_before" "$git_after"; then :; else
+  git_cmp_status=$?
+  printf 'error: Stage 3 postbuild git state comparison failed: %s differs from or cannot be compared with %s; Stage 3 was not admitted\n' \
+    "$git_before" "$git_after" >&2
+  exit "$git_cmp_status"
+fi
+if cmp -s "$tool_before" "$tool_after"; then :; else
+  tool_cmp_status=$?
+  printf 'error: Stage 3 postbuild tool authority comparison failed: %s differs from or cannot be compared with %s; Stage 3 was not admitted\n' \
+    "$tool_before" "$tool_after" >&2
+  exit "$tool_cmp_status"
+fi
 
 BSTAGE3_ROOT=$root BSTAGE3_MANIFEST=$manifest BSTAGE3_PLATFORM=$platform
 BSTAGE3_BACKEND=$stage2_backend BSTAGE3_MODE=dynload BSTAGE3_SEED=$seed

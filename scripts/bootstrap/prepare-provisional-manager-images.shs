@@ -118,6 +118,36 @@ available_memory() {
 }
 build_image() {
   name=$1 entry=$2 image="$output_root/images/$1$suffix"
+  image_cache_root="$output_root/cache/$name"
+  image_storage_root="$output_root/storage/$name"
+  image_cache_scope="provisional-$name"
+  mkdir -p "$image_cache_root/simple" "$image_cache_root/frontend" \
+    "$image_cache_root/hir" "$image_cache_root/native" "$image_cache_root/xdg" \
+    "$image_cache_root/host" "$image_cache_root/native-noop" "$image_cache_root/phase3-compat" \
+    "$image_cache_root/runtime-obj" "$image_cache_root/hir-failure" \
+    "$image_storage_root" "$output_root/worktree/$name" || die "image-owned cache roots unavailable: $name"
+  cache_environment_digest=$(printf '%s\n' \
+    "SIMPLE_CACHE=$image_cache_root/simple" \
+    "SIMPLE_CACHE_DIR=$image_cache_root/simple" \
+    "SIMPLE_CACHE_PROJECT=provisional-$name" \
+    "SIMPLE_CACHE_SCOPE=$image_cache_scope" \
+    "SIMPLE_USER_STORAGE_ROOT=$image_storage_root" \
+    "SIMPLE_FRONTEND_CACHE_DIR=$image_cache_root/frontend" \
+    "SIMPLE_FRONTEND_CACHE=1" \
+    "SIMPLE_FRONTEND_CACHE_SCOPE=$image_cache_scope" \
+    "SIMPLE_HIR_CACHE_DIR=$image_cache_root/hir" \
+    "SIMPLE_HIR_CACHE_FAILED_DIAGNOSTIC_DIR=$image_cache_root/hir-failure" \
+    "SIMPLE_HIR_CACHE=1" \
+    "SIMPLE_NATIVE_BUILD_CACHE_DIR=$image_cache_root/native" \
+    "SIMPLE_NATIVE_NOOP_CACHE_ROOT=$image_cache_root/native-noop" \
+    "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$image_cache_root/phase3-compat" \
+    "SIMPLE_RT_OBJ_CACHE_DIR=$image_cache_root/runtime-obj" \
+    "SIMPLE_RT_OBJ_CACHE=1" \
+    "SIMPLE_HOST_CACHE_ROOT=$image_cache_root/host" \
+    "SIMPLE_WORKTREE_STORAGE_ROOT=$output_root/worktree/$name" \
+    "XDG_CACHE_HOME=$image_cache_root/xdg" "TMPDIR=$output_root/tmp" \
+    "TEMP=$output_root/tmp" "TMP=$output_root/tmp" | sha256sum | cut -d ' ' -f 1) \
+    || die "image cache-environment digest unavailable: $name"
   image_pin_receipt="$output_root/image-receipts/$name.env"
   verify_pins
   regular "$source_root/$entry" || die "image entry absent from pinned source: $entry"
@@ -125,7 +155,7 @@ build_image() {
   argv_digest=$(printf '%s\n' "$producer" native-build "$entry" --backend llvm \
     --target "$target" --runtime-bundle core-c-bootstrap --runtime-path "$runtime_path" \
     --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --source src/package_ownership --source src/compositions --entry-closure \
-    --threads "$threads" --cache-dir "$output_root/cache/$name" --mode one-binary --output "$image" |
+    --threads "$threads" --cache-dir "$image_cache_root/native" --mode one-binary --output "$image" |
     sha256sum | cut -d ' ' -f 1) || die "image argv digest unavailable"
   image_wire() {
     printf '%s\n' 'format=SIMPLE-PROVISIONAL-IMAGE-1' 'diagnostic_only=1' \
@@ -138,6 +168,18 @@ build_image() {
       "target=$target" "memory_limit_bytes=$memory_bytes" \
       "memory_enforcement=sampled-process-tree-rss-$memory_policy" \
       "memory_reserve_bytes=$reserve_bytes" "timeout_seconds=$timeout_seconds" "threads=$threads" \
+      "simple_cache_root=$image_cache_root/simple" \
+      "simple_cache_project=provisional-$name" "simple_cache_scope=$image_cache_scope" \
+      "user_storage_root=$image_storage_root" \
+      "frontend_cache_root=$image_cache_root/frontend" "frontend_cache_scope=$image_cache_scope" \
+      "hir_cache_root=$image_cache_root/hir" \
+      "hir_failure_diagnostic_root=$image_cache_root/hir-failure" \
+      "native_build_cache_root=$image_cache_root/native" "native_noop_cache_root=$image_cache_root/native-noop" \
+      "phase3_compatibility_cache_root=$image_cache_root/phase3-compat" \
+      "runtime_object_cache_root=$image_cache_root/runtime-obj" "host_cache_root=$image_cache_root/host" \
+      "worktree_storage_root=$output_root/worktree/$name" \
+      "xdg_cache_root=$image_cache_root/xdg" \
+      "cache_environment_digest=$cache_environment_digest" \
       "watchdog_digest=$(hash_file "$watchdog")" "argv_digest=$argv_digest" \
       "image_path=$image" "image_sha256=$(hash_file "$image")"
   }
@@ -173,13 +215,36 @@ build_image() {
   positive "$cap_kib" || die "process-tree RSS cap invalid"
   if (CDPATH= cd -- "$source_root" && \
     env -u SIMPLE_BOOTSTRAP_SESSION_ID -u SIMPLE_BOOTSTRAP_SESSION_EXEC \
-    TMPDIR="$output_root/tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+    -u SIMPLE_NATIVE_BUILD_WORKER -u SIMPLE_NATIVE_BUILD_FORCE_WORKER \
+    -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_PARSE_SHARD -u SIMPLE_PARSE_SHARD_QUEUE \
+    -u SIMPLE_HIR_SHARD -u SIMPLE_HIR_SHARD_QUEUE -u SIMPLE_HIR_SHARD_OWNER \
+    -u SIMPLE_HIR_SHARD_CLAIM_LIMIT -u SIMPLE_MIR_SHARD -u SIMPLE_MIR_SHARD_QUEUE \
+    -u SIMPLE_MIR_SHARD_OWNER -u SIMPLE_MIR_SHARD_EXPORT_WRITE -u SIMPLE_MIR_SHARDING \
+    -u SIMPLE_SHARED_PARSE_CAS_ROOT -u SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY \
+    -u SIMPLE_SHARED_PARSE_CAS_TRACE -u SIMPLE_SHARED_PARSE_SOURCE_ROOT \
+    -u SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH -u SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST \
+    SIMPLE_WORKTREE_STORAGE_ROOT="$output_root/worktree/$name" \
+    TMPDIR="$output_root/tmp" TEMP="$output_root/tmp" TMP="$output_root/tmp" \
+    XDG_CACHE_HOME="$image_cache_root/xdg" \
+    SIMPLE_CACHE="$image_cache_root/simple" SIMPLE_CACHE_PROJECT="provisional-$name" \
+    SIMPLE_CACHE_SCOPE="$image_cache_scope" SIMPLE_USER_STORAGE_ROOT="$image_storage_root" \
+    SIMPLE_HOST_CACHE_ROOT="$image_cache_root/host" \
+    SIMPLE_CACHE_DIR="$image_cache_root/simple" \
+    SIMPLE_FRONTEND_CACHE_DIR="$image_cache_root/frontend" \
+    SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_SCOPE="$image_cache_scope" \
+    SIMPLE_HIR_CACHE_DIR="$image_cache_root/hir" \
+    SIMPLE_HIR_CACHE_FAILED_DIAGNOSTIC_DIR="$image_cache_root/hir-failure" \
+    SIMPLE_HIR_CACHE=1 SIMPLE_NATIVE_BUILD_CACHE_DIR="$image_cache_root/native" \
+    SIMPLE_NATIVE_NOOP_CACHE_ROOT="$image_cache_root/native-noop" \
+    SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT="$image_cache_root/phase3-compat" \
+    SIMPLE_RT_OBJ_CACHE=1 SIMPLE_RT_OBJ_CACHE_DIR="$image_cache_root/runtime-obj" \
+    SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BOOTSTRAP_RSS_CAP_MODE="$memory_policy" \
     SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$cap_kib" \
     "$watchdog" "$timeout_seconds" 5 "$producer" native-build "$entry" --backend llvm --target "$target" \
       --runtime-bundle core-c-bootstrap --runtime-path "$runtime_path" \
       --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --source src/package_ownership --source src/compositions --entry-closure \
-      --threads "$threads" --cache-dir "$output_root/cache/$name" --mode one-binary --output "$image") \
+      --threads "$threads" --cache-dir "$image_cache_root/native" --mode one-binary --output "$image") \
       >"$output_root/logs/$name.attempt$attempt.stdout.log" \
       2>"$output_root/logs/$name.attempt$attempt.stderr.log"; then
     :

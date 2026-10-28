@@ -1,0 +1,81 @@
+"""Bounded native gateway configuration. Credentials never occur in SDN.
+
+V1 deliberately accepts one logical repository per listener. Selecting that
+repository remains mandatory on every request, including capabilities.
+"""
+use app.io.mod.{file_read_regular_no_follow_bounded_bytes, env_get}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.scv.scv_config_fields_v1.{scv_config_dict_v1, scv_config_text_v1, scv_config_int_v1}
+use app.scv.gateway_github_v1.{ScvGithubRepositoryV1, ScvGithubReadPolicyV1, scv_gateway_github_policy_validate_v1}
+
+struct ScvGatewayConfigV1:
+    repository: text
+    listen_host: text
+    listen_port: i32
+    bearer_token_env: text
+    github: ScvGithubReadPolicyV1
+
+fn scv_gateway_env_name_valid_v1(name: text) -> bool:
+    if name.len() < 1 or name.len() > 128: return false
+    for index in 0..name.len():
+        val code = name.char_code_at(index)
+        val letter = (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+        if not letter and (index == 0 or code < 48 or code > 57): return false
+    true
+
+fn scv_gateway_bearer_valid_v1(token: text) -> bool:
+    if token.len() < 32 or token.len() > 256: return false
+    for code in token.bytes():
+        val letter = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        if not letter and not digit and not [45, 46, 95, 126, 43, 47, 61].contains(code.to_i64()): return false
+    true
+
+fn scv_gateway_config_parse_v1(bytes: [u8]) -> Result<ScvGatewayConfigV1, text>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 8192, max_depth: 4,
+        max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)
+    val document = match sdn_parse_strict_bytes_v1(bytes, limits):
+        case Ok(parsed): parsed
+        case Err(_): return Err("GatewayConfigSyntax")
+    val fields = scv_config_dict_v1(document.value, "gateway", [
+        "version", "repository", "listen_host", "listen_port", "bearer_token_env",
+        "github_host", "github_owner", "github_repository", "github_repository_id"])?
+    scv_config_int_v1(fields["version"], "version", 1, 1)?
+    val repository = scv_config_text_v1(fields["repository"], "repository")?
+    if repository.len() > 128 or repository == "." or repository == "..": return Err("GatewayConfigRepository")
+    for code in repository.bytes():
+        val letter = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        if not letter and not digit and not [45, 46, 95].contains(code.to_i64()): return Err("GatewayConfigRepository")
+    val host = scv_config_text_v1(fields["listen_host"], "listen_host")?
+    # Literal IPv4 loopback avoids DNS rebinding or wildcard ambiguity.
+    if host != "127.0.0.1": return Err("GatewayLoopbackListenerRequired")
+    val port = scv_config_int_v1(fields["listen_port"], "listen_port", 1024, 65535)?
+    val token_env = scv_config_text_v1(fields["bearer_token_env"], "bearer_token_env")?
+    if not scv_gateway_env_name_valid_v1(token_env): return Err("GatewayConfigCredentialReference")
+    val github_host = scv_config_text_v1(fields["github_host"], "github_host")?
+    if github_host != "github.com": return Err("GatewayGithubHostUnsupported")
+    val mapping = ScvGithubRepositoryV1(repository_id: repository, host: github_host,
+        owner: scv_config_text_v1(fields["github_owner"], "github_owner")?,
+        repository: scv_config_text_v1(fields["github_repository"], "github_repository")?,
+        github_repository_id: scv_config_text_v1(fields["github_repository_id"], "github_repository_id")?)
+    val policy = ScvGithubReadPolicyV1(allowlist: [mapping], timeout_ms: 5000,
+        maximum_response_bytes: 2097152, maximum_blob_bytes: 1048576, maximum_requests: 3u64)
+    scv_gateway_github_policy_validate_v1(policy)?
+    Ok(ScvGatewayConfigV1(repository: repository, listen_host: host,
+        listen_port: port.to_i32(), bearer_token_env: token_env, github: policy))
+
+fn scv_gateway_config_load_v1(path: text) -> Result<ScvGatewayConfigV1, text>:
+    val bytes = match file_read_regular_no_follow_bounded_bytes(path, 8192):
+        case Ok(content): content
+        case Err(_): return Err("GatewayConfigReadRefused")
+    scv_gateway_config_parse_v1(bytes)
+
+fn scv_gateway_bearer_load_v1(config: ScvGatewayConfigV1) -> Result<text, text>:
+    val token = env_get(config.bearer_token_env)
+    if not scv_gateway_bearer_valid_v1(token): return Err("GatewayCredentialUnavailable")
+    Ok(token)
+
+export ScvGatewayConfigV1, scv_gateway_config_parse_v1, scv_gateway_config_load_v1
+export scv_gateway_env_name_valid_v1, scv_gateway_bearer_valid_v1, scv_gateway_bearer_load_v1

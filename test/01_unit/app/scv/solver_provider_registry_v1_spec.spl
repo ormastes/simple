@@ -1,0 +1,104 @@
+# Provider registry parsing and policy binding only. These in-memory fixtures
+# are not installed artifacts; they do not prove bytes or process execution.
+use std.spec.*
+use std.scv.solver_provider_registry_v1.*
+use std.scv.solver_contract_v1.*
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+fn registry_lock_v1(parser_digest: text, model_digest: text, solver_digest: text, policy: text) -> text:
+    """Build a minimal SDN provider lock used by adversarial registry cases."""
+    val parser_manifest = "d".repeat(64)
+    val model_manifest = "e".repeat(64)
+    val solver_manifest = "f".repeat(64)
+    val lines = [
+        "schema_version: 1",
+        "providers |provider_id, domain, role, plugin_manifest, manifest_sha256, artifact_path, artifact_sha256, lock_digest, build_identity, abi_version, provider_schema, policy_revision, host_capability|",
+        "    \"scv.parser.raw-bytes.v1\", \"source.bytes\", \"parser\", \"plugins/scv/parser/plugin.sdn\", \"{parser_manifest}\", \"plugins/scv/parser/provider.bin\", \"{parser_digest}\", \"{parser_digest}\", \"test-fixture-unverified-parser\", \"scv-provider-abi-v1\", \"raw-bytes-v1\", \"{policy}\", \"host:builtin-in-process-v1\"",
+        "    \"scv.model.source-file.v1\", \"source.bytes\", \"model\", \"plugins/scv/model/plugin.sdn\", \"{model_manifest}\", \"plugins/scv/model/provider.bin\", \"{model_digest}\", \"{model_digest}\", \"test-fixture-unverified-model\", \"scv-provider-abi-v1\", \"raw-bytes-v1\", \"{policy}\", \"host:builtin-in-process-v1\"",
+        "    \"scv.solver.source-bytes.v1\", \"source.bytes\", \"solver\", \"plugins/scv/solver/plugin.sdn\", \"{solver_manifest}\", \"plugins/scv/solver/provider.bin\", \"{solver_digest}\", \"{solver_digest}\", \"test-fixture-unverified-solver\", \"scv-provider-abi-v1\", \"raw-bytes-v1\", \"{policy}\", \"host:builtin-in-process-v1\"",
+    ]
+    lines.join("\n") + "\n"
+
+fn registry_policy_v1(revision: text, parser_digest: text, model_digest: text, solver_digest: text) -> SolverHostPolicyV1:
+    val binding = SolveBindingV1(repository: "repo", namespace: "ns", domain: "source.bytes",
+        base_revision: "b", left_revision: "l", right_revision: "r", base_model_id: "bm",
+        left_model_id: "lm", right_model_id: "rm", expected_root: "root", schema_revision: "raw-bytes-v1",
+        policy_revision: revision, routing_revision: "route", identity_map_revision: "identity",
+        parser_lock_digest: parser_digest, solver_lock_digest: solver_digest, profile_digest: "profile",
+        configuration_digest: "config", operation_bundle_digest: "ops", authorization_scope: "scope")
+    SolverHostPolicyV1(expected: binding,
+        parser: ParserProvider(provider_id: "scv.parser.raw-bytes.v1", lock_digest: parser_digest),
+        model: DomainModelProvider(provider_id: "scv.model.source-file.v1", lock_digest: model_digest),
+        solver: SolverProvider(provider_id: "scv.solver.source-bytes.v1", lock_digest: solver_digest),
+        validators: [], publisher: Publisher(provider_id: "unavailable", lock_digest: ""))
+
+describe "SCV provider registry artifact and policy boundary":
+    it "parses provider metadata but leaves process execution unqualified":
+        step("Parse a bounded provider lock")
+        val parser = "a".repeat(64)
+        val model = "b".repeat(64)
+        val solver = "c".repeat(64)
+        val registry = solver_provider_registry_parse_v1(registry_lock_v1(parser, model, solver, "accepted-A").bytes(), SdnStrictLimitsV1())
+        step("Resolve through the separately supplied old policy")
+        val resolved = solver_provider_registry_resolve_v1(registry.unwrap(), registry.unwrap().lock_sha256, registry_policy_v1("accepted-A", parser, model, solver), "source.bytes")
+        step("Check the host does not infer execution from artifact metadata")
+        expect(resolved.status).to_equal("resolved-unqualified")
+        expect(resolved.execution_status).to_equal("unqualified-builtin-execution")
+        expect(resolved.execution_attested).to_equal(false)
+        expect(resolved.provider_ids).to_equal(["scv.parser.raw-bytes.v1", "scv.model.source-file.v1", "scv.solver.source-bytes.v1"])
+
+    it "rejects artifact digest substitution and noncanonical digest labels":
+        step("Submit a malformed digest in a provider lock")
+        val parsed = solver_provider_registry_parse_v1(registry_lock_v1("sha256:forged", "b".repeat(64), "c".repeat(64), "accepted-A").bytes(), SdnStrictLimitsV1())
+        step("Check that a label is not treated as an artifact digest")
+        expect(parsed.is_err()).to_equal(true)
+
+    it "binds provider artifact bytes to the locked digest without claiming execution":
+        step("Lock a small immutable artifact payload")
+        val artifact = "fixed provider bytes".bytes()
+        val digest = sha256_u8_hex(artifact)
+        val parsed = solver_provider_registry_parse_v1(registry_lock_v1(digest, "b".repeat(64), "c".repeat(64), "accepted-A").bytes(), SdnStrictLimitsV1()).unwrap()
+        step("Check the exact bytes and a substituted payload")
+        expect(solver_provider_artifact_bytes_match_v1(parsed.providers[0], artifact)).to_equal(true)
+        expect(solver_provider_artifact_bytes_match_v1(parsed.providers[0], "substituted bytes".bytes())).to_equal(false)
+        expect(solver_provider_registry_resolve_v1(parsed, parsed.lock_sha256, registry_policy_v1("accepted-A", digest, "b".repeat(64), "c".repeat(64)), "source.bytes").execution_attested).to_equal(false)
+
+    it "rejects unsafe manifest and artifact paths before any ordinary file read":
+        step("Parse a lock that attempts to escape the plugin root")
+        val bytes = registry_lock_v1("a".repeat(64), "b".repeat(64), "c".repeat(64), "accepted-A").replace("plugins/scv/parser/provider.bin", "plugins/scv/parser/../../outside")
+        val parsed = solver_provider_registry_parse_v1(bytes.bytes(), SdnStrictLimitsV1())
+        step("Check that unsafe paths fail at schema admission")
+        expect(parsed.is_err()).to_equal(true)
+
+    it "refuses a registry whose policy generation differs from the supplied accepted policy":
+        step("Parse a lock bound to the previously accepted policy")
+        val parser = "a".repeat(64)
+        val model = "b".repeat(64)
+        val solver = "c".repeat(64)
+        val registry = solver_provider_registry_parse_v1(registry_lock_v1(parser, model, solver, "accepted-A").bytes(), SdnStrictLimitsV1()).unwrap()
+        step("Attempt resolution using a different policy generation")
+        val resolved = solver_provider_registry_resolve_v1(registry, registry.lock_sha256, registry_policy_v1("candidate-B", parser, model, solver), "source.bytes")
+        step("Check that the registry is not accepted under the mismatched generation")
+        expect(resolved.status).to_equal("needs_inputs")
+        expect(resolved.execution_attested).to_equal(false)
+
+    it "requires the exact prior accepted lock digest at resolution":
+        step("Parse a lock pinned by its exact raw bytes")
+        val parser = "a".repeat(64)
+        val model = "b".repeat(64)
+        val solver = "c".repeat(64)
+        val registry = solver_provider_registry_parse_v1(registry_lock_v1(parser, model, solver, "accepted-A").bytes(), SdnStrictLimitsV1()).unwrap()
+        step("Resolve using a substituted lock digest")
+        val resolved = solver_provider_registry_resolve_v1(registry, "0".repeat(64), registry_policy_v1("accepted-A", parser, model, solver), "source.bytes")
+        step("Check that a different lock cannot select providers")
+        expect(resolved.status).to_equal("needs_inputs")
+        expect(resolved.provider_ids).to_equal([])
+
+    it "rejects duplicate or replaced provider entries instead of selecting the first match":
+        step("Duplicate a provider identity in the lock")
+        val bytes = registry_lock_v1("a".repeat(64), "b".repeat(64), "c".repeat(64), "accepted-A")
+        val duplicate = bytes.replace("scv.model.source-file.v1", "scv.parser.raw-bytes.v1")
+        val parsed = solver_provider_registry_parse_v1(duplicate.bytes(), SdnStrictLimitsV1())
+        step("Check that duplicate provider IDs cannot shadow a reviewed entry")
+        expect(parsed.is_err()).to_equal(true)

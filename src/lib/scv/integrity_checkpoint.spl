@@ -1,0 +1,50 @@
+# Checkpoint payload verification; read failures are explicit corruption.
+use app.io.mod (file_exists, file_read, dir_walk)
+use std.scv.core.{scv_repo_dir}
+use std.scv.store.{scv_hash_text, scv_content_id_for_file}
+
+# Full checkpoint verification (MIG-09): recompute each checkpoint's manifest
+# hash and every payload file hash. Mirrors stabilize.scv_checkpoint_verify
+# without importing stabilize (which imports this module).
+fn scv_validate_checkpoint_manifest(root: text, id: text, dir: text, manifest: text) -> text:
+    var errors: [text] = []
+    if scv_hash_text("checkpoint", manifest) != id:
+        errors.push("checkpoint manifest hash mismatch: {id}\n")
+    var in_rows = false
+    for line in manifest.split("\n"):
+        if not in_rows:
+            if line == "--":
+                in_rows = true
+            continue
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val sep = trimmed.index_of(" ")
+        if sep <= 0:
+            errors.push("bad checkpoint manifest row: {id} {trimmed}\n")
+            continue
+        val sha = trimmed[:sep]
+        val rel = trimmed[sep + 1:]
+        val data = "{dir}/data/{rel}"
+        if not file_exists(data):
+            errors.push("missing checkpoint file: {id} {rel}\n")
+        elif scv_content_id_for_file(data) != Ok(sha):
+            errors.push("checkpoint file hash mismatch: {id} {rel}\n")
+    errors.join("")
+
+fn scv_validate_checkpoints(root: text) -> text:
+    val dir = "{scv_repo_dir(root)}/checkpoints"
+    if not file_exists(dir):
+        return ""
+    var errors: [text] = []
+    for path in dir_walk(dir):
+        if not path.ends_with("/manifest.sdn"):
+            continue
+        val checkpoint_dir = path[0:path.len() - "/manifest.sdn".len()]
+        val segments = checkpoint_dir.split("/")
+        val id = segments[segments.len() - 1]
+        if id.starts_with("."):
+            continue
+        errors.push(scv_validate_checkpoint_manifest(root, id, checkpoint_dir, file_read(path)))
+    errors.join("")
+

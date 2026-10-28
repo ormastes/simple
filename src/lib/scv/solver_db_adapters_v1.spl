@@ -1,0 +1,103 @@
+# Domain-specific adapters: never convert DB inputs into a text merge request.
+use std.scv.solver_contract_v1.*
+use std.scv.solver_host_v1.{solver_host_preflight_v1, solver_host_result_v1}
+use std.scv.solver_budget_v1.{solver_budget_host_v1}
+use std.scv.solver_db_budget_v1.*
+use std.scv.solver_db_rows_schema_v1.{DbRowsSchemaInputV1, DbRowsSchemaSolveV1, solve_db_rows_schema_v1}
+use std.scv.db_schema_identity_v2.{DbSchemaV2}
+use std.scv.db_schema_codec_v2.{db_schema_bytes_v2, db_schema_check_revision_v2}
+use std.scv.db_schema_merge_v2.{DbSchemaMergeResultV2, db_schema_merge_v2}
+use std.scv.db_reducer.{MaterializedState, MergePlan, db_plan_patch}
+use std.scv.db_patch.{DbPatch}
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_digest}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+struct DbSchemaSolveV1:
+    result: SolveResultV1
+    base: DbSchemaV2
+    left: DbSchemaV2
+    right: DbSchemaV2
+    proposal: DbSchemaMergeResultV2?
+
+struct DbRowsSolveV1:
+    result: SolveResultV1
+    state: MaterializedState
+    patch: DbPatch
+    preview: MergePlan?
+
+fn solver_db_schema_model_id_v1(schema: DbSchemaV2) -> Result<text, text>:
+    val verified = db_schema_check_revision_v2(schema)?
+    Ok(sha256_u8_hex(db_schema_bytes_v2(schema)?))
+
+fn solve_db_schema_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, base: DbSchemaV2, left: DbSchemaV2, right: DbSchemaV2) -> Result<DbSchemaSolveV1, text>:
+    """Schema identity and migration semantics come solely from the V2 owner."""
+    var budget = solver_budget_host_v1(request, policy)
+    budget = solver_budget_schema_v1(budget, base)
+    budget = solver_budget_schema_v1(budget, left)
+    budget = solver_budget_schema_v1(budget, right)
+    val retained = budget.spent
+    val work = budget.spent
+    var refusal = "resource_limited"
+    if not budget.limited: refusal = solver_host_preflight_v1(request, policy, "db.schema", work, retained)
+    if request.cancelled: refusal = "cancelled"
+    if refusal != "":
+        return Ok(DbSchemaSolveV1(result: solver_host_result_v1(request, policy, refusal, nil, [], work, retained), base: base, left: left, right: right, proposal: nil))
+    val binding = request.binding
+    if (binding.namespace != base.table_uid.database_namespace or binding.base_model_id != solver_db_schema_model_id_v1(base)? or
+        binding.left_model_id != solver_db_schema_model_id_v1(left)? or binding.right_model_id != solver_db_schema_model_id_v1(right)? or
+        binding.base_revision != base.revision or binding.left_revision != left.revision or binding.right_revision != right.revision or
+        binding.schema_revision != base.revision or binding.expected_root != binding.base_model_id or
+        binding.operation_bundle_digest != "schema-applied-operation-receipts-v2"):
+        return Ok(DbSchemaSolveV1(result: solver_host_result_v1(request, policy, "failed", nil, [], work, retained), base: base, left: left, right: right, proposal: nil))
+    val proposal = db_schema_merge_v2(base, left, right)?
+    var conflicts: [SolverConflictV1] = []
+    for conflict in proposal.conflicts:
+        conflicts.push(SolverConflictV1(domain: "db.schema", code: conflict.code, subject: conflict.detail, input_key: solver_result_key_v1(request, policy)))
+    var root: text? = nil
+    var status = "conflicted"
+    if val candidate = proposal.candidate:
+        if conflicts.len() == 0:
+            root = solver_db_schema_model_id_v1(candidate)?
+            status = "proposed"
+    # required_checks from the solver are deliberately ignored; host owns them.
+    Ok(DbSchemaSolveV1(result: solver_host_result_v1(request, policy, status, root, conflicts, work, retained), base: base, left: left, right: right, proposal: proposal))
+
+fn solve_db_rows_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, state: MaterializedState, patch: DbPatch, accepted_config: DbPolicyConfig) -> Result<DbRowsSolveV1, text>:
+    """Reuse the real reducer preview; signature authorization is still required."""
+    var budget = solver_budget_host_v1(request, policy)
+    budget = solver_budget_state_patch_v1(budget, state, patch)
+    budget = solver_budget_db_config_v1(budget, accepted_config)
+    val retained = budget.spent
+    val work = budget.spent
+    var refusal = "resource_limited"
+    if not budget.limited: refusal = solver_host_preflight_v1(request, policy, "db.rows", work, retained)
+    if request.cancelled: refusal = "cancelled"
+    if refusal != "":
+        return Ok(DbRowsSolveV1(result: solver_host_result_v1(request, policy, refusal, nil, [], work, retained), state: state, patch: patch, preview: nil))
+    val state_wire = db_snapshot_encode(state)?
+    val patch_wire = db_patch_encode(patch)?
+    val config_digest = db_policy_digest(accepted_config)?
+    val binding = request.binding
+    if (accepted_config.revision != config_digest or binding.repository != accepted_config.merge.repository or binding.namespace != accepted_config.merge.namespace or
+        binding.base_model_id != sha256_text(state_wire) or binding.left_model_id != sha256_text(patch_wire) or binding.right_model_id != config_digest or
+        binding.base_revision != state.revision or binding.left_revision != patch.payload_digest or binding.right_revision != config_digest or
+        binding.schema_revision != accepted_config.merge.schema_revision or binding.policy_revision != config_digest or
+        binding.configuration_digest != config_digest or binding.expected_root != sha256_text(state_wire) or
+        binding.operation_bundle_digest != patch.payload_digest):
+        return Ok(DbRowsSolveV1(result: solver_host_result_v1(request, policy, "failed", nil, [], work, retained), state: state, patch: patch, preview: nil))
+    val preview = db_plan_patch(state, patch, accepted_config.merge)?
+    var conflicts: [SolverConflictV1] = []
+    for conflict in preview.conflicts:
+        conflicts.push(SolverConflictV1(domain: "db.rows", code: conflict.code, subject: conflict.entity + ":" + conflict.field, input_key: solver_result_key_v1(request, policy)))
+    var status = "proposed"
+    var root: text? = sha256_text(db_snapshot_encode(preview.proposed)?)
+    if conflicts.len() > 0:
+        status = "conflicted"
+        root = nil
+    Ok(DbRowsSolveV1(result: solver_host_result_v1(request, policy, status, root, conflicts, work, retained), state: state, patch: patch, preview: preview))
+
+export DbSchemaSolveV1, DbRowsSolveV1, solver_db_schema_model_id_v1
+export solve_db_schema_v1, solve_db_rows_v1
+export DbRowsSchemaInputV1, DbRowsSchemaSolveV1, solve_db_rows_schema_v1

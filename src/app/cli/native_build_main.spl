@@ -85,8 +85,9 @@ use compiler.driver.driver_build.native_file_worker_incremental_v1.{
     file_worker_inc_receipt_line_v1}
 use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1, file_worker_inc_iface_digest_v1,
     file_worker_inc_prepare_v1, file_worker_inc_finish_v1}
-use compiler.driver.driver_build.native_file_worker_instances_v1.{file_worker_instances_plan_v1,
-    file_worker_instances_run_v1, file_worker_instances_receipt_line_v1}
+use compiler.driver.driver_build.native_file_worker_instances_v1.{prelink_instances_run_v1,
+    prelink_instances_blocks_link_v1, prelink_instances_writes_retire_v1,
+    file_worker_instances_receipt_line_v1}
 use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_STAGE_ENV_V1,
     GENERIC_INSTANCE_RETIRE_ENV_V1, GENERIC_INSTANCE_LINK_ENV_V1, generic_instance_object_from_stage_v1,
     generic_instance_retire_snapshot_v1, generic_instance_retire_record_v1, generic_instance_verified_v1,
@@ -1392,6 +1393,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
         env_set("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
         return file_result
     var hir_ok = true
+    var shard_hir_queue = ""
     val hir_count = if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
             env_get("SIMPLE_HIR_SHARDING") ?? "") == 1: native_build_hir_shard_count(args) else: 0
     if hir_count > 1:
@@ -1399,6 +1401,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
         if hir_queue == "":
             hir_ok = false
         else:
+            shard_hir_queue = hir_queue
             print "[capsule-shard] hir shards={hir_count} ledger={hir_queue}"
             val hir_run = run_ledger_shards("hir-shard", "--hir-shard", "SIMPLE_HIR_SHARD_QUEUE",
                 "SIMPLE_HIR_SHARD_OWNER", base, hir_queue, args, hir_count, hir_count,
@@ -1421,6 +1424,19 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                 val outcome = native_mir_shard_outcome_v1(mir_run.code, mir_run.failed_modules,
                     mir_run.total_claims, mir_run.all_stopped)
                 if outcome == "link":
+                    # Same pre-link instance step as the file-worker pool, but the
+                    # shard route retires no COMDAT copies (may_retire=false), so an
+                    # instance failure only warns and the link uses the COMDAT copies.
+                    if shard_hir_queue == "":
+                        print "[capsule-shard] prelink: skipped (no deps ledger)"
+                    else:
+                        val shard_producer = file_worker_inc_producer_v1(
+                            native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity()), args)
+                        val (_shard_relink, shard_instances_ok) = prelink_generic_instances_v1(args, mir_queue,
+                            shard_hir_queue, shard_producer, false, [])
+                        if not shard_instances_ok:
+                            eprint "[capsule-shard] warning: generic instance objects unavailable; linking on COMDAT copies"
+                            env_set(GENERIC_INSTANCE_LINK_ENV_V1, "")
                     result = mir_queue
                 elif outcome == "fail":
                     eprint "[capsule-shard] MIR aggregate failure exit={mir_run.code} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; link blocked"
@@ -1512,9 +1528,9 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     print "[file-worker] receipts={receipts.len()} overlap_proven={file_worker_overlap_proven_v1(receipts)}"
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules, run.total_claims, run.all_stopped)
     if outcome == "link":
-        val (instances_relink, instances_ok) = run_file_worker_instances_v1(args, mir_queue, hir_queue, inc_producer,
+        val (instances_relink, instances_ok) = prelink_generic_instances_v1(args, mir_queue, hir_queue, inc_producer, true,
             if retire_written: retire_snapshot else: [])
-        if not instances_ok:
+        if prelink_instances_blocks_link_v1(true, instances_ok):
             eprint "[file-worker] retired COMDAT copies have no verified instance object; link blocked"
             return "fail"
         if inc_dir != "":
@@ -1538,7 +1554,7 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
 # (relink, ok): relink when an instance was built or dropped (P-E
 # removed-module rule); ok is false only when a COMDAT copy the children
 # retired (`retired`) has no verified instance object to link.
-fn run_file_worker_instances_v1(args: [text], mir_queue: text, hir_queue: text, producer: text,
+fn prelink_generic_instances_v1(args: [text], mir_queue: text, hir_queue: text, producer: text, may_retire: bool,
         retired: [text]) -> (bool, bool):
     val frontend_env = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
     val frontend = if frontend_env != "": frontend_env else: native_build_frontend_cache_dir_arg(args)
@@ -1565,17 +1581,17 @@ fn run_file_worker_instances_v1(args: [text], mir_queue: text, hir_queue: text, 
             deps_of[m] = deps.unwrap()
     val (body_lists, owners) = generic_instance_lists_with_body_v1(lists, generic_instance_module_ids_v1(modules),
         deps_of, file_worker_inc_iface_digest_v1)
-    val plan = file_worker_instances_plan_v1(body_lists, machine_cache_root(), producer)
     val stage = "{mir_queue}.instances/stage"
-    val run = file_worker_instances_run_v1(plan, machine_cache_root(), producer, "{mir_queue}.instances/jobs",
-        "coordinator-{getpid()}", true, generic_instance_object_from_stage_v1(stage, _1))
+    val (plan, run) = prelink_instances_run_v1(body_lists, machine_cache_root(), producer, "{mir_queue}.instances/jobs",
+        "coordinator-{getpid()}", generic_instance_object_from_stage_v1(stage, _1))
     print file_worker_instances_receipt_line_v1(run)
     # Retirable from the next build on only when every needed key PASSED.
     var needed: [text] = []
     for s in plan.needed:
         needed.push(s.concrete_key)
-    val _recorded = generic_instance_retire_record_v1(machine_cache_root(), producer, needed, owners,
-        run.complete and run.retire_comdat)
+    if prelink_instances_writes_retire_v1(may_retire):
+        val _recorded = generic_instance_retire_record_v1(machine_cache_root(), producer, needed, owners,
+            run.complete and run.retire_comdat)
     # A retired key no module needs any more had its copy retired nowhere.
     var link_keys: [text] = []
     for k in retired:

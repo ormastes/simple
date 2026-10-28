@@ -16,6 +16,15 @@ currently requires its admitted external hosted linker. The overall
 `mold_is_pure_simple_linker_complete()` receipt gate does not automatically
 change defaults or replace real execution evidence.
 
+## Phase compiler Hello sanity
+
+Use the [four-executable Hello linkage matrix](../07_guide/app/llm/bootstrap_parallel_handoff.md#four-executable-hello-linkage-sanity)
+with the exact Phase 1, 2, or 3 compiler. Preserve individual native and
+interpreter and BuildRunner results and backend identity; phase 1 skips
+BuildRunner, phase 2 skips interpreter, and phase 3 requires both. Phase 3 needs
+a qualified full CLI built by that phase. Do not promote diagnostic results to
+bootstrap admission.
+
 ## Bootstrap failure collection
 
 ### Release compiler selection and platform qualification

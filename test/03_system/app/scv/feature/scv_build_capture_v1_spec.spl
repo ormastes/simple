@@ -1,0 +1,353 @@
+"""Managed build-input capture, immutable byte delivery and exact cursor barriers.
+
+The owner is a declared logical universe. It makes no physical filesystem or
+watcher acknowledgement claim. Raw config/environment bindings are supplied by
+the parent that owns those inputs; arbitrary digest strings are rejected.
+"""
+use std.spec.{describe, it, expect, step}
+use std.scv.build_capture_v1.*
+
+fn capture_test_digest_v1() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn capture_test_universe_v1() -> BuildInputUniverseV1:
+    val digest = capture_test_digest_v1()
+    BuildInputUniverseV1(namespace: "managed-build-inputs-v1",
+        path_policy_digest: scv_build_path_policy_digest_v1(), complete_scopes: ["src", "config", "generated", "external"],
+        configuration_digest: digest, target_digest: digest, compiler_digest: digest,
+        runtime_digest: digest, environment_digest: digest, external_roots: ["external"])
+
+fn capture_test_entry_v1(path: text, body: text, origin: text) -> BuildInputEntryV1:
+    BuildInputEntryV1(path: path, kind: "regular", mode: 420, bytes: body.bytes(),
+        origin: origin, producer_digest: capture_test_digest_v1())
+
+fn capture_test_cursor_v1(sequence: i64) -> ScvBuildCursorV1:
+    ScvBuildCursorV1(epoch: "capture-test-epoch", sequence: sequence)
+
+fn capture_test_transaction_v1(sequence: i64, upserts: [BuildInputEntryV1], deleted: [text]) -> BuildCaptureTransactionV1:
+    BuildCaptureTransactionV1(cursor: capture_test_cursor_v1(sequence),
+        upserts: upserts, deleted_paths: deleted, renames: [])
+
+fn capture_test_apply_v1(state: BuildCaptureStateV1, transaction: BuildCaptureTransactionV1) -> Result<BuildCaptureStateV1, text>:
+    scv_build_capture_apply_v1(state, capture_test_cursor_v1(transaction.cursor.sequence - 1),
+        "transaction-{transaction.cursor.sequence}", transaction)
+
+describe "SCV build capture V1":
+    it "retains exact binary bytes and copies caller payloads":
+        # @req REQ-SCV-BUILD-CAPTURE-01
+        step("capture: freeze exact bytes inside a declared managed universe")
+        var bytes: [u8] = [0, 255, 10, 128]
+        val entry = BuildInputEntryV1(path: "src/binary", kind: "regular", mode: 420,
+            bytes: bytes, origin: "worktree", producer_digest: capture_test_digest_v1())
+        val frozen = scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [entry], capture_test_cursor_v1(0)).unwrap()
+        bytes[0] = 70
+        step("assert: delivered bytes and snapshot storage cannot mutate each other")
+        var delivered = scv_build_snapshot_read_v1(frozen, "src/binary").unwrap()
+        expect(delivered).to_equal([0, 255, 10, 128])
+        delivered[1] = 1
+        expect(scv_build_snapshot_read_v1(frozen, "src/binary").unwrap()).to_equal([0, 255, 10, 128])
+        expect(scv_build_snapshot_valid_v1(frozen)).to_equal(true)
+
+    it "copies complete scope and external root arrays":
+        # @req REQ-SCV-BUILD-CAPTURE-01
+        var universe = capture_test_universe_v1()
+        val frozen = scv_build_snapshot_freeze_v1(universe, [], capture_test_cursor_v1(0)).unwrap()
+        universe.complete_scopes[0] = "outside"
+        universe.external_roots[0] = "elsewhere"
+        expect(frozen.universe.complete_scopes.contains("src")).to_equal(true)
+        expect(frozen.universe.external_roots).to_equal(["external"])
+        expect(scv_build_snapshot_valid_v1(frozen)).to_equal(true)
+
+    it "canonicalizes entry order while binding each metadata field":
+        # @req REQ-SCV-BUILD-CAPTURE-02
+        val universe = capture_test_universe_v1()
+        val a = capture_test_entry_v1("src/a", "A", "committed")
+        var b = capture_test_entry_v1("src/b", "B", "worktree")
+        val first = scv_build_snapshot_freeze_v1(universe, [b, a], capture_test_cursor_v1(0)).unwrap()
+        val second = scv_build_snapshot_freeze_v1(universe, [a, b], capture_test_cursor_v1(0)).unwrap()
+        expect(first.snapshot_id).to_equal(second.snapshot_id)
+        b.mode = 493
+        val executable = scv_build_snapshot_freeze_v1(universe, [a, b], capture_test_cursor_v1(0)).unwrap()
+        expect(executable.snapshot_id == first.snapshot_id).to_equal(false)
+        b.origin = "editor"
+        val editor = scv_build_snapshot_freeze_v1(universe, [a, b], capture_test_cursor_v1(0)).unwrap()
+        expect(editor.snapshot_id == executable.snapshot_id).to_equal(false)
+        b.producer_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        expect(scv_build_snapshot_freeze_v1(universe, [a, b], capture_test_cursor_v1(0)).unwrap().snapshot_id == editor.snapshot_id).to_equal(false)
+
+    it "binds configuration environment target compiler runtime and cursor":
+        # @req REQ-SCV-BUILD-CAPTURE-02
+        val changed = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val universe = capture_test_universe_v1()
+        val base = scv_build_snapshot_freeze_v1(universe, [], capture_test_cursor_v1(0)).unwrap()
+        var other = capture_test_universe_v1()
+        other.configuration_digest = changed
+        expect(scv_build_snapshot_freeze_v1(other, [], capture_test_cursor_v1(0)).unwrap().snapshot_id == base.snapshot_id).to_equal(false)
+        other = capture_test_universe_v1()
+        other.environment_digest = changed
+        expect(scv_build_snapshot_freeze_v1(other, [], capture_test_cursor_v1(0)).unwrap().snapshot_id == base.snapshot_id).to_equal(false)
+        other = capture_test_universe_v1()
+        other.target_digest = changed
+        expect(scv_build_snapshot_freeze_v1(other, [], capture_test_cursor_v1(0)).unwrap().snapshot_id == base.snapshot_id).to_equal(false)
+        other = capture_test_universe_v1()
+        other.compiler_digest = changed
+        expect(scv_build_snapshot_freeze_v1(other, [], capture_test_cursor_v1(0)).unwrap().snapshot_id == base.snapshot_id).to_equal(false)
+        other = capture_test_universe_v1()
+        other.runtime_digest = changed
+        expect(scv_build_snapshot_freeze_v1(other, [], capture_test_cursor_v1(0)).unwrap().snapshot_id == base.snapshot_id).to_equal(false)
+        expect(scv_build_snapshot_freeze_v1(universe, [], capture_test_cursor_v1(1)).unwrap().snapshot_id == base.snapshot_id).to_equal(false)
+
+    it "refuses arbitrary digests unknown policies and unmanaged namespaces":
+        # @req REQ-SCV-BUILD-CAPTURE-03
+        var universe = capture_test_universe_v1()
+        universe.environment_digest = "unproved"
+        expect(scv_build_snapshot_freeze_v1(universe, [], capture_test_cursor_v1(0))).to_equal(Err("build-universe-digest-invalid"))
+        universe = capture_test_universe_v1()
+        universe.path_policy_digest = capture_test_digest_v1()
+        expect(scv_build_snapshot_freeze_v1(universe, [], capture_test_cursor_v1(0))).to_equal(Err("build-path-policy-unsupported"))
+        universe = capture_test_universe_v1()
+        universe.namespace = "live-filesystem"
+        expect(scv_build_snapshot_freeze_v1(universe, [], capture_test_cursor_v1(0))).to_equal(Err("build-namespace-unsupported"))
+
+    it "rejects duplicate paths instead of inventing editor precedence":
+        # @req REQ-SCV-BUILD-CAPTURE-03
+        val disk = capture_test_entry_v1("src/main.spl", "disk", "worktree")
+        val editor = capture_test_entry_v1("src/main.spl", "editor", "editor")
+        expect(scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [disk, editor], capture_test_cursor_v1(0))).to_equal(Err("build-path-duplicate"))
+
+    it "rejects traversal case-normalization controls unsupported kinds and modes":
+        # @req REQ-SCV-BUILD-CAPTURE-03
+        for path in ["../src/a", "/src/a", "src//a", "src/./a", "src/a\tbad", "src/a\0bad"]:
+            val entry = capture_test_entry_v1(path, "bytes", "worktree")
+            expect(scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [entry], capture_test_cursor_v1(0))).to_equal(Err("build-path-invalid"))
+        var entry = capture_test_entry_v1("src/a", "bytes", "worktree")
+        entry.kind = "device"
+        expect(scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [entry], capture_test_cursor_v1(0))).to_equal(Err("build-kind-or-mode-unsupported"))
+        entry.kind = "regular"
+        entry.mode = 511
+        expect(scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [entry], capture_test_cursor_v1(0))).to_equal(Err("build-kind-or-mode-unsupported"))
+
+    it "keeps case distinct and refuses entries outside the declared universe":
+        # @req REQ-SCV-BUILD-CAPTURE-03
+        val upper = capture_test_entry_v1("src/A", "upper", "worktree")
+        val lower = capture_test_entry_v1("src/a", "lower", "worktree")
+        val frozen = scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [upper, lower], capture_test_cursor_v1(0)).unwrap()
+        expect(scv_build_snapshot_read_v1(frozen, "src/A").unwrap()).to_equal("upper".bytes())
+        expect(scv_build_snapshot_read_v1(frozen, "src/a").unwrap()).to_equal("lower".bytes())
+        expect(scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [capture_test_entry_v1("elsewhere/a", "x", "worktree")], capture_test_cursor_v1(0))).to_equal(Err("build-entry-outside-universe"))
+
+    it "captures empty directories and exact symlink target bytes without following":
+        # @req REQ-SCV-BUILD-CAPTURE-04
+        val directory = BuildInputEntryV1(path: "src/empty", kind: "directory", mode: 493,
+            bytes: [], origin: "worktree", producer_digest: capture_test_digest_v1())
+        val link = BuildInputEntryV1(path: "src/link", kind: "symlink", mode: 511,
+            bytes: "../external/pkg".bytes(), origin: "worktree", producer_digest: capture_test_digest_v1())
+        val frozen = scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [directory, link], capture_test_cursor_v1(0)).unwrap()
+        expect(frozen.complete).to_equal(true)
+        expect(frozen.source.source_coverage).to_equal("unknown")
+        expect(frozen.source.unsupported_inputs).to_equal(["src/empty", "src/link"])
+        expect(scv_build_snapshot_read_v1(frozen, "src/link")).to_equal(Err("build-symlink-resolution-unsupported"))
+        expect(scv_build_snapshot_read_v1(frozen, "src/empty")).to_equal(Err("build-path-is-directory"))
+        expect(scv_build_snapshot_list_v1(frozen, "src/empty").unwrap()).to_equal([])
+
+    it "provides positive and negative directory resolution within complete scopes":
+        # @req REQ-SCV-BUILD-CAPTURE-04
+        val entries = [capture_test_entry_v1("src/one", "1", "worktree"), capture_test_entry_v1("src/nested/two", "2", "worktree")]
+        val frozen = scv_build_snapshot_freeze_v1(capture_test_universe_v1(), entries, capture_test_cursor_v1(0)).unwrap()
+        expect(scv_build_snapshot_list_v1(frozen, "src").unwrap()).to_equal(["src/nested", "src/one"])
+        expect(scv_build_snapshot_list_v1(frozen, "src/missing")).to_equal(Err("build-path-absent"))
+        expect(scv_build_snapshot_list_v1(frozen, "unowned")).to_equal(Err("build-path-unknown"))
+        expect(scv_build_snapshot_read_v1(frozen, "src/missing")).to_equal(Err("build-path-absent"))
+        expect(scv_build_snapshot_read_v1(frozen, "unowned/missing")).to_equal(Err("build-path-unknown"))
+
+    it "retains generated external and configuration bytes under declared origins":
+        # @req REQ-SCV-BUILD-CAPTURE-01
+        val entries = [capture_test_entry_v1("generated/a", "generated", "generated"),
+            capture_test_entry_v1("external/pkg/a", "external", "external"),
+            capture_test_entry_v1("config/build.sdn", "configuration", "configuration")]
+        val frozen = scv_build_snapshot_freeze_v1(capture_test_universe_v1(), entries, capture_test_cursor_v1(0)).unwrap()
+        for entry in entries:
+            expect(scv_build_snapshot_read_v1(frozen, entry.path).unwrap()).to_equal(entry.bytes)
+        var universe = capture_test_universe_v1()
+        universe.external_roots = []
+        expect(scv_build_snapshot_freeze_v1(universe, entries, capture_test_cursor_v1(0))).to_equal(Err("build-external-root-undeclared"))
+
+    it "drains every acknowledged editor transaction before returning its barrier":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        step("setup: open the managed owner at the initial source bytes")
+        val base = capture_test_entry_v1("src/main", "disk", "worktree")
+        var state = scv_build_capture_open_v1(capture_test_universe_v1(), [base], "capture-test-epoch").unwrap()
+        state = capture_test_apply_v1(state, capture_test_transaction_v1(1, [capture_test_entry_v1("src/main", "editor-one", "editor")], [])).unwrap()
+        state = capture_test_apply_v1(state, capture_test_transaction_v1(2, [capture_test_entry_v1("src/main", "editor-two", "editor")], [])).unwrap()
+        expect(state.applied_sequence).to_equal(0)
+        expect(state.cursor.sequence).to_equal(2)
+        step("freeze: drain queued acknowledgements at the exact requested cursor")
+        val frozen = scv_build_freeze_v1(state, capture_test_cursor_v1(2)).unwrap()
+        expect(frozen.cursor.sequence).to_equal(2)
+        expect(scv_build_snapshot_read_v1(frozen, "src/main").unwrap()).to_equal("editor-two".bytes())
+        expect(scv_build_freeze_v1(state, capture_test_cursor_v1(1))).to_equal(Err("build-barrier-cursor-mismatch"))
+
+    it "performs deletion and recreation atomically without mutating older frozen bytes":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        var state = scv_build_capture_open_v1(capture_test_universe_v1(), [capture_test_entry_v1("src/a", "old", "worktree")], "capture-test-epoch").unwrap()
+        val old = scv_build_freeze_v1(state, capture_test_cursor_v1(0)).unwrap()
+        state = capture_test_apply_v1(state, capture_test_transaction_v1(1, [], ["src/a"])).unwrap()
+        expect(scv_build_snapshot_read_v1(scv_build_freeze_v1(state, capture_test_cursor_v1(1)).unwrap(), "src/a")).to_equal(Err("build-path-absent"))
+        state = capture_test_apply_v1(state, capture_test_transaction_v1(2, [capture_test_entry_v1("src/a", "new", "editor")], [])).unwrap()
+        expect(scv_build_snapshot_read_v1(scv_build_freeze_v1(state, capture_test_cursor_v1(2)).unwrap(), "src/a").unwrap()).to_equal("new".bytes())
+        expect(scv_build_snapshot_read_v1(old, "src/a").unwrap()).to_equal("old".bytes())
+
+    it "rejects cursor holes replay and epoch changes before acknowledgement":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
+        expect(capture_test_apply_v1(state, capture_test_transaction_v1(2, [], []))).to_equal(Err("build-transaction-cursor-gap"))
+        val next = capture_test_apply_v1(state, capture_test_transaction_v1(1, [], [])).unwrap()
+        expect(scv_build_capture_apply_v1(next, capture_test_cursor_v1(0), "different-transaction", capture_test_transaction_v1(1, [], []))).to_equal(Err("build-transaction-cursor-gap"))
+        var transaction = capture_test_transaction_v1(1, [], [])
+        transaction.cursor.epoch = "different-epoch"
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-transaction-cursor-gap"))
+        expect(scv_build_freeze_v1(state, capture_test_cursor_v1(2))).to_equal(Err("build-barrier-cursor-mismatch"))
+
+    it "refuses a barrier after the owner reports unresolved capture coverage":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
+        val unknown = scv_build_capture_unknown_v1(state, "watcher-overflow-reconcile-required")
+        expect(scv_build_freeze_v1(unknown, capture_test_cursor_v1(0))).to_equal(Err("build-capture-unknown:watcher-overflow-reconcile-required"))
+        expect(capture_test_apply_v1(unknown, capture_test_transaction_v1(1, [], []))).to_equal(Err("build-capture-unknown:watcher-overflow-reconcile-required"))
+
+    it "accepts exact transaction replay and rejects changed payload under the same ID":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
+        val transaction = capture_test_transaction_v1(1, [capture_test_entry_v1("src/a", "one", "editor")], [])
+        val next = capture_test_apply_v1(state, transaction).unwrap()
+        val replayed = capture_test_apply_v1(next, transaction).unwrap()
+        expect(replayed.cursor.sequence).to_equal(1)
+        expect(replayed.pending.len()).to_equal(1)
+        val changed = capture_test_transaction_v1(1, [capture_test_entry_v1("src/a", "different", "editor")], [])
+        expect(capture_test_apply_v1(next, changed)).to_equal(Err("build-transaction-id-collision"))
+
+    it "applies explicit rename only after checking the exact previous entry digest":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val entry = capture_test_entry_v1("src/old", "same bytes", "worktree")
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [entry], "capture-test-epoch").unwrap()
+        val rename = BuildCaptureRenameV1(from_path: "src/old", to_path: "src/new", expected_entry_digest: scv_build_entry_digest_v1(entry))
+        var transaction = BuildCaptureTransactionV1(cursor: capture_test_cursor_v1(1), upserts: [], deleted_paths: [], renames: [rename])
+        val next = capture_test_apply_v1(state, transaction).unwrap()
+        val frozen = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_read_v1(frozen, "src/old")).to_equal(Err("build-path-absent"))
+        expect(scv_build_snapshot_read_v1(frozen, "src/new").unwrap()).to_equal(entry.bytes)
+        transaction.renames[0].expected_entry_digest = capture_test_digest_v1()
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-rename-precondition-failed"))
+
+    it "requires a fresh epoch to reconcile an unknown managed universe":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
+        val unknown = scv_build_capture_unknown_v1(state, "gap")
+        expect(scv_build_capture_reconcile_v1(unknown, capture_test_universe_v1(), [], "capture-test-epoch")).to_equal(Err("build-reconcile-epoch-reused"))
+        val reconciled = scv_build_capture_reconcile_v1(unknown, capture_test_universe_v1(), [capture_test_entry_v1("src/a", "reconciled", "worktree")], "new-epoch").unwrap()
+        val frozen = scv_build_freeze_v1(reconciled, ScvBuildCursorV1(epoch: "new-epoch", sequence: 0)).unwrap()
+        expect(scv_build_snapshot_read_v1(frozen, "src/a").unwrap()).to_equal("reconciled".bytes())
+
+    it "never reuses a retired epoch after multiple reconciliations":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val original = scv_build_capture_open_v1(capture_test_universe_v1(), [capture_test_entry_v1("src/a", "original", "worktree")], "epoch-A").unwrap()
+        val old_snapshot = scv_build_freeze_v1(original, ScvBuildCursorV1(epoch: "epoch-A", sequence: 0)).unwrap()
+        val second = scv_build_capture_reconcile_v1(original, capture_test_universe_v1(), [capture_test_entry_v1("src/a", "changed", "worktree")], "epoch-B").unwrap()
+        expect(scv_build_capture_reconcile_v1(second, capture_test_universe_v1(), [capture_test_entry_v1("src/a", "changed-again", "worktree")], "epoch-A")).to_equal(Err("build-reconcile-epoch-reused"))
+        expect(second.retired_epochs).to_equal(["epoch-A"])
+        expect(scv_build_snapshot_read_v1(old_snapshot, "src/a").unwrap()).to_equal("original".bytes())
+        val third = scv_build_capture_reconcile_v1(second, capture_test_universe_v1(), [], "epoch-C").unwrap()
+        expect(third.retired_epochs).to_equal(["epoch-A", "epoch-B"])
+        expect(scv_build_capture_reconcile_v1(third, capture_test_universe_v1(), [], "epoch-A")).to_equal(Err("build-reconcile-epoch-reused"))
+        expect(scv_build_capture_reconcile_v1(third, capture_test_universe_v1(), [], "epoch-B")).to_equal(Err("build-reconcile-epoch-reused"))
+
+    it "rejects tampered retained epoch history instead of accepting old cursor identities":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val original = scv_build_capture_open_v1(capture_test_universe_v1(), [], "epoch-A").unwrap()
+        var second = scv_build_capture_reconcile_v1(original, capture_test_universe_v1(), [], "epoch-B").unwrap()
+        second.retired_epochs[0] = "forged-epoch"
+        expect(scv_build_freeze_v1(second, ScvBuildCursorV1(epoch: "epoch-B", sequence: 0))).to_equal(Err("build-capture-epoch-history-invalid"))
+        expect(scv_build_capture_reconcile_v1(second, capture_test_universe_v1(), [], "epoch-A")).to_equal(Err("build-capture-epoch-history-invalid"))
+
+    it "rejects tampered snapshots before byte or absence delivery":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        var frozen = scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [capture_test_entry_v1("src/a", "old", "worktree")], capture_test_cursor_v1(0)).unwrap()
+        frozen.entries[0].bytes[0] = 90
+        expect(scv_build_snapshot_valid_v1(frozen)).to_equal(false)
+        expect(scv_build_snapshot_read_v1(frozen, "src/a")).to_equal(Err("build-snapshot-invalid"))
+        expect(scv_build_snapshot_list_v1(frozen, "src")).to_equal(Err("build-snapshot-invalid"))
+
+    it "rejects noncanonical array order even when its canonical ID matches":
+        # @req REQ-SCV-BUILD-CAPTURE-06
+        val a = capture_test_entry_v1("src/a", "a", "worktree")
+        val b = capture_test_entry_v1("src/b", "b", "worktree")
+        var frozen = scv_build_snapshot_freeze_v1(capture_test_universe_v1(), [a, b], capture_test_cursor_v1(0)).unwrap()
+        frozen.entries[0] = b
+        frozen.entries[1] = a
+        expect(scv_build_snapshot_valid_v1(frozen)).to_equal(false)
+
+    it "rejects duplicate scopes and a regular-file ancestor":
+        # @req REQ-SCV-BUILD-CAPTURE-03
+        var universe = capture_test_universe_v1()
+        universe.complete_scopes = ["src", "src"]
+        expect(scv_build_snapshot_freeze_v1(universe, [], capture_test_cursor_v1(0))).to_equal(Err("build-complete-scopes-invalid"))
+        val entries = [capture_test_entry_v1("src/a", "file", "worktree"), capture_test_entry_v1("src/a/b", "child", "worktree")]
+        expect(scv_build_snapshot_freeze_v1(capture_test_universe_v1(), entries, capture_test_cursor_v1(0))).to_equal(Err("build-parent-not-directory"))
+
+    it "copies queued editor payloads before acknowledging the transaction":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [], "capture-test-epoch").unwrap()
+        var transaction = capture_test_transaction_v1(1, [capture_test_entry_v1("src/a", "abc", "editor")], [])
+        val next = capture_test_apply_v1(state, transaction).unwrap()
+        transaction.upserts[0].bytes[0] = 90
+        val frozen = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_read_v1(frozen, "src/a").unwrap()).to_equal("abc".bytes())
+
+    it "invalidates a complete empty-directory negative after acknowledged creation":
+        # @req REQ-SCV-BUILD-CAPTURE-04
+        val empty = BuildInputEntryV1(path: "src/empty", kind: "directory", mode: 493,
+            bytes: [], origin: "worktree", producer_digest: capture_test_digest_v1())
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [empty], "capture-test-epoch").unwrap()
+        val before = scv_build_freeze_v1(state, capture_test_cursor_v1(0)).unwrap()
+        expect(scv_build_snapshot_list_v1(before, "src/empty").unwrap()).to_equal([])
+        val next = capture_test_apply_v1(state, capture_test_transaction_v1(1, [capture_test_entry_v1("src/empty/new", "new", "editor")], [])).unwrap()
+        val after = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_list_v1(after, "src/empty").unwrap()).to_equal(["src/empty/new"])
+        expect(scv_build_snapshot_list_v1(before, "src/empty").unwrap()).to_equal([])
+
+    it "moves an explicit directory and all descendants in one acknowledged transaction":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val directory = BuildInputEntryV1(path: "src/old", kind: "directory", mode: 493,
+            bytes: [], origin: "worktree", producer_digest: capture_test_digest_v1())
+        val child = capture_test_entry_v1("src/old/nested/a", "contents", "worktree")
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [directory, child], "capture-test-epoch").unwrap()
+        val rename = BuildCaptureRenameV1(from_path: "src/old", to_path: "src/new", expected_entry_digest: scv_build_entry_digest_v1(directory))
+        val transaction = BuildCaptureTransactionV1(cursor: capture_test_cursor_v1(1), upserts: [], deleted_paths: [], renames: [rename])
+        val next = capture_test_apply_v1(state, transaction).unwrap()
+        val after = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_read_v1(after, "src/new/nested/a").unwrap()).to_equal("contents".bytes())
+        expect(scv_build_snapshot_list_v1(after, "src/old")).to_equal(Err("build-path-absent"))
+
+    it "rejects rename collisions cycles and regular destination parents":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val a = capture_test_entry_v1("src/a", "a", "worktree")
+        val b = capture_test_entry_v1("src/b", "b", "worktree")
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [a, b], "capture-test-epoch").unwrap()
+        var rename = BuildCaptureRenameV1(from_path: "src/a", to_path: "src/b", expected_entry_digest: scv_build_entry_digest_v1(a))
+        var transaction = BuildCaptureTransactionV1(cursor: capture_test_cursor_v1(1), upserts: [], deleted_paths: [], renames: [rename])
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-rename-target-exists"))
+        transaction.renames[0].to_path = "src/a/child"
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-rename-descendant-cycle"))
+        transaction.renames[0].to_path = "src/b/child"
+        expect(capture_test_apply_v1(state, transaction)).to_equal(Err("build-parent-not-directory"))
+
+    it "deletes an explicit captured directory with every captured descendant":
+        # @req REQ-SCV-BUILD-CAPTURE-05
+        val directory = BuildInputEntryV1(path: "src/old", kind: "directory", mode: 493,
+            bytes: [], origin: "worktree", producer_digest: capture_test_digest_v1())
+        val child = capture_test_entry_v1("src/old/nested/a", "contents", "worktree")
+        val state = scv_build_capture_open_v1(capture_test_universe_v1(), [directory, child], "capture-test-epoch").unwrap()
+        val next = capture_test_apply_v1(state, capture_test_transaction_v1(1, [], ["src/old"])).unwrap()
+        val after = scv_build_freeze_v1(next, capture_test_cursor_v1(1)).unwrap()
+        expect(scv_build_snapshot_list_v1(after, "src/old")).to_equal(Err("build-path-absent"))
+        expect(scv_build_snapshot_read_v1(after, "src/old/nested/a")).to_equal(Err("build-path-absent"))

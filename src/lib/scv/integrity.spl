@@ -4,8 +4,12 @@ use app.io.mod (file_exists, file_read, dir_walk, file_size)
 use std.nogc_sync_mut.database.core.{SdnDatabase, SdnTable, SdnRow}
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
 use std.scv.core.{scv_objects_dir, scv_object_path, scv_chunk_path, scv_head_path, scv_parser_index_path, scv_parser_lock_path, scv_parsers_dir, scv_langmap_path, scv_object_index_path, scv_bookmarks_path, scv_workspace_path, scv_line_set_contains, scv_metadata_path_safe, scv_object_ref_safe, scv_worktree_path_safe}
+use std.scv.structural_store_v1.{scv_structural_restore_file_v1}
+use std.scv.structural_pack_v1.{scv_syntax_record_read_v1}
 use std.scv.core.{scv_format_path, scv_repo_dir}
 use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_commit_tree, scv_object_field, scv_content_id_for_file, scv_hash_text, scv_repo_format_version}
+
+use std.scv.integrity_checkpoint.{scv_validate_checkpoint_manifest, scv_validate_checkpoints}
 
 fn scv_current_tree_content(root: text) -> text:
     val commit = scv_read_workspace_commit(root)
@@ -47,7 +51,7 @@ fn scv_validate_file_chunk_parts(root: text, file_id: text) -> text:
         val chunk_path = scv_chunk_path(root, chunk)
         if not file_exists(chunk_path):
             errors.push("missing chunk part: {chunk}\n")
-        elif scv_content_id_for_file(chunk_path) != chunk:
+        elif scv_content_id_for_file(chunk_path) != Ok(chunk):
             errors.push("corrupt chunk part: {chunk}\n")
     errors.join("")
 
@@ -70,6 +74,10 @@ fn scv_validate_tree_file_link(root: text, rel: text, file_id: text, chunk: text
     val file_size = scv_object_field(content, "size")
     if file_size != size_text:
         errors.push("tree file size mismatch: {file_id}\n")
+    if scv_object_field(content, "structure") != "":
+        match scv_structural_restore_file_v1(root, content, chunk, size_text.to_i64() ?? -1):
+            Ok(bytes): ()
+            Err(error): errors.push(error)
     errors.join("")
 
 fn scv_validate_tree_row_object_refs(tree_id: text, file_id: text, chunk: text) -> text:
@@ -86,10 +94,9 @@ fn scv_validate_syntax_node(root: text, node_id: text, visited: text) -> (text, 
         return ("", visited)
     if not scv_object_ref_safe(node_id, "syntax_node_"):
         return ("bad syntax node id: {node_id}\n", visited + node_id + "\n")
-    val path = scv_object_path(root, "syntax", node_id)
-    if not file_exists(path):
-        return ("missing syntax node: {node_id}\n", visited + node_id + "\n")
-    val content = file_read(path)
+    val content = match scv_syntax_record_read_v1(root, node_id):
+        Ok(value): value
+        Err(error): return (error, visited + node_id + "\n")
     var errors: [text] = []
     val grammar = scv_object_field(content, "grammar")
     val execution = scv_object_field(content, "execution")
@@ -185,7 +192,11 @@ fn scv_validate_parser_lockfile(root: text) -> text:
         if not scv_parser_wasm_magic_ok(raw):
             errors.push("parser artifact is not wasm: {parts[1]} {parts[2]}\n")
             continue
-        val actual = scv_content_id_for_file(artifact_path)
+        val actual = match scv_content_id_for_file(artifact_path):
+            Ok(id): id
+            Err(error):
+                errors.push(error)
+                continue
         if actual != parts[6]:
             errors.push("parser artifact hash mismatch: {parts[1]} {parts[2]}\n")
     errors.join("")
@@ -217,10 +228,9 @@ fn scv_validate_langmap(root: text) -> text:
     errors.join("")
 
 fn scv_validate_parser_root_identity(root: text, node_id: text) -> text:
-    val path = scv_object_path(root, "syntax", node_id)
-    if not file_exists(path):
-        return ""
-    val content = file_read(path)
+    val content = match scv_syntax_record_read_v1(root, node_id):
+        Ok(value): value
+        Err(error): return error
     val grammar = scv_object_field(content, "grammar")
     if grammar == "" or grammar.starts_with("fallback-"):
         return ""
@@ -237,13 +247,12 @@ fn scv_validate_parser_root_identity(root: text, node_id: text) -> text:
     ""
 
 fn scv_validate_parser_index_root_fields(root: text, row: text, node_id: text) -> text:
-    val path = scv_object_path(root, "syntax", node_id)
-    if not file_exists(path):
-        return ""
     val parts = row.split("|")
     if parts.len() < 7:
         return "bad parser index entry: {row}\n"
-    val content = file_read(path)
+    val content = match scv_syntax_record_read_v1(root, node_id):
+        Ok(value): value
+        Err(error): return error
     var errors: [text] = []
     val indexed_path = scv_object_field(content, "path")
     val language = scv_object_field(content, "language")
@@ -600,7 +609,7 @@ fn scv_validate_tree_object_rows(root: text, tree_id: text, content: text) -> te
             errors.push("bad tree size: {tree_id} {parts[0]}\n")
         elif file_size(chunk_path) != size:
             errors.push("chunk size mismatch: {tree_id} {chunk}\n")
-        elif scv_content_id_for_file(chunk_path) != chunk:
+        elif scv_content_id_for_file(chunk_path) != Ok(chunk):
             errors.push("corrupt chunk: {tree_id} {chunk}\n")
     errors.join("")
 
@@ -683,50 +692,7 @@ fn scv_validate_commit_change_refs(root: text) -> text:
             errors.push("missing commit change object: {commit_id} {change}\n")
     errors.join("")
 
-# Full checkpoint verification (MIG-09): recompute each checkpoint's manifest
-# hash and every payload file hash. Mirrors stabilize.scv_checkpoint_verify
-# without importing stabilize (which imports this module).
-fn scv_validate_checkpoint_manifest(root: text, id: text, dir: text, manifest: text) -> text:
-    var errors: [text] = []
-    if scv_hash_text("checkpoint", manifest) != id:
-        errors.push("checkpoint manifest hash mismatch: {id}\n")
-    var in_rows = false
-    for line in manifest.split("\n"):
-        if not in_rows:
-            if line == "--":
-                in_rows = true
-            continue
-        val trimmed = line.trim()
-        if trimmed == "":
-            continue
-        val sep = trimmed.index_of(" ")
-        if sep <= 0:
-            errors.push("bad checkpoint manifest row: {id} {trimmed}\n")
-            continue
-        val sha = trimmed[:sep]
-        val rel = trimmed[sep + 1:]
-        val data = "{dir}/data/{rel}"
-        if not file_exists(data):
-            errors.push("missing checkpoint file: {id} {rel}\n")
-        elif scv_content_id_for_file(data) != sha:
-            errors.push("checkpoint file hash mismatch: {id} {rel}\n")
-    errors.join("")
-
-fn scv_validate_checkpoints(root: text) -> text:
-    val dir = "{scv_repo_dir(root)}/checkpoints"
-    if not file_exists(dir):
-        return ""
-    var errors: [text] = []
-    for path in dir_walk(dir):
-        if not path.ends_with("/manifest.sdn"):
-            continue
-        val checkpoint_dir = path[0:path.len() - "/manifest.sdn".len()]
-        val segments = checkpoint_dir.split("/")
-        val id = segments[segments.len() - 1]
-        if id.starts_with("."):
-            continue
-        errors.push(scv_validate_checkpoint_manifest(root, id, checkpoint_dir, file_read(path)))
-    errors.join("")
+export scv_validate_checkpoint_manifest, scv_validate_checkpoints
 
 # Repo format marker (MIG-12): absent = v1; a present marker must carry a
 # known version. Unknown/newer versions fail closed.
@@ -775,7 +741,7 @@ fn scv_fsck(root: text) -> text:
             errors.push("bad tree size: {parts[0]}\n")
         elif file_size(chunk_path) != size:
             errors.push("chunk size mismatch: {chunk}\n")
-        elif scv_content_id_for_file(chunk_path) != chunk:
+        elif scv_content_id_for_file(chunk_path) != Ok(chunk):
             errors.push("corrupt chunk: {chunk}\n")
         errors.push(scv_validate_tree_file_link(root, parts[0], file_id, chunk, size_text))
         errors.push(scv_validate_file_chunk_parts(root, file_id))

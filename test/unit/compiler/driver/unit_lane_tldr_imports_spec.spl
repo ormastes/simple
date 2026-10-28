@@ -1,0 +1,135 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# plan: doc/03_plan/compiler/build_system/true_per_file_src_to_obj_plan.md (PM3)
+#
+# PM3: the per-file unit child (SIMPLE_FILE_WORKER_UNIT=1) parses only its picked
+# files and resolves imports through TLDR summaries, behind SIMPLE_UNIT_TLDR_IMPORTS
+# (default ON when the unit lane is active). "0" keeps the import-HIR path.
+use std.spec
+use std.io_runtime.{file_read, file_write, getpid, rt_env_get, rt_env_set}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.driver.driver_tldr_import_route_v1.{unit_tldr_imports_flag_v1, unit_tldr_imports_enabled_v1,
+    unit_tldr_imports_memo_reset_v1, tldr_imports_memo_reset_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_plan_v1, unit_lower_v1}
+use compiler.driver.driver.{compiler_driver_create}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{CompileMode}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+
+val A_SRC: text = "pub fn base_val() -> i64:\n    1\n\npub fn ident<T>(x: T) -> T:\n    x\n"
+val B_SRC: text = 'use pkg.a.{base_val}' + "\n\npub fn mid() -> i64:\n    base_val() + 1\n"
+val C_SRC: text = 'use pkg.b.{mid}' + "\n\nfn main() -> i64:\n    mid()\n"
+val D_SRC: text = "export use pkg.a.*\n\npub fn dval() -> i64:\n    4\n"
+val E_SRC: text = 'use pkg.b.{mid}' + "\n" + 'use pkg.d.{dval}' + "\n\nfn main() -> i64:\n    mid() + dval()\n"
+
+fn fixture_root(tag: text) -> text:
+    val r = "build/tmp/unit_lane_tldr_spec_{getpid()}_{tag}"
+    val _d = dir_create_all(r + "/src")
+    r
+
+fn put(root: text, module_id: text, src: text) -> text:
+    val module_path = module_id.replace(".", "/")
+    val p = root + "/src/" + module_path + ".spl"
+    val dir = root + "/src/" + module_path.substring(0, module_path.last_index_of("/"))
+    val _d = dir_create_all(dir)
+    val _w = file_write(p, src)
+    p
+
+fn inventory(root: text) -> Dict<text, text>:
+    var m: Dict<text, text> = {}
+    m["pkg.a"] = put(root, "pkg.a", A_SRC)
+    m["pkg.b"] = put(root, "pkg.b", B_SRC)
+    m["pkg.d"] = put(root, "pkg.d", D_SRC)
+    m
+
+fn make_driver(root: text, inputs: [text]) -> CompilerDriver:
+    var options = driver_core_compile_options_default()
+    options.input_files = inputs
+    options.mode = CompileMode.Check
+    options.bootstrap_input_count = 0
+    options.native_source_roots = ["src"]
+    options.native_source_snapshot_root = root
+    var driver = compiler_driver_create(options)
+    val (_ctx, loaded) = driver.load_sources_impl()
+    expect(loaded).to_equal(true)
+    expect(driver.stage_parse().is_none()).to_equal(true)
+    driver
+
+fn with_switch(value: text) -> text:
+    val saved = rt_env_get("SIMPLE_UNIT_TLDR_IMPORTS") ?? ""
+    rt_env_set("SIMPLE_UNIT_TLDR_IMPORTS", value)
+    unit_tldr_imports_memo_reset_v1()
+    tldr_imports_memo_reset_v1()
+    saved
+
+fn restore_switch(saved: text):
+    rt_env_set("SIMPLE_UNIT_TLDR_IMPORTS", saved)
+    unit_tldr_imports_memo_reset_v1()
+    tldr_imports_memo_reset_v1()
+
+describe "unit-lane TLDR imports switch (PM3)":
+    it "defaults to the unit-lane state and honours 0/1":
+        expect(unit_tldr_imports_flag_v1("", true)).to_equal(true)
+        expect(unit_tldr_imports_flag_v1("", false)).to_equal(false)
+        expect(unit_tldr_imports_flag_v1("0", true)).to_equal(false)
+        expect(unit_tldr_imports_flag_v1("1", false)).to_equal(true)
+
+    it "memoizes the read once per process until reset":
+        val saved = with_switch("")
+        expect(unit_tldr_imports_enabled_v1(true)).to_equal(true)
+        rt_env_set("SIMPLE_UNIT_TLDR_IMPORTS", "0")
+        expect(unit_tldr_imports_enabled_v1(true)).to_equal(true)
+        unit_tldr_imports_memo_reset_v1()
+        expect(unit_tldr_imports_enabled_v1(true)).to_equal(false)
+        restore_switch(saved)
+
+describe "unit-lane TLDR imports (PM3)":
+    it "leaf unit: parsed=1 summaries=2 import_hir_lowered=0 and the leaf lowers":
+        val saved = with_switch("")
+        val root = fixture_root("leaf_on")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        val plan = unit_tldr_plan_v1("u0", root + "/tldr", [leaf], mods)
+        expect(plan.parsed).to_equal(1)
+        expect(plan.summaries).to_equal(2)
+        expect(plan.fallbacks).to_equal(0)
+        expect(plan.surfaces.len()).to_equal(2)
+        var driver = make_driver(root, [leaf])
+        val got = unit_lower_v1(driver, "u0", root + "/tldr", [leaf], mods, true)
+        expect(got.gap).to_equal("none")
+        expect(got.parsed).to_equal(1)
+        expect(got.summaries).to_equal(2)
+        expect(got.import_hir_lowered).to_equal(0)
+        expect(got.line).to_equal("[unit-tldr] unit=u0 parsed=1 summaries=2 fallbacks=0 import_hir_lowered=0")
+        restore_switch(saved)
+
+    it "switch 0 keeps the old path: import HIR is lowered":
+        val saved = with_switch("0")
+        val root = fixture_root("leaf_off")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        var driver = make_driver(root, [leaf, mods["pkg.b"], mods["pkg.a"]])
+        val got = unit_lower_v1(driver, "u0", root + "/tldr", [leaf], mods, true)
+        expect(got.gap).to_equal("none")
+        expect(got.summaries).to_equal(0)
+        expect(got.import_hir_lowered > 0).to_equal(true)
+        restore_switch(saved)
+
+    it "a fallback module is parsed alone":
+        val saved = with_switch("")
+        val root = fixture_root("fallback")
+        val mods = inventory(root)
+        val leaf = put(root, "e", E_SRC)
+        val plan = unit_tldr_plan_v1("u1", root + "/tldr", [leaf], mods)
+        expect(plan.fallbacks).to_equal(1)
+        expect(plan.fallback_modules).to_equal(["pkg.d"])
+        expect(plan.parsed).to_equal(2)
+        expect(plan.parse_paths).to_equal([leaf, mods["pkg.d"]])
+        var has_b = false
+        var has_d = false
+        for s in plan.surfaces:
+            if s.module_name == "pkg.b": has_b = true
+            if s.module_name == "pkg.d": has_d = true
+        expect(has_b).to_equal(true)
+        expect(has_d).to_equal(false)
+        restore_switch(saved)

@@ -1,4 +1,4 @@
-"""Exercise callback dispatch using the direct seed runner's public JSON mode.
+"""Exercise callback dispatch using the direct seed runner's diagnostic text mode.
 
 This models the CLI boundary, not execution of Simple assertions.
 """
@@ -26,6 +26,12 @@ class DispatchTests(unittest.TestCase):
             for name in ('config/simple.test.sdn', 'config/sdoctest.sdn',
                          'src/app/test_runner_new/main.spl',
                          'src/app/test_runner_new/test_runner_main.spl',
+                         'src/app/test_daemon/light_protocol.spl',
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl',
+                         'src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl',
+                         'src/lib/nogc_sync_mut/spec.spl',
+                         'src/lib/nogc_sync_mut/test_runner/test_runner_output.spl',
+                         'src/lib/nogc_sync_mut/test_runner/sdoctest/runner.spl',
                          'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl',
                          'src/lib/nogc_sync_mut/test_runner/test_runner_args.spl',
                          'src/lib/nogc_sync_mut/test_runner/test_runner_types.spl',
@@ -35,25 +41,17 @@ class DispatchTests(unittest.TestCase):
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text('fixture input', encoding='utf-8')
-            spec_row = dict(path='one_spec.spl', passed=1, failed=0,
-                            skipped=0, pending=0, error=None)
-            spec_result = dict(success=True, files=[spec_row], total_passed=1,
-                               total_failed=0, total_skipped=0, total_pending=0)
-            doc_row = dict(path='one.md', passed=0 if failed else 1,
-                           failed=int(failed), skipped=0, errors=0)
-            docs = dict(files=[doc_row], total=1, passed=doc_row['passed'],
-                        failed=int(failed), skipped=0, errors=0)
-            summary = dict(success=not failed, spec=spec_result,
-                           spl_doctest=docs, sdoctest=docs)
-
             def runner(command, **kwargs):
-                # Public direct dispatch recognizes --json or --format json.
-                # --format=json only affects the spec formatter in the seed.
-                json_mode = '--json' in command or any(
-                    command[i:i+2] == ['--format', 'json']
-                    for i in range(len(command)-1))
-                kwargs['stdout'].write(json.dumps(
-                    summary if json_mode else spec_result).encode() + b'\n')
+                self.assertIn('--format=text', command)
+                self.assertNotIn('--json', command)
+                report = (
+                    'SPEC FILE VERDICT: one_spec.spl outcome=OK declared>=1 executed=1 passed=1 failed=0 skipped=0 dropped=0\n'
+                    'Files: 1 discovered, 1 executed\n'
+                    'Results: 1 total, 1 passed, 0 failed\n'
+                    f'SPL Doctest: {0 if failed else 1} passed, {int(failed)} failed, 0 skipped\n'
+                    f'SDoctest Results: 1 total, {0 if failed else 1} passed, {int(failed)} failed, 0 skipped, 0 errors\n'
+                )
+                kwargs['stdout'].write(report.encode())
                 return SimpleNamespace(returncode=int(failed))
 
             output = root / 'output'
@@ -65,7 +63,11 @@ class DispatchTests(unittest.TestCase):
             receipt = json.loads((output / 'result.json').read_text())
             self.assertEqual(code, int(failed))
             self.assertEqual(receipt['status'], 'FAIL' if failed else 'PASS')
-            self.assertEqual(receipt['runner_summary'], summary)
+            categories = receipt['runner_summary']['categories']
+            self.assertEqual(categories['spec']['passed'], 1)
+            self.assertEqual(categories['spl_doctest']['failed'], int(failed))
+            self.assertEqual(categories['sdoctest']['failed'], int(failed))
+            self.assertTrue(receipt['coverage_status'].startswith('NOT_PROVEN'))
 
     def test_combined_categories_survive_direct_seed_dispatch(self):
         self.exercise(False)

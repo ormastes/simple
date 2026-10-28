@@ -1,0 +1,133 @@
+# Low-level reviewed built-ins only. The registered host wrapper loads and
+# checks the accepted provider lock before calling these proposal adapters.
+# This module cannot validate externally, publish, allocate aliases, load
+# plugin code, or access mutable source paths. Direct results stay unqualified.
+use std.scv.solver_contract_v1.*
+use std.scv.solver_source_v1.*
+use std.scv.solver_budget_v1.{solver_budget_source_v1}
+use std.scv.solver_provider_registry_v1.{solver_builtin_provider_ids_v1}
+
+struct SourceSolveV1:
+    result: SolveResultV1
+    inputs: SourceMergeInputV1
+    candidate: SourceFileV1?
+
+fn solver_builtin_ids_v1(domain: text) -> [text]:
+    # This catalog chooses the built-in code path. It does not attest the
+    # loaded process artifact; proposal results remain unqualified below.
+    solver_builtin_provider_ids_v1(domain)
+
+fn solver_host_preflight_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, domain: text, work: i64, retained_bytes: i64) -> text:
+    if request.cancelled: return "cancelled"
+    if request.logical_work_budget < work or request.memory_budget < retained_bytes or work < 0 or retained_bytes < 0: return "resource_limited"
+    if request.request_id == "" or request.binding.domain != domain: return "failed"
+    var normalized_request = request.binding
+    normalized_request.parser_lock_digest = policy.expected.parser_lock_digest
+    normalized_request.solver_lock_digest = policy.expected.solver_lock_digest
+    if solver_binding_bytes_v1(normalized_request) != solver_binding_bytes_v1(policy.expected): return "failed"
+    if request.binding.parser_lock_digest != policy.expected.parser_lock_digest or request.binding.solver_lock_digest != policy.expected.solver_lock_digest: return "needs_inputs"
+    val binding = policy.expected
+    if binding.repository == "" or binding.namespace == "" or binding.policy_revision == "" or binding.routing_revision == "" or binding.authorization_scope == "" or binding.profile_digest == "" or binding.configuration_digest == "" or binding.identity_map_revision == "": return "needs_inputs"
+    val ids = solver_builtin_ids_v1(domain)
+    if ids.len() != 3: return "unsupported"
+    if policy.parser.provider_id != ids[0] or policy.model.provider_id != ids[1] or policy.solver.provider_id != ids[2]: return "unsupported"
+    if policy.parser.lock_digest == "" or policy.model.lock_digest == "" or policy.solver.lock_digest == "": return "needs_inputs"
+    if binding.parser_lock_digest != policy.parser.lock_digest or binding.solver_lock_digest != policy.solver.lock_digest: return "needs_inputs"
+    ""
+
+# Checks are a host-owned minimum by domain. A solver's required_checks member
+# is never read. Policy can supply a pinned producer but cannot delete a check.
+fn solver_required_checks_v1(requested_domain: text, subject: text, policy: SolverHostPolicyV1) -> [RequiredCheckV1]:
+    var domain = "unsupported"
+    if ["source.bytes", "source.simple", "db.schema", "db.rows"].contains(requested_domain): domain = requested_domain
+    var names: [text] = ["exact-input-binding", "expected-authority-state", "accepted-policy-authorization", "executing-provider-artifact"]
+    if domain == "source.bytes" or domain == "source.simple":
+        names = names + ["exact-byte-reconstruction", "file-identity-operation-binding", "language-parse", "compiler-configuration", "impacted-dependencies", "required-tests"]
+    elif domain == "db.schema":
+        names = names + ["schema-identity-uniqueness", "schema-migration-closure", "combined-db-constraints", "old-schema-mapping"]
+    elif domain == "db.rows":
+        names = names + ["patch-signature-admission", "causal-dependency-closure", "combined-db-constraints", "schema-uid-mapping"]
+    var checks: [RequiredCheckV1] = []
+    for name in names:
+        var producer = "unavailable:{domain}:{name}"
+        var lock = ""
+        # Each independently approved validator owns one explicitly named check.
+        if policy.validators.len() <= 64:
+            for validator in policy.validators:
+                if validator.provider_id.len() <= 256 and validator.lock_digest.len() <= 256:
+                    if validator.provider_id == "scv.validator.{domain}.{name}":
+                        producer = validator.provider_id
+                        lock = validator.lock_digest
+        checks.push(RequiredCheckV1(check_id: "{domain}:{name}", subject_digest: subject, required_producer_id: producer, required_producer_lock: lock))
+    checks
+
+fn solver_host_result_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, status: text, candidate_root: text?, conflicts: [SolverConflictV1], work: i64, retained_bytes: i64) -> SolveResultV1:
+    # No actual executing-artifact loader/build identity is integrated yet.
+    # Declared accepted-policy labels do NOT attest the executing implementation.
+    # Keep computed drafts/conflicts, but never issue a qualified proposal/cache
+    # key. Refusals also skip binding hashing since budget checks may have failed.
+    var input_key = ""
+    var reported_status = status
+    if status == "proposed" or status == "conflicted":
+        input_key = solver_result_key_v1(request, policy)
+        reported_status = "needs_inputs"
+    var subject = input_key
+    if val root = candidate_root: subject = root
+    SolveResultV1(request_id: request.request_id, status: reported_status, candidate_root: candidate_root, conflicts: conflicts, required_checks: solver_required_checks_v1(policy.expected.domain, subject, policy), input_binding: request.binding, input_binding_key: input_key, deterministic_result_key: "", logical_work: work, retained_input_bytes: retained_bytes, complete_proposal: false, validation_status: "external-validation-required", execution_status: "unqualified-builtin-execution")
+
+fn solve_source_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, input: SourceMergeInputV1) -> SourceSolveV1:
+    """Resolve accepted routing and exact reads before calling the pure adapter."""
+    val budget = solver_budget_source_v1(request, policy, input)
+    val retained = budget.spent
+    val work = budget.spent
+    var refusal = "resource_limited"
+    if not budget.limited: refusal = solver_host_preflight_v1(request, policy, "source.bytes", work, retained)
+    if request.cancelled: refusal = "cancelled"
+    if refusal != "":
+        return SourceSolveV1(result: solver_host_result_v1(request, policy, refusal, nil, [], work, retained), inputs: input, candidate: nil)
+    val binding = request.binding
+    if (binding.base_model_id != source_file_digest_v1(input.base) or
+        binding.left_model_id != source_file_digest_v1(input.left) or
+        binding.right_model_id != source_file_digest_v1(input.right) or
+        binding.base_revision != input.base.revision or binding.left_revision != input.left.revision or binding.right_revision != input.right.revision or
+        binding.expected_root != source_file_digest_v1(input.base) or
+        binding.operation_bundle_digest != source_operations_digest_v1(input.moves)):
+        return SourceSolveV1(result: solver_host_result_v1(request, policy, "failed", nil, [], work, retained), inputs: input, candidate: nil)
+    val proposal = source_merge_v1(input)
+    if val candidate = proposal.candidate:
+        return SourceSolveV1(result: solver_host_result_v1(request, policy, "proposed", source_file_digest_v1(candidate), [], work, retained), inputs: input, candidate: candidate)
+    val conflict = SolverConflictV1(domain: binding.domain, code: proposal.conflict_code, subject: input.base.file_uid, input_key: solver_result_key_v1(request, policy))
+    SourceSolveV1(result: solver_host_result_v1(request, policy, "conflicted", nil, [conflict], work, retained), inputs: input, candidate: nil)
+
+fn solver_access_overlaps_v1(left: SolverAccessV1, right: SolverAccessV1) -> bool:
+    if left.domain != right.domain or left.object_id != right.object_id: return false
+    if left.whole_object or right.whole_object: return true
+    # Point insertions at either boundary require a deliberate composition rule.
+    left.start_byte <= right.end_byte and right.start_byte <= left.end_byte
+
+fn solver_access_valid_v1(access: SolverAccessV1) -> bool:
+    access.domain != "" and access.object_id != "" and access.start_byte >= 0 and access.end_byte >= access.start_byte
+
+fn solver_compose_disjoint_v1(plans: [SolverPlanAccessV1]) -> Result<[text], text>:
+    """Keep caller's accepted deterministic chain; refuse overlap, never race."""
+    var ids: [text] = []
+    var prior_reads: [SolverAccessV1] = []
+    var prior_writes: [SolverAccessV1] = []
+    for plan in plans:
+        if plan.plan_id == "" or ids.contains(plan.plan_id): return Err("SOLVER_PLAN_ID")
+        for read in plan.reads:
+            if not solver_access_valid_v1(read): return Err("SOLVER_ACCESS_RANGE")
+            for write in prior_writes:
+                if solver_access_overlaps_v1(read, write): return Err("SOLVER_READ_WRITE_OVERLAP")
+        for write in plan.writes:
+            if not solver_access_valid_v1(write): return Err("SOLVER_ACCESS_RANGE")
+            for prior in prior_reads + prior_writes:
+                if solver_access_overlaps_v1(write, prior): return Err("SOLVER_WRITE_OVERLAP")
+        ids.push(plan.plan_id)
+        prior_reads = prior_reads + plan.reads
+        prior_writes = prior_writes + plan.writes
+    Ok(ids)
+
+export SourceSolveV1, solver_builtin_ids_v1, solver_host_preflight_v1
+export solver_required_checks_v1, solver_host_result_v1, solve_source_v1
+export solver_access_overlaps_v1, solver_compose_disjoint_v1

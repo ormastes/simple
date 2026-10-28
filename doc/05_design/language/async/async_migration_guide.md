@@ -1,5 +1,15 @@
 # Async Migration Guide: GC ↔ NoGC Patterns
 
+**2026-10-27 qualification note:** the patterns below predate the
+[current async integration contract](../../../04_architecture/language/async_infrastructure.md).
+For new APIs, `std.async` is the shared facade, `async_host` the hosted
+implementation, and `std.embedded_async` the proposed bounded composition.
+Preserve existing imports through tested adapters. A GC wrapper or arena
+index alone does not prove shared-result identity, lifetime across suspension,
+or cross-thread safety. Current pending HostFuture chains and HostTaskHandle
+joins require live subscription hardening; see the
+[detail design](../../lib/runtime/async_infrastructure.md).
+
 How to write async code that works across GC and NoGC memory modes in Simple. References the cross-language async research (`doc/01_research/async_patterns_cross_language.md`) and the nogc_async_mut architecture (`doc/07_guide/sync_async/async/nogc_async_mut_architecture.md`).
 
 **Updated:** 2026-02-22

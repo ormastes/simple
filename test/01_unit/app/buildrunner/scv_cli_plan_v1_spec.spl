@@ -1,0 +1,80 @@
+"""Opt-in argv/schema/source enumeration contracts; no native builders."""
+use std.spec.{describe, it, expect}
+use app.buildrunner.scv_cli_options_v1.{build_runner_scv_options_v1}
+use app.buildrunner.scv_cli_plan_v1.{build_runner_scv_plan_parse_v1, build_runner_scv_source_roots_v1}
+use app.buildrunner.scv_session_record_v1.{build_runner_scv_record_encode_v1, build_runner_scv_record_parse_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{BuildInputV1}
+use test.fixtures.buildrunner.scv_cli_fixture_v1.*
+
+fn check_scv_plan_refused(payload: text):
+    expect(build_runner_scv_plan_parse_v1(payload.bytes(), setup_scv_cli_run_v1()).is_err()).to_equal(true)
+
+describe "BuildRunner explicit SCV CLI mode":
+    it "preserves legacy arguments and strips only the explicit source-session option":
+        val legacy = ["run", "--manifest", "run.sdn", "--state", "state"]
+        expect(build_runner_scv_options_v1(legacy).unwrap().args).to_equal(legacy)
+        expect(build_runner_scv_options_v1(legacy).unwrap().session_file).to_equal("")
+        val selected = build_runner_scv_options_v1(legacy + ["--scv-session", "source.sdn"]).unwrap()
+        expect(selected.args).to_equal(legacy)
+        expect(selected.session_file).to_equal("source.sdn")
+
+    it "rejects duplicate missing and unsupported source-session options":
+        expect(build_runner_scv_options_v1(["run", "--scv-session"]).is_err()).to_equal(true)
+        expect(build_runner_scv_options_v1(["run", "--scv-session", "a", "--scv-session", "b"]).is_err()).to_equal(true)
+        expect(build_runner_scv_options_v1(["worker", "--scv-session", "a"]).is_err()).to_equal(true)
+        expect(build_runner_scv_options_v1(["check", "--scv-session", "a"]).is_err()).to_equal(true)
+        expect(build_runner_scv_options_v1(["verify", "--scv-session", "a"]).unwrap().session_file).to_equal("a")
+        expect(build_runner_scv_options_v1(["verify-settled", "--scv-session", "a"]).unwrap().session_file).to_equal("a")
+
+    it "requires an exhaustive exact source role inventory":
+        val plan = build_runner_scv_plan_parse_v1(setup_scv_cli_plan_v1().bytes(), setup_scv_cli_run_v1()).unwrap()
+        expect(plan.roles["compile|src/main.spl"]).to_equal("source")
+        expect(plan.roles["compile|task-context/compile.sdn"]).to_equal("ordinary")
+        check_scv_plan_refused(setup_scv_cli_plan_v1().replace("    compile, src/main.spl, source\n", ""))
+        check_scv_plan_refused(setup_scv_cli_plan_v1() + "    other, src/extra.spl, source\n")
+        check_scv_plan_refused(setup_scv_cli_plan_v1().replace("src/main.spl, source", "src/main.spl, ordinary"))
+        check_scv_plan_refused(setup_scv_cli_plan_v1() + "    compile, src/main.spl, source\n")
+
+    it "fails closed for schema typos duplicates versions and unsupported scopes":
+        val source = setup_scv_cli_plan_v1()
+        check_scv_plan_refused(source + "unknown: true\n")
+        check_scv_plan_refused("schema_version: 1\n" + source)
+        check_scv_plan_refused(source.replace("schema_version: 1", "schema_version: 2"))
+        check_scv_plan_refused(source.replace("cold_init", "cold_innit"))
+        check_scv_plan_refused(source.replace("[\"src\"]", "[\"outside\"]"))
+        check_scv_plan_refused(source.replace("task, path, role", "task, path"))
+
+    it "binds every enumerated source root and rejects unsafe compiler arguments":
+        val task = setup_scv_cli_task_v1()
+        expect(build_runner_scv_source_roots_v1(task, ["src"], "llvm", "src").unwrap()).to_equal(["src"])
+        var altered = setup_scv_cli_task_v1()
+        altered.args = task.args + ["--config", "/live/config.sdn"]
+        expect(build_runner_scv_source_roots_v1(altered, ["src"], "llvm", "src").is_err()).to_equal(true)
+        altered = setup_scv_cli_task_v1()
+        altered.args[2] = "/live/src"
+        expect(build_runner_scv_source_roots_v1(altered, ["src"], "llvm", "src").is_err()).to_equal(true)
+        expect(build_runner_scv_source_roots_v1(task, ["src"], "cranelift", "src").is_err()).to_equal(true)
+        expect(build_runner_scv_source_roots_v1(task, ["src"], "llvm", "").is_err()).to_equal(true)
+
+    it "includes the implicit library domain even with a narrower source argument":
+        var task = setup_scv_cli_task_v1()
+        task.args[2] = "src/app"
+        task.args[4] = "src/app/main.spl"
+        task.inputs[0] = BuildInputV1(path: "src/app/main.spl", digest: sha256_text("fn main(): 1\n"))
+        expect(build_runner_scv_source_roots_v1(task, ["src"], "llvm", "src").unwrap()).to_equal(["src/app", "src"])
+        expect(build_runner_scv_source_roots_v1(task, ["src"], "llvm", "/installed/src").is_err()).to_equal(true)
+
+    it "persists the raw immutable inventory pointer separately from tagged adapter identity":
+        val adapter = setup_scv_cli_adapter_metadata_v1()
+        val raw_pointer = sha256_text("inventory-metadata-only")
+        val payload = build_runner_scv_record_encode_v1(sha256_text("plan"), "/fixture", "/fixture/build/scv", ["src"], adapter, raw_pointer, {"compile": sha256_text("binding")})
+        val reopened = build_runner_scv_record_parse_v1(payload.bytes()).unwrap()
+        expect(reopened.source_inventory_digest).to_equal(raw_pointer)
+        expect(reopened.source_inventory_digest.len()).to_equal(64)
+        expect(adapter.source_inventory_digest).to_equal("sha256_" + reopened.source_inventory_digest)
+        expect(reopened.snapshot_root).to_equal(adapter.legacy.snapshot_root)
+        expect(reopened.inventory_generation).to_equal(3)
+        expect(build_runner_scv_record_parse_v1(payload.replace(raw_pointer, "sha256_" + raw_pointer).bytes()).is_err()).to_equal(true)
+        expect(payload).to_contain("full_artifact_authorized: false")
+        expect(build_runner_scv_record_parse_v1(payload.replace("full_artifact_authorized: false", "full_artifact_authorized: true").bytes()).is_err()).to_equal(true)

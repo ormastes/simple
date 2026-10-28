@@ -1,0 +1,137 @@
+"""Serialized build retention authority using checked snapshot-store GC.
+
+Every admission and eviction holds the same OS-owned file lock, released by
+the OS after a crash. Its stable inode is never unlinked or replaced. A finite
+one-second contention timeout fails closed. Non-snapshot deletion
+requires a separate checked store owner and is rejected here before any I/O.
+"""
+use std.scv.build_retention_v1.*
+use std.scv.build_retention_codec_v1.{build_retention_parse_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_gc_authorized_v1}
+use app.io.mod.{file_exists, file_read_regular_no_follow_bounded,
+    dir_exists, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write}
+
+fn retention_authority_path_v1(cache_root: text) -> text:
+    cache_root + "/.build-retention-v1.sdn"
+
+fn retention_lock_path_v1(cache_root: text) -> text:
+    cache_root + "/.build-retention-v1.lock"
+
+fn build_retention_store_load_v1(cache_root: text) -> Result<BuildRetentionStateV1, text>:
+    val source = file_read_regular_no_follow_bounded(retention_authority_path_v1(cache_root), 8388608)?
+    val state = build_retention_parse_v1(source.bytes())?
+    if build_retention_sdn_v1(state) != source: return Err("retention_noncanonical_authority")
+    Ok(state)
+
+fn retention_store_write_v1(cache_root: text, state: BuildRetentionStateV1) -> Result<bool, text>:
+    val source = build_retention_sdn_v1(state)
+    if source.len() > 8388608: return Err("retention_metadata_budget")
+    if not file_atomic_write(retention_authority_path_v1(cache_root), source): return Err("retention_authority_write")
+    val check = build_retention_store_load_v1(cache_root)?
+    if build_retention_root_v1(check) != build_retention_root_v1(state): return Err("retention_authority_readback")
+    Ok(true)
+
+fn retention_unchanged_history_v1(previous: BuildRetentionStateV1, candidate: BuildRetentionStateV1) -> Result<bool, text>:
+    var by: Dict<text, i64> = {}
+    for index in 0..candidate.nodes.len(): by[build_retention_key_v1(candidate.nodes[index])] = index
+    for old in previous.nodes:
+        val key = build_retention_key_v1(old)
+        if not by.contains_key(key): return Err("retention_history_drop")
+        val node = candidate.nodes[by[key]]
+        if (old.dependencies != node.dependencies or old.bytes != node.bytes or
+                node.last_used < old.last_used or (old.authoritative and not node.authoritative) or
+                (not old.rebuildable and node.rebuildable)):
+            return Err("retention_immutable_identity")
+    Ok(true)
+
+fn retention_store_commit_locked_v1(cache_root: text, expected_generation: i64, expected_root: text,
+        candidate: BuildRetentionStateV1, limits: BuildRetentionLimitsV1) -> Result<text, text>:
+    # Validate without deriving an eviction plan: admission must succeed even
+    # when protected history exceeds the requested storage budget.
+    var validation = limits
+    validation.max_bytes = 9223372036854775807
+    validation.max_retained = limits.max_nodes
+    validation.max_remove = 0
+    build_retention_plan_v1(candidate, validation, 0)?
+    if file_exists(retention_authority_path_v1(cache_root)):
+        val current = build_retention_store_load_v1(cache_root)?
+        if current.generation != expected_generation or build_retention_root_v1(current) != expected_root:
+            return Err("retention_stale_root")
+        if build_retention_root_v1(current) == build_retention_root_v1(candidate): return Ok(expected_root)
+        if expected_generation == 9223372036854775807 or candidate.generation != expected_generation + 1:
+            return Err("retention_generation")
+        retention_unchanged_history_v1(current, candidate)?
+    elif expected_generation != 0 or expected_root != "" or candidate.generation != 1:
+        return Err("retention_initial_generation")
+    retention_store_write_v1(cache_root, candidate)?
+    Ok(build_retention_root_v1(candidate))
+
+fn build_retention_store_commit_v1(cache_root: text, expected_generation: i64, expected_root: text,
+        candidate: BuildRetentionStateV1, limits: BuildRetentionLimitsV1) -> Result<text, text>:
+    if cache_root == "" or not dir_exists(cache_root): return Err("retention_store_root")
+    val lock = file_lock(retention_lock_path_v1(cache_root), 1)
+    if lock < 0: return Err("retention_busy")
+    val result = retention_store_commit_locked_v1(cache_root, expected_generation, expected_root, candidate, limits)
+    if not file_unlock(lock): return Err("retention_unlock")
+    result
+
+fn retention_snapshot_owned_v1(plan: BuildRetentionPlanV1) -> Result<bool, text>:
+    # No arbitrary paths and no physical deletion of manifests/receipts by a
+    # snapshot callback. A snapshot and its provenance receipt are one store
+    # unit; separately named graph nodes would need their own store owner.
+    for key in plan.deletions:
+        val parts = key.split("/")
+        if parts.len() != 2 or parts[0] != "snapshot": return Err("retention_store_callback_unavailable")
+    Ok(true)
+
+fn retention_store_execute_locked_v1(cache_root: text, requested: BuildRetentionPlanV1,
+        limits: BuildRetentionLimitsV1, now: i64) -> Result<i64, text>:
+    var state = build_retention_store_load_v1(cache_root)?
+    if requested.generation != state.generation or requested.root != build_retention_root_v1(state):
+        return Err("retention_stale_plan")
+    val plan = build_retention_plan_v1(state, limits, now)?
+    if (plan.deletions != requested.deletions or plan.protected != requested.protected or
+            plan.remaining_bytes != requested.remaining_bytes or plan.remaining_nodes != requested.remaining_nodes or
+            plan.status != requested.status): return Err("retention_plan_mismatch")
+    retention_snapshot_owned_v1(plan)?
+    var count = 0
+    for key in plan.deletions:
+        if state.generation == 9223372036854775807: return Err("retention_generation_exhausted")
+        # Recheck the exact durable root immediately before EACH checked store
+        # callback, while pin/lease/root publication is excluded by the lock.
+        val current = build_retention_store_load_v1(cache_root)?
+        if current.generation != state.generation or build_retention_root_v1(current) != build_retention_root_v1(state):
+            return Err("retention_stale_callback")
+        val revision = key.split("/")[1]
+        val source = build_retention_sdn_v1(state)
+        val permit = "revision: \"{revision}\"\nroot: \"{build_retention_root_v1(state)}\"\n"
+        if not file_atomic_write(cache_root + "/.build-retention-v1.permit.sdn", permit):
+            return Err("retention_permit_write")
+        if scv_compile_snapshot_gc_authorized_v1(cache_root, revision, source) != 1:
+            file_delete(cache_root + "/.build-retention-v1.permit.sdn")
+            return Err("retention_store_delete_refused")
+        file_delete(cache_root + "/.build-retention-v1.permit.sdn")
+        var nodes: [BuildRetentionNodeV1] = []
+        for node in state.nodes:
+            if build_retention_key_v1(node) != key: nodes.push(node)
+        state.nodes = nodes
+        state.generation = state.generation + 1
+        # A failed post-delete durable write fails closed. No other object is
+        # touched and the caller receives an explicit incomplete transaction.
+        retention_store_write_v1(cache_root, state)?
+        count = count + 1
+    Ok(count)
+
+fn build_retention_store_execute_v1(cache_root: text, plan: BuildRetentionPlanV1,
+        limits: BuildRetentionLimitsV1, now: i64) -> Result<i64, text>:
+    val lock = file_lock(retention_lock_path_v1(cache_root), 1)
+    if lock < 0: return Err("retention_busy")
+    val result = retention_store_execute_locked_v1(cache_root, plan, limits, now)
+    # A permit is ephemeral; remove it even on refusal before releasing lock.
+    file_delete(cache_root + "/.build-retention-v1.permit.sdn")
+    if not file_unlock(lock): return Err("retention_unlock")
+    result
+
+export build_retention_store_load_v1, build_retention_store_commit_v1
+export build_retention_store_execute_v1

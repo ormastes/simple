@@ -1,0 +1,44 @@
+use std.spec.*
+use app.scv.gateway_commands_v1.{scv_gateway_command_v1, scv_gateway_draft_write_output_noreplace_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_write_bytes, file_read_regular_no_follow_bounded_bytes, directory_fsync}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+
+describe "SCV draft gateway CLI v1":
+    it "advertises native serve, put and get routes with explicit development mode":
+        val result = scv_gateway_command_v1(["draft"])
+        expect(result.exit_code).to_equal(0)
+        expect(result.output).to_contain("scv gateway draft serve")
+        expect(result.output).to_contain("scv gateway draft put|get")
+        expect(result.output).to_contain("scv gateway snapshot replicate")
+        expect(result.output).to_contain("scv gateway snapshot fetch")
+
+    it "requires a frozen source snapshot and config identity before replication":
+        val result = scv_gateway_command_v1(["snapshot", "replicate"])
+        expect(result.exit_code).to_equal(1)
+        expect(result.output).to_contain("invalid_request")
+
+    it "refuses listener startup unless loopback development mode and reason are explicit":
+        val result = scv_gateway_command_v1(["draft", "serve", "--config", "/tmp/missing.sdn", "--reason", "test"])
+        expect(result.exit_code).to_equal(1)
+        expect(result.output).to_contain("tls_unavailable")
+
+    it "rejects incomplete transfer options before credential or file access":
+        val result = scv_gateway_command_v1(["draft", "put", "--endpoint", "http://127.0.0.1:1/scv/draft/v1"])
+        expect(result.exit_code).to_equal(1)
+        expect(result.output).to_contain("invalid_request")
+
+    it "publishes GET bytes only to a new no-follow destination and preserves existing files":
+        val root = secure_temp_dir_raw("/tmp", "scv-draft-cli-output-v1-")
+        expect(root.len()).to_be_greater_than(0)
+        expect(directory_fsync(root)).to_equal(true)
+        val existing = root + "/existing.bin"
+        expect(file_write_bytes(existing, [1u8])).to_equal(true)
+        expect(scv_gateway_draft_write_output_noreplace_v1(existing, [2u8]).is_err()).to_equal(true)
+        expect(file_read_regular_no_follow_bounded_bytes(existing, 16).unwrap()).to_equal([1u8])
+        expect(snapshot_symlink_create_nofollow_v1(root, root + "/alias.bin", "existing.bin", 1)).to_equal(true)
+        expect(scv_gateway_draft_write_output_noreplace_v1(root + "/alias.bin", [3u8]).is_err()).to_equal(true)
+        val destination = root + "/new.bin"
+        expect(scv_gateway_draft_write_output_noreplace_v1(destination, [0u8, 255u8]).is_ok()).to_equal(true)
+        expect(file_read_regular_no_follow_bounded_bytes(destination, 16).unwrap()).to_equal([0u8, 255u8])
+        expect(dir_remove_all(root)).to_equal(true)

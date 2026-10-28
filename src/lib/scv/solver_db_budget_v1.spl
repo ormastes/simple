@@ -1,0 +1,202 @@
+# Walk typed immutable records before any canonical encoder/hash. Shared total
+# bounds cover nesting, metadata, operation history, state and accepted policy.
+use std.scv.solver_budget_v1.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{MaterializedState}
+use std.scv.db_policy_codec.{DbPolicyConfig}
+use std.scv.db_schema_identity_v2.*
+use std.scv.distributed_identity.{EntityUid, EntityRef}
+
+fn solver_budget_uid_v1(budget: SolverBudgetV1, uid: EntityUid) -> SolverBudgetV1:
+    solver_budget_texts_v1(budget, [uid.database_namespace, uid.entity_kind, uid.actor.hex])
+
+fn solver_budget_ref_v1(budget: SolverBudgetV1, ref: EntityRef) -> SolverBudgetV1:
+    var next = solver_budget_charge_v1(budget, 4)
+    if val uid = ref.provisional: next = solver_budget_uid_v1(next, uid)
+    if val alias = ref.settled: next = solver_budget_texts_v1(next, [alias.database_namespace, alias.entity_kind])
+    next
+
+fn solver_budget_count_v1(budget: SolverBudgetV1, count: i64) -> SolverBudgetV1:
+    var next = budget
+    if count < 0 or count > 4096:
+        next.limited = true
+        return next
+    # Sorting/dedup may be quadratic in existing reducers/codecs.
+    solver_budget_charge_v1(next, count * count + 1)
+
+fn solver_budget_value_v1(budget: SolverBudgetV1, value: DbValue, depth: i64) -> SolverBudgetV1:
+    var next = solver_budget_charge_v1(budget, 8)
+    if depth > 32:
+        next.limited = true
+        return next
+    if next.limited: return next
+    match value:
+        Text(content): next = solver_budget_texts_v1(next, [content])
+        Unsigned(_): ()
+        Flag(_): ()
+        Absent: ()
+        Reference(ref): next = solver_budget_ref_v1(next, ref)
+        List(values):
+            next = solver_budget_count_v1(next, values.len())
+            for item in values:
+                if next.limited: return next
+                next = solver_budget_value_v1(next, item, depth + 1)
+        Set(values):
+            next = solver_budget_count_v1(next, values.len())
+            for item in values:
+                if next.limited: return next
+                next = solver_budget_value_v1(next, item, depth + 1)
+        ObservedSet(members):
+            next = solver_budget_count_v1(next, members.len())
+            for member in members:
+                if next.limited: return next
+                next = solver_budget_texts_v1(next, [member.dot])
+                next = solver_budget_value_v1(next, member.value, depth + 1)
+        CausalSet(events):
+            next = solver_budget_count_v1(next, events.len())
+            for event in events:
+                if next.limited: return next
+                next = solver_budget_texts_v1(next, [event.dot])
+                next = solver_budget_count_v1(next, event.observed.len())
+                if next.limited: return next
+                next = solver_budget_texts_v1(next, event.observed)
+                next = solver_budget_value_v1(next, event.value, depth + 1)
+    next
+
+fn solver_budget_schema_v1(budget: SolverBudgetV1, schema: DbSchemaV2) -> SolverBudgetV1:
+    var next = solver_budget_uid_v1(budget, schema.table_uid)
+    next = solver_budget_texts_v1(next, [schema.table_name, schema.parent_revision, schema.merge_parent_revision, schema.revision])
+    next = solver_budget_count_v1(next, schema.columns.len())
+    next = solver_budget_count_v1(next, schema.applied_operations.len())
+    for receipt in schema.applied_operations:
+        if next.limited: return next
+        next = solver_budget_uid_v1(next, receipt.operation_uid)
+        next = solver_budget_texts_v1(next, [receipt.payload_digest])
+    for column in schema.columns:
+        if next.limited: return next
+        next = solver_budget_uid_v1(next, column.column_uid)
+        next = solver_budget_uid_v1(next, column.introduction_migration)
+        next = solver_budget_texts_v1(next, [column.name, column.logical_type, column.introduction_revision, column.merge_policy, column.visibility])
+        for rule in [column.default_rule, column.introduction_default]:
+            match rule:
+                NoDefault: ()
+                Constant(value): next = solver_budget_value_v1(next, value, 0)
+        next = solver_budget_count_v1(next, column.constraints.len())
+        for constraint in column.constraints:
+            if next.limited: return next
+            next = solver_budget_uid_v1(next, constraint.constraint_uid)
+            next = solver_budget_texts_v1(next, [constraint.kind, constraint.expression])
+            next = solver_budget_count_v1(next, constraint.columns.len())
+            for uid in constraint.columns:
+                if next.limited: return next
+                next = solver_budget_uid_v1(next, uid)
+    next
+
+fn solver_budget_fields_v1(budget: SolverBudgetV1, fields: [DbField]) -> SolverBudgetV1:
+    var next = solver_budget_count_v1(budget, fields.len())
+    for field in fields:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [field.name])
+        next = solver_budget_value_v1(next, field.value, 0)
+    next
+
+fn solver_budget_condition_v1(budget: SolverBudgetV1, condition: RowPrecondition) -> SolverBudgetV1:
+    val next = solver_budget_texts_v1(budget, [condition.base_row, condition.expected_revision])
+    solver_budget_fields_v1(next, condition.expected_fields)
+
+fn solver_budget_operation_v1(budget: SolverBudgetV1, operation: DbOperation) -> SolverBudgetV1:
+    var next = solver_budget_ref_v1(budget, db_operation_ref(operation))
+    if next.limited: return next
+    match operation:
+        Create(_, kind, fields): next = solver_budget_fields_v1(solver_budget_texts_v1(next, [kind]), fields)
+        AppendObservation(_, kind, fields): next = solver_budget_fields_v1(solver_budget_texts_v1(next, [kind]), fields)
+        Tombstone(_, condition): next = solver_budget_condition_v1(next, condition)
+        UpdateFields(_, edits, condition):
+            next = solver_budget_condition_v1(next, condition)
+            next = solver_budget_count_v1(next, edits.len())
+            for edit in edits:
+                if next.limited: return next
+                next = solver_budget_texts_v1(next, [edit.field])
+                next = solver_budget_value_v1(next, edit.before, 0)
+                next = solver_budget_value_v1(next, edit.after, 0)
+        AddSetMember(_, field, member, dot):
+            next = solver_budget_texts_v1(next, [field, dot])
+            next = solver_budget_value_v1(next, member, 0)
+        RemoveObservedSetMember(_, field, observed):
+            next = solver_budget_count_v1(next, observed.len())
+            next = solver_budget_texts_v1(next, [field])
+            next = solver_budget_texts_v1(next, observed)
+        AddSetMemberAfterRemoval(_, field, member, dot, observed):
+            next = solver_budget_count_v1(next, observed.len())
+            next = solver_budget_texts_v1(next, [field, dot])
+            next = solver_budget_texts_v1(next, observed)
+            next = solver_budget_value_v1(next, member, 0)
+        RemoveSetMember(_, field, member, dot, observed):
+            next = solver_budget_count_v1(next, observed.len())
+            next = solver_budget_texts_v1(next, [field, dot])
+            next = solver_budget_texts_v1(next, observed)
+            next = solver_budget_value_v1(next, member, 0)
+    next
+
+fn solver_budget_state_patch_v1(budget: SolverBudgetV1, state: MaterializedState, patch: DbPatch) -> SolverBudgetV1:
+    var next = solver_budget_texts_v1(budget, [state.revision, patch.batch_id, patch.repository, patch.namespace, patch.actor, patch.base_revision, patch.schema_revision, patch.reducer_revision, patch.payload_digest, patch.digest_algorithm, patch.signer, patch.signature_algorithm, patch.provenance])
+    next = solver_budget_charge_v1(next, patch.signature.len())
+    next = solver_budget_count_v1(next, patch.causal_dependencies.len())
+    next = solver_budget_texts_v1(next, patch.causal_dependencies)
+    next = solver_budget_count_v1(next, state.rows.len())
+    next = solver_budget_count_v1(next, state.accepted.len())
+    next = solver_budget_count_v1(next, patch.operations.len())
+    for row in state.rows:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [row.entity, row.kind, row.revision])
+        next = solver_budget_fields_v1(next, row.fields)
+    for batch in state.accepted:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [batch.batch_id, batch.canonical_digest, batch.actor, batch.prior_revision])
+    for operation in patch.operations:
+        if next.limited: return next
+        next = solver_budget_operation_v1(next, operation)
+    next
+
+fn solver_budget_db_config_v1(budget: SolverBudgetV1, config: DbPolicyConfig) -> SolverBudgetV1:
+    val admission = config.admission
+    val merge = config.merge
+    var next = solver_budget_texts_v1(budget, [config.revision, admission.revision, admission.repository, admission.namespace, admission.schema_revision, admission.reducer_revision, admission.metadata.revision, merge.repository, merge.namespace, merge.schema_revision, merge.reducer_revision])
+    next = solver_budget_count_v1(next, admission.keys.len())
+    next = solver_budget_count_v1(next, admission.metadata.rules.len())
+    next = solver_budget_count_v1(next, merge.fields.len())
+    next = solver_budget_count_v1(next, merge.constraints.len())
+    for key in admission.keys:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [key.key_id, key.role])
+        next = solver_budget_charge_v1(next, key.public_key.len())
+        next = solver_budget_count_v1(next, key.permissions.len())
+        for permission in key.permissions:
+            if next.limited: return next
+            next = solver_budget_texts_v1(next, [permission.operation, permission.kind, permission.field])
+    for rule in admission.metadata.rules:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [rule.kind, rule.field, rule.classification])
+        next = solver_budget_count_v1(next, rule.allowed_value_digests.len())
+        next = solver_budget_texts_v1(next, rule.allowed_value_digests)
+    for field in merge.fields:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [field.kind, field.field])
+        match field.rule:
+            AuthorityWins(signer): next = solver_budget_texts_v1(next, [signer])
+            _: ()
+    for constraint in merge.constraints:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [constraint.kind])
+        next = solver_budget_count_v1(next, constraint.key_fields.len())
+        next = solver_budget_count_v1(next, constraint.unique_fields.len())
+        next = solver_budget_count_v1(next, constraint.references.len())
+        next = solver_budget_texts_v1(next, constraint.key_fields)
+        next = solver_budget_texts_v1(next, constraint.unique_fields)
+        for reference in constraint.references:
+            if next.limited: return next
+            next = solver_budget_texts_v1(next, [reference.field, reference.target_kind])
+    next
+
+export solver_budget_schema_v1, solver_budget_state_patch_v1, solver_budget_db_config_v1
+export solver_budget_value_v1, solver_budget_count_v1

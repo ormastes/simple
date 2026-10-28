@@ -3,7 +3,9 @@ use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.SymbolTable
+use compiler.common.diagnostics.span.Span
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.MirLowering
 use compiler.mir._MirLowering.module_lowering.*
@@ -67,3 +69,44 @@ describe "borrowed dictionary indexing owner":
         expect(lowering.runtime_dict_value_mir_type(pointer) == nil).to_equal(true)
         expect(lowering.runtime_dict_value_mir_type(array) == nil).to_equal(true)
         expect(lowering.runtime_dict_value_mir_type(MirType.i64()) == nil).to_equal(true)
+
+    it "recognizes only bare or singly borrowed Dict locals as runtime dictionaries":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val dictionary = MirType(kind: MirTypeKind.Dict(MirType.i64(), MirType.f64()))
+        val bare = lowering.builder.new_local(nil, dictionary, LocalKind.Var)
+        val immutable_ref = lowering.builder.new_local(nil, MirType(kind: MirTypeKind.Ref(dictionary, false)), LocalKind.Arg(index: 0))
+        val mutable_ref = lowering.builder.new_local(nil, MirType(kind: MirTypeKind.Ref(dictionary, true)), LocalKind.Arg(index: 1))
+        val pointer = lowering.builder.new_local(nil, MirType(kind: MirTypeKind.Ptr(dictionary, true)), LocalKind.Var)
+        val array_ref = lowering.builder.new_local(nil, MirType(kind: MirTypeKind.Ref(MirType(kind: MirTypeKind.Array(MirType.i64(), 2)), true)), LocalKind.Var)
+        val nested_ref = lowering.builder.new_local(nil, MirType(kind: MirTypeKind.Ref(MirType(kind: MirTypeKind.Ref(dictionary, true)), true)), LocalKind.Var)
+        expect(lowering.local_is_runtime_dict(bare)).to_equal(true)
+        expect(lowering.local_is_runtime_dict(immutable_ref)).to_equal(true)
+        expect(lowering.local_is_runtime_dict(mutable_ref)).to_equal(true)
+        expect(lowering.local_is_runtime_dict(pointer)).to_equal(false)
+        expect(lowering.local_is_runtime_dict(array_ref)).to_equal(false)
+        expect(lowering.local_is_runtime_dict(nested_ref)).to_equal(false)
+        expect(lowering.local_is_runtime_dict(LocalId(id: 999))).to_equal(false)
+
+    it "recovers borrowed Dict getter value decoding without HIR type metadata":
+        var lowering = MirLowering.new(SymbolTable.new())
+        var builder = lowering.builder
+        builder.begin_function(
+            SymbolId(id: 0), "borrowed_get",
+            MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+            Span.empty()
+        )
+        val dictionary = MirType(kind: MirTypeKind.Dict(MirType(kind: MirTypeKind.Str), MirType.f64()))
+        val dict_local = builder.new_local(nil, MirType(kind: MirTypeKind.Ref(dictionary, true)), LocalKind.Arg(index: 0))
+        val key_local = builder.new_local(nil, MirType(kind: MirTypeKind.Str), LocalKind.Arg(index: 1))
+        lowering.builder = builder
+        val base = HirExpr(kind: HirExprKind.NilLit, has_type_: false,
+            type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()), span: Span.empty())
+        val result = lowering.lower_dict_runtime_read(base, dict_local, key_local, false)
+        if val result_type = lowering.builder.local_type(result):
+            var is_float = false
+            match result_type.kind:
+                case MirTypeKind.F64: is_float = true
+                case _: ()
+            expect(is_float).to_equal(true)
+        else:
+            expect(false).to_equal(true)

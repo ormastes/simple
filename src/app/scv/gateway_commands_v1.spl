@@ -1,0 +1,402 @@
+"""CLI owner for the read-only SCV gateway; no production TLS claim."""
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use app.scv.gateway_config_v1.{scv_gateway_config_load_v1, scv_gateway_bearer_load_v1}
+use app.scv.gateway_service_v1.{scv_gateway_serve_v1}
+use app.scv.gateway_config_v1.{scv_gateway_env_name_valid_v1, scv_gateway_bearer_valid_v1}
+use app.scv.gateway_client_v1.{ScvGatewayClientConfigV1, scv_gateway_client_call_v1}
+use std.scv.gateway_protocol_v1.{ScvGatewayRequestV1, scv_gateway_response_encode_v1}
+use app.io.mod.{env_get, file_read_regular_no_follow_bounded_bytes, file_write_bytes, file_fsync, directory_fsync, secure_temp_dir}
+use app.scv.gateway_draft_service_v1.{scv_gateway_draft_config_load_v1,
+    scv_gateway_draft_grants_resolve_v1, scv_gateway_draft_serve_v1}
+use app.scv.gateway_draft_client_v1.{ScvGatewayDraftClientConfigV1, ScvGatewaySnapshotClientConfigV1,
+    scv_gateway_draft_client_put_v1, scv_gateway_draft_client_get_v1,
+    scv_gateway_snapshot_client_replicate_v1, scv_gateway_snapshot_client_fetch_pin_v1}
+use std.scv.gateway_snapshot_replication_v1.{ScvGatewaySnapshotManifestV1,
+    ScvGatewaySnapshotObjectRefV1, SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1,
+    scv_gateway_snapshot_manifest_decode_v1, scv_gateway_snapshot_manifest_encode_v1,
+    scv_gateway_snapshot_manifest_validate_v1}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.scv.compile_snapshot_values_v1.{scv_compile_snapshot_revision_id_v1}
+use std.scv.core.{scv_worktree_path_safe}
+use std.scv.gateway_draft_protocol_v1.{SCV_GATEWAY_DRAFT_MAX_BLOB_BYTES_V1}
+use std.nogc_sync_mut.io.file_ops.{file_publish_noreplace}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow, dir_remove_all}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_contains, path_entry_present}
+
+struct ScvGatewayCommandResultV1:
+    exit_code: i64
+    output: text
+
+struct _ScvGatewaySnapshotPackageV1:
+    manifest: ScvGatewaySnapshotManifestV1
+    manifest_wire: text
+    objects: Dict<text, [u8]>
+
+fn scv_gateway_command_help_v1() -> text:
+    "scv gateway serve --config <native.sdn> --development-loopback --reason <audit reason> (read-only loopback); scv gateway read --endpoint <URI/scv/v1> --repository <logical-id> --method <capabilities|read_ref|read_commit|read_blob> --id <request-id> --token-env <name> [--selector <ref-or-oid>] [--tls-address <IPv4>] [--development-loopback]; scv gateway draft serve --config <native.sdn> --development-loopback --reason <audit reason>; scv gateway draft put|get --endpoint <URI/scv/draft/v1> --repository <id> --principal <id> --request-id <id> --token-env <name> --file <path>|--digest <sha256> --output <absolute-new-path> [--tls-address <IPv4>] [--development-loopback]; scv gateway snapshot replicate --endpoint <URI/scv/snapshot/v1> --repository <id> --principal <id> --request-id <id> --token-env <name> --snapshot-root <frozen-dir> --config-digest <sha256>; scv gateway snapshot fetch --endpoint <URI/scv/snapshot/v1> --repository <id> --principal <id> --request-id <id> --token-env <name> --snapshot-id <pin-id> --store-root <private-preprovisioned-dir>"
+
+fn _gateway_snapshot_provenance_value_v1(lines: [text], index: i64, prefix: text) -> Result<text, text>:
+    if index >= lines.len() or not lines[index].starts_with(prefix): return Err("snapshot_provenance_invalid")
+    Ok(lines[index][prefix.len():])
+
+fn _gateway_snapshot_package_v1(snapshot_root: text, repository: text, principal: text,
+        config_digest: text) -> Result<_ScvGatewaySnapshotPackageV1, text>:
+    if not dir_is_real_no_follow(snapshot_root): return Err("snapshot_root_invalid")
+    val root_identity = path_final_existing(snapshot_root)?
+    if root_identity.path != snapshot_root: return Err("snapshot_root_noncanonical")
+    val provenance_path = "{snapshot_root}/SCV_COMPILE_SNAPSHOT"
+    val inventory_path = "{snapshot_root}/SCV_COMPILE_INVENTORY"
+    val provenance_bytes = file_read_regular_no_follow_bounded_bytes(provenance_path, 2048)?
+    val inventory_bytes = file_read_regular_no_follow_bounded_bytes(inventory_path,
+        SCV_GATEWAY_SNAPSHOT_MAX_MANIFEST_BYTES_V1)?
+    val provenance = validated_utf8_bytes_to_text_linear(provenance_bytes)?
+    val inventory = validated_utf8_bytes_to_text_linear(inventory_bytes)?
+    val provenance_lines = provenance.split("\n")
+    if provenance_lines.len() != 6 or provenance_lines[0] != "simple-scv-compile-snapshot-v1":
+        return Err("snapshot_provenance_invalid")
+    val revision_id = _gateway_snapshot_provenance_value_v1(provenance_lines, 1, "revision=")?
+    val commit_id = _gateway_snapshot_provenance_value_v1(provenance_lines, 2, "commit=")?
+    val tree_id = _gateway_snapshot_provenance_value_v1(provenance_lines, 3, "tree=")?
+    val inventory_digest = _gateway_snapshot_provenance_value_v1(provenance_lines, 4, "inventory=")?
+    val count_text = _gateway_snapshot_provenance_value_v1(provenance_lines, 5, "count=")?
+    val inventory_count = count_text.to_i64() ?? -1
+    if inventory_count < 0 or "{inventory_count}" != count_text or sha256_text(inventory) != inventory_digest:
+        return Err("snapshot_inventory_invalid")
+    val rows: [text] = if inventory == "": [] else: inventory.split("\n")
+    if rows.len() as i64 != inventory_count or rows.len() > 4096: return Err("snapshot_inventory_limit")
+    var objects: [ScvGatewaySnapshotObjectRefV1] = []
+    var object_bytes: Dict<text, [u8]> = {}
+    var total_bytes = 0
+    for row in rows:
+        val fields = row.split("|")
+        if fields.len() != 3 or not scv_worktree_path_safe(fields[0]): return Err("snapshot_inventory_row")
+        val expected_count = fields[2].to_i64() ?? -1
+        if expected_count < 0 or "{expected_count}" != fields[2] or expected_count > SCV_GATEWAY_DRAFT_MAX_BLOB_BYTES_V1:
+            return Err("snapshot_source_limit")
+        val source_path = "{snapshot_root}/{fields[0]}"
+        val source_identity = path_final_existing(source_path)?
+        if source_identity.path != source_path or not path_identity_contains(root_identity, source_identity):
+            return Err("snapshot_source_scope")
+        val source_bytes = file_read_regular_no_follow_bounded_bytes(source_path,
+            SCV_GATEWAY_DRAFT_MAX_BLOB_BYTES_V1)?
+        val digest = sha256_u8_hex(source_bytes)
+        if fields[1] != "sha256_{digest}" or source_bytes.len() as i64 != expected_count:
+            return Err("snapshot_source_integrity")
+        total_bytes = total_bytes + expected_count
+        if total_bytes > 67108864: return Err("snapshot_total_limit")
+        if not object_bytes.contains_key(fields[1]):
+            var object_index = 0
+            while object_index < objects.len() and objects[object_index].object_id < fields[1]:
+                object_index = object_index + 1
+            objects.push(ScvGatewaySnapshotObjectRefV1(kind: "source_bytes",
+                object_id: fields[1], content_sha256: digest, byte_count: expected_count))
+            var move_index = objects.len() - 1
+            while move_index > object_index:
+                objects[move_index] = objects[move_index - 1]
+                move_index = move_index - 1
+            objects[object_index] = ScvGatewaySnapshotObjectRefV1(kind: "source_bytes",
+                object_id: fields[1], content_sha256: digest, byte_count: expected_count)
+            object_bytes[fields[1]] = source_bytes
+        elif object_bytes[fields[1]] != source_bytes:
+            return Err("snapshot_source_digest_collision")
+    val manifest = ScvGatewaySnapshotManifestV1(version: 1, repository: repository,
+        principal_id: principal, source_domain: "compile-inventory-v1", config_digest: config_digest,
+        revision_id: revision_id, commit_id: commit_id, tree_id: tree_id,
+        inventory_digest: inventory_digest, inventory_count: inventory_count,
+        provenance: provenance, inventory: inventory, objects: objects, structural_recipes: [])
+    val manifest_wire = scv_gateway_snapshot_manifest_encode_v1(manifest, repository, principal)?
+    scv_gateway_snapshot_manifest_validate_v1(manifest, repository, principal)?
+    Ok(_ScvGatewaySnapshotPackageV1(manifest: manifest, manifest_wire: manifest_wire,
+        objects: object_bytes))
+
+fn _gateway_command_result_v1(code: i64, status: text, detail: text) -> ScvGatewayCommandResultV1:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "command": SdnValue.String("scv.gateway"), "status": SdnValue.String(status),
+        "detail": SdnValue.String(detail), "publication": SdnValue.String("not_publication"),
+        "production_qualified": SdnValue.Bool(false)}
+    ScvGatewayCommandResultV1(exit_code: code, output: sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn _draft_output_stage_v1(parent: text, stage: text, destination: text, bytes: [u8]) -> Result<(), text>:
+    if not dir_is_real_no_follow(stage) or not stage.starts_with("{parent}/scv-draft-output-"):
+        return Err("draft_output_stage_scope")
+    val parent_identity = path_final_existing(parent)?
+    val stage_identity = path_final_existing(stage)?
+    if stage_identity.path != stage or not path_identity_contains(parent_identity, stage_identity):
+        return Err("draft_output_stage_scope")
+    val staged = "{stage}/payload.bin"
+    if not file_write_bytes(staged, bytes) or not file_fsync(staged) or not directory_fsync(stage):
+        return Err("draft_output_sync")
+    val verified = file_read_regular_no_follow_bounded_bytes(staged, SCV_GATEWAY_DRAFT_MAX_BLOB_BYTES_V1)?
+    if verified != bytes: return Err("draft_output_readback")
+    if not file_publish_noreplace(staged, destination)?: return Err("draft_output_exists")
+    val published = file_read_regular_no_follow_bounded_bytes(destination, SCV_GATEWAY_DRAFT_MAX_BLOB_BYTES_V1)?
+    if published != bytes or not file_fsync(destination) or not directory_fsync(parent):
+        return Err("draft_output_sync")
+    Ok(())
+
+pub fn scv_gateway_draft_write_output_noreplace_v1(path: text, bytes: [u8]) -> Result<(), text>:
+    if bytes.len() as i64 > SCV_GATEWAY_DRAFT_MAX_BLOB_BYTES_V1: return Err("draft_output_limit")
+    if path.len() < 2 or path.len() > 4096 or not path.starts_with("/") or path.ends_with("/") or
+        path.contains("//") or path.contains("\\") or path.contains("\n") or path.contains("\r"):
+        return Err("draft_output_path_refused")
+    for byte in path.bytes():
+        if byte < 32 or byte == 127: return Err("draft_output_path_refused")
+    val parts = path.split("/")
+    if parts.len() < 2: return Err("draft_output_path_refused")
+    for part in parts:
+        if part == ".." or part == ".": return Err("draft_output_path_refused")
+    val leaf = parts[parts.len() - 1]
+    if leaf == "": return Err("draft_output_path_refused")
+    var parent = "/"
+    var index = 1
+    while index < parts.len() - 1:
+        if parts[index] == "": return Err("draft_output_path_refused")
+        if parent == "/": parent = "/" + parts[index]
+        else: parent = parent + "/" + parts[index]
+        index = index + 1
+    val destination = if parent == "/": "/" + leaf else: parent + "/" + leaf
+    val parent_identity = path_final_existing(parent)?
+    if parent == "/" or parent_identity.path != parent or not dir_is_real_no_follow(parent): return Err("draft_output_parent_refused")
+    if path_entry_present(destination)?: return Err("draft_output_exists")
+    val stage = secure_temp_dir(parent, "scv-draft-output-")?
+    val stage_identity = path_final_existing(stage)?
+    if stage_identity.path != stage or not path_identity_contains(parent_identity, stage_identity):
+        return Err("draft_output_stage_scope")
+    val result = _draft_output_stage_v1(parent, stage, destination, bytes)
+    val cleanup_identity = path_final_existing(stage)?
+    if not dir_is_real_no_follow(stage) or cleanup_identity != stage_identity:
+        return Err("draft_output_stage_scope")
+    if not dir_remove_all(stage): return Err("draft_output_stage_cleanup")
+    if not directory_fsync(parent): return Err("draft_output_sync")
+    result
+
+fn scv_gateway_command_v1(args: [text]) -> ScvGatewayCommandResultV1:
+    if args.len() == 0 or (args.len() == 1 and args[0] == "--help"):
+        return _gateway_command_result_v1(0, "usage", scv_gateway_command_help_v1())
+    if args[0] == "draft": return scv_gateway_draft_command_v1(args[1:])
+    if args[0] == "snapshot": return scv_gateway_snapshot_command_v1(args[1:])
+    if args[0] == "read": return scv_gateway_read_command_v1(args[1:])
+    if args[0] != "serve":
+        return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+    var config_path = ""
+    var reason = ""
+    var development = false
+    var index = 1
+    while index < args.len():
+        if args[index] == "--config" and config_path == "" and index + 1 < args.len():
+            config_path = args[index + 1]
+            index = index + 2
+        elif args[index] == "--reason" and reason == "" and index + 1 < args.len():
+            reason = args[index + 1]
+            index = index + 2
+        elif args[index] == "--development-loopback" and not development:
+            development = true
+            index = index + 1
+        else:
+            return _gateway_command_result_v1(1, "invalid_request", "Unknown, missing or duplicate gateway argument")
+    if not development:
+        return _gateway_command_result_v1(1, "tls_unavailable", "Production service refused: native TLS owner is not qualified. Development requires --development-loopback and --reason.")
+    if config_path == "" or reason == "":
+        return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+    val config = match scv_gateway_config_load_v1(config_path):
+        case Err(_): return _gateway_command_result_v1(1, "configuration_rejected", "Gateway configuration must be bounded, no-follow, strict native SDN with an exact repository mapping")
+        case Ok(value): value
+    val token = match scv_gateway_bearer_load_v1(config):
+        case Err(_): return _gateway_command_result_v1(1, "credential_unavailable", "Gateway bearer environment reference is unset or invalid")
+        case Ok(value): value
+    match scv_gateway_serve_v1(config, token, development, reason):
+        case Err(_): _gateway_command_result_v1(1, "service_refused", "Loopback development listener could not start; production remains unavailable")
+        case Ok(_): _gateway_command_result_v1(0, "stopped", "Read-only loopback development service stopped")
+
+fn scv_gateway_draft_command_v1(args: [text]) -> ScvGatewayCommandResultV1:
+    if args.len() == 0: return _gateway_command_result_v1(0, "usage", scv_gateway_command_help_v1())
+    val operation = args[0]
+    if operation == "serve":
+        var values: Dict<text, text> = {}
+        var development = false
+        var index = 1
+        while index < args.len():
+            if args[index] == "--development-loopback" and not development:
+                development = true
+                index = index + 1
+            elif ["--config", "--reason"].contains(args[index]) and not values.contains_key(args[index]) and index + 1 < args.len():
+                values[args[index]] = args[index + 1]
+                index = index + 2
+            else: return _gateway_command_result_v1(1, "invalid_request", "Unknown, missing or duplicate draft serve argument")
+        if not development: return _gateway_command_result_v1(1, "tls_unavailable", "Draft service requires explicit loopback development mode; native TLS service is unavailable")
+        if not values.contains_key("--config") or not values.contains_key("--reason"):
+            return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+        val config = match scv_gateway_draft_config_load_v1(values["--config"]):
+            case Err(_): return _gateway_command_result_v1(1, "configuration_rejected", "Draft gateway configuration or pre-provisioned store root was refused")
+            case Ok(value): value
+        val grants = match scv_gateway_draft_grants_resolve_v1(config):
+            case Err(_): return _gateway_command_result_v1(1, "credential_unavailable", "Draft gateway grant credentials are unavailable or ambiguous")
+            case Ok(value): value
+        match scv_gateway_draft_serve_v1(config, grants, development, values["--reason"]):
+            case Err(_): _gateway_command_result_v1(1, "service_refused", "Loopback draft listener could not start; production TLS is unavailable")
+            case Ok(_): _gateway_command_result_v1(0, "stopped", "Draft listener returned; earlier local durable receipts remain valid")
+    elif operation == "put" or operation == "get":
+        var values: Dict<text, text> = {}
+        var development = false
+        var index = 1
+        val valued = ["--endpoint", "--repository", "--principal", "--request-id", "--token-env",
+            "--file", "--digest", "--output", "--tls-address"]
+        while index < args.len():
+            if args[index] == "--development-loopback" and not development:
+                development = true
+                index = index + 1
+            elif valued.contains(args[index]) and not values.contains_key(args[index]) and index + 1 < args.len():
+                if args[index + 1] == "": return _gateway_command_result_v1(1, "invalid_request", "Empty draft client argument")
+                values[args[index]] = args[index + 1]
+                index = index + 2
+            else: return _gateway_command_result_v1(1, "invalid_request", "Unknown, missing or duplicate draft client argument")
+        for required in ["--endpoint", "--repository", "--principal", "--request-id", "--token-env"]:
+            if not values.contains_key(required): return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+        val token_env = values["--token-env"]
+        if not scv_gateway_env_name_valid_v1(token_env): return _gateway_command_result_v1(1, "invalid_request", "Invalid token environment reference")
+        if operation == "put" and (not values.contains_key("--file") or values.contains_key("--digest")):
+            return _gateway_command_result_v1(1, "invalid_request", "Draft put requires --file and does not accept --digest")
+        if operation == "get" and (not values.contains_key("--digest") or not values.contains_key("--output") or values.contains_key("--file")):
+            return _gateway_command_result_v1(1, "invalid_request", "Draft get requires --digest and --output and does not accept --file")
+        if operation == "put" and values.contains_key("--output"):
+            return _gateway_command_result_v1(1, "invalid_request", "Draft put does not accept --output")
+        val config = ScvGatewayDraftClientConfigV1(endpoint: values["--endpoint"],
+            repository: values["--repository"], principal_id: values["--principal"],
+            allow_loopback_http: development, timeout_ms: 60000,
+            tls_address: values["--tls-address"] ?? "")
+        val credentials: fn() -> Result<text, text> = \:
+            val token = env_get(token_env)
+            if not scv_gateway_bearer_valid_v1(token): return Err("draft_credential_unavailable")
+            Ok(token)
+        if operation == "put":
+            val bytes = match file_read_regular_no_follow_bounded_bytes(values["--file"], SCV_GATEWAY_DRAFT_MAX_BLOB_BYTES_V1):
+                case Err(_): return _gateway_command_result_v1(1, "input_rejected", "Draft input must be a bounded regular file")
+                case Ok(value): value
+            val receipt = match scv_gateway_draft_client_put_v1(config, values["--request-id"], values["--request-id"], bytes, credentials):
+                case Err(_): return _gateway_command_result_v1(1, "transfer_failed", "Draft transfer failed; retry the same request ID and bytes")
+                case Ok(value): value
+            _gateway_command_result_v1(0, "local_durable", "repository={receipt.repository} principal={receipt.principal_id} request_id={receipt.request_id} sha256={receipt.content_sha256} bytes={receipt.byte_count} state=local_durable")
+        else:
+            val response = match scv_gateway_draft_client_get_v1(config, values["--request-id"], values["--request-id"], values["--digest"], credentials):
+                case Err(_): return _gateway_command_result_v1(1, "transfer_failed", "Draft read failed; no content was written")
+                case Ok(value): value
+            match scv_gateway_draft_write_output_noreplace_v1(values["--output"], response.payload):
+                case Err(_): return _gateway_command_result_v1(1, "output_rejected", "Draft bytes were verified but a safe new output file could not be published; existing files were preserved")
+                case Ok(_): pass
+            _gateway_command_result_v1(0, "local_readback", "repository={response.repository} principal={response.principal_id} sha256={response.content_sha256} bytes={response.byte_count} state=local_readback")
+    else:
+        _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+
+fn scv_gateway_snapshot_command_v1(args: [text]) -> ScvGatewayCommandResultV1:
+    if args.len() == 0: return _gateway_command_result_v1(0, "usage", scv_gateway_command_help_v1())
+    val operation = args[0]
+    if operation != "replicate" and operation != "fetch":
+        return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+    var values: Dict<text, text> = {}
+    var development = false
+    var index = 1
+    val valued = ["--endpoint", "--repository", "--principal", "--request-id", "--token-env",
+        "--snapshot-root", "--config-digest", "--snapshot-id", "--store-root", "--tls-address"]
+    while index < args.len():
+        if args[index] == "--development-loopback" and not development:
+            development = true
+            index = index + 1
+        elif valued.contains(args[index]) and not values.contains_key(args[index]) and index + 1 < args.len():
+            if args[index + 1] == "": return _gateway_command_result_v1(1, "invalid_request", "Empty snapshot argument")
+            values[args[index]] = args[index + 1]
+            index = index + 2
+        else: return _gateway_command_result_v1(1, "invalid_request", "Unknown, missing or duplicate snapshot argument")
+    for required in ["--endpoint", "--repository", "--principal", "--request-id", "--token-env"]:
+        if not values.contains_key(required): return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+    if operation == "replicate" and (not values.contains_key("--snapshot-root") or
+            not values.contains_key("--config-digest") or values.contains_key("--snapshot-id") or values.contains_key("--store-root")):
+        return _gateway_command_result_v1(1, "invalid_request", "Snapshot replicate requires --snapshot-root and --config-digest")
+    if operation == "fetch" and (not values.contains_key("--snapshot-id") or
+            not values.contains_key("--store-root") or values.contains_key("--snapshot-root") or values.contains_key("--config-digest")):
+        return _gateway_command_result_v1(1, "invalid_request", "Snapshot fetch requires --snapshot-id and --store-root")
+    val token_env = values["--token-env"]
+    if not scv_gateway_env_name_valid_v1(token_env):
+        return _gateway_command_result_v1(1, "invalid_request", "Invalid token environment reference")
+    val config = ScvGatewaySnapshotClientConfigV1(endpoint: values["--endpoint"],
+        repository: values["--repository"], principal_id: values["--principal"],
+        allow_loopback_http: development, timeout_ms: 60000,
+        tls_address: if values.contains_key("--tls-address"): values["--tls-address"] else: "")
+    val credentials: fn() -> Result<text, text> = \:
+        val token = env_get(token_env)
+        if not scv_gateway_bearer_valid_v1(token): return Err("snapshot_credential_unavailable")
+        Ok(token)
+    if operation == "fetch":
+        val pin_root = values["--store-root"]
+        val pin_identity = match path_final_existing(pin_root):
+            case Ok(value): value.path
+            case Err(_): ""
+        if not dir_is_real_no_follow(pin_root) or pin_root == "/" or pin_identity != pin_root:
+            return _gateway_command_result_v1(1, "pin_root_refused", "Offline pin root must be an existing canonical private directory")
+        val receipt = match scv_gateway_snapshot_client_fetch_pin_v1(config,
+                values["--request-id"], values["--snapshot-id"], pin_root, credentials):
+            case Err(_): return _gateway_command_result_v1(1, "fetch_failed", "Snapshot root or closure verification failed; no offline pin was acknowledged")
+            case Ok(value): value
+        return _gateway_command_result_v1(0, "offline_pin_local_durable",
+            "repository={receipt.repository_id} principal={receipt.principal_id} snapshot_id={receipt.snapshot_id} objects={receipt.object_count} bytes={receipt.byte_count} state=offline_pin_local_durable")
+    val package = match _gateway_snapshot_package_v1(values["--snapshot-root"],
+            config.repository, config.principal_id, values["--config-digest"]):
+        case Err(_): return _gateway_command_result_v1(1, "snapshot_rejected", "Frozen compile-source snapshot or configuration identity failed validation")
+        case Ok(value): value
+    val response = match scv_gateway_snapshot_client_replicate_v1(config,
+            values["--request-id"], values["--request-id"], package.manifest, package.objects, credentials):
+        case Err(_): return _gateway_command_result_v1(1, "replication_failed", "Snapshot closure did not reach a verified durable root")
+        case Ok(value): value
+    if response.status != "ok":
+        return _gateway_command_result_v1(1, response.status, "Snapshot root was not durably published; retry after supplying required object bytes")
+    _gateway_command_result_v1(0, "snapshot_local_durable",
+        "repository={response.repository} principal={response.principal_id} snapshot_id={response.snapshot_id} manifest_sha256={response.manifest_sha256} state=snapshot_local_durable")
+
+fn scv_gateway_read_command_v1(args: [text]) -> ScvGatewayCommandResultV1:
+    var values: Dict<text, text> = {}
+    var development = false
+    var index = 0
+    val valued = ["--endpoint", "--repository", "--method", "--id", "--token-env", "--selector", "--tls-address"]
+    while index < args.len():
+        val option = args[index]
+        if option == "--development-loopback" and not development:
+            development = true
+            index = index + 1
+        elif valued.contains(option) and not values.contains_key(option) and index + 1 < args.len():
+            if args[index + 1] == "": return _gateway_command_result_v1(1, "invalid_request", "Empty gateway read argument")
+            values[option] = args[index + 1]
+            index = index + 2
+        else:
+            return _gateway_command_result_v1(1, "invalid_request", "Unknown, missing or duplicate gateway read argument")
+    for required in ["--endpoint", "--repository", "--method", "--id", "--token-env"]:
+        if not values.contains_key(required): return _gateway_command_result_v1(1, "invalid_request", scv_gateway_command_help_v1())
+    val method = values["--method"]
+    if not ["capabilities", "read_ref", "read_commit", "read_blob"].contains(method):
+        return _gateway_command_result_v1(1, "invalid_request", "Gateway read method is not supported")
+    val has_selector = values.contains_key("--selector")
+    if (method == "capabilities" and has_selector) or (method != "capabilities" and not has_selector):
+        return _gateway_command_result_v1(1, "invalid_request", "Only object reads require a selector")
+    val token_env = values["--token-env"]
+    if not scv_gateway_env_name_valid_v1(token_env):
+        return _gateway_command_result_v1(1, "invalid_request", "Invalid credential environment reference")
+    val request = ScvGatewayRequestV1(version: 1, id: values["--id"], repository: values["--repository"],
+        method: method, ref_or_oid: if has_selector: values["--selector"] else: "")
+    val config = ScvGatewayClientConfigV1(endpoint: values["--endpoint"], repository: request.repository,
+        allow_loopback_http: development, timeout_ms: 5000,
+        tls_address: if values.contains_key("--tls-address"): values["--tls-address"] else: "")
+    # The client invokes this only after endpoint and request preflight. Tokens
+    # are neither command arguments to a child process nor part of SDN config.
+    val credentials: fn() -> Result<text, text> = \:
+        val token = env_get(token_env)
+        if not scv_gateway_bearer_valid_v1(token): return Err("gateway_credential_unavailable")
+        Ok(token)
+    match scv_gateway_client_call_v1(config, request, credentials):
+        case Err(_): _gateway_command_result_v1(1, "read_failed", "Native gateway request failed; no object was admitted")
+        case Ok(response):
+            match scv_gateway_response_encode_v1(response, request, config.repository):
+                case Err(_): _gateway_command_result_v1(1, "read_failed", "Native gateway response failed validation")
+                case Ok(output): ScvGatewayCommandResultV1(exit_code: if response.status == "ok": 0 else: 1, output: output)
+
+export ScvGatewayCommandResultV1, scv_gateway_command_v1, scv_gateway_command_help_v1, scv_gateway_read_command_v1
+export scv_gateway_draft_write_output_noreplace_v1

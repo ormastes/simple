@@ -1,5 +1,25 @@
 # Profile-switchable container detail design
 
+## 2026-10-27 typed capability admission
+
+Use the [shared capability contract](../../04_architecture/compiler/collection_backend_capabilities.md)
+for the runtime/compiler bridge. Existing `AdaptiveSetAlgorithm`,
+`AdaptiveSetAttribute`, `AdaptiveSetProfile` and workload observations keep
+their original meanings; map them through typed adapters to the proposed
+common description. Backend capability is not another `.sprof` threshold or
+target string. Preserve ordinary overwrite/remove APIs separately from the
+strict registry's insert-once/request API and stable AsyncRef result.
+
+Resolve semantics → required capabilities → layout/ownership → memory/progress
+before cost ranking. Explicit unsupported requests diagnose; advisory choices
+can keep Original. No profile may enable a forbidden transition, hidden lock,
+changed key equality, unqualified native provider, or capture callback that
+violates progress. Report no-capture/static-only/constructor-only and supported
+directed migration pairs through common explain fields. A static capability tag
+does not imply new accepted annotation syntax. See CBC-01–12 in the
+[TDD plan](../../03_plan/sys_test/collection_backend_capabilities.md); all new
+cases remain planned/UNRUN, including native and future pure-Simple parity.
+
 ## Status reconciliation (2026-10-25)
 
 Verified against `origin/release/1.0.0` and its git log on 2026-10-25. Docs-only; no tests were run for this note.

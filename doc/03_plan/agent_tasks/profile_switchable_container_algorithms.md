@@ -1,5 +1,32 @@
 # Agent task ownership: profile-switchable containers
 
+## 2026-10-27 item 3/7 consistency lane
+
+User-selected scope: shared DataFrame/container/lockless/async interfaces and
+honest static/profile/switch capability reporting. This lane changes plans and
+design only. Existing implementation and host acceptance remain OPEN.
+
+- Design/merge owner: Astra `/root/astra_dataframe_profile`.
+- Read-only inventory sidecar: Luna `/root/luna_dataframe_inventory`.
+- Final independent reviewer: Astra `/root/astra_async_arch`; no P0/P1 in
+  architecture review, with wording corrections incorporated before landing.
+  Exact review and validation are retained in the PR.
+- Worktree: `/home/yoon/dev/simple-dataframe-consistency-20261027`.
+- Branch: `work/dataframe-container-consistency-20261027`.
+- Target: `release/1.0.0`; inspected base/expected target at start:
+  `f0a39c2ee3d04b5eefd65cd1ce3d899d06ef5547`.
+- Shared contract: proposed `CollectionCapabilitiesV1`; retain existing
+  AdaptiveSetAlgorithm/Attribute/Profile and canonical async result vocabulary.
+- [Architecture](../../04_architecture/compiler/collection_backend_capabilities.md)
+  and [CBC TDD plan](../sys_test/collection_backend_capabilities.md) define
+  interfaces, test helper/step names, conformance/failure controls, ownership,
+  and evidence boundaries before implementation begins. No placeholder passes.
+
+Runtime/compiler implementation remains with their existing owners; this lane
+does not fold in concurrent lockless-map or bootstrap edits. Future slices use
+the same capability description for native and pure-Simple providers, without
+claiming one provider's evidence qualifies another.
+
 ## Status reconciliation (2026-10-25)
 
 Verified against `origin/release/1.0.0` and its git log on 2026-10-25. Docs-only; no tests were run for this note.

@@ -176,6 +176,10 @@ fn has_verdict_line(output: text) -> bool:
 fn unrun_verdict_line(path: text, reason: text) -> text:
     "SPEC FILE VERDICT: {path} outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason={reason}"
 
+pub fn process_failure_verdict_line(path: text, passed: i64, in_development: i64 = 0) -> text:
+    val executed = passed + in_development
+    "SPEC FILE VERDICT: {path} outcome=ERROR declared>={executed} executed={executed} passed={passed} failed=0 in_development={in_development} dropped=0 process_error=1 reason=child-exit-nonzero"
+
 # Classify WHY a spec executed nothing, from the child's combined output. The
 # reason is a grep-able token on the verdict line so a sweep can separate a
 # missing module (an infrastructure gap someone must land) from a spec that
@@ -184,6 +188,10 @@ fn unrun_verdict_line(path: text, reason: text) -> text:
 fn unrun_reason(output: text) -> text:
     if output.starts_with("COVER ADMISSION FAILED:"):
         return "cover-admission-failed"
+    if output.contains("test-runner: structured BDD evidence unavailable"):
+        return "bdd-evidence-unavailable"
+    if output.contains("--assert-ran: no BDD examples executed"):
+        return "zero-examples"
     if output.contains("Cannot resolve module:"):
         return "unresolved-module"
     if output.contains("compile failed: parse:") or output.contains("error: parse") or output.contains("error: syntax") or output.contains("Unexpected token"):
@@ -192,15 +200,15 @@ fn unrun_reason(output: text) -> text:
         return "unresolved-symbol"
     return "zero-examples"
 
-# Did this spec fail to LOAD, as opposed to running and failing an assertion?
-# The distinction is the whole point of the unrun line: a spec that asserted
-# something and got the wrong answer is a product defect; a spec that could not
-# be loaded at all is an infrastructure gap, and it declared examples nobody
-# ever evaluated. `unrun_reason` is the single classifier — this is a named
-# predicate over it, NOT a second copy of the token list, so the two can never
-# drift apart.
-fn is_load_failure(output: text) -> bool:
-    unrun_reason(output) != "zero-examples"
+# Did this result fail without authenticated execution evidence, rather than
+# run examples and fail an assertion? Assertion failures must stay on the ran
+# path with their real count. A structured-evidence refusal with zero examples
+# gets the existing unrun verdict shape, carrying reason=zero-examples.
+fn is_unrun_failure(output: text) -> bool:
+    if output.starts_with("test-runner: authenticated BDD assertion failure:"):
+        return false
+    val reason = unrun_reason(output)
+    reason != "zero-examples" or output.contains("--assert-ran: no BDD examples executed")
 
 # Verdict line for a spec the AGGREGATING (directory) lane actually ran.
 #

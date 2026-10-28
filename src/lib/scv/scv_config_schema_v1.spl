@@ -1,0 +1,122 @@
+"""SCV repository schema v1. All master-plan sections remain explicit values.
+
+This validates configuration intent; provider availability and operational
+support require host admission. The decoder does not install or start anything.
+"""
+use std.common.sdn.value.{SdnValue}
+use std.scv.scv_config_fields_v1.*
+
+fn config_topology_v1(value: SdnValue) -> Result<bool, text>:
+    val fields = scv_config_dict_v1(value, "scv.topology", ["client_mode", "shared_authority", "gateway_profile", "coordinator", "allow_local_offline_revisions"])?
+    scv_config_enum_v1(fields["client_mode"], "client_mode", ["hybrid", "native", "git"])?
+    scv_config_enum_v1(fields["shared_authority"], "shared_authority", ["git_upstream"])?
+    scv_config_text_v1(fields["gateway_profile"], "gateway_profile")?
+    scv_config_enum_v1(fields["coordinator"], "coordinator", ["sj"])?
+    scv_config_bool_v1(fields["allow_local_offline_revisions"], "allow_local_offline_revisions")?
+    Ok(true)
+
+fn config_hashes_v1(value: SdnValue) -> Result<bool, text>:
+    val fields = scv_config_dict_v1(value, "scv.hashes", ["lookup_default", "lookup_allowed", "durable_default", "secure_allowed", "legacy_read", "compute_policy", "provider", "isa", "verify_fast_matches", "allow_secure_downgrade"])?
+    val lookup = scv_config_texts_v1(fields["lookup_allowed"], "lookup_allowed", ["xxh3_128", "gxhash_128", "blake3_256", "sha256"])?
+    val secure = scv_config_texts_v1(fields["secure_allowed"], "secure_allowed", ["blake3_256", "sha256"])?
+    val selected_lookup = scv_config_text_v1(fields["lookup_default"], "lookup_default")?
+    val selected_secure = scv_config_text_v1(fields["durable_default"], "durable_default")?
+    if not lookup.contains(selected_lookup): return Err("default_not_allowed: lookup_default")
+    if not secure.contains(selected_secure): return Err("default_not_allowed: durable_default")
+    scv_config_texts_v1(fields["legacy_read"], "legacy_read", ["sha256", "blake3_256"])?
+    scv_config_enum_v1(fields["compute_policy"], "compute_policy", ["required_then_lazy"])?
+    scv_config_enum_v1(fields["provider"], "provider", ["auto", "builtin_simple"])?
+    scv_config_enum_v1(fields["isa"], "isa", ["auto", "portable"])?
+    if not scv_config_bool_v1(fields["verify_fast_matches"], "verify_fast_matches")?: return Err("unsafe_value: verify_fast_matches")
+    if scv_config_bool_v1(fields["allow_secure_downgrade"], "allow_secure_downgrade")?: return Err("unsafe_value: allow_secure_downgrade")
+    Ok(true)
+
+fn config_storage_v1(value: SdnValue) -> Result<bool, text>:
+    val fields = scv_config_dict_v1(value, "scv.storage", ["source_layout", "source_boundaries", "database_layout", "target_record_bytes", "soft_max_record_bytes", "oversized_record", "codec_profile", "structural_delta_depth", "retain_raw_copy"])?
+    scv_config_enum_v1(fields["source_layout"], "source_layout", ["syntax_nodes"])?
+    scv_config_enum_v1(fields["source_boundaries"], "source_boundaries", ["complete_nodes_blocks_siblings"])?
+    scv_config_enum_v1(fields["database_layout"], "database_layout", ["schema_row_value_records"])?
+    val target = scv_config_int_v1(fields["target_record_bytes"], "target_record_bytes", 1, 1073741824)?
+    val soft = scv_config_int_v1(fields["soft_max_record_bytes"], "soft_max_record_bytes", 1, 1073741824)?
+    if target > soft: return Err("range: target_record_bytes exceeds soft_max_record_bytes")
+    scv_config_enum_v1(fields["oversized_record"], "oversized_record", ["stream_intact"])?
+    scv_config_enum_v1(fields["codec_profile"], "codec_profile", ["balanced", "none"])?
+    # Structural deltas need a separate admitted implementation/restore gate.
+    scv_config_int_v1(fields["structural_delta_depth"], "structural_delta_depth", 0, 0)?
+    if not scv_config_bool_v1(fields["retain_raw_copy"], "retain_raw_copy")?: return Err("unsafe_value: retain_raw_copy")
+    Ok(true)
+
+fn config_capture_v1(value: SdnValue) -> Result<bool, text>:
+    val fields = scv_config_dict_v1(value, "scv.capture", ["ordinary_save", "private_checkpoint", "build_trigger", "edit_debounce_ms", "maximum_batch_delay_ms", "explicit_checkpoint_ack", "fine_grained_edits", "record_private_transcripts"])?
+    scv_config_enum_v1(fields["ordinary_save"], "ordinary_save", ["preserve"])?
+    scv_config_enum_v1(fields["private_checkpoint"], "private_checkpoint", ["allow_invalid"])?
+    scv_config_enum_v1(fields["build_trigger"], "build_trigger", ["validated_transaction"])?
+    val debounce = scv_config_int_v1(fields["edit_debounce_ms"], "edit_debounce_ms", 0, 3600000)?
+    val maximum = scv_config_int_v1(fields["maximum_batch_delay_ms"], "maximum_batch_delay_ms", 1, 3600000)?
+    if debounce > maximum: return Err("range: edit_debounce_ms exceeds maximum_batch_delay_ms")
+    scv_config_enum_v1(fields["explicit_checkpoint_ack"], "explicit_checkpoint_ack", ["durable"])?
+    scv_config_enum_v1(fields["fine_grained_edits"], "fine_grained_edits", ["coalesce"])?
+    if scv_config_bool_v1(fields["record_private_transcripts"], "record_private_transcripts")?: return Err("unsupported_value: record_private_transcripts=true")
+    Ok(true)
+
+fn config_solvers_v1(value: SdnValue) -> Result<bool, text>:
+    val fields = scv_config_dict_v1(value, "scv.solvers", ["providers_lock", "routes_file", "default_on_unknown_domain", "missing_required_provider", "ambiguous_route", "deterministic_default", "llm_proposals", "isolated_worker_memory_bytes", "background_analysis"])?
+    for name in ["providers_lock", "routes_file"]:
+        val path = scv_config_text_v1(fields[name], name)?
+        if not scv_config_relative_path_v1(path, false): return Err("unsafe_path: " + name)
+        if not path.starts_with("config/") or not path.ends_with(".sdn"): return Err("unsafe_path: " + name)
+    scv_config_enum_v1(fields["default_on_unknown_domain"], "default_on_unknown_domain", ["opaque_conflict"])?
+    scv_config_enum_v1(fields["missing_required_provider"], "missing_required_provider", ["block_promotion"])?
+    scv_config_enum_v1(fields["ambiguous_route"], "ambiguous_route", ["error"])?
+    if not scv_config_bool_v1(fields["deterministic_default"], "deterministic_default")?: return Err("unsafe_value: deterministic_default")
+    # LLM execution is not implemented by this loader. Reject the requested
+    # capability rather than let an absent provider look enabled.
+    if scv_config_bool_v1(fields["llm_proposals"], "llm_proposals")?: return Err("unsupported_value: llm_proposals=true")
+    scv_config_int_v1(fields["isolated_worker_memory_bytes"], "isolated_worker_memory_bytes", 1, 1073741824)?
+    scv_config_bool_v1(fields["background_analysis"], "background_analysis")?
+    Ok(true)
+
+fn config_database_v1(value: SdnValue) -> Result<bool, text>:
+    val fields = scv_config_dict_v1(value, "scv.database", ["identity_scheme", "settled_aliases", "conflict_default", "schema_changes", "scalar_timestamp_winner", "lazy_constant_defaults", "causal_retention", "settlement_ack"])?
+    scv_config_enum_v1(fields["identity_scheme"], "identity_scheme", ["actor_incarnation_counter"])?
+    scv_config_enum_v1(fields["settled_aliases"], "settled_aliases", ["gateway_epoch_sequence"])?
+    scv_config_enum_v1(fields["conflict_default"], "conflict_default", ["explicit"])?
+    scv_config_enum_v1(fields["schema_changes"], "schema_changes", ["typed_operations"])?
+    if scv_config_bool_v1(fields["scalar_timestamp_winner"], "scalar_timestamp_winner")?: return Err("unsafe_value: scalar_timestamp_winner")
+    if not scv_config_bool_v1(fields["lazy_constant_defaults"], "lazy_constant_defaults")?: return Err("unsupported_value: lazy_constant_defaults=false")
+    scv_config_enum_v1(fields["causal_retention"], "causal_retention", ["frontier_or_explicit_retirement"])?
+    scv_config_enum_v1(fields["settlement_ack"], "settlement_ack", ["accepted_ref_verified"])?
+    Ok(true)
+
+fn config_retention_v1(value: SdnValue) -> Result<bool, text>:
+    val fields = scv_config_dict_v1(value, "scv.retention", ["private_checkpoint_policy", "keep_unpublished_roots", "unresolved_conflicts", "eviction_target", "raw_reclamation"])?
+    scv_config_enum_v1(fields["private_checkpoint_policy"], "private_checkpoint_policy", ["reachable_then_reviewed_expiry"])?
+    if not scv_config_bool_v1(fields["keep_unpublished_roots"], "keep_unpublished_roots")?: return Err("unsafe_value: keep_unpublished_roots")
+    scv_config_enum_v1(fields["unresolved_conflicts"], "unresolved_conflicts", ["pin_inputs"])?
+    scv_config_enum_v1(fields["eviction_target"], "eviction_target", ["rebuildable_caches_only"])?
+    scv_config_enum_v1(fields["raw_reclamation"], "raw_reclamation", ["disabled_until_restore_gate"])?
+    Ok(true)
+
+fn config_execution_v1(value: SdnValue) -> Result<bool, text>:
+    val fields = scv_config_dict_v1(value, "scv.execution", ["scheduler", "budget_required", "nested_thread_pools", "mandatory_grammar_download"])?
+    scv_config_enum_v1(fields["scheduler"], "scheduler", ["shared_build_runner"])?
+    if not scv_config_bool_v1(fields["budget_required"], "budget_required")?: return Err("unsafe_value: budget_required")
+    if scv_config_bool_v1(fields["nested_thread_pools"], "nested_thread_pools")?: return Err("unsupported_value: nested_thread_pools=true")
+    if scv_config_bool_v1(fields["mandatory_grammar_download"], "mandatory_grammar_download")?: return Err("unsupported_value: mandatory_grammar_download=true")
+    Ok(true)
+
+pub fn scv_config_schema_v1(value: SdnValue) -> Result<Dict<text, SdnValue>, text>:
+    val root = scv_config_dict_v1(value, "root", ["schema_version", "scv"])?
+    scv_config_int_v1(root["schema_version"], "schema_version", 1, 1)?
+    val settings = scv_config_dict_v1(root["scv"], "scv", ["topology", "hashes", "storage", "capture", "solvers", "database", "retention", "execution"])?
+    config_topology_v1(settings["topology"])?
+    config_hashes_v1(settings["hashes"])?
+    config_storage_v1(settings["storage"])?
+    config_capture_v1(settings["capture"])?
+    config_solvers_v1(settings["solvers"])?
+    config_database_v1(settings["database"])?
+    config_retention_v1(settings["retention"])?
+    config_execution_v1(settings["execution"])?
+    Ok(settings)
+
+export scv_config_schema_v1

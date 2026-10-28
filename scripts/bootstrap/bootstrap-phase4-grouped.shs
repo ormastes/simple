@@ -32,6 +32,8 @@ llvm_index_config= cranelift_index_config= phase3_llvm_index_config= phase3_cran
 threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
 estimated_group_disk_bytes= minimum_free_disk_bytes=
 phase_only= phase_output= finalize_only=0 memory_policy=enforce
+executor=${SIMPLE_BUILD_EXECUTOR-buildrunner}
+direct_product= direct_backend=
 for arg in "$@"; do
   case "$arg" in
     --producer-receipt=*) producer_receipt=${arg#*=} ;;
@@ -75,67 +77,109 @@ for arg in "$@"; do
     --minimum-free-disk-bytes=*) minimum_free_disk_bytes=${arg#*=} ;;
     --phase-only=*) phase_only=${arg#*=} ;;
     --phase-output=*) phase_output=${arg#*=} ;;
+    --executor=*) executor=${arg#*=} ;;
+    --direct-product=*) direct_product=${arg#*=} ;;
+    --direct-backend=*) direct_backend=${arg#*=} ;;
     --finalize-only) finalize_only=1 ;;
     *) die "unknown option: $arg" ;;
   esac
 done
 case "$phase_only" in ''|phase3|phase4) ;; *) die "invalid isolated phase" ;; esac
 case "$memory_policy" in enforce|monitor) ;; *) die "invalid memory policy" ;; esac
-if [ -n "$phase_only" ]; then
+case "$executor" in direct|buildrunner) ;; *) die "invalid build executor: $executor" ;; esac
+if [ -n "$direct_product" ]; then
+  [ "$executor" = direct ] || die "--direct-product requires --executor=direct"
+  [ "$phase_only" = phase4 ] && [ "$finalize_only" -eq 0 ] || die "direct product requires --phase-only=phase4"
+  case "$direct_product" in bootstrap|full-cli|interpreter|mcp|lsp|test-runner) ;; *) die "unsupported direct product" ;; esac
+  case "$direct_backend" in llvm|cranelift) ;; *) die "--direct-backend must be llvm or cranelift" ;; esac
+else
+  [ "$executor" = buildrunner ] || die "--executor=direct requires one --direct-product"
+  [ -z "$direct_backend" ] || die "--direct-backend requires --direct-product"
+fi
+if [ -n "$direct_product" ]; then
+  [ "$phase_only" = phase4 ] && [ "$finalize_only" -eq 0 ] && [ -z "$phase_output" ] \
+    || die "direct product cannot publish a managed phase completion"
+elif [ -n "$phase_only" ]; then
   [ "$finalize_only" -eq 0 ] && [ "$phase_output" = "phase-output/$phase_only/completion.env" ] || die "isolated phase output differs"
 else
   [ -z "$phase_output" ] || die "phase output requires isolated phase"
 fi
-for path in "$producer_receipt" "$scv_receipt" "$source_root" "$source_inventory" "$source_links" \
-    "$module_inventory" "$excluded_inventory" "$module_role_policy" "$shared_parse_cas_root" \
-    "$root" "$template" "$manifest_program" "$builder_program" \
-    "$group_program" "$group_worker" "$group_broker" "$index_program" \
-    "$authority_program" "$authority_receipt" "$image_receipt" \
-    "$llvm_index_config" "$cranelift_index_config" \
-    "$phase3_llvm_index_config" "$phase3_cranelift_index_config"; do
-  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
-done
-for path in "$producer_receipt" "$scv_receipt" "$source_inventory" "$source_links" "$module_inventory" \
-    "$excluded_inventory" "$module_role_policy" \
-    "$template" "$manifest_program" "$builder_program" "$group_program" \
-    "$group_worker" "$group_broker" "$index_program" "$authority_program" \
-    "$authority_receipt" "$image_receipt" \
-    "$llvm_index_config" "$cranelift_index_config" \
-    "$phase3_llvm_index_config" "$phase3_cranelift_index_config"; do regular "$path" || die "missing pinned input: $path"; done
+if [ -n "$direct_product" ]; then
+  for path in "$producer_receipt" "$source_root" "$source_inventory" "$root" \
+      "$authority_program" "$authority_receipt" "$image_receipt"; do
+    [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+  done
+  for path in "$producer_receipt" "$source_inventory" "$authority_program" "$authority_receipt" "$image_receipt"; do
+    regular "$path" || die "missing direct-build authority input: $path"
+  done
+else
+  for path in "$producer_receipt" "$scv_receipt" "$source_root" "$source_inventory" "$source_links" \
+      "$module_inventory" "$excluded_inventory" "$module_role_policy" "$shared_parse_cas_root" \
+      "$root" "$template" "$manifest_program" "$builder_program" \
+      "$group_program" "$group_worker" "$group_broker" "$index_program" \
+      "$authority_program" "$authority_receipt" "$image_receipt" \
+      "$llvm_index_config" "$cranelift_index_config" \
+      "$phase3_llvm_index_config" "$phase3_cranelift_index_config"; do
+    [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+  done
+  for path in "$producer_receipt" "$scv_receipt" "$source_inventory" "$source_links" "$module_inventory" \
+      "$excluded_inventory" "$module_role_policy" \
+      "$template" "$manifest_program" "$builder_program" "$group_program" \
+      "$group_worker" "$group_broker" "$index_program" "$authority_program" \
+      "$authority_receipt" "$image_receipt" \
+      "$llvm_index_config" "$cranelift_index_config" \
+      "$phase3_llvm_index_config" "$phase3_cranelift_index_config"; do regular "$path" || die "missing pinned input: $path"; done
+fi
 [ "$(hash_file "$authority_receipt")" = "$authority_digest" ] || die "authority receipt changed"
 [ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root unavailable"
-[ -d "$shared_parse_cas_root" ] && [ ! -L "$shared_parse_cas_root" ] || die "shared parse CAS root unavailable"
 case "$source_inventory" in "$source_root"/*) source_inventory_relative=${source_inventory#"$source_root"/} ;; *) die "source inventory must be inside immutable source root" ;; esac
-case "$source_links" in "$source_root"/*) source_links_relative=${source_links#"$source_root"/} ;; *) die "link inventory must be inside immutable source root" ;; esac
+if [ -z "$direct_product" ]; then
+  [ -d "$shared_parse_cas_root" ] && [ ! -L "$shared_parse_cas_root" ] || die "shared parse CAS root unavailable"
+  case "$source_links" in "$source_root"/*) source_links_relative=${source_links#"$source_root"/} ;; *) die "link inventory must be inside immutable source root" ;; esac
+fi
 case "$root/" in "$source_root/"*) die "output root overlaps immutable source root" ;; esac
 case "$source_root/" in "$root/"*) die "immutable source root overlaps output root" ;; esac
-for n in "$threads" "$memory_bytes" "$reserve_bytes" "$group_size" "$max_attempts" \
-    "$poll_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
-  positive "$n" || die "positive resource policy required"
-done
-case "$lifetime_ms" in 0) ;; *) positive "$lifetime_ms" || die "nonnegative work lifetime required" ;; esac
-[ "$memory_bytes" -le 1125899906842624 ] \
-  || die "memory cap exceeds manager task limit"
+if [ -n "$direct_product" ]; then
+  for n in "$threads" "$memory_bytes" "$reserve_bytes" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
+    positive "$n" || die "positive direct build resource policy required"
+  done
+  [ "$memory_bytes" -le 1125899906842624 ] || die "memory cap exceeds direct task limit"
+  positive "$lifetime_ms" || die "positive direct build lifetime required"
+else
+  for n in "$threads" "$memory_bytes" "$reserve_bytes" "$group_size" "$max_attempts" \
+      "$poll_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
+    positive "$n" || die "positive resource policy required"
+  done
+  case "$lifetime_ms" in 0) ;; *) positive "$lifetime_ms" || die "nonnegative work lifetime required" ;; esac
+  [ "$memory_bytes" -le 1125899906842624 ] || die "memory cap exceeds manager task limit"
+fi
 [ -n "$target" ] || die "target required"
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
-for inventory in "$source_inventory" "$module_inventory"; do
+validate_inventory() {
+  inventory=$1
   [ -s "$inventory" ] || die "empty inventory: $inventory"
   [ "$(LC_ALL=C sort -u "$inventory" | wc -l | tr -d ' ')" = "$(wc -l <"$inventory" | tr -d ' ')" ] || die "duplicate inventory row"
   LC_ALL=C sort "$inventory" | cmp -s - "$inventory" || die "unsorted inventory: $inventory"
-done
+}
+validate_inventory "$source_inventory"
+if [ -z "$direct_product" ]; then validate_inventory "$module_inventory"; fi
 awk 'length($0)==0 || index($0,"\r") || ($0 !~ /^src\// && $0 !~ /^examples\/10_tooling\// && $0 !~ /^scripts\/bootstrap\// && $0 !~ /^scripts\/check\/lib\// && $0 !~ /^test\/03_system\/app\/bootstrap_builder\/feature\// && $0 !~ /^test\/fixtures\/bootstrap_builder\//) || $0 ~ /(^|\/)\.\.?($|\/)/ { bad=1 } END { exit bad }' "$source_inventory" || die "invalid source inventory"
-module_inventory_count=$(wc -l <"$module_inventory" | tr -d ' ')
-positive "$module_inventory_count" || die "module inventory count invalid"
-case "$excluded_inventory_count" in ''|*[!0-9]*|0[0-9]*) die "excluded inventory count invalid" ;; esac
-case "$excluded_inventory_digest:$module_role_policy_digest" in
-  *[!0-9a-f:]* ) die "module role digest invalid" ;;
-esac
-[ "${#excluded_inventory_digest}" -eq 64 ] && [ "${#module_role_policy_digest}" -eq 64 ] \
-  || die "module role digest invalid"
-[ "$(hash_file "$excluded_inventory")" = "$excluded_inventory_digest" ] &&
-  [ "$(wc -l <"$excluded_inventory" | tr -d ' ')" = "$excluded_inventory_count" ] &&
-  [ "$(hash_file "$module_role_policy")" = "$module_role_policy_digest" ] \
-  || die "module role files differ from compiled authority"
+if [ -z "$direct_product" ]; then
+  module_inventory_count=$(wc -l <"$module_inventory" | tr -d ' ')
+  positive "$module_inventory_count" || die "module inventory count invalid"
+fi
+if [ -z "$direct_product" ]; then
+  case "$excluded_inventory_count" in ''|*[!0-9]*|0[0-9]*) die "excluded inventory count invalid" ;; esac
+  case "$excluded_inventory_digest:$module_role_policy_digest" in
+    *[!0-9a-f:]* ) die "module role digest invalid" ;;
+  esac
+  [ "${#excluded_inventory_digest}" -eq 64 ] && [ "${#module_role_policy_digest}" -eq 64 ] \
+    || die "module role digest invalid"
+  [ "$(hash_file "$excluded_inventory")" = "$excluded_inventory_digest" ] &&
+    [ "$(wc -l <"$excluded_inventory" | tr -d ' ')" = "$excluded_inventory_count" ] &&
+    [ "$(hash_file "$module_role_policy")" = "$module_role_policy_digest" ] \
+    || die "module role files differ from compiled authority"
+fi
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
 # Reject invalid target/schema before starting any independent source task.
@@ -144,9 +188,11 @@ perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_
 prepare="$repo_root/scripts/bootstrap/prepare-phase4-native-groups.shs"
 shared_parse_root_check="$repo_root/scripts/bootstrap/lib/shared-parse-cas-root.shs"
 shared_parse_source_check="$repo_root/scripts/bootstrap/lib/shared-parse-source-authority.shs"
-regular "$prepare" || die "tracked grouped preparer unavailable"
-regular "$shared_parse_root_check" || die "shared parse root checker unavailable"
-regular "$shared_parse_source_check" || die "shared parse source checker unavailable"
+if [ -z "$direct_product" ]; then
+  regular "$prepare" || die "tracked grouped preparer unavailable"
+  regular "$shared_parse_root_check" || die "shared parse root checker unavailable"
+  regular "$shared_parse_source_check" || die "shared parse source checker unavailable"
+fi
 mkdir -p "$root" || die "managed phase root unavailable"
 receipt="$root/completion.env"
 scratch="$root/driver-${phase_only:-parent}"
@@ -191,7 +237,7 @@ verify_shared_source() {
     || die "private source snapshot failed; evidence retained: $observed"
   cmp -s "$observed" "$source_authority" \
     || die "private source differs from admitted Stage 2 bytes: $observed"
-  verify_image_set
+  if [ -z "$direct_product" ]; then verify_image_set; fi
   "$authority_program" phase2-native-authority-verify \
     --receipt "$authority_receipt" --digest "$authority_digest" \
     --canonical-snapshot "$observed" >/dev/null \
@@ -542,10 +588,47 @@ perl -e '
 cmp -s "$expected_inventory" "$source_inventory" \
   || die "binary source inventory differs from complete admitted Stage 2 regular paths"
 rm -f "$expected_inventory"
-verify_shared_source
+if [ -z "$direct_product" ]; then verify_shared_source; fi
 . "$repo_root/scripts/bootstrap/lib/managed-cuda-selection.shs" || die "managed CUDA selector unavailable"
 bootstrap_managed_cuda_select "$source_root" "$source_inventory" \
   || die "CUDA manifest/template absent or invalid in admitted source inventory"
+
+# A direct Phase 4 tool build is deliberately a single artifact operation. It
+# produces build-only evidence and exits before managed suite/phase completion,
+# so direct invocation cannot be mistaken for BuildRunner admission.
+if [ -n "$direct_product" ]; then
+  verify_image_pin "$authority_program" authority_program authority_sha256
+  authority_program_sha=$expected_digest
+  sh "$repo_root/scripts/bootstrap/build-phase4-direct-product.shs" \
+    --executor=direct --program="$producer" --producer-sha256="$producer_sha" \
+    --source-root="$source_root" --source-authority="$source_authority" \
+    --source-authority-sha256="$source_authority_digest" --target="$target" \
+    --authority-program="$authority_program" --authority-receipt="$authority_receipt" \
+    --authority-digest="$authority_digest" --authority-program-sha256="$authority_program_sha" \
+    --threads="$threads" --memory-bytes="$memory_bytes" --memory-policy="$memory_policy" \
+    --reserve-bytes="$reserve_bytes" \
+    --estimated-group-disk-bytes="$estimated_group_disk_bytes" \
+    --minimum-free-disk-bytes="$minimum_free_disk_bytes" \
+    --backend="$direct_backend" --product="$direct_product" \
+    --cuda-source-root="$cuda_selected_root" \
+    --cuda-selection-identity="$cuda_selection_identity" \
+    --runtime-authority="$runtime_authority" --runtime-snapshot="$runtime_snapshot" \
+    --runtime-snapshot-sha256="$runtime_snapshot_digest" \
+    --tool-authority="$tool_authority" --tool-authority-sha256="$tool_authority_digest" \
+    --timeout-seconds="$(( (lifetime_ms + 999) / 1000 ))" \
+    --output-root="$root/phase4/direct/$direct_backend/$direct_product" \
+    || die "direct Phase 4 product build failed"
+  bootstrap_stage3_verify_stage2_admission_receipt \
+    "$producer_receipt" "$producer_receipt" "$producer" "$producer" \
+    "$source_authority" "$source_authority" "$runtime_snapshot" "$runtime_snapshot" \
+    "$runtime_authority" "$runtime_authority" "$tool_authority" "$tool_authority" \
+    "$args_digest" "$sanity" "$sanity" "$(dirname -- "$sanity")" \
+    "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$repo_root" \
+    || die "Stage 2 producer/runtime/tool authority changed during direct build"
+  verify_image_pin "$authority_program" authority_program authority_sha256
+  [ "$expected_digest" = "$authority_program_sha" ] || die "source authority verifier identity changed during direct build"
+  exit 0
+fi
 
 hashes="$scratch/verified-hashes.tmp.$$"
 trap 'rm -f "$hashes"' EXIT HUP INT TERM

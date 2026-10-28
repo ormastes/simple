@@ -260,7 +260,8 @@ at 129 bytes including newline and the table at 131,072 rows, and validates PID
 ranges. The kernel metadata allocation is independently bounded. A vanished
 process is excluded only after ESRCH or a confirmed zombie; permission errors,
 short reads, and changed birth identities fail the observation. Observer path,
-binary/source SHA-256, backend, starts/restarts/errors and last PID are receipted.
+binary/source SHA-256, denial-policy header SHA-256, backend,
+starts/restarts/errors and last PID are receipted.
 The session helper remains verified during native observations. Observer failure
 kills/reaps the observer; a fresh observer may be started for cleanup only,
 never to resume the workload. A persistently broken observer kills the anchored
@@ -268,13 +269,27 @@ root group and reports unverified quiescence. SIGPIPE is ignored before helper
 admission so early pipe closure produces a caught exit 89 with a receipt; the
 workload receives its original SIGPIPE disposition.
 
-A denied libproc/session detail query now receives one independent
-`sysctl(KERN_PROC_PID)` check. It is omitted only when that successful query
-proves the PID absent, or returns the exact expected PID/birth identity in
-zombie state. A live process, reused PID, short metadata reply, or denied
-metadata check still fails closed with exit 89. Denial diagnostics retain the
-original operation/errno and record the proof outcome. This does not make a
-live protected process measurable or authorize ignoring denied RSS.
+A denied libproc/session detail query receives up to three independent
+`sysctl(KERN_PROC_PID)` checks. When a check finds the exact expected identity
+still live, the observer waits 10 ms and checks again to cover a short-lived
+process exiting between the detail error and proof. It is omitted only when a
+successful query proves the PID absent, or returns the exact expected
+PID/birth identity in zombie state. A persistent live process, reused PID,
+short metadata reply, or denied metadata check still fails closed with exit
+89. Denial diagnostics retain the original operation/errno and record the
+probe count and final proof outcome. This does not make a live protected
+process measurable or authorize ignoring denied RSS.
+
+The denial policy has a deterministic fixture that exercises live-then-exit,
+live-then-zombie, persistent live denial, PID reuse, unknown proof, and
+immediate authoritative absence/zombie cases:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror \
+  scripts/resource/macos-observer-denial-policy-test.c \
+  -o /tmp/macos-observer-denial-policy-test
+/tmp/macos-observer-denial-policy-test
+```
 Denial diagnostics also record bounded, whitespace-sanitized kernel command
 name, parent/group/session IDs and effective/real UID. On detail EOF the
 supervisor records its expected root/session, retained/current group anchor

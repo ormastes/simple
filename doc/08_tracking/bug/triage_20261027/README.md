@@ -43,3 +43,48 @@ Later correction files supersede the archived row for the named `bug_id` while l
 V1 files, their manifest, and the append-only V1 correction register remain historical records. V2 is the later full-ID classification snapshot: for current classification lookup, use the V2 row for each ID, including the corrected Vulkan mapper row. The V2 review target remains the frozen `c0b3ad911f4cb00c0f3550b05baa8d06347d17d0`; merged post-freeze fixes do not change the assessment SHA or confer runtime qualification.
 
 This remains partial progress toward the full user goal. Canonical bug database writes and runtime-qualified build evidence remain held pending the user's build-exception decision. No bug DB, CRC, or status files were changed, and no compiler or SSpec was run for this documentation snapshot. No full-audit PASS is claimed.
+
+
+## V3 scoped aggregate checkpoint
+
+V3 is a scoped derived snapshot of the original frozen audit (`d805f566f89b9e830c292d5cc0a1e0f5f6449c37`) assessed at `c0b3ad911f4cb00c0f3550b05baa8d06347d17d0`. See [V3 categories](reviewed_categories_v3.sdn), [residual IDs](residual_ids_v3.sdn), [manifest and captured input hashes](manifest_v3.sdn), [accepted evidence by lane](evidence_v3/), and the mandatory [reproduction scope table](reproduction_scope_v3.sdn). V1 and V2 artifacts and correction records remain unchanged historical snapshots.
+
+- The final partition has 1,097 accepted classifications, 505 not admitted and still needing evidence, and no missing IDs. The 505 residual records are not all unreviewed: their report/source inspection may be recorded, but their reproducibility remains untested and no runtime attempt is admitted for them.
+- Count provenance: the V2 baseline is 600 accepted (including merged lane 04); V3 then applies 16 adjudication queues covering 512 rows (497 accepted, 15 needing more evidence), yielding 1,097 accepted and 505 residual. [V2 manifest](manifest_v2.sdn) and merged lane 04 hash are explicitly bound in [V3 manifest](manifest_v3.sdn); the ten primary CSVs alone do not explain the baseline count.
+- Exactly one of the 1,602 rows is reproducible, and only in mandatory `HOST_PROTOCOL` scope: `BUG-STAGE3-RESUME-SOURCE-POLICY-20261011`. The portable [reproduction evidence](evidence_v3/stage3_host_protocol_reproduction.md) records the retained command, exits, receipt IDs, report-paraphrased red excerpt, and the 14 dependency blobs identical between executed baseline `b0d3cf73dc19e75640952c220bf0e069230b5eda` and assessed `c0`. This demonstrates a shell argument-builder mismatch for that protocol case; it does not show an actual compiler build reproduced.
+- The other 1,601 rows remain `untested`. No compiled Simple runtime is qualified; full Phase 3, compiler build, and normal CLI qualification remain `UNRUN`.
+- The Bungee font registry record is the only eligible invalid candidate; no closure was applied. The cross-engine invalid proposal was rejected, leaving that row valid and keep-open.
+- Six related code PRs were already included in frozen `c0`: [#5034](https://github.com/ormastes/simple/pull/5034), [#5035](https://github.com/ormastes/simple/pull/5035), [#5036](https://github.com/ormastes/simple/pull/5036), [#5041](https://github.com/ormastes/simple/pull/5041), [#5042](https://github.com/ormastes/simple/pull/5042), and [#5043](https://github.com/ormastes/simple/pull/5043). Four related code PRs merged after the freeze: [#5048](https://github.com/ormastes/simple/pull/5048), [#5049](https://github.com/ormastes/simple/pull/5049), [#5054](https://github.com/ormastes/simple/pull/5054), and [#5073](https://github.com/ormastes/simple/pull/5073). Post-freeze changes do not retroactively alter c0 classifications. Documentation/checkpoint PRs #5053, #5057, and #5061 are not code fixes.
+
+### HOST_PROTOCOL scope limits
+
+The red receipt (`exec-f1426a88-b544-492a-9bb1-3e213ab7524f`, exit 1) ran the six-test host protocol suite at baseline `b0d3cf73dc19e75640952c220bf0e069230b5eda`; the source-bound 14 dependency blobs match frozen `c0`. Only the digest/worker argument vector mismatch is admitted. The green receipt (`exec-12af553a-00fe-44f9-b64c-a872d0e83352`, exit 0) was recorded after remedy edits but before creation of `28493de7580915b9fc0fd104cd55cea9bb07edc5`; that commit records the matching code state. It is post-target host protocol evidence, not proof of a current compiler build or full Phase 3.
+
+### Precedence and remaining work
+
+Use V3 as the latest derived classification snapshot, with its single scoped HOST_PROTOCOL exception. V1 and V2 categories, manifests, correction rows, and counts remain historical and byte-preserved. The assessment SHA remains `c0`; later implementation fixes and protocol-only green receipts do not qualify a compiled Simple runtime.
+
+Canonical bug database application and runtime-qualified build evidence remain held pending the user's exception. No bug status or closure was applied; no bug database was modified; and no compiler, system test, or live database was run for this documentation correction. This remains partial progress, not a full 1,602-report audit PASS.
+
+
+## V4 final residual consolidation
+
+V4 keeps the V3 scoped aggregate as its immutable base and replaces its 505 residual classifications with the final residual evidence set: `first_half_final_triage.csv` (13 accepted, 2 still needing evidence) and adjudication groups `v2_16` through `v2_31` (461 accepted, 29 still needing evidence). The additions contain 505 unique IDs and exactly equal the V3 residual-ID set. Therefore V4 contains 1,571 accepted classifications and 31 residual IDs, with no missing or foreign IDs. The [V4 merge receipt](merge_receipt_v4.sdn) records the row-level additions; [manifest_v4.sdn](manifest_v4.sdn) binds every source hash.
+
+- The 1,097 accepted V3 rows are carried forward field-for-field; the V3 `HOST_PROTOCOL` source-policy reproduction scope is preserved in [reproduction_scope_v4.sdn](reproduction_scope_v4.sdn) with its portable evidence copied into [evidence_v4](evidence_v4/).
+- The 474 newly accepted rows have their titles, source receipts, classifications, evidence references, and review rationales in the per-lane V4 evidence pages. The remaining 31 rows and their rationales are in [residual review details](evidence_v4/residuals.md). Residual status means not admitted as final; it does not mean every row lacked report/source review. Their reproducibility remains untested.
+- Exactly one record is reproducible in `HOST_PROTOCOL` scope; the other 1,601 remain untested. No compiled Simple runtime is qualified, and full Phase 3, compiler build, and normal CLI qualification remain `UNRUN`.
+- The Bungee font registry row remains the only eligible invalid candidate, with no closure applied. The rejected cross-engine invalid proposal remains valid and keep-open.
+
+This checkpoint does not mutate canonical bug status, apply invalid closures, or claim a full compiler build/runtime pass. Canonical writes and runtime-qualified build evidence remain pending the user's build-exception decision. V3 and all older artifacts remain immutable historical checkpoints. No compiler, system tests, or live bug database were run for V4.
+
+
+## V5 residual31 revision 2 consolidation
+
+V5 supersedes the V4 residual classification with the independently approved revision 2 overlay. It preserves the V4 1,571 accepted rows and applies the 31-row overlay exactly once: six accepted (cases 4, 6, 9, 10, 11, 26) and 25 `needs_more_evidence`. The resulting partition is 1,577 accepted / 25 residual / 0 missing across the same 1,602 authoritative IDs. Revision 1’s all-31 acceptance was withdrawn and is not used.
+
+The approved source CSV, Markdown, author receipt, independent GO report and delta receipt are copied byte-for-byte under [evidence_v5](evidence_v5/); [row-level evidence updates](evidence_v5/residual31_revision2.md) preserve each row’s evidence references, rationale and correction. [V5 categories](reviewed_categories_v5.sdn), [residual IDs](residual_ids_v5.sdn), and [merge receipt](merge_receipt_v5.sdn) record the admitted fields and accounting. [Manifest V5](manifest_v5.sdn) binds the V4 lineage, approved overlay, review receipts and V5 outputs.
+
+Among these 31 updated residual rows, only release-wrapper case 4 has a known source remedy, marked `fixed_pending_verification`; all 31 overlay rows remain `untested`. V5 adds no invalid-closure candidate. One inherited HOST_PROTOCOL source-policy record remains the only reproducible record; no compiled Simple runtime is qualified, full Phase 3 remains `UNRUN`, and 1,601 records remain untested.
+
+For current classification lookup use V5; V1–V4 files remain immutable historical snapshots. The release base includes PR #5101, which applied the prior V4 canonical migration, including the Bungee row’s invalid closure (the record remains visible). V5 itself made no database or status write: its six accepted and 25 needs-more-evidence overlay rows have not been applied to the canonical database. Runtime qualification remains outstanding pending the user’s build-exception decision; no compiler build or SSpec was run for V5.

@@ -1,0 +1,65 @@
+# Tests-first. Execution remains NOT_RUN until the parent admits a runtime.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.build_capture_v1.*
+use compiler.common.cache_contract.snapshot_contract_v1.*
+use compiler.driver.cache.gateway.scv_build_snapshot_relation_v1.*
+use test.fixtures.scv.build_validation_v1_fixture.*
+
+describe "Build snapshots retain the compiler authority boundary":
+    it "compares actual canonical source rows and non-source identities without issuing authority":
+        val frozen = setup_scv_build_snapshot_v1()
+        val result = scv_build_snapshot_diagnose_v1(frozen, setup_scv_build_compiler_snapshot_v1(),
+            [setup_scv_build_source_blob_v1()], frozen.universe.environment_digest).unwrap()
+        expect(result.source_rows_match).to_equal(true)
+        expect(result.identity_fields_match).to_equal(true)
+        expect(result.matched_sources).to_equal(1)
+        expect(result.semantic_authorized).to_equal(false)
+        expect(result.missing_authorities).to_contain("compiler-build-namespace-owner")
+        expect(result.missing_authorities).to_contain("live-complete-semantic-readset")
+
+    it "rejects each changed configuration target compiler runtime environment and path-policy domain":
+        val frozen = setup_scv_build_snapshot_v1()
+        for field in ["configuration", "target", "compiler", "runtime", "environment", "path-policy"]:
+            var actual = setup_scv_build_compiler_snapshot_v1()
+            var environment = frozen.universe.environment_digest
+            val changed = sha256_text("different-domain")
+            if field == "configuration": actual.configuration_digest = changed
+            elif field == "target": actual.target_layout_digest = changed
+            elif field == "compiler": actual.compiler_owner_digest = changed
+            elif field == "runtime": actual.runtime_digest = changed
+            elif field == "path-policy": actual.path_policy_digest = changed
+            else: environment = changed
+            val result = scv_build_snapshot_diagnose_v1(frozen, actual,
+                [setup_scv_build_source_blob_v1()], environment).unwrap()
+            expect(result.identity_fields_match).to_equal(false)
+            expect(result.semantic_authorized).to_equal(false)
+
+    it "does not accept source bytes after addition deletion namespace or case-policy changes":
+        val frozen = setup_scv_build_snapshot_v1()
+        for field in ["bytes", "missing", "duplicate", "namespace", "case"]:
+            var blobs = [setup_scv_build_source_blob_v1()]
+            var actual = setup_scv_build_compiler_snapshot_v1()
+            if field == "bytes": blobs[0].source_bytes = [120u8]
+            elif field == "missing": blobs = []
+            elif field == "duplicate": actual.source_entries.push(actual.source_entries[0])
+            elif field == "namespace": blobs[0].logical_path.repository_namespace_digest = sha256_text("other-repo")
+            else: blobs[0].logical_path.path_semantics = PathSemanticsV1.CaseFoldedNfc
+            val result = scv_build_snapshot_diagnose_v1(frozen, actual, blobs,
+                frozen.universe.environment_digest)
+            if result.is_ok(): expect(result.unwrap().source_rows_match).to_equal(false)
+            else: expect(result.is_err()).to_equal(true)
+
+    it "rejects a tampered frozen subject before looking at compiler rows":
+        var frozen = setup_scv_build_snapshot_v1()
+        frozen.entries[0].mode = 493
+        expect(scv_build_snapshot_diagnose_v1(frozen, setup_scv_build_compiler_snapshot_v1(),
+            [setup_scv_build_source_blob_v1()], frozen.universe.environment_digest).is_err()).to_equal(true)
+
+    it "records missing actual resolver generated provider directory and toolchain authority":
+        val frozen = setup_scv_build_snapshot_v1()
+        val result = scv_build_snapshot_diagnose_v1(frozen, setup_scv_build_compiler_snapshot_v1(),
+            [setup_scv_build_source_blob_v1()], frozen.universe.environment_digest).unwrap()
+        for domain in ["compiler-build-path-policy-owner", "resolver-candidate-directory-owner",
+                "generated-input-owner", "provider-toolchain-owner"]:
+            expect(result.missing_authorities).to_contain(domain)

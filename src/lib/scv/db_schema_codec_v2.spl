@@ -1,0 +1,155 @@
+# Version discriminator is framed inside the existing canonical envelope.
+use std.scv.db_schema_identity_v2.*
+use std.scv.distributed_identity.*
+use std.scv.db_canonical.*
+use std.scv.db_patch.{DbValue, db_value_bytes}
+use std.scv.db_snapshot_values.{db_snapshot_value_encode, db_snapshot_value_decode}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+fn db_schema_uid_bytes_v2(uid: EntityUid) -> Result<[u8], text>:
+    if not entity_uid_validate(uid).valid: return Err("SCVDB_SCHEMA_UID")
+    db_canonical_text(entity_ref_canonical(entity_ref_provisional(uid)))
+
+fn db_schema_default_bytes_v2(rule: DbDefaultRuleV2) -> Result<[u8], text>:
+    val checked = db_schema_default_validate_v2(rule)?
+    match rule:
+        NoDefault: Ok(db_frame(0u8, []))
+        Constant(value): Ok(db_frame(1u8, db_value_bytes(value)?))
+
+fn db_schema_constraint_bytes_v2(constraint: DbConstraintDefinitionV2) -> Result<[u8], text>:
+    var columns: [[u8]] = []
+    for uid in constraint.columns: columns.push(db_schema_uid_bytes_v2(uid)?)
+    Ok(db_frame(10u8, db_schema_uid_bytes_v2(constraint.constraint_uid)? + db_canonical_text(constraint.kind)? + db_canonical_list(columns) + db_canonical_text(constraint.expression)?))
+
+fn db_schema_column_bytes_v2(column: DbColumnDefinitionV2) -> Result<[u8], text>:
+    val checked = db_schema_column_validate_v2(column, column.column_uid.database_namespace)?
+    var constraints: [DbCanonicalEntry] = []
+    for constraint in column.constraints:
+        constraints.push(DbCanonicalEntry(key: db_schema_uid_bytes_v2(constraint.constraint_uid)?, value: db_schema_constraint_bytes_v2(constraint)?))
+    var nullable = 0u8
+    var tombstone = 0u8
+    if column.nullable: nullable = 1u8
+    if column.tombstone: tombstone = 1u8
+    var payload = db_schema_uid_bytes_v2(column.column_uid)? + db_canonical_text(column.name)? + db_canonical_text(column.logical_type)?
+    payload = payload + db_frame(1u8, [nullable]) + db_schema_default_bytes_v2(column.default_rule)? + db_schema_default_bytes_v2(column.introduction_default)?
+    payload = payload + db_canonical_text(column.introduction_revision)? + db_schema_uid_bytes_v2(column.introduction_migration)?
+    payload = payload + db_canonical_map(constraints)? + db_canonical_text(column.merge_policy)? + db_canonical_text(column.visibility)?
+    Ok(db_frame(11u8, payload + db_frame(2u8, db_u64_bytes(column.presentation_order)) + db_frame(1u8, [tombstone])))
+
+fn db_schema_column_digest_v2(column: DbColumnDefinitionV2) -> Result<text, text>:
+    Ok(sha256_u8_hex(db_domain_bytes("schema-column-v2", db_schema_column_bytes_v2(column)?)?))
+
+fn db_schema_bytes_v2(schema: DbSchemaV2) -> Result<[u8], text>:
+    val checked = db_schema_validate_v2(schema)?
+    var columns: [DbCanonicalEntry] = []
+    for column in schema.columns:
+        columns.push(DbCanonicalEntry(key: db_schema_uid_bytes_v2(column.column_uid)?, value: db_schema_column_bytes_v2(column)?))
+    var receipts: [DbCanonicalEntry] = []
+    for receipt in schema.applied_operations:
+        receipts.push(DbCanonicalEntry(key: db_schema_uid_bytes_v2(receipt.operation_uid)?, value: db_canonical_text(receipt.payload_digest)?))
+    var tombstone = 0u8
+    if schema.tombstone: tombstone = 1u8
+    val payload = db_frame(2u8, db_u64_bytes(2u64)) + db_schema_uid_bytes_v2(schema.table_uid)? + db_canonical_text(schema.table_name)? + db_canonical_text(schema.parent_revision)? + db_canonical_text(schema.merge_parent_revision)? + db_canonical_map(columns)? + db_canonical_map(receipts)? + db_frame(1u8, [tombstone])
+    db_domain_bytes("schema-v2", db_frame(12u8, payload))
+
+fn db_schema_revision_v2(schema: DbSchemaV2) -> Result<text, text>:
+    Ok(sha256_u8_hex(db_schema_bytes_v2(schema)?))
+
+fn db_schema_seal_v2(schema: DbSchemaV2) -> Result<DbSchemaV2, text>:
+    var sealed = schema
+    sealed.revision = db_schema_revision_v2(schema)?
+    Ok(sealed)
+
+fn db_schema_check_revision_v2(schema: DbSchemaV2) -> Result<bool, text>:
+    if schema.revision != db_schema_revision_v2(schema)?: return Err("SCVDB_SCHEMA_REVISION")
+    Ok(true)
+
+fn db_schema_create_v2(table_uid: EntityUid, table_name: text) -> Result<DbSchemaV2, text>:
+    db_schema_seal_v2(DbSchemaV2(table_uid: table_uid, table_name: table_name, parent_revision: "", merge_parent_revision: "", revision: "", columns: [], applied_operations: [], tombstone: false))
+
+fn db_cell_address_bytes_v2(address: DbCellAddressV2) -> Result<[u8], text>:
+    val checked = db_cell_address_validate_v2(address)?
+    db_domain_bytes("cell-address-v2", db_frame(13u8, db_frame(2u8, db_u64_bytes(2u64)) + db_schema_uid_bytes_v2(address.table_uid)? + db_schema_uid_bytes_v2(address.column_uid)? + db_canonical_text(entity_ref_canonical(address.row))?))
+
+fn db_cell_address_encode_v2(address: DbCellAddressV2) -> Result<[u8], text>:
+    val checked = db_cell_address_validate_v2(address)?
+    val table = db_snapshot_value_encode(DbValue.Reference(entity_ref_provisional(address.table_uid)), 0)?
+    val column = db_snapshot_value_encode(DbValue.Reference(entity_ref_provisional(address.column_uid)), 0)?
+    val row = db_snapshot_value_encode(DbValue.Reference(address.row), 0)?
+    db_domain_bytes("cell-address-wire-v2", db_frame(13u8, db_frame(2u8, db_u64_bytes(2u64)) + table + column + row))
+
+fn db_schema_read_wire_ref_v2(frame: DbDecodedFrame) -> Result<EntityRef, text>:
+    match db_snapshot_value_decode(frame, 0)?:
+        Reference(ref): Ok(ref)
+        _: Err("SCVDB_SCHEMA_ADDRESS_REFERENCE")
+
+fn db_cell_address_decode_v2(bytes: [u8]) -> Result<DbCellAddressV2, text>:
+    val domain = db_domain_bytes("cell-address-wire-v2", [])?
+    if bytes.len() > 16384 or bytes.len() <= domain.len(): return Err("SCVDB_SCHEMA_ADDRESS_FORMAT")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_SCHEMA_ADDRESS_DOMAIN")
+    val frame = db_read_frame(bytes, domain.len())?
+    if frame.tag != 13u8 or frame.next_offset != bytes.len(): return Err("SCVDB_SCHEMA_ADDRESS_FORMAT")
+    val parts = db_read_children(frame.payload)?
+    if parts.len() != 4: return Err("SCVDB_SCHEMA_ADDRESS_FIELDS")
+    if db_read_unsigned(parts[0])? != 2u64: return Err("SCVDB_SCHEMA_ADDRESS_VERSION")
+    val table = db_schema_read_wire_ref_v2(parts[1])?
+    val column = db_schema_read_wire_ref_v2(parts[2])?
+    if table.provisional == nil or column.provisional == nil: return Err("SCVDB_SCHEMA_ADDRESS_UID_REQUIRED")
+    val address = DbCellAddressV2(table_uid: table.provisional.unwrap(), column_uid: column.provisional.unwrap(), row: db_schema_read_wire_ref_v2(parts[3])?)
+    val checked = db_cell_address_validate_v2(address)?
+    if db_cell_address_encode_v2(address)? != bytes: return Err("SCVDB_SCHEMA_ADDRESS_NONCANONICAL")
+    Ok(address)
+
+fn db_cell_state_bytes_v2(state: DbCellStateV2) -> Result<[u8], text>:
+    var payload: [u8] = []
+    match state:
+        Absent: payload = db_frame(0u8, [])
+        Null: payload = db_frame(1u8, [])
+        Value(value):
+            match value:
+                Absent: return Err("SCVDB_SCHEMA_NESTED_ABSENT")
+                _: ()
+            payload = db_frame(2u8, db_value_bytes(value)?)
+        Defaulted(value, migration_uid, introduction_revision):
+            val checked = db_schema_uid_validate_v2(migration_uid, "migration", migration_uid.database_namespace)?
+            if introduction_revision == "": return Err("SCVDB_SCHEMA_INTRODUCTION")
+            val checked_default = db_schema_default_validate_v2(DbDefaultRuleV2.Constant(value))?
+            payload = db_frame(3u8, db_value_bytes(value)? + db_schema_uid_bytes_v2(migration_uid)? + db_canonical_text(introduction_revision)?)
+        Tombstoned: payload = db_frame(4u8, [])
+    db_domain_bytes("cell-state-v2", payload)
+
+fn db_schema_change_bytes_v2(change: DbSchemaChangeV2) -> Result<[u8], text>:
+    match change:
+        AddColumn(column): Ok(db_frame(20u8, db_schema_column_bytes_v2(column)?))
+        RenameColumn(uid, name): Ok(db_frame(21u8, db_schema_uid_bytes_v2(uid)? + db_canonical_text(name)?))
+        DropColumn(uid): Ok(db_frame(22u8, db_schema_uid_bytes_v2(uid)?))
+        MoveColumnPresentation(uid, order): Ok(db_frame(23u8, db_schema_uid_bytes_v2(uid)? + db_frame(2u8, db_u64_bytes(order))))
+        AlterType(uid, logical_type): Ok(db_frame(24u8, db_schema_uid_bytes_v2(uid)? + db_canonical_text(logical_type)?))
+        SetDefault(uid, rule): Ok(db_frame(25u8, db_schema_uid_bytes_v2(uid)? + db_schema_default_bytes_v2(rule)?))
+        SetNullability(uid, nullable):
+            var flag = 0u8
+            if nullable: flag = 1u8
+            Ok(db_frame(26u8, db_schema_uid_bytes_v2(uid)? + db_frame(1u8, [flag])))
+        SetMergePolicy(uid, policy): Ok(db_frame(27u8, db_schema_uid_bytes_v2(uid)? + db_canonical_text(policy)?))
+        AddConstraint(uid, constraint): Ok(db_frame(28u8, db_schema_uid_bytes_v2(uid)? + db_schema_constraint_bytes_v2(constraint)?))
+        DropConstraint(uid, constraint_uid): Ok(db_frame(29u8, db_schema_uid_bytes_v2(uid)? + db_schema_uid_bytes_v2(constraint_uid)?))
+
+fn db_schema_operation_bytes_v2(operation: DbSchemaOperationV2) -> Result<[u8], text>:
+    val checked = db_schema_uid_validate_v2(operation.operation_uid, "migration", operation.operation_uid.database_namespace)?
+    if operation.base_revision == "": return Err("SCVDB_SCHEMA_BASE_REQUIRED")
+    var dependencies: [[u8]] = []
+    for uid in operation.dependencies:
+        val dependency_checked = db_schema_uid_validate_v2(uid, "migration", operation.operation_uid.database_namespace)?
+        dependencies.push(db_schema_uid_bytes_v2(uid)?)
+    db_domain_bytes("schema-operation-v2", db_frame(30u8, db_schema_uid_bytes_v2(operation.operation_uid)? + db_canonical_text(operation.base_revision)? + db_canonical_text(operation.expected_definition)? + db_canonical_set(dependencies)? + db_schema_change_bytes_v2(operation.change)?))
+
+fn db_schema_operation_digest_v2(operation: DbSchemaOperationV2) -> Result<text, text>:
+    Ok(sha256_u8_hex(db_schema_operation_bytes_v2(operation)?))
+
+export db_schema_uid_bytes_v2, db_schema_default_bytes_v2, db_schema_constraint_bytes_v2
+export db_schema_column_bytes_v2, db_schema_column_digest_v2, db_schema_bytes_v2, db_schema_revision_v2
+export db_schema_seal_v2, db_schema_check_revision_v2, db_schema_create_v2
+export db_cell_address_bytes_v2, db_cell_state_bytes_v2, db_schema_change_bytes_v2
+export db_cell_address_encode_v2, db_cell_address_decode_v2
+export db_schema_operation_bytes_v2, db_schema_operation_digest_v2

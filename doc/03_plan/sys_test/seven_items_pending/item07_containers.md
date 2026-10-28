@@ -1,5 +1,13 @@
 # Umbrella item 7: container feedback execution criteria
 
+2026-10-27 refinement: [CBC-01–12](../collection_backend_capabilities.md)
+extend AC01–08 with shared capability admission across typed DataFrames,
+adaptive maps and strict resource registries. Required progress/equality/
+lifetime and supported migration pairs constrain profile selection. Static-only,
+no-capture, constructor-only and unsupported states must be observable; no
+profile or explicit algorithm can silently admit a lock-based strict backend.
+These additions are planned/UNRUN and do not replace existing scenario bodies.
+
 Status: NOT_IMPLEMENTED for these new umbrella scenario bodies only. Existing adaptive containers, profile capture, planner code and executable specs remain intact and are not relabeled unimplemented.
 
 Authority: [seven-item host completion plan, item 7](../../seven_plans_host_completion_2026-09-29.md), [existing system test plan](../profile_switchable_container_algorithms.md), [selected feature requirements](../../../02_requirements/feature/profile_switchable_container_algorithms.md), [selected NFRs](../../../02_requirements/nfr/profile_switchable_container_algorithms.md), and [architecture](../../../04_architecture/compiler/profile_switchable_container_algorithms.md).

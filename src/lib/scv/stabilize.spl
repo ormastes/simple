@@ -37,12 +37,17 @@ fn scv_checkpoint(root: text) -> text:
     var row_list: [text] = []
     for rel in rels:
         val src = "{scv_repo_dir(root)}/{rel}"
-        row_list.push("{scv_content_id_for_file(src)} {rel}\n")
+        val source_id = match scv_content_id_for_file(src):
+            Ok(id): id
+            Err(error): return error
+        row_list.push("{source_id} {rel}\n")
     val rows = row_list.join("")
     val manifest = "format: 1\nhead_op: {scv_current_op(root)}\ncommit: {scv_read_workspace_commit(root)}\nfiles: {rels.len()}\n--\n{rows}"
     val id = scv_hash_text("checkpoint", manifest)
     val final_dir = "{scv_checkpoints_dir(root)}/{id}"
     if file_exists("{final_dir}/manifest.sdn"):
+        if not scv_journal_record_event(root, scv_current_op(root), "checkpoint", id, id):
+            return "ERROR checkpoint {id} exists but its journal event could not be verified\n"
         return "checkpoint {id} files={rels.len()} (exists)\n"
     dir_create(scv_checkpoints_dir(root), true)
     val stage = "{scv_checkpoints_dir(root)}/.stage_{id}_{current_time_ms()}"
@@ -51,10 +56,12 @@ fn scv_checkpoint(root: text) -> text:
         scv_create_parent_dir(dst)
         if not file_copy("{scv_repo_dir(root)}/{rel}", dst):
             return "ERROR checkpoint copy failed: {rel}\n"
-    scv_write_text("{stage}/manifest.sdn", manifest)
+    if not scv_write_text("{stage}/manifest.sdn", manifest):
+        return "ERROR checkpoint manifest write failed\n"
     if not file_rename(stage, final_dir):
         return "ERROR checkpoint publish failed: {id}\n"
-    scv_journal_record_event(root, scv_current_op(root), "checkpoint", id, id)
+    if not scv_journal_record_event(root, scv_current_op(root), "checkpoint", id, id):
+        return "ERROR checkpoint {id} was published but its journal event could not be verified\n"
     "checkpoint {id} files={rels.len()}\n"
 
 fn scv_checkpoint_manifest_id_ok(id: text, manifest: text) -> bool:
@@ -88,7 +95,7 @@ fn scv_checkpoint_verify(root: text, id: text) -> text:
         val data = "{dir}/data/{rel}"
         if not file_exists(data):
             errors = errors + "missing checkpoint file: {rel}\n"
-        elif scv_content_id_for_file(data) != sha:
+        elif scv_content_id_for_file(data) != Ok(sha):
             errors = errors + "checkpoint file hash mismatch: {rel}\n"
         checked = checked + 1
     if checked == 0 and errors == "":
@@ -144,17 +151,19 @@ fn scv_doctor_checkpoints_ok(root: text) -> bool:
 
 # Cheap health check (stabilization §3): one `<component>  OK|STALE|FAIL` row
 # per check, then a fail-closed verdict line. STALE is non-fatal (rebuildable
-# or reconcilable state); the stale derived workspace pointer is reconciled
-# from the published head view, which is the single publication point.
+# or reconcilable state). An unresolved WAL is an error and stops the check
+# before any derived view is reconciled or rewritten.
 fn scv_doctor(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR — nothing was checked (repository not initialized)\n"
     var out = ""
     var checks = 0
     var failed = 0
-    # WAL recovery first: an incomplete trailing transaction is rolled back
-    # (or forward) before any state below is validated. STALE is non-fatal.
+    # WAL recovery first. Do not continue into doctor reconciliation if an
+    # ambiguous transaction could make a mutable write unsafe.
     val wal_result = scv_wal_recover(root)
+    if wal_result.starts_with("ERROR"):
+        return wal_result
     val journal_row = if wal_result == "wal clean\n": "OK" else: "STALE"
     out = out + "journal  {journal_row}\n"
     checks = checks + 1

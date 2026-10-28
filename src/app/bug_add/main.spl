@@ -139,9 +139,16 @@ fn main() -> i64:
                 return 1
 
     val db_opt = load_bug_database(BUG_DB_PATH)
+    var create_database_exclusively = false
     var db = match db_opt:
         case Some(value): value
-        case nil: create_bug_database(BUG_DB_PATH)
+        case nil:
+            # A nil load may mean absence or unreadable existing contents.
+            # Build the new row in memory, then use the canonical create-only
+            # database writer. Its no-replace publish refuses existing paths,
+            # including dangling symlinks, without a check-then-write race.
+            create_database_exclusively = true
+            create_bug_database(BUG_DB_PATH)
 
     val bug = Bug(
         id: id,
@@ -163,8 +170,12 @@ fn main() -> i64:
         print "Error: failed to add bug (id may already exist)"
         return 1
 
-    if not db.save():
-        print "Error: failed to save bug database"
+    val saved = if create_database_exclusively: db.save_exclusive() else: db.save()
+    if not saved:
+        if create_database_exclusively:
+            print "Error: failed to create bug database without replacing an existing path"
+        else:
+            print "Error: failed to save bug database"
         return 1
 
     if log_opts.progress != "summary":

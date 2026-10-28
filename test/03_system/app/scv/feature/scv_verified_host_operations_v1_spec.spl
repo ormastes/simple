@@ -1,0 +1,121 @@
+"""Read-only SCV host capture and fail-closed mutation scenarios.
+
+Each scenario inspects the actual source and content-addressed object. No
+receipt claims a copy, move, delete, or durable journal event.
+"""
+use std.spec.{describe, it, expect, step}
+use std.scv.verified_host_operations_v1.*
+use app.scv.host_capture_commands_v1.{scv_host_capture_command_v1}
+use app.io.mod.{dir_create, dir_remove_all, file_exists, file_read_bytes, file_write, file_write_bytes, secure_temp_dir}
+use std.scv.core.{scv_chunk_path}
+use std.scv.store.{scv_content_id_for_u8}
+
+fn host_ops_test_root_v1() -> text:
+    val root = secure_temp_dir("/tmp", "scv-host-ops-v1").unwrap()
+    dir_create("{root}/.scv/objects/chunks", true)
+    file_write("{root}/.scv/HEAD_OP", "test-operation\n")
+    root
+
+describe "SCV verified host operations V1":
+    it "captures exact source bytes into an immutable SCV chunk":
+        # @req REQ-SCV-HOST-CAPTURE-01
+        val root = host_ops_test_root_v1()
+        val bytes: [u8] = [0, 255, 10, 128]
+        file_write_bytes("{root}/source.bin", bytes)
+        step("capture: read one explicit workspace-relative regular file")
+        val receipt = scv_host_capture_read_v1(root, "source.bin")
+        step("assert: source is unchanged and the SCV object stores the exact bytes")
+        expect(receipt.status).to_equal("captured_not_durable")
+        expect(receipt.byte_count).to_equal(4)
+        expect(file_read_bytes("{root}/source.bin")).to_equal(bytes)
+        expect(file_read_bytes(scv_chunk_path(root, receipt.object_id))).to_equal(bytes)
+        expect(receipt.detail.contains("durability_not_claimed")).to_equal(true)
+        dir_remove_all(root)
+
+    it "formats the bounded capture result through the command adapter":
+        # @req REQ-SCV-HOST-CAPTURE-01
+        val root = host_ops_test_root_v1()
+        file_write_bytes("{root}/source.bin", [70, 71])
+        val output = scv_host_capture_command_v1(root, ["host-capture", "source.bin"])
+        expect(output.contains("status: \"captured_not_durable\"")).to_equal(true)
+        expect(output.contains("bytes: 2")).to_equal(true)
+        expect(output.contains("journal_claim: false")).to_equal(true)
+        dir_remove_all(root)
+
+    it "returns the same content identity when the capture is repeated":
+        # @req REQ-SCV-HOST-CAPTURE-02
+        val root = host_ops_test_root_v1()
+        val bytes: [u8] = [65, 0, 66]
+        file_write_bytes("{root}/source.bin", bytes)
+        val first = scv_host_capture_read_v1(root, "source.bin")
+        val second = scv_host_capture_read_v1(root, "source.bin")
+        expect(first.status).to_equal("captured_not_durable")
+        expect(second.status).to_equal("captured_not_durable")
+        expect(first.object_id).to_equal(second.object_id)
+        expect(file_read_bytes(scv_chunk_path(root, second.object_id))).to_equal(bytes)
+        dir_remove_all(root)
+
+    it "fails closed when the content store path has not been prepared":
+        # @req REQ-SCV-HOST-CAPTURE-06
+        val root = secure_temp_dir("/tmp", "scv-host-store-absent-v1").unwrap()
+        dir_create("{root}/.scv", true)
+        file_write("{root}/.scv/HEAD_OP", "test-operation\n")
+        val bytes: [u8] = [4, 5, 6]
+        file_write_bytes("{root}/source.bin", bytes)
+        val receipt = scv_host_capture_read_v1(root, "source.bin")
+        expect(receipt.status).to_equal("failed")
+        expect(file_read_bytes("{root}/source.bin")).to_equal(bytes)
+        expect(file_exists("{root}/.scv/objects/chunks")).to_equal(false)
+        dir_remove_all(root)
+
+    it "rejects a corrupt preexisting content-addressed chunk":
+        # @req REQ-SCV-HOST-CAPTURE-07
+        val root = host_ops_test_root_v1()
+        val source: [u8] = [20, 21, 22]
+        val wrong: [u8] = [23, 24, 25]
+        file_write_bytes("{root}/source.bin", source)
+        val id = scv_content_id_for_u8(source)
+        file_write_bytes(scv_chunk_path(root, id), wrong)
+        val receipt = scv_host_capture_read_v1(root, "source.bin")
+        expect(receipt.status).to_equal("capture_write_failed")
+        expect(file_read_bytes("{root}/source.bin")).to_equal(source)
+        expect(file_read_bytes(scv_chunk_path(root, id))).to_equal(wrong)
+        dir_remove_all(root)
+
+    it "refuses copy and leaves both user paths unchanged":
+        # @req REQ-SCV-HOST-CAPTURE-03
+        val root = host_ops_test_root_v1()
+        val source: [u8] = [1, 2, 3]
+        val destination: [u8] = [9, 8, 7]
+        file_write_bytes("{root}/source.bin", source)
+        file_write_bytes("{root}/destination.bin", destination)
+        val receipt = scv_host_copy_v1(root, "copy-1", "source.bin", "destination.bin")
+        expect(receipt.status).to_equal("unsupported")
+        expect(file_read_bytes("{root}/source.bin")).to_equal(source)
+        expect(file_read_bytes("{root}/destination.bin")).to_equal(destination)
+        expect(file_exists("{root}/.scv/journal/events.log")).to_equal(false)
+        dir_remove_all(root)
+
+    it "refuses move and delete without changing the source or creating success events":
+        # @req REQ-SCV-HOST-CAPTURE-04
+        val root = host_ops_test_root_v1()
+        val bytes: [u8] = [0, 13, 255, 42]
+        file_write_bytes("{root}/source.bin", bytes)
+        val moved = scv_host_move_v1(root, "move-1", "source.bin", "moved.bin")
+        val deleted = scv_host_delete_v1(root, "delete-1", "source.bin")
+        expect(moved.status).to_equal("unsupported")
+        expect(deleted.status).to_equal("unsupported")
+        expect(file_exists("{root}/source.bin")).to_equal(true)
+        expect(file_read_bytes("{root}/source.bin")).to_equal(bytes)
+        expect(file_exists("{root}/moved.bin")).to_equal(false)
+        expect(file_exists("{root}/.scv/journal/events.log")).to_equal(false)
+        dir_remove_all(root)
+
+    it "rejects path escape before reading or writing any external path":
+        # @req REQ-SCV-HOST-CAPTURE-05
+        val root = host_ops_test_root_v1()
+        val receipt = scv_host_capture_read_v1(root, "../outside")
+        expect(receipt.status).to_equal("failed")
+        expect(receipt.object_id).to_equal("")
+        expect(file_exists("{root}/.scv/journal/events.log")).to_equal(false)
+        dir_remove_all(root)

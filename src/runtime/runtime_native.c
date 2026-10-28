@@ -904,6 +904,18 @@ int64_t rt_current_task_id(void) {
  * definitions: on COFF, Rust may alias rt_par_* to rt_gpu_* COMDATs which
  * the core-C GPU trap provider replaces. Each CPU entry needs a live owner.
  * BEGIN CORE PAR ATOMICS */
+int64_t rt_par_atomic_i64_is_lock_free(int64_t* ptr) {
+    if (ptr == NULL || sizeof(_Atomic int64_t) != sizeof(int64_t) ||
+        _Alignof(_Atomic int64_t) > sizeof(int64_t) ||
+        (uintptr_t)ptr % _Alignof(_Atomic int64_t) != 0)
+        return 0;
+    return atomic_is_lock_free((const volatile _Atomic int64_t*)ptr) ? 1 : 0;
+}
+
+int64_t rt_par_atomic_load_i64(int64_t* ptr) {
+    return atomic_load_explicit((const volatile _Atomic int64_t*)ptr, memory_order_seq_cst);
+}
+
 int64_t rt_par_atomic_add_i64(int64_t* ptr, int64_t value) {
     return atomic_fetch_add_explicit((_Atomic int64_t*)ptr, value, memory_order_seq_cst);
 }

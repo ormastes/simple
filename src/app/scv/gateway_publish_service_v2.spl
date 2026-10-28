@@ -1,0 +1,323 @@
+# Native authenticated HTTP service for SCV GitHub topic publication.
+# GitHub writes are host-policy gated and publish only a generated topic ref;
+# no topic result is accepted settlement.
+use app.scv.gateway_config_v1.{ScvGatewayConfigV1, scv_gateway_bearer_valid_v1}
+use app.scv.gateway_service_v1.{scv_gateway_authorized_v1}
+use app.scv.gateway_github_v1.{ScvGithubReadPolicyV1, ScvGithubReadRequestV1,
+    ScvGithubReadResultV1, scv_gateway_github_read_live_v1}
+use app.scv.gateway_draft_store_v1.{ScvDraftBlobAdmittedScopeV1}
+use app.scv.db.git_candidate.{DbGitCandidateFile}
+use app.scv.gateway_github_publish_v2.{ScvGatewayGithubPublishPolicyV2,
+    ScvGatewayGithubPublishRequestV2, ScvGatewayGithubPublishResultV2,
+    scv_gateway_github_publish_policy_validate_v2,
+    scv_gateway_github_publish_prepare_v2, scv_gateway_github_publish_reconcile_v2}
+use app.scv.gateway_github_topic_v1.{ScvGatewayGithubTopicResultV1,
+    scv_gateway_github_topic_publish_live_v1}
+use app.scv.gateway_github_landing_v1.{ScvGatewayGithubLandingPortV1,
+    ScvGatewayGithubLandingResultV1, scv_gateway_github_landing_reconcile_v1,
+    scv_gateway_github_landing_live_port_v1}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.scv.scv_config_fields_v1.{scv_config_dict_v1, scv_config_text_v1,
+    scv_config_int_v1}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus, HttpMethod}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy,
+    plaintext_development_capability}
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+
+const SCV_GATEWAY_PUBLISH_BODY_LIMIT_V2: i64 = 1048576
+
+struct _ScvGatewayPublishWireV2:
+    method: text
+    request: ScvGatewayGithubPublishRequestV2
+    content_sha256: text
+
+fn _scv_gateway_publish_text_v2(value: SdnValue, path: text) -> Result<text, text>:
+    match value:
+        case String(item): Ok(item)
+        case _: Err("GatewayPublishTextRequired: " + path)
+
+fn _scv_gateway_publish_http_v2(status: HttpStatus, body: text) -> HttpResponse:
+    HttpResponse(status: status, body: body, headers: [
+        ("Content-Type", "application/sdn"), ("Cache-Control", "no-store")])
+
+fn _scv_gateway_publish_error_v2(status: HttpStatus, code: text) -> HttpResponse:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "status": SdnValue.String("error"), "error": SdnValue.String(code),
+        "state": SdnValue.String("unavailable"),
+        "publication": SdnValue.String("not_acceptance")}
+    _scv_gateway_publish_http_v2(status, sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn _scv_gateway_publish_files_decode_v2(value: SdnValue) -> Result<[DbGitCandidateFile], text>:
+    match value:
+        case Array(items):
+            if items.len() == 0 or items.len() > 256: return Err("GatewayPublishFileLimit")
+            var files: [DbGitCandidateFile] = []
+            for item in items:
+                val fields = scv_config_dict_v1(item, "files[]", ["path", "content"])?
+                files.push(DbGitCandidateFile(path: scv_config_text_v1(fields["path"], "path")?,
+                    content: _scv_gateway_publish_text_v2(fields["content"], "content")?))
+            Ok(files)
+        case _: Err("GatewayPublishFilesRequired")
+
+fn _scv_gateway_publish_wire_decode_v2(source: text) -> Result<_ScvGatewayPublishWireV2, text>:
+    val body = text_to_utf8_bytes(source)
+    if body.len() as i64 > SCV_GATEWAY_PUBLISH_BODY_LIMIT_V2: return Err("GatewayPublishBodyLimit")
+    val limits = SdnStrictLimitsV1(max_source_bytes: SCV_GATEWAY_PUBLISH_BODY_LIMIT_V2,
+        max_depth: 8, max_nodes: 8192, max_rows: 0, max_cells: 0, max_columns: 16)
+    val document = sdn_parse_strict_bytes_v1(body, limits)?
+    val fields = scv_config_dict_v1(document.value, "request", ["version", "method",
+        "repository_id", "request_id", "base_ref", "expected_base_head", "candidate_oid",
+        "candidate_commit_bytes", "rebuild_message_hint", "files", "content_sha256"])?
+    if scv_config_int_v1(fields["version"], "version", 2, 2)? != 2: return Err("GatewayPublishVersion")
+    val method = scv_config_text_v1(fields["method"], "method")?
+    if not ["prepare", "reconcile", "publish", "landing-reconcile"].contains(method): return Err("GatewayPublishMethod")
+    val request = ScvGatewayGithubPublishRequestV2(
+        repository_id: scv_config_text_v1(fields["repository_id"], "repository_id")?,
+        request_id: scv_config_text_v1(fields["request_id"], "request_id")?,
+        base_ref: scv_config_text_v1(fields["base_ref"], "base_ref")?,
+        expected_base_head: scv_config_text_v1(fields["expected_base_head"], "expected_base_head")?,
+        candidate_oid: scv_config_text_v1(fields["candidate_oid"], "candidate_oid")?,
+        candidate_commit_bytes: scv_config_text_v1(fields["candidate_commit_bytes"], "candidate_commit_bytes")?,
+        files: _scv_gateway_publish_files_decode_v2(fields["files"])?,
+        rebuild_message_hint: scv_config_text_v1(fields["rebuild_message_hint"], "rebuild_message_hint")?)
+    val digest = _scv_gateway_publish_text_v2(fields["content_sha256"], "content_sha256")?
+    if (method == "prepare" and digest != "") or
+       (method != "prepare" and not _scv_gateway_publish_digest_valid_v2(digest)):
+        return Err("GatewayPublishContentDigest")
+    Ok(_ScvGatewayPublishWireV2(method: method, request: request, content_sha256: digest))
+
+pub fn scv_gateway_publish_request_encode_v2(method: text,
+        request: ScvGatewayGithubPublishRequestV2, content_sha256: text) -> Result<text, text>:
+    if not ["prepare", "reconcile", "publish", "landing-reconcile"].contains(method): return Err("GatewayPublishMethod")
+    if (method == "prepare" and content_sha256 != "") or
+       (method != "prepare" and not _scv_gateway_publish_digest_valid_v2(content_sha256)):
+        return Err("GatewayPublishContentDigest")
+    var files: [SdnValue] = []
+    for file in request.files:
+        files.push(SdnValue.Dict({"path": SdnValue.String(file.path),
+            "content": SdnValue.String(file.content)}))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "method": SdnValue.String(method), "repository_id": SdnValue.String(request.repository_id),
+        "request_id": SdnValue.String(request.request_id), "base_ref": SdnValue.String(request.base_ref),
+        "expected_base_head": SdnValue.String(request.expected_base_head),
+        "candidate_oid": SdnValue.String(request.candidate_oid),
+        "candidate_commit_bytes": SdnValue.String(request.candidate_commit_bytes),
+        "rebuild_message_hint": SdnValue.String(request.rebuild_message_hint), "files": SdnValue.Array(files),
+        "content_sha256": SdnValue.String(content_sha256)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn _scv_gateway_publish_result_wire_v2(result: ScvGatewayGithubPublishResultV2) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "status": SdnValue.String("ok"), "state": SdnValue.String(result.state),
+        "publication": SdnValue.String(result.publication),
+        "repository_id": SdnValue.String(result.repository_id),
+        "principal_id": SdnValue.String(result.principal_id),
+        "request_id": SdnValue.String(result.request_id), "base_ref": SdnValue.String(result.base_ref),
+        "expected_base_head": SdnValue.String(result.expected_base_head),
+        "topic_ref": SdnValue.String(result.topic_ref),
+        "candidate_oid": SdnValue.String(result.candidate_oid),
+        "content_sha256": SdnValue.String(result.content_sha256)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn _scv_gateway_topic_result_wire_v2(result: ScvGatewayGithubTopicResultV1) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "status": SdnValue.String("ok"), "state": SdnValue.String(result.state),
+        "publication": SdnValue.String(result.publication),
+        "repository_id": SdnValue.String(result.repository_id),
+        "principal_id": SdnValue.String(result.principal_id),
+        "request_id": SdnValue.String(result.request_id),
+        "base_ref": SdnValue.String(result.base_ref),
+        "expected_base_head": SdnValue.String(result.expected_base_head),
+        "topic_ref": SdnValue.String(result.topic_ref),
+        "candidate_oid": SdnValue.String(result.candidate_oid),
+        "content_sha256": SdnValue.String(result.content_sha256),
+        "transport": SdnValue.String(result.transport)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn _scv_gateway_landing_result_wire_v2(result: ScvGatewayGithubLandingResultV1) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "status": SdnValue.String("ok"), "state": SdnValue.String(result.state),
+        "publication": SdnValue.String(result.publication),
+        "repository_id": SdnValue.String(result.repository_id),
+        "principal_id": SdnValue.String(result.principal_id),
+        "request_id": SdnValue.String(result.request_id), "base_ref": SdnValue.String(result.base_ref),
+        "protected_ref_oid": SdnValue.String(result.protected_ref_oid),
+        "topic_ref": SdnValue.String(result.topic_ref),
+        "candidate_oid": SdnValue.String(result.candidate_oid),
+        "content_sha256": SdnValue.String(result.content_sha256),
+        "pull_request_number": SdnValue.Int(result.pull_request_number as i64),
+        "merge_commit_sha": SdnValue.String(result.merge_commit_sha),
+        "observed_pr_merge_sha": SdnValue.String(result.observed_pr_merge_sha),
+        "provider_requests": SdnValue.Int(result.provider_requests as i64),
+        "provider_requests_known": SdnValue.Bool(result.provider_requests_known),
+        "observation_id": SdnValue.String(result.observation_id)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn _scv_gateway_publish_handler_scope_v2(policy: ScvGatewayGithubPublishPolicyV2,
+        method: text) -> ScvDraftBlobAdmittedScopeV1:
+    val read_allowed = if method == "publish": policy.allow_topic_publish else:
+        if method == "landing-reconcile": policy.allow_landing_reconcile else:
+            if method == "reconcile": policy.allow_reconcile else: policy.allow_prepare
+    val write_allowed = if method == "publish": policy.allow_topic_publish else:
+        if method == "landing-reconcile": policy.allow_landing_observation_write else:
+            method == "prepare" and policy.allow_prepare
+    ScvDraftBlobAdmittedScopeV1(repository_id: policy.repository.repository_id,
+        principal_id: policy.principal_id,
+        can_read: read_allowed, can_write: write_allowed)
+
+fn _scv_gateway_publish_digest_valid_v2(value: text) -> bool:
+    if value.len() != 64: return false
+    for code in value.bytes():
+        if not ((code >= 48u8 and code <= 57u8) or (code >= 97u8 and code <= 102u8)):
+            return false
+    true
+
+fn _scv_gateway_publish_request_v2(config: ScvGatewayConfigV1,
+        policy: ScvGatewayGithubPublishPolicyV2, request: ScvGatewayGithubPublishRequestV2) -> bool:
+    config.repository == policy.repository.repository_id and
+    config.github.allowlist.len() == 1 and policy.github.allowlist.len() == 1 and
+    config.github.allowlist[0].repository_id == policy.github.allowlist[0].repository_id and
+    config.github.allowlist[0].github_repository_id == policy.github.allowlist[0].github_repository_id and
+    config.github.allowlist[0].host == policy.repository.host and
+    config.github.allowlist[0].owner == policy.repository.owner and
+    config.github.allowlist[0].repository == policy.repository.repository and
+    request.repository_id == config.repository
+
+fn _scv_gateway_publish_status_v2(reason: text) -> HttpStatus:
+    if reason == "SCV_GH_PUBLISH_WRITE_DENIED" or reason == "SCV_GH_PUBLISH_READ_DENIED" or reason == "SCV_GH_PUBLISH_SCOPE" or
+       reason == "SCV_GH_TOPIC_WRITE_DENIED" or reason == "SCV_GH_TOPIC_SCOPE" or reason == "SCV_GH_TOPIC_REMOTE_DENIED":
+        return HttpStatus.Forbidden
+    if reason == "SCV_GH_LANDING_DENIED" or reason == "SCV_GH_LANDING_SCOPE" or
+       reason == "SCV_GH_LANDING_PROTECTED_REF_DENIED" or reason == "SCV_GH_PUBLISH_LANDING_DENIED":
+        return HttpStatus.Forbidden
+    if reason == "SCV_GH_PUBLISH_BASE_STALE" or reason == "SCV_GH_PUBLISH_IDEMPOTENCY_CONFLICT": return HttpStatus.Conflict
+    HttpStatus.BadRequest
+
+pub fn scv_gateway_publish_handle_with_landing_port_v2(config: ScvGatewayConfigV1,
+        policy: ScvGatewayGithubPublishPolicyV2, token: text, http: HttpRequest,
+        read: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>,
+        landing_port: ScvGatewayGithubLandingPortV1,
+        lease_held: fn() -> bool) -> HttpResponse:
+    # Bearer verification is the first request-dependent operation. The
+    # principal is mapped from host policy only after this boundary passes.
+    if not scv_gateway_authorized_v1(http, token):
+        return _scv_gateway_publish_error_v2(HttpStatus.Unauthorized, "gateway_authentication_required")
+    if http.method != HttpMethod.Post or http.path != "/scv/v2/publish" or http.query != "":
+        return _scv_gateway_publish_error_v2(HttpStatus.BadRequest, "gateway_endpoint_denied")
+    if text_to_utf8_bytes(http.body).len() as i64 > SCV_GATEWAY_PUBLISH_BODY_LIMIT_V2 or
+       not _scv_gateway_publish_content_type_v2(http):
+        return _scv_gateway_publish_error_v2(HttpStatus.BadRequest, "gateway_request_rejected")
+    if config.repository != policy.repository.repository_id or
+       config.github.allowlist.len() != 1 or policy.github.allowlist.len() != 1 or
+       config.github.allowlist[0].repository_id != policy.github.allowlist[0].repository_id or
+       config.github.allowlist[0].github_repository_id != policy.github.allowlist[0].github_repository_id or
+       config.github.allowlist[0].host != policy.repository.host or
+       config.github.allowlist[0].owner != policy.repository.owner or
+       config.github.allowlist[0].repository != policy.repository.repository:
+        return _scv_gateway_publish_error_v2(HttpStatus.Forbidden, "gateway_repository_denied")
+    val wire = match _scv_gateway_publish_wire_decode_v2(http.body):
+        case Ok(value): value
+        case Err(_): return _scv_gateway_publish_error_v2(HttpStatus.BadRequest, "gateway_invalid_request")
+    if not _scv_gateway_publish_request_v2(config, policy, wire.request):
+        return _scv_gateway_publish_error_v2(HttpStatus.Forbidden, "gateway_repository_denied")
+    if wire.method == "publish":
+        if not policy.allow_topic_publish:
+            return _scv_gateway_publish_error_v2(HttpStatus.Forbidden, "gateway_topic_publish_denied")
+        val scope = _scv_gateway_publish_handler_scope_v2(policy, "publish")
+        match scv_gateway_github_topic_publish_live_v1(policy, scope, wire.request,
+                wire.content_sha256, lease_held):
+            case Ok(value):
+                _scv_gateway_publish_http_v2(HttpStatus.Ok, _scv_gateway_topic_result_wire_v2(value))
+            case Err(reason):
+                _scv_gateway_publish_error_v2(_scv_gateway_publish_status_v2(reason), "gateway_topic_publish_rejected")
+    elif wire.method == "landing-reconcile":
+        if not policy.allow_landing_reconcile or not policy.allow_landing_observation_write:
+            return _scv_gateway_publish_error_v2(HttpStatus.Forbidden, "gateway_landing_reconcile_denied")
+        val scope = _scv_gateway_publish_handler_scope_v2(policy, wire.method)
+        match scv_gateway_github_landing_reconcile_v1(policy, scope,
+                wire.request, wire.content_sha256, landing_port, lease_held):
+            case Ok(value):
+                _scv_gateway_publish_http_v2(HttpStatus.Ok, _scv_gateway_landing_result_wire_v2(value))
+            case Err(reason):
+                _scv_gateway_publish_error_v2(_scv_gateway_publish_status_v2(reason), "gateway_landing_reconcile_rejected")
+    else:
+        val scope = _scv_gateway_publish_handler_scope_v2(policy, wire.method)
+        var result: Result<ScvGatewayGithubPublishResultV2, text> = Err("gateway_publish_unavailable")
+        if wire.method == "prepare":
+            result = scv_gateway_github_publish_prepare_v2(policy, scope, wire.request, read, lease_held)
+        else:
+            result = scv_gateway_github_publish_reconcile_v2(policy, scope, wire.request,
+                wire.content_sha256, read, lease_held)
+        match result:
+            case Ok(value): _scv_gateway_publish_http_v2(HttpStatus.Ok, _scv_gateway_publish_result_wire_v2(value))
+            case Err(reason): _scv_gateway_publish_error_v2(_scv_gateway_publish_status_v2(reason), "gateway_publish_rejected")
+
+pub fn scv_gateway_publish_handle_v2(config: ScvGatewayConfigV1,
+        policy: ScvGatewayGithubPublishPolicyV2, token: text, http: HttpRequest,
+        read: fn(ScvGithubReadPolicyV1, ScvGithubReadRequestV1) -> Result<ScvGithubReadResultV1, text>,
+        lease_held: fn() -> bool) -> HttpResponse:
+    scv_gateway_publish_handle_with_landing_port_v2(config, policy, token, http,
+        read, scv_gateway_github_landing_live_port_v1(), lease_held)
+
+fn _scv_gateway_publish_content_type_v2(http: HttpRequest) -> bool:
+    var count = 0
+    var accepted = false
+    for header in http.headers:
+        if header.0.to_lower() == "content-type":
+            count = count + 1
+            accepted = header.1.to_lower() == "application/sdn"
+    count == 1 and accepted
+
+pub fn scv_gateway_publish_server_policy_v2(reason: text) -> Result<SecureServerPolicy, text>:
+    val capability = plaintext_development_capability(reason)?
+    var policy = SecureServerPolicy.plaintext_dev(capability)
+    policy.max_request_line = 256
+    policy.max_header_count = 16
+    policy.max_header_line = 1024
+    policy.max_body = SCV_GATEWAY_PUBLISH_BODY_LIMIT_V2
+    policy.max_read_iters = 128
+    policy.read_timeout_ms = 5000
+    policy.write_timeout_ms = 5000
+    policy.max_connections = 4
+    policy.max_response_bytes = 8192
+    Ok(policy)
+
+pub fn scv_gateway_publish_serve_v2(config: ScvGatewayConfigV1,
+        policy: ScvGatewayGithubPublishPolicyV2, token: text,
+        development_loopback: bool, reason: text) -> Result<(), text>:
+    if not development_loopback: return Err("gateway_tls_unavailable_production_refused")
+    if config.listen_host != "127.0.0.1" or config.listen_port < 1024 or config.listen_port > 65535:
+        return Err("gateway_loopback_listener_required")
+    if config.repository != policy.repository.repository_id or
+       config.github.allowlist.len() != 1 or policy.github.allowlist.len() != 1 or
+       config.github.allowlist[0].repository_id != policy.github.allowlist[0].repository_id or
+       config.github.allowlist[0].github_repository_id != policy.github.allowlist[0].github_repository_id or
+       config.github.allowlist[0].host != policy.repository.host or
+       config.github.allowlist[0].owner != policy.repository.owner or
+       config.github.allowlist[0].repository != policy.repository.repository:
+        return Err("gateway_repository_policy_rejected")
+    if policy.remote != "https://github.com/{policy.repository.owner}/{policy.repository.repository}":
+        return Err("gateway_remote_policy_rejected")
+    scv_gateway_github_publish_policy_validate_v2(policy)?
+    if not scv_gateway_bearer_valid_v1(token): return Err("gateway_credential_unavailable")
+    if reason.len() == 0 or reason.len() > 256: return Err("gateway_development_reason_required")
+    for code in reason.bytes():
+        if code < 32 or code > 126: return Err("gateway_development_reason_required")
+    val capability = plaintext_development_capability(reason)?
+    val server_policy = scv_gateway_publish_server_policy_v2(reason)?
+    var router = Router.new()
+    router.set_not_found(\http:
+        scv_gateway_publish_handle_v2(config, policy, token, http,
+            scv_gateway_github_read_live_v1, \: scv_sj_lease_is_held(policy.source_root)))
+    var server = SimpleHttpServer.new(config.listen_host, config.listen_port, router)
+    server = server.with_policy(server_policy)
+    server.start_plaintext(capability)
+
+export scv_gateway_publish_request_encode_v2, scv_gateway_publish_handle_v2
+export scv_gateway_publish_handle_with_landing_port_v2
+export scv_gateway_publish_server_policy_v2, scv_gateway_publish_serve_v2

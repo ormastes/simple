@@ -1,0 +1,253 @@
+"""Read-only native SDN gateway envelope; no transport, credentials or IO.
+
+Owner: /root/impl_storage; base 8dcbbbf949c; target release/1.0.0.
+SHA-256 binds payload bytes for source integrity only. It establishes neither
+Git object identity, provider authorization, ref acceptance nor publication.
+Provider/service owners validate canonical ref/commit payload semantics and
+their explicit Git verification claims. Binary blobs remain arbitrary bytes.
+"""
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+use std.common.base_encoding.utilities.{base_encoding_bytes_to_text}
+
+pub val SCV_GATEWAY_MAX_PAYLOAD_BYTES_V1: i64 = 1048576
+pub val SCV_GATEWAY_MAX_REQUEST_BYTES_V1: i64 = 4096
+pub val SCV_GATEWAY_MAX_RESPONSE_BYTES_V1: i64 = 2105344
+
+pub struct ScvGatewayRequestV1:
+    version: i64
+    id: text
+    repository: text
+    method: text
+    ref_or_oid: text
+
+pub struct ScvGatewayResponseV1:
+    version: i64
+    id: text
+    repository: text
+    method: text
+    ref_or_oid: text
+    status: text
+    oid: text
+    object_kind: text
+    payload_id: text
+    payload_encoding: text
+    payload: text
+    error: text
+    publication: text
+
+fn gateway_token_v1(value: text, bound: i64) -> bool:
+    if value.len() <= 0 or value.len() > bound or value == "." or value == "..": return false
+    for ch in value.bytes():
+        if not ((ch >= 48 and ch <= 57) or (ch >= 65 and ch <= 90) or
+            (ch >= 97 and ch <= 122) or ch == 46 or ch == 95 or ch == 45): return false
+    true
+
+fn gateway_error_code_v1(value: text) -> bool:
+    if value.len() <= 0 or value.len() > 96: return false
+    for ch in value.bytes():
+        if not ((ch >= 97 and ch <= 122) or (ch >= 48 and ch <= 57) or ch == 95): return false
+    true
+
+fn gateway_nibble_v1(ch: i64) -> i64:
+    if ch >= 48 and ch <= 57: ch - 48
+    elif ch >= 97 and ch <= 102: ch - 87
+    else: -1
+
+pub fn scv_gateway_oid_valid_v1(oid: text) -> bool:
+    if oid.len() != 40 and oid.len() != 64: return false
+    for ch in oid.bytes():
+        if gateway_nibble_v1(ch.to_i64()) < 0: return false
+    true
+
+pub fn scv_gateway_ref_valid_v1(name: text) -> bool:
+    if name.len() > 512: return false
+    if not name.starts_with("refs/heads/") and not name.starts_with("refs/tags/"): return false
+    if name.contains("..") or name.contains("//") or name.contains("@{"): return false
+    for ch in name.bytes():
+        if not ((ch >= 48 and ch <= 57) or (ch >= 65 and ch <= 90) or
+            (ch >= 97 and ch <= 122) or ch == 46 or ch == 95 or ch == 45 or ch == 47): return false
+    for part in name.split("/"):
+        if part == "" or part.starts_with(".") or part.starts_with("-") or part.ends_with(".") or part.ends_with(".lock"): return false
+    true
+
+pub fn scv_gateway_request_validate_v1(request: ScvGatewayRequestV1, allowed_repository: text) -> Result<(), text>:
+    if request.version != 1: return Err("gateway_version")
+    if not gateway_token_v1(request.id, 128): return Err("gateway_request_id")
+    if not gateway_token_v1(allowed_repository, 128) or request.repository != allowed_repository:
+        return Err("gateway_repository")
+    if request.method == "capabilities":
+        if request.ref_or_oid != "": return Err("gateway_selector")
+    elif request.method == "read_ref":
+        if not scv_gateway_ref_valid_v1(request.ref_or_oid): return Err("gateway_ref")
+    elif request.method == "read_commit" or request.method == "read_blob":
+        if not scv_gateway_oid_valid_v1(request.ref_or_oid): return Err("gateway_oid")
+    else: return Err("gateway_method")
+    Ok(())
+
+fn gateway_limits_v1(max_bytes: i64) -> SdnStrictLimitsV1:
+    SdnStrictLimitsV1(max_source_bytes: max_bytes, max_depth: 2,
+        max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 0)
+
+fn gateway_fields_v1(source: text, names: [text], bound: i64) -> Result<Dict<text, SdnValue>, text>:
+    if source.len() <= 0: return Err("gateway_wire_empty")
+    if source.len() > bound: return Err("gateway_wire_limit")
+    val parsed = match sdn_parse_strict_v1(source, gateway_limits_v1(bound)):
+        Ok(document): document
+        Err(issue): return Err("gateway_sdn_" + issue.code)
+    match parsed.value:
+        Dict(fields):
+            for name in fields.keys():
+                if not names.contains(name): return Err("gateway_unknown_field")
+            for name in names:
+                if not fields.contains_key(name): return Err("gateway_missing_field")
+            Ok(fields)
+        _: Err("gateway_mapping_required")
+
+fn gateway_text_v1(value: SdnValue) -> Result<text, text>:
+    match value:
+        String(item): Ok(item)
+        _: Err("gateway_text_required")
+
+fn gateway_version_v1(value: SdnValue) -> Result<i64, text>:
+    match value:
+        Int(item): Ok(item)
+        _: Err("gateway_integer_required")
+
+fn gateway_quoted_v1(value: text) -> text:
+    sdn_encode_canonical(SdnValue.String(value))
+
+pub fn scv_gateway_request_encode_v1(request: ScvGatewayRequestV1, allowed_repository: text) -> Result<text, text>:
+    scv_gateway_request_validate_v1(request, allowed_repository)?
+    Ok("version: 1\nid: {gateway_quoted_v1(request.id)}\nrepository: {gateway_quoted_v1(request.repository)}\nmethod: {gateway_quoted_v1(request.method)}\nref_or_oid: {gateway_quoted_v1(request.ref_or_oid)}\n")
+
+pub fn scv_gateway_request_decode_v1(source: text, allowed_repository: text) -> Result<ScvGatewayRequestV1, text>:
+    val fields = gateway_fields_v1(source, ["version", "id", "repository", "method", "ref_or_oid"], SCV_GATEWAY_MAX_REQUEST_BYTES_V1)?
+    val request = ScvGatewayRequestV1(version: gateway_version_v1(fields["version"])?, id: gateway_text_v1(fields["id"])?,
+        repository: gateway_text_v1(fields["repository"])?, method: gateway_text_v1(fields["method"])?, ref_or_oid: gateway_text_v1(fields["ref_or_oid"])?)
+    scv_gateway_request_validate_v1(request, allowed_repository)?
+    Ok(request)
+
+pub fn scv_gateway_payload_hex_encode_v1(bytes: [u8]) -> Result<text, text>:
+    if bytes.len() < 0 or bytes.len() > SCV_GATEWAY_MAX_PAYLOAD_BYTES_V1: return Err("gateway_payload_limit")
+    val digits = "0123456789abcdef".bytes()
+    var encoded: [u8] = []
+    for byte in bytes:
+        val value = byte.to_i64()
+        encoded.push(digits[value >> 4])
+        encoded.push(digits[value & 15])
+    # Only generated ASCII enters this conversion; no source-byte decoding.
+    Ok(base_encoding_bytes_to_text(encoded))
+
+pub fn scv_gateway_payload_hex_decode_v1(encoded: text) -> Result<[u8], text>:
+    if encoded.len() < 0 or encoded.len() > SCV_GATEWAY_MAX_PAYLOAD_BYTES_V1 * 2: return Err("gateway_payload_limit")
+    if encoded.len() % 2 != 0: return Err("gateway_payload_hex")
+    var bytes: [u8] = []
+    var index = 0
+    while index < encoded.len():
+        val hi = gateway_nibble_v1(encoded.byte_at(index))
+        val lo = gateway_nibble_v1(encoded.byte_at(index + 1))
+        if hi < 0 or lo < 0: return Err("gateway_payload_hex")
+        bytes.push(((hi << 4) | lo).to_u8())
+        index = index + 2
+    Ok(bytes)
+
+fn gateway_response_shape_v1(response: ScvGatewayResponseV1, request: ScvGatewayRequestV1, allowed_repository: text) -> Result<(), text>:
+    scv_gateway_request_validate_v1(request, allowed_repository)?
+    if (response.version != request.version or response.id != request.id or
+        response.repository != request.repository or response.method != request.method or
+        response.ref_or_oid != request.ref_or_oid): return Err("gateway_response_subject")
+    if response.publication != "not_publication": return Err("gateway_publication_claim")
+    if response.payload_encoding != "hex": return Err("gateway_payload_encoding")
+    if response.status != "ok":
+        if not ["not_found", "denied", "error"].contains(response.status): return Err("gateway_status")
+        if not gateway_error_code_v1(response.error): return Err("gateway_error_code")
+        if (response.oid != "" or response.object_kind != "" or response.payload_id != "" or
+            response.payload != ""): return Err("gateway_failure_payload")
+        return Ok(())
+    if response.error != "": return Err("gateway_success_error")
+    var expected_kind = "blob"
+    if request.method == "capabilities": expected_kind = "capabilities"
+    elif request.method == "read_ref": expected_kind = "ref"
+    elif request.method == "read_commit": expected_kind = "commit"
+    if response.object_kind != expected_kind: return Err("gateway_object_kind")
+    if request.method == "capabilities":
+        if response.oid != "": return Err("gateway_oid")
+    else:
+        if not scv_gateway_oid_valid_v1(response.oid): return Err("gateway_oid")
+        if request.method != "read_ref" and response.oid != request.ref_or_oid: return Err("gateway_response_oid")
+    if response.payload_id.len() != 71 or not response.payload_id.starts_with("sha256:"):
+        return Err("gateway_payload_id")
+    Ok(())
+
+pub fn scv_gateway_response_validate_v1(response: ScvGatewayResponseV1, request: ScvGatewayRequestV1, allowed_repository: text) -> Result<(), text>:
+    gateway_response_shape_v1(response, request, allowed_repository)?
+    if response.status != "ok": return Ok(())
+    val bytes = scv_gateway_payload_hex_decode_v1(response.payload)?
+    if response.payload_id != "sha256:" + sha256_u8_fast_hex(bytes): return Err("gateway_payload_digest")
+    Ok(())
+
+pub fn scv_gateway_response_payload_v1(response: ScvGatewayResponseV1, request: ScvGatewayRequestV1, allowed_repository: text) -> Result<[u8], text>:
+    scv_gateway_response_validate_v1(response, request, allowed_repository)?
+    if response.status != "ok": return Err("gateway_response_not_ok")
+    scv_gateway_payload_hex_decode_v1(response.payload)
+
+pub fn scv_gateway_response_ok_v1(request: ScvGatewayRequestV1, allowed_repository: text, oid: text, object_kind: text, bytes: [u8]) -> Result<ScvGatewayResponseV1, text>:
+    scv_gateway_request_validate_v1(request, allowed_repository)?
+    val payload = scv_gateway_payload_hex_encode_v1(bytes)?
+    val response = ScvGatewayResponseV1(version: 1, id: request.id, repository: request.repository,
+        method: request.method, ref_or_oid: request.ref_or_oid, status: "ok", oid: oid, object_kind: object_kind,
+        payload_id: "sha256:" + sha256_u8_fast_hex(bytes), payload_encoding: "hex", payload: payload,
+        error: "", publication: "not_publication")
+    gateway_response_shape_v1(response, request, allowed_repository)?
+    Ok(response)
+
+pub fn scv_gateway_response_error_v1(request: ScvGatewayRequestV1, allowed_repository: text, status: text, error: text) -> Result<ScvGatewayResponseV1, text>:
+    val response = ScvGatewayResponseV1(version: 1, id: request.id, repository: request.repository,
+        method: request.method, ref_or_oid: request.ref_or_oid, status: status, oid: "", object_kind: "",
+        payload_id: "", payload_encoding: "hex", payload: "", error: error, publication: "not_publication")
+    if status == "ok": return Err("gateway_status")
+    scv_gateway_response_validate_v1(response, request, allowed_repository)?
+    Ok(response)
+
+pub fn scv_gateway_response_encode_v1(response: ScvGatewayResponseV1, request: ScvGatewayRequestV1, allowed_repository: text) -> Result<text, text>:
+    scv_gateway_response_validate_v1(response, request, allowed_repository)?
+    gateway_response_wire_v1(response)
+
+# Constructing from bounded bytes computes the secure payload ID once. The
+# internal writer receives only that validated constructor result; arbitrary
+# response records must still use response_encode's verification boundary.
+pub fn scv_gateway_response_ok_encode_v1(request: ScvGatewayRequestV1, allowed_repository: text, oid: text, object_kind: text, bytes: [u8]) -> Result<text, text>:
+    val response = scv_gateway_response_ok_v1(request, allowed_repository, oid, object_kind, bytes)?
+    gateway_response_wire_v1(response)
+
+fn gateway_response_wire_v1(response: ScvGatewayResponseV1) -> Result<text, text>:
+    var parts: [text] = ["version: 1\n"]
+    val names = ["id", "repository", "method", "ref_or_oid", "status", "oid", "object_kind", "payload_id", "payload_encoding", "payload", "error", "publication"]
+    val values = [response.id, response.repository, response.method, response.ref_or_oid, response.status,
+        response.oid, response.object_kind, response.payload_id, response.payload_encoding, response.payload, response.error, response.publication]
+    var index = 0
+    while index < names.len():
+        # Hex is already validated, contains no escape characters, and is
+        # always quoted to preserve all-digit and empty payloads as text.
+        # Do not send a 2-MiB payload through scalar per-character escaping.
+        if names[index] == "payload": parts.push("payload: \"" + response.payload + "\"\n")
+        else: parts.push(names[index] + ": " + gateway_quoted_v1(values[index]) + "\n")
+        index = index + 1
+    val source = parts.join("")
+    if source.len() > SCV_GATEWAY_MAX_RESPONSE_BYTES_V1: return Err("gateway_wire_limit")
+    Ok(source)
+
+pub fn scv_gateway_response_decode_v1(source: text, request: ScvGatewayRequestV1, allowed_repository: text) -> Result<ScvGatewayResponseV1, text>:
+    scv_gateway_request_validate_v1(request, allowed_repository)?
+    val fields = gateway_fields_v1(source, ["version", "id", "repository", "method", "ref_or_oid", "status", "oid", "object_kind", "payload_id", "payload_encoding", "payload", "error", "publication"], SCV_GATEWAY_MAX_RESPONSE_BYTES_V1)?
+    val response = ScvGatewayResponseV1(version: gateway_version_v1(fields["version"])?, id: gateway_text_v1(fields["id"])?,
+        repository: gateway_text_v1(fields["repository"])?, method: gateway_text_v1(fields["method"])?, ref_or_oid: gateway_text_v1(fields["ref_or_oid"])?,
+        status: gateway_text_v1(fields["status"])?, oid: gateway_text_v1(fields["oid"])?, object_kind: gateway_text_v1(fields["object_kind"])?,
+        payload_id: gateway_text_v1(fields["payload_id"])?, payload_encoding: gateway_text_v1(fields["payload_encoding"])?,
+        payload: gateway_text_v1(fields["payload"])?, error: gateway_text_v1(fields["error"])?, publication: gateway_text_v1(fields["publication"])?)
+    scv_gateway_response_validate_v1(response, request, allowed_repository)?
+    Ok(response)

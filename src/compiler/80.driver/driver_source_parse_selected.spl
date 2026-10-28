@@ -1,0 +1,399 @@
+# CompilerDriver phase-2 source parsing.
+
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use std.io_runtime.{env_set, exit}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_native_objectless_proof.{driver_native_parser_can_persist_objectless, driver_native_objectless_proof_key, driver_native_retained_objectless_proofs}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.native_source_interface_index.{NativeSourceInterfaceIndexV1}
+use compiler.driver.cache.native_module_input_fact_snapshots.{native_module_input_fact_snapshots_v1}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
+use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v1}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.driver_core_modes.{CompileMode}
+use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1, parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1,
+    parse_full_frontend_target_receipted_in_borrowed_scope_v1}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1,
+    parse_full_frontend_uncached_in_borrowed_scope_with_advisory_policy_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
+use compiler.frontend.core.parser_preprocessor.{pp_declare_parse_scope}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
+use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
+use compiler.frontend.effect_registry.{effect_registry_promote_transient_owner}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_promote_transient_owner}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_promote_transient_owner}
+use compiler.core.ast.{ast_reset, ast_prepare_persistent_owner_v1}
+use compiler.core.ast_coverage_inventory.{
+    compiler_coverage_inventory_promote_transient_owner,
+    compiler_coverage_inventory_release_parse_scratch}
+use compiler.frontend.desugar.placeholder_lambda.{placeholder_release_parse_scratch}
+use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
+use compiler.core.parser.{par_had_error_get}
+use compiler.core.parser.{parser_promote_transient_owners, parser_initialization_generation_v1}
+use compiler.core.parser_decls.{parser_declaration_metadata_promote_transient_owner}
+use compiler.frontend.resource_registry.{resource_registry_promote_transient_owner}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_selected_v1,
+    worker_surface_seed_v1, worker_surface_closure_v1, worker_surface_ready_v1,
+    worker_surface_restrict_claims_v1, worker_surface_text_v1, worker_surface_counters_v1,
+    worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
+    worker_hir_restrict_loads_v1, source_path_by_canonical_map_v1,
+    worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_v1}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1, unit_tldr_imports_enabled_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{UnitTldrPlanV1, unit_tldr_plan_v1, unit_tldr_empty_plan_v1,
+    unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1, unit_tldr_log_line_v1}
+use compiler.driver.driver_tldr_import_route_v1.{TldrFrozenRoutePlanV1, tldr_route_frozen_inputs_v1}
+use compiler.driver.driver_tldr_frozen_surface_route_v1.{tldr_frozen_surface_lane_error_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mono_pending_publish_v1,
+    native_file_worker_unit_active_v1, native_file_worker_batch_v1, NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1}
+use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
+use compiler.driver.cache.phase_compatibility_admission.{
+    driver_import_phase2_frontend_v1, driver_stage_phase2_frontend_frozen_raw_v1
+}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses,
+    frontend_cache_native_digest_unavailable}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurfaceBuilder,
+    ModuleSurfacesByName,
+    ModuleSurfaceParserOwner,
+    module_surface_canonical_path,
+    module_surface_from_owner,
+    module_surface_promote,
+    module_surfaces_promote,
+    module_surfaces_promote_reason,
+    module_surfaces_retained_alignment_error
+}
+use compiler.driver.driver_source_loading.{
+    _driver_physical_source_key,
+    _driver_text_bucket_index,
+    _driver_unique_physical_sources
+}
+use compiler.driver.driver_log_helpers.{
+    log_debug,
+    log_phase,
+    log_module_surface_released,
+    log_module_surface_stage,
+    log_build_progress
+}
+use compiler.driver.driver_cache_scope_policy_v1.{driver_frontend_cache_scope_publish_allowed_v1}
+use compiler.driver.driver_phase_gates.{
+    driver_streaming_surface_enabled,
+    driver_source_entry_request,
+    driver_source_entry_closure_enabled,
+    driver_source_matches_entry,
+    bootstrap_entry_source_index
+}
+use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.io_runtime.{file_exists}
+use compiler.common.structural_contracts.offload_profile.{OffloadDecision, validate_offload_profile}
+use compiler.common.structural_contracts.frontend_offload_switch.{
+    FrontendOffloadInputs, FrontendOffloadSwitch, resolve_frontend_offload,
+    frontend_offload_decision, frontend_offload_profile,
+    FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE, frontend_offload_receipt_line
+}
+
+use compiler.common.diagnostics.span.{Span}
+# @workaround bug=phase2_private_sffi_cross_owner_export_unresolved_2026-10-27 reason=explicit_public_owner_imports_avoid_private_inline_sffi_export_resolution
+use compiler.driver.driver_source_parse_support.{
+    rt_transient_heap_promote, driver_parse_env_get_v1, driver_parse_transient_scope_begin_v1,
+    driver_parse_transient_scope_pause_v1, driver_promote_retained_frontend_owners_v1, driver_end_transient_parse_scope
+}
+
+impl CompilerDriver:
+    me promote_target_cfg_receipt_v1(source_path: text) -> bool:
+        if self.ctx.runtime_std_full_inventory_selection == nil:
+            return true
+        if not self.ctx.runtime_std_cfg_source_identity_by_path.has(source_path):
+            return false
+        val identity = self.ctx.runtime_std_cfg_source_identity_by_path[source_path]
+        if not self.ctx.runtime_std_cfg_decisions.has(identity):
+            return false
+        # Promote the dictionary root itself, not a by-value receipt lookup.
+        rt_transient_heap_promote(self.ctx.runtime_std_cfg_decisions)
+
+    me parse_target_cfg_selected_v1(source_content: text, source_path: text,
+        source_module_name: text, borrowed_scope: bool,
+        allow_cached_parse: bool = true) -> Result<ParserModule, text>:
+        if not borrowed_scope and not allow_cached_parse:
+            return Err("uncached target cfg replay requires the parent's borrowed scope")
+        if not self.ctx.runtime_std_cfg_source_identity_by_path.has(source_path) or
+                not self.ctx.runtime_std_cfg_source_digest_by_path.has(source_path):
+            return Err("full inventory target cfg source authority missing: {source_path}")
+        val identity = self.ctx.runtime_std_cfg_source_identity_by_path[source_path]
+        val source_digest = self.ctx.runtime_std_cfg_source_digest_by_path[source_path]
+        val parsed = if borrowed_scope and not allow_cached_parse:
+            parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1(
+                source_content, source_path, source_module_name, self.ctx.logger,
+                identity, source_digest, self.ctx.native_target)
+        elif borrowed_scope:
+            parse_full_frontend_target_receipted_in_borrowed_scope_v1(
+                source_content, source_path, source_module_name, self.ctx.logger,
+                identity, source_digest, self.ctx.native_target)
+        else:
+            parse_full_frontend_target_receipted_v1(
+                source_content, source_path, source_module_name, self.ctx.logger,
+                identity, source_digest, self.ctx.native_target)
+        match parsed:
+            case Err(error): Err("full inventory target cfg rejected {identity}: {error}")
+            case Ok(value):
+                val module = value[0]
+                val receipt = value[1]
+                if not frontend_cfg_receipt_valid_v1(receipt, identity,
+                        source_digest, self.ctx.native_target):
+                    return Err("full inventory target cfg receipt invalid: {identity}")
+                if self.ctx.runtime_std_cfg_decisions.has(identity):
+                    val old = self.ctx.runtime_std_cfg_decisions[identity]
+                    if old.decision_digest != receipt.decision_digest or
+                            old.preprocessed_digest != receipt.preprocessed_digest:
+                        return Err("full inventory target cfg reparse changed: {identity}")
+                else:
+                    self.ctx.runtime_std_cfg_decisions[identity] = receipt
+                Ok(module)
+
+    pub me parse_full_frontend_selected_v1(source_content: text, source_path: text,
+        source_module_name: text) -> Result<ParserModule, text>:
+        # Step-3 lazy restore on the retained route: an opted-in HIR shard
+        # worker parses the module SKELETON here (surfaces only); HIR re-parses
+        # the full source of each module it claims (driver_hir_pipeline_lowering).
+        val parse_text = driver_surface_parse_text_v1(source_content,
+            driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? "", driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? "")
+        # Ordinary native builds retain full ParserModules, not lexer/flat-AST/
+        # cache-decode scratch. Borrow one per-file scope through preprocessing,
+        # parsing and desugaring, then retain exactly the escaped owners.
+        # Coverage/MC/DC manifests and target-cfg receipts are escaped owners
+        # too. Promote them before teardown without retaining flat-AST scratch.
+        val aot = self.ctx.options.mode == CompileMode.Aot or
+            self.ctx.options.cli_mode_text == "aot"
+        if not aot:
+            return self.parse_full_frontend_unscoped_selected_v1(
+                parse_text, source_path, source_module_name)
+        ast_prepare_persistent_owner_v1()
+        val parser_generation = parser_initialization_generation_v1()
+        if not driver_parse_transient_scope_begin_v1():
+            panic("transient retained parser scope unavailable for {source_path}")
+        val parsed = self.parse_full_frontend_in_borrowed_scope_selected_v1(
+            parse_text, source_path, source_module_name)
+        if not driver_parse_transient_scope_pause_v1():
+            val _ended = driver_end_transient_parse_scope()
+            panic("transient retained parser scope pause failed for {source_path}")
+        val result_ok = rt_transient_heap_promote(parsed)
+        # Advisory/target rejection can return before parser initialization.
+        # Native module globals can still be nil in that case; preserve the Err
+        # without asking the runtime to promote owners that were never created.
+        val parser_entered = parser_initialization_generation_v1() != parser_generation
+        val owners_ok = driver_promote_retained_frontend_owners_v1(parser_entered)
+        # Rejected target/advisory requests may not publish any receipt.
+        val receipt_ok = if parsed.is_ok():
+            self.promote_target_cfg_receipt_v1(source_path)
+        else: true
+        val ended = driver_end_transient_parse_scope()
+        if not (result_ok and owners_ok and receipt_ok and ended):
+            panic("transient retained parser ownership failed for {source_path} (result_ok={result_ok} owners_ok={owners_ok} receipt_ok={receipt_ok} ended={ended})")
+        parsed
+
+    me parse_full_frontend_unscoped_selected_v1(source_content: text, source_path: text,
+        source_module_name: text) -> Result<ParserModule, text>:
+        pp_declare_parse_scope(self.ctx.runtime_std_full_inventory_selection != nil, self.ctx.native_target)
+        if self.ctx.runtime_std_full_inventory_selection != nil:
+            return self.parse_target_cfg_selected_v1(source_content, source_path,
+                source_module_name, false)
+        match parse_full_frontend_with_advisory_policy_v1(source_content,
+                source_path, source_module_name, self.ctx.logger,
+                self.ctx.frontend_advisory_policy,
+                self.ctx.environment_variant_frontend_owner_id,
+                self.ctx.environment_variant_frontend_session_id,
+                self.ctx.environment_variant_frontend_generation,
+                self.ctx.environment_variant_frontend_cache_identity):
+            case Ok(module): Ok(module)
+            case Err(_): Err(
+                "required environment variant frontend provider unavailable for {source_path}")
+
+    me parse_full_frontend_in_borrowed_scope_selected_v1(source_content: text, source_path: text,
+        source_module_name: text) -> Result<ParserModule, text>:
+        self.parse_full_frontend_in_borrowed_scope_selected_cache_policy_v1(
+            source_content, source_path, source_module_name, true)
+
+    # Same actual selected frontend pipeline, with private/shared flat-AST
+    # restoration disabled for genuine source-to-HIR producer admission.
+    me parse_full_frontend_in_borrowed_scope_selected_uncached_v1(source_content: text, source_path: text,
+        source_module_name: text) -> Result<ParserModule, text>:
+        self.parse_full_frontend_in_borrowed_scope_selected_cache_policy_v1(
+            source_content, source_path, source_module_name, false)
+
+    me parse_full_frontend_in_borrowed_scope_selected_cache_policy_v1(source_content: text, source_path: text,
+        source_module_name: text, allow_cached_parse: bool) -> Result<ParserModule, text>:
+        pp_declare_parse_scope(self.ctx.runtime_std_full_inventory_selection != nil, self.ctx.native_target)
+        if self.ctx.runtime_std_full_inventory_selection != nil:
+            return self.parse_target_cfg_selected_v1(source_content, source_path,
+                source_module_name, true, allow_cached_parse)
+        val selected = if allow_cached_parse:
+            parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1(source_content,
+                source_path, source_module_name, self.ctx.logger,
+                self.ctx.frontend_advisory_policy,
+                self.ctx.environment_variant_frontend_owner_id,
+                self.ctx.environment_variant_frontend_session_id,
+                self.ctx.environment_variant_frontend_generation,
+                self.ctx.environment_variant_frontend_cache_identity)
+        else:
+            parse_full_frontend_uncached_in_borrowed_scope_with_advisory_policy_v1(source_content,
+                source_path, source_module_name, self.ctx.logger,
+                self.ctx.frontend_advisory_policy,
+                self.ctx.environment_variant_frontend_owner_id,
+                self.ctx.environment_variant_frontend_session_id,
+                self.ctx.environment_variant_frontend_generation,
+                self.ctx.environment_variant_frontend_cache_identity)
+        match selected:
+            case Ok(module): Ok(module)
+            case Err(_): Err(
+                "required environment variant frontend provider unavailable for {source_path}")
+
+    me add_streaming_module_surface(
+        builder: ModuleSurfaceBuilder,
+        source_path: text,
+        source_authored_path: text,
+        source_content: text,
+        source_module_name: text,
+        source_index: i64,
+        canonical_path: text,
+        force_source_parse: bool = false,
+        worker_mode: i64 = 0,
+        frozen_parse_text: text? = nil
+    ) -> Result<ModuleSurfaceBuilder, text>:
+        # worker_mode: 0 = ordinary, 1 = worker closure module (skeleton via
+        # worker_surface_text_v1), 2 = worker placeholder (empty text; identity
+        # fields still come from `source`, so the HIR closure digest holds).
+        if builder.frozen:
+            return Err("module surface builder is frozen")
+        if builder.index_by_path_lookup_index(canonical_path) >= 0:
+            return Err("module surface already exists for physical source: {canonical_path}")
+        ast_prepare_persistent_owner_v1()
+        val parser_generation = parser_initialization_generation_v1()
+        if not driver_parse_transient_scope_begin_v1():
+            return Err("transient parser scope unavailable for {source_path}")
+        val source = SourceFile(
+            path: source_path,
+            authored_path: source_authored_path,
+            content: source_content,
+            module_name: source_module_name)
+        # Step-3 lazy restore: an opted-in HIR shard worker builds the surface
+        # from the module skeleton (driver_hir_worker_surface_v1.spl).
+        val surface_text = if frozen_parse_text != nil:
+            frozen_parse_text.unwrap()
+        elif worker_mode == 2:
+            ""
+        elif worker_mode == 1:
+            worker_surface_text_v1(source_path, source_content,
+                if (driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "") != "":
+                    (driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "") + "/tldr"
+                else: "")
+        else:
+            driver_surface_parse_text_v1(source_content,
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? "", driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? "")
+        log_module_surface_stage(source_path, "parse-start")
+        if tldr_imports_enabled_v1():
+            if frozen_parse_text != nil and surface_text != source_content:
+                self.tldr_surface_interface_parses = self.tldr_surface_interface_parses + 1
+            else:
+                self.tldr_surface_source_parses = self.tldr_surface_source_parses + 1
+        val selected_module = if force_source_parse:
+            self.parse_full_frontend_in_borrowed_scope_selected_uncached_v1(
+                surface_text, source_path, source_module_name)
+        else:
+            self.parse_full_frontend_in_borrowed_scope_selected_v1(
+                surface_text, source_path, source_module_name)
+        val module = match selected_module:
+            case Ok(value): value
+            case Err(error):
+                if not driver_parse_transient_scope_pause_v1():
+                    val _ended = driver_end_transient_parse_scope()
+                    return Err("transient parser scope pause failed for {source_path}")
+                val error_ok = rt_transient_heap_promote(selected_module)
+                val owners_ok = driver_promote_retained_frontend_owners_v1(
+                    parser_initialization_generation_v1() != parser_generation)
+                val ended = driver_end_transient_parse_scope()
+                if not (error_ok and owners_ok and ended):
+                    return Err("transient parser scope error ownership failed for {source_path}")
+                return Err(error)
+        if par_had_error_get():
+            if not driver_parse_transient_scope_pause_v1():
+                val _ended = driver_end_transient_parse_scope()
+                return Err("transient parser scope pause failed after parse error for {source_path}")
+            if not self.promote_target_cfg_receipt_v1(source_path):
+                val _ended = driver_end_transient_parse_scope()
+                return Err("target cfg receipt promotion failed for {source_path}")
+            if not driver_promote_retained_frontend_owners_v1(
+                    parser_initialization_generation_v1() != parser_generation):
+                val _ended = driver_end_transient_parse_scope()
+                return Err("frontend registry promotion failed after parse error for {source_path}")
+            val parse_error = driver_parse_error_message(source_path)
+            val _ended = driver_end_transient_parse_scope()
+            return Err(parse_error)
+        log_module_surface_stage(source_path, "parse-done")
+        # Build the compact projection before pausing so all intermediate
+        # arrays/dictionaries remain owned by the per-file transient scope.
+        # Only the reachable surface graph is promoted below.
+        # Box the rich parser aggregate while allocation tracking is active.
+        # Surface extraction then crosses the module boundary by class
+        # reference instead of copying every executable body by value.
+        val module_owner = ModuleSurfaceParserOwner.new(module)
+        val declaration_only = driver_native_parser_can_persist_objectless(module_owner)
+        val surface_result = module_surface_from_owner(
+            module_owner, source, source_index)
+        if surface_result.is_err():
+            if not driver_parse_transient_scope_pause_v1():
+                val _ended = driver_end_transient_parse_scope()
+                return Err("transient parser scope pause failed after surface error for {source_path}")
+            if not self.promote_target_cfg_receipt_v1(source_path):
+                val _ended = driver_end_transient_parse_scope()
+                return Err("target cfg receipt promotion failed for {source_path}")
+            if not driver_promote_retained_frontend_owners_v1(
+                    parser_initialization_generation_v1() != parser_generation):
+                val _ended = driver_end_transient_parse_scope()
+                return Err("frontend registry promotion failed after surface error for {source_path}")
+            val error_ok = rt_transient_heap_promote(surface_result)
+            val ended = driver_end_transient_parse_scope()
+            if not (error_ok and ended):
+                return Err("transient parser scope surface error ownership failed for {source_path}")
+            return Err(surface_result.unwrap_err())
+        val surface = surface_result.unwrap()
+        log_module_surface_stage(source_path, "surface-done")
+        if not driver_parse_transient_scope_pause_v1():
+            val _ended = driver_end_transient_parse_scope()
+            return Err("transient parser scope pause failed for {source_path}")
+        if not self.promote_target_cfg_receipt_v1(source_path):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("target cfg receipt promotion failed for {source_path}")
+        if not driver_promote_retained_frontend_owners_v1(
+                parser_initialization_generation_v1() != parser_generation):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("frontend registry promotion failed for {source_path}")
+        if not module_surface_promote(surface):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("module surface promotion failed for {source_path}")
+        log_module_surface_stage(source_path, "promote-done")
+        # Close and reclaim the parser scope before mutating the persistent
+        # registry. Pausing permits promotion; it does not make allocations
+        # performed by builder.add_* persistent.
+        if not driver_end_transient_parse_scope():
+            return Err("transient parser scope end failed for {source_path}")
+        val add_result = builder.add_surface_canonical_identity(
+            surface, source_module_name, canonical_path)
+        if add_result.is_err():
+            return Err(add_result.unwrap_err())
+        # The transient scope is already closed: only allocate the digest/key
+        # and persistent proof row now, never retain ParserModule or its bodies.
+        if declaration_only and worker_mode != 2 and frozen_parse_text == nil:
+            val proof_key = driver_native_objectless_proof_key(source_module_name, canonical_path)
+            self.ctx.native_objectless_decl_proofs[proof_key] = sha256_text(source_content)
+        log_module_surface_stage(source_path, "commit-done")
+        Ok(builder)
+

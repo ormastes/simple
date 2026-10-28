@@ -1,0 +1,157 @@
+# Bounded intake for the existing SCV editor spool. This module records the
+# editor's proposal stream only. It does not attest saves, filesystem effects,
+# editor buffer versions, byte ranges, or durable journal publication.
+use app.io.mod.{file_exists, file_read_regular_no_follow_bounded_bytes}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.scv.editor_ipc.{
+    EditorIpc, ScvEditorEvent, ScvEditorIpcRecordV1,
+    scv_editor_ipc_open, scv_editor_ipc_decode_line_v1,
+    scv_editor_ipc_apply_prefix_v1
+}
+
+val SCV_EDITOR_CAPTURE_MAX_BYTES_V1: i64 = 1048576
+val SCV_EDITOR_CAPTURE_MAX_RECORDS_V1: i64 = 32768
+
+pub struct ScvEditorCaptureStateV1:
+    ipc: EditorIpc
+    verified_prefix: text
+    buffer_paths: [text]
+    open_saves: [text]
+    refactor_active: bool
+    closed: bool
+    poisoned: bool
+
+pub struct ScvEditorCaptureResultV1:
+    state: ScvEditorCaptureStateV1
+    events: [ScvEditorEvent]
+    origin: text
+    completeness: text
+    diagnostics: [text]
+    proposed_only: bool
+
+pub fn scv_editor_capture_open_v1(spool_path: text) -> ScvEditorCaptureStateV1:
+    ScvEditorCaptureStateV1(ipc: scv_editor_ipc_open(spool_path),
+        verified_prefix: "", buffer_paths: [], open_saves: [], refactor_active: false,
+        closed: false, poisoned: false)
+
+fn capture_result_v1(state: ScvEditorCaptureStateV1, events: [ScvEditorEvent],
+        completeness: text, diagnostics: [text]) -> ScvEditorCaptureResultV1:
+    ScvEditorCaptureResultV1(state: state, events: events, origin: "ide",
+        completeness: completeness, diagnostics: diagnostics, proposed_only: true)
+
+fn capture_failure_v1(state: ScvEditorCaptureStateV1, diagnostic: text) -> ScvEditorCaptureResultV1:
+    var next = state
+    next.poisoned = true
+    capture_result_v1(next, [], "needs_reconciliation", [diagnostic])
+
+fn capture_save_index_v1(paths: [text], path: text) -> i64:
+    var index = 0
+    while index < paths.len():
+        if paths[index] == path: return index
+        index = index + 1
+    -1
+
+fn capture_buffer_index_v1(paths: [text], path: text) -> i64:
+    capture_save_index_v1(paths, path)
+
+fn capture_record_count_v1(bytes: [u8]) -> i64:
+    var count = 0
+    for byte in bytes:
+        if byte == 10: count = count + 1
+    count
+
+fn capture_validate_record_v1(state: ScvEditorCaptureStateV1,
+        record: ScvEditorIpcRecordV1) -> Result<ScvEditorCaptureStateV1, text>:
+    if state.closed: return Err("editor-record-after-disconnect")
+    var next = state
+    if record.kind == "buffer_open" or record.kind == "edit":
+        if capture_buffer_index_v1(next.buffer_paths, record.path) < 0:
+            next.buffer_paths = next.buffer_paths.push(record.path)
+    elif record.kind == "path_rename":
+        val source_index = capture_buffer_index_v1(next.buffer_paths, record.path)
+        val target_index = capture_buffer_index_v1(next.buffer_paths, record.path2)
+        if target_index >= 0 and target_index != source_index:
+            return Err("editor-rename-target-open")
+        if source_index >= 0: next.buffer_paths[source_index] = record.path2
+    elif record.kind == "save_begin":
+        if capture_save_index_v1(next.open_saves, record.path) >= 0:
+            return Err("editor-save-nested")
+        next.open_saves = next.open_saves.push(record.path)
+    elif record.kind == "save_end":
+        val index = capture_save_index_v1(next.open_saves, record.path)
+        if index < 0: return Err("editor-save-end-unmatched")
+        var remaining: [text] = []
+        var cursor = 0
+        while cursor < next.open_saves.len():
+            if cursor != index: remaining = remaining.push(next.open_saves[cursor])
+            cursor = cursor + 1
+        next.open_saves = remaining
+    elif record.kind == "refactor_begin":
+        if next.refactor_active: return Err("editor-refactor-nested")
+        next.refactor_active = true
+    elif record.kind == "refactor_entity":
+        if not next.refactor_active: return Err("editor-refactor-entity-unmatched")
+    elif record.kind == "refactor_end":
+        if not next.refactor_active: return Err("editor-refactor-end-unmatched")
+        next.refactor_active = false
+    elif record.kind == "flush":
+        if next.open_saves.len() > 0 or next.refactor_active:
+            return Err("editor-disconnected-during-transaction")
+        next.closed = true
+    Ok(next)
+
+fn capture_validate_records_v1(state: ScvEditorCaptureStateV1,
+        lines: [text], record_count: i64) -> Result<ScvEditorCaptureStateV1, text>:
+    if state.ipc.offset < 0 or state.ipc.offset > record_count:
+        return Err("editor-cursor-outside-prefix")
+    var next = state
+    var cursor = state.ipc.offset
+    while cursor < record_count:
+        val decoded = scv_editor_ipc_decode_line_v1(lines[cursor])
+        if val Err(reason) = decoded: return Err(reason)
+        val validated = capture_validate_record_v1(next, decoded.unwrap())
+        if val Err(reason) = validated: return Err(reason)
+        next = validated.unwrap()
+        cursor = cursor + 1
+    Ok(next)
+
+pub fn scv_editor_capture_poll_v1(state: ScvEditorCaptureStateV1) -> ScvEditorCaptureResultV1:
+    if state.poisoned:
+        return capture_result_v1(state, [], "needs_reconciliation", ["editor-capture-reconciliation-required"])
+    if not file_exists(state.ipc.spool_path):
+        if state.verified_prefix != "": return capture_failure_v1(state, "editor-spool-prefix-changed")
+        return capture_result_v1(state, [], "complete", [])
+    val loaded = file_read_regular_no_follow_bounded_bytes(
+        state.ipc.spool_path, SCV_EDITOR_CAPTURE_MAX_BYTES_V1)
+    if val Err(_) = loaded: return capture_failure_v1(state, "editor-spool-read-or-byte-limit")
+    val bytes = loaded.unwrap()
+    if bytes.len() > SCV_EDITOR_CAPTURE_MAX_BYTES_V1:
+        return capture_failure_v1(state, "editor-spool-byte-limit")
+    val record_count = capture_record_count_v1(bytes)
+    if record_count > SCV_EDITOR_CAPTURE_MAX_RECORDS_V1:
+        return capture_failure_v1(state, "editor-spool-record-limit")
+    if not utf8_bytes_valid(bytes): return capture_failure_v1(state, "editor-spool-utf8-invalid")
+    val observed = bytes_to_text(bytes)
+    if observed.len() < state.verified_prefix.len() or not observed.starts_with(state.verified_prefix):
+        return capture_failure_v1(state, "editor-spool-prefix-changed")
+    val lines = observed.split("\n")
+    val validated = capture_validate_records_v1(state, lines, record_count)
+    if val Err(reason) = validated: return capture_failure_v1(state, reason)
+    var complete_prefix = ""
+    if record_count > 0: complete_prefix = lines[0:record_count].join("\n") + "\n"
+    val (applied_ipc, events) = scv_editor_ipc_apply_prefix_v1(state.ipc, complete_prefix)
+    var next = validated.unwrap()
+    next.ipc = applied_ipc
+    next.verified_prefix = complete_prefix
+    var diagnostics: [text] = []
+    var completeness = "complete"
+    if not observed.ends_with("\n"):
+        completeness = "incomplete"
+        diagnostics = diagnostics.push("editor-spool-record-pending")
+    if next.open_saves.len() > 0 or next.refactor_active:
+        completeness = "incomplete"
+        diagnostics = diagnostics.push("editor-transaction-open")
+    if next.closed:
+        completeness = "incomplete"
+        diagnostics = diagnostics.push("editor-disconnected-reconcile")
+    capture_result_v1(next, events, completeness, diagnostics)

@@ -17,14 +17,34 @@ use File::Basename qw(dirname);
 use File::Temp qw(tempdir);
 use File::Path qw(make_path remove_tree);
 use Config;
-use Fcntl qw(O_RDONLY O_NOFOLLOW F_SETFD);
+use Fcntl qw(O_RDONLY O_WRONLY O_CREAT O_EXCL O_NOFOLLOW F_SETFD);
 use Digest::SHA;
 use IPC::Open2 qw(open2);
-use Errno qw(ESRCH ENOENT EINTR);
+use Errno qw(ESRCH ENOENT EINTR EEXIST);
 
 # EPIPE must be a caught observation failure even during pre-workload admission.
 my $workload_sigpipe = $SIG{PIPE} // 'DEFAULT';
 $SIG{PIPE} = 'IGNORE';
+
+# This private entrypoint exercises the same identity publication helper used
+# below. Requiring both the explicit mode and exact arguments prevents this
+# diagnostic path from falling through into workload dispatch.
+if (@ARGV && $ARGV[0] eq '--test-identity-publication') {
+    ($ENV{SIMPLE_RSS_WATCHDOG_TEST_MODE} // '') eq '1'
+        or die "rss-guard: private identity test mode is disabled\n";
+    shift @ARGV;
+    @ARGV == 5 or die "rss-guard: invalid private identity test arguments\n";
+    my ($identity_file, $identity, $barrier_dir, $label, $mode) = @ARGV;
+    $mode =~ /\A(?:race|corrupt|truncated|missing)\z/
+        or die "rss-guard: invalid private identity test mode\n";
+    my $hook;
+    if ($mode eq 'race') {
+        $hook = sub { wait_for_identity_test_barrier($barrier_dir, $label) };
+    }
+    my $force_failure = $mode eq 'missing' ? 1 : 0;
+    publish_compiler_identity_memo($identity_file, $identity, $hook, $force_failure);
+    exit 0;
+}
 
 my %opt = ( 'max-phys-footprint-kib' => ($ENV{SIMPLE_BOOTSTRAP_PROCESS_TREE_PHYS_FOOTPRINT_CAP_KIB} // 0),
             'max-rss-kib' => 5859375, 'interval-ms' => 100,
@@ -307,7 +327,7 @@ sub resolve_observation_budget_ms {
 my $observation_budget_ms = resolve_observation_budget_ms(
     $^O, $ENV{SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS});
 my ($sample_duration_max_ms, $sample_overruns, $sample_budget_exceeded) = (0, 0, 0);
-my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha);
+my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha, $observer_policy_sha);
 my ($observer_read, $observer_write, $observer_pid);
 my $observer_buffer = '';
 my ($observer_starts, $observer_errors, $observer_last_pid) = (0, 0, 0);
@@ -490,6 +510,9 @@ sub install_observer {
     my $source = abs_path($watchdog_source_dir . '/macos-process-observer.c');
     open(my $fh, '<', $source) or die "cannot read process observer source";
     $observer_source_sha = hash_handle($fh);
+    my $policy = abs_path($watchdog_source_dir . '/macos-observer-denial-policy.h');
+    open(my $policy_fh, '<', $policy) or die "cannot read process observer denial policy";
+    $observer_policy_sha = hash_handle($policy_fh);
     $observer_path = dirname($session_helper) . '/macos-process-observer';
     my $compiler = $ENV{CC} || 'cc';
     my $builder = fork();
@@ -509,7 +532,10 @@ sub install_observer {
         sleep 0.02;
     }
     hash_handle($fh) eq $observer_source_sha or die "process observer source changed during compilation";
+    hash_handle($policy_fh) eq $observer_policy_sha
+        or die "process observer denial policy changed during compilation";
     close($fh);
+    close($policy_fh);
     chmod(0500, $observer_path) == 1 or die "cannot protect process observer";
     sysopen($observer_fd, $observer_path, O_RDONLY | O_NOFOLLOW) or die "cannot pin process observer";
     -f $observer_fd or die "process observer is not a regular file";
@@ -783,6 +809,97 @@ sub windows_target_compile_flags {
     die "unsupported Windows session helper compiler target: $target";
 }
 
+# Publish a queried compiler identity without replacing a concurrent winner.
+# A same-directory hard link is atomic and fails if the destination exists on
+# both Windows and POSIX; rename is unsuitable because POSIX rename replaces.
+sub publish_compiler_identity_memo {
+    my ($identity_file, $identity, $before_publish, $force_publish_failure) = @_;
+    defined($identity) && $identity =~ /clang/i
+        or die "compiler identity publication rejected non-clang payload\n";
+    my ($memo, $temporary);
+    my $created = 0;
+    for my $attempt (0 .. 99) {
+        $temporary = "$identity_file.new.$$.$attempt";
+        if (sysopen($memo, $temporary, O_WRONLY | O_CREAT | O_EXCL, 0600)) { $created = 1; last }
+        next if $!{EEXIST};
+        die "cannot create compiler identity temporary $temporary: $!\n";
+    }
+    $created or die "cannot allocate unique compiler identity temporary for $identity_file\n";
+    binmode($memo, ':raw') or do {
+        my $error = "$!";
+        close($memo);
+        unlink($temporary);
+        die "cannot set compiler identity temporary raw mode $temporary: $error\n";
+    };
+    my $wrote = print {$memo} $identity;
+    my $write_error = "$!";
+    my $closed = close($memo);
+    my $close_error = "$!";
+    if (!$wrote || !$closed) {
+        unlink($temporary) or die "cannot clean compiler identity temporary $temporary after write/close failure: $!\n";
+        !$wrote and die "cannot write compiler identity temporary $temporary: $write_error\n";
+        die "cannot close compiler identity temporary $temporary: $close_error\n";
+    }
+
+    $before_publish->() if $before_publish;
+    my $published = $force_publish_failure ? 0 : link($temporary, $identity_file);
+    my $publish_error = $force_publish_failure ? 'injected publication failure' : "$!";
+    if (!$published) {
+        my $winner_matches = 0;
+        my $target_state = 'destination is absent';
+        my @target = lstat($identity_file);
+        if (@target) {
+            $target_state = 'destination is not a regular non-symlink file';
+            if (-f $identity_file && !-l $identity_file) {
+                if (sysopen(my $winner, $identity_file, O_RDONLY | O_NOFOLLOW)) {
+                    if (binmode($winner, ':raw')) {
+                        my @winner_stat = stat($winner);
+                        if (@winner_stat && -f $winner && $winner_stat[7] == length($identity)) {
+                            local $/;
+                            my $winner_identity = <$winner>;
+                            my $winner_closed = close($winner);
+                            $winner_matches = $winner_closed && defined($winner_identity) &&
+                                $winner_identity eq $identity && $winner_identity =~ /clang/i;
+                            $target_state = $winner_matches ? '' : 'destination bytes differ from queried identity';
+                        } else {
+                            close($winner);
+                            $target_state = 'destination size or file type differs from queried identity';
+                        }
+                    } else {
+                        close($winner);
+                        $target_state = "cannot read destination in raw mode: $!";
+                    }
+                } else {
+                    $target_state = "cannot open destination for identity readback: $!";
+                }
+            }
+        }
+        if ($winner_matches) {
+            unlink($temporary) or die "cannot clean losing compiler identity temporary $temporary: $!\n";
+            return 1;
+        }
+        my $cleanup_error = unlink($temporary) ? '' : "; cannot clean own temporary: $!";
+        die "cannot publish compiler identity $identity_file: $publish_error; $target_state$cleanup_error\n";
+    }
+    unlink($temporary) or die "cannot remove published compiler identity temporary $temporary: $!\n";
+    return 1;
+}
+
+sub wait_for_identity_test_barrier {
+    my ($barrier_dir, $label) = @_;
+    $label =~ /\A[A-Za-z0-9_-]+\z/ or die "invalid private identity test barrier label\n";
+    my $ready = "$barrier_dir/$label.ready";
+    sysopen(my $marker, $ready, O_WRONLY | O_CREAT | O_EXCL, 0600)
+        or die "cannot create private identity test barrier marker $ready: $!\n";
+    print {$marker} "ready\n" or die "cannot write private identity test barrier marker $ready: $!\n";
+    close($marker) or die "cannot close private identity test barrier marker $ready: $!\n";
+    for (1 .. 3000) {
+        return 1 if -f "$barrier_dir/go";
+        sleep(0.01);
+    }
+    die "timed out waiting for private identity test barrier\n";
+}
+
 # Build once, reuse on every guard start. The cache key covers everything that
 # determines the binary: source sha, compiler identity (--version, which also
 # names the target), compiler path, flags (including the baked-in shell path)
@@ -820,9 +937,7 @@ sub install_cached_windows_helper {
         $identity = <$version> // '';
         close($version) or die "compiler identity query failed";
         $identity =~ /clang/i or die "compiler identity is not clang: $identity";
-        open(my $memo, '>', "$identity_file.new.$$") or die "cannot record compiler identity";
-        print {$memo} $identity;
-        close($memo) && rename("$identity_file.new.$$", $identity_file) or die "cannot record compiler identity";
+        publish_compiler_identity_memo($identity_file, $identity);
     }
     push @flags, windows_target_compile_flags($style, $identity);
     my $key = Digest::SHA::sha256_hex(join("\0", 'simple-session-helper-cache-v1', $helper_source_sha,
@@ -1470,6 +1585,7 @@ sub receipt {
         "observer_backend=$observer_backend\nobserver_path=" . ($observer_path // '') . "\n" .
         "observer_sha256=" . ($observer_sha // '') . "\n" .
         "observer_source_sha256=" . ($observer_source_sha // '') . "\n" .
+        "observer_policy_header_sha256=" . ($observer_policy_sha // '') . "\n" .
         "observer_starts=$observer_starts\nobserver_errors=$observer_errors\n" .
         "observer_restarts=" . ($observer_starts ? $observer_starts - 1 : 0) . "\n" .
         "observer_last_pid=$observer_last_pid\n" .

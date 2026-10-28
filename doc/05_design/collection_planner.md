@@ -1,6 +1,24 @@
 <!-- codex-design -->
 # Collection planner detail design
 
+## 2026-10-27 shared container selection and resource contract
+
+Apply the [common capability contract](../04_architecture/compiler/collection_backend_capabilities.md)
+when adding a DataFrame index/backend/layout candidate. Keep operation plans
+(fusion/nested/hash/merge/direct index), storage algorithms, column layouts,
+native/pure-Simple providers and `.sprof` feedback separate. Admit semantics,
+operations, lifetime, progress, target and old+new+retired memory before cost.
+Layout conversion preserves dtype/masks/strides/row and entry identity; pinned
+or unsupported transitions retain original storage or return the explicit
+request error. Profile hints cannot provide these proofs.
+
+Reuse the async design's ResourceFactory/AsyncRef for shared index production,
+IndexRefFactory for checked immutable views, and RecyclePool for mutable
+scratch. Existing sync/async DataFrame families remain compatible. No shared
+mutable column is justified merely by an async type name. New behavior starts
+with CBC-01–12 [focused TDD](../03_plan/sys_test/collection_backend_capabilities.md)
+and existing CP/PSC production fixtures; this supplement adds no code or PASS.
+
 ## 2026-10-03 registry and typed-column implementation increment
 
 The content-only registry loader now parses a closed SDN schema, retains the

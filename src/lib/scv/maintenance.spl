@@ -7,7 +7,10 @@ use std.common.compress.gzip.{gzip_decompress}
 use std.common.string_core.{char_from_code}
 use std.scv.core.{scv_objects_dir, scv_object_path, scv_chunk_path, scv_object_index_path, scv_quarantine_dir, scv_state_private, scv_line_set_contains, scv_worktree_path_safe, scv_parser_index_path}
 use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_workspace_parent_error, scv_commit_tree, scv_object_field, scv_content_id_for_file, scv_create_parent_dir, scv_i64_bytes_to_u8, scv_hash_text, scv_write_text, scv_write_file_object_from_bytes, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op}
+use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_content_id}
+use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 use std.scv.integrity.{scv_current_tree_content}
+use std.scv.structural_pack_v1.{scv_syntax_pack_closure_v1}
 use std.nogc_sync_mut.io.file_ops.{file_rename, file_modified_time}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
@@ -77,11 +80,16 @@ fn scv_export_tree(root: text, out_dir: text) -> text:
             return "ERROR missing chunk: {chunk}\n"
         if file_size(src) != size:
             return "ERROR chunk size mismatch: {chunk}\n"
-        if scv_content_id_for_file(src) != chunk:
+        val buffer = scv_file_buffer_read(src)
+        val actual = match scv_file_buffer_content_id(buffer):
+            Ok(id): id
+            Err(error): return error
+        if actual != chunk:
             return "ERROR corrupt chunk: {chunk}\n"
         val dst = "{out_dir}/{rel}"
         scv_create_parent_dir(dst)
-        file_write_bytes(dst, file_read_bytes(src) ?? [])
+        if not atomic_write_bytes(dst, buffer.bytes):
+            return "ERROR cannot export file: {rel}\n"
         exported = exported + 1
     "exported {exported}\n"
 
@@ -119,12 +127,13 @@ fn scv_export_manifest(root: text, manifest_path: text) -> text:
             return "ERROR missing chunk: {chunk}\n"
         if file_size(chunk_path) != size:
             return "ERROR chunk size mismatch: {chunk}\n"
-        if scv_content_id_for_file(chunk_path) != chunk:
+        if scv_content_id_for_file(chunk_path) != Ok(chunk):
             return "ERROR corrupt chunk: {chunk}\n"
         manifest_rows.push("file|{parts[0]}|{chunk}|{parts[3]}\n")
     val manifest = manifest_rows.join("")
     scv_create_parent_dir(manifest_path)
-    scv_write_text(manifest_path, manifest)
+    if not scv_write_text(manifest_path, manifest):
+        return "ERROR cannot publish export manifest\n"
     "export-manifest {manifest_path}\n"
 
 fn scv_manifest_rel_safe(rel: text) -> bool:
@@ -138,14 +147,15 @@ fn scv_import_manifest_file(root: text, source_dir: text, rel: text, chunk: text
         return ("ERROR missing source file: {rel}\n", lines, 0)
     if "{file_size(src)}" != size_text:
         return ("ERROR size mismatch: {rel}\n", lines, 0)
-    if scv_content_id_for_file(src) != chunk:
+    val buffer = scv_file_buffer_read(src)
+    val actual = match scv_file_buffer_content_id(buffer):
+        Ok(id): id
+        Err(error): return (error, lines, 0)
+    if actual != chunk:
         return ("ERROR content mismatch: {rel}\n", lines, 0)
-    val chunk_path = scv_chunk_path(root, chunk)
-    if not file_exists(chunk_path):
-        file_write_bytes(chunk_path, file_read_bytes(src) ?? [])
-    val payload = "path: {rel}\nchunk: {chunk}\nsize: {size_text}\nmtime: 0\n"
-    val file_id = scv_hash_text("file", payload)
-    scv_write_text(scv_object_path(root, "files", file_id), payload)
+    val (file_id, stored_chunk) = match scv_write_file_object_from_bytes(root, rel, buffer.bytes, 0):
+        Ok(ids): ids
+        Err(error): return (error, lines, 0)
     var next_lines = lines
     next_lines.push("{rel}|{file_id}|{chunk}|{size_text}|0")
     ("", next_lines, 1)
@@ -188,7 +198,8 @@ fn scv_import_manifest(root: text, manifest_path: text, source_dir: text) -> tex
     val op = scv_write_operation(root, scv_current_op(root), commit, "import-manifest")
     if op.starts_with("ERROR"):
         return op
-    scv_write_text("{root}/.scv/meta/status_index.sdn", file_read(scv_object_path(root, "trees", tree)))
+    if not scv_write_text("{root}/.scv/meta/status_index.sdn", file_read(scv_object_path(root, "trees", tree))):
+        return "ERROR cannot publish imported status index\n"
     "import-manifest files={imported} commit={commit} op={op}\n"
 
 fn scv_object_id_from_path(path: text) -> text:
@@ -241,6 +252,8 @@ fn scv_add_reachable_from_file_object(root: text, file_id: text, reachable: text
             val chunk = trimmed[6:].trim()
             if chunk != "" and not scv_line_set_contains(out, chunk):
                 out = out + chunk + "\n"
+        elif trimmed.starts_with("structure:"):
+            out = scv_add_reachable_syntax_node(root, trimmed[10:].trim(), out)
         elif trimmed.contains("|"):
             val parts = trimmed.split("|")
             if parts.len() >= 1:
@@ -296,6 +309,10 @@ fn scv_add_reachable_syntax_node(root: text, node_id: text, reachable: text) -> 
         return out
     for line in file_read(path).split("\n"):
         val trimmed = line.trim()
+        if trimmed.starts_with("payload:"):
+            val payload = trimmed[8:].trim()
+            if payload.starts_with("sha256_") and not scv_line_set_contains(out, payload):
+                out = out + payload + "\n"
         if not trimmed.starts_with("children:"):
             continue
         val children = trimmed[9:].trim()
@@ -361,6 +378,9 @@ fn scv_reachable_object_ids(root: text) -> text:
                     out = scv_add_reachable_from_view_content(root, file_read(view_path), out)
     scv_add_reachable_from_parser_index(root, out)
 
+fn scv_reachable_object_ids_checked(root: text) -> Result<text, text>:
+    scv_syntax_pack_closure_v1(root, scv_reachable_object_ids(root))
+
 fn scv_count_unreachable_kind(root: text, kind: text, reachable: text) -> i64:
     val dir = "{scv_objects_dir(root)}/{kind}"
     if not file_exists(dir):
@@ -386,7 +406,9 @@ fn scv_prune_unreachable_kind(root: text, kind: text, reachable: text) -> i64:
 fn scv_gc_dry_run(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR repository not initialized\n"
-    val reachable = scv_reachable_object_ids(root)
+    val reachable = match scv_reachable_object_ids_checked(root):
+        Ok(value): value
+        Err(error): return error
     var out = ""
     out = out + "unreachable_chunks={scv_count_unreachable_kind(root, \"chunks\", reachable)}\n"
     out = out + "unreachable_files={scv_count_unreachable_kind(root, \"files\", reachable)}\n"
@@ -397,7 +419,9 @@ fn scv_gc_dry_run(root: text) -> text:
 fn scv_gc_prune(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR repository not initialized\n"
-    val reachable = scv_reachable_object_ids(root)
+    val reachable = match scv_reachable_object_ids_checked(root):
+        Ok(value): value
+        Err(error): return error
     var out = ""
     out = out + "pruned_chunks={scv_prune_unreachable_kind(root, \"chunks\", reachable)}\n"
     out = out + "pruned_files={scv_prune_unreachable_kind(root, \"files\", reachable)}\n"
@@ -560,7 +584,7 @@ fn scv_gc_add_root_line(root: text, reachable: text, id: text) -> text:
         out = out + id + "\n"
     out
 
-fn scv_gc_roots_reachable(root: text) -> text:
+fn scv_gc_roots_reachable_checked(root: text) -> Result<text, text>:
     var reachable = scv_reachable_object_ids(root)
     # pack delta base ids stay pinned
     for bid in scv_pack_reachable_base_ids(root).split("\n"):
@@ -615,7 +639,7 @@ fn scv_gc_roots_reachable(root: text) -> text:
                     val p = part.trim()
                     if p.starts_with("commit_"):
                         reachable = scv_gc_add_root_line(root, reachable, p)
-    reachable
+    scv_syntax_pack_closure_v1(root, reachable)
 
 fn scv_gc_kinds() -> [text]:
     ["chunks", "files", "trees", "commits", "syntax"]
@@ -664,11 +688,12 @@ fn scv_gc_quarantine_move(root: text, qdir: text, kind: text, path: text) -> boo
 
 # Move unreachable loose objects past the retention age into quarantine.
 # Returns (moved, kept_young, quarantine_dir).
-fn scv_gc_quarantine(root: text, reachable: text, min_age_days: i64, now_ms: i64) -> (i64, i64, text):
+fn scv_gc_quarantine(root: text, reachable: text, min_age_days: i64, now_ms: i64) -> Result<(i64, i64, text), text>:
+    val checked = scv_syntax_pack_closure_v1(root, reachable)?
     val qdir = "{scv_quarantine_dir(root)}/{scv_gc_civil_date(now_ms)}"
     var moved = 0
     var young = 0
-    for row in scv_gc_unreachable_rows(root, reachable):
+    for row in scv_gc_unreachable_rows(root, checked):
         val parts = row.split("|")
         val kind = parts[0]
         val path = parts[1]
@@ -683,7 +708,7 @@ fn scv_gc_quarantine(root: text, reachable: text, min_age_days: i64, now_ms: i64
         for path in dir_walk(pack_dir):
             if not path.ends_with(".pack.gz"):
                 continue
-            if scv_gc_pack_any_reachable(path, reachable):
+            if scv_gc_pack_any_reachable(path, checked):
                 continue
             if scv_gc_object_age_days(path, now_ms) > min_age_days:
                 val pack_id = scv_pack_id_from_path_m(path)
@@ -694,7 +719,7 @@ fn scv_gc_quarantine(root: text, reachable: text, min_age_days: i64, now_ms: i64
                     scv_gc_quarantine_move(root, qdir, "packs", manifest_path)
             else:
                 young = young + 1
-    (moved, young, qdir)
+    Ok((moved, young, qdir))
 
 # True when any entry (full or delta, incl. delta base) in the pack is reachable.
 fn scv_gc_pack_any_reachable(path: text, reachable: text) -> bool:
@@ -740,7 +765,9 @@ fn scv_gc(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR repository not initialized\n"
     # Build reachable set including pack base ids
-    var reachable = scv_reachable_object_ids(root)
+    var reachable = match scv_gc_roots_reachable_checked(root):
+        Ok(value): value
+        Err(error): return error
     # Add base ids from packs to pin them
     val base_ids = scv_pack_reachable_base_ids(root)
     for bid in base_ids.split("\n"):
