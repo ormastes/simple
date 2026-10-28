@@ -9,7 +9,8 @@
 use std.spec.step
 
 use std.spec
-use app.test_daemon.light_protocol.{unrun_reason, unrun_verdict_line, ran_verdict_line, is_unrun_failure, process_failure_verdict_line, has_verdict_line, timeout_verdict_line, no_response_verdict_line}
+use app.test_daemon.light_protocol.{unrun_reason, unrun_verdict_line, ran_verdict_line, is_unrun_failure, process_failure_verdict_line, aggregate_spec_file_verdict_line, has_verdict_line, timeout_verdict_line, no_response_verdict_line}
+use std.test_runner.test_executor_parsing.{make_result_from_output}
 
 # @req REQ-SSPEC-APP
 describe "every spec file a test run touches reports a machine-readable verdict":
@@ -101,6 +102,29 @@ describe "every spec file a test run touches reports a machine-readable verdict"
         step("Missing structured evidence is an unrun infrastructure failure")
         assert_true(is_unrun_failure("test-runner: structured BDD evidence unavailable (Process exited with code 7)"))
 
+        step("A legacy executor that refuses a synthetic pass is also an unrun failure")
+        val fallback = make_result_from_output("test/zero_spec.spl", "", "", 0, 10, 60)
+        expect(fallback.error).to_equal("no parseable pass/fail summary in test output; refusing synthetic pass")
+        expect(unrun_reason(fallback.error)).to_equal("bdd-evidence-unavailable")
+        assert_true(is_unrun_failure(fallback.error))
+        val no_summary_line = aggregate_spec_file_verdict_line(fallback.path,
+            fallback.passed, fallback.failed, fallback.in_development,
+            fallback.error, fallback.degraded_reason, fallback.timed_out,
+            fallback.duration_ms)
+        assert_contains(no_summary_line, "executed=0")
+        assert_contains(no_summary_line, "dropped=1")
+        assert_contains(no_summary_line, "reason=bdd-evidence-unavailable")
+        val embedded = "assertion failed: no parseable pass/fail summary in test output; refusing synthetic pass"
+        assert_false(is_unrun_failure(embedded))
+        val ordinary_failure_line = aggregate_spec_file_verdict_line("test/ordinary_failure_spec.spl",
+            0, 1, 0, embedded, "", false, 10)
+        assert_contains(ordinary_failure_line, "executed=1")
+        assert_contains(ordinary_failure_line, "failed=1")
+        assert_contains(ordinary_failure_line, "dropped=0")
+        expect(ordinary_failure_line.contains("unrun=1")).to_equal(false)
+        assert_false(is_unrun_failure("test-runner: authenticated BDD assertion failure: " + fallback.error))
+        assert_false(is_unrun_failure("unrelated executor diagnostic without a result summary"))
+
         step("A failed assertion is not")
         assert_false(is_unrun_failure("expected 0 to equal 999"))
         assert_false(is_unrun_failure("test-runner: authenticated BDD assertion failure: Cannot resolve module: bad.matcher (process exit 1)"))
@@ -114,6 +138,29 @@ describe "every spec file a test run touches reports a machine-readable verdict"
         assert_contains(process_failed, "failed=0")
         assert_contains(process_failed, "dropped=0")
         assert_contains(process_failed, "process_error=1")
+
+    it "keeps the aggregate helper's timeout, post-pass, and ordinary pass branches distinct":
+        val timed = aggregate_spec_file_verdict_line("test/timeout_spec.spl",
+            0, 1, 0, "", "", true, 600000)
+        assert_contains(timed, "timeout=1")
+        assert_contains(timed, "executed=1")
+        assert_contains(timed, "failed=1")
+
+        val post_pass = aggregate_spec_file_verdict_line("test/post_pass_spec.spl",
+            8, 0, 0, "test-runner: BDD process failure after authenticated pass (exit 1)", "", false, 10)
+        assert_contains(post_pass, "outcome=ERROR")
+        assert_contains(post_pass, "executed=8")
+        assert_contains(post_pass, "passed=8")
+        assert_contains(post_pass, "failed=0")
+        assert_contains(post_pass, "process_error=1")
+
+        val passed = aggregate_spec_file_verdict_line("test/pass_spec.spl",
+            3, 0, 0, "", "", false, 10)
+        assert_contains(passed, "outcome=OK")
+        assert_contains(passed, "executed=3")
+        assert_contains(passed, "passed=3")
+        assert_contains(passed, "failed=0")
+        assert_contains(passed, "dropped=0")
 
     # @manual_section Specs that DID run report their real counts
     it "reports the executed counts for a spec the aggregating lane actually ran":
