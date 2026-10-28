@@ -1,0 +1,183 @@
+# @req REQ-ASYNC-REF-001
+# The owner explicitly drains AsyncRef wake records into SimpleRing V1.
+
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64}
+use std.nogc_async_mut.async.async_ref.{
+    AsyncRefError, AsyncWakeI64, AsyncWakeScanI64
+}
+use std.nogc_async_mut.async_ring.async_ref.{async_ref_deliver_wake_i64}
+use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError, RingCancelOutcome}
+use std.nogc_async_mut.async_ring.software_provider.{SoftwareRingProvider}
+use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult}
+
+fn _lockless_test_map(keys: i64, descriptors: i64, outcomes: i64, waiters: i64) -> LocklessMapI64:
+    match LocklessMapI64.create(keys, descriptors, outcomes, waiters):
+        case Ok(value): value
+        case Err(error): fail("lockless test map construction failed: {error}")
+
+fn _close_lockless_test_map(map: LocklessMapI64):
+    unsafe(capabilities: [ffi]): map.close_quiescent()
+
+fn _lockless_expect_wake(scan: AsyncWakeScanI64) -> AsyncWakeI64:
+    match scan:
+        case AsyncWakeScanI64.Wake(value): value
+        case AsyncWakeScanI64.More(_): fail("wake scan unexpectedly yielded without a wake")
+        case AsyncWakeScanI64.Done: fail("pending wake was not found")
+        case AsyncWakeScanI64.Invalid: fail("wake cursor contained an invalid waiter handle")
+
+describe "AsyncRefI64 SimpleRing wake adapter":
+    it "returns the caller token while pending and delivers a real terminal ring completion":
+        unsafe(capabilities: [ffi]):
+            val map = _lockless_test_map(4, 4, 4, 2)
+            val reference = map.request(7, 700).unwrap()
+            val ring = match SimpleRing<i64, i64>.create(871u64, 881u64, 1):
+                case Ok(value): value
+                case Err(error): fail("ring creation failed: {error}")
+            val provider = match SoftwareRingProvider<i64, i64>.create(891u64, 1):
+                case Ok(value): value
+                case Err(error): fail("provider creation failed: {error}")
+            val reservation = match ring.reserve(881u64, 8701u64):
+                case Ok(value): value
+                case Err(error): fail("ring reservation failed: {error}")
+            match ring.commit(881u64, reservation, 1):
+                case Ok(_): ()
+                case Err(error): fail("ring commit failed: {error}")
+            val submission = match provider.take_one(ring):
+                case Ok(Some(value)): value
+                case Ok(nil): fail("ring submission missing")
+                case Err(error): fail("ring submission failed: {error}")
+            val subscription = reference.subscribe(submission.token).unwrap()
+            val duplicate_subscription = reference.subscribe(submission.token).unwrap()
+            match subscription.poll():
+                case TaskPollResult.Pending(token):
+                    expect(token.ring_id).to_equal(submission.token.ring_id)
+                    expect(token.slot).to_equal(submission.token.slot)
+                    expect(token.generation.value).to_equal(submission.token.generation.value)
+                case TaskPollResult.Ready(_): fail("newly subscribed reference was already terminal")
+            match duplicate_subscription.poll():
+                case TaskPollResult.Pending(token):
+                    expect(token.slot).to_equal(submission.token.slot)
+                case _: fail("duplicate token did not resolve to the existing interest")
+
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.complete(7001).unwrap()).to_equal(true)
+            val cursor = reference.wake_cursor().unwrap()
+            val wake = _lockless_expect_wake(cursor.next_pending(8))
+            val next = match async_ref_deliver_wake_i64(ring, wake):
+                case Ok(value): value
+                case Err(error): fail("ring wake delivery failed: {error}")
+            match ring.take_completion(881u64):
+                case Ok(Some(completion)):
+                    expect(completion.token.slot).to_equal(submission.token.slot)
+                    expect(completion.value.unwrap()).to_equal(7001)
+                case Ok(nil): fail("owner did not observe the delivered completion")
+                case Err(error): fail("ring completion read failed: {error}")
+            match next.next_pending(8):
+                case AsyncWakeScanI64.Done: ()
+                case _: fail("acknowledged wake remained pending")
+            match subscription.poll():
+                case TaskPollResult.Ready(Ok(value)): expect(value).to_equal(7001)
+                case TaskPollResult.Ready(Err(error)): fail("delivered result failed: {error}")
+                case TaskPollResult.Pending(_): fail("terminal reference returned Pending after publication")
+            _close_lockless_test_map(map)
+
+    it "keeps a wake retryable when owner delivery fails before ring admission":
+        unsafe(capabilities: [ffi]):
+            val map = _lockless_test_map(2, 2, 2, 1)
+            val reference = map.request(9, 900).unwrap()
+            val ring = match SimpleRing<i64, i64>.create(872u64, 882u64, 1):
+                case Ok(value): value
+                case Err(error): fail("ring creation failed: {error}")
+            val provider = match SoftwareRingProvider<i64, i64>.create(892u64, 1):
+                case Ok(value): value
+                case Err(error): fail("provider creation failed: {error}")
+            val reservation = ring.reserve(882u64, 8702u64).unwrap()
+            ring.commit(882u64, reservation, 2).unwrap()
+            val subscription = reference.subscribe(reservation.token).unwrap()
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.complete(9001).unwrap()).to_equal(true)
+            val wake = _lockless_expect_wake(reference.wake_cursor().unwrap().next_pending(1))
+            match async_ref_deliver_wake_i64(ring, wake):
+                case Err(SimpleRingError.NotInFlight): ()
+                case Err(error): fail("wrong pre-admission delivery error: {error}")
+                case Ok(_): fail("wake was acknowledged before ring became in-flight")
+            val submission = match provider.take_one(ring):
+                case Ok(Some(value)): value
+                case Ok(nil): fail("ring submission missing")
+                case Err(error): fail("ring submission failed: {error}")
+            val retried = match async_ref_deliver_wake_i64(ring, wake):
+                case Ok(value): value
+                case Err(error): fail("same wake could not be retried: {error}")
+            match ring.take_completion(882u64):
+                case Ok(Some(completion)): expect(completion.value.unwrap()).to_equal(9001)
+                case Ok(nil): fail("retried wake did not publish a completion")
+                case Err(error): fail("ring completion read failed: {error}")
+            match retried.next_pending(1):
+                case AsyncWakeScanI64.Done: ()
+                case _: fail("successfully delivered wake remained pending")
+            match subscription.poll():
+                case TaskPollResult.Ready(_): ()
+                case TaskPollResult.Pending(_): fail("completed subscription remained pending")
+            expect(submission.token.generation.value).to_equal(reservation.token.generation.value)
+            _close_lockless_test_map(map)
+
+    it "keeps cancellation local to one waiter while another waiter completes":
+        unsafe(capabilities: [ffi]):
+            val map = _lockless_test_map(2, 2, 2, 2)
+            val reference = map.request(10, 1000).unwrap()
+            val ring = match SimpleRing<i64, i64>.create(873u64, 883u64, 2):
+                case Ok(value): value
+                case Err(error): fail("ring creation failed: {error}")
+            val provider = match SoftwareRingProvider<i64, i64>.create(893u64, 2):
+                case Ok(value): value
+                case Err(error): fail("provider creation failed: {error}")
+            val first = ring.reserve(883u64, 8703u64).unwrap()
+            val second = ring.reserve(883u64, 8704u64).unwrap()
+            ring.commit(883u64, first, 3).unwrap()
+            ring.commit(883u64, second, 4).unwrap()
+            val first_submission = provider.take_one(ring).unwrap().unwrap()
+            val second_submission = provider.take_one(ring).unwrap().unwrap()
+            val cancelled = reference.subscribe(first_submission.token).unwrap()
+            val retained = reference.subscribe(second_submission.token).unwrap()
+            expect(cancelled.cancel_interest().unwrap()).to_equal(true)
+            match ring.cancel(883u64, first_submission.token):
+                case RingCancelOutcome.ProviderCancelRequested(token):
+                    expect(token.slot).to_equal(first_submission.token.slot)
+                case _: fail("ring owner did not accept cancellation of abandoned interest")
+            provider.complete_cancelled(ring, first_submission, "AsyncRef interest cancelled").unwrap()
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.complete(1001).unwrap()).to_equal(true)
+            var cursor = reference.wake_cursor().unwrap()
+            var wakes = 0
+            while true:
+                match cursor.next_pending(8):
+                    case AsyncWakeScanI64.Wake(wake):
+                        expect(wake.token.slot).to_equal(second_submission.token.slot)
+                        cursor = async_ref_deliver_wake_i64(ring, wake).unwrap()
+                        wakes = wakes + 1
+                    case AsyncWakeScanI64.More(next_cursor): cursor = next_cursor
+                    case AsyncWakeScanI64.Done: break
+                    case AsyncWakeScanI64.Invalid: fail("wake cursor contained an invalid waiter handle")
+            expect(wakes).to_equal(1)
+            match ring.take_completion_retained(883u64):
+                case Ok(Some(completion)):
+                    expect(completion.token.slot).to_equal(first_submission.token.slot)
+                    expect(completion.error).to_equal("AsyncRef interest cancelled")
+                case Ok(nil): fail("cancelled ring reservation was not retired")
+                case Err(error): fail("cancelled ring completion read failed: {error}")
+            match ring.take_completion_retained(883u64):
+                case Ok(Some(completion)): expect(completion.token.slot).to_equal(second_submission.token.slot)
+                case Ok(nil): fail("remaining subscriber was not woken")
+                case Err(error): fail("ring completion read failed: {error}")
+            match retained.poll():
+                case TaskPollResult.Ready(_): ()
+                case TaskPollResult.Pending(_): fail("remaining completed subscriber stayed pending")
+            expect(cancelled.cancel_interest().unwrap()).to_equal(false)
+            val replayed_cancel = reference.subscribe(first_submission.token).unwrap()
+            match replayed_cancel.poll():
+                case TaskPollResult.Ready(Err(AsyncRefError.CancelledInterest)): ()
+                case _: fail("terminal resubscription forgot the prior canceled interest")
+            ring.release_retained_completion(883u64, first_submission.token).unwrap()
+            ring.release_retained_completion(883u64, second_submission.token).unwrap()
+            _close_lockless_test_map(map)

@@ -642,13 +642,18 @@ impl MonomorphizationPass:
                     if alias_owner == "" or (physical_owner[spec_owner] ?? "") != alias_owner:
                         continue
                 val spec: HirFunction = self.specialized_functions[m]
+                val placed_name = if spec.is_extern:
+                    self.template_signature_v1(self.spec_template[m]).name
+                else: m
                 funcs[spec.symbol] = spec
-                if publish_placements:
+                # An extern instance is a typed declaration, not an emitted body.
+                # Attach its signature below without certifying a body placement.
+                if publish_placements and not spec.is_extern:
                     # Provenance comes from the actual fixed-point placement,
                     # never a mangled-name pattern or a SymbolId range. Hash
                     # each completed specialization once, then record every
                     # logical alias that actually receives that exact body.
-                    if self.spec_symbols[m] != spec.symbol.id or spec.name != m or self.template_module[self.spec_template[m]] != spec_owner:
+                    if self.spec_symbols[m] != spec.symbol.id or spec.name != placed_name or self.template_module[self.spec_template[m]] != spec_owner:
                         placement_valid = false
                     if not placement_digests.has(m):
                         placement_digests[m] = mono_complete_function_digest_v1(spec)
@@ -662,7 +667,7 @@ impl MonomorphizationPass:
                 # MIR uses the owning table to resolve callable identity. A
                 # specialization must have a row just like a parsed function.
                 if val budget = self.invocation_budget:
-                    if spec == nil or spec.symbol == nil or self.spec_symbols[m] != spec.symbol.id or spec.name != m or self.template_module[self.spec_template[m]] != spec_owner:
+                    if spec == nil or spec.symbol == nil or self.spec_symbols[m] != spec.symbol.id or spec.name != placed_name or self.template_module[self.spec_template[m]] != spec_owner:
                         budget.fail_v1("E-MONO-SIGNATURE: specialization placement provenance differs")
                         return {}
                     match self.attach_specialized_signature_v1(name, out.symbols, spec):
@@ -1518,6 +1523,8 @@ impl MonomorphizationPass:
             val caller_signature: HirType = transported[0]
             match caller_signature.kind:
                 case HirTypeKind.Function(_, ret, _):
+                    if specialized.is_extern:
+                        self.sym_names[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = spec_name
                     self.fn_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = ret
                     if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
                         self.archive_caller_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = ret
@@ -1661,14 +1668,15 @@ impl MonomorphizationPass:
             var specialized: HirFunction = specialize_function_with_types(template, local_type_args, self.invocation_budget != nil, self.invocation_budget)
             mono_instance_profile_v1[mangled] = self.invocation_clock_v1() - t_spec
             if specialized == nil or self.invocation_failed_v1(): return -1
-            specialized.name = mangled
+            specialized.name = if template.is_extern: template.name else: mangled
             specialized.symbol = SymbolId.new(sym)
             self.specialized_functions[mangled] = specialized
             signature = mono_template_signature_v1(specialized)
         # A specialization is a concrete callee from here on: its return
         # type feeds the inference of an ENCLOSING generic call (`wrap(wrap(v))`).
         self.fn_returns[mono_sym_key(spec_mod, sym)] = signature.return_type
-        self.sym_names[mono_sym_key(spec_mod, sym)] = signature.name
+        # Keep the instance lookup identity separate from an extern's C name.
+        self.sym_names[mono_sym_key(spec_mod, sym)] = mangled
         self.spec_template[mangled] = func_name
         self.spec_module[mangled] = spec_mod
         self.spec_queue = self.spec_queue.push(mangled)
@@ -1702,6 +1710,8 @@ impl MonomorphizationPass:
         # owned by the actual template declaration, shared by both body modes.
         val signature = self.template_signature_v1(template_name)
         val owner: text = self.template_module[template_name]
+        if signature.is_extern:
+            return signature.name
         if signature.global_linkage or owner == self.current_module:
             return spec_name
         # The provider emits under its canonical logical module, so a
@@ -2129,14 +2139,20 @@ impl MonomorphizationPass:
             return ""
         match callee.kind:
             case HirExprKind.Var(sym_id):
+                val callee_symbol: SymbolId = sym_id
                 val name = self.sym_name(sym_id)
+                if self.spec_symbols.has(name) and self.spec_symbols[name] == callee_symbol.id:
+                    return ""
                 if self.has_template_v1(name):
                     if self.callee_local_plain(sym_id):
                         return ""
                     return name
                 ""
             case HirExprKind.NamedVar(sym_id, name):
+                val callee_symbol: SymbolId = sym_id
                 val by_sym = self.sym_name(sym_id)
+                if self.spec_symbols.has(by_sym) and self.spec_symbols[by_sym] == callee_symbol.id:
+                    return ""
                 if self.has_template_v1(by_sym):
                     if self.callee_local_plain(sym_id):
                         return ""

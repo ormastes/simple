@@ -3,7 +3,8 @@
 # Fetch → tmpfile → $EDITOR → diff → upload
 # Supports both storage (native) and markdown (lossy) edit modes
 
-use std.file_system.file_ops.{file_read_text, file_write_text, file_exists, file_delete}
+use std.io_runtime.{read_file_text_result}
+export use app.devhub.editor_file.{editor_temp_parent, prepare_editor_file, cleanup_editor_file}
 use std.io.process_ops.{process_run}
 use app.devhub.config.{ItfConfig, resolve_editor}
 use app.devhub.adapter_confluence.{confluence_get_page, confluence_update_page, PageContent}
@@ -42,27 +43,39 @@ fn edit_page(config: ItfConfig, page_id: text, mode: text, message: text) -> i64
         file_ext = ".html"
 
     # 3. Write to temp file
-    val tmp_path = "/tmp/itf_edit_{page_id}{file_ext}"
-    file_write_text(tmp_path, edit_text)
+    val prepared: (text, text) = match prepare_editor_file(editor_temp_parent(), edit_text, file_ext):
+        case Ok(value): value
+        case Err(reason):
+            print_error(reason)
+            return 1
+    val tmp_directory = prepared.0
+    val tmp_path = prepared.1
 
     # 4. Open editor
     val editor = resolve_editor(config)
     val (_, _, editor_code) = process_run(editor, [tmp_path])
     if editor_code != 0:
+        if not cleanup_editor_file(tmp_directory):
+            print_error("could not remove private editor directory")
         print_error("editor exited with code {editor_code}")
         return 2
 
     # 5. Read edited content
-    val edited = file_read_text(tmp_path)
-    if edited == nil:
-        print_error("could not read edited file")
-        return 1
+    val edited = match read_file_text_result(tmp_path):
+        case Ok(value): value
+        case Err(_):
+            if not cleanup_editor_file(tmp_directory):
+                print_error("could not remove private editor directory")
+            print_error("could not read edited file")
+            return 1
 
     # 6. Check if changed
     if edited == edit_text:
         print "No changes made."
         # Clean up temp file
-        file_delete(tmp_path)
+        if not cleanup_editor_file(tmp_directory):
+            print_error("could not remove private editor directory")
+            return 1
         return 0
 
     # 7. Convert back if needed
@@ -72,12 +85,15 @@ fn edit_page(config: ItfConfig, page_id: text, mode: text, message: text) -> i64
     else:
         new_storage = edited
 
+    # The edited text is now in memory. Release the private local copy before
+    # any remote mutation, and do not report success when cleanup fails.
+    if not cleanup_editor_file(tmp_directory):
+        print_error("could not remove private editor directory")
+        return 1
+
     # 8. Upload with version tracking
     val commit_msg = if message != "": message else: "Edited via itf CLI"
     val (update_ok, updated_ref, update_err) = confluence_update_page(config, page_id, title, new_storage, version, commit_msg)
-
-    # Clean up temp file
-    file_delete(tmp_path)
 
     if not update_ok:
         print_error("failed to update page: {update_err}")

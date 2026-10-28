@@ -2820,6 +2820,12 @@ impl MirLowering:
                                 match self.rti.bind(term, self.symbols):
                                     case Ok(hir_type):
                                         self.rti_last_error = ""
+                                        if (_sffi_env_get("SIMPLE_RTI_DIAGNOSTICS") ?? "") == "1":
+                                            val resolved_key = rti_term_canonical_text(term)
+                                            val bound_key = result_err_field_type_key(hir_type, self.symbols)
+                                            val resolved_hint = if resolved_key.len() > 200: resolved_key.substring(0, 200) + "..." else: resolved_key
+                                            val bound_hint = if bound_key.len() > 200: bound_key.substring(0, 200) + "..." else: bound_key
+                                            self.rti_last_error = "diagnostic resolved={resolved_hint}; bound_before_tuple={bound_hint}"
                                         return (true, Some(hir_type))
                                     case Err(err):
                                         self.rti_last_error = err.message
@@ -2965,6 +2971,9 @@ impl MirLowering:
         Function-field MethodCalls can have no expression-type answer while
         their checked call result already carries its declaration. Never
         reevaluate the subject or infer a payload from its physical word."""
+        # This context belongs to this subject, not an earlier call lowered by
+        # the same owner. Only diagnostics consume rti_last_error.
+        self.rti_last_error = ""
         val expression_type = self.enum_match_expr_type(scrutinee)
         if lowered_local_id < 0: return expression_type
         if val retained = self.find_local_hir_type(lowered_local_id):
@@ -2990,7 +2999,17 @@ impl MirLowering:
                             if declared != nil:
                                 val expression_key = result_err_field_type_key(declared, self.symbols)
                                 if expression_key == "" or expression_key != retained_key:
-                                    self.error_fatal("enum match expression and retained Result/Optional declarations conflict", Some(scrutinee.span))
+                                    # Keep the rejecting guard. Bounded semantic
+                                    # keys distinguish an erased call signature
+                                    # from a genuinely conflicting declaration;
+                                    # no source text or runtime values are read.
+                                    if (_sffi_env_get("SIMPLE_RTI_DIAGNOSTICS") ?? "") == "1":
+                                        val expression_hint = if expression_key.len() > 512: expression_key.substring(0, 512) + "..." else: expression_key
+                                        val retained_hint = if retained_key.len() > 512: retained_key.substring(0, 512) + "..." else: retained_key
+                                        val rti_context = if self.rti_last_error.len() > 512: self.rti_last_error.substring(0, 512) + "..." else: self.rti_last_error
+                                        self.error_fatal("enum match expression and retained Result/Optional declarations conflict; expression={expression_hint}; retained={retained_hint}; rti_context={rti_context}", Some(scrutinee.span))
+                                    else:
+                                        self.error_fatal("enum match expression and retained Result/Optional declarations conflict", Some(scrutinee.span))
                                     return nil
                                 return expression_type
                         return Some(retained)

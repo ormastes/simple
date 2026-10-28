@@ -3,6 +3,7 @@
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native, process_capture_unbounded_native}
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
     ProcessObservationProviderV1, ObservedProcessStartStatusV1,
@@ -39,6 +40,10 @@ extern fn rt_stderr_write(s: text)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 @unsafe(reason: "raw bounded process capture; exit_code -1 is the failure sentinel and output is contract-bounded", capabilities: [ffi])
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+@unsafe(reason: "select boxed interpreter capture or native pointer-and-length capture ABI", capabilities: [ffi])
+extern fn rt_is_interpreter_runtime() -> bool
+@unsafe(reason: "seed JIT retains the boxed process adapter even when native AOT uses the pointer-and-length ABI", capabilities: [ffi])
+extern fn rt_is_jit_runtime() -> bool
 @unsafe(reason: "raw bounded process bytes are admitted by the caller's explicit text codec", capabilities: [ffi])
 extern fn rt_process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64)
 
@@ -925,7 +930,18 @@ pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
     (sh, sh_args)
 
 fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
-    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    val tool: (text, [text]) = _resolve_posix_tool(cmd, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=The deployed P2 marshals the legacy process tuple call without its command byte length; use the existing explicit native capture ABI
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if not interpreted and not jit:
+        # Preserve the Windows CreateProcess/exit-status repair below. Its
+        # bounded provider accepts -1 for unlimited output; POSIX does not.
+        if _is_windows_platform():
+            return process_capture_bounded_native(native_command, native_arguments, 0, -1)
+        return process_capture_unbounded_native(native_command, native_arguments)
     # On Windows the C rt_process_run popen()s a POSIX single-quoted command
     # line through cmd.exe and decodes _pclose's raw code with `>> 8`, so every
     # command -- including one that cannot start -- reported exit 0
@@ -934,14 +950,21 @@ fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
     # means none and -1 means unlimited output, the same as rt_process_run.
     if _is_windows_platform():
         unsafe(capabilities: [ffi]):
-            return rt_process_run_bounded(host_path_native(rcmd), rargs, 0, -1)
+            return rt_process_run_bounded(native_command, native_arguments, 0, -1)
     unsafe(capabilities: [ffi]):
-        rt_process_run(host_path_native(rcmd), rargs)
+        rt_process_run(native_command, native_arguments)
 
 fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
-    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    val tool: (text, [text]) = _resolve_posix_tool(cmd, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=Keep the command pointer and UTF8 byte extent explicit for native process capture until the deployed P2 ABI is qualified
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if not interpreted and not jit:
+        return process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
     unsafe(capabilities: [ffi]):
-        rt_process_run_bounded(host_path_native(rcmd), rargs, timeout_ms, max_output_bytes)
+        rt_process_run_bounded(native_command, native_arguments, timeout_ms, max_output_bytes)
 
 fn _process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -1434,6 +1457,25 @@ pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_
     val (stdout, stderr, exit_code) = _process_run_bounded_raw(resolved_cmd, args, timeout_ms, max_output_bytes)
     proc_slot_release()
     (stdout, stderr, exit_code)
+
+pub fn process_run_bounded_native(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    """Native tuple compatibility entry with positive timeout/capture limits.
+
+    The ordinary interpreter-capable process API remains separate. Resolution,
+    command path conversion and process-governor slots keep their real owners.
+    """
+    if timeout_ms <= 0 or max_output_bytes <= 0:
+        return ("", "native bounded capture requires positive timeout and output limits", -1)
+    val resolved_command: text = _resolve_process_cmd(cmd + "")
+    val tool: (text, [text]) = _resolve_posix_tool(resolved_command, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    if native_command == "":
+        return ("", "native bounded capture command resolution returned empty text", -1)
+    proc_slot_acquire()
+    val result: (text, text, i64) = process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    result
 
 pub fn process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64):
     proc_slot_acquire()

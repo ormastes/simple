@@ -25,9 +25,9 @@
 # Research: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md
 
 use std.env.{env_get}
-use std.file_system.file_ops.{file_read_text, file_exists}
+use std.io.file_ops.{file_exists}
 use std.io.process_ops.{process_run}
-use std.io_runtime.{cwd}
+use std.io_runtime.{cwd, read_file_text_result}
 use app.devhub.config.{ItfConfig, load_config, parse_sdn_sections}
 use app.devhub.flags.{_extract_flag}
 
@@ -217,21 +217,41 @@ fn parse_repo_devhub_config(content: text) -> RepoDevhubConfig:
 # ============================================================================
 
 fn find_repo_root() -> text:
+    find_repo_root_from(cwd())
+
+
+fn repo_parent_directory(path: text) -> text:
+    """Return a canonical parent on Unix and native Windows; roots stop."""
+    var normalized = path.replace("\\", "/")
+    while normalized.ends_with("/") and normalized.len() > 1:
+        if normalized.len() == 3 and normalized.char_at(1) == ":":
+            return ""
+        normalized = normalized[0:normalized.len() - 1]
+    if normalized.starts_with("//"):
+        val parts = normalized.split("/")
+        # Do not probe a different share or a server root while ascending UNC.
+        if parts.len() <= 4:
+            return ""
+    val slash = normalized.rfind("/")
+    if slash < 0 or normalized == "/": return ""
+    if slash == 0: return "/"
+    if slash == 2 and normalized.char_at(1) == ":": return normalized[0:3]
+    normalized[0:slash]
+
+
+fn find_repo_root_from(start: text) -> text:
     """Walk up from the cwd looking for `.spipe/config.sdn`; "" if not found.
 
     Anchored on that file rather than `.git` because devhub's repo-scoped
     config IS that file — a worktree or a submodule checkout with a `.git`
     file but no `.spipe/` has nothing here for us to read.
     """
-    var dir = cwd()
+    var dir = start.replace("\\", "/")
     var guard: i64 = 0
     while dir != "" and guard < 64:
         if file_exists("{dir}/.spipe/config.sdn"):
             return dir
-        val slash = dir.rfind("/")
-        if slash <= 0:
-            return ""
-        dir = dir[0:slash]
+        dir = repo_parent_directory(dir)
         guard = guard + 1
     ""
 
@@ -241,10 +261,13 @@ fn load_repo_devhub_config() -> RepoDevhubConfig:
     val root = find_repo_root()
     if root == "":
         return RepoDevhubConfig.empty()
-    val content = file_read_text("{root}/.spipe/config.sdn")
-    if content == nil:
-        return RepoDevhubConfig.empty()
-    parse_repo_devhub_config(content)
+    load_repo_devhub_config_from(root)
+
+
+fn load_repo_devhub_config_from(root: text) -> RepoDevhubConfig:
+    match read_file_text_result("{root}/.spipe/config.sdn"):
+        case Ok(content): parse_repo_devhub_config(content)
+        case Err(_): RepoDevhubConfig.empty()
 
 
 fn git_remote_origin_url() -> text:

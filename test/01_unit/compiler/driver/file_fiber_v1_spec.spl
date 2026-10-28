@@ -15,6 +15,7 @@ use compiler.driver.driver_build.file_fiber_v1.{FileFiberEntryV1, file_fiber_run
 use compiler.driver.cache.source_reader_v1.{SourceReader}
 use compiler.frontend.parser_types.{ParserModule}
 use std.nogc_sync_mut.io_runtime.{file_write_exact, file_delete, file_exists, file_read, getpid}
+use std.common.task_runner.fiber_scheduler.{fiber_sched_new, fiber_sched_submit, fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_all_done, fiber_step_park}
 
 class StubReader:
     parsed: [text]
@@ -51,6 +52,81 @@ fn _entry(key: text, path: text) -> FileFiberEntryV1:
     FileFiberEntryV1(module_key: key, path: path, est_bytes: 10, content: "")
 
 describe "FileFiber v1":
+    it "terminates invalid scheduler configuration before starting file work":
+        var run = file_fiber_begin_v1([_entry("invalid", "virtual/invalid.spl")], [], 100)
+        expect(file_fiber_finished_v1(run)).to_be(true)
+        file_fiber_end_v1(run)
+        expect(run.error[0]).to_equal("fiber scheduler failed: no workers")
+        expect(fiber_sched_all_done(run.sched)).to_be(true)
+        expect(run.sched.reserved).to_equal(0)
+
+    it "surfaces scheduler reservation overflow and terminates the host loop":
+        val max_i64 = 9223372036854775807
+        val entries = [
+            FileFiberEntryV1(module_key: "a", path: "virtual/a.spl", est_bytes: max_i64, content: ""),
+            FileFiberEntryV1(module_key: "b", path: "virtual/b.spl", est_bytes: max_i64, content: "")]
+        var run = file_fiber_begin_v1(entries, [0], max_i64)
+
+        var s = fiber_sched_new([0], max_i64)
+        s = fiber_sched_submit(s, max_i64)
+        s = fiber_sched_submit(s, max_i64)
+        s = fiber_sched_admit(s)
+        val pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_park(9))
+        run.sched = s
+
+        expect(run.sched.error).to_equal("reservation total exceeds i64")
+        expect(run.reactor.in_flight).to_equal(0)
+        expect(run.parse_requests.len()).to_equal(0)
+        expect(run.async_idx.len()).to_equal(0)
+        expect(run.async_done.len()).to_equal(0)
+        expect(run.table.fill_queue.len()).to_equal(0)
+        expect(file_fiber_finished_v1(run)).to_be(true)
+
+        # If a host fill is still queued, keep the carrier state alive so the
+        # host can consume it before terminal cleanup.
+        run.table.fill_queue = ["pending"]
+        expect(file_fiber_finished_v1(run)).to_be(false)
+        file_fiber_end_v1(run)
+        expect(run.sched.reserved).to_equal(max_i64)
+        run.table.fill_queue = []
+        expect(file_fiber_finished_v1(run)).to_be(true)
+
+        run.advance(_imports)
+        file_fiber_end_v1(run)
+        expect(run.error[0]).to_equal("fiber scheduler failed: reservation total exceeds i64")
+        expect(run.error[1]).to_equal("fiber scheduler failed: reservation total exceeds i64")
+        expect(run.sched.reserved).to_equal(0)
+        expect(run.sched.pending.len()).to_equal(0)
+        expect(fiber_sched_all_done(run.sched)).to_be(true)
+
+    it "does not force overflow while a queued fill can wake a parked fiber":
+        val max_i64 = 9223372036854775807
+        val entries = [
+            FileFiberEntryV1(module_key: "a", path: "virtual/a.spl", est_bytes: max_i64, content: ""),
+            FileFiberEntryV1(module_key: "b", path: "virtual/b.spl", est_bytes: max_i64, content: "")]
+        var run = file_fiber_begin_v1(entries, [0], max_i64)
+
+        var s = fiber_sched_new([0], max_i64)
+        s = fiber_sched_submit(s, max_i64)
+        s = fiber_sched_submit(s, max_i64)
+        s = fiber_sched_admit(s)
+        s.external_inflight = 1
+        val pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_park(9))
+        run.sched = s
+        run.table.fill_queue = ["a"]
+
+        run.advance(_imports)
+        expect(run.sched.error).to_equal("")
+        expect(run.sched.reserved).to_equal(max_i64)
+        expect(run.sched.pending).to_equal([1])
+        # Drain the synthetic host work, then let the overflow terminate the run.
+        val _fills = run.take_fill_requests()
+        run.advance(_imports)
+        file_fiber_end_v1(run)
+        expect(fiber_sched_all_done(run.sched)).to_be(true)
+
     it "runs a file whose import is produced by another fiber of the run":
         val a = _src("a", "use b\nfn a(): 1\n")
         val b = _src("b", "fn b(): 2\n")

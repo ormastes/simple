@@ -67,6 +67,7 @@ static int rt_lg_read_fd(int fd, char *out, size_t cap) {
     if (n < 0) return 0;
     if (n == 0) { errno = ENODATA; return 0; }
     if ((size_t)n >= cap - 1) { errno = EOVERFLOW; return 0; }
+    if (memchr(out, 0, (size_t)n)) { errno = EPROTO; return 0; }
     out[n] = 0; return 1;
 }
 
@@ -235,10 +236,20 @@ static void rt_lg_free_strings(char **items) {
 static int rt_lg_populated(int fd, int *populated) {
     char events[256];
     if (!rt_lg_read_at(fd, "cgroup.events", events, sizeof(events))) return 0;
-    char *line = strstr(events, "populated ");
-    if (!line || (line != events && line[-1] != '\n') ||
-        (line[10] != '0' && line[10] != '1')) return 0;
-    *populated = line[10] == '1'; return 1;
+    int seen = 0, value = 1;
+    for (const char *line = events; *line;) {
+        const char *end = strchr(line, '\n');
+        if (!end) { errno = EPROTO; return 0; }
+        if ((size_t)(end - line) >= 10 && memcmp(line, "populated ", 10) == 0) {
+            if (seen || end - line != 11 || (line[10] != '0' && line[10] != '1')) {
+                errno = EPROTO; return 0;
+            }
+            seen = 1; value = line[10] == '1';
+        }
+        line = end + 1;
+    }
+    if (!seen) { errno = EPROTO; return 0; }
+    *populated = value; return 1;
 }
 
 static int rt_lg_peak(int fd, int64_t *peak) {
@@ -506,11 +517,11 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     int64_t answer[2] = {0, EINVAL};
     char program[4096], directory[4096], root[4096], stdout_path[4096], stderr_path[4096];
     char expected[65], identity[65], memory_text[64], verify[128];
-    int64_t readback = 0;
+    int64_t readback = 0, started_ms = -1;
     char **argv = NULL, **envp = NULL;
     int64_t argc = 0; int copy_error = 0;
     int parent_fd = -1, group_fd = -1, exec_fd = -1, cwd_fd = -1, out_fd = -1, err_fd = -1;
-    int created = 0, child_started = 0, pidfd = -1;
+    int created = 0, pidfd = -1;
     pid_t pid = -1;
     if (rt_linux_group.active || memory_limit < 0 || memory_limit > 1125899906842624LL ||
         timeout_ms < 0 || timeout_ms > 604800000 ||
@@ -561,6 +572,10 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     out_fd = open(stdout_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     err_fd = open(stderr_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (out_fd < 0 || err_fd < 0) { answer[1] = errno; goto done; }
+    /* Finish fallible admission before clone: a clock failure must never
+     * launch a child and then discard its cleanup authority. */
+    started_ms = rt_lg_now_ms();
+    if (started_ms < 0) { answer[1] = EIO; goto done; }
 #if defined(SYS_clone3) && defined(SYS_execveat) && defined(SYS_close_range)
     struct clone_args clone = {0};
     clone.flags = CLONE_PIDFD | CLONE_INTO_CGROUP;
@@ -583,24 +598,17 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     answer[1] = ENOTSUP; goto done;
 #endif
     if (pid < 0) { answer[1] = errno ? errno : ENOTSUP; goto done; }
-    child_started = 1;
-    if (pidfd < 0) { answer[1] = ENOTSUP; goto done; }
+    /* CLONE_PIDFD stores the allocated descriptor before clone3 returns
+     * success (clone(2)). No fallible work belongs between this successful
+     * spawn and returning the lease. Cancellation/collection failures keep
+     * these handles owned, instead of entering a blocking best-effort reap. */
     rt_linux_group = (RtLinuxGroup){.active=1, .parent_fd=parent_fd,
         .group_fd=group_fd, .pidfd=pidfd, .pid=pid,
-        .started_ms=rt_lg_now_ms(), .timeout_ms=timeout_ms};
+        .started_ms=started_ms, .timeout_ms=timeout_ms};
     memcpy(rt_linux_group.name, name, strlen(name) + 1);
-    if (rt_linux_group.started_ms < 0) {
-        answer[1] = EIO; rt_lg_kill(&rt_linux_group); rt_linux_group.active = 0;
-        goto done;
-    }
     answer[0] = 1; answer[1] = 0;
     parent_fd = group_fd = pidfd = -1; created = 0;
 done:
-    if (answer[0] == 0 && child_started) {
-        if (group_fd >= 0) (void)rt_lg_write_at(group_fd, "cgroup.kill", "1");
-        if (pidfd >= 0) close(pidfd);
-        if (pid > 0) (void)waitpid(pid, NULL, 0);
-    }
     if (out_fd >= 0) close(out_fd);
     if (err_fd >= 0) close(err_fd);
     if (exec_fd >= 0) close(exec_fd);

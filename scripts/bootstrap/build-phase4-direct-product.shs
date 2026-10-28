@@ -28,6 +28,8 @@ executor= program= producer_sha= source_root= source_authority= source_authority
 target= threads= backend= product= cuda_source_root= cuda_selection_identity=
 memory_bytes= memory_policy= reserve_bytes= estimated_group_disk_bytes= minimum_free_disk_bytes=
 authority_program= authority_receipt= authority_digest= authority_program_sha=
+authority_mode=admitted original_source_snapshot= original_source_snapshot_sha=
+hello_receipt= hello_receipt_sha=
 runtime_authority= runtime_snapshot= runtime_snapshot_sha=
 tool_authority= tool_authority_sha= timeout_seconds= output_root=
 for arg in "$@"; do
@@ -42,6 +44,11 @@ for arg in "$@"; do
     --authority-receipt=*) authority_receipt=${arg#*=} ;;
     --authority-digest=*) authority_digest=${arg#*=} ;;
     --authority-program-sha256=*) authority_program_sha=${arg#*=} ;;
+    --authority-mode=*) authority_mode=${arg#*=} ;;
+    --original-source-snapshot=*) original_source_snapshot=${arg#*=} ;;
+    --original-source-snapshot-sha256=*) original_source_snapshot_sha=${arg#*=} ;;
+    --hello-receipt=*) hello_receipt=${arg#*=} ;;
+    --hello-receipt-sha256=*) hello_receipt_sha=${arg#*=} ;;
     --target=*) target=${arg#*=} ;;
     --threads=*) threads=${arg#*=} ;;
     --memory-bytes=*) memory_bytes=${arg#*=} ;;
@@ -64,6 +71,16 @@ for arg in "$@"; do
   esac
 done
 [ "$executor" = direct ] || die 'direct executor required'
+case "$authority_mode" in
+  admitted)
+    [ -z "$original_source_snapshot$original_source_snapshot_sha$hello_receipt$hello_receipt_sha" ] \
+      || die 'provisional authority pins require --authority-mode=provisional' ;;
+  provisional)
+    for value in "$original_source_snapshot" "$original_source_snapshot_sha" "$hello_receipt" "$hello_receipt_sha"; do
+      [ -n "$value" ] || die 'provisional mode requires original source snapshot and Hello receipt pins'
+    done ;;
+  *) die 'authority mode must be admitted or provisional' ;;
+esac
 for path in "$program" "$source_root" "$source_authority" "$target" "$threads" "$memory_bytes" \
     "$memory_policy" "$reserve_bytes" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes" "$backend" \
     "$product" "$cuda_source_root" "$cuda_selection_identity" "$runtime_authority" \
@@ -75,6 +92,9 @@ for path in "$program" "$source_root" "$source_authority" "$runtime_authority" \
     "$runtime_snapshot" "$tool_authority" "$authority_program" "$authority_receipt" "$output_root"; do
   reject_symlink_components "$path"
 done
+if [ "$authority_mode" = provisional ]; then
+  for path in "$original_source_snapshot" "$hello_receipt"; do reject_symlink_components "$path"; done
+fi
 regular "$program" && [ -x "$program" ] || die 'producer must be an executable regular file'
 [ -d "$source_root" ] && [ ! -L "$source_root" ] || die 'source root must be a real directory'
 source_physical=$(CDPATH= cd -P -- "$source_root" && pwd -P) || die 'source root cannot be resolved physically'
@@ -84,6 +104,9 @@ regular "$source_authority" || die 'source authority must be a regular file'
 regular "$runtime_snapshot" && regular "$tool_authority" || die 'runtime/tool authority files unavailable'
 regular "$authority_program" && [ -x "$authority_program" ] && regular "$authority_receipt" \
   || die 'compiled source authority verifier/receipt unavailable'
+if [ "$authority_mode" = provisional ]; then
+  regular "$original_source_snapshot" && regular "$hello_receipt" || die 'provisional source/Hello receipt unavailable'
+fi
 case "$backend" in llvm|cranelift) ;; *) die "unsupported backend: $backend" ;; esac
 case "$cuda_source_root" in src/plugins|src/compositions/cuda_dynamic|src/compositions/cuda_disabled) ;; *) die 'unsupported selected CUDA source root' ;; esac
 case "$threads" in ''|*[!0-9]*) die 'threads must be a positive integer' ;; esac
@@ -112,6 +135,13 @@ printf '%s\n' "$cuda_selection_identity" | grep -Eq '^cuda-[0-9a-f]{64}-[0-9a-f]
 for digest in "$producer_sha" "$source_authority_sha" "$runtime_snapshot_sha" "$tool_authority_sha"; do
   printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$' || die 'identity digests must be lowercase SHA-256'
 done
+if [ "$authority_mode" = provisional ]; then
+  for digest in "$original_source_snapshot_sha" "$hello_receipt_sha"; do
+    printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$' || die 'provisional source/Hello digests must be lowercase SHA-256'
+  done
+  [ "$(hash_file "$original_source_snapshot")" = "$original_source_snapshot_sha" ] || die 'original source snapshot digest changed'
+  [ "$(hash_file "$hello_receipt")" = "$hello_receipt_sha" ] || die 'Hello receipt digest changed'
+fi
 printf '%s\n' "$authority_digest" | grep -Eq '^[0-9a-f]{64}$' || die 'authority digest must be lowercase SHA-256'
 [ "$(hash_file "$authority_program")" = "$authority_program_sha" ] || die 'source authority verifier digest changed'
 [ "$(hash_file "$program")" = "$producer_sha" ] || die 'producer digest changed'
@@ -161,9 +191,36 @@ verify_source_snapshot() {
   observed="$output_root/source-snapshot-observed.$$.txt"
   bootstrap_stage3_source_snapshot "$observed" "$source_root" || die 'source snapshot failed'
   cmp -s "$observed" "$source_authority" || die 'source tree differs from admitted snapshot'
-  "$authority_program" phase2-native-authority-verify \
-    --receipt "$authority_receipt" --digest "$authority_digest" \
-    --canonical-snapshot "$observed" >/dev/null || die 'compiled source authority verifier rejected the snapshot'
+  if [ "$authority_mode" = admitted ]; then
+    "$authority_program" phase2-native-authority-verify \
+      --receipt "$authority_receipt" --digest "$authority_digest" \
+      --canonical-snapshot "$observed" >/dev/null || die 'compiled source authority verifier rejected the snapshot'
+  else
+    [ "$(hash_file "$original_source_snapshot")" = "$original_source_snapshot_sha" ] || die 'original source snapshot changed'
+    [ "$(hash_file "$hello_receipt")" = "$hello_receipt_sha" ] || die 'Hello receipt changed'
+    "$authority_program" native-groups-provisional-authority-verify \
+      --receipt "$authority_receipt" --digest "$authority_digest" \
+      --source-snapshot "$original_source_snapshot" --hello-receipt "$hello_receipt" \
+      >/dev/null || die 'compiled provisional authority verifier rejected the source/Hello proof'
+    provisional_field() {
+      "$authority_program" native-groups-provisional-authority-field \
+        --receipt "$authority_receipt" --digest "$authority_digest" --field "$1"
+    }
+    [ "$(provisional_field diagnostic_only)" = 1 ] || die 'authority receipt is not diagnostic-only'
+    [ "$(provisional_field producer_path)" = "$program" ] || die 'provisional producer path differs'
+    [ "$(provisional_field producer_digest)" = "$producer_sha" ] || die 'provisional producer digest differs'
+    [ "$(provisional_field source_root)" = "$source_root" ] || die 'provisional source root differs'
+    [ "$(provisional_field source_authority_path)" = "$source_authority" ] || die 'provisional source authority path differs'
+    [ "$(provisional_field source_authority_digest)" = "$source_authority_sha" ] || die 'provisional source authority digest differs'
+    [ "$(provisional_field runtime_snapshot_path)" = "$runtime_snapshot" ] || die 'provisional runtime snapshot path differs'
+    [ "$(provisional_field runtime_snapshot_digest)" = "$runtime_snapshot_sha" ] || die 'provisional runtime snapshot digest differs'
+    [ "$(provisional_field target)" = "$target" ] || die 'provisional target differs'
+    [ "$(provisional_field source_snapshot_path)" = "$original_source_snapshot" ] || die 'provisional original snapshot path differs'
+    [ "$(provisional_field source_snapshot_digest)" = "$original_source_snapshot_sha" ] || die 'provisional original snapshot digest differs'
+    [ "$(provisional_field hello_receipt_path)" = "$hello_receipt" ] || die 'provisional Hello receipt path differs'
+    [ "$(provisional_field hello_receipt_digest)" = "$hello_receipt_sha" ] || die 'provisional Hello receipt digest differs'
+    [ "$source_authority_sha" = "$original_source_snapshot_sha" ] || die 'provisional copied-source snapshot identity differs from original'
+  fi
   rm -f "$observed"
 }
 verify_source_snapshot
@@ -258,6 +315,10 @@ verify_source_snapshot
 [ "$(hash_file "$tool_authority")" = "$tool_authority_sha" ] || die 'tool authority changed during direct build'
 [ "$(hash_file "$authority_program")" = "$authority_program_sha" ] || die 'source authority verifier changed during direct build'
 [ "$(hash_file "$authority_receipt")" = "$authority_digest" ] || die 'source authority receipt changed during direct build'
+if [ "$authority_mode" = provisional ]; then
+  [ "$(hash_file "$original_source_snapshot")" = "$original_source_snapshot_sha" ] || die 'original source snapshot changed during direct build'
+  [ "$(hash_file "$hello_receipt")" = "$hello_receipt_sha" ] || die 'Hello receipt changed during direct build'
+fi
 verify_source_snapshot
 regular "$output_root/process-tree-rss.env" || die 'compiler watchdog receipt unavailable'
 receipt_field() { awk -F= -v key="$1" '$1==key { value=substr($0,index($0,"=")+1); count++ } END { if (count != 1) exit 1; print value }' "$output_root/process-tree-rss.env"; }
@@ -316,6 +377,14 @@ receipt="$output_root/direct-build.env"
 umask 077
 {
   printf '%s\n' 'format=SIMPLE-PHASE4-DIRECT-BUILD-1' 'evidence_state=BUILD_ONLY'
+  printf '%s\n' "authority_mode=$authority_mode"
+  if [ "$authority_mode" = provisional ]; then
+    printf '%s\n' 'diagnostic_only=1' 'admitted=0' 'producer_status=unadmitted'
+    printf '%s\n' "original_source_snapshot_sha256=$original_source_snapshot_sha" \
+      "hello_receipt_sha256=$hello_receipt_sha"
+  else
+    printf '%s\n' 'diagnostic_only=0' 'admitted=0'
+  fi
   printf '%s\n' "executor=$executor" "product=$product" "entry=$entry" \
     "backend=$backend" "target=$target" "threads=$threads" \
     "memory_bytes=$memory_bytes" "memory_policy=$memory_policy" \

@@ -1,0 +1,45 @@
+use std.nogc_sync_mut.test_runner.source_route.{source_has_bdd_structure, interpreter_snippet_source}
+
+fn verify(ok: bool, name: text) -> i64:
+    if ok:
+        print "PASS {name}"
+        return 0
+    print "FAIL {name}"
+    1
+
+fn main() -> i64:
+    var failures = 0
+    val plain = "val actual = 41\nif actual != 41:\n    panic(\"wrong\")\n"
+    val wrapped = interpreter_snippet_source("plain_test.spl", plain)
+    failures = failures + verify(wrapped.contains("describe \"standalone SPL snippet\"") and wrapped.contains("val actual = 41") and wrapped.contains("        if actual != 41:"), "plain-real-example-body")
+    failures = failures + verify(interpreter_snippet_source("empty.spl", "") == "" and interpreter_snippet_source("comment.spl", "# it \"fake\":\n# expect(1).to_equal(1)\n") == "", "empty-comment-no-example")
+    failures = failures + verify(interpreter_snippet_source("decl.spl", "fn helper():\n    print \"not called\"\n") == "" and interpreter_snippet_source("main.spl", "fn main():\n    print \"entry\"\n") == "", "declarations-not-snippets")
+    failures = failures + verify(interpreter_snippet_source("pass.spl", "pass\n") == "", "pass-only-no-example")
+    failures = failures + verify(interpreter_snippet_source("named_spec.spl", plain) == "", "spec-file-contract-preserved")
+    val bdd = "use std.spec\ndescribe \"real\":\n    it \"body\":\n        expect(1).to_equal(1)\n"
+    failures = failures + verify(source_has_bdd_structure(bdd) and interpreter_snippet_source("ordinary.spl", bdd) == "", "bdd-source-not-rewrapped")
+    failures = failures + verify(source_has_bdd_structure(bdd + "# sdoctest:\n# print \"doc\"\n"), "mixed-bdd-doc-keeps-spec")
+    val bdd_roots = [
+        "context \"nested context\":\n",
+        "slow_it \"slow example\":\n",
+        "feature \"feature group\":\n",
+        "scenario \"scenario example\":\n",
+        "pending(\"planned example\")\n",
+        "skip_it(\"conditional example\", fn(): pass)\n"
+    ]
+    var all_bdd_roots_are_detected = true
+    for root in bdd_roots:
+        if not source_has_bdd_structure(root) or interpreter_snippet_source("ordinary.spl", root) != "":
+            all_bdd_roots_are_detected = false
+    failures = failures + verify(all_bdd_roots_are_detected, "all-bdd-root-forms-not-rewrapped")
+    failures = failures + verify(not source_has_bdd_structure("# describe \"fake\":\nval text = \"it fake\"\n"), "comment-string-not-bdd")
+    failures = failures + verify(not source_has_bdd_structure("## it \"commented\":\n/// scenario \"also commented\":\n"), "comment-prefix-variants-not-bdd")
+    failures = failures + verify(not source_has_bdd_structure("fn doc():\n    \"\"\"\n    describe \"fake\":\n        it \"fake\":\n    \"\"\"\n    pass\n"), "docstring-not-bdd")
+    val keyword_prefixes = "val itinerary = 40 + 1\nval describe_value = 40 + 1\nval context_name = 40 + 1\nval slow_itinerary = 40 + 1\nval feature_flag = 40 + 1\nval scenario_name = 40 + 1\nval pending_count = 40 + 1\nval skip_it_result = 40 + 1\n"
+    val prefix_snippet = "val itinerary = 40 + 1\nif itinerary != 41:\n    panic(\"prefix identifier body was not executed\")\n"
+    val prefix_wrapped = interpreter_snippet_source("keyword_prefixes.spl", prefix_snippet)
+    failures = failures + verify(not source_has_bdd_structure(keyword_prefixes), "bdd-keyword-prefix-identifiers-not-bdd")
+    failures = failures + verify(prefix_wrapped.contains("describe \"standalone SPL snippet\""), "bdd-keyword-prefix-body-routed-as-snippet")
+    failures = failures + verify(prefix_wrapped.contains("val itinerary = 40 + 1") and prefix_wrapped.contains("if itinerary != 41:"), "bdd-keyword-prefix-body-preserved")
+    print "SOURCE_ROUTE_REGRESSION failures={failures}"
+    if failures > 0: 1 else: 0

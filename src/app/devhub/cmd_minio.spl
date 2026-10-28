@@ -1,15 +1,17 @@
 # ITF CLI — `itf minio {ls,get,put,stat,presign,health}` subcommands.
 
-use std.file_system.file_ops.{file_read_text}
+use std.io.file_ops.{file_read_regular_no_follow_bounded_bytes}
 use std.io_runtime.{time_now_unix_micros}
+use app.devhub.minio_output.{minio_stat_json, minio_health_json}
+use app.devhub.minio_options.{minio_parse_expiry}
 use app.devhub.adapter_minio.{
     MinioConfig, BucketInfo, ObjectInfo, GetObjectResult, HeadObjectResult,
     load_minio_config, check_minio_auth,
     minio_list_buckets, minio_list_objects, minio_get_object, minio_stat_object,
-    minio_put_text, minio_put_object, minio_presign_get, minio_presign_put, minio_health_live,
-    minio_download, minio_create_bucket, minio_delete_bucket, minio_delete_object
+    minio_put_text, minio_put_object, minio_put_bytes, minio_presign_get, minio_presign_put, minio_health_live,
+    minio_download, minio_create_bucket, minio_delete_bucket, minio_delete_object, MINIO_MULTIPART_THRESHOLD
 }
-use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
+use app.devhub.flags.{_extract_flag, _has_flag, _positional_args_with_booleans}
 use app.devhub.output.{print_error, print_success, print_info, print_dim, print_table_dynamic, format_json_output, wants_json, format_size, format_transfer_summary, set_no_pager}
 
 
@@ -74,26 +76,13 @@ fn _require_auth(cfg: MinioConfig) -> bool:
     true
 
 
-fn _parse_int(s: text, default_val: i64) -> i64:
-    var n: i64 = 0
-    var i = 0
-    var seen_digit = false
-    while i < s.len():
-        val c = s.char_code_at(i)
-        if c >= 48 and c <= 57:
-            n = n * 10 + (c - 48)
-            seen_digit = true
-        i = i + 1
-    if seen_digit: n else: default_val
-
-
 fn _minio_ls(args: [text]) -> i64:
     """`itf minio ls [bucket [--prefix P]] [--no-pager]`"""
     set_no_pager(_has_flag(args, "--no-pager"))
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
-    val pos = _positional_args(args)
+    val pos = _positional_args_with_booleans(args, ["--json"])
     if pos.len() == 0:
         val response: (bool, [BucketInfo], text) = minio_list_buckets(cfg)
         val ok = response.0
@@ -142,7 +131,7 @@ fn _minio_get(args: [text]) -> i64:
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
-    val pos = _positional_args(args)
+    val pos = _positional_args_with_booleans(args, ["--json"])
     if pos.len() < 2:
         print_error("usage: itf minio get <bucket> <key> [--out PATH] [--range R]")
         return 1
@@ -174,14 +163,12 @@ fn _minio_get(args: [text]) -> i64:
 fn _minio_put(args: [text]) -> i64:
     """`itf minio put <bucket> <key> --file PATH [--content-type CT]`
 
-    Routes to `minio_put_text` for text bodies (any --file content read as UTF-8 text)
-    up to 64 MiB. Binary bodies fall through to `minio_put_object` which returns a
-    clear "needs raw-bytes SFFI" error (issue #10 follow-up).
+    Read the actual file as bounded bytes and pass them losslessly to HTTP v2.
     """
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
-    val pos = _positional_args(args)
+    val pos = _positional_args_with_booleans(args, ["--json"])
     if pos.len() < 2:
         print_error("usage: itf minio put <bucket> <key> --file PATH [--content-type CT]")
         return 1
@@ -192,24 +179,19 @@ fn _minio_put(args: [text]) -> i64:
     if file_path == "":
         print_error("--file PATH is required")
         return 1
-    # Try text path first — works for JSON/XML/plain bodies up to 64 MiB.
-    if val content = file_read_text(file_path):
-        val started = time_now_unix_micros()
-        val (ok, _etag, raw) = minio_put_text(cfg, bucket, key, content, ct)
-        val elapsed_ms = (time_now_unix_micros() - started) / 1000
-        if not ok:
-            print_error(raw)
+    val content: [u8] = match file_read_regular_no_follow_bounded_bytes(file_path, MINIO_MULTIPART_THRESHOLD):
+        case Ok(value): value
+        case Err(reason):
+            print_error(reason)
             return 1
-        print_success("uploaded {bucket}/{key} ({content.len()} bytes, text path)")
-        print_dim(format_transfer_summary("uploaded", content.len(), elapsed_ms))
-        return 0
-    # Fallthrough — binary path (currently surfaces a clear error + workaround;
-    # the message names `itf minio presign-put`, the real escape hatch).
-    val (ok, etag, raw) = minio_put_object(cfg, bucket, key, file_path)
+    val started = time_now_unix_micros()
+    val (ok, _etag, raw) = minio_put_bytes(cfg, bucket, key, content, ct)
+    val elapsed_ms = (time_now_unix_micros() - started) / 1000
     if not ok:
         print_error(raw)
         return 1
-    print_success("uploaded {bucket}/{key} (etag {etag})")
+    print_success("uploaded {bucket}/{key} ({content.len()} bytes)")
+    print_dim(format_transfer_summary("uploaded", content.len(), elapsed_ms))
     0
 
 
@@ -221,7 +203,7 @@ fn _minio_stat(args: [text]) -> i64:
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
-    val pos = _positional_args(args)
+    val pos = _positional_args_with_booleans(args, ["--json"])
     if pos.len() < 2:
         print_error("usage: itf minio stat <bucket> <key>")
         return 1
@@ -232,7 +214,7 @@ fn _minio_stat(args: [text]) -> i64:
         print_error(raw)
         return 1
     if wants_json(args):
-        print "{{\"key\":\"{key}\",\"size\":{head.content_length},\"etag\":\"{head.etag}\",\"last_modified\":\"{head.last_modified}\"}}"
+        print minio_stat_json(key, head.content_length, head.etag, head.last_modified)
         return 0
     val size_text = if _has_flag(args, "--bytes"): "{head.content_length}" else: format_size(head.content_length)
     print_info("Size", size_text)
@@ -246,7 +228,7 @@ fn _minio_mb(args: [text]) -> i64:
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
-    val pos = _positional_args(args)
+    val pos = _positional_args_with_booleans(args, ["--json"])
     if pos.len() < 1:
         print_error("usage: itf minio mb <bucket>")
         return 1
@@ -263,7 +245,7 @@ fn _minio_rb(args: [text]) -> i64:
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
-    val pos = _positional_args(args)
+    val pos = _positional_args_with_booleans(args, ["--json"])
     if pos.len() < 1:
         print_error("usage: itf minio rb <bucket>")
         return 1
@@ -280,7 +262,7 @@ fn _minio_rm(args: [text]) -> i64:
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
-    val pos = _positional_args(args)
+    val pos = _positional_args_with_booleans(args, ["--json"])
     if pos.len() < 2:
         print_error("usage: itf minio rm <bucket> <key>")
         return 1
@@ -297,11 +279,15 @@ fn _minio_presign(args: [text]) -> i64:
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
-    val pos = _positional_args(args)
+    val pos = _positional_args_with_booleans(args, ["--json"])
     if pos.len() < 2:
         print_error("usage: itf minio presign <bucket> <key> [--expires SECONDS]")
         return 1
-    val expires = _parse_int(_extract_flag(args, "--expires", "86400"), 86400)
+    val expires: i64 = match minio_parse_expiry(_extract_flag(args, "--expires", "86400")):
+        case Some(value): value
+        case nil:
+            print_error("--expires must be a decimal integer from 1 through 604800")
+            return 1
     val (ok, url, err) = minio_presign_get(cfg, pos[0], pos[1], expires)
     if not ok:
         print_error(err)
@@ -321,11 +307,15 @@ fn _minio_presign_put(args: [text]) -> i64:
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
-    val pos = _positional_args(args)
+    val pos = _positional_args_with_booleans(args, ["--json"])
     if pos.len() < 2:
         print_error("usage: itf minio presign-put <bucket> <key> [--expires SECONDS]")
         return 1
-    val expires = _parse_int(_extract_flag(args, "--expires", "86400"), 86400)
+    val expires: i64 = match minio_parse_expiry(_extract_flag(args, "--expires", "86400")):
+        case Some(value): value
+        case nil:
+            print_error("--expires must be a decimal integer from 1 through 604800")
+            return 1
     val (ok, url, err) = minio_presign_put(cfg, pos[0], pos[1], expires)
     if not ok:
         print_error(err)
@@ -347,8 +337,8 @@ fn _minio_health(args: [text]) -> i64:
         print_error(raw)
         return 1
     if wants_json(args):
-        print "{{\"alive\":{alive},\"status\":\"{raw}\",\"latency_ms\":{latency_ms},\"endpoint\":\"{cfg.url}\"}}"
-        return 0
+        print minio_health_json(alive, raw, latency_ms, cfg.url)
+        return if alive: 0 else: 1
     if alive:
         print_success("OK — {cfg.url} ({latency_ms}ms, {raw})")
         return 0
@@ -365,10 +355,10 @@ fn _print_minio_help():
     print "Commands:"
     print "  ls [bucket [--prefix P]]    List buckets, or objects under a bucket"
     print "  get <bucket> <key>          Fetch object body or stream to --out PATH"
-    print "  put <bucket> <key>          Upload --file PATH (text/JSON/XML; binary blocked, see presign-put)"
+    print "  put <bucket> <key>          Upload --file PATH (lossless text/binary, up to 64 MiB)"
     print "  stat <bucket> <key>         Size/etag/last-modified (via ListObjectsV2 — see NOTE below)"
     print "  presign <bucket> <key>      Generate a presigned GET URL (--expires SECONDS, max 604800)"
-    print "  presign-put <bucket> <key>  Generate a presigned PUT URL (binary-upload workaround)"
+    print "  presign-put <bucket> <key>  Generate a presigned PUT URL for an external uploader"
     print "  mb <bucket>                 Create a bucket"
     print "  rb <bucket>                 Delete an (empty) bucket"
     print "  rm <bucket> <key>           Delete an object (confirmation-free)"

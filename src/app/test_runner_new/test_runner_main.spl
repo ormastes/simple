@@ -25,6 +25,7 @@ use std.spec.in_development.{source_is_in_development, in_development_explicitly
 use std.spec.requires_feature.{spec_required_features, feature_env_names, disabled_required_features, feature_skip_line, feature_skip_summary_line, feature_disabled_reason}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
+use std.nogc_sync_mut.test_runner.source_route.{source_has_bdd_structure}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
 use std.test_runner.test_executor_lanes.{run_test_file_composite}
 use std.test_runner.test_runner_output.{combined_test_run_sdn, print_result, print_summary}
@@ -32,6 +33,7 @@ use std.test_runner.test_runner_config.{report_free_mem, mode_to_str, propagate_
 use app.test_runner_new.cover_admission.{cover_admitted_files, cover_append_failures}
 use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
 use app.test_runner_new.sdn_wrapper.{run_test_sdn_wrapper}
+use app.test_runner_new.test_runner_worker_admission.{test_runner_admitted_worker_count}
 use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary, schedule_flatten, schedule_session_file_paths, schedule_local_file_paths}
 # MEMORY DEBUG: groups 3-9 commented out to isolate memory usage
 # GROUP 3: Container
@@ -721,17 +723,9 @@ fn run_tests_parallel_mode(
     val (normal_files, qemu_files) = separate_qemu_tests(uncached_files)
 
     # Determine worker count
-    var max_workers = options.max_workers
-    if max_workers <= 0:
-        max_workers = get_cpu_count() * options.resource_limit_pct / 100
-        if max_workers < 1:
-            max_workers = 1
-        # Cap auto-detected worker count to prevent process explosion on
-        # high-core machines. Each worker spawns shell + simple binary (2
-        # processes), so 8 workers = up to 16 OS processes at peak.
-        # Use --max-workers=N to override explicitly.
-        if max_workers > 8:
-            max_workers = 8
+    val auto_workers = get_cpu_count() * options.resource_limit_pct / 100
+    val max_workers = test_runner_admitted_worker_count(options.max_workers,
+        auto_workers, env_get("SIMPLE_HOST_MAX_THREADS") ?? "")
 
     val parallel_setup_end = time_now_unix_micros()
     val parallel_setup_ms = (parallel_setup_end - parallel_setup_start) / 1000
@@ -1412,6 +1406,13 @@ fn run_test_cli() -> i64:
 
     if options.spl_doctest:
         run_spl_doc = true
+        # An explicit source doctest target runs documentation alone unless
+        # the same source also declares BDD examples. Directory/whole runs keep
+        # the established combined discovery policy. Empty docs still fail.
+        if not options.run_all and options.path.ends_with(".spl"):
+            val source = file_read(options.path) ?? ""
+            if not source_has_bdd_structure(source):
+                run_spec = false
 
     val library_lanes_error = native_test_library_lanes_error(options.library_mode, run_sdoc, run_spl_doc)
     if library_lanes_error != "":

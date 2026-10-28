@@ -1,0 +1,38 @@
+# @cover src/app/devhub/minio_options.spl
+# @cover src/app/devhub/minio_output.spl
+use std.spec.*
+use std.spec.step
+use app.devhub.minio_options.{minio_parse_expiry}
+use app.devhub.minio_output.{minio_stat_json, minio_health_json}
+use std.common.json.value.{json_value_parse_opt, json_value_field, json_value_as_text, json_value_serialize}
+
+describe "MinIO CLI expiry and JSON contracts":
+    it "should admit exact presign expiry boundaries":
+        step("Read the minimum, default and maximum seconds")
+        expect(minio_parse_expiry("1")!).to_equal(1)
+        expect(minio_parse_expiry("86400")!).to_equal(86400)
+        expect(minio_parse_expiry("604800")!).to_equal(604800)
+
+    it "should reject malformed, zero, negative and overflowing expiry values":
+        step("Refuse input rather than stripping nondigits or wrapping arithmetic")
+        expect(minio_parse_expiry("")).to_be_nil()
+        expect(minio_parse_expiry("0")).to_be_nil()
+        expect(minio_parse_expiry("-60")).to_be_nil()
+        expect(minio_parse_expiry("6oops0")).to_be_nil()
+        expect(minio_parse_expiry("604801")).to_be_nil()
+        expect(minio_parse_expiry("999999999999999999999999")).to_be_nil()
+
+    it "should encode object keys and ETags as JSON strings":
+        step("Serialize object metadata containing JSON delimiters")
+        val key = "quote\" slash\\ newline\n"
+        val output = json_value_parse_opt(minio_stat_json(key, 4, "etag\"", "now"))!
+        expect(json_value_as_text(json_value_field(output, "key"))!).to_equal(key)
+        expect(json_value_as_text(json_value_field(output, "etag"))!).to_equal("etag\"")
+        expect(json_value_serialize(json_value_field(output, "size"))).to_equal("4")
+
+    it "should encode failed health details without corrupting JSON":
+        step("Serialize a failing endpoint with multiline diagnostics")
+        val output = json_value_parse_opt(minio_health_json(false, "fail\nreason", 2, "http://host/\""))!
+        expect(json_value_as_text(json_value_field(output, "status"))!).to_equal("fail\nreason")
+        expect(json_value_as_text(json_value_field(output, "endpoint"))!).to_equal("http://host/\"")
+        expect(json_value_serialize(json_value_field(output, "alive"))).to_equal("false")

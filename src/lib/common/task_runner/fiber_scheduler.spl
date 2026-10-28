@@ -110,7 +110,7 @@ fn _fs_admit_head(s: FiberSchedV1) -> FiberSchedV1:
     var rest: [i64] = []
     for i in 1..t.pending.len(): rest = rest.push(t.pending[i])
     t.pending = rest
-    if t.reserved + t.fiber_est[id] > t.budget: t.overcommits = t.overcommits + 1
+    if t.fiber_est[id] > t.budget - t.reserved: t.overcommits = t.overcommits + 1
     t.reserved = t.reserved + t.fiber_est[id]
     val w = _fs_least_loaded_worker(t)
     t.fiber_state[id] = FIBER_STATE_READY
@@ -126,9 +126,24 @@ fn fiber_sched_runnable_count(s: FiberSchedV1) -> i64:
 fn fiber_sched_admit(s: FiberSchedV1) -> FiberSchedV1:
     """Admit pending fibers in order while they fit; apply the progress rule."""
     var t = s
-    while t.pending.len() > 0 and t.reserved + t.fiber_est[t.pending[0]] <= t.budget:
-        t = _fs_admit_head(t)
+    if t.error != "": return t
+    # The progress rule may exceed budget, but the reservation total must
+    # always remain representable. Leave the pending head untouched on error.
+    while t.pending.len() > 0:
+        val id = t.pending[0]
+        if t.reserved < 0 or t.fiber_est[id] < 0:
+            t.error = "reservation total exceeds i64"
+            return t
+        if t.fiber_est[id] <= t.budget - t.reserved:
+            t = _fs_admit_head(t)
+        else:
+            break
     if t.pending.len() > 0 and fiber_sched_runnable_count(t) == 0 and t.external_inflight == 0:
+        val id = t.pending[0]
+        if t.reserved < 0 or t.fiber_est[id] < 0 or
+           t.fiber_est[id] > 9223372036854775807 - t.reserved:
+            t.error = "reservation total exceeds i64"
+            return t
         t = _fs_admit_head(t)
     t
 
@@ -184,8 +199,25 @@ fn fiber_sched_pick(s: FiberSchedV1, w: i64) -> FiberPickV1:
     FiberPickV1(sched: t, fiber: id)
 
 fn fiber_sched_complete(s: FiberSchedV1, w: i64, fiber: i64, step: FiberStepV1) -> FiberSchedV1:
-    """Apply one step result of `fiber`, run on worker w."""
+    """Apply one step result of `fiber`, run on worker w.
+
+    A voluntary yield goes behind already-ready peers in local dispatch order.
+    Local picks use the array bottom, so enqueue the yielding fiber at the top.
+    This preserves retained admission and costs O(local ready queue length).
+    """
     var t = s
+    # READY plus absence from the owner's queue is this single-carrier core's
+    # implicit picked state. Reject duplicate/unowned delivery before changing
+    # queues or reservations. A valid owner may still drain after an error.
+    if w < 0 or w >= t.queues.len():
+        if t.error == "": t.error = "completion worker index out of range"
+        return t
+    if fiber < 0 or fiber >= t.fiber_state.len():
+        if t.error == "": t.error = "completion fiber index out of range"
+        return t
+    if t.fiber_state[fiber] != FIBER_STATE_READY or t.fiber_worker[fiber] != w or t.queues[w].contains(fiber):
+        if t.error == "": t.error = "completion requires a picked fiber owned by worker"
+        return t
     if step.kind == FIBER_STEP_DONE:
         t.fiber_state[fiber] = FIBER_STATE_DONE
         t.reserved = t.reserved - t.fiber_est[fiber]
@@ -194,7 +226,10 @@ fn fiber_sched_complete(s: FiberSchedV1, w: i64, fiber: i64, step: FiberStepV1) 
         t.fiber_state[fiber] = FIBER_STATE_PARKED
         t.fiber_token[fiber] = step.token
         return fiber_sched_admit(t)
-    t.queues[w] = t.queues[w].push(fiber)
+    var ready: [i64] = [fiber]
+    for peer in t.queues[w]:
+        ready = ready.push(peer)
+    t.queues[w] = ready
     t
 
 fn fiber_sched_wake(s: FiberSchedV1, token: i64) -> FiberSchedV1:
@@ -206,6 +241,20 @@ fn fiber_sched_wake(s: FiberSchedV1, token: i64) -> FiberSchedV1:
             t.fiber_token[id] = 0
             val w = t.fiber_worker[id]
             t.queues[w] = t.queues[w].push(id)
+    t
+
+fn fiber_sched_abort(s: FiberSchedV1) -> FiberSchedV1:
+    """Terminalize all work after the carrier has drained its external work."""
+    var t = s
+    for id in 0..t.fiber_state.len():
+        t.fiber_state[id] = FIBER_STATE_DONE
+        t.fiber_token[id] = 0
+    t.pending = []
+    var queues: [[i64]] = []
+    for _w in t.worker_socket: queues = queues.push([])
+    t.queues = queues
+    t.reserved = 0
+    t.external_inflight = 0
     t
 
 fn fiber_sched_parked_count(s: FiberSchedV1) -> i64:
@@ -234,5 +283,5 @@ export FIBER_STEP_DONE, FIBER_STEP_YIELD, FIBER_STEP_PARK
 export FIBER_STATE_PENDING, FIBER_STATE_READY, FIBER_STATE_PARKED, FIBER_STATE_DONE
 export FiberStepV1, fiber_step_done, fiber_step_yield, fiber_step_park
 export FiberSchedV1, FiberPickV1, fiber_sched_new, fiber_sched_submit, fiber_sched_prioritize
-export fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake
+export fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake, fiber_sched_abort
 export fiber_sched_runnable_count, fiber_sched_parked_count, fiber_sched_all_done, fiber_sched_run_round

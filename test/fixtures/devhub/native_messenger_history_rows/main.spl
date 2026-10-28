@@ -1,0 +1,47 @@
+# Supplemental production-helper evidence, not the Messenger database or SSpec suite.
+use std.database.sql.types.{DbRow, DbValue}
+use app.devhub.messenger.adapter.history_rows.{messenger_history_rows}
+
+fn row(room: text, sequence: i64, id: text) -> DbRow:
+    DbRow(columns: ["room", "seq", "id"], values: [DbValue.Text(room), DbValue.Integer(sequence), DbValue.Text(id)])
+
+fn main() -> i64:
+    val source = [row("r", 30, "third"), row("r", 10, "first"), row("other", 0, "foreign"), row("r", 20, "second")]
+    match messenger_history_rows(source, "room", "seq", "r", 2):
+        case Ok(selected):
+            assert(selected.len() == 2)
+            assert(selected[0].values[2].to_text() == "first")
+            assert(selected[1].values[2].to_text() == "second")
+        case Err(_): return 1
+    print "PASS sequence selection before limit and room isolation"
+    match messenger_history_rows([row("r", 2, "a"), row("r", 2, "b"), row("r", 1, "c")], "room", "seq", "r", 2):
+        case Ok(selected):
+            assert(selected.len() == 2)
+            assert(selected[0].values[2].to_text() == "c")
+            assert(selected[1].values[2].to_text() == "a")
+        case Err(_): return 1
+    print "PASS stable equal-sequence eviction at cutoff"
+    val invalid = DbRow(columns: ["room", "seq"], values: [DbValue.Text("r"), DbValue.Text("2")])
+    match messenger_history_rows([row("r", 1, "ok"), invalid], "room", "seq", "r", 1):
+        case Err(_): ()
+        case Ok(_): return 1
+    val malformed = DbRow(columns: ["room", "seq"], values: [DbValue.Text("r")])
+    match messenger_history_rows([malformed], "room", "seq", "r", 2):
+        case Err(_): ()
+        case Ok(_): return 1
+    val missing = DbRow(columns: ["seq"], values: [DbValue.Integer(1)])
+    match messenger_history_rows([missing], "room", "seq", "r", 2):
+        case Err(_): ()
+        case Ok(_): return 1
+    val null_room = DbRow(columns: ["room", "seq"], values: [DbValue.Null, DbValue.Integer(1)])
+    match messenger_history_rows([null_room], "room", "seq", "NULL", 2):
+        case Err(_): ()
+        case Ok(_): return 1
+    match messenger_history_rows([], "room", "seq", "r", 0):
+        case Err(_): ()
+        case Ok(_): return 1
+    match messenger_history_rows(source, "room", "seq", "absent", 2):
+        case Ok(selected): assert(selected.len() == 0)
+        case Err(_): return 1
+    print "PASS invalid metadata, invalid limit and empty room guards"
+    0
