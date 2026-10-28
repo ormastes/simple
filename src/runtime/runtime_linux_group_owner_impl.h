@@ -67,6 +67,7 @@ static int rt_lg_read_fd(int fd, char *out, size_t cap) {
     if (n < 0) return 0;
     if (n == 0) { errno = ENODATA; return 0; }
     if ((size_t)n >= cap - 1) { errno = EOVERFLOW; return 0; }
+    if (memchr(out, 0, (size_t)n)) { errno = EPROTO; return 0; }
     out[n] = 0; return 1;
 }
 
@@ -235,10 +236,20 @@ static void rt_lg_free_strings(char **items) {
 static int rt_lg_populated(int fd, int *populated) {
     char events[256];
     if (!rt_lg_read_at(fd, "cgroup.events", events, sizeof(events))) return 0;
-    char *line = strstr(events, "populated ");
-    if (!line || (line != events && line[-1] != '\n') ||
-        (line[10] != '0' && line[10] != '1')) return 0;
-    *populated = line[10] == '1'; return 1;
+    int seen = 0, value = 1;
+    for (const char *line = events; *line;) {
+        const char *end = strchr(line, '\n');
+        if (!end) { errno = EPROTO; return 0; }
+        if ((size_t)(end - line) >= 10 && memcmp(line, "populated ", 10) == 0) {
+            if (seen || end - line != 11 || (line[10] != '0' && line[10] != '1')) {
+                errno = EPROTO; return 0;
+            }
+            seen = 1; value = line[10] == '1';
+        }
+        line = end + 1;
+    }
+    if (!seen) { errno = EPROTO; return 0; }
+    *populated = value; return 1;
 }
 
 static int rt_lg_peak(int fd, int64_t *peak) {
