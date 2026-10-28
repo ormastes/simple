@@ -1,0 +1,107 @@
+# Exercises production preflight refusal and manager recovery before V4 start.
+use std.spec.{describe, it, expect, fail, after_each}
+use app.bootstrap_builder.worker.{builder_worker_execute_v1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildInputV1, BuildHostV1, builder_task_identity_v1}
+use app.bootstrap_builder.codec.{builder_write_task_v1, builder_read_result_v1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_terminal_v1, builder_transport_reaped_v1, builder_transport_recover_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use std.common.build_manager.no_child_started.{builder_no_child_started_decode_v1}
+use app.io.file_ops.{file_atomic_write, file_hash_sha256, file_read, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+
+var preflight_refusal_root = ""
+
+fn preflight_refusal_fixture(suffix: text) -> (BuildTaskV1, BuilderAttemptV1):
+    preflight_refusal_root = "build/worker-preflight-refusal-" + str(getpid()) + "-" + suffix
+    val root = preflight_refusal_root + "/attempts/compiler/1/local"
+    expect(dir_create_all(root + "/work")).to_equal(true)
+    expect(file_atomic_write(root + "/producer.exe", "#!/bin/sh\necho unexpected > child-started\n")).to_equal(true)
+    expect(file_atomic_write(root + "/work/source.spl", "fn main():\n    print 1\n")).to_equal(true)
+    val digest = file_hash_sha256(root + "/work/source.spl")
+    val task = BuildTaskV1(id: "compiler", attempt: 1, phase: "compile",
+        producer_digest: file_hash_sha256(root + "/producer.exe"),
+        source_digest: digest, toolchain_digest: digest, dependencies: [],
+        program: "producer.exe", args: [], inputs: [BuildInputV1("source.spl", digest)],
+        outputs: ["result.o"], cache_key: digest, timeout_ms: 1000,
+        memory_limit_bytes: 1048576, memory_policy: "monitor", links: [])
+    expect(builder_write_task_v1(root + "/task.sdn", task)).to_equal(true)
+    val host = BuildHostV1("local", "local", "", preflight_refusal_root, "worker", digest, 1)
+    val attempt = BuilderAttemptV1(task_id: task.id, attempt: 1, host: host, pid: 0,
+        local_root: root, remote_root: root, error: "", identity_digest: builder_task_identity_v1(task),
+        process: builder_process_portable_v1())
+    (task, attempt)
+
+fn preflight_refusal_assert_terminal(task: BuildTaskV1, attempt: BuilderAttemptV1, reason: text):
+    val root = attempt.local_root
+    expect(builder_worker_execute_v1(root + "/task.sdn", root, "local")).to_equal(2)
+    expect(file_read(root + "/worker.error")).to_contain(reason)
+    expect(file_exists(root + "/work/child-started")).to_equal(false)
+    expect(file_exists(root + "/compiler.reaped")).to_equal(false)
+    expect(builder_transport_reaped_v1(attempt)).to_equal(false)
+    expect(builder_transport_terminal_v1(attempt)).to_equal(true)
+    match builder_no_child_started_decode_v1(file_read(root + "/compiler.not-started.sdn")):
+        Ok(proof):
+            expect(proof.identity_digest).to_equal(builder_task_identity_v1(task))
+            expect(proof.host_id).to_equal("local")
+            expect(proof.reason).to_equal(file_read(root + "/worker.error"))
+        Err(message): fail(message)
+    match builder_read_result_v1(root + "/result.sdn"):
+        Ok(result):
+            expect(result.status).to_equal("ERROR")
+            expect(result.exit_code).to_equal(2)
+            expect(result.outputs.len()).to_equal(0)
+        Err(message): fail(message)
+    match builder_transport_recover_v1(task, attempt.host, preflight_refusal_root, attempt.process):
+        Ok(recovered): expect(recovered.identity_digest).to_equal(attempt.identity_digest)
+        Err(message): fail(message)
+
+describe "Portable worker preflight refusal preserves terminal ownership":
+    after_each():
+        if preflight_refusal_root != "":
+            expect(dir_remove_all(preflight_refusal_root)).to_equal(true)
+            preflight_refusal_root = ""
+
+    it "settles changed staged input before compiler admission":
+        val fixture = preflight_refusal_fixture("input")
+        expect(file_atomic_write(fixture.1.local_root + "/work/source.spl", "changed source")).to_equal(true)
+        preflight_refusal_assert_terminal(fixture.0, fixture.1, "input digest mismatch")
+
+    it "settles changed producer bytes before pinning":
+        val fixture = preflight_refusal_fixture("producer")
+        expect(file_atomic_write(fixture.1.local_root + "/producer.exe", "changed producer")).to_equal(true)
+        preflight_refusal_assert_terminal(fixture.0, fixture.1, "producer digest mismatch")
+
+    it "settles a failed isolated cache creation before compiler admission":
+        val fixture = preflight_refusal_fixture("cache")
+        expect(file_atomic_write(fixture.1.local_root + "/work/.builder-cache", "not a directory")).to_equal(true)
+        preflight_refusal_assert_terminal(fixture.0, fixture.1, "cannot create isolated cache")
+
+    it "retains nonterminal ownership when no-child persistence fails":
+        val fixture = preflight_refusal_fixture("proof-write")
+        val attempt = fixture.1
+        val root = attempt.local_root
+        expect(file_atomic_write(root + "/work/source.spl", "changed source")).to_equal(true)
+        expect(dir_create_all(root + "/compiler.not-started.sdn")).to_equal(true)
+        expect(builder_worker_execute_v1(root + "/task.sdn", root, "local")).to_equal(2)
+        expect(file_read(root + "/worker.error")).to_contain("no-child receipt persistence failed")
+        expect(file_exists(root + "/capacity.settled")).to_equal(false)
+        expect(builder_transport_terminal_v1(attempt)).to_equal(false)
+
+    it "retains nonterminal ownership when capacity persistence fails":
+        val fixture = preflight_refusal_fixture("capacity-write")
+        val attempt = fixture.1
+        val root = attempt.local_root
+        expect(file_atomic_write(root + "/work/source.spl", "changed source")).to_equal(true)
+        expect(dir_create_all(root + "/capacity.settled")).to_equal(true)
+        expect(builder_worker_execute_v1(root + "/task.sdn", root, "local")).to_equal(2)
+        expect(file_read(root + "/worker.error")).to_contain("capacity settlement persistence failed")
+        expect(builder_transport_terminal_v1(attempt)).to_equal(false)
+
+    it "does not issue ownership evidence for an invalid host identity":
+        val fixture = preflight_refusal_fixture("invalid-host")
+        val root = fixture.1.local_root
+        expect(builder_worker_execute_v1(root + "/task.sdn", root, "../invalid")).to_equal(3)
+        expect(file_read(root + "/worker.error")).to_equal("invalid host identity")
+        expect(file_exists(root + "/compiler.not-started.sdn")).to_equal(false)
+        expect(file_exists(root + "/capacity.settled")).to_equal(false)
