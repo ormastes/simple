@@ -1,0 +1,84 @@
+# Production manager recovery with file-backed terminal receipts. No child is
+# launched; this tests cleanup requests, not native descendant containment.
+use std.spec.{describe, it, expect}
+use app.buildrunner.cli.{builder_cli_run_locked_v1}
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildRunV1, BuildResultV1,
+    builder_task_identity_v1}
+use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_encode_v1,
+    builder_manager_dispatch, builder_manager_decode_v1}
+use app.bootstrap_builder.codec.{builder_write_result_v1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.io.file_ops.{file_atomic_write, file_read, file_hash_sha256}
+use app.io.dir_ops.{dir_create_all}
+use app.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1, builder_capacity_settlement_encode_v1}
+
+var recovery_spawns: i64 = 0
+
+fn recovery_spawn(program: text, digest: text, args: [text], directory: text) -> Result<i64, text>:
+    recovery_spawns = recovery_spawns + 1
+    Err("unexpected dispatch during recovery")
+
+fn recovery_wait(token: i64, timeout_ms: i64) -> Result<i64, text>:
+    Err("recovery must not use a raw process token")
+
+fn recovery_terminate(token: i64) -> Result<bool, text>:
+    Err("recovery must not signal a raw process token")
+
+fn recovery_directory(path: text) -> bool:
+    path != ""
+
+describe "BuildRunner partial recovery cleanup":
+    it "requests cancellation of every recovered attempt before rejecting later unknown ownership":
+        val root = cwd().replace("\\", "/") + "/build/partial-recovery-" + str(getpid())
+        val source = root + "/source"
+        val state_root = root + "/state"
+        expect(dir_create_all(source)).to_equal(true)
+        expect(dir_create_all(state_root + "/receipts")).to_equal(true)
+        val image = source + "/producer"
+        expect(file_atomic_write(image, "recovery-port-image\n")).to_equal(true)
+        val digest = file_hash_sha256(image)
+        var tasks: [BuildTaskV1] = []
+        for id in ["first", "second", "unknown"]:
+            tasks = tasks.push(BuildTaskV1(id: id, attempt: 1, phase: "module",
+                producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+                dependencies: [], program: image, args: [], inputs: [], outputs: [id + ".bin"],
+                cache_key: digest, timeout_ms: 1000, memory_limit_bytes: 1048576, links: []))
+        val run = BuildRunV1(tasks: tasks, hosts: [BuildHostV1(id: "local", transport: "local",
+            endpoint: "", workspace: root, worker_program: image, worker_digest: digest, slots: 3)],
+            keep_going: true, max_attempts: 1)
+        var state = builder_manager_start(run)
+        for index in 0..3:
+            state = builder_manager_dispatch(state, index, "local")
+        expect(state.error).to_equal("")
+        val journal = builder_manager_encode_v1(state)
+        expect(file_atomic_write(state_root + "/journal.sdn", journal)).to_equal(true)
+        # Exact terminal receipts let recovery attach the first two attempts.
+        # The third deliberately lacks final evidence and a fresh challenge.
+        for index in 0..2:
+            val task = tasks[index]
+            val attempt = state_root + "/attempts/" + task.id + "/1/local"
+            expect(dir_create_all(attempt + "/work")).to_equal(true)
+            val identity = builder_task_identity_v1(task)
+            val receipt = BuildResultV1(task_id: task.id, attempt: 1,
+                identity_digest: identity, host_id: "local", status: "ERROR", exit_code: 1,
+                outputs: [], cache_hits: -1, cache_misses: -1, cache_stores: -1)
+            expect(builder_write_result_v1(attempt + "/result.sdn", receipt)).to_equal(true)
+            expect(file_atomic_write(attempt + "/compiler.reaped", identity + "\nlocal")).to_equal(true)
+            expect(file_atomic_write(attempt + "/capacity.settled", builder_capacity_settlement_encode_v1(
+                BuilderCapacitySettlementV1(identity, "local", "windows-job-settled")))).to_equal(true)
+        val config = BuilderCliV1(command: "run", manifest: "", state: state_root,
+            source_root: source, output_root: root + "/output", request: "", attempt_root: "", host: "", error: "")
+        val port = BuilderProcessPortV1(recovery_spawn, recovery_wait, recovery_terminate, recovery_directory)
+        recovery_spawns = 0
+        expect(builder_cli_run_locked_v1(run, config, port, nil)).to_equal(2)
+        expect(recovery_spawns).to_equal(0)
+        for index in 0..2:
+            val control = file_read(state_root + "/attempts/" + tasks[index].id + "/1/local/control.request")
+            expect(control.starts_with(builder_task_identity_v1(tasks[index]) + "\nlocal\n")).to_equal(true)
+            expect(control.ends_with("\ncancel")).to_equal(true)
+        expect(file_read(state_root + "/journal.sdn")).to_equal(journal)
+        val restored = builder_manager_decode_v1(run, journal).unwrap()
+        expect(restored.statuses).to_equal(["RUNNING", "RUNNING", "RUNNING"])
