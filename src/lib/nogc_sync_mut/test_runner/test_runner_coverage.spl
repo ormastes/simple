@@ -76,11 +76,34 @@ fn reset_coverage_state():
     condition_true = {}
     condition_false = {}
 
+# Escape only key delimiters in the path segment. Ordinary paths retain the
+# established key spelling, while literal percent sequences remain reversible.
+fn encode_coverage_key_path(file: text) -> text:
+    file.replace("%", "%25").replace("|", "%7C")
+
+fn decode_coverage_key_path(file: text) -> text:
+    file.replace("%7C", "|").replace("%25", "%")
+
 fn decision_key(file: text, line: text, col: text, decision_id: text) -> text:
-    "{file}|{line}|{col}|{decision_id}"
+    "{encode_coverage_key_path(file)}|{line}|{col}|{decision_id}"
 
 fn condition_key(file: text, line: text, col: text, decision_id: text, condition_id: text) -> text:
-    "{file}|{line}|{col}|{decision_id}|{condition_id}"
+    "{encode_coverage_key_path(file)}|{line}|{col}|{decision_id}|{condition_id}"
+
+fn coverage_key_path(key: text) -> text:
+    val parts = key.split("|")
+    if parts.len() == 0:
+        return ""
+    decode_coverage_key_path(parts[0])
+
+fn coverage_key_fields(key: text) -> [text]:
+    val parts = key.split("|")
+    var fields: [text] = []
+    var i = 1
+    while i < parts.len():
+        fields.push(parts[i])
+        i = i + 1
+    fields
 
 fn merge_counts(keys: [text], tmap: Dict<text, i64>, fmap: Dict<text, i64>, key: text, t: i64, f: i64):
     if not tmap.has(key) and not fmap.has(key):
@@ -344,9 +367,9 @@ fn build_coverage_data_from_state(raw_sdn: text) -> CoverageData:
     var file_cond_covered: [i64] = []
 
     for key in decision_keys:
-        val parts = key.split("|")
-        if parts.len() >= 4:
-            val fpath = parts[0]
+        val parts = coverage_key_fields(key)
+        if parts.len() >= 3:
+            val fpath = coverage_key_path(key)
             val t = decision_true[key] ?? 0
             val f = decision_false[key] ?? 0
             val covered = t > 0 and f > 0
@@ -365,9 +388,9 @@ fn build_coverage_data_from_state(raw_sdn: text) -> CoverageData:
                 total_dec_covered = total_dec_covered + 1
 
     for key in condition_keys:
-        val parts = key.split("|")
-        if parts.len() >= 5:
-            val fpath = parts[0]
+        val parts = coverage_key_fields(key)
+        if parts.len() >= 4:
+            val fpath = coverage_key_path(key)
             val t = condition_true[key] ?? 0
             val f = condition_false[key] ?? 0
             val covered = t > 0 and f > 0
@@ -433,12 +456,12 @@ fn render_coverage_state_sdn() -> text:
     lines.push("")
     lines.push("decisions |id, file, line, column, true_count, false_count|")
     for key in decision_keys:
-        val parts = key.split("|")
-        if parts.len() >= 4:
-            val fpath = parts[0]
-            val line_str = parts[1]
-            val col_str = parts[2]
-            val decision_id = parts[3]
+        val parts = coverage_key_fields(key)
+        if parts.len() >= 3:
+            val fpath = coverage_key_path(key)
+            val line_str = parts[0]
+            val col_str = parts[1]
+            val decision_id = parts[2]
             val t = decision_true[key] ?? 0
             val f = decision_false[key] ?? 0
             lines.push("    {decision_id}, {fpath}, {line_str}, {col_str}, {t}, {f}")
@@ -446,13 +469,13 @@ fn render_coverage_state_sdn() -> text:
     lines.push("")
     lines.push("conditions |decision_id, condition_id, file, line, column, true_count, false_count|")
     for key in condition_keys:
-        val parts = key.split("|")
-        if parts.len() >= 5:
-            val fpath = parts[0]
-            val line_str = parts[1]
-            val col_str = parts[2]
-            val decision_id = parts[3]
-            val condition_id = parts[4]
+        val parts = coverage_key_fields(key)
+        if parts.len() >= 4:
+            val fpath = coverage_key_path(key)
+            val line_str = parts[0]
+            val col_str = parts[1]
+            val decision_id = parts[2]
+            val condition_id = parts[3]
             val t = condition_true[key] ?? 0
             val f = condition_false[key] ?? 0
             lines.push("    {decision_id}, {condition_id}, {fpath}, {line_str}, {col_str}, {t}, {f}")
@@ -706,7 +729,16 @@ fn print_coverage_delta(data: CoverageData):
 # =========================================================================
 
 fn _coverage_counter_key_parts(key: text) -> [text]:
-    key.split("|")
+    val raw_parts = key.split("|")
+    var parts: [text] = []
+    if raw_parts.len() == 0:
+        return parts
+    parts.push(decode_coverage_key_path(raw_parts[0]))
+    var i = 1
+    while i < raw_parts.len():
+        parts.push(raw_parts[i])
+        i = i + 1
+    parts
 
 fn coverage_owner_outcome_summary(
         owner_id: text, path: text) -> CoverageOwnerOutcomeSummary:
@@ -728,12 +760,12 @@ fn coverage_owner_outcome_summary(
         if true_count > 0:
             branch_outcome_covered = branch_outcome_covered + 1
         else:
-            zero_outcome_rows.push(owner_id + "|" + path + "|" + parts[1] +
+            zero_outcome_rows.push(owner_id + "|" + encode_coverage_key_path(path) + "|" + parts[1] +
                 "|" + parts[3] + "|" + parts[4] + "|true")
         if false_count > 0:
             branch_outcome_covered = branch_outcome_covered + 1
         else:
-            zero_outcome_rows.push(owner_id + "|" + path + "|" + parts[1] +
+            zero_outcome_rows.push(owner_id + "|" + encode_coverage_key_path(path) + "|" + parts[1] +
                 "|" + parts[3] + "|" + parts[4] + "|false")
     CoverageOwnerOutcomeSummary(
         owner_id: owner_id, path: path,
@@ -773,7 +805,7 @@ fn check_critical_branch_outcomes(rows: [text]) -> CriticalBranchOutcomeCheck:
             continue
         seen[row] = true
         if _critical_outcome_covered(
-                parts[1], parts[2], parts[3], parts[4], parts[5]):
+                decode_coverage_key_path(parts[1]), parts[2], parts[3], parts[4], parts[5]):
             covered = covered + 1
         else:
             missing.push(row)
