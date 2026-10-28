@@ -17,6 +17,9 @@ use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_
 use std.test_runner.native_compile_contract.{native_test_request_error, native_test_compile_threads, native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt, native_test_source_roots_identity}
 use std.test_runner.native_compile_contract.{native_test_artifact_path_v1}
 use std.common.test_runner.native_framework_wrapper.{spipe_partition_source, spipe_rewrite_infix_expect_line, native_framework_wrapper_source}
+use std.nogc_sync_mut.test_runner.source_route.{interpreter_snippet_source}
+use std.test_runner.test_result_wrapper.{result_wrapper_path}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
 use std.test_runner.native_owned_process.{ScopedChildRun, run_scoped_child as _run_scoped_child}
 export use std.nogc_sync_mut.test_runner.resource_policy.{safe_mode_caps}
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines, simple_string_byte_ranges}
@@ -169,7 +172,7 @@ fn remove_structured_evidence(evidence_path: text):
         file_delete(evidence_path + ".expectations")
 
 fn finish_interpreter_child_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
-    val result = make_result_from_structured_evidence(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs, evidence_path)
+    val result = make_result_from_structured_evidence(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs, evidence_path, require_evidence: true)
     remove_structured_evidence(evidence_path)
     result
 
@@ -179,10 +182,12 @@ fn finish_interpreter_child_evidence(file_path: text, stdout: text, stderr: text
 # (for example coverage manifests), while the finish helper parses and cleans
 # the evidence pair.
 fn run_interpreter_child_with_evidence(file_path: text, binary: text, args: [text], options: TestOptions, timeout_ms: i64) -> Result<(ScopedChildRun, text), text>:
+    val snippet_source = interpreter_snippet_source(file_path, read_file_content(file_path))
     var child_args = args
+    var snippet_path = ""
     var evidence_path = ""
     var previous_evidence_path = ""
-    if options.assert_ran:
+    if options.assert_ran or snippet_source != "":
         val temp_root = _tp_get_temp_dir()
         val temp_sep = if temp_root.ends_with("/") or temp_root.ends_with("\\"): "" else: "/"
         evidence_path = "{temp_root}{temp_sep}simple_bdd_result_{getpid()}_{time_now_unix_micros()}.txt"
@@ -193,9 +198,33 @@ fn run_interpreter_child_with_evidence(file_path: text, binary: text, args: [tex
         if not env_set("SIMPLE_TEST_RESULT_FILE", evidence_path):
             return Err("test-runner: cannot configure structured result environment")
         child_args = child_args.push("--test-result-file={evidence_path}")
+    if snippet_source != "":
+        snippet_path = result_wrapper_path(file_path) + "_snippet_spec.spl"
+        if not file_create_exclusive(snippet_path, snippet_source):
+            if evidence_path != "": env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path)
+            remove_structured_evidence(evidence_path)
+            return Err("test-runner: cannot create source snippet wrapper")
+        var replaced = false
+        var routed_args: [text] = []
+        for argument in child_args:
+            if argument == file_path:
+                routed_args.push(snippet_path)
+                replaced = true
+            else:
+                routed_args.push(argument)
+        if not replaced:
+            file_delete(snippet_path)
+            if evidence_path != "": env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path)
+            remove_structured_evidence(evidence_path)
+            return Err("test-runner: source snippet child argument does not identify the original source")
+        child_args = routed_args
     val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, child_args,
         timeout_ms, test_child_memory_bytes(options), 0, 0,
         if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    if snippet_path != "" and not file_delete(snippet_path):
+        if evidence_path != "": env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path)
+        remove_structured_evidence(evidence_path)
+        return Err("test-runner: cannot remove source snippet wrapper")
     if evidence_path != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
         remove_structured_evidence(evidence_path)
         return Err("test-runner: cannot restore structured result environment")
