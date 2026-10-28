@@ -1,0 +1,79 @@
+# Direct native diagnostic for the real single-carrier FiberSchedV1 owner.
+# Nonzero exits identify independent failed assertions. This is not evidence
+# of multicore execution, native I/O or generic ResourceFactory qualification.
+use std.common.task_runner.fiber_scheduler.{fiber_sched_new, fiber_sched_submit, fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake, fiber_sched_runnable_count, fiber_sched_parked_count, fiber_sched_all_done, fiber_step_yield, fiber_step_done, fiber_step_park}
+
+fn main() -> i64:
+    var accounting_errors: i64 = 0
+    var sched = fiber_sched_new([0], 30)
+    sched = fiber_sched_submit(sched, 10)
+    sched = fiber_sched_submit(sched, 20)
+    print "submitted budget={sched.budget} est0={sched.fiber_est[0]} est1={sched.fiber_est[1]} error={sched.error}"
+    sched = fiber_sched_admit(sched)
+    print "admitted reserved={sched.reserved} ready={fiber_sched_runnable_count(sched)}"
+    var pick = fiber_sched_pick(sched, 0)
+    print "first fiber={pick.fiber} reserved={pick.sched.reserved}"
+    if pick.fiber != 1: return 11
+    sched = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_yield())
+    print "yielded reserved={sched.reserved} ready={fiber_sched_runnable_count(sched)}"
+    if fiber_sched_runnable_count(sched) != 2: return 13
+    pick = fiber_sched_pick(sched, 0)
+    if pick.fiber != 0: return 14
+    print "ready-peer-progress: PASS"
+    if sched.reserved != 30: accounting_errors = accounting_errors + 1
+    sched = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_done())
+    if sched.reserved != 20: accounting_errors = accounting_errors + 1
+    pick = fiber_sched_pick(sched, 0)
+    if pick.fiber != 1: return 16
+    sched = fiber_sched_complete(pick.sched, 0, pick.fiber, fiber_step_done())
+    if sched.reserved != 0: accounting_errors = accounting_errors + 1
+    if not fiber_sched_all_done(sched): return 18
+
+    var peers = fiber_sched_new([0], 40)
+    for _i in 0..4:
+        peers = fiber_sched_submit(peers, 10)
+    peers = fiber_sched_admit(peers)
+    for _round in 0..3:
+        for offset in 0..4:
+            val next = fiber_sched_pick(peers, 0)
+            if next.fiber != 3 - offset: return 21
+            peers = fiber_sched_complete(next.sched, 0, next.fiber, fiber_step_yield())
+            if peers.reserved != 40: accounting_errors = accounting_errors + 1
+            if fiber_sched_runnable_count(peers) != 4: return 23
+    for _i in 0..4:
+        val next = fiber_sched_pick(peers, 0)
+        if next.fiber < 0: return 24
+        peers = fiber_sched_complete(next.sched, 0, next.fiber, fiber_step_done())
+    if not fiber_sched_all_done(peers): return 25
+    if peers.reserved != 0: accounting_errors = accounting_errors + 1
+    if peers.overcommits != 0: return 27
+
+    # Parking still removes a task until its actual wake; yielding its peer
+    # cannot fabricate a wake or release retained resource admission.
+    var parked = fiber_sched_new([0], 30)
+    parked = fiber_sched_submit(parked, 10)
+    parked = fiber_sched_submit(parked, 20)
+    parked = fiber_sched_admit(parked)
+    var next = fiber_sched_pick(parked, 0)
+    parked = fiber_sched_complete(next.sched, 0, next.fiber, fiber_step_park(9))
+    next = fiber_sched_pick(parked, 0)
+    if next.fiber != 0: return 31
+    parked = fiber_sched_complete(next.sched, 0, next.fiber, fiber_step_yield())
+    if fiber_sched_parked_count(parked) != 1: return 32
+    if fiber_sched_runnable_count(parked) != 1: return 33
+    parked = fiber_sched_wake(parked, 9)
+    if fiber_sched_runnable_count(parked) != 2: return 34
+    next = fiber_sched_pick(parked, 0)
+    if next.fiber != 1: return 35
+    parked = fiber_sched_complete(next.sched, 0, next.fiber, fiber_step_done())
+    next = fiber_sched_pick(parked, 0)
+    if next.fiber != 0: return 36
+    parked = fiber_sched_complete(next.sched, 0, next.fiber, fiber_step_done())
+    if parked.reserved != 0: accounting_errors = accounting_errors + 1
+    if not fiber_sched_all_done(parked): return 38
+    print "yield-order-and-park-wake: PASS"
+    if accounting_errors > 0:
+        print "resource-accounting: FAIL checks={accounting_errors}"
+        return 12
+    print "fiber-yield-progress: PASS"
+    0
