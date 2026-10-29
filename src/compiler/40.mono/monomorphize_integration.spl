@@ -913,7 +913,7 @@ impl MonomorphizationPass:
             eprint("[mono-diag] collect module={module_name} values={function_values.len()}")
         var function_index = 0
         while function_index < function_values.len():
-            self.collect_function_entry_v1(module_name, function_values, function_index, trace_provider and function_index < 32)
+            self.collect_function_entry_v1(module_name, module.symbols, function_values, function_index, trace_provider and function_index < 32)
             function_index = function_index + 1
         if trace_provider:
             eprint("[mono-diag] collected module={module_name} registered={self.stats.generic_functions_found}")
@@ -1132,7 +1132,7 @@ impl MonomorphizationPass:
 
     # The typed array owner survives the complete scalar-index walk. Avoid
     # both an erased by-value extraction return and copied aggregate-key lookup.
-    me collect_function_entry_v1(module_name: text, functions: [HirFunction], index: i64, trace_entry: bool = false):
+    me collect_function_entry_v1(module_name: text, symbols: SymbolTable, functions: [HirFunction], index: i64, trace_entry: bool = false):
         val func: HirFunction = functions[index]
         if trace_entry:
             # The existing classifier also accepts an absent binder array.
@@ -1146,7 +1146,7 @@ impl MonomorphizationPass:
         # Inference needs the declared result, even when bootstrap keeps an
         # erased physical return ABI. Cache once per function, including
         # generic declarations whose signatures are instantiated later.
-        val semantic_return: HirType = self.semantic_function_return_v1(module_name, func)
+        val semantic_return: HirType = self.semantic_function_return_v1(module_name, symbols, func)
         self.fn_returns[mono_sym_key(module_name, fsym.id)] = semantic_return
         self.semantic_template_returns_v1.remove(func.name)
         if fsym.id >= self.next_symbol:
@@ -1378,11 +1378,14 @@ impl MonomorphizationPass:
             mono_scoped_generic_seen_v1[seen_key] = true
             mono_scoped_generic_uses_v1 = mono_scoped_generic_uses_v1.push(use_)
 
-    me semantic_function_return_v1(module_name: text, func: HirFunction) -> HirType:
+    me semantic_function_return_v1(module_name: text, symbols: SymbolTable, func: HirFunction) -> HirType:
         # Keep semantic evidence separate from HirFunction.return_type: the
         # latter may deliberately carry the bootstrap physical ABI.
-        if not self.module_symbols.has(module_name): return func.return_type
-        rti_semantic_callable_return_v1(module_name, self.module_symbols[module_name],
+        # Collection precedes module_symbols installation, and archive mode
+        # deliberately never retains that table. Use the current provider's
+        # table directly rather than caching its erased ABI on the first visit.
+        if symbols == nil: return func.return_type
+        rti_semantic_callable_return_v1(module_name, symbols,
             func.symbol, func.name, func.return_type)
 
     me template_semantic_return_v1(template: MonoTemplateSignatureV1) -> HirType:
