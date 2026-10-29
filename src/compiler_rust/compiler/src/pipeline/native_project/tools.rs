@@ -237,6 +237,15 @@ pub(crate) fn target_c_compiler(target: simple_common::target::Target) -> String
     if target.os == simple_common::target::TargetOS::Windows
         && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
     {
+        // Bootstrap publishes its admitted target-specific C driver as CC.
+        // Preserve that authority instead of resolving another clang on PATH.
+        // Keep the Clang-only fallback: the general detector can select a GCC
+        // cross driver when the host and target ABI differ.
+        if let Ok(cc) = std::env::var("CC") {
+            if !cc.trim().is_empty() {
+                return simple_common::platform::path::to_native_owned(cc);
+            }
+        }
         return "clang".to_string();
     }
     hosted_linux_cross_compiler(target, false)
