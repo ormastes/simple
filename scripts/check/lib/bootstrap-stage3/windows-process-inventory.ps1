@@ -36,9 +36,9 @@ if ($Worker) {
             $parent = $byPid[$next]
             # A reused parent PID must never excuse another process. Stop the
             # proven chain when either creation time is unavailable or the
-            # recorded parent is newer than its child.
+            # recorded parent is not strictly older than its child.
             if ($null -eq $child.CreationDate -or $null -eq $parent.CreationDate -or
-                $parent.CreationDate -gt $child.CreationDate) { break }
+                $parent.CreationDate -ge $child.CreationDate) { break }
             $cursor = $next
         }
         $rows = [System.Collections.Generic.List[string]]::new()

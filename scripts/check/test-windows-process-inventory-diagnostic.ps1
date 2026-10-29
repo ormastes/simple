@@ -92,7 +92,7 @@ $ancestryMock = @'
 function Get-CimInstance {
     param($ClassName, $OperationTimeoutSec, $Filter)
     $now = Get-Date
-    $parentTime = if ($env:SIMPLE_INVENTORY_FIXTURE_REUSED -eq '1') { $now.AddSeconds(10) } else { $now.AddSeconds(-1) }
+    $parentTime = if ($env:SIMPLE_INVENTORY_FIXTURE_REUSED -eq '1') { $now.AddSeconds(10) } elseif ($env:SIMPLE_INVENTORY_FIXTURE_REUSED -eq 'equal') { $now } elseif ($env:SIMPLE_INVENTORY_FIXTURE_REUSED -eq 'null') { $null } else { $now.AddSeconds(-1) }
     return @(
         [pscustomobject]@{ ProcessId = $PID; ParentProcessId = 900001; WorkingSetSize = 1024; Name = 'powershell.exe'; CommandLine = 'inventory worker'; CreationDate = $now },
         [pscustomobject]@{ ProcessId = 900001; ParentProcessId = 900002; WorkingSetSize = 1024; Name = 'sh.exe'; CommandLine = 'sh scripts/bootstrap/bootstrap-from-scratch.sh --resume'; CreationDate = $parentTime },
@@ -106,7 +106,7 @@ function Get-CimInstance {
 $ancestryFixture = Join-Path $evidence 'ancestry-provider.ps1'
 $ancestryText = $text.Replace('Set-StrictMode -Version Latest', "Set-StrictMode -Version Latest`n$ancestryMock")
 [System.IO.File]::WriteAllText($ancestryFixture, $ancestryText, [System.Text.UTF8Encoding]::new($false))
-foreach ($reused in @('0', '1')) {
+foreach ($reused in @('0', '1', 'equal', 'null')) {
     $env:SIMPLE_INVENTORY_FIXTURE_REUSED = $reused
     $ancestrySnapshot = Join-Path $evidence "ancestry-$reused.snapshot"
     $ancestryStdout = Join-Path $evidence "ancestry-$reused.stdout"
@@ -122,7 +122,7 @@ foreach ($reused in @('0', '1')) {
         $rows = [System.IO.File]::ReadAllText($ancestrySnapshot)
         if ($rows -notmatch '(?m)^900003\|' -or $rows -notmatch '(?m)^900004\|') { throw 'independent bootstrap or native child was hidden' }
         if ($reused -eq '0' -and ($rows -match '(?m)^900001\|' -or $rows -match '(?m)^900002\|')) { throw 'own wrapper was counted as a peer' }
-        if ($reused -eq '1' -and ($rows -notmatch '(?m)^900001\|' -or $rows -notmatch '(?m)^900002\|')) { throw 'unproven reused ancestor was hidden' }
+        if ($reused -ne '0' -and ($rows -notmatch '(?m)^900001\|' -or $rows -notmatch '(?m)^900002\|')) { throw 'unproven reused ancestor was hidden' }
     } finally { $ancestry.Dispose() }
 }
 Remove-Item Env:SIMPLE_INVENTORY_FIXTURE_REUSED -ErrorAction SilentlyContinue
