@@ -159,9 +159,13 @@ static int pov4_acquire_cwd(uint64_t handle, const char* canonical_path,
     pthread_mutex_unlock(&pov4_cwd_lock);
     if (duplicate < 0) { if (!matched) errno = ESTALE; return -1; }
     uint8_t current[POV4_DIGEST_BYTES];
-    if (!pov4_directory_digest(duplicate, current) ||
-        memcmp(current, digest, POV4_DIGEST_BYTES) != 0) {
-        int saved = errno ? errno : ESTALE; close(duplicate); errno = saved; return -1;
+    if (!pov4_directory_digest(duplicate, current)) {
+        int saved = errno; close(duplicate); errno = saved; return -1;
+    }
+    if (memcmp(current, digest, POV4_DIGEST_BYTES) != 0) {
+        /* Digest mismatch is our own failure, not a failed syscall: successful
+         * fstat/fcntl calls may leave unrelated caller errno values intact. */
+        close(duplicate); errno = ESTALE; return -1;
     }
     return duplicate;
 }
