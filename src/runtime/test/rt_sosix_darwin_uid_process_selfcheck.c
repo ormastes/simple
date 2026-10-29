@@ -10,8 +10,26 @@ int main(void) { puts("SKIP: Darwin UID zombie barrier requires macOS"); return 
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
+/* Real kernel census/identity calls can consume the entire 10ms budget under
+ * load, before any blocker is counted. Advance test time only at the barrier's
+ * polling sleeps so count assertions always describe a completed census. */
+static int64_t test_now_ns = 1000000000;
+static int test_clock_gettime(clockid_t clock, struct timespec *time) {
+    assert(clock == CLOCK_MONOTONIC);
+    time->tv_sec = test_now_ns / 1000000000;
+    time->tv_nsec = test_now_ns % 1000000000;
+    return 0;
+}
+static int test_nanosleep(const struct timespec *delay, struct timespec *remaining) {
+    (void)remaining;
+    test_now_ns += (int64_t)delay->tv_sec * 1000000000 + delay->tv_nsec;
+    return 0;
+}
 static int test_sysctl(int *, unsigned, void *, size_t *, void *, size_t);
 static void after_snapshot(void);
+#define clock_gettime test_clock_gettime
+#define nanosleep test_nanosleep
 #define SOSIX_DARWIN_UID_PROCESS_SYSCTL test_sysctl
 #define SOSIX_DARWIN_UID_PROCESS_AFTER_SNAPSHOT() after_snapshot()
 #include "../runtime_sosix_darwin_uid_process_private.h"
