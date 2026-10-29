@@ -194,7 +194,12 @@ static int sosix_darwin_process_poll(SosixDarwinProcess *owner, uint64_t generat
         if (live && owner->cleanup_deadline &&
             (owner->leader_exited || (!owner->kill_sent && now >= owner->kill_deadline))) {
             if (!kill(-owner->pid, SIGKILL)) owner->kill_sent = 1;
-            else if (errno != ESRCH) return errno;
+            else if (errno != ESRCH &&
+                !(errno == EPERM && owner->leader_exited && owner->kill_sent)) return errno;
+            /* A previously killed descendant can become unsignalable between
+             * the live snapshot and this signal. EPERM then means retry the
+             * observation, never retirement: the next zero-live snapshot is
+             * still required, and cleanup_deadline bounds persistent denial. */
         }
         if (owner->leader_exited && !live) {
             pid_t waited = wait4(owner->pid, &owner->wait_status, WNOHANG, &owner->usage);

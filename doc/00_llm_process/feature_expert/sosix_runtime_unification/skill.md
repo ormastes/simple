@@ -93,3 +93,12 @@ queues, QEMU serial-bytes-observed row (needs pure-Simple deploy).
   behavior examples on the `io_rw` route.
 - Still red and pre-existing, outside this lane's edits: `fs_service_vfs_backend_v1_spec`
   (seed parse error), `fs_service_adapter_v1_spec` (indexed field receiver), `fs_ipc_codec_v1_spec`.
+
+## Darwin descendant signal race (2026-10-29)
+
+A repeated group SIGKILL may return EPERM after an earlier successful SIGKILL
+and observed leader exit. Keep ownership and resample until zero live members
+or the cleanup deadline; EPERM alone never permits retirement. Initial denial
+still errors. Native and deterministic evidence is in
+`scripts/check/check-sosix-darwin-process.shs`; the executable SSpec and manual
+are `darwin_process_signal_race_spec` under the process system-test trees.

@@ -116,3 +116,12 @@ run.
 failed environment validation. Checked admission preserves its reason; existing
 token APIs retain their signatures. This is partial evidence, not child-launch
 PASS. See [bounded owner evidence](../../../08_tracking/bug/windows_owned_scope_admission_2026_10_25.md).
+
+## Darwin descendant retirement (2026-10-29)
+
+The snapshot process owner retains an unreaped leader while observing group
+retirement. A repeated SIGKILL EPERM after successful delivery and leader exit
+is an observation retry, bounded by cleanup_deadline. Never infer retirement
+from that signal result. The deterministic signal-race selfcheck covers retained
+authority, persistent-denial timeout, and propagation of initial EPERM; the
+native component still verifies actual descendants are retired.
