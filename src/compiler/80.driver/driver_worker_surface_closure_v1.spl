@@ -48,7 +48,7 @@ use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_guards_active_v1, tldr_closure_walk_check_v1}
 use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1, driver_library_mode_native_owner_v1}
-use compiler.driver.driver_source_loading.{_driver_entry_import_dirname, _driver_physical_source_key, driver_closure_import_specs_v1}
+use compiler.driver.driver_source_loading.{_driver_entry_import_dirname, _driver_physical_source_key, driver_closure_import_specs_from_source_v1}
 extern fn rt_process_start_identity(pid: i64) -> i64
 
 val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v2"
@@ -159,7 +159,15 @@ pub struct WorkerAdmittedGraphV1:
 
 pub fn worker_admitted_edges_v1(paths: [text], contents: [text], names: [text],
         roots: [text], library_mode: text) -> Result<WorkerAdmittedGraphV1, text>:
-    if paths.len() != contents.len() or paths.len() != names.len():
+    var seeds: [bool] = []
+    for _path in paths: seeds.push(true)
+    worker_admitted_edges_selected_v1(paths, contents, names, roots, library_mode, seeds)
+
+# Build only nodes reachable from worker seeds; unit ordering deliberately
+# calls the all-seeds wrapper because it orders the complete inventory.
+pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names: [text],
+        roots: [text], library_mode: text, seeds: [bool]) -> Result<WorkerAdmittedGraphV1, text>:
+    if paths.len() != contents.len() or paths.len() != names.len() or paths.len() != seeds.len():
         return Err("worker surface inventory length mismatch")
     var by_physical: Dict<text, i64> = {}
     var i = 0
@@ -169,9 +177,20 @@ pub fn worker_admitted_edges_v1(paths: [text], contents: [text], names: [text],
         i = i + 1
     var graph: [[i64]] = []
     var errors: [text] = []
+    var queued: [bool] = []
+    var queue: [i64] = []
     i = 0
     while i < paths.len():
-        val required = driver_closure_import_specs_v1(paths[i])
+        graph.push([])
+        errors.push("")
+        queued.push(seeds[i])
+        if seeds[i]: queue.push(i)
+        i = i + 1
+    var head = 0
+    while head < queue.len():
+        i = queue[head]
+        head = head + 1
+        val required = driver_closure_import_specs_from_source_v1(paths[i], contents[i])
         var candidates: [text] = []
         for candidate in required:
             candidates.push(candidate)
@@ -203,9 +222,15 @@ pub fn worker_admitted_edges_v1(paths: [text], contents: [text], names: [text],
                 continue
             val dep = by_physical[physical]
             if dep != i and not deps.contains(dep): deps.push(dep)
-        graph.push(deps)
-        errors.push(error)
-        i = i + 1
+            if not queued[dep]:
+                queued[dep] = true
+                queue.push(dep)
+        graph[i] = deps
+        errors[i] = error
+        if driver_phase_trace_enabled() and head % 128 == 0:
+            log_phase("phase2:surface:admitted-graph:progress scanned={head} queued={queue.len()} inventory={paths.len()}")
+    if driver_phase_trace_enabled():
+        log_phase("phase2:surface:admitted-graph:done scanned={head} inventory={paths.len()}")
     Ok(WorkerAdmittedGraphV1(edges: graph, errors: errors))
 
 pub fn worker_admitted_error_v1(graph: WorkerAdmittedGraphV1, selected: [bool]) -> text:
