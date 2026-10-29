@@ -3,16 +3,29 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
 #if defined(_WIN32)
-#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
-#undef _WIN32_WINNT
-#define _WIN32_WINNT 0x0602
-#endif
 #include <io.h>
 #include <windows.h>
+/* FILE_ID_INFO and FileIdInfo are hidden by pre-Windows-8 SDK targets.
+ * runtime_native.c can include windows.h before this header, so changing
+ * _WIN32_WINNT here cannot expose them (and would change caller policy).
+ * Use the documented GetFileInformationByHandleEx wire ABI, preserving the
+ * full 128-bit identity. Unsupported OS/filesystems still fail the query.
+ * https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_id_info
+ */
+typedef struct rt_fd_stat_file_id_info_v1 {
+    ULONGLONG VolumeSerialNumber;
+    unsigned char Identifier[16];
+} rt_fd_stat_file_id_info_v1;
+#define RT_FD_STAT_FILE_ID_INFO_CLASS_V1 ((FILE_INFO_BY_HANDLE_CLASS)18)
+typedef char rt_fd_stat_file_id_size_v1[
+    sizeof(rt_fd_stat_file_id_info_v1) == 24 ? 1 : -1];
+typedef char rt_fd_stat_file_id_offset_v1[
+    offsetof(rt_fd_stat_file_id_info_v1, Identifier) == 8 ? 1 : -1];
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -107,13 +120,13 @@ static int64_t rt_fd_stat_snapshot_v1_impl(
     _set_thread_local_invalid_parameter_handler(prior_handler);
     if (native == -1) return -EBADF;
 
-    FILE_ID_INFO identity;
+    rt_fd_stat_file_id_info_v1 identity;
     FILE_STANDARD_INFO standard;
     FILE_BASIC_INFO basic;
     memset(&identity, 0, sizeof(identity));
     memset(&standard, 0, sizeof(standard));
     memset(&basic, 0, sizeof(basic));
-    if (!GetFileInformationByHandleEx((HANDLE)native, FileIdInfo,
+    if (!GetFileInformationByHandleEx((HANDLE)native, RT_FD_STAT_FILE_ID_INFO_CLASS_V1,
             &identity, sizeof(identity)) ||
         !GetFileInformationByHandleEx((HANDLE)native, FileStandardInfo,
             &standard, sizeof(standard)) ||
@@ -127,8 +140,8 @@ static int64_t rt_fd_stat_snapshot_v1_impl(
         standard.AllocationSize.QuadPart < 0) return -EOVERFLOW;
     uint64_t size = (uint64_t)standard.EndOfFile.QuadPart;
     snapshot[0] = (uint64_t)identity.VolumeSerialNumber;
-    memcpy(&snapshot[1], &identity.FileId.Identifier[0], sizeof(uint64_t));
-    memcpy(&snapshot[2], &identity.FileId.Identifier[8], sizeof(uint64_t));
+    memcpy(&snapshot[1], &identity.Identifier[0], sizeof(uint64_t));
+    memcpy(&snapshot[2], &identity.Identifier[8], sizeof(uint64_t));
     snapshot[3] = size;
     snapshot[4] = (uint64_t)standard.AllocationSize.QuadPart;
     snapshot[5] = (uint64_t)basic.FileAttributes;
