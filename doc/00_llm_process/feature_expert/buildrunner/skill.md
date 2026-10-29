@@ -59,3 +59,11 @@ per live module and refuses function completion and object/JIT publication.
 Free/reset clear owned failures. Isolated provider evidence is separate from
 new compiler qualification. See
 [refusal propagation](../../../08_tracking/bug/cranelift_rejected_call_publication_2026_10_30.md).
+
+## Panic call ABI (2026-10-30)
+
+Generated one-message panic calls must split the evaluated text into raw bytes
+and byte length at MirBuilder.emit_call. Keep Abort and explicit two-argument
+calls intact. A successful native build can still contain logged rejected
+declarations; inspect those diagnostics before qualification. See
+[panic ABI evidence](../../../08_tracking/bug/cranelift_panic_call_abi_conflict_2026_10_30.md).

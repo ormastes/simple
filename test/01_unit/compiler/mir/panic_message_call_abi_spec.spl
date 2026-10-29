@@ -1,0 +1,109 @@
+# @manual_section: Runtime panic message ABI and diverging control flow.
+use std.spec.{describe, it, expect, step}
+use compiler.mir.mir_data.*
+
+fn panic_test_function(name: text, params: [MirType]) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: params,
+            return_type: MirType.unit(), is_variadic: false, params_known: true)))))
+
+fn panic_test_call_name(instruction: MirInst) -> text:
+    match instruction.kind:
+        case MirInstKind.Call(_, callee, _):
+            match callee.kind:
+                case MirOperandKind.Const(MirConstValue.Str(name), _): name
+                case _: ""
+        case _: ""
+
+describe "MIR panic messages use one canonical pointer and byte length ABI":
+    it "reuses a dynamic message for pointer and byte length while preserving Abort":
+        """A generated guard may carry one already evaluated text operand.
+        Expand it without reevaluating its producer or losing the abort edge.
+        """
+        step("Emit a dynamic message local and its one-message panic")
+        var builder = MirBuilder.new()
+        builder.begin_simple_function("panic_probe", "unit")
+        val producer = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("make_message"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))))
+        val message = builder.emit_call_value(producer, [], MirType.i64())
+        builder.emit_call(panic_test_function("rt_panic", [MirType.i64()]),
+            [MirOperand(kind: MirOperandKind.Move(message))], MirType.unit())
+        val instructions = builder.instructions
+        var producer_calls = 0
+        var data_calls = 0
+        var length_calls = 0
+        var panic_calls = 0
+        for instruction in instructions:
+            val name = panic_test_call_name(instruction)
+            if name == "make_message": producer_calls = producer_calls + 1
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, args):
+                    if name == "rt_string_data" or name == "rt_string_len":
+                        expect(args.len()).to_equal(1)
+                        match args[0].kind:
+                            case MirOperandKind.Copy(local): expect(local.id).to_equal(message.id)
+                            case _: expect(false).to_equal(true)
+                        if name == "rt_string_data": data_calls = data_calls + 1
+                        else: length_calls = length_calls + 1
+                    if name == "rt_panic":
+                        panic_calls = panic_calls + 1
+                        expect(args.len()).to_equal(2)
+                        match callee.kind:
+                            case MirOperandKind.Const(_, type_):
+                                match type_.kind:
+                                    case MirTypeKind.FuncPtr(sig):
+                                        expect(sig.params.len()).to_equal(2)
+                                        expect(sig.return_type.kind == MirTypeKind.Unit).to_equal(true)
+                                        expect(sig.params_known).to_equal(true)
+                                    case _: expect(false).to_equal(true)
+                            case _: expect(false).to_equal(true)
+                case _: ()
+        expect(producer_calls).to_equal(1)
+        expect(data_calls).to_equal(1)
+        expect(length_calls).to_equal(1)
+        expect(panic_calls).to_equal(1)
+        step("Retain the caller-owned abort terminator")
+        builder.terminate_abort("must not fall through")
+        expect(builder.blocks.len()).to_equal(1)
+        match builder.blocks[0].terminator:
+            case MirTerminator.Abort(message): expect(message).to_equal("must not fall through")
+            case _: expect(false).to_equal(true)
+
+    it "leaves explicit pointer and byte length calls unchanged":
+        step("Emit known bytes with an embedded NUL and explicit full length")
+        var builder = MirBuilder.new()
+        builder.begin_simple_function("raw_panic_probe", "unit")
+        val pointer_type = MirType.ptr(MirType(kind: MirTypeKind.I8), false)
+        val pointer = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("a\0b"), pointer_type))
+        builder.emit_call(panic_test_function("rt_panic", [pointer_type, MirType.i64()]),
+            [pointer, MirOperand.const_int(3)], MirType.unit())
+        expect(builder.instructions.len()).to_equal(1)
+        match builder.instructions[0].kind:
+            case MirInstKind.Call(_, _, args):
+                expect(args.len()).to_equal(2)
+                match args[1].kind:
+                    case MirOperandKind.Const(MirConstValue.Int(length), _): expect(length).to_equal(3)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "does not rewrite another one-argument function":
+        step("Keep an unrelated function's argument list intact")
+        var builder = MirBuilder.new()
+        builder.begin_simple_function("ordinary_probe", "unit")
+        builder.emit_call(panic_test_function("ordinary", [MirType.i64()]),
+            [MirOperand.const_int(7)], MirType.unit())
+        expect(builder.instructions.len()).to_equal(1)
+        match builder.instructions[0].kind:
+            case MirInstKind.Call(_, _, args): expect(args.len()).to_equal(1)
+            case _: expect(false).to_equal(true)
+
+    it "does not silently normalize malformed panic arity":
+        step("Leave invalid arity visible to the existing validation owners")
+        var builder = MirBuilder.new()
+        builder.begin_simple_function("invalid_probe", "unit")
+        builder.emit_call(panic_test_function("rt_panic", []),
+            [MirOperand.const_int(1), MirOperand.const_int(2), MirOperand.const_int(3)], MirType.unit())
+        expect(builder.instructions.len()).to_equal(1)
+        match builder.instructions[0].kind:
+            case MirInstKind.Call(_, _, args): expect(args.len()).to_equal(3)
+            case _: expect(false).to_equal(true)
