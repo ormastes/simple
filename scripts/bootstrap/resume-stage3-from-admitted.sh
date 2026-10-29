@@ -872,19 +872,38 @@ esac
 # into both the args hash and the real invocation so they cannot diverge; empty
 # unless an allowlisted print-only probe var is set to exactly 1.
 stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
-# Opt-in parallelism / per-file timeout for the Stage 3 recompile.  Unset
-# reproduces the pinned `--threads 1` argv byte-for-byte.  Baked into both the
-# args hash and the transcribed invocation (the child runs under `env -i`, so
-# an outer variable would never reach it).  `full` = online CPUs.
-stage3_threads=${SIMPLE_NATIVE_BUILD_THREADS:-1}
-[ "$stage3_threads" != full ] ||
-  stage3_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
-case "$stage3_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
-stage3_requested_route=direct
-stage3_fallback_route=none
-if [ "$stage3_threads" -gt 1 ]; then
-  stage3_requested_route=coordinator
-  stage3_fallback_route=direct
+# Direct fanout is explicit and bounded. The legacy thread environment still
+# selects its coordinator route. The resolved thread count and route are bound
+# into both the argument hash and the transcribed worker invocation below.
+. "$root/scripts/bootstrap/lib/stage3-direct-parallel.shs"
+bootstrap_stage3_resolve_parallel_policy || exit 1
+stage3_threads=$bootstrap_stage3_policy_threads
+stage3_requested_route=$bootstrap_stage3_policy_route
+stage3_fallback_route=$bootstrap_stage3_policy_fallback
+if [ -n "${SIMPLE_STAGE3_DIRECT_THREADS:-}" ] && [ "$stage3_threads" -gt 1 ]; then
+  [ "$stage3_rss_cap_mode" = enforce ] ||
+    bootstrap_stage3_error 'parallel direct Stage 3 requires enforced memory containment'
+  [ -z "${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE:-}${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM:-}" ] ||
+    bootstrap_stage3_error 'parallel direct Stage 3 refuses memory probe overrides'
+  bootstrap_stage3_admit_direct_memory "$stage3_threads" "$memory_admission" "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" ||
+    bootstrap_stage3_error 'parallel direct Stage 3 memory admission refused'
+  # The nested compiler watchdog has a separate tree cap. Admit its actual
+  # policy, not just the outer process limit, before allowing fanout.
+  case "$platform" in
+    *-apple-darwin*) : "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:=6835937}"; export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB ;;
+  esac
+  . "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
+  bootstrap_tree_rss_resolve "$stage3_threads" "$root" ||
+    bootstrap_stage3_error "$bootstrap_tree_rss_refusal"
+  [ "$bootstrap_tree_rss_cap_kib" -ge "$bootstrap_stage3_direct_group_need_kib" ] ||
+    bootstrap_stage3_error 'parallel direct Stage 3 tree RSS cap is below the worker budget'
+  {
+    echo "direct_parallel_threads=$stage3_threads"
+    echo "direct_parallel_worker_budget_mib=9000"
+    echo "direct_parallel_process_required_mib=$bootstrap_stage3_direct_process_need"
+    echo "direct_parallel_host_required_kib=$bootstrap_stage3_direct_host_need_kib"
+    echo "direct_parallel_tree_rss_cap_kib=$bootstrap_tree_rss_cap_kib"
+  } >>"$memory_admission" || bootstrap_stage3_error 'cannot record direct Stage 3 memory admission'
 fi
 stage3_timeout_args=
 case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
