@@ -1,0 +1,98 @@
+#!/bin/sh
+# Experimental native AMFI image binding evidence. Does not admit a V4 provider.
+set -eu
+if [ "$(uname -s)" != Darwin ]; then
+    echo 'SKIP: AMFI spawn constraint evidence requires macOS'
+    exit 77
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/sosix-amfi.XXXXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+cc=${CC:-cc}
+"$cc" -std=c11 -O0 "$root/src/runtime/test/rt_sosix_darwin_constraint_fixture.c" -o "$scratch/good"
+"$cc" -std=c11 -O0 -DSOSIX_LIBRARY_FIXTURE=17 -dynamiclib \
+    "$root/src/runtime/test/rt_sosix_darwin_constraint_fixture.c" -o "$scratch/allowed.dylib"
+"$cc" -std=c11 -O0 -DSOSIX_LIBRARY_FIXTURE=99 -dynamiclib \
+    "$root/src/runtime/test/rt_sosix_darwin_constraint_fixture.c" -o "$scratch/other.dylib"
+"$cc" -std=c11 -O0 -DSOSIX_LIBRARY_FIXTURE=99 -DSOSIX_FIXTURE_SYMBOL=sosix_leaf_value -dynamiclib \
+    "$root/src/runtime/test/rt_sosix_darwin_constraint_fixture.c" -o "$scratch/leaf.dylib"
+"$cc" -std=c11 -O0 -DSOSIX_LIBRARY_FIXTURE=17 -DSOSIX_TRANSITIVE_FIXTURE=1 -dynamiclib \
+    "$root/src/runtime/test/rt_sosix_darwin_constraint_fixture.c" "$scratch/leaf.dylib" -o "$scratch/transitive.dylib"
+"$cc" -fobjc-arc -framework Foundation -framework Security \
+    "$root/src/runtime/runtime_sosix_darwin_spawn_constraint_private.m" \
+    "$root/src/runtime/test/rt_sosix_darwin_spawn_constraint_selfcheck.m" -o "$scratch/check"
+
+run_case() {
+    case_name=$1; expected_status=$2; trusted=$3; launched=$4; operation=$5; mode=$6; library=$7; replacement=$8
+    main_marker="$scratch/$case_name.main"; exe_marker="$scratch/$case_name.exe"; lib_marker="$scratch/$case_name.lib"
+    actual_status=0
+    "$scratch/check" "$trusted" "$launched" "$operation" "$mode" "$main_marker" "$library" "$exe_marker" "$lib_marker" "$replacement" 2>"$scratch/$case_name.stderr" || actual_status=$?
+    if [ "$expected_status" = injection ]; then
+        case "$actual_status" in 0|134|137) ;; *) echo "FAIL: injection unexpected status $actual_status" >&2; exit 1 ;; esac
+    elif [ "$actual_status" != "$expected_status" ]; then
+        cat "$scratch/$case_name.stderr" >&2
+        echo "FAIL: $case_name expected status $expected_status, got $actual_status" >&2; exit 1
+    fi
+}
+no_marker() { if [ -e "$1" ]; then echo "FAIL: unexpected execution marker $1" >&2; exit 1; fi; }
+has_marker() { if [ ! -f "$1" ]; then echo "FAIL: missing execution marker $1" >&2; exit 1; fi; }
+
+# The negative oracle deliberately omits binding: a differently signed binary
+# runs. This is the RED control for any implementation that only validates then
+# invokes path-based spawn.
+cp "$scratch/good" "$scratch/replacement"
+codesign --force --sign - --identifier org.simple.sosix.replacement "$scratch/replacement" 2>/dev/null
+run_case unbound 0 "$scratch/good" "$scratch/replacement" unbound plain '' ''
+has_marker "$scratch/unbound.exe"
+echo 'PASS: negative control executes replacement without kernel binding'
+
+run_case accepted 0 "$scratch/good" "$scratch/good" bind plain '' ''
+has_marker "$scratch/accepted.main"
+echo 'PASS: matching CDHash executes'
+
+cp "$scratch/good" "$scratch/replace-target"
+run_case replaced 137 "$scratch/good" "$scratch/replace-target" replace plain '' "$scratch/replacement"
+no_marker "$scratch/replaced.exe"; no_marker "$scratch/replaced.main"
+echo 'PASS: same-UID rename after binding is rejected before constructors'
+
+cp "$scratch/good" "$scratch/mutate-target"
+run_case mutated 137 "$scratch/good" "$scratch/mutate-target" mutate plain '' ''
+no_marker "$scratch/mutated.exe"; no_marker "$scratch/mutated.main"
+echo 'PASS: retained writable descriptor mutation is rejected before constructors'
+
+# A library constraint is signed into the executable's CodeDirectory. The
+# allowlist binds custom dependencies; OS libraries are exempt by Apple design.
+library_hash=$(codesign -dvvv "$scratch/allowed.dylib" 2>&1 | sed -n 's/^CDHash=//p')
+transitive_hash=$(codesign -dvvv "$scratch/transitive.dylib" 2>&1 | sed -n 's/^CDHash=//p')
+python3 - "$scratch/libraries.plist" "$library_hash" "$transitive_hash" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], 'wb') as output:
+    plistlib.dump({'cdhash': {'$in': [bytes.fromhex(value) for value in sys.argv[2:]]}}, output)
+PY
+cp "$scratch/good" "$scratch/closed"
+codesign --force --sign - --options hard,kill --library-constraint "$scratch/libraries.plist" \
+    --enforce-constraint-validity "$scratch/closed" 2>/dev/null
+run_case allowed_library 0 "$scratch/closed" "$scratch/closed" bind dlopen "$scratch/allowed.dylib" ''
+has_marker "$scratch/allowed_library.lib"
+echo 'PASS: signed allowlist permits the exact custom library'
+
+run_case denied_library 42 "$scratch/closed" "$scratch/closed" bind dlopen "$scratch/other.dylib" ''
+has_marker "$scratch/denied_library.main"; no_marker "$scratch/denied_library.lib"
+echo 'PASS: different custom library is rejected before its constructor'
+
+run_case denied_transitive 42 "$scratch/closed" "$scratch/closed" bind dlopen "$scratch/transitive.dylib" ''
+has_marker "$scratch/denied_transitive.main"; no_marker "$scratch/denied_transitive.lib"
+echo 'PASS: allowed library cannot load an unlisted transitive dependency'
+
+run_case denied_injection injection "$scratch/closed" "$scratch/closed" bind inject "$scratch/other.dylib" ''
+no_marker "$scratch/denied_injection.lib"
+echo 'PASS: unlisted DYLD_INSERT_LIBRARIES code never executes'
+
+# Neither a valid replacement signature nor removal of the library constraint
+# can retain the main image's admitted CDHash.
+cp "$scratch/closed" "$scratch/stripped"
+codesign --force --sign - "$scratch/stripped" 2>/dev/null
+run_case stripped 137 "$scratch/closed" "$scratch/stripped" bind dlopen "$scratch/other.dylib" ''
+no_marker "$scratch/stripped.exe"; no_marker "$scratch/stripped.lib"
+echo 'PASS: removing signed dependency constraints invalidates launch binding'
+echo 'STATUS: PASS (experimental image binding only; no strict tree or V4 admission)'
