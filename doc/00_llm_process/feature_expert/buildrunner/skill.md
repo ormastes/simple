@@ -50,3 +50,12 @@ i64 `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`; absence retains the compiler default,
 and malformed values refuse before candidate execution. This does not change
 hard memory enforcement or admit a previously rejected compiler. See
 [reserve scrub evidence](../../../08_tracking/bug/bootstrap_sanity_memory_reserve_scrub_2026_10_30.md).
+
+## Cranelift rejected-call publication (2026-10-30)
+
+A void call legitimately returns handle zero; do not use that value alone as an
+error test. The Rust provider retains declaration/import/direct-call failures
+per live module and refuses function completion and object/JIT publication.
+Free/reset clear owned failures. Isolated provider evidence is separate from
+new compiler qualification. See
+[refusal propagation](../../../08_tracking/bug/cranelift_rejected_call_publication_2026_10_30.md).

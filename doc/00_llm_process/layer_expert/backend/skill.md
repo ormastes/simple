@@ -311,3 +311,12 @@ declarations from missing builder/module state. Return-zero ABI and fail-closed
 build aggregation remain unchanged. The rebuilt bridge must be qualified;
 editing its source cannot change a statically linked frozen producer. See
 `doc/08_tracking/bug/buildrunner_cranelift_zero_function_ref_2026_10_29.md`.
+
+## Cranelift rejected-call publication (2026-10-30)
+
+A void call legitimately returns handle zero; do not use that value alone as an
+error test. The Rust provider retains declaration/import/direct-call failures
+per live module and refuses function completion and object/JIT publication.
+Free/reset clear owned failures. Isolated provider evidence is separate from
+new compiler qualification. See
+[refusal propagation](../../../08_tracking/bug/cranelift_rejected_call_publication_2026_10_30.md).
