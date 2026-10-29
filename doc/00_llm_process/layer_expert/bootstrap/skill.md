@@ -922,3 +922,8 @@ Transport collection checks task name, attempt, host and immutable task digest
 before output handling, even for failures with no outputs. Later manager
 admission does not replace this boundary. See
 [collection guide](../../../07_guide/tooling/buildrunner_collection_identity.md).
+
+The native BuildRunner Hello fixture selects one-binary mode and versions its
+cache identity. Preserve Darwin SDKROOT/deployment target before manager launch;
+compiler exit zero, direct Hello and production worker admission are distinct
+gates. See the BuildRunner stage-trace guide's native Hello prerequisites.

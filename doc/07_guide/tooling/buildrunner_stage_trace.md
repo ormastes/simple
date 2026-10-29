@@ -21,3 +21,30 @@ When the matrix uses its BuildRunner provider, it forwards `--trace-stages` to b
 BuildRunner writes `build_trace` SDN records to stdout for root/source/database admission, scheduler startup, task admission, cache reuse, dispatch, worker memory/V4 admission, executable pinning, V4 ownership transfer, collection, publication, and terminal results. Local and SSH worker invocations receive the option. Standalone Linux and Windows workers emit input-admission, process-start and result events; Linux additionally marks delegated capacity admission. Their `process-start` owned event follows acquisition of the native owner lease. Worker records include the task identity, producer SHA-256, attempt, and recognized backend/route. A managed Hello task's producer can be Python; the matrix records separately identify the actual phase compiler. `unspecified` means the task arguments did not establish a recognized backend or route.
 
 The new structured trace does not copy argv, paths, environment values, or arbitrary error messages. Existing human-readable errors and compiler logs are unchanged. Trace events are diagnostic only; a `v4-capabilities` begin followed by worker result exit 2 does not prove that a compiler started. Only `v4-start` with `event: "owned"` indicates that the worker received an active process lease. No trace option bypasses the V4 admission guard.
+
+## Native Hello fixture prerequisites
+
+`test/fixtures/buildrunner/hello_native_run_v1.spl` declares one native
+`hello.exe` output and explicitly selects `--mode one-binary`. Its versioned
+cache identity does not reuse the former implicit link-mode task. This avoids
+unrequested SMF packaging, whose object reader currently requires ELF.
+
+On Darwin, select the SDK before invoking the manager and retain these exact
+values with the toolchain evidence:
+
+```sh
+export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+export MACOSX_DEPLOYMENT_TARGET="$(xcrun --sdk macosx --show-sdk-version)"
+```
+
+These host-derived defaults target that installed SDK version; supply a reviewed
+older deployment target explicitly when cross-version compatibility is required.
+The worker preserves both variables in its explicit environment snapshot and
+binds them in the task context digest. It does not discover an SDK implicitly.
+Missing values produce `darwin-deployment-or-sdk-missing`; a linked executable
+by itself does not turn the compiler's nonzero exit into success.
+
+A direct compiler Hello is diagnostic evidence only. The production fixture
+still needs the manager, matching receipt, executed output and strict process
+ownership. Darwin strict V4 and kernel-enforced task memory remain unavailable;
+changing output mode or supplying an SDK does not satisfy those requirements.
