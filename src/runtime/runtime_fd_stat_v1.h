@@ -27,7 +27,21 @@ enum rt_fd_stat_kind_v1 {
     RT_FD_STAT_KIND_V1_OTHER = 3
 };
 
-#if defined(_WIN32) && defined(_MSC_VER)
+#if defined(_WIN32) && defined(_UCRT) && !defined(_MSC_VER)
+/* MinGW's UCRT import library exports this API, but its stdlib.h does not
+ * declare it. Use the owning CRT's thread-local handler, never a process-wide
+ * override which could change another thread's invalid-parameter behavior. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+_CRTIMP _invalid_parameter_handler __cdecl
+_set_thread_local_invalid_parameter_handler(_invalid_parameter_handler handler);
+#ifdef __cplusplus
+}
+#endif
+#endif
+
+#if defined(_WIN32) && (defined(_MSC_VER) || defined(_UCRT))
 static void __cdecl rt_fd_stat_ignore_invalid_parameter_v1(
     const wchar_t *expression, const wchar_t *function,
     const wchar_t *file, unsigned int line, uintptr_t reserved) {
@@ -81,9 +95,8 @@ static int64_t rt_fd_stat_snapshot_v1_impl(
 
 #if defined(_WIN32)
     if (descriptor < 0 || descriptor > INT32_MAX) return -EBADF;
-#if !defined(_MSC_VER)
-    /* MinGW CRT families do not provide a uniform non-terminating invalid-fd
-     * query.  Refuse this lane until its descriptor owner supplies one. */
+#if !defined(_MSC_VER) && !defined(_UCRT)
+    /* Legacy MinGW CRTs have no supported thread-local invalid-fd handler. */
     return -ENOTSUP;
 #else
     intptr_t native;
