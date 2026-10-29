@@ -160,3 +160,28 @@ When a new M-phase lands, gains a design doc, or an env gate's status
 changes, update the Code map / Env gates / Known limits tables above and the
 `## M-plan status` section in `.spipe/stage4_memory_harden/state.md` in the
 same change.
+
+## Native session allocator residency (2026-10-30)
+
+Session object reclamation and resident memory release are separate checks.
+`rt_session_heap_end` now requests glibc `malloc_trim(0)` after successful
+reclamation and lifecycle unlock. Other allocators retain their existing path;
+module transient scope ends do not trim. The real owner fixture
+`test/01_unit/runtime/session_heap_reclaim_test.c` checks live survivors and
+invalid/active/repeated-end guards. Run
+`scripts/check/check-session-heap-reclaim.shs` on the selected host.
+The controlled actual-owner experiment reduced RSS from 66,509 to 467 pages
+with identical live heap totals; this does not qualify the full native manager.
+See `doc/01_research/local/native_session_allocator_residency_2026_10_30.md`.
+
+### P2 provider correction (2026-10-30)
+
+The affected P2 compiler selects the Rust session owner from `native_all`, not
+the C owner. Rust `collections.rs::rt_session_heap_end` explicitly drops session
+bookkeeping before Linux GNU `libc::malloc_trim(0)`. Check the final artifact's
+symbol/disassembly; allocator imports alone cannot identify its owner. The
+same real-owner fixture accepts `--runtime-archive PATH` for the Rust archive.
+Rust heap snapshot bytes count headers; backing bytes are a separate counter.
+The C experiments do not establish P2 improvement. The rebuilt Rust archive
+ABI fixture and focused Rust unit now pass; final P2 linkage and manager RSS
+remain pending. See the provider correction in the linked research evidence.

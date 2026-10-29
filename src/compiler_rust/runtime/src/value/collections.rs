@@ -3367,6 +3367,16 @@ pub extern "C" fn rt_session_heap_end(session: u32) -> bool {
         return false;
     };
     free_transient_objects(&heap.objects);
+    // Release the session's own Vec/HashSet allocations before asking libc to
+    // return unused arena pages. The TLS borrow and object registry locks are
+    // already released; no live object ownership changes at this boundary.
+    drop(heap);
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // The native-all runtime uses Rust's system allocator. Other global
+        // allocators may not use glibc; trimming then remains harmless/advisory.
+        libc::malloc_trim(0);
+    }
     true
 }
 
