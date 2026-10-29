@@ -112,6 +112,18 @@ describe "40.mono variable flow: bindings":
     it "return value of a non-generic function":
         expect(flow("", "    keep(mk())\n")).to_equal(ok_str)
 
+    it "infers a value returned by an unsafe block":
+        val raw = "@unsafe(reason: \"test native handle\", capabilities: [ffi])\nextern fn rt_ptr_read_i64(p: i64, offset: i64) -> i64\n" +
+            "@unsafe(reason: \"test generic extern\", capabilities: [ffi])\nextern fn rt_string_data<T>(value: T) -> i64\n" +
+            "@unsafe(reason: \"test generic extern\", capabilities: [ffi])\nextern fn rt_string_len<T>(value: T) -> i64\n\n"
+        val body = "    val handle = unsafe(capabilities: [ffi]): rt_ptr_read_i64(1, 0)\n" +
+            "    val data = unsafe(capabilities: [ffi]): rt_string_data(handle)\n" +
+            "    val size = unsafe(capabilities: [ffi]): rt_string_len(handle)\n    keep(handle)\n"
+        expect(flow(raw, body)).to_equal(ok_i64)
+
+    it "preserves text through unsafe blocks rather than guessing the erased integer ABI":
+        expect(flow("", "    val value = unsafe(capabilities: [ffi]): mk()\n    keep(value)\n")).to_equal(ok_str)
+
     it "unannotated let from a generic call, passed on":
         expect(flow("", "    val a = keep(\"x\")\n    val b = keep(a)\n")).to_equal(ok_str)
 
@@ -218,6 +230,9 @@ describe "40.mono variable flow: one specialization per instantiation":
         expect(flow("fn use_r(a: Result<i64, text>, b: Result<i64, text>) -> i64:\n    keep(a)\n    keep(b)\n    0\n\n", "    0\n")).to_equal("keep$unknown unresolved=0 diags=")
 
 describe "40.mono variable flow: refused, never guessed":
+    it "refuses an unsafe block whose value has no concrete type evidence":
+        expect(flow("", "    val value = unsafe(capabilities: [ffi]): nil\n    keep(value)\n")).to_equal(refused)
+
     it "a value with no local type evidence is refused with E-MONO-032":
         expect(flow("", "    keep(nil)\n")).to_equal(refused)
 
