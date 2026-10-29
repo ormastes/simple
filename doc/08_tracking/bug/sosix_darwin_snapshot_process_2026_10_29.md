@@ -47,3 +47,34 @@ The native command's final output was:
 The check skips other hosts with exit 77. No Phase2 rebuild or deployed
 Simple/SSpec provider qualification occurred. Apple platform-signed executable
 copies are not qualified by this locally built fixture.
+
+## Explicit standalone runner follow-up
+
+`src/runtime/tools/sosix_darwin_snapshot_runner.c` now makes this component
+usable as a separately compiled native command. The only accepted profile is
+`trusted-snapshot-group`; `sealed-v4` rejects before file acquisition or spawn.
+Capability output is SDN and explicitly reports immutable executable,
+complete descendant tree, and sealed V4 as false. This command does not change
+BuildRunner/TestRunner admission and is not a substitute for the V4 receipt ABI.
+
+The manual-first acceptance is
+`doc/06_spec/03_system/lib/process/darwin_snapshot_runner_spec.md`; its modern
+SSpec executes the real native check through the process facade. Actual macOS
+evidence is seven executed, seven passed, zero failed, zero skipped using the
+explicit P1 diagnostic interpreter; pure-Simple qualification is outstanding.
+TDD first failed at missing C source, then passed the initial five native scenarios.
+Independent review reproduced relative TMPDIR/cwd failure and blocking FIFO
+acquisition. Absolute snapshot paths and nonblocking source open fix those
+cases; two more actual native acceptance scenarios now cover them.
+
+Strict native integration still needs a proven authority boundary. A protected
+broker with executable storage outside the caller's UID plus descendant
+containment would need provisioning and qualification. The current user has
+no noninteractive sudo authority. A VM could supply a different boundary but
+would require explicit execution-platform admission and is not this native
+profile. Path rehashing, chmod 0500, group signals, or process enumeration do
+not establish those missing guarantees.
+
+The runtime source-list parity checker reports existing release roster drift
+across many unrelated files; the new standalone C source has an explicit
+`none` row and is not an offender. The direct-environment working guard passed.

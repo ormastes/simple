@@ -48,7 +48,11 @@ static int sosix_darwin_image_create(int source_fd, SosixDarwinImage *image) {
     if (fstat(source_fd, &source) || !S_ISREG(source.st_mode) || source.st_size <= 0)
         return errno ? errno : EINVAL;
     const char *base = getenv("TMPDIR"); if (!base || !*base) base = "/tmp";
-    if (snprintf(image->directory, sizeof(image->directory), "%s/sosix-image-XXXXXXXX", base) >= (int)sizeof(image->directory)) return ENAMETOOLONG;
+    /* Spawn actions may change cwd before the kernel resolves the image path.
+     * Keep the snapshot path absolute even when the caller uses TMPDIR=.. */
+    char absolute_base[PATH_MAX];
+    if (!realpath(base, absolute_base)) return errno;
+    if (snprintf(image->directory, sizeof(image->directory), "%s/sosix-image-XXXXXXXX", absolute_base) >= (int)sizeof(image->directory)) return ENAMETOOLONG;
     if (!mkdtemp(image->directory)) return errno;
     if (snprintf(image->path, sizeof(image->path), "%s/image", image->directory) >= (int)sizeof(image->path)) { rmdir(image->directory); return ENAMETOOLONG; }
     int write_fd = open(image->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
