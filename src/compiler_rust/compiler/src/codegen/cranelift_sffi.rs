@@ -131,6 +131,26 @@ lazy_static! {
     static ref MODULE_OWNED: Mutex<HashMap<i64, ModuleOwnedHandles>> = Mutex::new(HashMap::new());
     /// Signature handle -> the one module that consumed it, or SIG_SHARED.
     static ref SIG_OWNER: Mutex<HashMap<i64, i64>> = Mutex::new(HashMap::new());
+    /// First provider refusal for a live module. A zero call result is also a
+    /// valid void result, so errors must travel independently of value handles.
+    static ref MODULE_FAILURES: Mutex<HashMap<i64, Option<String>>> = Mutex::new(HashMap::new());
+}
+
+// Module construction registers the slot; arbitrary invalid handles never
+// allocate failure state. Independent modules cannot poison one another.
+fn record_module_failure(module: i64, reason: String) {
+    if let Some(first) = MODULE_FAILURES.lock().unwrap().get_mut(&module) {
+        if first.is_none() { *first = Some(reason); }
+    }
+}
+
+fn module_has_failure(module: i64) -> bool {
+    MODULE_FAILURES.lock().unwrap().get(&module).is_some_and(Option::is_some)
+}
+
+fn record_builder_failure(ctx: i64, reason: String) {
+    let module = ACTIVE_BUILDERS.lock().unwrap().get(&ctx).map(|ab| ab.module_handle);
+    if let Some(module) = module { record_module_failure(module, reason); }
 }
 
 /// A signature consumed by two modules is never released with either.
@@ -215,6 +235,7 @@ pub fn clear_cranelift_registries() {
     SIGNATURES.lock().unwrap().clear();
     MODULE_OWNED.lock().unwrap().clear();
     SIG_OWNER.lock().unwrap().clear();
+    MODULE_FAILURES.lock().unwrap().clear();
     JIT_MODULES.lock().unwrap().clear();
     AOT_MODULES.lock().unwrap().clear();
 }
@@ -566,6 +587,7 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
     let module = JITModule::new(builder);
     let handle = next_handle();
 
+    MODULE_FAILURES.lock().unwrap().insert(handle, None);
     JIT_MODULES.lock().unwrap().insert(
         handle,
         JITModuleContext {
@@ -579,6 +601,7 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
 /// Finalize the module after all functions are defined.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_finalize_module(module: i64) -> i64 {
+    if module_has_failure(module) { return 0; }
     {
         let mut modules = JIT_MODULES.lock().unwrap();
         if let Some(ctx) = modules.get_mut(&module) {
@@ -603,6 +626,7 @@ pub unsafe extern "C" fn rt_cranelift_free_module(module: i64) {
     }
     release_module_handles(module);
     discard_module_functions(module);
+    MODULE_FAILURES.lock().unwrap().remove(&module);
 }
 
 // Retain the release/1.0.0 MODULE_OWNED/SIG_OWNER handle lifecycle above;
@@ -679,6 +703,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_function(
         Ok(handle) => handle,
         Err(reason) => {
             eprintln!("cranelift: declare_function failed: {reason}");
+            record_module_failure(module, reason);
             0
         }
     }
@@ -739,6 +764,7 @@ pub unsafe extern "C" fn rt_cranelift_import_function(ctx: i64, func_handle: i64
         Ok(handle) => handle,
         Err(reason) => {
             eprintln!("cranelift: import_function failed: {reason}");
+            record_builder_failure(ctx, reason);
             0
         }
     }
@@ -1092,6 +1118,16 @@ pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64,
 /// Returns the context handle for use with define_function.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_end_function(ctx: i64) -> i64 {
+    // A rejected instruction may leave otherwise valid IR (e.g. only Abort).
+    // Do not finalize or publish it. Drop its borrowing builder before backing.
+    {
+        let mut active = ACTIVE_BUILDERS.lock().unwrap();
+        if active.get(&ctx).is_some_and(|ab| module_has_failure(ab.module_handle)) {
+            drop(active.remove(&ctx));
+            BUILDER_BACKINGS.lock().unwrap().remove(&ctx);
+            return 0;
+        }
+    }
     // Step 1: Finalize builder and extract metadata
     let (name, module_handle, is_jit) = {
         let mut active = ACTIVE_BUILDERS.lock().unwrap();
@@ -1148,6 +1184,7 @@ fn describe_module_error(err: &ModuleError) -> String {
 pub unsafe extern "C" fn rt_cranelift_define_function(module: i64, _func_id: i64, ctx: i64) -> bool {
     let finished = FINISHED_FUNCS.lock().unwrap().remove(&ctx);
     let Some(finished) = finished else { return false };
+    if module_has_failure(module) || module_has_failure(finished.module_handle) { return false; }
 
     let mut modules = JIT_MODULES.lock().unwrap();
     let Some(mod_ctx) = modules.get_mut(&module) else {
@@ -1577,7 +1614,9 @@ pub unsafe extern "C" fn rt_cranelift_call(ctx: i64, func_ref_handle: i64, args_
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
     let Some(&func_ref) = ab.func_refs.get(&func_ref_handle) else {
-        eprintln!("cranelift: call missing func-ref handle {func_ref_handle}");
+        let reason = format!("call missing func-ref handle {func_ref_handle} in {}", ab.func_name);
+        eprintln!("cranelift: {reason}");
+        record_module_failure(ab.module_handle, reason);
         return 0;
     };
 
@@ -1590,7 +1629,9 @@ pub unsafe extern "C" fn rt_cranelift_call(ctx: i64, func_ref_handle: i64, args_
         let arg_handles = std::slice::from_raw_parts(args_ptr as *const i64, args_len as usize);
         for &h in arg_handles {
             let Some(&val) = ab.values.get(&h) else {
-                eprintln!("cranelift: call missing value handle {h}");
+                let reason = format!("call missing value handle {h} in {}", ab.func_name);
+                eprintln!("cranelift: {reason}");
+                record_module_failure(ab.module_handle, reason);
                 return 0;
             };
             args.push(val);
@@ -1797,6 +1838,7 @@ pub unsafe extern "C" fn rt_cranelift_append_func_params(ctx: i64, block: i64) {
 /// Get a function pointer from a JIT module.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_get_function_ptr(module: i64, name_ptr: i64, name_len: i64) -> i64 {
+    if module_has_failure(module) { return 0; }
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return 0;
@@ -1999,6 +2041,7 @@ fn rt_cranelift_new_aot_module_impl(
     let module = ObjectModule::new(builder);
     let handle = next_handle();
 
+    MODULE_FAILURES.lock().unwrap().insert(handle, None);
     AOT_MODULES.lock().unwrap().insert(
         handle,
         ObjectModuleContext {
@@ -2035,6 +2078,8 @@ pub unsafe extern "C" fn rt_cranelift_emit_object_raw(module: i64, path_ptr: i64
 }
 
 fn rt_cranelift_emit_object_impl(module: i64, path: &str) -> bool {
+    // Refuse before consuming the module or touching a pre-existing output.
+    if module_has_failure(module) { return false; }
     let mut aot_modules = AOT_MODULES.lock().unwrap();
     if let Some(ctx) = aot_modules.remove(&module) {
         let comdat_funcs = ctx.comdat_funcs;
@@ -2064,6 +2109,7 @@ pub unsafe extern "C" fn rt_cranelift_aot_define_function(
 ) -> bool {
     let finished = FINISHED_FUNCS.lock().unwrap().remove(&ctx);
     let Some(finished) = finished else { return false };
+    if module_has_failure(module) || module_has_failure(finished.module_handle) { return false; }
     let name = finished.name;
 
     let mut modules = AOT_MODULES.lock().unwrap();
@@ -3080,3 +3126,7 @@ mod function_handle_diagnostic_tests {
 #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[path = "cranelift_abort_tests.rs"]
 mod abort_tests;
+
+#[cfg(test)]
+#[path = "cranelift_error_latch_tests.rs"]
+mod error_latch_tests;
