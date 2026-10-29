@@ -1,0 +1,37 @@
+use std.spec.{describe, it, expect}
+use app.cli.bootstrap_source_authority_route.{bootstrap_source_authority_refresh_route_v1}
+
+describe "bootstrap source authority refresh routing":
+    it "routes an ordinary explicit-entry refresh to the canonical owner":
+        val args = ["--entry", "test/native-generated-owned/entry.spl", "--refresh-source-authority"]
+        expect(bootstrap_source_authority_refresh_route_v1(args, false, false, false).unwrap()).to_equal(true)
+        expect(bootstrap_source_authority_refresh_route_v1(["main.spl"], false, false, false).unwrap()).to_equal(false)
+
+    it "keeps flag-like option values out of refresh and role classification":
+        expect(bootstrap_source_authority_refresh_route_v1(["--output", "--refresh-source-authority"], false, false, false).unwrap()).to_equal(false)
+        expect(bootstrap_source_authority_refresh_route_v1(["--output", "--hir-shard=0/1", "--refresh-source-authority"], false, false, false).unwrap()).to_equal(true)
+
+    it "refuses duplicate refresh intent":
+        val result = bootstrap_source_authority_refresh_route_v1(["--refresh-source-authority", "--refresh-source-authority"], false, false, false)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("duplicate")
+
+    it "refuses inherited and explicit internal workers":
+        val refresh = ["--refresh-source-authority"]
+        expect(bootstrap_source_authority_refresh_route_v1(refresh, true, false, false).is_err()).to_equal(true)
+        for role in ["--file-worker=0/1", "--parse-shard=0/1", "--hir-shard=0/1", "--mir-shard=0/1", "--group-result=owned"]:
+            val result = bootstrap_source_authority_refresh_route_v1([role, "--refresh-source-authority"], false, false, false)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("internal worker")
+        expect(bootstrap_source_authority_refresh_route_v1(["--hir-shard=0/1"], true, false, false).unwrap()).to_equal(false)
+
+    it "does not bypass either strict bootstrap profile for positional entries":
+        val args = ["main.spl", "--refresh-source-authority"]
+        expect(bootstrap_source_authority_refresh_route_v1(args, false, true, false).is_err()).to_equal(true)
+        expect(bootstrap_source_authority_refresh_route_v1(args, false, false, true).is_err()).to_equal(true)
+
+    it "refuses grouped refresh without changing ordinary grouped dispatch":
+        val grouped = ["--group-manifest", "owned.sdn", "--refresh-source-authority"]
+        expect(bootstrap_source_authority_refresh_route_v1(grouped, false, false, false).is_err()).to_equal(true)
+        expect(bootstrap_source_authority_refresh_route_v1(["--group-manifest", "owned.sdn"], false, false, false).unwrap()).to_equal(false)
+        expect(bootstrap_source_authority_refresh_route_v1(["--output", "--group-manifest", "--refresh-source-authority"], false, false, false).unwrap()).to_equal(true)
