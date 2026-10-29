@@ -1399,6 +1399,7 @@ int       rt_process_owned_v3_release_value(int64_t handle);
 /* Cooperative Darwin snapshots use a separate ABI and never advertise V4. */
 SplArray* rt_sosix_darwin_snapshot_v1_capabilities_value(void);
 SplArray* rt_sosix_darwin_snapshot_v1_start_value(int64_t profile, SplArray* invocation, SplArray* environment, SplArray* limits);
+SplArray* rt_sosix_darwin_bound_image_v1_start_value(int64_t expected_sha256, SplArray* invocation, SplArray* environment, SplArray* limits);
 SplArray* rt_sosix_darwin_snapshot_v1_poll_value(int64_t handle, int64_t wait_ns);
 SplArray* rt_sosix_darwin_snapshot_v1_cancel_value(int64_t handle);
 SplArray* rt_sosix_darwin_snapshot_v1_output_value(int64_t handle, int64_t stream);

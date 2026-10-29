@@ -2,7 +2,8 @@
  *
  * Scope: a cooperative caller owns this object exclusively, including wait4.
  * SIGCHLD must remain waitable (no SIG_IGN/SA_NOCLDWAIT or foreign reaper).
- * The image is a trusted-same-UID snapshot, NOT a sealed V4 image. Group
+ * The image is either a cooperative snapshot or an explicitly AMFI-bound image.
+ * This process component is NOT a sealed V4 provider. Group
  * retirement covers members that stay in the created process group. A child
  * may escape with setsid/setpgid; this is NOT strict descendant containment.
  * No V4 capabilities are advertised by this component.

@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <CommonCrypto/CommonDigest.h>
 SplArray* rt_array_new(int64_t cap) {
     SplArray* a=calloc(1,sizeof(*a)); assert(a); a->cap=cap; a->items=calloc((size_t)cap+1,sizeof(*a->items)); assert(a->items); return a;
 }
@@ -53,6 +54,26 @@ static SplArray* complete(int64_t handle) {
     }
     assert(!"bounded completion failed");return NULL;
 }
+static void bound_api(const char *executable) {
+    int source=open(executable,O_RDONLY);assert(source>=0);
+    CC_SHA256_CTX hash;CC_SHA256_Init(&hash);unsigned char bytes[65536],digest[32];ssize_t count;
+    while((count=read(source,bytes,sizeof(bytes)))>0)CC_SHA256_Update(&hash,bytes,(CC_LONG)count);
+    assert(!count);close(source);CC_SHA256_Final(digest,&hash);
+    char expected[65];for(size_t i=0;i<32;i++)snprintf(expected+i*2,3,"%02x",digest[i]);
+    const char *values[]={executable,"/","capture","argument with spaces"},*environment[]={"SNAPSHOT_TEST=explicit"};
+    int64_t bounds[]={2000000000,10000000,2000000000,128,128};
+    SplArray *in=texts(values,4),*env=texts(environment,1),*limits=ints(bounds,5);
+    expected[0]=expected[0]=='0'?'1':'0';
+    SplArray *result=rt_sosix_darwin_bound_image_v1_start_value((int64_t)(uintptr_t)expected,in,env,limits);
+    assert(result && rt_array_get(result,1)==ESTALE && !rt_array_get(result,2));rt_array_free(result);
+    for(size_t i=0;i<32;i++)snprintf(expected+i*2,3,"%02x",digest[i]);
+    result=rt_sosix_darwin_bound_image_v1_start_value((int64_t)(uintptr_t)expected,in,env,limits);
+    assert(result && !rt_array_get(result,1) && rt_array_get(result,2)>0);int64_t handle=rt_array_get(result,2);
+    rt_array_free(result);result=complete(handle);assert(rt_array_get(result,6)==23);rt_array_free(result);
+    assert(!rt_sosix_darwin_snapshot_v1_ack_value(handle));
+    rt_array_free(in);rt_array_free(env);rt_array_free(limits);
+    puts("PASS bound image API: authenticated digest rejection and provisioned capture through production runtime object");
+}
 int main(int argc,char** argv) {
     if(argc>1) {
         if(!strcmp(argv[1],"capture")) {
@@ -65,6 +86,9 @@ int main(int argc,char** argv) {
         signal(SIGTERM,SIG_IGN);for(;;) pause_ms(100);
     }
     char executable[PATH_MAX];assert(realpath(argv[0],executable));
+#ifdef SOSIX_TEST_BOUND_IMAGE_API
+    bound_api(executable);
+#endif
     SplArray* caps=rt_sosix_darwin_snapshot_v1_capabilities_value();assert(caps && rt_array_len(caps)==10);
     assert(rt_array_get(caps,1)==1 && rt_array_get(caps,3)==0 && rt_array_get(caps,4)==0);
     assert(rt_array_get(caps,7)==1 && rt_array_get(caps,8)==1 && rt_array_get(caps,9)==0);rt_array_free(caps);

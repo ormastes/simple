@@ -85,12 +85,18 @@ SplArray* rt_sosix_darwin_snapshot_v1_capabilities_value(void) {
  * profile must explicitly equal 1 (trusted cooperative snapshot).
  * environment is complete, never implicitly inherited. limits are nanoseconds,
  * then independent stdout/stderr byte caps. start returns [1,errno,handle]. */
-SplArray* rt_sosix_darwin_snapshot_v1_start_value(int64_t profile, SplArray* invocation, SplArray* environment, SplArray* limits) {
+static SplArray* ds1_start(int64_t profile, const unsigned char* expected_digest, SplArray* invocation, SplArray* environment, SplArray* limits) {
     const int64_t initial[] = {1,ENOTSUP,0}; SplArray* result = ds1_words(initial,3);
     if (!result) return NULL; /* Reserve receipt before acquiring any child. */
 #ifdef __APPLE__
     int error = EINVAL; Ds1Slot* slot = NULL;
-    if (profile != 1 || !ds1_process_allowed()) { error=ENOTSUP; goto done; }
+    if ((profile != 1 && profile != 2) || (profile==2 && !expected_digest) || !ds1_process_allowed()) { error=ENOTSUP; goto done; }
+    if(profile==2) {
+        posix_spawnattr_t probe;unsigned char hash[20]={0},bytes[82];error=posix_spawnattr_init(&probe);
+        if(!error){error=sosix_darwin_amfi_attach(&probe,hash,bytes);posix_spawnattr_destroy(&probe);}
+        if(error)goto done;
+        error=EINVAL;
+    }
     int64_t n = invocation ? rt_array_len(invocation) : -1;
     int64_t e = environment ? rt_array_len(environment) : -1;
     if (n < 2 || n > 1026 || e < 0 || e > 1024 || !limits || rt_array_len(limits) != 5) goto done;
@@ -128,7 +134,7 @@ SplArray* rt_sosix_darwin_snapshot_v1_start_value(int64_t profile, SplArray* inv
     struct stat source_stat;
     if (fstat(source,&source_stat)) error=errno;
     else if (!S_ISREG(source_stat.st_mode) || source_stat.st_size<=0) error=EINVAL;
-    else error=sosix_darwin_image_create(source,&slot->image);
+    else error=profile==2?sosix_darwin_image_create_bound(source,expected_digest,&slot->image):sosix_darwin_image_create(source,&slot->image);
     close(source);
     if (error) goto unlock;
     int cwd=open(in[1],O_RDONLY|O_DIRECTORY|O_CLOEXEC);
@@ -151,10 +157,45 @@ free_inputs:
 done:
     rt_array_set(result,1,rt_value_int(error));
 #else
-    (void)profile; (void)invocation; (void)environment; (void)limits;
+    (void)profile; (void)expected_digest; (void)invocation; (void)environment; (void)limits;
 #endif
     return result;
 }
+
+SplArray* rt_sosix_darwin_snapshot_v1_start_value(int64_t profile, SplArray* invocation, SplArray* environment, SplArray* limits) {
+    /* Preserve the old profile contract: no implicit upgrade or fallback. */
+    if(profile!=1){const int64_t words[]={1,ENOTSUP,0};return ds1_words(words,3);}
+    return ds1_start(1,NULL,invocation,environment,limits);
+}
+
+/* Explicit content-authenticated AMFI image admission. It shares only the
+ * cooperative group lifecycle registry; this is not strict Tree admission.
+ * expected_sha256 is a canonical lowercase hex digest supplied by the caller's
+ * trusted artifact manifest, never recomputed from the mutable source path. */
+SplArray* rt_sosix_darwin_bound_image_v1_start_value(int64_t expected_sha256, SplArray* invocation, SplArray* environment, SplArray* limits) {
+#ifdef __APPLE__
+    unsigned char digest[32];int error=EINVAL;
+    if(rt_string_len(expected_sha256)!=64)goto invalid;
+    const uint8_t *text=rt_string_data(expected_sha256);if(!text)goto invalid;
+    for(size_t i=0;i<32;i++) {
+        unsigned value=0;
+        for(size_t j=0;j<2;j++) {
+            unsigned c=text[i*2+j];
+            if(c>='0'&&c<='9')value=value*16+c-'0';
+            else if(c>='a'&&c<='f')value=value*16+c-'a'+10;
+            else goto invalid;
+        }
+        digest[i]=(unsigned char)value;
+    }
+    return ds1_start(2,digest,invocation,environment,limits);
+invalid:
+    {const int64_t words[]={1,error,0};return ds1_words(words,3);}
+#else
+    (void)expected_sha256;(void)invocation;(void)environment;(void)limits;
+    const int64_t words[]={1,ENOTSUP,0};return ds1_words(words,3);
+#endif
+}
+
 SplArray* rt_sosix_darwin_snapshot_v1_poll_value(int64_t handle, int64_t wait_ns) {
 #ifdef __APPLE__
     if (!ds1_process_allowed()) return ds1_receipt(NULL,ESTALE);
