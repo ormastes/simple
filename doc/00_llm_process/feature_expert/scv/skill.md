@@ -223,3 +223,11 @@ due 2026-11-24, signed step scripts SCV-IMPL-{D-08,B-06}, WOTS leaves 69..70).
 - Measuring rule: a stage-2 binary runs stdlib text methods through the
   compiled `string_core` only when `SIMPLE_LIB` does not name a checkout, so
   time cold init both with and without it before concluding anything.
+
+### Frozen producer exported-static boundary (2026-10-29)
+
+Existing exported scalar APIs need public declarations for recovered P2 native
+imports; an export list alone hits unsupported private-static accessor emission.
+Preserve values and internal visibility. Native paired fixtures verify the
+boundary, but real SCV allocation behavior remains a separate runtime gate.
+Evidence: `doc/08_tracking/bug/scv_exported_static_native_visibility_2026_10_29.md`.

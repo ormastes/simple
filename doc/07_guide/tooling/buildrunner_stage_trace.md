@@ -59,3 +59,13 @@ probe demonstrates actual mutation and a42 result; the untyped probe remains
 the compiler inference reproducer. Passing MIR is separate from native linkage
 and production manager acceptance. See
 [the tracked boundary](../../08_tracking/bug/buildrunner_database_match_unwrap_owner_2026_10_29.md).
+
+## Exported native scalar declarations
+
+The frozen native producer requires a public declaration for an imported
+module static. An explicit export list alone can still reach its unsupported
+non-public accessor path. For existing intended public APIs, preserve both
+the export and the public declaration; keep internal constants private. The
+paired native fixtures verify imported-value execution. This compatibility
+correction does not qualify SCV allocation behavior or the complete manager;
+see [the evidence and remaining gates](../../08_tracking/bug/scv_exported_static_native_visibility_2026_10_29.md).
