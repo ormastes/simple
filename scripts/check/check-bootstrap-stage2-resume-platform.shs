@@ -1,0 +1,79 @@
+#!/bin/sh
+# Execute the production path-validation block with real files and transcript
+# parsing. This fixture does not clone caches, run a compiler, or admit a phase.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage2-resume-platform.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+owner="$repo/scripts/bootstrap/resume-stage2-from-cache.sh"
+# Keep the actual helpers and validation statements; only host detection is
+# substituted, allowing both Windows ABIs and POSIX contracts on any host.
+awk '/^usage\(\)/ { copy=1 } /^\[ "\$#" = 1 \]/ { copy=0 } copy' "$owner" > "$scratch/helpers"
+awk '/^platform=\$\(bootstrap_stage3_host_platform\)/ { copy=1 }
+     /^stage2_recorded_cold_init=/ { copy=0 } copy' "$owner" > "$scratch/validate"
+grep -q 'transcript executable is not the frozen runtime compiler' "$scratch/validate"
+. "$scratch/helpers"
+. "$repo/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+bootstrap_stage3_host_platform() { printf '%s\n' "$fixture_platform"; }
+record() { printf '%s:%s:%s\n' "$1" "${#2}" "$2"; }
+fixture_number=0
+run_case() {
+    fixture_platform=$1
+    expected_suffix=$2
+    variant=$3
+    expected_error=$4
+    fixture_number=$((fixture_number + 1))
+    output="$scratch/case-$fixture_number"
+    s2="$output/stage2/$fixture_platform"
+    s3="$output/stage3/$fixture_platform"
+    rt="$s3/stage2-runtime-authority"
+    cc="$s3/stage2-native-cache"
+    mkdir -p "$s2" "$rt" "$cc/scope" "$s3/stage2-admitted"
+    : > "$cc/scope/.cache_scope"
+    : > "$rt/simple$expected_suffix"
+    output_suffix=$expected_suffix
+    compiler_suffix=$expected_suffix
+    case "$expected_suffix" in .exe) wrong_suffix= ;; *) wrong_suffix=.exe ;; esac
+    case "$variant" in
+        wrong-output) output_suffix=$wrong_suffix ;;
+        wrong-compiler) compiler_suffix=$wrong_suffix ;;
+        missing-compiler) rm "$rt/simple$expected_suffix" ;;
+        existing-output) : > "$s2/simple$expected_suffix" ;;
+        admitted-output) : > "$s3/stage2-admitted/simple$expected_suffix" ;;
+    esac
+    {
+        record executable "$rt/simple$compiler_suffix"
+        for arg in --target "$fixture_platform" --backend llvm --mode dynload \
+            --threads 2 --cache-dir "$cc" --runtime-path "$rt" \
+            -o "$s2/simple$output_suffix" --runtime-bundle core-c-bootstrap \
+            --entry src/app/cli/bootstrap_main.spl; do
+            record argv "$arg"
+        done
+    } > "$s3/stage2-command.transcript"
+    # No `if . file` here: it disables errexit inside the sourced owner.
+    set +e
+    (set -e; . "$scratch/validate") > "$scratch/result" 2>&1
+    result=$?
+    set -e
+    if [ -z "$expected_error" ]; then
+        [ "$result" = 0 ] || { cat "$scratch/result" >&2; exit 1; }
+    else
+        [ "$result" != 0 ] && grep -Fq "$expected_error" "$scratch/result" || {
+            printf 'FAIL: %s %s expected %s\n' "$fixture_platform" "$variant" "$expected_error" >&2
+            cat "$scratch/result" >&2
+            exit 1
+        }
+    fi
+}
+for fixture_platform in x86_64-pc-windows-msvc x86_64-pc-windows-gnu \
+    x86_64-unknown-linux-gnu aarch64-apple-darwin; do
+    case "$fixture_platform" in *windows*) suffix=.exe ;; *) suffix= ;; esac
+    run_case "$fixture_platform" "$suffix" canonical ''
+    run_case "$fixture_platform" "$suffix" wrong-output 'transcript output path is not canonical'
+    run_case "$fixture_platform" "$suffix" wrong-compiler 'transcript executable is not the frozen runtime compiler'
+    run_case "$fixture_platform" "$suffix" missing-compiler 'frozen runtime compiler is missing'
+    run_case "$fixture_platform" "$suffix" existing-output 'canonical Stage 2 output already exists'
+    run_case "$fixture_platform" "$suffix" admitted-output 'an admitted Stage 2 output already exists'
+done
+printf 'Stage 2 resume platform paths: PASS (%s cases)\n' "$fixture_number"
