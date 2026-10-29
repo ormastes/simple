@@ -104,13 +104,20 @@ trap 'exit 1' HUP INT TERM
 
 platform=$(bootstrap_stage3_host_platform) ||
     resume_fail "unsupported host platform"
+# Match the canonical constructor and Stage 3 resume, independently of the
+# transcript: accepting its spelling would permit a non-canonical output.
+exe_suffix=
+case "$platform" in
+    *-pc-windows-msvc|*-pc-windows-gnu) exe_suffix=.exe ;;
+esac
 stage2_dir="$output/stage2/$platform"
 stage3_dir="$output/stage3/$platform"
 cache="$stage3_dir/stage2-native-cache"
 runtime="$stage3_dir/stage2-runtime-authority"
 transcript="$stage3_dir/stage2-command.transcript"
-canonical="$stage2_dir/simple"
-admitted="$stage3_dir/stage2-admitted/simple"
+canonical="$stage2_dir/simple$exe_suffix"
+admitted="$stage3_dir/stage2-admitted/simple$exe_suffix"
+runtime_compiler="$runtime/simple$exe_suffix"
 
 canonical_directory "$stage2_dir" >/dev/null ||
     resume_fail "Stage 2 directory is missing, symlinked, or non-canonical"
@@ -121,7 +128,7 @@ canonical_directory "$cache" >/dev/null ||
 canonical_directory "$runtime" >/dev/null ||
     resume_fail "stage2-runtime-authority is missing, symlinked, or non-canonical"
 regular_file "$transcript" || resume_fail "Stage 2 command transcript is missing"
-regular_file "$runtime/simple" || resume_fail "frozen runtime compiler is missing"
+regular_file "$runtime_compiler" || resume_fail "frozen runtime compiler is missing"
 [ ! -e "$canonical" ] && [ ! -L "$canonical" ] ||
     resume_fail "canonical Stage 2 output already exists"
 [ ! -e "$admitted" ] && [ ! -L "$admitted" ] ||
@@ -164,7 +171,7 @@ case "$threads" in ''|*[!0-9]*|0) resume_fail "invalid transcript thread count" 
 [ "$transcript_bundle" = core-c-bootstrap ] || resume_fail "runtime bundle is not canonical"
 [ "$transcript_entry" = src/app/cli/bootstrap_main.spl ] ||
     resume_fail "entry is not bootstrap_main"
-[ "$(transcript_executable "$transcript")" = "$runtime/simple" ] ||
+[ "$(transcript_executable "$transcript")" = "$runtime_compiler" ] ||
     resume_fail "transcript executable is not the frozen runtime compiler"
 
 stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$transcript") ||
