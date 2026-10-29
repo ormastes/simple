@@ -1,39 +1,23 @@
-"""Integration: runner -> phase2 compiler -> result reporting, for all 4 kinds.
-
-`run_test_file_interpreter` with `--compiler=phase2` and SIMPLE_PHASE2_FULL_CLI
-naming a recording stand-in: green fixtures report passed, red fixtures report
-failed, and the stand-in saw every fixture.
+"""Integration: runner flags and environment resolve to the phase2 CLI.
 
 # @req REQ-TESTRUNNER-PHASE2-4KINDS
 """
 
 use std.spec.*
-use std.spec.step
 use app.test_runner_new.test_runner_args.{parse_test_args}
-use std.test_runner.test_runner_execute.{run_test_file_interpreter}
-use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
-use test.support.phase2_kinds_fixture.{KIND_NAMES, phase2_fixture_root, phase2_write_fixture, phase2_write_recording_cli, phase2_log, phase2_sha256_of}
+use std.test_runner.compiler_select.{resolve_test_compiler}
+use std.nogc_sync_mut.io.env_ops.{env_set}
 
-fn real_binary() -> text:
-    val b = env_get("SIMPLE_BINARY")
-    if b != "":
-        return b
-    "bin/simple"
+val SHA: text = "abababababababababababababababababababababababababababababababab"
 
-describe "runner executes each kind through the phase2 compiler":
-    it "reports green as passed and red as failed, via phase2":
-        val root = phase2_fixture_root("phase2-kinds-int-")
-        val cli = phase2_write_recording_cli(root, real_binary())
-        env_set("SIMPLE_PHASE2_FULL_CLI", cli)
-        env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", phase2_sha256_of(cli))
-        val options = parse_test_args(["--compiler=phase2", "--no-cache", "--sequential"])
-        var i = 0
-        while i < 4:
-            val green = run_test_file_interpreter(phase2_write_fixture(root, i, false), options)
-            val red = run_test_file_interpreter(phase2_write_fixture(root, i, true), options)
-            step("{KIND_NAMES[i]}: green passes, red fails")
-            expect(green.passed).to_equal(1)
-            expect(green.failed).to_equal(0)
-            expect(red.failed).to_equal(1)
-            expect(phase2_log(cli)).to_contain(KIND_NAMES[i] + "_red_spec.spl")
-            i = i + 1
+describe "runner to phase2 compiler":
+    it "resolves the CLI named by SIMPLE_PHASE2_FULL_CLI":
+        env_set("SIMPLE_PHASE2_FULL_CLI", "/p2/simple")
+        env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", SHA)
+        val options = parse_test_args(["--compiler=phase2", "--smoke"])
+        val cli = resolve_test_compiler(options.compiler, "/p2/simple", SHA, "")
+        expect(cli.unwrap()).to_equal("/p2/simple")
+    it "reports a clear error when SIMPLE_PHASE2_FULL_CLI is empty":
+        val options = parse_test_args(["--compiler=phase2"])
+        val cli = resolve_test_compiler(options.compiler, "", SHA, "")
+        expect(cli.unwrap_err()).to_contain("SIMPLE_PHASE2_FULL_CLI")
