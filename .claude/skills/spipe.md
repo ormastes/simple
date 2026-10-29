@@ -161,6 +161,24 @@ Codex routes SPipe development work through `$sp_dev`:
 
 **[.codex/skills/sp_dev/SKILL.md](../../.codex/skills/sp_dev/SKILL.md)**
 
+### HAL tests through Simple
+
+Implement HAL/runtime behavior tests as modern SSpec `*_spec.spl` scenarios
+run through `simple test` wherever Simple can reach the contract. Prefer the
+production SOSIX/HAL facade; for a low-level ABI or provider contract, Simple
+can call backed `rt_*` symbols via explicit `extern fn` declarations. Verify
+the actual signature, linking/registration, and execution mode first. This is
+a focused test-boundary exception, not permission for product code to bypass
+its facade. C harnesses support only the portions Simple cannot exercise;
+record the limitation and keep reachable assertions in Simple.
+
+Native HAL acceptance requires the selected real provider on the required
+host, executed examples, and the exact compiler/runtime identity. Interpreter
+emulation, unsupported-host branches, missing externs, and zero executed
+examples cannot qualify it. Read the
+[HAL testing procedure](../../doc/07_guide/infra/testing.md#hal-and-runtime-tests-through-simple)
+for facade/FFI selection, host guards, and evidence accounting.
+
 ### MC/DC and RT/HAL evidence lane
 
 For `mcdc_rt_hal_hardening`, retain three separate evidence states: static-off
