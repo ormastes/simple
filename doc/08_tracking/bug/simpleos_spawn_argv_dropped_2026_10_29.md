@@ -71,3 +71,18 @@ interpreter and flags above, all six scenarios execute: before correction,
 production ownership boundaries. They do not prove physical mappings, scheduler
 execution, successful native kernel linking, or guest argv delivery. The legacy
 packed-decoder gap above remains explicitly unverified.
+
+Independent review also found that the syscall inferred success from movement
+of the global task counter even when the child owner returned zero. Identity
+reservation can consume a pair before failing, and other CPUs can advance the
+counter. The handler now publishes only the PID returned by its child owner.
+A third source-contract regression reproduces the counter-based inference:
+6/7 scenarios pass before correction, and 7/7 pass afterward with the same
+diagnostic runtime. This does not claim a physical concurrency test.
+
+The legacy direct path uses `stage_user_process_image_for_scheduler`, whose
+comments record freestanding stage3 aggregate-return corruption and a direct
+ELF staging workaround. The argv path uses `build_user_process_image` to carry
+the requested vectors and therefore needs native guest qualification across
+that aggregate boundary. Host source and raw-buffer checks cannot establish
+that the affected compiler handles this path correctly.
