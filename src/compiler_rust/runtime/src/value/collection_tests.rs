@@ -2748,6 +2748,41 @@ fn bsm_p1_session_outside_module_freed_at_end() {
     assert!(super::rt_session_heap_end(again));
 }
 
+/// Session retirement preserves unrelated roots and refuses every live-scope
+/// case before allocator reclamation. The archive-linked C fixture separately
+/// checks the actual glibc call and resident-page experiment.
+#[test]
+fn bsm_p1_session_reclaim_preserves_unrelated_roots_and_refuses_active_scope() {
+    let survivor = super::rt_array_new(4);
+    let value = RuntimeValue::from_int(123);
+    assert!(super::rt_array_push(survivor, value));
+    assert!(!super::rt_session_heap_end(0));
+    let session = super::rt_session_heap_begin();
+    assert_ne!(session, 0);
+    assert_eq!(super::rt_session_heap_begin(), 0);
+    assert!(!super::rt_session_heap_end(session.wrapping_add(1)));
+    assert!(super::rt_transient_array_scope_begin());
+    assert!(!super::rt_session_heap_end(session));
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(!super::rt_session_heap_end(session));
+    assert!(super::rt_transient_array_scope_end());
+    let owned = bsm_p1_row(8);
+    assert!(super::session_heap_owns(owned));
+    assert!(super::rt_session_heap_end(session));
+    assert!(!bsm_p1_live(owned));
+    assert_eq!(super::rt_session_heap_id(), 0);
+    assert!(!super::rt_session_heap_end(session));
+    assert!(bsm_p1_live(survivor));
+    assert_eq!(super::rt_array_get(survivor, 0), value);
+    let next = super::rt_session_heap_begin();
+    assert_ne!(next, 0);
+    assert_ne!(next, session);
+    assert!(!super::rt_session_heap_end(session));
+    assert!(super::rt_session_heap_end(next));
+    assert_eq!(super::rt_array_get(survivor, 0), value);
+    super::rt_array_free(survivor);
+}
+
 /// BSM P1 x P4: an rc root leaves the session; session end must not free it.
 #[test]
 fn bsm_p1_rc_shared_row_survives_session_end() {

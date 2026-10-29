@@ -146,3 +146,13 @@ its advisory push gate is `push-session-heap-reclaim`. Non-glibc hosts exercise
 the unchanged owner path. Controlled RSS evidence and remaining native manager
 qualification are recorded in
 `doc/01_research/local/native_session_allocator_residency_2026_10_30.md`.
+
+### Rust hosted owner parity (2026-10-30)
+
+P2 bootstrap entry selection resolves `rt_session_heap_end` from the Rust
+`native_all` archive. Its implementation now drops session bookkeeping and
+requests glibc trim on Linux GNU after TLS and registry locks end. This is
+separate from the valid C-owner fix above. Require archive-linked owner tests
+and final compiler disassembly before attributing manager behavior to either
+implementation. `check-session-heap-reclaim.shs --runtime-archive PATH` links the
+explicit archive through the same scalar public ABI; the default still tests C.

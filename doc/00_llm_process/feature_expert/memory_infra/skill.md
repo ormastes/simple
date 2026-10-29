@@ -173,3 +173,14 @@ invalid/active/repeated-end guards. Run
 The controlled actual-owner experiment reduced RSS from 66,509 to 467 pages
 with identical live heap totals; this does not qualify the full native manager.
 See `doc/01_research/local/native_session_allocator_residency_2026_10_30.md`.
+
+### P2 provider correction (2026-10-30)
+
+The affected P2 compiler selects the Rust session owner from `native_all`, not
+the C owner. Rust `collections.rs::rt_session_heap_end` explicitly drops session
+bookkeeping before Linux GNU `libc::malloc_trim(0)`. Check the final artifact's
+symbol/disassembly; allocator imports alone cannot identify its owner. The
+same real-owner fixture accepts `--runtime-archive PATH` for the Rust archive.
+Rust heap snapshot bytes count headers; backing bytes are a separate counter.
+The C experiments do not establish P2 improvement; rebuilt Rust/P2 validation
+remains required. See the provider correction in the linked research evidence.
