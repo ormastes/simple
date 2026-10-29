@@ -1,0 +1,105 @@
+"""Comment doctest discovery and composite-program construction.
+
+Discovery keeps source files that contain a real example and drops spec/test
+files, `# @doctest_skip` files, and files whose fences are not runnable
+languages. The composite program for one example is the whole source file,
+a marker comment naming the example's line, `use std.spec.*`, and the example.
+
+# @req REQ-TESTRUNNER-COMMENT-KIND
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.test_runner.doctest_runner.{discover_spl_doctest_files, build_spl_doctest_code, Doctest}
+
+val EXAMPLE = "## ```simple\n## val a = 1\n## ```\nfn f():\n    1\n"
+
+fn new_root() -> text:
+    secure_temp_dir(_tp_get_temp_dir(), "spl-doctest-disc-").unwrap().replace("\\", "/")
+
+fn put(root: text, name: text, body: text):
+    file_write(root + "/" + name, body)
+
+fn names(found: [text], root: text) -> [text]:
+    var out: [text] = []
+    for f in found:
+        out.push(f.replace(root + "/", ""))
+    out
+
+describe "discover_spl_doctest_files":
+    it "returns a source file that holds an example":
+        val root = new_root()
+        put(root, "lib.spl", EXAMPLE)
+        expect(names(discover_spl_doctest_files([root]), root)).to_equal(["lib.spl"])
+    it "skips a source file with no example":
+        val root = new_root()
+        put(root, "plain.spl", "fn f():\n    1\n")
+        expect(discover_spl_doctest_files([root]).len()).to_equal(0)
+    it "skips a _spec.spl file even when it holds an example":
+        val root = new_root()
+        put(root, "x_spec.spl", EXAMPLE)
+        expect(discover_spl_doctest_files([root]).len()).to_equal(0)
+    it "skips a _test.spl file even when it holds an example":
+        val root = new_root()
+        put(root, "x_test.spl", EXAMPLE)
+        expect(discover_spl_doctest_files([root]).len()).to_equal(0)
+    it "skips a file marked doctest_skip":
+        val root = new_root()
+        put(root, "skipme.spl", "# @doctest_skip\n" + EXAMPLE)
+        expect(discover_spl_doctest_files([root]).len()).to_equal(0)
+    it "skips a non-spl file":
+        val root = new_root()
+        put(root, "notes.txt", EXAMPLE)
+        expect(discover_spl_doctest_files([root]).len()).to_equal(0)
+    it "skips a file whose only fence is not a runnable language":
+        val root = new_root()
+        put(root, "text.spl", "## ```text\n## hi\n## ```\nfn f():\n    1\n")
+        expect(discover_spl_doctest_files([root]).len()).to_equal(0)
+    it "skips a file whose fence is never closed":
+        val root = new_root()
+        put(root, "open.spl", "## ```simple\n## val a = 1\nfn f():\n    1\n")
+        expect(discover_spl_doctest_files([root]).len()).to_equal(0)
+    it "skips an empty file":
+        val root = new_root()
+        put(root, "empty.spl", "")
+        expect(discover_spl_doctest_files([root]).len()).to_equal(0)
+    it "finds a file in a nested directory":
+        val root = new_root()
+        process_run_bounded("mkdir", ["-p", root + "/deep/er"], 10000, 65536)
+        put(root, "deep/er/inner.spl", EXAMPLE)
+        expect(names(discover_spl_doctest_files([root]), root)).to_equal(["deep/er/inner.spl"])
+    it "returns only the eligible files from a mixed directory":
+        val root = new_root()
+        put(root, "a.spl", EXAMPLE)
+        put(root, "b.spl", "fn f():\n    1\n")
+        put(root, "c_spec.spl", EXAMPLE)
+        put(root, "d.spl", EXAMPLE)
+        val found = names(discover_spl_doctest_files([root]), root)
+        expect(found.len()).to_equal(2)
+        expect(found.contains("a.spl")).to_equal(true)
+        expect(found.contains("d.spl")).to_equal(true)
+    it "returns nothing for an empty directory":
+        expect(discover_spl_doctest_files([new_root()]).len()).to_equal(0)
+
+describe "build_spl_doctest_code":
+    fn make(line: i64, code: text) -> Doctest:
+        Doctest(source_file: "x.spl", line_number: line, code: code, expected_output: "", should_fail: false)
+
+    it "starts with the whole source file":
+        val built = build_spl_doctest_code("fn f():\n    1\n", make(3, "val a = 1"))
+        expect(built.starts_with("fn f():\n    1\n")).to_equal(true)
+    it "ends with the example code":
+        val built = build_spl_doctest_code("fn f():\n    1\n", make(3, "val a = 1"))
+        expect(built.ends_with("val a = 1")).to_equal(true)
+    it "names the example's source line in a marker comment":
+        val built = build_spl_doctest_code("fn f():\n    1\n", make(7, "val a = 1"))
+        expect(built).to_contain("# --- doctest from line 7 ---")
+    it "imports the spec library before the example":
+        val built = build_spl_doctest_code("fn f():\n    1\n", make(7, "val a = 1"))
+        expect(built).to_contain("use std.spec.*\nval a = 1")
+    it "keeps the marker between the source and the example":
+        val built = build_spl_doctest_code("SRC", make(2, "CODE"))
+        expect(built.index_of("SRC") < built.index_of("# --- doctest")).to_equal(true)
+        expect(built.index_of("# --- doctest") < built.index_of("CODE")).to_equal(true)
