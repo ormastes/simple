@@ -20,3 +20,11 @@ optional bang-unwrap. Keep the explicit BuildRunnerDatabaseSessionV1 binding
 until a new producer passes the unannotated native probe. Settlement and finish
 are ownership gates, never optional diagnostics. See
 [tracked inference boundary](../../../08_tracking/bug/buildrunner_database_match_unwrap_owner_2026_10_29.md).
+
+## Live Linux containment evidence (2026-10-29)
+
+The cgroup owner now has live setsid-descendant retirement and kernel OOM
+fixtures. Run `scripts/check/check-linux-capacity-containment.shs` only with an
+already-delegated isolated memory controller; missing prerequisites are errors.
+Native C evidence remains distinct from the authored, unexecuted SSpec and full
+BuildRunner qualification. See `doc/08_tracking/bug/buildrunner_linux_containment_evidence_2026_10_29.md`.

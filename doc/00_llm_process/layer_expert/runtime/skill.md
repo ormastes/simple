@@ -125,3 +125,11 @@ is an observation retry, bounded by cleanup_deadline. Never infer retirement
 from that signal result. The deterministic signal-race selfcheck covers retained
 authority, persistent-denial timeout, and propagation of initial EPERM; the
 native component still verifies actual descendants are retired.
+
+## Live Linux containment evidence (2026-10-29)
+
+The cgroup owner now has live setsid-descendant retirement and kernel OOM
+fixtures. Run `scripts/check/check-linux-capacity-containment.shs` only with an
+already-delegated isolated memory controller; missing prerequisites are errors.
+Native C evidence remains distinct from the authored, unexecuted SSpec and full
+BuildRunner qualification. See `doc/08_tracking/bug/buildrunner_linux_containment_evidence_2026_10_29.md`.
