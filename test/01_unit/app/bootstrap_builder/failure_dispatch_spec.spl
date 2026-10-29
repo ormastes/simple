@@ -10,6 +10,7 @@ use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_encode
     builder_manager_decode_v1}
 use app.bootstrap_builder.codec.{builder_write_result_v1}
 use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_poll_v1}
 use app.io.file_ops.{file_atomic_write, file_read, file_hash_sha256}
 use app.io.dir_ops.{dir_create_all}
 use app.io.env_ops.{cwd}
@@ -34,7 +35,7 @@ fn failure_dispatch_spawn(program: text, digest: text, args: [text], directory: 
 
 fn failure_dispatch_wait(token: i64, timeout_ms: i64) -> Result<i64, text>:
     failure_dispatch_waits = failure_dispatch_waits.push(str(token) + ":" + str(timeout_ms))
-    if failure_dispatch_mode == "collect-error": return Ok(1)
+    if failure_dispatch_mode == "collect-error" or failure_dispatch_mode == "exit-without-proof": return Ok(1)
     Err("injected observation failure")
 
 fn failure_dispatch_terminate(token: i64) -> Result<bool, text>:
@@ -95,6 +96,32 @@ fn failure_dispatch_reset(mode: text):
     failure_dispatch_roots = []
 
 describe "manager does not dispatch after unknown authority":
+    it "quarantines a reaped local worker whose compiler ownership proof is missing":
+        val (run, config) = failure_dispatch_fixture("exit-without-proof", "")
+        failure_dispatch_reset("exit-without-proof")
+        val task = run.tasks[0]
+        val probe = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
+            host: run.hosts[0], pid: 78,
+            local_root: config.state + "/probe", remote_root: "",
+            error: "", identity_digest: builder_task_identity_v1(task),
+            process: failure_dispatch_port())
+        # Fail before entering the manager loop on the old implementation,
+        # which mislabeled the cached worker exit as pending forever.
+        expect(builder_transport_poll_v1(probe)).to_equal(-1)
+        expect(builder_transport_poll_v1(probe)).to_equal(-1)
+        expect(failure_dispatch_waits.len()).to_equal(1)
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port(), nil)).to_equal(2)
+        expect(failure_dispatch_spawns).to_equal(1)
+        expect(failure_dispatch_waits.len()).to_equal(2)
+        match builder_manager_decode_v1(run, file_read(config.state + "/journal.sdn")):
+            Ok(restored):
+                expect(restored.statuses[0]).to_equal("RUNNING")
+                expect(restored.tasks[0].attempt).to_equal(1)
+                expect(restored.host_ids[0]).to_equal("local")
+                expect(restored.statuses[1]).to_equal("PENDING")
+                expect(restored.statuses[2]).to_equal("PENDING")
+            Err(reason): expect(reason).to_equal("valid unresolved ownership journal")
+
     it "rejects missing, crashed and unproven retained failure before independent dispatch":
         for status in ["missing", "CRASHED", "ERROR"]:
             val (run, config) = failure_dispatch_fixture(status, status)
