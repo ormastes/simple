@@ -39,9 +39,16 @@ def driver_environment(environment):
 def validate_arguments(argv):
     for arg in argv:
         parts = arg[4:].split(',') if arg.startswith('-Wl,') else [arg]
-        if any(part.startswith(("@", "--ld-path=", "-fuse-ld=", "--config")) or
-               part in {"--ld-path", "-fuse-ld", "-filelist", "--no-default-config"} for part in parts):
-            raise ValueError('opaque response or competing linker selection in Darwin capture')
+        for index, part in enumerate(parts):
+            # ld64 interprets these operands as dyld runtime paths, not response
+            # files. Accept them only in their linker-option operand position.
+            dyld_path = (index > 0 and parts[index - 1] in {"-rpath", "-install_name"}
+                         and any(part == token or part.startswith(token + "/")
+                                 for token in ("@loader_path", "@executable_path", "@rpath")))
+            if ((part.startswith("@") and not dyld_path) or
+                    part.startswith(("--ld-path=", "-fuse-ld=", "--config")) or
+                    part in {"--ld-path", "-fuse-ld", "-filelist", "--no-default-config"}):
+                raise ValueError('opaque response or competing linker selection in Darwin capture')
 
 
 def capture_proxy(directory, compiler_driver, linker, capture):

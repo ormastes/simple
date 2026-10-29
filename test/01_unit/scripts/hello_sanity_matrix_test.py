@@ -22,6 +22,40 @@ DARWIN_SPEC.loader.exec_module(DARWIN)
 
 
 class LinkInputEvidence(unittest.TestCase):
+    def test_positional_diagnostic_preserves_compiler_inputs_without_coordinator_flags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane = Path(directory)
+            output = lane / "main.o"
+            matrix = object.__new__(MATRIX.Matrix)
+            matrix.compiler, matrix.runtime = Path("/phase2"), Path("/runtime")
+            matrix.darwin = True
+            commands = []
+            def record_run(lane, name, command, extra):
+                commands.append(command)
+                output.write_bytes(b"object boundary fixture")
+            matrix.run = record_run
+            for route in ["coordinator", "positional"]:
+                matrix.args = SimpleNamespace(compile_route=route, backend="llvm")
+                matrix.compile(lane, "main", MATRIX.FIXTURES / "main.spl", output, ["--emit-object"])
+            coordinator, positional = commands
+            self.assertIn("--entry", coordinator)
+            self.assertIn("--source", coordinator)
+            self.assertEqual(positional[:3], ["/phase2", "native-build", str(MATRIX.FIXTURES / "main.spl")])
+            for flag in ["--entry", "--entry-closure", "--source", "--mode"]:
+                self.assertNotIn(flag, positional)
+            for flag in ["--low-memory", "--emit-object", "--runtime-path", "--cache-dir", "--backend"]:
+                self.assertIn(flag, positional)
+
+    def test_native_evidence_cannot_cross_compilation_routes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prior = Path(directory)
+            MATRIX.sdn(prior / "identity.sdn", {"phase": 2, "compiler_sha256": "bound", "compile_route": "coordinator"})
+            matrix = object.__new__(MATRIX.Matrix)
+            matrix.sha = "bound"
+            matrix.args = SimpleNamespace(phase=2, compile_route="positional", reuse_build_evidence=prior)
+            with self.assertRaisesRegex(ValueError, "compilation route mismatch"):
+                matrix.prior_native_inputs("two-objects")
+
     def test_phase_capabilities_and_seed_interpreter_selection(self):
         self.assertEqual(MATRIX.phase_capabilities(1), (True, False))
         self.assertEqual(MATRIX.phase_capabilities(2), (False, True))
@@ -160,9 +194,16 @@ class LinkInputEvidence(unittest.TestCase):
                 DARWIN.replay_inputs(capture, program, driver, linker, main, provider, root / "hello")
 
     def test_darwin_rejects_opaque_and_driver_override_arguments(self):
-        for arg in ["-Wl,@hidden.rsp", "-Wl,-filelist,hidden.list", "--config=hidden.cfg"]:
+        for arg in ["-Wl,@hidden.rsp", "-Wl,-filelist,hidden.list", "--config=hidden.cfg",
+                    "-Wl,-rpath,@hidden.rsp", "@loader_path", "-Wl,@loader_path",
+                    "-Wl,-rpath,@loader_path_suffix", "-Wl,-rpath,@loader_path,@hidden.rsp"]:
             with self.subTest(arg=arg), self.assertRaisesRegex(ValueError, "opaque"):
                 DARWIN.capture_link("unavailable-driver", "unavailable-linker", "unused", [arg])
+
+    def test_darwin_accepts_dyld_tokens_only_as_linker_path_operands(self):
+        for arg in ["-Wl,-rpath,@loader_path", "-Wl,-rpath,@executable_path/../lib",
+                    "-Wl,-install_name,@rpath/libhello.dylib"]:
+            DARWIN.validate_arguments([arg])
 
     @unittest.skipUnless(sys.platform == "darwin" and shutil.which("ld64.lld"), "requires real Darwin Mach-O tools")
     def test_darwin_real_driver_capture_and_all_four_linkage_forms(self):
