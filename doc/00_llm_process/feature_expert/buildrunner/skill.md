@@ -72,3 +72,11 @@ The a52 producer's four native panic controls passed with clean compiler
 diagnostics, including runtime-concatenated text evaluated once and the cast's
 intended panic. Its separate full CLI matrix exceeded the enforced RSS cap;
 native SSpec/docgen and complete BuildRunner admission are not implied.
+
+### Frontend core RTI owner alias (2026-10-30)
+
+The native SSpec runner exposed mixed `compiler.core.types` /
+`compiler.frontend.core.types` declaration ownership. Shared HIR owner normalization
+now folds the loader alias; RTI mixed-provider rejection remains intact. Focused
+seed red/green tests pass; newly matched native runner validation is pending.
+See `doc/08_tracking/bug/rti_frontend_core_alias_owner_2026_10_30.md`.

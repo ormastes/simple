@@ -1,0 +1,35 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.return_type_interface_v1.*
+
+fn owner_rows(second_owner: text) -> [ReturnTypeRow]:
+    val path = "src/compiler/10.frontend/core/types.spl"
+    val ast = parse_full_frontend("fn first() -> i64:\n    1\nfn second() -> i64:\n    2\n", path, path, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    var hir = lowering.lower_module(ast)
+    for function in hir.functions.values():
+        if function.name == "second":
+            var symbol = hir.symbols.symbols[function.symbol.id]
+            symbol.defining_module = Some(second_owner)
+            hir.symbols.symbols[function.symbol.id] = symbol
+    rti_rows_from_hir_v1(hir).unwrap().rows
+
+describe "RTI frontend core alias ownership":
+    it "registers physical and import-alias declarations as one provider":
+        val rows = owner_rows("compiler.core.types")
+        expect(rows.len()).to_equal(2)
+        for row in rows:
+            expect(row.decl.module_id).to_equal("compiler.frontend.core.types")
+        var table = ReturnTypeInterfaceTable.new()
+        expect(table.register_rows(rows).unwrap()).to_equal(2)
+
+    it "still rejects declarations from a genuinely different provider":
+        val rows = owner_rows("compiler.frontend.core.other")
+        var table = ReturnTypeInterfaceTable.new()
+        val result = table.register_rows(rows)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().code).to_equal("E-RTI-006")
