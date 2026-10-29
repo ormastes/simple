@@ -197,47 +197,90 @@ receipt, fix the pure-Simple owner, and verify a distinct root-cause cycle. The
 lane has a maximum of three distinct fix/verify cycles. Do not rerun an identical
 failed command; after the third cycle, stop and report the remaining blocker.
 
-## Four executable Hello linkage sanity
+## Hello sanity: 16 native execution cases and phase interpreter checks
 
-When a campaign requests four Hello linkage checks, build and execute four
-separate binaries: one directly from source, one linked from two objects, one
-linked with a static library, and one linked with a shared library. Use the four-binary sanity matrix for Phase 1, 2, or 3; confirm the
-selected compiler, runtime, link inputs, and expected output before launching it. Do not substitute the
-four different frontend probes (`p2_add`, MIR retention, module naming, and
-positional Hello) for this linkage matrix.
+The complete native Hello target is a 16-case matrix: four linkage forms, two
+code-generation backends (LLVM and Cranelift), and two execution paths (direct
+compiler invocation and BuildRunner). The forms are: source to executable,
+two objects to executable, static library to executable, and shared library to
+executable. Every cell must build and run its own executable and retain the
+observed `Hello, World!` output. A successful compile, object, or library build
+alone is not a pass. Do not substitute frontend probes (`p2_add`, MIR retention,
+module naming, or positional Hello) for these cases.
+
+Track each cell independently using the tuple `(form, backend, path)` and one
+of `PASS`, `FAIL`, `UNRUN`, or `UNSUPPORTED`, with command, compiler identity,
+artifact hash, exit status, and output as evidence. A missing receipt is
+`UNRUN`; unsupported behavior is never a pass. The required rows are:
+
+| Form | LLVM direct | LLVM BuildRunner | Cranelift direct | Cranelift BuildRunner |
+| --- | --- | --- | --- | --- |
+| Source to executable | status + evidence | status + evidence | status + evidence | status + evidence |
+| Two objects to executable | status + evidence | status + evidence | status + evidence | status + evidence |
+| Static library to executable | status + evidence | status + evidence | status + evidence | status + evidence |
+| Shared library to executable | status + evidence | status + evidence | status + evidence | status + evidence |
+
+These are acceptance requirements, not claims that all 16 cases are currently
+implemented or proven. At the time of this guide update, the existing
+`hello-sanity-matrix.py` driver runs the four direct cases for one selected
+backend per invocation. An optional one-source BuildRunner adapter requires
+`--buildrunner-manager`, `--buildrunner-manifest-writer`,
+`--buildrunner-template`, and `--buildrunner-target` together. It uses the
+production manifest writer and manager, verifies the published artifact and a
+bound enforced-memory receipt, then executes the artifact. Manager exit alone
+is insufficient. Its memory receipt support is currently limited to Windows
+Job Objects and Linux cgroups; macOS cannot receive a BuildRunner pass from an
+unqualified memory receipt. The other three BuildRunner forms remain `UNRUN`.
+Without the complete provider configuration, all four BuildRunner forms remain
+`UNRUN`. Keep separate reports for both backends. Required pending BuildRunner
+cells make an otherwise successful direct report `PARTIAL` with nonzero exit;
+neither a report nor this guide claims the full 16-case gate has passed.
 
 Invoke `scripts/bootstrap/hello-sanity-matrix.shs` from Bash or the
 `hello-sanity-matrix.cmd` entrypoint from Windows with `--compiler`,
-`--phase 1|2|3`, `--source-root`, `--runtime-path`, and a new `--output`
-directory. Use the compiler belonging to the phase being checked.
+`--phase 1|2|3`, `--source-root`, `--runtime-path`, a fresh `--output`, and
+`--backend llvm|cranelift`. Use the exact compiler belonging to the phase and
+backend being checked. Keep outputs and logs distinct; parallel jobs may share
+frozen read-only inputs but must not share writable outputs or conflicting
+caches. Record compiler/runtime identities, link inputs and commands, exit
+statuses, artifact hashes, and observed output. Backend reports remain
+diagnostic evidence and do not replace formal admission receipts.
 
-The four independent jobs may read the same frozen source and producer in
-parallel. Give each job distinct output and log paths; isolate writable caches
-only where concurrent writers would conflict. Retain the compiler and runtime
-identities, link inputs and commands, exit statuses, and each executable's
-actual output. A library or object build alone is not an executable Hello pass.
-Run Hello through the interpreter owned by the selected compiler where available.
-Phase 2 skips this case by configuration and reports `SKIPPED`; a separate CLI
-is not evidence for that compiler. Other phases report an unavailable interpreter
-as unsupported rather than passing it.
-The phase capability configuration is:
+On macOS the adapter pins the actual clang binary and `ld64.lld`, captures
+the compiler's hosted link inputs, checks exact main/provider object identity,
+and verifies the shared library load command and exported symbol. The default
+is serial execution (`--jobs 1`); `--jobs 0` permits concurrent direct lanes
+only when aggregate resource headroom allows it. `--max-rss-kib` bounds each
+command's process tree, and `--min-free-disk-bytes` defaults to 1.5 GiB. Admission
+must also preserve the campaign's host memory reserve; a request for parallel
+cases does not authorize exceeding it.
 
-| Phase | Interpreter | BuildRunner |
+The 2026-10-29 macOS diagnostic campaign used the unchanged P2 compiler
+`0d6f2e4720845195c9f91de292056fac4c57cabef81390507c78d95e51133a28`.
+All eight direct cells (four per backend) terminated at their RSS bounds before
+emitting their requested artifacts. Their process receipts report quiescence
+and zero observer errors. All eight BuildRunner cells were `UNRUN`; the P2
+interpreter was `SKIPPED`. The native matrix is **incomplete and failing**.
+Retained local evidence is under
+`build/hello-matrix-macos-p2-cranelift-20261029-02` and
+`build/hello-matrix-macos-p2-llvm-20261029-01`; the latter contains the resource
+admission record showing capacity for one lane after the 8 GiB host reserve.
+Real C-based Mach-O transport tests validate the adapter's four linkage forms;
+they are not evidence that these P2 Simple compiler cells passed.
+
+Interpreter execution is tracked separately from the 16 native cases. Use the
+interpreter owned by the selected phase compiler; a separate or ambient CLI is
+not evidence. The phase-specific interpreter state is:
+
+| Phase | Interpreter requirement | Evidence rule |
 | --- | --- | --- |
-| 1 | Required; seed `run` with `SIMPLE_EXECUTION_MODE=interpret` | Skipped |
-| 2 | Skipped; minimal compiler has no `run` | Required |
-| 3 | Required; qualify a full CLI built by the exact phase 3 compiler | Required |
+| 1 | Required | Run the seed's `run` with `SIMPLE_EXECUTION_MODE=interpret`; bind evidence to the phase 1 compiler. |
+| 2 | Configured skip | Minimal compiler has no `run`; record `SKIPPED`, never `PASS`. |
+| 3 | Required | Qualify the full CLI built by the exact phase 3 compiler and bind it to that producer, source, and runtime before interpreter execution. |
 
-The native matrix reports BuildRunner as `UNRUN` when required: separate
-BuildRunner tasks must execute and verify the four forms for both backends.
-For Phase 2, a matrix `PASS` (and exit code 0) certifies only its four native
-Hello lanes plus the configured interpreter skip. It does not mean the Phase 2
-sanity gate or compiler phase is complete while BuildRunner remains `UNRUN`.
-The current native matrix cannot yet accept a separately receipt-bound phase 3
-full CLI, so a minimal compiler's rejected interpreter case remains unsupported;
-phase 3 interpreter qualification is pending that owner integration. Bind the
-full CLI to its phase 3 producer, source and runtime, then use the reviewed
-full-CLI sanity before interpreter execution. Never borrow an ambient CLI.
-
-For Phase 2, retain a separate four-lane result for each requested LLVM and
-Cranelift backend. These diagnostics do not replace formal admission receipts.
+The phase's overall gate is incomplete while any required direct, BuildRunner,
+or interpreter case is `UNRUN`, `UNSUPPORTED`, or `FAIL`. In particular, the
+current driver cannot yet consume separately receipt-bound phase 3 full-CLI
+evidence, so phase 3 interpreter qualification remains pending that integration.
+Do not promote a direct-only matrix `PASS` to phase completion when required
+BuildRunner cases remain `UNRUN`.

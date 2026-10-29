@@ -3,7 +3,7 @@
 
 The Linux adapter uses genuine LLD reproduction inputs, including the compiler's
 hosted entry shim. It substitutes the explicitly emitted main/provider bytes at
-the final link boundary. Other adapters must fail closed until implemented.
+the final link boundary. Darwin captures the real pinned clang driver argv and preserves hosted inputs.
 """
 import argparse
 import concurrent.futures
@@ -138,7 +138,7 @@ def matrix_status(phase, native_status, interpreter_status):
 def runtime_identity(root):
     return {str(path.relative_to(root)): digest(path)
             for path in root.rglob("*") if path.is_file() and
-            (path.suffix in {".a", ".lib", ".o", ".obj", ".dll", ".so"} or path.name == "hosted-runtime.env")}
+            (path.suffix in {".a", ".lib", ".o", ".obj", ".dll", ".so", ".dylib"} or path.name == "hosted-runtime.env")}
 
 
 def first_command_executable(text):
@@ -196,6 +196,15 @@ class Matrix:
             raise ValueError("runtime contains no bound library/object authority")
         self.created_output = False
         self.windows = os.name == "nt"
+        self.darwin = sys.platform == "darwin"
+        if self.darwin:
+            helper = Path(__file__).with_name("hello-sanity-matrix-darwin.py")
+            spec = importlib.util.spec_from_file_location("hello_matrix_darwin", helper)
+            self.darwin_adapter = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(self.darwin_adapter)
+            self.driver = self.darwin_adapter.resolve_driver()
+            self.driver_sha = digest(self.driver)
+            self.sdk = self.darwin_adapter.resolve_sdk()
         self.windows_budget = None
         if self.windows:
             helper = Path(__file__).with_name("hello-sanity-matrix-windows.py")
@@ -221,11 +230,17 @@ class Matrix:
             "SIMPLE_RUNTIME_PATH": str(self.runtime),
             "SIMPLE_PACKAGE_INDEX_COLD_INIT": "1", "SIMPLE_LINKER": "lld-link" if self.windows and args.windows_abi == "msvc" else "lld",
         })
+        if self.darwin:
+            self.base.pop("SIMPLE_LINKER", None)
+            self.base = self.darwin_adapter.driver_environment(self.base)
+            self.base["SDKROOT"] = str(self.sdk)
         self.base["PATH"] = str(self.linker.parent) + os.pathsep + self.base.get("PATH", "")
 
     def validate_identity(self):
         if digest(self.compiler) != self.sha:
             raise ValueError("phase compiler bytes changed")
+        if self.darwin and digest(self.driver) != self.driver_sha:
+            raise ValueError("Darwin compiler driver bytes changed")
         if digest(self.linker) != self.linker_sha:
             raise ValueError("linker bytes changed")
 
@@ -247,6 +262,8 @@ class Matrix:
         if self.stop.is_set():
             raise ValueError("interrupted before command launch")
         self.validate_identity()
+        if shutil.disk_usage(self.out).free < self.args.min_free_disk_bytes:
+            raise ValueError("disk reserve reached before command launch")
         env = self.command_environment(lane, extra)
         for child in ["tmp", "storage", "native-state", "cache/user", "cache/project", "cache/xdg"]:
             (lane / child).mkdir(parents=True, exist_ok=True)
@@ -283,6 +300,8 @@ class Matrix:
                         reason = "interrupted"
                     elif time.monotonic() - begin > timeout + 15:
                         reason = "supervisor-timeout"
+                    elif shutil.disk_usage(self.out).free < self.args.min_free_disk_bytes:
+                        reason = "disk-reserve"
                     elif sum(path.stat().st_size for path in [stdout, stderr] if path.exists()) > self.args.max_log_bytes:
                         reason = "log-limit"
                     else:
@@ -326,10 +345,19 @@ class Matrix:
                    "--runtime-bundle", "core-c-bootstrap", "--runtime-path", str(self.runtime),
                    "--entry-closure", "--threads", "1", "--cache-dir", str(lane / "cache" / name),
                    "--mode", "one-binary", "--entry", str(entry), "--output", str(output)]
+        if self.darwin:
+            command.extend(["--source", str(entry.parent)])
         command.extend(flags)
+        capture = None
+        if self.darwin and not flags and not (extra or {}).get("SIMPLE_CC"):
+            capture = lane / (name + ".link.json")
+            proxy = self.darwin_adapter.capture_proxy(lane / (name + "-tool"), self.driver, self.linker, capture)
+            extra = (extra or {}) | {"SIMPLE_CC": str(proxy)}
         self.run(lane, name, command, extra)
         if not output.is_file() or output.stat().st_size == 0:
             raise ValueError(f"{name}: missing/empty artifact")
+        if capture:
+            self.darwin_adapter.verify_capture(capture, output, self.driver, self.linker)
 
     def check_executable(self, lane, executable):
         stdout, stderr = self.run(lane, "execute", [executable], seconds=5)
@@ -364,6 +392,15 @@ class Matrix:
     def replay(self, lane, main, provider, capture, output, captured_output=None):
         if captured_output is None:
             captured_output = lane / "capture-program"
+        if self.darwin:
+            command, root = self.darwin_adapter.replay_inputs(
+                capture, captured_output, self.driver, self.linker, main, provider, output)
+            self.run(lane, "link-explicit-objects", command, cwd=root)
+            sdn(lane / "link-inputs.sdn", {"main_object": main, "main_sha256": digest(main),
+                "provider": provider, "provider_sha256": digest(provider),
+                "exact_emitted_inputs_consumed": True, "capture_sha256": digest(capture),
+                "driver_sha256": self.driver_sha, "linker_sha256": self.linker_sha})
+            return
         self.verify_capture(lane, capture, captured_output)
         unpack = lane / "link-reproduction"
         unpack.mkdir()
@@ -387,7 +424,11 @@ class Matrix:
              "exact_emitted_inputs_consumed": True, "reproduction_sha256": digest(capture)})
 
     def shared_provider(self, lane, provider_object, library):
-        if not self.windows:
+        if self.darwin:
+            command = [self.driver, "--ld-path=" + str(self.linker), "--no-default-config", "-dynamiclib",
+                       "-Wl,-undefined,error", "-Wl,-install_name,@loader_path/" + library.name,
+                       "-o", library, provider_object]
+        elif not self.windows:
             command = [self.linker, "-shared", "--no-undefined", "-soname", library.name,
                        "-o", library, provider_object]
         elif self.args.windows_abi == "msvc":
@@ -451,7 +492,7 @@ class Matrix:
                 prior = self.prior_native_inputs(name) if self.args.reuse_build_evidence or (name == "shared-library" and self.args.reuse_shared_evidence) else None
                 reusable_shared = name == "shared-library" and self.args.reuse_shared_evidence is not None
                 provider = lane / {"two-objects": "provider.obj" if self.windows else "provider.o", "static-library": "hello.lib" if self.windows else "libhello.a",
-                                   "shared-library": "hello.dll" if self.windows else "libhello.so"}[name]
+                                   "shared-library": "hello.dll" if self.windows else "libhello.dylib" if self.darwin else "libhello.so"}[name]
                 flag = {"two-objects": "--emit-object", "static-library": "--emit-archive",
                         "shared-library": "--emit-shared"}[name]
                 main = lane / ("main.obj" if self.windows else "main.o")
@@ -479,34 +520,45 @@ class Matrix:
                     if len(imports) != 1:
                         raise ValueError("expected one genuine DLL import library from compiler shared emission")
                     link_provider = imports[0]
-                capture = lane / "link.tar"
+                capture = lane / ("link.json" if self.darwin else "link.tar")
                 captured_output = lane / ("capture-program.exe" if self.windows else "capture-program")
                 capture_env = {"SIMPLE_LINK_OBJECTS": str(link_provider)}
                 capture_env["LLD_REPRODUCE" if self.windows else "SIMPLE_NATIVE_LINK_REPRODUCE_PATH"] = str(capture)
-                if self.args.phase == 1:
+                if self.darwin:
+                    capture_env.pop("SIMPLE_NATIVE_LINK_REPRODUCE_PATH", None)
+                    proxy = self.darwin_adapter.capture_proxy(lane / "capture-tool", self.driver, self.linker, capture)
+                    capture_env["SIMPLE_CC"] = str(proxy)
+                elif self.args.phase == 1:
                     capture_env.pop("SIMPLE_NATIVE_LINK_REPRODUCE_PATH", None)
                     capture_env["LLD_REPRODUCE"] = str(capture)
                     if not self.windows:
                         proxy = phase1_linker_proxy(lane / "capture-tool", self.linker, capture)
                         capture_env["PATH"] = str(proxy.parent) + os.pathsep + self.base["PATH"]
                 if prior and (name != "shared-library" or reusable_shared):
-                    capture = prior / "link.tar"
+                    capture = prior / ("link.json" if self.darwin else "link.tar")
                     captured_output = prior / captured_output.name
                 else:
                     self.compile(lane, "capture-hosted-link", FIXTURES / "main.spl", captured_output,
                         extra=capture_env)
                 self.replay(lane, main, link_provider, capture, output, captured_output)
                 if name == "shared-library":
-                    stdout, _ = self.run(lane, "dynamic-needed", ["llvm-readobj", "--coff-imports", output] if self.windows else ["readelf", "-d", output])
-                    if (b"hello.dll" not in stdout.lower()) if self.windows else (b"NEEDED" not in stdout or b"libhello.so" not in stdout):
-                        raise ValueError("shared executable does not retain libhello.so DT_NEEDED")
-                    symbols, _ = self.run(lane, "provider-symbols", ["llvm-readobj", "--coff-exports", provider] if self.windows else ["nm", "-D", "--defined-only", provider])
+                    if self.darwin:
+                        stdout, _ = self.run(lane, "dynamic-needed", ["otool", "-L", output])
+                        if b"@loader_path/libhello.dylib" not in stdout:
+                            raise ValueError("shared executable lacks provider LC_LOAD_DYLIB")
+                        symbols, _ = self.run(lane, "provider-symbols", ["nm", "-gU", provider])
+                    else:
+                        stdout, _ = self.run(lane, "dynamic-needed", ["llvm-readobj", "--coff-imports", output] if self.windows else ["readelf", "-d", output])
+                        if (b"hello.dll" not in stdout.lower()) if self.windows else (b"NEEDED" not in stdout or b"libhello.so" not in stdout):
+                            raise ValueError("shared executable lacks provider dynamic dependency")
+                        symbols, _ = self.run(lane, "provider-symbols", ["llvm-readobj", "--coff-exports", provider] if self.windows else ["nm", "-D", "--defined-only", provider])
                     if b"hello_value" not in symbols:
                         raise ValueError("shared provider export hello_value is missing")
             self.check_executable(lane, output)
             values.update(status="PASS", executable_sha256=digest(output))
         except Exception as error:
-            barrier.abort()
+            if self.args.jobs != 1:
+                barrier.abort()
             values["reason"] = str(error)
             if isinstance(error, CleanupPending):
                 values["status"] = "RUNNING_FINALIZATION"
@@ -588,6 +640,7 @@ class Matrix:
             "backend": self.args.backend,
             "source_root": self.root, "source_revision": revision, "runtime": self.runtime,
             "linker": self.linker, "linker_sha256": self.linker_sha,
+            **({"driver": self.driver, "driver_sha256": self.driver_sha, "sdk": self.sdk} if self.darwin else {}),
             **{name.replace(".", "_") + "_sha256": sha for name, sha in fixture_hashes.items()}})
         sdn(self.out / "runtime-inputs.sdn", self.runtime_hashes)
         setup = self.out / "setup"
@@ -613,13 +666,24 @@ class Matrix:
             except ValueError:
                 if not (self.root / "build/scv/source-inventory/CURRENT").exists():
                     raise
-        barrier = threading.Barrier(len(self.args.lanes))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.args.lanes) + 1) as pool:
+        barrier = threading.Barrier(1 if self.args.jobs == 1 else len(self.args.lanes))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.args.jobs or len(self.args.lanes) + 1) as pool:
             futures = [pool.submit(self.lane, name, barrier) for name in self.args.lanes]
             configured_skip = not phase_capabilities(self.args.phase)[0]
             interpreter = pool.submit(self.interpreter) if not configured_skip and not self.args.skip_interpreter else None
             rows = [future.result() for future in futures]
             interpreter_result = interpreter.result() if interpreter else {"status": "SKIPPED" if configured_skip else "UNRUN"}
+        buildrunner_rows = {name: {"status": "SKIPPED" if not phase_capabilities(self.args.phase)[1] else "UNRUN"} for name in LANES}
+        provider = (self.args.buildrunner_manager, self.args.buildrunner_manifest_writer,
+                    self.args.buildrunner_template, self.args.buildrunner_target)
+        if phase_capabilities(self.args.phase)[1] and all(provider):
+            helper = Path(__file__).with_name("hello-sanity-buildrunner.py")
+            spec = importlib.util.spec_from_file_location("hello_sanity_buildrunner", helper)
+            adapter = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(adapter)
+            buildrunner_rows["one-source"] = adapter.run_one_source(self, self.args.backend, *provider)
+        for name, record in buildrunner_rows.items():
+            sdn(self.out / ("buildrunner-" + name + ".sdn"), record)
         for name, sha in fixture_hashes.items():
             if digest(self.root / FIXTURES / name) != sha:
                 raise ValueError("fixture changed during matrix")
@@ -629,11 +693,20 @@ class Matrix:
         complete_native = set(self.args.lanes) == set(LANES)
         native_status = "FAIL" if passed != len(rows) else "PASS" if complete_native else "PARTIAL"
         status = matrix_status(self.args.phase, native_status, interpreter_result["status"])
+        if phase_capabilities(self.args.phase)[1]:
+            states = {row["status"] for row in buildrunner_rows.values()}
+            buildrunner_status = "FAIL" if "FAIL" in states else "UNRUN" if states == {"UNRUN"} else "PARTIAL" if "UNRUN" in states else "PASS"
+            if buildrunner_status == "FAIL":
+                status = "FAIL"
+            elif status == "PASS" and buildrunner_status != "PASS":
+                status = "PARTIAL"
+        else:
+            buildrunner_status = "SKIPPED"
         if self.children:
             status = "RUNNING_FINALIZATION"
         sdn(self.out / "result.sdn", {"phase": self.args.phase, "compiler_sha256": self.sha,
             "status": status, "scope": "compiler-native-and-interpreter",
-            "buildrunner_status": "UNRUN" if phase_capabilities(self.args.phase)[1] else "SKIPPED",
+            "buildrunner_status": buildrunner_status,
             "native_status": native_status,
             "selected_native_status": "PASS" if passed == len(rows) else "FAIL",
             "required_native_lanes": 4, "selected_native_lanes": len(rows),
@@ -653,8 +726,11 @@ def main():
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--max-rss-kib", type=int, default=4194304,
                         help="per-lane process-tree budget; four concurrent lanes")
+    parser.add_argument("--jobs", type=int, choices=[0, 1], default=1 if sys.platform == "darwin" else 0,
+                        help="1 serializes native/interpreter commands; 0 runs lanes concurrently")
+    parser.add_argument("--min-free-disk-bytes", type=int, default=1610612736)
     parser.add_argument("--max-log-bytes", type=int, default=4194304)
-    parser.add_argument("--linker", default="lld-link" if os.name == "nt" else "ld.lld")
+    parser.add_argument("--linker", default="lld-link" if os.name == "nt" else "ld64.lld" if sys.platform == "darwin" else "ld.lld")
     parser.add_argument("--windows-abi", choices=["msvc", "gnu"], default="msvc")
     parser.add_argument("--prior-version-evidence", type=Path,
                         help="reuse hash-bound green version evidence without rerunning it")
@@ -668,14 +744,26 @@ def main():
                         help="explicitly unrun interpreter case when reusing separate retained evidence")
     parser.add_argument("--prior-interpreter-evidence", type=Path,
                         help="reuse exact phase/compiler/fixture interpreter evidence across code-generation backend reports")
+    parser.add_argument("--buildrunner-manager", type=Path)
+    parser.add_argument("--buildrunner-manifest-writer", type=Path)
+    parser.add_argument("--buildrunner-template", type=Path)
+    parser.add_argument("--buildrunner-target")
     args = parser.parse_args()
+    provider = (args.buildrunner_manager, args.buildrunner_manifest_writer,
+                args.buildrunner_template, args.buildrunner_target)
+    if any(provider) and not all(provider):
+        parser.error("BuildRunner requires manager, manifest writer, template, and target together")
+    if all(provider):
+        args.buildrunner_manager = args.buildrunner_manager.resolve()
+        args.buildrunner_manifest_writer = args.buildrunner_manifest_writer.resolve()
+        args.buildrunner_template = args.buildrunner_template.resolve()
     if len(set(args.lanes)) != len(args.lanes):
         parser.error("native lanes must be unique")
-    if min(args.timeout_seconds, args.max_rss_kib, args.max_log_bytes) <= 0:
+    if min(args.timeout_seconds, args.max_rss_kib, args.max_log_bytes) <= 0 or args.min_free_disk_bytes < 0:
         parser.error("resource bounds must be positive")
-    if sys.platform != "linux" and os.name != "nt":
-        parser.error("UNSUPPORTED: exact hosted-link adapters support Linux/ELF and native Windows/COFF")
-    for tool in [args.linker, "llvm-readobj"] if os.name == "nt" else ["perl", args.linker, "readelf", "nm"]:
+    if sys.platform not in {"linux", "darwin"} and os.name != "nt":
+        parser.error("UNSUPPORTED: exact hosted-link adapters support Linux/ELF, macOS/Mach-O and native Windows/COFF")
+    for tool in [args.linker, "llvm-readobj"] if os.name == "nt" else (["perl", args.linker, "clang", "otool", "nm"] if sys.platform == "darwin" else ["perl", args.linker, "readelf", "nm"]):
         if shutil.which(tool) is None:
             parser.error(f"missing required tool: {tool}")
     matrix = Matrix(args)

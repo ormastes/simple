@@ -1,5 +1,8 @@
 """Boundary tests for real linker-input evidence; no fake compiler execution."""
 import importlib.util
+import json
+import os
+from unittest import mock
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -12,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location("hello_matrix", ROOT / "scripts/bootstrap/hello-sanity-matrix.py")
 MATRIX = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MATRIX)
+
+DARWIN_SPEC = importlib.util.spec_from_file_location("hello_matrix_darwin", ROOT / "scripts/bootstrap/hello-sanity-matrix-darwin.py")
+DARWIN = importlib.util.module_from_spec(DARWIN_SPEC)
+DARWIN_SPEC.loader.exec_module(DARWIN)
 
 
 class LinkInputEvidence(unittest.TestCase):
@@ -101,7 +108,7 @@ class LinkInputEvidence(unittest.TestCase):
             (root / "provider.o").write_bytes(provider.read_bytes())
             result = MATRIX.replace_inputs(["--chroot", ".", "main.o", "provider.o"], root, main, provider)
             self.assertEqual(result, ["--chroot", ".", "../main.o", "../provider.o"])
-            self.assertEqual((root / result[2]).resolve(), main)
+            self.assertEqual((root / result[2]).resolve(), main.resolve())
 
     def test_ambiguous_duplicate_link_inputs_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -129,6 +136,70 @@ class LinkInputEvidence(unittest.TestCase):
                 matrix.execute()
             self.assertFalse(matrix.created_output)
             self.assertEqual(sentinel.read_text(), 'status: "historical"\n')
+
+    def test_darwin_capture_preserves_hosted_inputs_and_rejects_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            driver, linker, main, provider, shim, program = [root / name for name in
+                ["clang", "ld64.lld", "main.o", "provider.o", "hosted-entry.o", "program"]]
+            for path in [driver, linker, main, provider, shim, program]:
+                path.write_bytes(path.name.encode())
+            capture = root / "link.json"
+            record = {"driver": str(driver), "driver_sha256": MATRIX.digest(driver),
+                      "linker": str(linker), "linker_sha256": MATRIX.digest(linker),
+                      "cwd": str(root), "output": str(program), "output_sha256": MATRIX.digest(program),
+                      "inputs": {str(p): MATRIX.digest(p) for p in [main, provider, shim]},
+                      "argv": ["--ld-path=" + str(linker), "--no-default-config", str(main), str(provider), str(shim), "-o", str(program)]}
+            capture.write_text(json.dumps(record))
+            command, cwd = DARWIN.replay_inputs(capture, program, driver, linker, main, provider, root / "hello")
+            self.assertIn(str(shim), command)
+            self.assertEqual(command[-2:], ["-o", str(root / "hello")])
+            self.assertEqual(cwd, root)
+            shim.write_bytes(b"unbound replacement")
+            with self.assertRaisesRegex(ValueError, "input changed"):
+                DARWIN.replay_inputs(capture, program, driver, linker, main, provider, root / "hello")
+
+    def test_darwin_rejects_opaque_and_driver_override_arguments(self):
+        for arg in ["-Wl,@hidden.rsp", "-Wl,-filelist,hidden.list", "--config=hidden.cfg"]:
+            with self.subTest(arg=arg), self.assertRaisesRegex(ValueError, "opaque"):
+                DARWIN.capture_link("unavailable-driver", "unavailable-linker", "unused", [arg])
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("ld64.lld"), "requires real Darwin Mach-O tools")
+    def test_darwin_real_driver_capture_and_all_four_linkage_forms(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            driver, linker = DARWIN.resolve_driver(), Path(shutil.which("ld64.lld"))
+            sdk = DARWIN.resolve_sdk()
+            def run(argv):
+                return subprocess.run(list(map(str, argv)), check=True, capture_output=True, timeout=15, env=os.environ | {"SDKROOT": str(sdk)})
+            main_c, provider_c = root / "main.c", root / "provider.c"
+            main_c.write_text('#include <stdio.h>\nextern int hello_value(void);\nint main(void) { if (hello_value() != 42) return 1; puts("Hello, World!"); return 0; }\n')
+            provider_c.write_text('int hello_value(void) { return 42; }\n')
+            single = root / "single.c"
+            single.write_text(provider_c.read_text() + main_c.read_text())
+            run([driver, "--ld-path=" + str(linker), single, "-o", root / "single"])
+            self.assertEqual(run([root / "single"]).stdout, MATRIX.EXPECTED)
+            main, provider = root / "main.o", root / "provider.o"
+            run([driver, "-c", main_c, "-o", main])
+            run([driver, "-c", provider_c, "-o", provider])
+            archive, shared = root / "libhello.a", root / "libhello.dylib"
+            run(["ar", "rcs", archive, provider])
+            run([driver, "--ld-path=" + str(linker), "-dynamiclib", provider,
+                 "-Wl,-install_name,@loader_path/libhello.dylib", "-o", shared])
+            for form, linked in [("object", provider), ("archive", archive), ("shared", shared)]:
+                capture = root / (form + ".json")
+                proxy = DARWIN.capture_proxy(root / (form + "-tool"), driver, linker, capture)
+                natural, output = root / (form + "-natural"), root / form
+                with mock.patch.dict(os.environ, {"CCC_OVERRIDE_OPTIONS": "+--ld-path=/nonexistent/unbound-linker"}):
+                    run([proxy, main, linked, "-o", natural])
+                command, cwd = DARWIN.replay_inputs(capture, natural, driver, linker, main, linked, output)
+                run(command)
+                completed = run([output])
+                self.assertEqual(completed.stdout, MATRIX.EXPECTED)
+                self.assertEqual(completed.stderr, b"")
+                if form == "shared":
+                    self.assertIn(b"@loader_path/libhello.dylib", run(["otool", "-L", output]).stdout)
+                    self.assertIn(b"_hello_value", run(["nm", "-gU", shared]).stdout)
 
     def test_response_keeps_paths_with_spaces(self):
         self.assertEqual(MATRIX.response_tokens('"inputs/main space.o" -o "output space"'),

@@ -2965,6 +2965,31 @@ Cap each live failure lane at three distinct fix/verify cycles. Do not repeat an
 identical failed command or promote executable existence, static checks, or
 frontier review to a false PASS.
 
+### Bootstrap Hello execution evidence
+
+The native Hello acceptance target has 16 individual cases: source, two-object,
+static-library, and shared-library forms, each built with LLVM and Cranelift
+and run by both the direct compiler path and BuildRunner. Keep one evidence
+row per `(form, backend, path)` with command, exact compiler identity, artifact
+hash, exit status, and observed `Hello, World!` output. Use `PASS`, `FAIL`,
+`UNRUN`, or `UNSUPPORTED`; missing evidence is `UNRUN`, and neither
+`UNSUPPORTED` nor a successful compile-only step is a pass.
+
+Current `scripts/bootstrap/hello-sanity-matrix.py` coverage is four direct
+cases for the selected backend per invocation. Optional one-source BuildRunner
+execution requires a qualified manager, manifest writer, worker template, and
+target, plus verified output and enforced-memory receipts. The other three
+BuildRunner forms remain `UNRUN`; without providers all four remain `UNRUN`.
+Pending required BuildRunner cells prevent overall `PASS`. Do not imply that
+one report proves the second backend or all BuildRunner cases. See
+[`bootstrap_parallel_handoff.md`](../../doc/07_guide/app/llm/bootstrap_parallel_handoff.md#hello-sanity-16-native-execution-cases-and-phase-interpreter-checks)
+for the full matrix and receipts. Track interpreter evidence separately:
+Phase 1 requires its own seed in interpreter mode; Phase 2 records
+`SKIPPED` because the minimal compiler has no `run`; Phase 3 requires a full
+CLI bound to that exact phase 3 producer, source, and runtime. An ambient CLI
+cannot qualify a phase. Do not call the phase gate complete while any required
+matrix or interpreter case is `UNRUN`, `UNSUPPORTED`, or `FAIL`.
+
 ## Host storage precondition (added 2026-08-11)
 
 **Before starting any gate, bootstrap, or evidence run, check host storage.**
