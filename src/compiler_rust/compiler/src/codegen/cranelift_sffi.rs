@@ -3031,7 +3031,7 @@ mod function_handle_diagnostic_tests {
             assert!(reason.contains(&format!("module={module}")), "{reason}");
             assert!(reason.contains("symbol=\"diagnostic_callee\""), "{reason}");
             assert!(reason.contains("incompatible with previous declaration"), "{reason}");
-            assert!(reason.contains("i64") && reason.contains("f64"), "{reason}");
+            assert!(reason.contains("types::I64") && reason.contains("types::F64"), "{reason}");
             assert_eq!(rt_cranelift_declare_function(module, symbol.as_ptr() as i64,
                 symbol.len() as i64, conflicting, 1), 0);
             // A rejected redeclaration must not erase the valid original.
