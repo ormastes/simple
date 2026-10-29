@@ -13,6 +13,7 @@
 #include <string.h>
 
 static char self[MAX_PATH];
+#include "runtime_process_owned_sha256_private.h"
 static RtOwnedProcessTokenV2 start(const char* mode, int64_t timeout, uint64_t cap) {
     const char* args[] = {self, mode, NULL};
     RtOwnedProcessTokenV2 token;
@@ -43,6 +44,18 @@ static void discard_collect(RtOwnedProcessTokenV2 token) {
 }
 static int child_mode(int argc, char** argv) {
     if (argc == 2) {
+        if (!strcmp(argv[1], "--stdin-echo")) {
+            unsigned char bytes[4096]; DWORD got, written;
+            for (;;) {
+                if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), bytes, sizeof(bytes), &got, NULL)) {
+                    assert(GetLastError() == ERROR_BROKEN_PIPE); break;
+                }
+                if (!got) break;
+                assert(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, got, &written, NULL));
+                assert(written == got);
+            }
+            return 0;
+        }
         if (!strcmp(argv[1], "--sleep")) { Sleep(600); return 0; }
         if (!strcmp(argv[1], "--hold")) { Sleep(60000); return 0; }
         if (!strcmp(argv[1], "--exit259")) return 259;
@@ -197,17 +210,103 @@ static void admission_checks(void) {
     puts("PASS: admission invalid-budget missing-executable zero-authority no-handle-leak");
 }
 
+static void input_checks(void) {
+    enum { LENGTH = 131073 };
+    unsigned char* input = malloc(LENGTH);
+    unsigned char* echoed = malloc(LENGTH + 1);
+    assert(input && echoed);
+    for (size_t i = 0; i < LENGTH; i++) input[i] = (unsigned char)(i % 251);
+    unsigned char digest[32]; owned_sha256(input, LENGTH, digest);
+    const char* args[] = {self, "--stdin-echo", NULL};
+    RtOwnedProcessTokenV2 token;
+    RtOwnedProcessStartReceiptV2 start_receipt;
+    assert(rt_process_owned_start_v3(self, args, input, LENGTH, 5000, 20, LENGTH,
+        &token, &start_receipt));
+    assert(start_receipt.accepted && start_receipt.version == RT_OWNED_PROCESS_INPUT_VERSION);
+    memset(input, 0xcc, LENGTH); /* The caller no longer owns the accepted bytes. */
+    RtOwnedProcessInputReceiptV3 receipt;
+    assert(rt_process_owned_input_receipt_v3(token, &receipt));
+    assert(receipt.input_bytes_accepted == LENGTH && !memcmp(receipt.input_sha256, digest, 32));
+    RtOwnedProcessPollReceiptV2 poll = {0}; size_t kept = 0;
+    ULONGLONG deadline = GetTickCount64() + 6000;
+    while ((!poll.terminal || kept < LENGTH) && GetTickCount64() < deadline) {
+        char out[4097];
+        assert(rt_process_owned_poll_v2(token, 20, out, sizeof(out), NULL, 0, &poll));
+        assert(kept + poll.stdout_bytes_delivered <= LENGTH);
+        memcpy(echoed + kept, out, (size_t)poll.stdout_bytes_delivered);
+        kept += (size_t)poll.stdout_bytes_delivered;
+    }
+    assert(poll.terminal && kept == LENGTH);
+    for (size_t i = 0; i < LENGTH; i++) assert(echoed[i] == (unsigned char)(i % 251));
+    assert(rt_process_owned_input_receipt_v3(token, &receipt));
+    assert(receipt.stdin_closed && receipt.terminal && receipt.reaped);
+    assert(receipt.input_bytes_written == LENGTH && !memcmp(receipt.input_sha256, digest, 32));
+    discard_collect(token);
+    assert(!rt_process_owned_input_receipt_v3(token, &receipt));
+    assert(receipt.runtime_error == RT_OWNED_PROCESS_WINDOWS_STALE_ERROR);
+
+    assert(rt_process_owned_start_v3(self, args, NULL, 0, 2000, 20, 0, &token, &start_receipt));
+    finish(token);
+    assert(rt_process_owned_input_receipt_v3(token, &receipt));
+    owned_sha256(NULL, 0, digest);
+    assert(receipt.stdin_closed && receipt.input_bytes_accepted == 0 && receipt.input_bytes_written == 0);
+    assert(!memcmp(receipt.input_sha256, digest, 32));
+    discard_collect(token);
+
+    token = start("--sleep", 0, 0);
+    assert(!rt_process_owned_input_receipt_v3(token, &receipt) && receipt.runtime_error == EINVAL);
+    finish(token); discard_collect(token);
+    assert(!rt_process_owned_start_v3(self, args, NULL, 1, 0, 0, 0, &token, &start_receipt));
+    assert(!start_receipt.accepted && !token.high && !token.low && start_receipt.runtime_error == EINVAL);
+    assert(!rt_process_owned_start_v3(self, args, input, RT_OWNED_PROCESS_MAX_INPUT_BYTES + 1ULL,
+        0, 0, 0, &token, &start_receipt));
+    assert(!token.high && !token.low && start_receipt.runtime_error == EINVAL);
+    free(input); free(echoed);
+    puts("PASS: input immutable-binary-snapshot sha256 partial-writes empty-eof stale-version admission");
+}
+
+static void input_backpressure_checks(void) {
+    unsigned char* input = malloc(RT_OWNED_PROCESS_MAX_INPUT_BYTES);
+    assert(input); memset(input, 0x41, RT_OWNED_PROCESS_MAX_INPUT_BYTES);
+    const char* args[] = {self, "--hold", NULL};
+    RtOwnedProcessTokenV2 token;
+    RtOwnedProcessStartReceiptV2 start_receipt;
+    assert(rt_process_owned_start_v3(self, args, input, RT_OWNED_PROCESS_MAX_INPUT_BYTES,
+        0, 20, 0, &token, &start_receipt));
+    RtOwnedProcessPollReceiptV2 poll;
+    ULONGLONG began = GetTickCount64();
+    for (int i = 0; i < 4; i++)
+        assert(rt_process_owned_poll_v2(token, 0, NULL, 0, NULL, 0, &poll));
+    assert(poll.live && GetTickCount64() - began < 1000);
+    /* A blocked stdin reader must not hold up an independent lease. */
+    RtOwnedProcessTokenV2 other = start("--exit259", 2000, 0);
+    finish(other); discard_collect(other);
+    RtOwnedProcessCancelReceipt cancelled;
+    assert(rt_process_owned_cancel_v2(token, &cancelled));
+    RtOwnedProcessInputReceiptV3 receipt;
+    assert(rt_process_owned_input_receipt_v3(token, &receipt));
+    assert(receipt.stdin_closed && receipt.terminal && receipt.reaped);
+    assert(receipt.input_bytes_accepted == RT_OWNED_PROCESS_MAX_INPUT_BYTES);
+    assert(receipt.input_bytes_written < receipt.input_bytes_accepted);
+    discard_collect(token);
+    free(input);
+    puts("PASS: input-backpressure nonblocking-poll independent-lease cancel-completion partial-receipt");
+}
+
 int main(int argc, char** argv) {
     int child = child_mode(argc, argv);
     if (child >= 0) return child;
     assert(GetModuleFileNameA(NULL, self, sizeof(self)));
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--suite-capture") &&
         strcmp(argv[1], "--suite-lifecycle") && strcmp(argv[1], "--suite-concurrency") &&
-        strcmp(argv[1], "--suite-admission"))) return 2;
+        strcmp(argv[1], "--suite-admission") && strcmp(argv[1], "--suite-input") &&
+        strcmp(argv[1], "--suite-input-backpressure"))) return 2;
     if (argc == 1 || !strcmp(argv[1], "--suite-capture")) capture_checks();
     if (argc == 1 || !strcmp(argv[1], "--suite-lifecycle")) lifecycle_checks();
     if (argc == 1 || !strcmp(argv[1], "--suite-concurrency")) concurrency_checks();
     if (argc == 1 || !strcmp(argv[1], "--suite-admission")) admission_checks();
+    if (argc == 1 || !strcmp(argv[1], "--suite-input")) input_checks();
+    if (argc == 1 || !strcmp(argv[1], "--suite-input-backpressure")) input_backpressure_checks();
     return 0;
 }
 #else

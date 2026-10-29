@@ -1,8 +1,11 @@
-/* Private Windows V2 lease owner. Included after the synchronous Win32 helpers.
- * V3 atomic stdin, sealed pins, and the V4 wire remain unsupported. A live
+/* Private Windows V2 lease owner and V3 immutable stdin core.
+ * Included after the synchronous Win32 helpers. Sealed pins, the opaque V3
+ * facade and the V4 wire remain unsupported. A live
  * HANDLE and Job Object are authority; diagnostic PIDs never authorize work.
  * The registry lock protects every slot/handle access. Poll releases it before
  * sleeping, so independent leases and collection can continue concurrently. */
+#include "runtime_process_owned_sha256_private.h"
+
 #define OWNED_WIN_ASYNC_SLOTS 128
 #define OWNED_WIN_ASYNC_MAX_WAIT_MS 250
 
@@ -19,6 +22,13 @@ typedef struct OwnedWinLease {
     int reaped, terminal, cancel_requested, timed_out, kill_sent, op_refs;
     int runtime_error;
     int64_t exit_code;
+    HANDLE input_pipe;
+    OVERLAPPED input_io;
+    uint8_t* input;
+    uint8_t input_sha256[32];
+    uint64_t input_len, input_written;
+    DWORD input_requested;
+    int input_contract_v3, input_pending, input_stopping;
 } OwnedWinLease;
 
 static SRWLOCK owned_win_leases_lock = SRWLOCK_INIT;
@@ -31,6 +41,10 @@ static void owned_win_lease_dispose(OwnedWinLease* slot) {
     owned_win_close(&slot->out.write_end);
     owned_win_close(&slot->err.read_end);
     owned_win_close(&slot->err.write_end);
+    /* Disposal is allowed only before the first write or after completion. */
+    owned_win_close(&slot->input_pipe);
+    owned_win_close(&slot->input_io.hEvent);
+    RT_OWNED_HOST_FREE(slot->input);
     RT_OWNED_HOST_FREE(slot->out.buf);
     RT_OWNED_HOST_FREE(slot->err.buf);
     memset(slot, 0, sizeof(*slot));
@@ -61,6 +75,8 @@ static int owned_win_random_token(RtOwnedProcessTokenV2* token) {
 static void owned_win_lease_error(OwnedWinLease* slot, int error) {
     if (!slot->runtime_error) slot->runtime_error = error;
 }
+
+#include "runtime_process_owned_windows_input_private.h"
 
 static int owned_win_lease_kill(OwnedWinLease* slot) {
     if (slot->kill_sent) return 1;
@@ -142,18 +158,21 @@ static void owned_win_lease_advance(OwnedWinLease* slot) {
         if (slot->out.read_end) { slot->out.truncated = 1; owned_win_close(&slot->out.read_end); }
         if (slot->err.read_end) { slot->err.truncated = 1; owned_win_close(&slot->err.read_end); }
     }
-    if (slot->reaped && accounting_ok && !accounting.ActiveProcesses &&
+    owned_win_input_advance(slot, slot->reaped || slot->kill_sent || slot->cancel_requested);
+    if (slot->reaped && accounting_ok && !accounting.ActiveProcesses && !slot->input_pipe &&
         !slot->out.read_end && !slot->err.read_end) slot->terminal = 1;
 }
 
-bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
+static bool owned_win_start(const char* cmd, const char* const* argv,
+                               const uint8_t* input, uint64_t input_len, int pipe_stdin,
                                int64_t timeout_ms, int64_t term_grace_ms,
                                uint64_t max_output_bytes, RtOwnedProcessTokenV2* token,
                                RtOwnedProcessStartReceiptV2* receipt) {
     if (!receipt || !token) return false;
     memset(token, 0, sizeof(*token)); memset(receipt, 0, sizeof(*receipt));
-    receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION;
-    if (!cmd || !cmd[0] || !argv || !argv[0] || timeout_ms < 0 || term_grace_ms < 0 ||
+    receipt->version = pipe_stdin ? RT_OWNED_PROCESS_INPUT_VERSION : RT_OWNED_PROCESS_ASYNC_VERSION;
+    if (input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES || (input_len && !input) ||
+        !cmd || !cmd[0] || !argv || !argv[0] || timeout_ms < 0 || term_grace_ms < 0 ||
         max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES) {
         receipt->runtime_error = EINVAL; return false;
     }
@@ -189,9 +208,14 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
         !CreatePipe(&slot->err.read_end, &slot->err.write_end, &security, 0) ||
         !SetHandleInformation(slot->out.read_end, HANDLE_FLAG_INHERIT, 0) ||
         !SetHandleInformation(slot->err.read_end, HANDLE_FLAG_INHERIT, 0)) { error = EMFILE; goto done; }
-    stdin_handle = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        &security, OPEN_EXISTING, 0, NULL);
-    if (stdin_handle == INVALID_HANDLE_VALUE) { error = EIO; goto done; }
+    if (pipe_stdin) {
+        error = owned_win_input_prepare(slot, &stdin_handle, &security, input, input_len);
+        if (error) goto done;
+    } else {
+        stdin_handle = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &security, OPEN_EXISTING, 0, NULL);
+        if (stdin_handle == INVALID_HANDLE_VALUE) { error = EIO; goto done; }
+    }
     slot->job = CreateJobObjectW(NULL, NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits; memset(&limits, 0, sizeof(limits));
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -272,6 +296,45 @@ done:
     ReleaseSRWLockExclusive(&owned_win_leases_lock);
     return error == 0;
 }
+
+bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
+                               int64_t timeout_ms, int64_t term_grace_ms,
+                               uint64_t max_output_bytes, RtOwnedProcessTokenV2* token,
+                               RtOwnedProcessStartReceiptV2* receipt) {
+    return owned_win_start(cmd, argv, NULL, 0, 0, timeout_ms, term_grace_ms,
+        max_output_bytes, token, receipt);
+}
+
+bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
+                               const uint8_t* input, uint64_t input_len,
+                               int64_t timeout_ms, int64_t term_grace_ms,
+                               uint64_t max_output_bytes, RtOwnedProcessTokenV2* token,
+                               RtOwnedProcessStartReceiptV2* receipt) {
+    return owned_win_start(cmd, argv, input, input_len, 1, timeout_ms, term_grace_ms,
+        max_output_bytes, token, receipt);
+}
+
+bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
+                                       RtOwnedProcessInputReceiptV3* receipt) {
+    if (!receipt) return false;
+    memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_INPUT_VERSION;
+    AcquireSRWLockExclusive(&owned_win_leases_lock);
+    OwnedWinLease* slot = owned_win_lease_find(token);
+    if (!slot) receipt->runtime_error = RT_OWNED_PROCESS_WINDOWS_STALE_ERROR;
+    else if (!slot->input_contract_v3) receipt->runtime_error = EINVAL;
+    else {
+        receipt->input_bytes_accepted = slot->input_len;
+        receipt->input_bytes_written = slot->input_written;
+        memcpy(receipt->input_sha256, slot->input_sha256, sizeof(receipt->input_sha256));
+        receipt->stdin_closed = !slot->input_pipe;
+        receipt->terminal = slot->terminal; receipt->reaped = slot->reaped;
+        receipt->runtime_error = slot->runtime_error;
+    }
+    ReleaseSRWLockExclusive(&owned_win_leases_lock);
+    return receipt->runtime_error == 0;
+}
+
+#define RT_OWNED_WIN32_INPUT_IMPLEMENTED 1
 
 static uint64_t owned_win_lease_deliver(OwnedWinStream* stream, uint64_t* delivered,
                                        char* output, uint64_t capacity) {
