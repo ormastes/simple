@@ -1,0 +1,65 @@
+#!/bin/sh
+# Execute the production early gate and parent selection with real provenance
+# admission, without starting compilation or publishing any bootstrap receipt.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d) || exit 2
+trap 'rm -f "$work/gate.sh" "$work/parent.sh" "$work/simple" "$work/simple.provenance.env" "$work/existing.env" "$work/rejected.log"; rmdir "$work"' EXIT HUP INT TERM
+script="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+sed -n '/^if \[ -n "${produce_stage3_receipt_reason}" \] &&$/,/^fi$/p' "$script" >"$work/gate.sh"
+sed -n '/^bootstrap_stage2_trust_root=0$/,/^elif \[ -z "${bootstrap_receipt_path}" \]/p' "$script" | sed '$d' >"$work/parent.sh"
+printf '%s\n' 'else' '  exit 65' 'fi' >>"$work/parent.sh"
+[ -s "$work/gate.sh" ]
+hash() { shasum -a 256 "$1" | awk '{print $1}'; }
+make_runtime() {
+  printf '%s\n' '#!/bin/sh' 'echo "Simple v1.test"' >"$work/simple"
+  chmod +x "$work/simple"
+}
+receipt() {
+  cat >"$work/simple.provenance.env" <<EOF
+schema=simple-runtime-provenance-v1
+status=admitted
+implementation=$1
+artifact_sha256=$(hash "$work/simple")
+target_triple=aarch64-apple-darwin
+version_output=Simple v1.test
+producer=unit-test
+evidence=unit-test
+EOF
+}
+select_parent() (
+  produce_stage3_receipt_reason=verify-landed-compiler-fix
+  stop_after_stage2=$1
+  full_bootstrap=0
+  stop_after_seed=0
+  bootstrap_receipt_path=$3
+  bootstrap_early_repo_root=$root
+  SIMPLE_BUILD_COMPILER=$2
+  export SIMPLE_RUNTIME_HOST_ARCH=arm64 SIMPLE_RUNTIME_HOST_OS=Darwin
+  . "$work/gate.sh"
+  . "$work/parent.sh"
+  [ "$bootstrap_stage2_trust_root" = 1 ]
+  [ "$bootstrap_stage2_parent_authority" = admitted-pure-simple-runtime-stage2-trust-root ]
+  [ "$bootstrap_stage2_parent_override" = "$work/simple" ]
+)
+reject() {
+  rc=0
+  select_parent "$2" "$3" "$4" >"$work/rejected.log" 2>&1 || rc=$?
+  [ "$rc" = 64 ] || { echo "FAIL: expected refusal ($1), exit=$rc" >&2; exit 1; }
+  grep -Fq "$1" "$work/rejected.log"
+}
+make_runtime
+receipt pure-simple
+select_parent 1 "$work/simple" ''
+reject produce-stage3-receipt-requires-stage2-trust-root-lane 0 "$work/simple" ''
+reject produce-stage3-receipt-requires-stage2-trust-root-lane 1 '' ''
+: >"$work/existing.env"
+reject produce-stage3-receipt-requires-stage2-trust-root-lane 1 "$work/simple" "$work/existing.env"
+printf '# stale digest\n' >>"$work/simple"
+reject stage2-parent-runtime-provenance-rejected 1 "$work/simple" ''
+make_runtime
+receipt rust-seed
+reject stage2-parent-runtime-provenance-rejected 1 "$work/simple" ''
+rm -f "$work/simple.provenance.env"
+reject stage2-parent-runtime-provenance-rejected 1 "$work/simple" ''
+echo 'PASS: Stage 3 receipt production requires admitted pure parent or seed trust root'
