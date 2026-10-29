@@ -1,0 +1,137 @@
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.sdoctest.types.{SdoctestConfig, SdoctestIgnore}
+use std.test_runner.sdoctest.discovery.{discover_sdoctest_files, discover_from_dir, sdoctest_file_eligible, is_ignored, is_tag_ignored, extract_basename, list_contains}
+
+val ROOT = "build/md_kind/unit_discovery"
+
+fn no_ignore() -> SdoctestIgnore:
+    SdoctestIgnore(paths: [], tags: [])
+
+fn empty_config() -> SdoctestConfig:
+    SdoctestConfig(version: 1, default_timeout: 1000, sources: [], ignore: no_ignore(), init_scripts: [], environments: [])
+
+fn fresh(name: text) -> text:
+    val dir = ROOT + "/" + name
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    dir
+
+fn touch(path: text):
+    file_write(path, "```simple\nval a = 1\n```\n")
+
+fn sorted_names(paths: [text]) -> [text]:
+    var names: [text] = []
+    for p in paths:
+        names.push(extract_basename(p))
+    names.sort()
+    names
+
+describe "sdoctest file eligibility":
+    it "accepts a markdown file":
+        expect(sdoctest_file_eligible("a/b.md", false)).to_equal(true)
+
+    it "rejects a text file":
+        expect(sdoctest_file_eligible("a/b.txt", false)).to_equal(false)
+
+    it "rejects a spl file by default":
+        expect(sdoctest_file_eligible("a/b.spl", false)).to_equal(false)
+
+    it "accepts a spl file only when opted in":
+        expect(sdoctest_file_eligible("a/b.spl", true)).to_equal(true)
+
+    it "rejects a file merely containing md in its name":
+        expect(sdoctest_file_eligible("a/b.md.bak", false)).to_equal(false)
+
+    it "rejects an uppercase extension":
+        expect(sdoctest_file_eligible("a/README.MD", false)).to_equal(false)
+
+describe "sdoctest discovery: single target":
+    it "returns an existing markdown file":
+        val dir = fresh("single")
+        touch(dir + "/one.md")
+        val files = discover_sdoctest_files(empty_config(), dir + "/one.md")
+        expect(files.len()).to_equal(1)
+        expect(files[0]).to_equal(dir + "/one.md")
+
+    it "returns nothing for a missing markdown file":
+        val dir = fresh("missing")
+        expect(discover_sdoctest_files(empty_config(), dir + "/none.md").len()).to_equal(0)
+
+    it "returns nothing for a non-markdown file":
+        val dir = fresh("nonmd")
+        touch(dir + "/notes.txt")
+        expect(discover_sdoctest_files(empty_config(), dir + "/notes.txt").len()).to_equal(0)
+
+    it "returns nothing for a spl file without the opt-in":
+        val dir = fresh("splfile")
+        touch(dir + "/a.spl")
+        expect(discover_sdoctest_files(empty_config(), dir + "/a.spl").len()).to_equal(0)
+
+    it "returns nothing with no target and no configured sources":
+        expect(discover_sdoctest_files(empty_config(), "").len()).to_equal(0)
+
+describe "sdoctest discovery: directory":
+    it "finds every markdown file in a flat directory":
+        val dir = fresh("flat")
+        touch(dir + "/a.md")
+        touch(dir + "/b.md")
+        expect(sorted_names(discover_sdoctest_files(empty_config(), dir))).to_equal(["a.md", "b.md"])
+
+    it "skips non-markdown files":
+        val dir = fresh("mixed")
+        touch(dir + "/a.md")
+        touch(dir + "/b.txt")
+        touch(dir + "/c.spl")
+        expect(sorted_names(discover_sdoctest_files(empty_config(), dir))).to_equal(["a.md"])
+
+    it "recurses into subdirectories":
+        val dir = fresh("nested")
+        process_run_bounded("mkdir", ["-p", dir + "/sub/deeper"], 10000, 65536)
+        touch(dir + "/top.md")
+        touch(dir + "/sub/mid.md")
+        touch(dir + "/sub/deeper/low.md")
+        expect(sorted_names(discover_sdoctest_files(empty_config(), dir))).to_equal(["low.md", "mid.md", "top.md"])
+
+    it "returns nothing for an empty directory":
+        val dir = fresh("empty")
+        expect(discover_sdoctest_files(empty_config(), dir).len()).to_equal(0)
+
+    it "returns nothing for a missing directory":
+        expect(discover_from_dir(ROOT + "/does_not_exist", "*.md", no_ignore()).len()).to_equal(0)
+
+    it "applies a basename glob pattern":
+        val dir = fresh("glob")
+        touch(dir + "/guide_a.md")
+        touch(dir + "/guide_b.md")
+        touch(dir + "/other.md")
+        expect(sorted_names(discover_from_dir(dir, "guide_*.md", no_ignore()))).to_equal(["guide_a.md", "guide_b.md"])
+
+    it "drops files matching an ignore path pattern":
+        val dir = fresh("ignore")
+        touch(dir + "/keep.md")
+        touch(dir + "/drop.md")
+        val ignore = SdoctestIgnore(paths: ["**/drop.md"], tags: [])
+        expect(sorted_names(discover_from_dir(dir, "*.md", ignore))).to_equal(["keep.md"])
+
+describe "sdoctest ignore helpers":
+    it "matches an ignored path":
+        expect(is_ignored("doc/old/x.md", SdoctestIgnore(paths: ["doc/old/*"], tags: []))).to_equal(true)
+
+    it "does not match an unrelated path":
+        expect(is_ignored("doc/new/x.md", SdoctestIgnore(paths: ["doc/old/*"], tags: []))).to_equal(false)
+
+    it "matches an ignored tag":
+        expect(is_tag_ignored(["slow", "net"], SdoctestIgnore(paths: [], tags: ["net"]))).to_equal(true)
+
+    it "does not match when no tag is ignored":
+        expect(is_tag_ignored(["fast"], SdoctestIgnore(paths: [], tags: ["net"]))).to_equal(false)
+
+    it "extracts a basename":
+        expect(extract_basename("a/b/c.md")).to_equal("c.md")
+        expect(extract_basename("c.md")).to_equal("c.md")
+
+    it "finds list members":
+        expect(list_contains(["a", "b"], "b")).to_equal(true)
+        expect(list_contains(["a", "b"], "c")).to_equal(false)
