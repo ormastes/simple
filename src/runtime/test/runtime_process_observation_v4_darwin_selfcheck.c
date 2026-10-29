@@ -394,7 +394,10 @@ int main(void) {
             _exit(1);
         _exit(0);
     }
-    int status = 0; assert(waitpid(child, &status, 0) == child);
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    assert(waited == child);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     assert(close(acquired) == 0);
     assert(getcwd(cwd_after, sizeof(cwd_after)) && strcmp(cwd_before, cwd_after) == 0);
