@@ -43,7 +43,8 @@ lifetime; it must remain alive and unchanged until `posix_spawn` returns.
 ## Dependency closure
 
 The native fixture embeds a signed library constraint permitting only explicit
-custom-library CDHashes. The caller then binds the resulting executable's
+custom-library CDHashes. Unconstrained positive controls first prove that the
+direct, transitive, and injected library fixtures can actually execute. The caller then binds the resulting executable's
 CDHash. The fixture uses `hard,kill` signing flags. Tests show an allowed library
 loads; a different library, an allowed library's unlisted dependency, and
 `DYLD_INSERT_LIBRARIES` injection cannot execute a library constructor. Removing
@@ -70,4 +71,5 @@ Native acceptance covers exact identity, post-attachment rename, retained-FD
 mutation, direct/transitive dependency policy, injected code, and removal of the
 signed policy. `darwin_spawn_constraint_spec.spl` invokes the real native suite
 through the canonical process facade and asserts every evidence marker. It is a
-macOS-only live spec: another OS or unavailable enforcement must not pass.
+macOS-only live spec: non-macOS hosts register an explicit framework pending outcome;
+unavailable enforcement on macOS remains a failure and never a pass.
