@@ -1,10 +1,12 @@
 """Hosted SOSIX background script launch. Empty result means launch failure; "unsupported" identifies an unbound host.
 
-Unix hosts use the shell-backed service to detach the monitor without retaining
-stdio pipes. Windows uses the existing native async process provider. SimpleOS
-has no bound hosted script service and is deliberately unsupported here.
+POSIX host labels use the shell-backed service to detach without retaining
+stdio pipes. Windows and SimpleOS labels have no bound detached script service.
+The Windows async provider inherits stdio and cannot satisfy this contract.
+Host detection may label MSYS/MinGW environments as Windows; this owner does
+not infer POSIX shell support or SimpleOS identity from the environment.
 """
-use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default, process_spawn_async}
+use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.env_ops.{host_os}
 
@@ -12,14 +14,11 @@ fn _sosix_shell_quote(value: text) -> text:
     "'" + value.replace("'", "'\\''") + "'"
 
 pub fn sosix_launch_background_script_for_host(os: text, script_path: text) -> text:
-    if os != "windows" and os != "linux" and os != "macos" and os != "freebsd" and os != "openbsd" and os != "netbsd" and not os.starts_with("mingw") and not os.starts_with("msys") and not os.starts_with("cygwin"):
-        return "unsupported"
-    if script_path == "" or script_path.contains("\0") or not file_exists(script_path):
+    if script_path == "" or script_path.contains("\0"):
         return ""
-    if os == "windows":
-        val pid = process_spawn_async("cmd", ["/c", script_path])
-        if pid > 0:
-            return "{pid}"
+    if os != "linux" and os != "macos" and os != "freebsd" and os != "openbsd" and os != "netbsd" and not os.starts_with("mingw") and not os.starts_with("msys") and not os.starts_with("cygwin"):
+        return "unsupported"
+    if not file_exists(script_path):
         return ""
     val command = "nohup sh {_sosix_shell_quote(script_path)} >/dev/null 2>&1 </dev/null & pid=$!; case \"$pid\" in ''|*[!0-9]*) exit 1 ;; esac; printf '%s\\n' \"$pid\""
     val pid = shell_output_default(command, "").trim()
