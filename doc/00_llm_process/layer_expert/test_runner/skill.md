@@ -554,3 +554,10 @@ Public SDN aliases (`--sdn`, `--format sdn`, `--format=sdn`) must enter the same
 transport admission path. Do not bypass unsupported V4 process ownership by
 printing a partial legacy console summary. See
 `doc/08_tracking/bug/test_runner_sdn_equals_transport_bypass_2026_10_28.md`.
+
+The Rust diagnostic driver's scenario artifact slugs are bounded to 180 ASCII
+bytes. Long names retain a readable prefix and a SHA-256 suffix over the
+original length-framed group/name fields; short paths are unchanged. Preserve
+full names in the manifest. A manifest-write warning is separate from scenario
+assertion outcomes. The pure-Simple runner does not share this writer in the
+inspected source. See `doc/08_tracking/bug/scenario_artifact_component_length_2026_10_29.md`.
