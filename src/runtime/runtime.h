@@ -1141,6 +1141,9 @@ typedef struct RtOwnedProcessCancelReceipt {
 /* Async identity-owned process lease.  The random token is authority; the
  * diagnostic PID fields returned after start/termination are not. */
 #define RT_OWNED_PROCESS_ASYNC_VERSION 2
+/* UCRT has no ESTALE. Windows lease receipts use this stable stale-authority
+ * error value; it is independent of native GetLastError values. */
+#define RT_OWNED_PROCESS_WINDOWS_STALE_ERROR 116
 #define RT_OWNED_PROCESS_INPUT_VERSION 3
 #define RT_OWNED_PROCESS_OPAQUE_V3_VERSION 1
 #define RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION 1
