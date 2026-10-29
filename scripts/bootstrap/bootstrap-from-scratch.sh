@@ -950,6 +950,8 @@ if [ -n "${resume_stage3_output}" ]; then
       if [ -n "${SIMPLE_STAGE3_DIRECT_THREADS:-}" ] && [ "${SIMPLE_STAGE3_DIRECT_THREADS}" != 1 ]; then
         echo 'error: Stage 3 --jobs conflicts with SIMPLE_STAGE3_DIRECT_THREADS' >&2; exit 1
       fi
+      SIMPLE_STAGE3_DIRECT_THREADS=1
+      export SIMPLE_STAGE3_DIRECT_THREADS
       ;;
     *[!0-9]*|0*) echo 'error: Stage 3 direct resume --jobs must be an integer from 1 to 64' >&2; exit 1 ;;
     *)
