@@ -1,0 +1,11 @@
+# BuildRunner
+
+The manager owns task admission and publication; transport collects worker
+receipts and isolated outputs. `builder_transport_collect_v1` must bind all
+four identity fields (task, attempt, host, immutable digest) before output
+handling, including failure receipts without outputs. The manager's subsequent
+validation does not replace this collection boundary.
+
+Guide: [receipt collection](../../../07_guide/tooling/buildrunner_collection_identity.md).
+Regression: `test/01_unit/app/bootstrap_builder/transport_identity_spec.spl`.
+An executed filesystem regression is not live process or strict V4 evidence.
