@@ -1,0 +1,45 @@
+"""Run real child scripts through the TestRunner process lifecycle.
+
+Unlike async_structured_evidence_spec, these cases spawn the selected Simple
+binary and observe the child exit through the runner's host process adapter.
+They guard that green-looking output cannot hide a nonzero child exit and that
+a real zero-exit child is reported as successful.
+"""
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
+use std.nogc_sync_mut.test_runner.test_runner_args.{parse_test_args}
+use std.nogc_sync_mut.test_runner.runner_lifecycle.{wait_tracked_process}
+use std.nogc_sync_mut.test_runner.test_runner_async.{
+    spawn_async_test, create_temp_files, cleanup_temp_files
+}
+
+fn run_child_process(label: text, body: text) -> i64:
+    val (stdout_path, stderr_path) = create_temp_files(label)
+    val spec_path = stdout_path + "_spec.spl"
+    file_write(spec_path, "use std.spec\n" + body)
+    val options = parse_test_args(["--timeout=20", "--no-db"])
+    val run = spawn_async_test(spec_path, options)
+    val code = wait_tracked_process(run.pid, run.timeout_ms)
+    cleanup_temp_files(stdout_path, stderr_path)
+    cleanup_temp_files(run.stdout_file, run.stderr_file)
+    if run.evidence_file != "":
+        cleanup_temp_files(run.evidence_file, run.evidence_file + ".expectations")
+        val trace_events = run.evidence_file + ".trace-events.sdnstream"
+        if file_exists(trace_events): file_delete(trace_events)
+    file_delete(spec_path)
+    code
+
+describe "TestRunner real child process path":
+    it "waits for a spawned child and reports its zero exit":
+        val code = run_child_process("async_child_green", """
+print "Results: 1 total, 1 passed, 0 failed"
+""")
+        expect(code).to_equal(0)
+
+    it "propagates a nonzero child exit despite green-looking output":
+        val code = run_child_process("async_child_red", """
+use std.io_runtime.{exit}
+print "Results: 1 total, 1 passed, 0 failed"
+exit(7)
+""")
+        expect(code).to_equal(7)
