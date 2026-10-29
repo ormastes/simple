@@ -7,6 +7,10 @@
 # "phase2" -> the phase2-built full CLI (env SIMPLE_PHASE2_FULL_CLI, pinned by
 # SIMPLE_PHASE2_FULL_CLI_SHA256). "" -> the explicit binary (SIMPLE_BINARY).
 
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
 fn _is_sha256_hex(s: text) -> bool:
     if s.len() != 64:
         return false
@@ -27,3 +31,21 @@ fn resolve_test_compiler(selector: text, phase2_cli: text, phase2_sha256: text, 
     if not _is_sha256_hex(phase2_sha256):
         return Err("SIMPLE_PHASE2_FULL_CLI_SHA256 is not a 64-char hex sha256: '" + phase2_sha256 + "'")
     Ok(phase2_cli)
+
+# Resolve `selector` from the environment AND verify the on-disk identity of
+# the selected CLI. Ok("") means "no explicit compiler" (caller keeps its own
+# binary); Err is a refusal to run (exit 2 at the CLI surface).
+fn select_test_child_binary(selector: text) -> Result<text, text>:
+    if selector == "":
+        return Ok("")
+    val sha = env_get("SIMPLE_PHASE2_FULL_CLI_SHA256") ?? ""
+    match resolve_test_compiler(selector, env_get("SIMPLE_PHASE2_FULL_CLI") ?? "", sha, ""):
+        case Err(e):
+            return Err(e)
+        case Ok(path):
+            if not file_exists(path):
+                return Err("SIMPLE_PHASE2_FULL_CLI does not exist: " + path)
+            val actual = file_hash_sha256_or_empty(path)
+            if actual.lower() != sha.lower():
+                return Err("SIMPLE_PHASE2_FULL_CLI sha256 mismatch: declared " + sha + ", actual " + actual + " (" + path + ")")
+            return Ok(path)
