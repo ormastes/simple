@@ -66,7 +66,9 @@ static void check_population_observation(void) {
         "populated 0junk\n", "populated 00\n", "populated 0",
         "populated 0\npopulated 1\n", "populated 1\npopulated 0\n",
         "notpopulated 0\n", "frozen 0\n", "populated 2\n",
-        "populated 0 \n", "populated 0\t\n", "populated -1\n"
+        "populated 0 \n", "populated 0\t\n", "populated -1\n",
+        "populated 0\ngarbage", "populated 0\nunknown 3\n",
+        "populated 0\npopulated\r1\n", "populated 0\nfrozen 0\nfrozen 1\n"
     };
     for (size_t i = 0; i < sizeof(events) / sizeof(events[0]); i++) {
         int fd = openat(group, "cgroup.events", O_WRONLY | O_CREAT | O_TRUNC, 0600);
