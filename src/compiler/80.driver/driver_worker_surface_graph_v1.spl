@@ -1,0 +1,66 @@
+# Pure dependency spelling and frozen-surface readiness shared by workers
+# and their native graph regression. Filesystem resolution stays in the owner.
+# Module ids a source names in `use` / `export use` / `pub use` lines: the
+# path itself and, for a `{...}` group, each member as a possible submodule.
+pub fn worker_surface_import_ids_v1(source: text) -> [text]:
+    var out: [text] = []
+    for line in source.replace("\r\n", "\n").split("\n"):
+        var t = line.trim()
+        val comment_at = t.index_of("#")
+        if comment_at >= 0: t = t.substring(0, comment_at).trim()
+        var rest = ""
+        if t.starts_with("use "): rest = t.substring(4)
+        elif t.starts_with("export use "): rest = t.substring(11)
+        elif t.starts_with("pub use "): rest = t.substring(8)
+        elif t.starts_with("import "): rest = t.substring(7)
+        elif t.starts_with("from "):
+            val import_at = t.index_of(" import ")
+            if import_at > 5: rest = t.substring(5, import_at)
+        elif t.starts_with("export ") and t.contains(" from "):
+            val from_at = t.last_index_of(" from ")
+            rest = t.substring(from_at + 6).trim()
+            # Match the phase-1/parser rule: a bare export source is a
+            # package sibling, never an unrelated root module of that name.
+            if rest != "" and not rest.contains("."):
+                rest = "." + rest
+        if rest == "":
+            continue
+        rest = rest.trim()
+        val as_at = rest.index_of(" as ")
+        if as_at > 0: rest = rest.substring(0, as_at)
+        val brace = rest.index_of(".{")
+        var base = if brace > 0: rest.substring(0, brace) else: rest
+        if base.ends_with(".*"): base = base.substring(0, base.len() - 2)
+        if base != "" and not out.contains(base): out.push(base)
+        if brace > 0:
+            val close = rest.index_of("}")
+            val inner = if close > brace: rest.substring(brace + 2, close) else: rest.substring(brace + 2)
+            for item in inner.split(","):
+                var name = item.trim()
+                val item_as = name.index_of(" as ")
+                if item_as > 0: name = name.substring(0, item_as).trim()
+                if name != "" and name != "*":
+                    val sub = base + "." + name
+                    if not out.contains(sub): out.push(sub)
+    out
+
+# ready[i]: built[i] and every edge target (>= 0) of i is ready, transitively.
+# edges are the frozen surface's import_target_indices + export route targets.
+pub fn worker_surface_ready_v1(built: [bool], edges: [[i64]]) -> [bool]:
+    var ready: [bool] = []
+    for b in built:
+        ready.push(b)
+    var changed = true
+    while changed:
+        changed = false
+        var i = 0
+        while i < ready.len():
+            if ready[i] and i < edges.len():
+                for t in edges[i]:
+                    if t >= 0 and (t >= ready.len() or not ready[t]):
+                        ready[i] = false
+                        changed = true
+                        break
+            i = i + 1
+    ready
+
