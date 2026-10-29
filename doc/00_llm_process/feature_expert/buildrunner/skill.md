@@ -28,3 +28,7 @@ fixtures. Run `scripts/check/check-linux-capacity-containment.shs` only with an
 already-delegated isolated memory controller; missing prerequisites are errors.
 Native C evidence remains distinct from the authored, unexecuted SSpec and full
 BuildRunner qualification. See `doc/08_tracking/bug/buildrunner_linux_containment_evidence_2026_10_29.md`.
+
+The live driver is registered as the bootstrap-tier automated
+`linux-capacity-containment` gate. Its delegated Linux prerequisites stay
+explicit; do not run it as a generic push-tier check or convert refusal to PASS.
