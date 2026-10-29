@@ -43,6 +43,9 @@ int8_t rt_array_set(SplArray* a, int64_t i, int64_t value) {
 }
 int64_t rt_value_int(int64_t value) { return value; }
 int64_t rt_value_as_int(int64_t value) { return value; }
+/* This harness represents every value as an untagged integer. The snapshot
+ * adapter linked by runtime_process_owned.c also needs the matching predicate. */
+int8_t rt_value_is_int(int64_t value) { (void)value; return 1; }
 void* rt_alloc(int64_t size) { return size > 0 ? calloc(1, (size_t)size) : NULL; }
 void rt_free(void* value) { free(value); }
 int64_t rt_string_len(int64_t value) { (void)value; return -1; }

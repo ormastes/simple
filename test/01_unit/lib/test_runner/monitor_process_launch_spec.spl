@@ -1,13 +1,14 @@
 # @req REQ-SSPEC-UNIT
 use std.spec.*
 use std.test_runner.monitor_process_launch.{launch_monitor_script_detached}
+use std.nogc_sync_mut.sosix.host_process_launch.{sosix_launch_background_script_for_host}
 use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default}
 use std.nogc_sync_mut.io.env_ops.{host_os}
 use std.io_runtime.{thread_sleep}
 
 fn _monitor_posix_shell_available() -> bool:
     val os = host_os()
-    not os.starts_with("windows")
+    os == "linux" or os == "macos" or os == "freebsd" or os == "openbsd" or os == "netbsd" or os.starts_with("mingw") or os.starts_with("msys") or os.starts_with("cygwin")
 
 fn _monitor_launch_and_reap():
     val pid = launch_monitor_script_detached("test/fixtures/test_runner/monitor launch's fixture.shs")
@@ -34,6 +35,20 @@ fn _monitor_launch_and_reap():
     expect(remains).to_equal(false)
 
 describe "detached test-runner monitor launch":
+    it "rejects unbound SimpleOS and unknown hosted providers":
+        expect(sosix_launch_background_script_for_host("simpleos", "test/fixtures/test_runner/monitor launch's fixture.shs")).to_equal("unsupported")
+        expect(sosix_launch_background_script_for_host("unknown", "test/fixtures/test_runner/monitor launch's fixture.shs")).to_equal("unsupported")
+
+    it "reports native Windows unsupported until detached stdio is bound":
+        expect(sosix_launch_background_script_for_host("windows", "test/fixtures/test_runner/does-not-exist.bat")).to_equal("unsupported")
+
+    it "rejects empty and NUL paths even for unbound hosts":
+        expect(sosix_launch_background_script_for_host("unknown", "")).to_equal("")
+        expect(sosix_launch_background_script_for_host("simpleos", "invalid\0path")).to_equal("")
+
+    it "rejects embedded NUL before consulting the host":
+        expect(sosix_launch_background_script_for_host("linux", "test/fixtures/test_runner/monitor launch's fixture.shs\0suffix")).to_equal("")
+
     it "refuses a missing script instead of returning the shell's background PID":
         step("file existence is checked before a detached shell can produce a misleading PID")
         expect(launch_monitor_script_detached("test/fixtures/test_runner/does-not-exist.shs")).to_equal("")
