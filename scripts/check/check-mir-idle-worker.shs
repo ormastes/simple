@@ -1,0 +1,40 @@
+#!/bin/sh
+# Real compiler regression: one module, three MIR workers, one emitted object.
+# Run from an admitted source checkout with its compatible runtime environment.
+set -eu
+if [ "$#" -ne 2 ]; then
+    echo "usage: $0 /absolute/candidate-simple /absolute/fresh-evidence-dir" >&2
+    exit 2
+fi
+compiler=$1
+evidence=$2
+case "$compiler:$evidence" in /*:/*) ;; *) exit 2 ;; esac
+[ -x "$compiler" ]
+[ ! -e "$evidence" ]
+mkdir -p "$evidence"
+SIMPLE_MIR_SHARDING=1 SIMPLE_MIR_SHARD_COUNT=3 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 \
+    timeout 180 "$compiler" native-build src/app/_cg/f06/main.spl \
+    --emit-object --backend=cranelift --threads 4 -o "$evidence/module.o" \
+    >"$evidence/compile.log" 2>&1 || {
+        echo "FAIL: compiler failed; see $evidence/compile.log" >&2
+        exit 1
+    }
+python3 - "$evidence" <<'PY'
+import pathlib, re, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+log = (root / 'compile.log').read_text()
+rows = re.findall(r'\[mir-shard\] done owner=([^ ]+) claimed=(\d+) passed=(\d+) sealed_failed=(\d+) borrow_failed=(\w+)', log)
+assert len(rows) == 3, rows
+assert sum(int(row[1]) for row in rows) == 1, rows
+assert sum(int(row[2]) for row in rows) == 1, rows
+assert sum(row[1] == '0' for row in rows) == 2, rows
+assert all(row[3] == '0' and row[4] == 'false' for row in rows), rows
+assert 'empty mir_modules' not in log
+obj = root / 'module.o'
+assert obj.stat().st_size > 0
+header = subprocess.check_output(['readelf', '-h', str(obj)], text=True)
+assert re.search(r'Type:\s+REL\b', header), header
+symbols = subprocess.check_output(['nm', '--defined-only', str(obj)], text=True)
+assert re.search(r'\bmain\b', symbols), symbols
+print('PASS: two idle workers completed; owned module emitted a relocatable main object')
+PY
