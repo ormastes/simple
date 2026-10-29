@@ -34,6 +34,9 @@ candidate="$tmp/simple"
 log="$tmp/stage3.log"
 transcript="$tmp/stage3.transcript"
 receipt="$tmp/status.env"
+SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT="$tmp/preflight.env"
+export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
+printf 'fixture preflight\n' >"$SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT"
 printf '#!/bin/sh\nexit 0\n' >"$candidate"
 chmod +x "$candidate"
 printf 'command transcript fixture\n' >"$transcript"
@@ -82,19 +85,23 @@ check test "$effective" -eq 1
 # the args hash and the real transcribed environment. Multi-worker recovery
 # records its coordinator request and explicit direct fallback; one worker
 # records the direct route with no fallback.
-check grep -Fq 'stage3_requested_route=direct' "$resume"
-check grep -Fq 'stage3_fallback_route=none' "$resume"
-check grep -Fq 'stage3_requested_route=coordinator' "$resume"
-check grep -Fq 'stage3_fallback_route=direct' "$resume"
-check test "$(grep -c 'SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=' "$resume")" -eq 2
-check test "$(grep -c 'SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=' "$resume")" -eq 2
+policy="$root/scripts/bootstrap/lib/stage3-direct-parallel.shs"
+check grep -Fq 'bootstrap_stage3_policy_route=direct' "$policy"
+check grep -Fq 'bootstrap_stage3_policy_fallback=none' "$policy"
+check grep -Fq 'bootstrap_stage3_policy_route=coordinator' "$policy"
+check grep -Fq 'bootstrap_stage3_policy_fallback=direct' "$policy"
+check grep -Fq '"SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route"' "$resume"
+check grep -Fq '"SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=$stage3_fallback_route"' "$resume"
+check grep -Fq '"$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib"' "$resume"
+check grep -Fq 'SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$requested_route"' "$root/scripts/bootstrap/lib/stage3-native-build-worker.sh"
+check grep -Fq 'SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$fallback_route"' "$root/scripts/bootstrap/lib/stage3-native-build-worker.sh"
 
 # Production ordering: status is classified and atomically published before
 # the failure branch; sanity/provenance creation remains below that branch.
 classify_line=$(grep -n '^bootstrap_stage3_resume_effective_status "$status"' "$resume" | cut -d: -f1)
 receipt_line=$(grep -n '^if ! bootstrap_stage3_resume_write_status_receipt ' "$resume" | cut -d: -f1)
 failure_line=$(grep -n '^if \[ "$effective_status" -ne 0 \]; then' "$resume" | cut -d: -f1)
-sanity_line=$(grep -n '^bootstrap_stage_sanity ' "$resume" | cut -d: -f1)
+sanity_line=$(grep -n '^[[:space:]]*bootstrap_stage_sanity "\$candidate"' "$resume" | cut -d: -f1)
 manifest_line=$(grep -n '^bootstrap_stage3_write_manifest$' "$resume" | cut -d: -f1)
 check test "$classify_line" -lt "$receipt_line"
 check test "$receipt_line" -lt "$failure_line"

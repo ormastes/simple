@@ -310,7 +310,10 @@ Options:
                      Stage 3. This is the sole receipt-free bootstrap lane.
   --resume-stage3-from-admitted=<output>
                      Resume only Stage 3 from OUTPUT's frozen admitted Stage 2
-                     using a new one-thread recovery transcript/evidence lane.
+                     using a new recovery transcript/evidence lane. --jobs=N
+                     for N > 1 requests direct Stage 3 parallelism (N <= 64
+                     and online CPUs); unset defaults to one unless the legacy
+                     SIMPLE_NATIVE_BUILD_THREADS override selects coordinator.
   --resume-stage4-from-admitted=<output>
                      Continue at Stage 4 from OUTPUT's provenance-admitted
                      Stage 3 without rebuilding or mutating Stage 2/3.
@@ -941,7 +944,23 @@ if [ -n "${resume_stage3_output}" ]; then
     echo "error: Stage 3 resume is mutually exclusive with rebuild/deploy/diagnostic options" >&2
     exit 1
   }
-  case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1 (it execs resume-stage3-from-admitted.sh, which takes no jobs argument and pins the stage-3 recompile to --threads 1; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
+  case "${jobs}" in
+    '') ;;
+    1)
+      if [ -n "${SIMPLE_STAGE3_DIRECT_THREADS:-}" ] && [ "${SIMPLE_STAGE3_DIRECT_THREADS}" != 1 ]; then
+        echo 'error: Stage 3 --jobs conflicts with SIMPLE_STAGE3_DIRECT_THREADS' >&2; exit 1
+      fi
+      ;;
+    *[!0-9]*|0*) echo 'error: Stage 3 direct resume --jobs must be an integer from 1 to 64' >&2; exit 1 ;;
+    *)
+      [ "${jobs}" -le 64 ] 2>/dev/null || { echo 'error: Stage 3 direct resume --jobs must be an integer from 1 to 64' >&2; exit 1; }
+      if [ -n "${SIMPLE_STAGE3_DIRECT_THREADS:-}" ] && [ "${SIMPLE_STAGE3_DIRECT_THREADS}" != "${jobs}" ]; then
+        echo 'error: Stage 3 --jobs conflicts with SIMPLE_STAGE3_DIRECT_THREADS' >&2; exit 1
+      fi
+      SIMPLE_STAGE3_DIRECT_THREADS=${jobs}
+      export SIMPLE_STAGE3_DIRECT_THREADS
+      ;;
+  esac
   case "${invalidate_cache_scope}" in ''|stage3) ;; *) echo 'error: Stage 3 resume can invalidate only stage3' >&2; exit 64 ;; esac
   RESUME_STAGE3_CACHE_ACTION=reuse
   [ "${fresh_cache}" -eq 0 ] || RESUME_STAGE3_CACHE_ACTION=clean

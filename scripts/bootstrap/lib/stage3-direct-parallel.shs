@@ -1,0 +1,85 @@
+#!/bin/sh
+# Resolve an explicitly requested direct Stage 3 fanout without selecting the
+# coordinator. The caller must include both outputs in its invocation receipt.
+bootstrap_stage3_resolve_parallel_policy() {
+  bootstrap_stage3_policy_direct=${SIMPLE_STAGE3_DIRECT_THREADS:-}
+  bootstrap_stage3_policy_legacy=${SIMPLE_NATIVE_BUILD_THREADS:-}
+  bootstrap_stage3_policy_threads=1
+  bootstrap_stage3_policy_route=direct
+  bootstrap_stage3_policy_fallback=none
+
+  if [ -n "$bootstrap_stage3_policy_direct" ]; then
+    case "$bootstrap_stage3_policy_direct" in
+      *[!0-9]*|0*) echo 'error: direct Stage 3 threads must be an integer from 1 to 64' >&2; return 1 ;;
+    esac
+    [ "$bootstrap_stage3_policy_direct" -le 64 ] 2>/dev/null || {
+      echo 'error: direct Stage 3 threads must be an integer from 1 to 64' >&2; return 1;
+    }
+    if [ -n "$bootstrap_stage3_policy_legacy" ] &&
+       [ "$bootstrap_stage3_policy_legacy" != "$bootstrap_stage3_policy_direct" ]; then
+      echo 'error: direct Stage 3 thread count conflicts with SIMPLE_NATIVE_BUILD_THREADS' >&2
+      return 1
+    fi
+    bootstrap_stage3_policy_online=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+    case "$bootstrap_stage3_policy_online" in ''|*[!0-9]*|0) bootstrap_stage3_policy_online=1 ;; esac
+    [ "$bootstrap_stage3_policy_direct" -le "$bootstrap_stage3_policy_online" ] || {
+      echo 'error: direct Stage 3 threads exceed online CPUs' >&2; return 1;
+    }
+    bootstrap_stage3_policy_threads=$bootstrap_stage3_policy_direct
+    return 0
+  fi
+
+  bootstrap_stage3_policy_threads=${bootstrap_stage3_policy_legacy:-1}
+  [ "$bootstrap_stage3_policy_threads" != full ] ||
+    bootstrap_stage3_policy_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+  case "$bootstrap_stage3_policy_threads" in ''|*[!0-9]*|0) return 1 ;; esac
+  if [ "$bootstrap_stage3_policy_threads" -gt 1 ]; then
+    bootstrap_stage3_policy_route=coordinator
+    bootstrap_stage3_policy_fallback=direct
+  fi
+}
+
+# Higher direct fanout must not turn observational/unknown memory into an
+# admission. Price each worker at the 9,000 MiB HIR reservation used by the
+# compiler, reserve 4 GiB for the coordinator and 12 GiB for the host, and
+# require all three preflight observations to satisfy that budget. A bounded
+# cgroup has to cover the process budget too. The numeric process cap remains
+# separately enforced by the worker's existing containment path.
+bootstrap_stage3_admit_direct_memory() {
+  [ "$#" -eq 3 ] || return 1
+  bootstrap_stage3_direct_jobs=$1
+  bootstrap_stage3_direct_evidence=$2
+  bootstrap_stage3_direct_process_max=$3
+  case "$bootstrap_stage3_direct_jobs" in ''|*[!0-9]*|0*) return 1 ;; esac
+  case "$bootstrap_stage3_direct_process_max" in ''|*[!0-9]*|0*) return 1 ;; esac
+  [ "$bootstrap_stage3_direct_jobs" -le 64 ] || return 1
+  [ -f "$bootstrap_stage3_direct_evidence" ] && [ ! -L "$bootstrap_stage3_direct_evidence" ] || return 1
+  bootstrap_stage3_direct_process_need=$((4096 + 9000 * bootstrap_stage3_direct_jobs))
+  bootstrap_stage3_direct_host_need_kib=$(((bootstrap_stage3_direct_process_need + 12288) * 1024))
+  bootstrap_stage3_direct_group_need_kib=$((bootstrap_stage3_direct_process_need * 1024))
+  [ "$bootstrap_stage3_direct_process_max" -ge "$bootstrap_stage3_direct_process_need" ] 2>/dev/null || {
+    echo "error: direct Stage 3 fanout needs a process cap of at least ${bootstrap_stage3_direct_process_need} MiB" >&2
+    return 1
+  }
+  awk -F= -v host="$bootstrap_stage3_direct_host_need_kib" \
+      -v group="$bootstrap_stage3_direct_group_need_kib" '
+    $1 == "status" || $1 == "provider" || $1 ~ /^sample_[123]_(provider|status|available_kib|cgroup_available_kib)$/ {
+      if (++seen[$1] != 1) bad=1
+      value[$1]=$2
+    }
+    END {
+      if (bad || value["status"] != "ready" ||
+          (value["provider"] !~ /^linux-/ && value["provider"] !~ /^darwin-/)) exit 1
+      for (i=1; i<=3; i++) {
+        p="sample_" i "_"
+        if (value[p "provider"] != value["provider"] || value[p "status"] != "ready" ||
+            value[p "available_kib"] !~ /^[0-9]+$/ || value[p "available_kib"]+0 < host+0) exit 1
+        c=value[p "cgroup_available_kib"]
+        if (value["provider"] ~ /^linux-/ && c != "unlimited" &&
+            (c !~ /^[0-9]+$/ || c+0 < group+0)) exit 1
+      }
+    }' "$bootstrap_stage3_direct_evidence" || {
+      echo "error: direct Stage 3 fanout lacks verified memory headroom (need ${bootstrap_stage3_direct_host_need_kib} KiB)" >&2
+      return 1
+    }
+}
