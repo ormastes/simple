@@ -182,7 +182,21 @@ fn check_inherent_method_evidence(mode: text):
     var hir = lowering.lower_module(parsed)
     expect(lowering.errors.len()).to_equal(0)
     expect(hir.impls.len()).to_equal(1)
-    if mode == "trait":
+    if mode == "copied_symbol":
+        var copied_impl: HirImpl = hir.impls[0]
+        for method_name in copied_impl.methods.keys():
+            val original: SymbolId = copied_impl.methods[method_name]
+            copied_impl.methods[method_name] = SymbolId(id: original.id)
+        hir.impls = [copied_impl]
+    elif mode == "mismatched_declaration":
+        val owner_impl: HirImpl = hir.impls[0]
+        val target: SymbolId = owner_impl.methods["value"]
+        for stored_key in hir.functions.keys():
+            if stored_key.id != target.id: continue
+            var declaration: HirFunction = hir.functions[stored_key]
+            declaration.symbol = SymbolId(id: -1)
+            hir.functions[stored_key] = declaration
+    elif mode == "trait":
         var trait_impl: HirImpl = hir.impls[0]
         trait_impl.has_trait_ = true
         hir.impls = [trait_impl]
@@ -206,7 +220,7 @@ fn check_inherent_method_evidence(mode: text):
                 match value.kind:
                     case HirExprKind.MethodCall(receiver, method, _, resolution):
                         val result = pass_.declared_local_method_return_v1(receiver, method, resolution)
-                        if mode == "positive":
+                        if mode == "positive" or mode == "copied_symbol":
                             expect(result != nil).to_equal(true)
                             if result != nil: expect(hir_type_key(result)).to_equal(hir_type_key(function.return_type))
                         else: expect(result == nil).to_equal(true)
@@ -218,6 +232,12 @@ fn check_inherent_method_evidence(mode: text):
 describe "local method return inference requires positive inherent ownership":
     it "uses the exact local nongeneric inherent method declaration":
         check_inherent_method_evidence("positive")
+
+    it "resolves a reconstructed method SymbolId by its checked scalar identity":
+        check_inherent_method_evidence("copied_symbol")
+
+    it "rejects a declaration whose symbol disagrees with its stored key":
+        check_inherent_method_evidence("mismatched_declaration")
 
     it "rejects an unresolved method supplied only by a trait impl":
         check_inherent_method_evidence("trait")
