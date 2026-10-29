@@ -48,3 +48,14 @@ A direct compiler Hello is diagnostic evidence only. The production fixture
 still needs the manager, matching receipt, executed output and strict process
 ownership. Darwin strict V4 and kernel-enforced task memory remain unavailable;
 changing output mode or supplying an SDK does not satisfy those requirements.
+
+## Frozen compiler session receiver diagnostics
+
+If a native manager build reports unresolved settle/finish methods after a
+Result-match optional unwrap, retain the explicit database session local type.
+These calls settle terminal ownership and publish the journal; do not replace
+them with success constants or omit their error checks. The typed imported
+probe demonstrates actual mutation and a42 result; the untyped probe remains
+the compiler inference reproducer. Passing MIR is separate from native linkage
+and production manager acceptance. See
+[the tracked boundary](../../08_tracking/bug/buildrunner_database_match_unwrap_owner_2026_10_29.md).
