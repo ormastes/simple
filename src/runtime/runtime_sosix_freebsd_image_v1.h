@@ -43,8 +43,10 @@ static int sosix_freebsd_stage_image_v1(const uint8_t *bytes, size_t len) {
         if (n <= 0) { if (n == 0) errno = EIO; goto fail; }
         at += (size_t)n;
     }
-    if (fchmod(writer, 0500) < 0 || fstat(writer, &before) < 0 ||
-        !S_ISREG(before.st_mode) || before.st_size != (off_t)len) goto fail;
+    if (fchmod(writer, 0500) < 0 || fstat(writer, &before) < 0) goto fail;
+    if (!S_ISREG(before.st_mode) || before.st_size != (off_t)len) {
+        errno = ESTALE; goto fail;
+    }
     reader = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (reader < 0 || fstat(reader, &after) < 0) goto fail;
     if (!S_ISREG(after.st_mode) || before.st_dev != after.st_dev ||
