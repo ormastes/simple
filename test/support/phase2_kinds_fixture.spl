@@ -1,0 +1,48 @@
+# Shared helpers for the "runner runs the 4 test kinds with phase2" specs.
+#
+# The 4 kinds are the numbered test tiers: unit (01_unit), integration
+# (02_integration), system (03_system), smoke (04_smoke) -- see test/FILE.md.
+# Fixtures are written to a private temp dir at spec runtime so a
+# deliberately-red fixture can never be picked up by whole-suite discovery.
+
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, secure_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+
+val KIND_DIRS: [text] = ["01_unit", "02_integration", "03_system", "04_smoke"]
+val KIND_NAMES: [text] = ["unit", "integration", "system", "smoke"]
+
+fn phase2_fixture_root(prefix: text) -> text:
+    val owned = secure_temp_dir(_tp_get_temp_dir(), prefix)
+    if owned.is_err():
+        return ""
+    owned.unwrap().replace("\\", "/")
+
+fn phase2_green_source(kind: text) -> text:
+    "use std.spec\ndescribe \"{kind} fixture\":\n    it \"holds\":\n        expect(6 * 7).to_equal(42)\n"
+
+fn phase2_red_source(kind: text) -> text:
+    "use std.spec\ndescribe \"{kind} fixture\":\n    it \"is red on purpose\":\n        expect(6 * 7).to_equal(43)\n"
+
+# Writes <root>/<tier dir>/<kind>_{green,red}_spec.spl; returns the path.
+fn phase2_write_fixture(root: text, index: i64, red: bool) -> text:
+    val dir = root + "/" + KIND_DIRS[index]
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    val kind = KIND_NAMES[index]
+    val suffix = if red: "red" else: "green"
+    val path = dir + "/" + kind + "_" + suffix + "_spec.spl"
+    val src = if red: phase2_red_source(kind) else: phase2_green_source(kind)
+    file_write(path, src)
+    path
+
+# A recording stand-in for the phase2-built full CLI: logs argv, then execs
+# the real binary. Returns the wrapper path; the log is <wrapper>.log.
+fn phase2_write_recording_cli(root: text, real_binary: text) -> text:
+    val path = root + "/phase2_simple"
+    val body = "#!/bin/sh\necho \"phase2-invoked $*\" >> \"{path}.log\"\nexec \"{real_binary}\" \"$@\"\n"
+    file_write(path, body)
+    process_run_bounded("chmod", ["+x", path], 10000, 65536)
+    path
+
+fn phase2_log(wrapper: text) -> text:
+    file_read(wrapper + ".log")
