@@ -33,3 +33,17 @@ never PASS. Each run hashes its private scratch path into a distinct cgroup
 identity and removes any owned workload on failure. The SSpec wrapper is authored
 but unexecuted; it must run through the qualified native Simple test tool before
 claiming that layer. Full BuildRunner Hello acceptance remains open.
+
+The post-merge PR5299 required gate reported the new shell driver as unwired.
+The follow-up registers it as `linux-capacity-containment`, a bootstrap-tier
+automated check, so the existing registry dispatcher executes its real command.
+It remains outside ordinary push-tier execution because it requires delegated
+Linux cgroup authority. This is actual wiring, not an opt-out or a skipped PASS;
+the driver still refuses unavailable prerequisites with a nonzero status.
+
+Rechecking the combined original range exposed a second newly added script,
+`check-mir-idle-worker.shs`. That separate regression requires a caller-bound
+admitted compiler, matching runtime, fresh evidence directory, and ELF tools.
+It is registered as a reasoned manual check instead of an invalid zero-argument
+automated command. Its three-worker/object assertions remain unchanged. This
+exception is not evidence that the MIR scenario ran in this containment lane.
