@@ -341,12 +341,21 @@ class Matrix:
         return stdout.read_bytes(), stderr.read_bytes()
 
     def compile(self, lane, name, entry, output, flags=(), extra=None):
+        route = self.args.compile_route
         command = [str(self.compiler), "native-build", "--backend", self.args.backend,
                    "--runtime-bundle", "core-c-bootstrap", "--runtime-path", str(self.runtime),
-                   "--entry-closure", "--threads", "1", "--cache-dir", str(lane / "cache" / name),
-                   "--mode", "one-binary", "--entry", str(entry), "--output", str(output)]
-        if self.darwin:
-            command.extend(["--source", str(entry.parent)])
+                   "--threads", "1", "--cache-dir", str(lane / "cache" / name),
+                   "--output", str(output)]
+        if route == "positional":
+            # The P2 bootstrap CLI dispatches explicit --entry through its
+            # coordinator; a positional entry invokes CompilerDriver directly.
+            # Keep that distinction visible rather than relabeling its result.
+            command[2:2] = [str(entry)]
+            command.append("--low-memory")
+        else:
+            command.extend(["--entry-closure", "--mode", "one-binary", "--entry", str(entry)])
+            if self.darwin:
+                command.extend(["--source", str(entry.parent)])
         command.extend(flags)
         capture = None
         if self.darwin and not flags and not (extra or {}).get("SIMPLE_CC"):
@@ -452,6 +461,8 @@ class Matrix:
         fields = dict(line.split(": ", 1) for line in (prior / "identity.sdn").read_text().splitlines())
         if fields.get("compiler_sha256") != '"' + self.sha + '"' or fields.get("phase") != str(self.args.phase):
             raise ValueError("prior matrix compiler/phase identity mismatch")
+        if fields.get("compile_route", '"coordinator"') != '"' + self.args.compile_route + '"':
+            raise ValueError("prior matrix compilation route mismatch")
         runtime_fields = dict(line.split(": ", 1) for line in (prior / "runtime-inputs.sdn").read_text().splitlines())
         if runtime_fields != {key: '"' + value + '"' for key, value in self.runtime_hashes.items()}:
             raise ValueError("prior matrix runtime authority mismatch")
@@ -464,6 +475,9 @@ class Matrix:
         if not provider_command.exists():
             provider_command = prior / name / "provider-object.argv.txt"
         command = shlex.split(provider_command.read_text())
+        actual_route = "coordinator" if "--entry" in command else "positional"
+        if actual_route != self.args.compile_route:
+            raise ValueError("prior matrix compiler argv route mismatch")
         if command[command.index("--backend") + 1] != self.args.backend:
             raise ValueError("prior matrix backend mismatch")
         if name != "shared-library" or self.args.reuse_shared_evidence:
@@ -481,7 +495,8 @@ class Matrix:
     def lane(self, name, barrier):
         lane = self.out / name
         started = time.monotonic()
-        values = {"phase": self.args.phase, "compiler_sha256": self.sha, "status": "FAIL"}
+        values = {"phase": self.args.phase, "compiler_sha256": self.sha,
+                  "compile_route": self.args.compile_route, "status": "FAIL"}
         try:
             lane.mkdir()
             barrier.wait(timeout=15)
@@ -637,7 +652,7 @@ class Matrix:
         revision = subprocess.check_output(["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True).strip()
         sdn(self.out / "identity.sdn", {"classification": "DIAGNOSTIC_NOT_ADMITTED",
             "phase": self.args.phase, "compiler": self.compiler, "compiler_sha256": self.sha,
-            "backend": self.args.backend,
+            "backend": self.args.backend, "compile_route": self.args.compile_route,
             "source_root": self.root, "source_revision": revision, "runtime": self.runtime,
             "linker": self.linker, "linker_sha256": self.linker_sha,
             **({"driver": self.driver, "driver_sha256": self.driver_sha, "sdk": self.sdk} if self.darwin else {}),
@@ -659,7 +674,7 @@ class Matrix:
             self.run(setup, "compiler-version", [self.compiler, "--version"], seconds=5)
         # The exact compiler initializes this source owner's inventory once.
         # All four concurrent lanes then consume it through the warm path.
-        if not (self.root / "build/scv/source-inventory/CURRENT").exists():
+        if self.args.compile_route == "coordinator" and not (self.root / "build/scv/source-inventory/CURRENT").exists():
             try:
                 self.compile(setup, "source-inventory-prime", FIXTURES / "single.spl", setup / "prime.o",
                              ["--emit-object"], {"SIMPLE_SCV_INVENTORY_COLD_INIT": "1"})
@@ -706,6 +721,7 @@ class Matrix:
             status = "RUNNING_FINALIZATION"
         sdn(self.out / "result.sdn", {"phase": self.args.phase, "compiler_sha256": self.sha,
             "status": status, "scope": "compiler-native-and-interpreter",
+            "compile_route": self.args.compile_route,
             "buildrunner_status": buildrunner_status,
             "native_status": native_status,
             "selected_native_status": "PASS" if passed == len(rows) else "FAIL",
@@ -723,6 +739,8 @@ def main():
     parser.add_argument("--runtime-path", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--backend", choices=["llvm", "cranelift"], default="cranelift")
+    parser.add_argument("--compile-route", choices=["coordinator", "positional"], default="coordinator",
+                        help="P2 positional diagnostic invokes CompilerDriver directly; does not qualify the coordinator")
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--max-rss-kib", type=int, default=4194304,
                         help="per-lane process-tree budget; four concurrent lanes")
@@ -749,6 +767,8 @@ def main():
     parser.add_argument("--buildrunner-template", type=Path)
     parser.add_argument("--buildrunner-target")
     args = parser.parse_args()
+    if args.compile_route == "positional" and args.phase != 2:
+        parser.error("positional diagnostic route is qualified only for phase 2")
     provider = (args.buildrunner_manager, args.buildrunner_manifest_writer,
                 args.buildrunner_template, args.buildrunner_target)
     if any(provider) and not all(provider):
