@@ -283,3 +283,60 @@ Luna independently reviewed the source diff and found no P0/P1 issue. Its
 compatibility note is documented at the public C API boundary: out-of-tree
 Darwin callers relying on ambient descriptor handoff must change; other
 platforms retain their previous inheritance policy.
+
+
+## Shared SOSIX owner integration and admitted image digest (2026-10-29)
+
+Release baseline `a538313ff6c` still used direct executable pins in both
+`bootstrap_builder/worker.spl` and `test_runner_new/sdn_wrapper.spl`. The hosted
+SOSIX owner existed only in an unmerged draft. Both application launch paths
+now use `std.nogc_sync_mut.sosix.memory_executable_v1`; their direct pin/start
+imports and calls are removed. The synchronous family matches the native
+provider rather than importing a synchronous provider from the draft's async
+family. Native process observation remains the lower-level provider, not a
+second application launch route.
+
+BuildRunner previously hashed `producer.exe` while checking staging, then
+later pinned it and trusted the pin's own digest. A replacement between those
+steps could therefore run before result admission. The shared owner's
+`digest_expected(task.producer_digest)` now rejects a differing immutable
+snapshot before start. The failure branch closes both directory and executable
+pins. The successful start retains the same provider-owned descriptor and V4
+lease, collection, cancellation and exact frozen ACK behavior.
+
+This change does not implement Darwin execution. Memory pinning still uses the
+Linux sealed static-ELF provider; there is no pathname fallback. The current
+native V4 start also rejects ProcessGroup on Linux, so Linux pin support must
+not be described as a working grouped runner. Both runner clients retain their
+ProcessGroup policy. None memory enforcement remains monitor-only, and tasks
+requiring enforcement still reject before launch.
+
+Diagnostic verification with the preserved P1 interpreter: the new digest
+contract has 4/4 examples passing and existing worker staging/output tests have
+2/2 passing. The in-development SDN wrapper suite has 5/10 passing and five
+`unsupported test runner worker SDN schema` failures both before and after this
+change; it is not a PASS. The native-only missing-image owner spec cannot run
+through the interpreter's opaque process adapter and is kept separate. The
+native Darwin C cwd/unavailable-provider selfcheck passes, but mocks executable
+pinning and does not qualify the new Simple owner ABI or Hello execution.
+
+The preserved P2 compiler has no `check` command. All diagnostic logs are under
+`build/astra-sosix-owner-20261029`; successful native owner compilation/execution
+and actual grouped Hello remain distinct required evidence.
+
+Native owner ABI qualification was attempted with the preserved P2 executable
+`0d6f2e4720845195c9f91de292056fac4c57cabef81390507c78d95e51133a28`
+and the new `test/fixtures/sosix/memory_executable_native_smoke.spl`:
+
+- Positional entry admission collected zero sources before compilation.
+- Explicit application/library roots with entry closure exceeded the sampled
+  2 GiB RSS cap: exit 88, peak 2,105,024 KiB, cleanup quiescent.
+- Narrowing the source root to the fixture directory, while preserving library
+  import resolution through SIMPLE_LIB, also exceeded that cap: exit 88, peak
+  2,121,728 KiB, cleanup quiescent.
+
+The guard imposed a 90-second deadline and measured a 24 GiB host. No native
+artifact or process success is claimed. This is a concrete remaining compiler
+closure-resource qualification issue; neither increasing the budget silently
+nor substituting an interpreter run would establish the owner ABI. The source
+migration remains draft pending native qualification.
