@@ -1,5 +1,11 @@
-"""Platform policy for tracked test children and their capture files."""
+"""Hosted SOSIX boundary for test children and their capture files.
 
+Provider ownership remains in process_ops: POSIX children use its PID owner;
+Windows capture uses its tagged JobObject owner. This boundary selects and
+executes the capture strategy without promising POSIX tree containment.
+"""
+
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_spawn_redirected}
 use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE}
 export use std.nogc_sync_mut.io.windows_redirected_process.{
@@ -38,3 +44,14 @@ fn sosix_test_spawn_plan(binary: text, args: [text], stdout_path: text,
     for arg in args:
         shell_args.push(arg)
     (false, "/bin/sh", shell_args)
+
+# The caller owns scheduler admission and tracking; the provider owns the token.
+# Keep selection and execution together so callers cannot launch a Windows
+# capture plan through the unredirected process API.
+fn sosix_test_spawn_capture(binary: text, args: [text], stdout_path: text,
+        stderr_path: text, timeout_ms: i64, capture_limit: i64) -> i64:
+    val (owned, program, launch_args) = sosix_test_spawn_plan(binary, args, stdout_path, stderr_path)
+    if owned:
+        return process_spawn_redirected(program, launch_args, stdout_path,
+            stderr_path, timeout_ms, capture_limit)
+    process_spawn_async(program, launch_args)
