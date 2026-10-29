@@ -1564,6 +1564,23 @@ pub fn driver_resolve_closure_import_v1(
         module_path, importer_dir)
 
 fn _driver_file_natively_owns_v1(path: text, module_name: text) -> bool:
+    # Epoch reads must still validate current bytes on every access. Ownership
+    # only depends on the physical path and aliases, so it does not need the
+    # import/sibling scan or its global content cache after that validation.
+    if driver_admitted_epoch_active_v1():
+        if not path.ends_with(".spl"): return false
+        val key = _driver_physical_source_key_strict_v1(path)
+        val loaded = driver_admitted_epoch_read_v1(path, key)
+        if loaded.is_err():
+            eprint("[epoch-read-fail] path={path} key={key} reason={loaded.unwrap_err()}")
+            return false
+        var content = loaded.unwrap()
+        if _g_spec_prelude_entry_key != "" and key == _g_spec_prelude_entry_key:
+            content = driver_spec_prelude_source(content)
+        if content == "": return false
+        for source in _driver_module_aliases_with_closure(path, content, _driver_module_name_from_path(path), true):
+            if source.module_name == module_name: return true
+        return false
     for source in _driver_collect_explicit_compiler_source(path):
         if source.module_name == module_name: return true
     false
