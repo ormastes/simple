@@ -1,6 +1,6 @@
 # Stats inventory imported an unroutable mock symlink predicate
 
-Status: candidate repair; native filesystem regression pending.
+Status: native filesystem regression passed; full CLI qualification remains separate.
 
 Attempt 7's CLI HIR build failed in `app/stats/inventory_scan_v2.spl:63:12`
 with `unresolved name: file_is_symlink`. This was its one FAILED module;
@@ -28,5 +28,17 @@ on them rather than treating them as working APIs.
 `test/01_unit/app/stats/inventory_symlink_probe.spl` requires a real temporary
 fixture: two real source files, a file symlink, directory symlink, dangling
 symlink and directory cycle. It checks both predicates, exact returned paths
-and SLOC, and refusal to scan a symlink root. Build/runtime receipts will be
-added after execution; source review alone does not establish native PASS.
+and SLOC, and refusal to scan a symlink root.
+
+Native execution passed once with exit 0 using admitted pure-Simple producer
+`a9ed5e4b92a811fa14f5ae351948c8d4350527f966139ea72ac13ccee3633e4f`.
+The first single-thread build timed out after 28/103 HIR modules; its cache was
+preserved for a 20-thread bounded continuation, which completed with peak
+5,076,788 KiB and unchanged source snapshot
+`6b1cd7e22692dcab2d58f74c87361e0c623f2f6c68489466ca99f08d527b5b62`.
+Receipts are in `/tmp/simple-stats-symlink-admitted7-continuation-20261030`:
+`filesystem-fixture.sdn` records verified symlink objects and exact readlink
+targets; `runtime-result.sdn` and `run.log` record the real executable result.
+Artifact SHA256:
+`837b1ab3d5cd96a72f8c7ff51fddbc13d607a151c0507d44b070aaa1eb140f40`.
+This proves the focused filesystem contract, not a full CLI or release PASS.
