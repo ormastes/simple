@@ -1,0 +1,142 @@
+"""Loader-owned sealed image storage, not executable authority.
+
+All operations are serialized. Only trusted loader-package code may call this
+owner; callers must separately establish live process-service authority. A
+handle is a lookup coordinate, never admission or permission to execute.
+"""
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use std.sffi.platform.{platform_name_raw}
+
+pub(package) fn anonymous_executable_image_provider_known_v1(platform: text) -> bool:
+    # Audited runtime_thread.c native host providers and the real AMO slot
+    # owner in riscv64/boot/baremetal_stubs.c. ARM64's constant-success stub
+    # and x86_64's nil lock/unlock are deliberately excluded. A successful
+    # single-thread lock probe cannot establish mutual exclusion.
+    platform == "linux" or platform == "macos" or platform == "windows" or
+        platform == "freebsd" or platform == "illumos" or platform == "solaris" or
+        platform == "riscv64-baremetal-simpleos"
+
+pub(package) fn anonymous_executable_image_provider_ready_v1() -> bool:
+    anonymous_executable_image_provider_known_v1(platform_name_raw())
+
+pub(package) struct AnonymousExecutableImageRefV1:
+    slot: i64
+    generation: u64
+
+struct AnonymousExecutableImageRowV1:
+    generation: u64
+    owner_slot: i64
+    owner_generation: u64
+    live: bool
+    digest: text
+    bytes: [u8]
+
+val _image_mutex_v1: i64 =
+    if anonymous_executable_image_provider_ready_v1(): mutex_raw_create() else: 0
+var _image_poisoned_v1: bool = false
+var _image_rows_v1: [AnonymousExecutableImageRowV1] = []
+var _image_charged_v1: i64 = 0
+
+fn _image_lock_v1() -> bool:
+    # An unlock error may leave the native word held. Do not wait on that
+    # word again after this owner has entered a fail-stop quarantine.
+    if _image_poisoned_v1 or _image_mutex_v1 <= 0:
+        return false
+    if not mutex_raw_lock(_image_mutex_v1):
+        return false
+    if _image_poisoned_v1:
+        _ = mutex_raw_unlock(_image_mutex_v1)
+        return false
+    true
+
+fn _image_unlock_v1() -> bool:
+    if not mutex_raw_unlock(_image_mutex_v1):
+        _image_poisoned_v1 = true
+        return false
+    true
+
+fn _image_copy_v1(bytes: [u8]) -> [u8]:
+    var copy: [u8] = []
+    for byte in bytes:
+        copy.push(byte)
+    copy
+
+fn _image_matches_v1(ref: AnonymousExecutableImageRefV1, owner_slot: i64, owner_generation: u64) -> bool:
+    if ref.slot < 0 or ref.slot >= _image_rows_v1.len() or owner_slot <= 0 or owner_generation == 0u64:
+        return false
+    val row = _image_rows_v1[ref.slot]
+    row.live and row.generation == ref.generation and row.owner_slot == owner_slot and row.owner_generation == owner_generation
+
+pub(package) fn anonymous_executable_image_seal_v1(owner_slot: i64, owner_generation: u64, bytes: [u8], expected_digest: text) -> AnonymousExecutableImageRefV1?:
+    """Copy and hash before publishing. Maximum 64 MiB total, 256 slots.
+
+    A digest mismatch is terminal. The owner must budget any additional input
+    and mapping copies separately; this quota accounts for the retained copy.
+    """
+    if owner_slot <= 0 or owner_generation == 0u64 or bytes.len() <= 0 or bytes.len() > 67108864:
+        return nil
+    if not _image_lock_v1():
+        return nil
+    var result: AnonymousExecutableImageRefV1? = nil
+    var index = 0
+    while index < _image_rows_v1.len():
+        val row = _image_rows_v1[index]
+        if not row.live and row.generation < 18446744073709551615u64:
+            break
+        index = index + 1
+    # Prove both quotas before allocating the retained copy. Exhausted slot
+    # generations are never recycled, including at the u64 wrap boundary.
+    if index < 256 and bytes.len() <= 67108864 - _image_charged_v1:
+        val owned = _image_copy_v1(bytes)
+        val digest = sha256_u8_hex(owned)
+        if digest == expected_digest:
+            if index < 256:
+                var generation = 1u64
+                if index < _image_rows_v1.len():
+                    generation = _image_rows_v1[index].generation + 1u64
+                if generation != 0u64:
+                    val row = AnonymousExecutableImageRowV1(generation: generation, owner_slot: owner_slot, owner_generation: owner_generation, live: true, digest: digest, bytes: owned)
+                    if index == _image_rows_v1.len():
+                        _image_rows_v1.push(row)
+                    else:
+                        _image_rows_v1[index] = row
+                    _image_charged_v1 = _image_charged_v1 + owned.len()
+                    result = Some(AnonymousExecutableImageRefV1(slot: index, generation: generation))
+    if not _image_unlock_v1():
+        return nil
+    result
+
+pub(package) fn anonymous_executable_image_charged_bytes_v1() -> i64:
+    """Diagnostic retained-byte charge; negative means serialization failed."""
+    if not _image_lock_v1(): return -1
+    val charged = _image_charged_v1
+    if not _image_unlock_v1(): return -1
+    charged
+
+pub(package) fn anonymous_executable_image_read_v1(ref: AnonymousExecutableImageRefV1, owner_slot: i64, owner_generation: u64) -> [u8]?:
+    if not _image_lock_v1():
+        return nil
+    var result: [u8]? = nil
+    if _image_matches_v1(ref, owner_slot, owner_generation):
+        result = Some(_image_copy_v1(_image_rows_v1[ref.slot].bytes))
+    if not _image_unlock_v1():
+        return nil
+    result
+
+pub(package) fn anonymous_executable_image_release_v1(ref: AnonymousExecutableImageRefV1, owner_slot: i64, owner_generation: u64) -> bool:
+    if not _image_lock_v1():
+        return false
+    var ok = false
+    if _image_matches_v1(ref, owner_slot, owner_generation):
+        var row = _image_rows_v1[ref.slot]
+        row.live = false
+        _image_charged_v1 = _image_charged_v1 - row.bytes.len()
+        row.bytes = []
+        row.digest = ""
+        _image_rows_v1[ref.slot] = row
+        ok = true
+    if not _image_unlock_v1():
+        return false
+    ok
