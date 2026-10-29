@@ -166,10 +166,13 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
                "--max-log-bytes", str(matrix.args.max_log_bytes),
                "--linker", str(matrix.linker), "--windows-abi", matrix.args.windows_abi,
                "--output", output]
+        if getattr(matrix.args, "trace_stages", False):
+            cmd.append("--trace-stages")
         matrix.run(lane, "manifest", cmd)
         args = ["--manifest", manifest, "--state", state, "--source-root", source,
                 "--output-root", published]
-        matrix.run(lane, "manager-run", [manager, "run", *args], seconds=task_seconds + 30)
+        trace_args = ["--trace-stages"] if getattr(matrix.args, "trace_stages", False) else []
+        matrix.run(lane, "manager-run", [manager, "run", *args, *trace_args], seconds=task_seconds + 30)
         out, _ = matrix.run(lane, "manager-verify", [manager, "verify", *args])
         if b"builder: verified tasks=1" not in out:
             raise ValueError("manager did not verify the expected task")

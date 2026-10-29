@@ -1,3 +1,4 @@
+use app.buildrunner.stage_trace_v1.{build_runner_stage_trace_v1}
 # Linux compiler worker. Its sealed image is selected by BuildHostV1; the
 # compiler and every descendant run inside one cgroup-v2 containment boundary.
 use app.io.args_ops.{get_args}
@@ -143,7 +144,7 @@ pub fn builder_linux_terminal_outcome_v1(receipt: LinuxProcessPollV1,
     if receipt.exit_code == 0: return Ok(("OK", 0))
     Ok(("ERROR", receipt.exit_code))
 
-fn builder_linux_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
+fn builder_linux_run_v1(task: BuildTaskV1, root: text, host: text, trace_stages: bool = false) -> Result<(text, i64), text>:
     val identity = builder_task_identity_v1(task)
     val payload = match file_read_regular_no_follow_bounded(root + "/capacity.request.sdn", 4096):
         Ok(value): value
@@ -151,6 +152,7 @@ fn builder_linux_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(te
     match builder_capacity_request_decode_v1(payload, identity, host):
         Ok(_): pass
         Err(reason): return Err(builder_linux_reject_without_parent_v1(task, root, host, reason))
+    build_runner_stage_trace_v1(trace_stages, "linux-worker", "capacity-admission", "begin", task)
     val parent = match linux_cgroup_parent_admit_v1(root, identity):
         LinuxCgroupParentAdmissionV1.Acquired(value): value
         LinuxCgroupParentAdmissionV1.Rejected(reason):
@@ -164,7 +166,7 @@ fn builder_linux_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(te
     if receipt == "" or not file_atomic_write(root + "/capacity.receipt", receipt):
         val released = linux_cgroup_parent_release_v1(parent)?
         return Err(builder_linux_reject_without_parent_v1(task, root, host, "cannot persist owned parent receipt"))
-    val outcome = builder_linux_run_in_parent_v1(task, root, host)
+    val outcome = builder_linux_run_in_parent_v1(task, root, host, trace_stages)
     val released = linux_cgroup_parent_release_v1(parent)?
     if not file_atomic_write(root + "/capacity.released", receipt):
         return Err("cannot persist owned parent cleanup receipt")
@@ -184,7 +186,7 @@ fn builder_linux_reject_without_parent_v1(task: BuildTaskV1, root: text,
         return reason + "; capacity settlement unavailable"
     builder_linux_reject_before_start_v1(task, root, host, reason)
 
-fn builder_linux_run_in_parent_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
+fn builder_linux_run_in_parent_v1(task: BuildTaskV1, root: text, host: text, trace_stages: bool = false) -> Result<(text, i64), text>:
     val identity = builder_task_identity_v1(task)
     if file_exists(root + "/cancel.request") or builder_linux_control_v1(root, identity, host):
         return Err(builder_linux_reject_before_start_v1(task, root, host, "cancelled before compiler launch"))
@@ -220,8 +222,10 @@ fn builder_linux_run_in_parent_v1(task: BuildTaskV1, root: text, host: text) -> 
         return Err(builder_linux_reject_before_start_v1(task, root, host, ready_links))
     # Start errors can occur after clone3. They never certify no-child-started.
     val enforcement_bytes = builder_memory_enforcement_bytes_v1(task.memory_policy, task.memory_limit_bytes)?
+    build_runner_stage_trace_v1(trace_stages, "linux-worker", "process-start", "begin", task)
     val lease = linux_process_start_with_memory_v1(request, enforcement_bytes,
         root, identity)?
+    build_runner_stage_trace_v1(trace_stages, "linux-worker", "process-start", "owned", task)
     var cancelled = false
     while true:
         if (file_exists(root + "/cancel.request") or builder_linux_control_v1(root, identity, host)) and not cancelled:
@@ -252,7 +256,7 @@ fn builder_linux_run_in_parent_v1(task: BuildTaskV1, root: text, host: text) -> 
         sleep_ms(10)
     Err("unreachable Linux owner loop")
 
-pub fn builder_linux_execute_v1(task_path: text, root: text, host: text) -> i64:
+pub fn builder_linux_execute_v1(task_path: text, root: text, host: text, trace_stages: bool = false) -> i64:
     if not builder_linux_absolute_v1(root) or task_path != root + "/request.sdn" or
             not builder_identifier_valid_v1(host): return 2
     val task = match builder_read_task_v1(task_path):
@@ -260,6 +264,7 @@ pub fn builder_linux_execute_v1(task_path: text, root: text, host: text) -> i64:
         Err(message):
             val _error = file_atomic_write(root + "/worker.error", message)
             return 2
+    build_runner_stage_trace_v1(trace_stages, "linux-worker", "input-admission", "begin", task)
     var diagnostic = builder_validate_task_v1(task)
     if diagnostic == "": diagnostic = builder_linux_verify_inputs_v1(task, root)
     if diagnostic != "": diagnostic = builder_linux_reject_without_parent_v1(task, root, host, diagnostic)
@@ -267,7 +272,7 @@ pub fn builder_linux_execute_v1(task_path: text, root: text, host: text) -> i64:
     var exit_code: i64 = 2
     var outputs: [BuildInputV1] = []
     if diagnostic == "":
-        match builder_linux_run_v1(task, root, host):
+        match builder_linux_run_v1(task, root, host, trace_stages):
             Ok(outcome):
                 status = outcome.0
                 exit_code = outcome.1
@@ -288,6 +293,7 @@ pub fn builder_linux_execute_v1(task_path: text, root: text, host: text) -> i64:
     val result = BuildResultV1(task.id, task.attempt, builder_task_identity_v1(task),
         host, status, exit_code, outputs, -1, -1, -1)
     if not builder_write_result_v1(root + "/result.sdn", result): return 3
+    build_runner_stage_trace_v1(trace_stages, "linux-worker", "result", "end", task, exit_code)
     exit_code
 
 fn main() -> i64:
@@ -299,10 +305,10 @@ fn main() -> i64:
         print "linux worker: {cli.error}"
         return 2
     if cli.command == "--help" or cli.command == "-h":
-        print "bootstrap-builder-linux-worker worker --request FILE --attempt-root DIR --host ID"
+        print "bootstrap-builder-linux-worker worker --request FILE --attempt-root DIR --host ID [--trace-stages]"
         return 0
     if cli.command != "worker": return 2
-    builder_linux_execute_v1(cli.request, cli.attempt_root, cli.host)
+    builder_linux_execute_v1(cli.request, cli.attempt_root, cli.host, cli.trace_stages)
 
 export builder_linux_execute_v1, builder_linux_terminal_outcome_v1
 export builder_linux_parse_required_memory_v1, builder_linux_required_memory_v1

@@ -28,13 +28,16 @@ class MissingReceiptTest(unittest.TestCase):
                 linker=Path("/usr/bin/ld"), runtime_hashes={"lib.a": module.matrix_digest(runtime / "lib.a")},
                 args=types.SimpleNamespace(phase=2, max_rss_kib=1024, timeout_seconds=10,
                     compile_route="positional", min_free_disk_bytes=0, max_log_bytes=1024,
-                    windows_abi="msvc"))
+                    windows_abi="msvc", trace_stages=True))
             matrix.compiler.write_bytes(b"compiler")
             matrix.sha = module.matrix_digest(matrix.compiler)
             commands = []
+            manager_commands = []
             def run(lane, name, argv, **kwargs):
                 if name == "manifest":
                     commands.append(argv)
+                if name == "manager-run":
+                    manager_commands.append(argv)
                 return b"builder: verified tasks=1\n", b""
             matrix.run = run
             target = "x86_64-windows" if os.name == "nt" else "x86_64-linux"
@@ -45,6 +48,8 @@ class MissingReceiptTest(unittest.TestCase):
                         self.assertEqual(result["status"], "FAIL")
                         self.assertIn("receipt", result["reason"])
                         command = commands[-1]
+                        self.assertEqual(command[-1], "--trace-stages")
+                        self.assertEqual(manager_commands[-1][-1], "--trace-stages")
                         self.assertEqual(command[command.index("--lane") + 1], lane)
                         self.assertEqual(command[command.index("--backend") + 1], backend)
                         self.assertEqual(command[command.index("--target") + 1], target)

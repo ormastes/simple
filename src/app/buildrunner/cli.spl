@@ -1,3 +1,4 @@
+use app.buildrunner.stage_trace_v1.{build_runner_stage_trace_v1}
 use app.buildrunner.scv_cli_options_v1.{build_runner_scv_options_v1}
 use app.buildrunner.scv_session_v1.{BuildRunnerScvSessionV1, build_runner_scv_session_open_v1,
     build_runner_scv_source_root_v1, build_runner_scv_source_paths_v1}
@@ -157,6 +158,7 @@ fn builder_cli_readmit_failures_v1(state: BuildRunnerV1, config: BuilderCliV1,
 
 fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderProcessPortV1,
         database: BuildRunnerDatabaseSessionV1?, scv: BuildRunnerScvSessionV1? = nil) -> i64:
+    build_runner_stage_trace_v1(config.trace_stages, "manager", "scheduler", "begin")
     var state = build_runner_start(run)
     if state.error != "":
         print "builder: {state.error}"
@@ -278,10 +280,13 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                     state.error = "transport returned unknown task"
                 else:
                     val task = state.tasks[index]
+                    build_runner_stage_trace_v1(config.trace_stages, "manager", "reap", "observed", task, exit_code)
                     var receipt = builder_cli_failure_v1(task, attempt.host.id, "CRASHED", exit_code)
                     var collected_ok = false
+                    build_runner_stage_trace_v1(config.trace_stages, "manager", "collect", "begin", task)
                     match builder_transport_collect_v1(attempt):
                         case Ok(collected):
+                            build_runner_stage_trace_v1(config.trace_stages, "manager", "collect", "received", task, collected.exit_code)
                             receipt = collected
                             collected_ok = true
                         case Err(message):
@@ -298,6 +303,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                             attempt.local_root + "/work", process)
                         state = build_runner_accept(state, receipt, observed)
                         if state.error == "" and receipt.status == "OK":
+                            build_runner_stage_trace_v1(config.trace_stages, "manager", "publish", "begin", task)
                             if not builder_cli_publish_v1(task, receipt, attempt.local_root,
                                     output_root, process):
                                 state.error = "cannot publish verified task output"
@@ -336,10 +342,12 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
         # Dispatch only after dependencies have been admitted and published.
         for index in build_runner_ready(state):
             val task = state.tasks[index]
+            build_runner_stage_trace_v1(config.trace_stages, "manager", "input-admission", "begin", task)
             val input_error = builder_cli_input_error_v1(task, source_root, scv)
             if input_error != "":
                 state.error = "producer/input digest mismatch for " + task.id + ": " + input_error
                 break
+            build_runner_stage_trace_v1(config.trace_stages, "manager", "input-admission", "accepted", task)
             val cached_path = config.state + "/receipts/" + task.id + ".sdn"
             var cache_hit = false
             if file_exists(cached_path):
@@ -363,6 +371,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                             cache_hit = true
                             reused = reused + 1
                             changed = true
+                            build_runner_stage_trace_v1(config.trace_stages, "manager", "cache", "verified-hit", task)
                             print "builder: {task.id} cache=verified-hit"
                     case Err(message):
                         print "builder: {task.id} cache=miss reason={message}"
@@ -376,8 +385,9 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                         if not builder_cli_persist_v1(state, config.state):
                             state.error = "cannot persist dispatch intent"
                             break
+                        build_runner_stage_trace_v1(config.trace_stages, "manager", "dispatch", "begin", task)
                         val attempt = builder_transport_start_v1(task, host, source_root, config.state, process,
-                            build_runner_scv_source_root_v1(scv), build_runner_scv_source_paths_v1(scv, task))
+                            build_runner_scv_source_root_v1(scv), build_runner_scv_source_paths_v1(scv, task), config.trace_stages)
                         if file_exists(config.state + "/cancel.request"):
                             if attempt.pid > 0: active = active.push(attempt)
                             val cleaned = builder_cli_cancel_v1(active)
@@ -395,6 +405,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                             print "builder: {task.id} launch failed: {attempt.error}"
                             state.error = "transport launch failed for " + task.id + ": " + attempt.error
                         else:
+                            build_runner_stage_trace_v1(config.trace_stages, "manager", "dispatch", "started", task)
                             active = active.push(attempt)
                             print "builder: {task.id} dispatched host={host.id} attempt={task.attempt}"
                         changed = true
@@ -429,6 +440,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
 
 fn builder_cli_run_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderProcessPortV1,
         scv_plan: text = "") -> i64:
+    build_runner_stage_trace_v1(config.trace_stages, "manager", "root-admission", "begin")
     val resolved = match builder_cli_resolve_roots_v1(config, process):
         case Ok(value): value
         case Err(message):
@@ -443,12 +455,14 @@ fn builder_cli_run_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderPro
         print "builder: another manager owns this state directory"
         return 2
     val source_root = if resolved.source_root == "": cwd() else: resolved.source_root
+    build_runner_stage_trace_v1(config.trace_stages, "manager", "source-session", "begin")
     val scv = match build_runner_scv_session_open_v1(run, resolved, scv_plan, false):
         case Ok(value): value
         case Err(reason):
             print "buildrunner: SCV source session refused: {reason}"
             file_unlock(lock)
             return 2
+    build_runner_stage_trace_v1(config.trace_stages, "manager", "database", "begin")
     val database = match build_runner_database_session_open_v1(run, resolved.state, source_root):
         Ok(value): value
         Err(reason):
@@ -466,6 +480,7 @@ fn builder_cli_run_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderPro
                     print "buildrunner: task database finalization failed: {reason}"
                     code = 2
     file_unlock(lock)
+    build_runner_stage_trace_v1(config.trace_stages, "manager", "run", "end", nil, code)
     code
 
 # Read-only post-run admission. A published file alone is insufficient: each
@@ -652,7 +667,7 @@ fn build_runner_cli_main_v1(process: BuilderProcessPortV1,
         print "builder: {config.error}"
         return 2
     if config.command == "--help" or config.command == "-h":
-        print "buildrunner run --manifest FILE --state DIR [--source-root DIR] [--output-root DIR]"
+        print "buildrunner run --manifest FILE --state DIR [--source-root DIR] [--output-root DIR] [--trace-stages]"
         print "buildrunner verify --manifest FILE --state DIR [--source-root DIR] [--output-root DIR]"
         print "buildrunner verify-settled --manifest FILE --state DIR [--source-root DIR] [--output-root DIR]"
         print "source snapshot opt-in for run/verify/verify-settled: --scv-session FILE"
@@ -660,7 +675,7 @@ fn build_runner_cli_main_v1(process: BuilderProcessPortV1,
         print "buildrunner worker --request FILE --attempt-root DIR --host ID"
         return 0
     if config.command == "worker":
-        return builder_worker_execute_v1(config.request, config.attempt_root, config.host)
+        return builder_worker_execute_v1(config.request, config.attempt_root, config.host, config.trace_stages)
     match builder_read_run_v1(config.manifest):
         case Err(message):
             print "builder: {message}"

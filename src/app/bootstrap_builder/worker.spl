@@ -1,3 +1,4 @@
+use app.buildrunner.stage_trace_v1.{build_runner_stage_trace_v1}
 use app.bootstrap_builder.compiler_admission_diagnostic.{builder_compiler_admission_diagnostic_v1}
 use app.buildrunner.task_context.{build_runner_context_decode_v1, build_runner_environment_digest_v1}
 use app.buildrunner.process_evidence.{build_runner_process_evidence_freeze_v1}
@@ -157,10 +158,12 @@ fn builder_worker_abort_v1(owner: ProcessObservationLeaseV4, root: text, identit
         polls = polls + 1
     false
 
-fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result<(text, i64), text>:
+fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text, trace_stages: bool = false) -> Result<(text, i64), text>:
     # This worker requires process-group retirement from its provider. The
     # current native V4 owner rejects that policy; it has no per-tree memory cap.
+    build_runner_stage_trace_v1(trace_stages, "worker", "memory-admission", "begin", task)
     val admitted = builder_worker_memory_admit_v1(task, root, host_id)?
+    build_runner_stage_trace_v1(trace_stages, "worker", "v4-capabilities", "begin", task)
     val capabilities = match process_observation_capabilities_v4():
         Ok(value): value
         Err(message):
@@ -168,12 +171,14 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
     if not capabilities.available:
         return Err(builder_worker_reject_before_start_v1(task, root, host_id,
             "exact process observation V4 unavailable"))
+    build_runner_stage_trace_v1(trace_stages, "worker", "environment-admission", "begin", task)
     val environment = builder_worker_environment_v1(root)?
     for input in task.inputs:
         if input.path == "task-context/" + task.id + ".sdn":
             val context = build_runner_context_decode_v1(file_read_regular_no_follow_bounded(root + "/work/" + input.path, 2048)?)?
             if context.environment_digest != build_runner_environment_digest_v1(environment, root)?:
                 return Err("compiler environment differs from admitted task context")
+    build_runner_stage_trace_v1(trace_stages, "worker", "executable-pin", "begin", task)
     var executable = SosixMemoryExecutableV1.prepare(root + "/producer.exe")?
     var directory = match OwnedCwdPinV4.pin(root + "/work"):
         Ok(value): value
@@ -207,12 +212,14 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
         enforcement_kind: ProcessObservationEnforcementKindV4.None,
         descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup,
         max_clock_resolution_ns: 10000000)
+    build_runner_stage_trace_v1(trace_stages, "worker", "v4-start", "begin", task)
     val started = executable.start_expected(directory, request, executable_digest)
     val _directory_closed = directory.close()
     val _executable_closed = executable.close()
     val start = started?
     var lease = start.lease
     if not lease.active: return Err("compiler process was rejected before ownership transfer")
+    build_runner_stage_trace_v1(trace_stages, "worker", "v4-start", "owned", task)
     val identity = builder_task_identity_v1(task)
     var cancelled = false
     while true:
@@ -289,12 +296,13 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
         sleep_ms(10)
     Err("unreachable compiler observation state")
 
-pub fn builder_worker_execute_v1(task_path: text, attempt_root: text, host_id: text) -> i64:
+pub fn builder_worker_execute_v1(task_path: text, attempt_root: text, host_id: text, trace_stages: bool = false) -> i64:
     val task = match builder_read_task_v1(task_path):
         Ok(value): value
         Err(message):
             val _diagnostic = file_atomic_write(attempt_root + "/worker.error", message)
             return 2
+    build_runner_stage_trace_v1(trace_stages, "worker", "input-admission", "begin", task)
     var status = "ERROR"
     var exit_code: i64 = 2
     var outputs: [BuildInputV1] = []
@@ -313,7 +321,7 @@ pub fn builder_worker_execute_v1(task_path: text, attempt_root: text, host_id: t
             diagnostic = builder_worker_reject_before_start_v1(task,
                 attempt_root, host_id, diagnostic)
     if diagnostic == "":
-        match builder_worker_run_v1(task, attempt_root, host_id):
+        match builder_worker_run_v1(task, attempt_root, host_id, trace_stages):
             Err(message): diagnostic = message
             Ok(outcome):
                 status = outcome.0
@@ -333,6 +341,7 @@ pub fn builder_worker_execute_v1(task_path: text, attempt_root: text, host_id: t
         status: status, exit_code: exit_code, outputs: outputs,
         cache_hits: -1, cache_misses: -1, cache_stores: -1)
     if not builder_write_result_v1(attempt_root + "/result.sdn", result): return 3
+    build_runner_stage_trace_v1(trace_stages, "worker", "result", "end", task, exit_code)
     exit_code
 
 export builder_worker_execute_v1, builder_worker_verify_inputs_v1, builder_worker_outputs_v1

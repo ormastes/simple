@@ -131,7 +131,7 @@ fn builder_transport_retry_cache_v1(task: BuildTaskV1, host: BuildHostV1, run_ro
     ""
 
 pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_root: text, run_root: text, process: BuilderProcessPortV1,
-        frozen_source_root: text = "", frozen_paths: [text] = []) -> BuilderAttemptV1:
+        frozen_source_root: text = "", frozen_paths: [text] = [], trace_stages: bool = false) -> BuilderAttemptV1:
     val root = run_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
     val remote = host.workspace + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
     var result = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
@@ -235,7 +235,9 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
         if file_exists(run_root + "/cancel.request"):
             result.error = "dispatch cancelled before worker launch"
             return result
-        match process.spawn_operation(host.worker_program, host.worker_digest, ["worker", "--request", root + "/request.sdn", "--attempt-root", root, "--host", host.id], root + "/work"):
+        var worker_args = ["worker", "--request", root + "/request.sdn", "--attempt-root", root, "--host", host.id]
+        if trace_stages: worker_args = worker_args.push("--trace-stages")
+        match process.spawn_operation(host.worker_program, host.worker_digest, worker_args, root + "/work"):
             Ok(token): result.pid = token
             Err(message):
                 result.error = message
@@ -252,7 +254,8 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
             return result
         result.error = builder_transport_retry_cache_v1(task, host, run_root, root, process)
         if result.error != "": return result
-        val command = "chmod -- 500 " + builder_transport_shell_quote_v1(remote + "/producer.exe") + " && exec " + builder_transport_shell_quote_v1(host.worker_program) + " worker --request " + builder_transport_shell_quote_v1(remote + "/request.sdn") + " --attempt-root " + builder_transport_shell_quote_v1(remote) + " --host " + builder_transport_shell_quote_v1(host.id)
+        val trace_option = if trace_stages: " --trace-stages" else: ""
+        val command = "chmod -- 500 " + builder_transport_shell_quote_v1(remote + "/producer.exe") + " && exec " + builder_transport_shell_quote_v1(host.worker_program) + " worker --request " + builder_transport_shell_quote_v1(remote + "/request.sdn") + " --attempt-root " + builder_transport_shell_quote_v1(remote) + " --host " + builder_transport_shell_quote_v1(host.id) + trace_option
         match process.spawn_operation("ssh", "", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", host.endpoint, command], root + "/work"):
             Ok(token): result.pid = token
             Err(message):

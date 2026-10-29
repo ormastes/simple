@@ -1,3 +1,4 @@
+use app.buildrunner.stage_trace_v1.{build_runner_stage_trace_v1}
 # Compiled Windows worker entry. Keep kernel32 ownership out of Linux manager
 # link closures and bind this distinct image digest in BuildHostV1.
 use app.io.args_ops.{get_args}
@@ -69,7 +70,7 @@ pub fn builder_windows_setup_failure_v1(task: BuildTaskV1, root: text, host: tex
     if not failure.tree_cleanup_confirmed: return failure.message + "; staged Git tree ownership unknown"
     builder_windows_reject_before_start_v1(task, root, host, failure.message)
 
-fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
+fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text, trace_stages: bool = false) -> Result<(text, i64), text>:
     val capacity_payload = match file_read_regular_no_follow_bounded(root + "/capacity.request.sdn", 4096):
         Ok(value): value
         Err(reason): return Err(builder_windows_reject_before_start_v1(task, root, host, reason))
@@ -128,6 +129,7 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
     if final_links != "":
         return Err(builder_windows_reject_before_start_v1(task, root, host, final_links))
     val enforcement_bytes = builder_memory_enforcement_bytes_v1(task.memory_policy, task.memory_limit_bytes)?
+    build_runner_stage_trace_v1(trace_stages, "windows-worker", "process-start", "begin", task)
     val lease = match windows_process_admit_with_reserve_v1(request, enforcement_bytes, required_memory):
         WindowsProcessAdmissionV1.Started(value): value
         WindowsProcessAdmissionV1.RejectedBeforeStart(reason):
@@ -139,6 +141,7 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
                 return Err(reason + "; capacity settlement could not be persisted")
             return Err(reason)
         WindowsProcessAdmissionV1.Unknown(reason): return Err(reason + "; native ownership unknown")
+    build_runner_stage_trace_v1(trace_stages, "windows-worker", "process-start", "owned", task)
     var cancelled = false
     while true:
         val requested = builder_windows_control_v1(root, identity, host)
@@ -171,12 +174,13 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
         sleep_ms(10)
     Err("unreachable Windows owner loop")
 
-fn builder_windows_execute_v1(request_path: text, root: text, host: text) -> i64:
+fn builder_windows_execute_v1(request_path: text, root: text, host: text, trace_stages: bool = false) -> i64:
     val task = match builder_read_task_v1(request_path):
         Ok(value): value
         Err(message):
             print "worker: {message}"
             return 2
+    build_runner_stage_trace_v1(trace_stages, "windows-worker", "input-admission", "begin", task)
     var diagnostic = builder_validate_task_v1(task)
     if not builder_identifier_valid_v1(host): diagnostic = "invalid worker host"
     if diagnostic != "": diagnostic = builder_windows_reject_before_start_v1(task, root, host, diagnostic)
@@ -184,7 +188,7 @@ fn builder_windows_execute_v1(request_path: text, root: text, host: text) -> i64
     var exit_code: i64 = 2
     var outputs: [BuildInputV1] = []
     if diagnostic == "":
-        match builder_windows_run_v1(task, root, host):
+        match builder_windows_run_v1(task, root, host, trace_stages):
             Ok(outcome):
                 status = outcome.0
                 exit_code = outcome.1
@@ -211,6 +215,7 @@ fn builder_windows_execute_v1(request_path: text, root: text, host: text) -> i64
         status: status, exit_code: exit_code, outputs: outputs,
         cache_hits: -1, cache_misses: -1, cache_stores: -1)
     if not builder_write_result_v1(root + "/result.sdn", result): return 3
+    build_runner_stage_trace_v1(trace_stages, "windows-worker", "result", "end", task, exit_code)
     exit_code
 
 fn main() -> i64:
@@ -222,9 +227,9 @@ fn main() -> i64:
         print "worker: {config.error}"
         return 2
     if config.command == "--help" or config.command == "-h":
-        print "bootstrap-builder-windows-worker worker --request FILE --attempt-root DIR --host ID"
+        print "bootstrap-builder-windows-worker worker --request FILE --attempt-root DIR --host ID [--trace-stages]"
         return 0
     if config.command != "worker": return 2
-    builder_windows_execute_v1(config.request, config.attempt_root, config.host)
+    builder_windows_execute_v1(config.request, config.attempt_root, config.host, config.trace_stages)
 
 export builder_windows_execute_v1, builder_windows_parse_required_memory_v1
