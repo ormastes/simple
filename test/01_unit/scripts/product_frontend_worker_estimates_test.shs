@@ -1,0 +1,34 @@
+#!/bin/sh
+# Execute the product policy against real transcript owner and compiler budgets.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$root/scripts/bootstrap/lib/product-frontend-policy.shs"
+unset SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB SIMPLE_SHARD_MEM_CLAMP SIMPLE_PARSE_SHARD_MAX
+unset SIMPLE_PARSE_SHARD_WORKER_KB SIMPLE_HIR_SHARD_WORKER_KB SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB
+bootstrap_product_frontend_fanout_host() { return 0; }
+rows=$(bootstrap_product_frontend_policy qualified 50331648 enforce 50331648)
+field() { printf '%s\n' "$rows" | awk -F= -v key="$1" '$1==key {print $2; n++} END {if(n!=1) exit 1}'; }
+compiler_budget() { awk -v key="$1" '$3==key ":" {print $6; n++} END {if(n!=1) exit 1}' "$root/src/app/cli/shard_mem_clamp.spl"; }
+[ "$(field SIMPLE_PARSE_SHARD_WORKER_KB)" = "$(compiler_budget SHARD_PARSE_WORKER_KB_V1)" ]
+[ "$(field SIMPLE_HIR_SHARD_WORKER_KB)" = "$(compiler_budget SHARD_HIR_WORKER_KB_V1)" ]
+[ "$(field SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB)" = 50331648 ]
+if printf '%s\n' "$rows" | grep -q '^SIMPLE_PARSE_SHARD_MAX='; then exit 1; fi
+# A full20 request retains 20 codegen threads; frontend share admits three HIR
+# workers at this fixed cap, instead of eight full source-closure replicas.
+hir=$(field SIMPLE_HIR_SHARD_WORKER_KB)
+[ "$((50331648 * 60 / 100 / hir))" -eq 3 ]
+if SIMPLE_HIR_SHARD_WORKER_KB=3000000 bootstrap_product_frontend_policy qualified 50331648 enforce 50331648 >/dev/null; then
+    echo 'stale inherited HIR estimate accepted' >&2; exit 1
+fi
+rows=$(SIMPLE_PARSE_SHARD_WORKER_KB=3800000 SIMPLE_HIR_SHARD_WORKER_KB=9000000 bootstrap_product_frontend_policy qualified 50331648 enforce 50331648)
+[ "$(field SIMPLE_HIR_SHARD_WORKER_KB)" = 9000000 ]
+rows=$(SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=8388608 bootstrap_product_frontend_policy qualified 50331648 enforce 50331648)
+[ "$(field SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB)" = 8388608 ]
+# Historical Windows owner still pins one parse frontend and a 3 GB share.
+bootstrap_product_frontend_fanout_host() { return 1; }
+rows=$(bootstrap_product_frontend_policy qualified 8388608 enforce)
+[ "$(field SIMPLE_PARSE_SHARD_MAX)" = 1 ]
+[ "$(field SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB)" = 3000000 ]
+[ "$(field SIMPLE_HIR_SHARD_WORKER_KB)" = 3000000 ]
+echo 'PASS: measured product worker estimates, unchanged caps, and Windows owner'
