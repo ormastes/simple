@@ -1,0 +1,58 @@
+# STUB(merge: fix/runner-phase2-dispatch) -- thin local stand-in for
+# std.test_runner.compiler_select, which a parallel change owns. Keep the
+# signatures; on merge, take the owning branch's version of this file.
+#
+# Test-runner compiler selection. "phase2" resolves to the phase2-BUILT full
+# CLI (env SIMPLE_PHASE2_FULL_CLI) pinned by SIMPLE_PHASE2_FULL_CLI_SHA256.
+# Never falls back to the seed or deployed bin/simple.
+
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+fn _cs_is_hex64(s: text) -> bool:
+    if s.len() != 64:
+        return false
+    val hex = "0123456789abcdefABCDEF"
+    var i = 0
+    while i < s.len():
+        if not hex.contains(s[i:i + 1]):
+            return false
+        i = i + 1
+    true
+
+fn compiler_sha256_matches(actual: text, expected: text) -> bool:
+    if not _cs_is_hex64(actual) or not _cs_is_hex64(expected):
+        return false
+    actual.lower() == expected.lower()
+
+fn resolve_test_compiler(selector: text, phase2_cli: text, phase2_sha256: text, explicit_binary: text) -> Result<text, text>:
+    if selector == "":
+        return Ok(explicit_binary)
+    if selector != "phase2":
+        return Err("unknown --compiler value '{selector}' (expected: phase2)")
+    if phase2_cli == "":
+        return Err("--compiler=phase2 requires SIMPLE_PHASE2_FULL_CLI (the phase2-built full CLI); refusing to fall back")
+    if phase2_sha256 == "":
+        return Err("--compiler=phase2 requires SIMPLE_PHASE2_FULL_CLI_SHA256")
+    if not _cs_is_hex64(phase2_sha256):
+        return Err("SIMPLE_PHASE2_FULL_CLI_SHA256 is not a 64-char hex sha256")
+    Ok(phase2_cli)
+
+# Resolve + verify the on-disk identity of the selected compiler.
+# Ok("") means "no explicit compiler"; Err carries an exit-2 message.
+fn select_test_child_binary(selector: text) -> Result<text, text>:
+    if selector == "":
+        return Ok("")
+    val cli = env_get("SIMPLE_PHASE2_FULL_CLI") ?? ""
+    val sha = env_get("SIMPLE_PHASE2_FULL_CLI_SHA256") ?? ""
+    match resolve_test_compiler(selector, cli, sha, ""):
+        case Err(e):
+            return Err(e)
+        case Ok(path):
+            if not file_exists(path):
+                return Err("SIMPLE_PHASE2_FULL_CLI does not exist: {path}")
+            val actual = file_hash_sha256_or_empty(path)
+            if not compiler_sha256_matches(actual, sha):
+                return Err("SIMPLE_PHASE2_FULL_CLI sha256 mismatch: declared {sha}, actual {actual} ({path})")
+            return Ok(path)
