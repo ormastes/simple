@@ -36,6 +36,8 @@ use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.driver.driver_worker_surface_path_v1.{worker_surface_path_suffix_v1}
+use compiler.driver.driver_log_helpers.{driver_phase_trace_enabled, log_phase}
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
 use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
 use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
@@ -58,6 +60,10 @@ var _ws_hir_restricted: bool = false
 var _ws_hir_allowed: Dict<text, bool> = {}
 var _ws_hir_loaded: i64 = 0
 var _ws_hir_skipped: i64 = 0
+var _ws_lookup_exact: i64 = 0
+var _ws_lookup_fallback: i64 = 0
+var _ws_lookup_rows: i64 = 0
+var _ws_lookup_misses: i64 = 0
 
 pub fn worker_surface_closure_selected_v1(hir_shard_spec: text, flag: text) -> bool:
     hir_shard_spec != "" and flag != "0"
@@ -118,6 +124,11 @@ fn _ws_closure_walk_guard_v1(site: text):
 pub fn worker_surface_closure_v1(paths: [text], canonical_paths: [text], contents: [text],
         seeds: [bool]) -> [bool]:
     _ws_closure_walk_guard_v1("worker_surface_closure_v1")
+    _ws_lookup_exact = 0
+    _ws_lookup_fallback = 0
+    _ws_lookup_rows = 0
+    _ws_lookup_misses = 0
+    val trace_lookup = driver_phase_trace_enabled()
     var by_canonical: Dict<text, i64> = {}
     var i = 0
     while i < canonical_paths.len():
@@ -144,6 +155,10 @@ pub fn worker_surface_closure_v1(paths: [text], canonical_paths: [text], content
             if key >= 0 and not needed[key]:
                 needed[key] = true
                 queue.push(key)
+        if trace_lookup and head % 128 == 0:
+            log_phase("phase2:surface:closure:progress sources={head} queued={queue.len()} exact={_ws_lookup_exact} fallback={_ws_lookup_fallback} rows={_ws_lookup_rows} misses={_ws_lookup_misses}")
+    if trace_lookup:
+        log_phase("phase2:surface:closure:done sources={head} exact={_ws_lookup_exact} fallback={_ws_lookup_fallback} rows={_ws_lookup_rows} misses={_ws_lookup_misses}")
     needed
 
 # The resolver may answer with a differently-rooted spelling of an inventory
@@ -151,13 +166,17 @@ pub fn worker_surface_closure_v1(paths: [text], canonical_paths: [text], content
 fn _ws_canonical_key_v1(resolved: text, canonical_paths: [text], by_canonical: Dict<text, i64>) -> i64:
     val norm = resolved.replace("\\", "/")
     if by_canonical.contains_key(norm):
+        _ws_lookup_exact = _ws_lookup_exact + 1
         return by_canonical[norm]
+    _ws_lookup_fallback = _ws_lookup_fallback + 1
     var j = 0
     while j < canonical_paths.len():
+        _ws_lookup_rows = _ws_lookup_rows + 1
         val c = canonical_paths[j]
-        if c.ends_with("/" + norm) or norm.ends_with("/" + c):
+        if worker_surface_path_suffix_v1(c, norm) or worker_surface_path_suffix_v1(norm, c):
             return j
         j = j + 1
+    _ws_lookup_misses = _ws_lookup_misses + 1
     -1
 
 # ready[i]: built[i] and every edge target (>= 0) of i is ready, transitively.
