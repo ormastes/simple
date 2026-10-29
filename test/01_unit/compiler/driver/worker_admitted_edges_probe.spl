@@ -1,0 +1,95 @@
+use compiler.driver.driver_worker_surface_closure_v1.{worker_admitted_edges_v1, worker_admitted_closure_v1, worker_admitted_order_v1, worker_admitted_error_v1}
+use std.io_runtime.{file_read}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1}
+
+fn main() -> i64:
+    val base = "test/01_unit/compiler/driver/admitted_edge_case/"
+    val paths = [base + "facade.spl", base + "provider.spl"]
+    val contents = [file_read(paths[0]) ?? "", file_read(paths[1]) ?? ""]
+    val names = ["fixture.facade", "fixture.provider"]
+    val result = worker_admitted_edges_v1(paths, contents, names, [], "")
+    if result.is_err():
+        print result.unwrap_err()
+        return 1
+    val graph = result.unwrap()
+    val edges = graph.edges
+    if edges.len() != 2 or not edges[0].contains(1): return 2
+    val closure = worker_admitted_closure_v1(edges, [true, false])
+    if closure != [true, true]: return 3
+    if worker_admitted_error_v1(graph, closure) != "": return 15
+    val order = worker_admitted_order_v1(edges)
+    if order != [1, 0]: return 4
+    val cycle = worker_admitted_closure_v1([[1], [0]], [true, false])
+    if cycle != [true, true]: return 5
+    val absent = worker_admitted_edges_v1([paths[0]], [contents[0]], [names[0]], [], "")
+    if absent.is_err(): return 6
+    if worker_admitted_error_v1(absent.unwrap(), [true]) == "": return 7
+    if worker_admitted_error_v1(absent.unwrap(), [false]) != "": return 8
+    val first = base + "overlay_a"
+    val second = base + "overlay_b"
+    val overlay = driver_library_mode_resolve_v1("pkg.provider", [first, second], base, "", "fixture.facade")
+    if overlay.is_err(): return 9
+    match overlay.unwrap():
+        case SourceRootResolutionV1.Found(path):
+            if not path.ends_with("overlay_a/pkg/provider.spl"): return 10
+        case _: return 11
+    val alias = driver_library_mode_resolve_v1("compiler.core.ast_expr", ["src"], base, "", "fixture.facade")
+    if alias.is_err(): return 12
+    match alias.unwrap():
+        case SourceRootResolutionV1.Found(path):
+            if not path.ends_with("compiler/10.frontend/core/ast_expr.spl"): return 13
+        case _: return 14
+    # Extra scanner candidates must not become required imports.
+    val optional_path = base + "optional.spl"
+    val optional = worker_admitted_edges_v1([optional_path, paths[1]],
+        [file_read(optional_path) ?? "", contents[1]], ["fixture.optional", names[1]], [], "")
+    if optional.is_err(): return 16
+    val optional_graph = optional.unwrap()
+    if worker_admitted_error_v1(optional_graph, [true, true]) != "": return 17
+    if not optional_graph.edges[0].contains(1): return 18
+
+    # The worker graph, not merely the resolver, must retain the first root.
+    val overlay_facade = base + "overlay_facade.spl"
+    val overlay_a = first + "/pkg/provider.spl"
+    val overlay_b = second + "/pkg/provider.spl"
+    val overlay_paths = [overlay_facade, overlay_a, overlay_b]
+    val overlay_graph = worker_admitted_edges_v1(overlay_paths,
+        [file_read(overlay_facade) ?? "", file_read(overlay_a) ?? "", file_read(overlay_b) ?? ""],
+        ["fixture.overlay", "pkg.provider", "pkg.provider"], [first, second], "")
+    if overlay_graph.is_err(): return 19
+    val overlay_edges = overlay_graph.unwrap()
+    if worker_admitted_error_v1(overlay_edges, [true, true, false]) != "": return 20
+    if not overlay_edges.edges[0].contains(1) or overlay_edges.edges[0].contains(2): return 21
+
+    # A configured library mode selects its family and never the other one.
+    val lib_facade = base + "library_facade.spl"
+    val nogc = base + "lib/nogc_sync_mut/widget.spl"
+    val gc = base + "lib/gc_sync_mut/widget.spl"
+    val lib_paths = [lib_facade, nogc, gc]
+    val lib_contents = [file_read(lib_facade) ?? "", file_read(nogc) ?? "", file_read(gc) ?? ""]
+    val lib_names = ["fixture.library", "lib.nogc_sync_mut.widget", "lib.gc_sync_mut.widget"]
+    val lib_graph = worker_admitted_edges_v1(lib_paths, lib_contents, lib_names, [base + "lib"], "nogc-sync-mut")
+    if lib_graph.is_err(): return 22
+    val lib_edges = lib_graph.unwrap()
+    if worker_admitted_error_v1(lib_edges, [true, true, false]) != "": return 23
+    if not lib_edges.edges[0].contains(1) or lib_edges.edges[0].contains(2): return 24
+    val opposite = worker_admitted_edges_v1(lib_paths, lib_contents, lib_names, [base + "lib"], "gc-sync-mut")
+    if opposite.is_err(): return 25
+    val opposite_edges = opposite.unwrap()
+    if worker_admitted_error_v1(opposite_edges, [true, false, true]) != "": return 26
+    if not opposite_edges.edges[0].contains(2) or opposite_edges.edges[0].contains(1): return 27
+
+    # Check the real alias as an edge; errors of unrelated AST imports are
+    # deliberately excluded because this fixture only admits two files.
+    val alias_facade = base + "alias_facade.spl"
+    val ast = "src/compiler/10.frontend/core/ast_expr.spl"
+    val alias_graph = worker_admitted_edges_v1([alias_facade, ast],
+        [file_read(alias_facade) ?? "", file_read(ast) ?? ""],
+        ["fixture.alias", "compiler.core.ast_expr"], ["src"], "")
+    if alias_graph.is_err(): return 28
+    val alias_edges = alias_graph.unwrap()
+    if worker_admitted_error_v1(alias_edges, [true, false]) != "": return 29
+    if not alias_edges.edges[0].contains(1): return 30
+    print "admitted edge probe passed"
+    0

@@ -46,6 +46,9 @@ use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
 use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_parse_v1, mono_module_scoped_selected_v1}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_guards_active_v1, tldr_closure_walk_check_v1}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1, driver_library_mode_native_owner_v1}
+use compiler.driver.driver_source_loading.{_driver_entry_import_dirname, _driver_physical_source_key, driver_closure_import_specs_v1}
 extern fn rt_process_start_identity(pid: i64) -> i64
 
 val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v2"
@@ -146,6 +149,90 @@ fn _ws_canonical_key_v1(resolved: text, canonical_paths: [text], by_canonical: D
         j = j + 1
     _ws_lookup_misses = _ws_lookup_misses + 1
     -1
+
+# Resolve the same admitted owner as phase 1. Phase-1 scans are required;
+# extra scanner candidates include speculative grouped members and qualified
+# export providers, so a missing candidate is not an import failure.
+pub struct WorkerAdmittedGraphV1:
+    edges: [[i64]]
+    errors: [text]
+
+pub fn worker_admitted_edges_v1(paths: [text], contents: [text], names: [text],
+        roots: [text], library_mode: text) -> Result<WorkerAdmittedGraphV1, text>:
+    if paths.len() != contents.len() or paths.len() != names.len():
+        return Err("worker surface inventory length mismatch")
+    var by_physical: Dict<text, i64> = {}
+    var i = 0
+    while i < paths.len():
+        val physical = _driver_physical_source_key(paths[i])
+        if not by_physical.contains_key(physical): by_physical[physical] = i
+        i = i + 1
+    var graph: [[i64]] = []
+    var errors: [text] = []
+    i = 0
+    while i < paths.len():
+        val required = driver_closure_import_specs_v1(paths[i])
+        var candidates: [text] = []
+        for candidate in required:
+            candidates.push(candidate)
+        for candidate in worker_surface_import_ids_v1(contents[i]):
+            if not candidates.contains(candidate): candidates.push(candidate)
+        val dir = _driver_entry_import_dirname(paths[i])
+        var deps: [i64] = []
+        var error = ""
+        for candidate in candidates:
+            val is_required = required.contains(candidate)
+            val result = driver_library_mode_resolve_v1(candidate, roots, dir, library_mode, names[i])
+            if result.is_err():
+                if is_required and error == "": error = result.unwrap_err()
+                continue
+            val selected = result.unwrap()
+            var target = ""
+            match selected:
+                case SourceRootResolutionV1.Found(path): target = path
+                case SourceRootResolutionV1.Ambiguous(directory):
+                    if is_required and error == "": error = "SOURCE_ROOT_AMBIGUOUS: " + paths[i] + "|" + candidate + "|" + directory
+                case SourceRootResolutionV1.Missing:
+                    if is_required and candidate.contains(".") and error == "":
+                        error = "WORKER_IMPORT_MISSING: " + paths[i] + "|" + candidate
+            if target == "": continue
+            val owner = driver_library_mode_native_owner_v1(target, candidate, dir, library_mode, names[i])
+            val physical = _driver_physical_source_key(owner)
+            if not by_physical.contains_key(physical):
+                if is_required and error == "": error = "WORKER_PROVIDER_NOT_ADMITTED: " + paths[i] + "|" + candidate + "|" + owner
+                continue
+            val dep = by_physical[physical]
+            if dep != i and not deps.contains(dep): deps.push(dep)
+        graph.push(deps)
+        errors.push(error)
+        i = i + 1
+    Ok(WorkerAdmittedGraphV1(edges: graph, errors: errors))
+
+pub fn worker_admitted_error_v1(graph: WorkerAdmittedGraphV1, selected: [bool]) -> text:
+    var i = 0
+    while i < graph.errors.len():
+        if i < selected.len() and selected[i] and graph.errors[i] != "": return graph.errors[i]
+        i = i + 1
+    ""
+
+pub fn worker_admitted_closure_v1(edges: [[i64]], seeds: [bool]) -> [bool]:
+    var needed: [bool] = []
+    var queue: [i64] = []
+    var i = 0
+    while i < edges.len():
+        val selected = i < seeds.len() and seeds[i]
+        needed.push(selected)
+        if selected: queue.push(i)
+        i = i + 1
+    var head = 0
+    while head < queue.len():
+        val at = queue[head]
+        head = head + 1
+        for dep in edges[at]:
+            if dep >= 0 and dep < needed.len() and not needed[dep]:
+                needed[dep] = true
+                queue.push(dep)
+    needed
 
 # Restrict this worker's claims to `paths` (the ready modules' sources).
 pub fn worker_surface_restrict_claims_v1(paths: [text]):
@@ -317,12 +404,15 @@ pub fn worker_unit_pick_order_v1(paths: [text], canonical_paths: [text], content
                 if key >= 0 and key != i and not deps.contains(key): deps.push(key)
         edges.push(deps)
         i = i + 1
+    worker_admitted_order_v1(edges)
+
+pub fn worker_admitted_order_v1(edges: [[i64]]) -> [i64]:
     var state: [i64] = []
-    for _p in paths:
+    for _p in edges:
         state.push(0)
     var order: [i64] = []
     var root = 0
-    while root < paths.len():
+    while root < edges.len():
         if state[root] == 0:
             var stack: [i64] = [root]
             var next: [i64] = [0]
