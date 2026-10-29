@@ -1997,6 +1997,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_process_owned_v3_start_pinned_value",
         system::rt_process_owned_v3_adapter_unavailable
     );
+    insert_simple!("rt_sosix_darwin_snapshot_v1_capabilities_value", system::rt_sosix_darwin_snapshot_v1_capabilities_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_start_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_poll_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_cancel_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_output_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_ack_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
     insert_simple!(
         "rt_process_observation_v4_capabilities_value",
         system::rt_process_observation_v4_capabilities_unavailable

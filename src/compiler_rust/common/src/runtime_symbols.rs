@@ -907,6 +907,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_owned_v3_start_pinned_value",
     // Process Observation V4: exact native provider; interpreter registers an
     // explicit unavailable capability receipt and rejects authority methods.
+    "rt_sosix_darwin_snapshot_v1_capabilities_value",
+    "rt_sosix_darwin_snapshot_v1_start_value",
+    "rt_sosix_darwin_snapshot_v1_poll_value",
+    "rt_sosix_darwin_snapshot_v1_cancel_value",
+    "rt_sosix_darwin_snapshot_v1_output_value",
+    "rt_sosix_darwin_snapshot_v1_ack_value",
     "rt_process_observation_v4_capabilities_value",
     "rt_process_observation_v4_pin_cwd_value",
     "rt_process_observation_v4_cwd_digest_value",
