@@ -1,8 +1,15 @@
 # Purpose and audience: runtime maintainers qualify the Windows V2 lease owner
 # using the production C implementation and a Windows-native child fixture.
 # @req REQ-WIN-OWN-001 REQ-WIN-OWN-002 REQ-WIN-OWN-003 REQ-WIN-OWN-004
+# @req REQ-WIN-INPUT-001 REQ-WIN-INPUT-002
 # @manual_section: Windows V2 process ownership
-# Evidence class: host-fixture. This does not qualify V3 input, V4, or SOSIX guests.
+# Evidence class: host-fixture. This does not qualify the opaque V3 facade, V4, or SOSIX guests.
+"""Runtime maintainers use these scenarios to qualify Windows process ownership
+and the internal immutable stdin core against a real Windows child fixture.
+Run scripts/check/check-owned-process-windows-async.ps1 before this native SSpec.
+A missing Windows producer or compiled fixture fails with MissingEvidence.
+Portable API fakes are separate transport evidence and cannot qualify Windows.
+"""
 
 use std.spec.*
 use std.spec.step
@@ -52,3 +59,27 @@ describe "Windows V2 process ownership":
         val output = run_windows_owner_suite("--suite-admission")
         step("Verify zero authority, stale-token rejection and unchanged handle count")
         expect(output).to_contain("PASS: admission invalid-budget missing-executable zero-authority no-handle-leak")
+
+# @manual_section: Windows immutable stdin core
+describe "Windows internal V3 immutable stdin":
+    """Callers pass a bounded byte snapshot to a private owned child. The owner
+    hashes the accepted copy, completes exact partial writes, and closes stdin.
+    These scenarios exercise core C receipts through the compiled native child;
+    the opaque V3 facade, executable pins and V4 remain unsupported.
+    """
+
+    it "should deliver the accepted binary snapshot and report exact input ownership":
+        # @req REQ-WIN-INPUT-001
+        # @capture(statistics): native assertion status for binary bytes, digest, lengths, EOF and stale authority
+        step("Start an echo child with a binary snapshot larger than the pipe buffer")
+        val output = run_windows_owner_suite("--suite-input")
+        step("Verify caller mutation cannot change accepted bytes or the input digest")
+        expect(output).to_contain("PASS: input immutable-binary-snapshot sha256 partial-writes empty-eof stale-version admission")
+
+    it "should cancel a blocked input writer while independent leases continue":
+        # @req REQ-WIN-INPUT-002
+        # @capture(statistics): native assertion status for bounded polling, cancellation completion and partial input receipt
+        step("Submit the maximum bounded snapshot to a child that never reads")
+        val output = run_windows_owner_suite("--suite-input-backpressure")
+        step("Verify an independent child completes and cancelled I/O closes before terminal collection")
+        expect(output).to_contain("PASS: input-backpressure nonblocking-poll independent-lease cancel-completion partial-receipt")

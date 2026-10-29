@@ -4301,7 +4301,7 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
  * (`rt_process_run_owned_bounded`, `..._observed_bounded`, and the two
  * `*_value` ABI wrappers) — the family the failing specs actually reach. The
  * asynchronous V2 token leases are implemented in the private include below.
- * V3 immutable stdin, sealed pins and observation V4 retain ENOTSUP until their
+ * The opaque V3 facade, sealed pins and observation V4 retain ENOTSUP until their
  * stronger contracts have a Windows provider.
  *
  * Bounded semantics are provided by a job object rather than a process group:
@@ -4970,6 +4970,7 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
 }
 #endif
 
+#ifndef RT_OWNED_WIN32_INPUT_IMPLEMENTED
 bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
                                const uint8_t* input, uint64_t input_len,
                                int64_t timeout_ms, int64_t term_grace_ms,
@@ -4983,6 +4984,8 @@ bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
     receipt->version = RT_OWNED_PROCESS_INPUT_VERSION; receipt->runtime_error = ENOTSUP;
     return false;
 }
+
+#endif
 
 bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
                                       const char* const* argv,
@@ -4999,6 +5002,7 @@ bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
     return false;
 }
 
+#ifndef RT_OWNED_WIN32_INPUT_IMPLEMENTED
 bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
                                        RtOwnedProcessInputReceiptV3* receipt) {
     (void)token;
@@ -5007,6 +5011,8 @@ bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
     receipt->runtime_error = ENOTSUP;
     return false;
 }
+
+#endif
 
 /* Win32 implements this for real above; only the non-unix fallback needs the
  * ENOTSUP answer. */
