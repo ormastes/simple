@@ -1393,6 +1393,13 @@ int       rt_process_owned_v3_release_value(int64_t handle);
  * executable and cwd handles are opaque, separately supplied capabilities and
  * must match the canonical binding. Every operation result is
  * [stdout_bytes, stderr_bytes, binding_digest, receipt_words]. */
+/* Cooperative Darwin snapshots use a separate ABI and never advertise V4. */
+SplArray* rt_sosix_darwin_snapshot_v1_capabilities_value(void);
+SplArray* rt_sosix_darwin_snapshot_v1_start_value(int64_t profile, SplArray* invocation, SplArray* environment, SplArray* limits);
+SplArray* rt_sosix_darwin_snapshot_v1_poll_value(int64_t handle, int64_t wait_ns);
+SplArray* rt_sosix_darwin_snapshot_v1_cancel_value(int64_t handle);
+SplArray* rt_sosix_darwin_snapshot_v1_output_value(int64_t handle, int64_t stream);
+int64_t rt_sosix_darwin_snapshot_v1_ack_value(int64_t handle);
 SplArray* rt_process_observation_v4_capabilities_value(void);
 int64_t   rt_process_observation_v4_pin_cwd_value(const char* path_data,
                                                    uint64_t path_len);

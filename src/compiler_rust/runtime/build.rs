@@ -29,6 +29,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_sosix_darwin_snapshot_v1_impl.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_sosix_darwin_process_private.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_sosix_darwin_image_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned_cwd_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned_sha256_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
