@@ -262,7 +262,8 @@ Options:
   --validate-bootstrap-receipt
                      Validate authorization and exit without starting a stage
   --produce-stage3-receipt=<typed-reason>
-                     Only with `--full-bootstrap --stop-after-stage2`. After the
+                     Requires --stop-after-stage2 and either --full-bootstrap
+                     or an admitted SIMPLE_BUILD_COMPILER parent. After the
                      Stage 2 admission is published, run the canonical producer
                      (scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs)
                      against the just-admitted parent and write
@@ -701,11 +702,14 @@ esac
 # this gate exists to stop. Pinned by
 # scripts/check/check-bootstrap-stage3-receipt-autowire.shs.
 if [ -n "${produce_stage3_receipt_reason}" ] &&
-   { [ "${stop_after_stage2}" -ne 1 ] || [ "${full_bootstrap}" -ne 1 ] ||
+   { [ "${stop_after_stage2}" -ne 1 ] ||
+     { [ "${full_bootstrap}" -ne 1 ] && [ -z "${SIMPLE_BUILD_COMPILER:-}" ]; } ||
      { [ -n "${bootstrap_receipt_path}" ] && [ -f "${bootstrap_receipt_path}" ]; }; }; then
   echo "bootstrap-policy-error: produce-stage3-receipt-requires-stage2-trust-root-lane" >&2
   exit 64
 fi
+# A named pure-Simple parent only selects the lane here; the trust-root chain
+# below must validate its provenance before enabling receipt production.
 if [ "${produce_managed_receipt_requested}" -eq 1 ]; then
   sh "${bootstrap_entry_dir}/lib/managed-planner-policy.shs" \
     "${produce_managed_receipt_reason}" "${stop_after_stage2}" \
