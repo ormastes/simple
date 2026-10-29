@@ -236,6 +236,26 @@ class Matrix:
             self.base["SDKROOT"] = str(self.sdk)
         self.base["PATH"] = str(self.linker.parent) + os.pathsep + self.base.get("PATH", "")
 
+    def compiler_trace_environment(self):
+        if not getattr(self.args, "trace_stages", False):
+            return {}
+        # Applied explicitly to compiler invocations after inherited SIMPLE_*
+        # variables have been sanitized. Never dump the process environment.
+        return {"SIMPLE_BOOTSTRAP_DIAG": "1", "SIMPLE_COMPILER_PHASE_PROFILE": "1",
+                "SIMPLE_COMPILER_TRACE": "1", "SIMPLE_KEEP_LLVM_IR": "0",
+                "SIMPLE_MEM_SNAPSHOT": "0"}
+
+    def trace_stage(self, lane, stage, event, exit_code=None):
+        if not getattr(self.args, "trace_stages", False):
+            return
+        values = {"format": "build-stage-v1", "owner": "hello-matrix",
+                  "stage": stage, "event": event, "phase": self.args.phase,
+                  "backend": self.args.backend, "compile_route": self.args.compile_route,
+                  "compiler_sha256": self.sha}
+        if exit_code is not None:
+            values["exit_code"] = exit_code
+        sdn(lane / (stage + ".trace-" + event + ".sdn"), values)
+
     def validate_identity(self):
         if digest(self.compiler) != self.sha:
             raise ValueError("phase compiler bytes changed")
@@ -285,6 +305,7 @@ class Matrix:
                 "--root-exit-policy", "terminate-job", "--", sys.executable,
                 str(Path(__file__).resolve()), "--capture-split", str(lane / name), *map(str, argv)]
         (lane / (name + ".argv.txt")).write_text(shlex.join(command) + "\n")
+        self.trace_stage(lane, name, "begin")
         begin = time.monotonic()
         reason = "child-exit"
         with (lane / (name + ".supervisor.stdout")).open("xb") if self.windows else stdout.open("xb") as out, \
@@ -330,6 +351,7 @@ class Matrix:
         sdn(lane / (name + ".sdn"), {"exit_code": code, "reason": reason,
             "compiler_sha256": self.sha, "elapsed_seconds": round(time.monotonic() - begin, 3),
             "stdout_sha256": digest(stdout), "stderr_sha256": digest(stderr)})
+        self.trace_stage(lane, name, "end", exit_code=code)
         self.validate_identity()
         if not self.windows:
             fields = dict(line.split("=", 1) for line in
@@ -364,7 +386,8 @@ class Matrix:
             capture = lane / (name + ".link.json")
             proxy = self.darwin_adapter.capture_proxy(lane / (name + "-tool"), self.driver, self.linker, capture)
             extra = (extra or {}) | {"SIMPLE_CC": str(proxy)}
-        self.run(lane, name, command, extra)
+        compiler_env = (extra or {}) | self.compiler_trace_environment()
+        self.run(lane, name, command, compiler_env)
         if not output.is_file() or output.stat().st_size == 0:
             raise ValueError(f"{name}: missing/empty artifact")
         if capture:
@@ -736,6 +759,8 @@ class Matrix:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--trace-stages", action="store_true",
+                        help="write stage SDN records and enable bounded compiler diagnostics")
     parser.add_argument("--compiler", required=True, type=Path)
     parser.add_argument("--phase", required=True, type=int, choices=[1, 2, 3])
     parser.add_argument("--source-root", required=True, type=Path)

@@ -17,6 +17,7 @@ import zipfile
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--trace-stages", action="store_true")
     parser.add_argument("--backend", required=True, choices=["llvm", "cranelift"])
     parser.add_argument("--lane", required=True,
                         choices=["one-source", "two-objects", "static-library", "shared-library"])

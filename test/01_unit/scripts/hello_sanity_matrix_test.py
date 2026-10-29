@@ -22,6 +22,33 @@ DARWIN_SPEC.loader.exec_module(DARWIN)
 
 
 class LinkInputEvidence(unittest.TestCase):
+    def test_trace_is_opt_in_and_contains_only_allowlisted_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane = Path(directory)
+            matrix = object.__new__(MATRIX.Matrix)
+            matrix.sha = "a" * 64
+            matrix.args = SimpleNamespace(trace_stages=False, phase=2, backend="llvm",
+                compile_route="positional", token="PRIVATE_SECRET")
+            matrix.trace_stage(lane, "compile", "begin")
+            self.assertEqual(list(lane.iterdir()), [])
+            matrix.args.trace_stages = True
+            matrix.trace_stage(lane, "compile", "begin")
+            matrix.trace_stage(lane, "compile", "end", exit_code=2)
+            trace = (lane / "compile.trace-end.sdn").read_text()
+            for value in ("build-stage-v1", "llvm", "positional", matrix.sha, "exit_code: 2"):
+                self.assertIn(value, trace)
+            self.assertNotIn("PRIVATE_SECRET", trace)
+            self.assertTrue((lane / "compile.trace-begin.sdn").exists())
+
+    def test_compiler_tracing_is_explicit_and_applied_after_sanitization(self):
+        matrix = object.__new__(MATRIX.Matrix)
+        matrix.args = SimpleNamespace(trace_stages=False)
+        self.assertEqual(matrix.compiler_trace_environment(), {})
+        matrix.args.trace_stages = True
+        self.assertEqual(matrix.compiler_trace_environment(), {
+            "SIMPLE_BOOTSTRAP_DIAG": "1", "SIMPLE_COMPILER_PHASE_PROFILE": "1",
+            "SIMPLE_COMPILER_TRACE": "1", "SIMPLE_KEEP_LLVM_IR": "0", "SIMPLE_MEM_SNAPSHOT": "0"})
+
     def test_positional_diagnostic_preserves_compiler_inputs_without_coordinator_flags(self):
         with tempfile.TemporaryDirectory() as directory:
             lane = Path(directory)
