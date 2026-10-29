@@ -47,8 +47,7 @@ that the previous estimate is below the observed sample, and verifies that the
 old/new estimates imply seven/one workers under the same cap while HIR remains
 three. It also checks the non-Linux and Windows policy paths.
 
-The focused policy regression passed before source freeze. Its constant 20-job
-assertion is not execution evidence for thread propagation; the production
+The focused policy regression passed before source freeze. The production
 request and receipt below establish the bounded attempt configuration. Do not
 treat the 24 GiB estimate as a hard limit or raise the 48 GiB cap to mask worker
 under-accounting.
