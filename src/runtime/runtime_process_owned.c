@@ -4277,9 +4277,9 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
 
 #else
 
-/* --- Win32 real implementation of the SYNCHRONOUS bounded family ------
- * Everything this branch does NOT implement (the async token-lease family,
- * the v3 opaque-handle surface, the observation-v4 family) is deliberately
+/* --- Win32 synchronous bounded and asynchronous V2 owned families ------
+ * Everything this branch does NOT implement (the V3 atomic-input family,
+ * the V3 opaque-handle surface, the observation-v4 family) is deliberately
  * left to the shared fallback stubs below, so a future family added there is
  * automatically covered on Windows too. Only the definitions Win32 really
  * implements are fenced out of that fallback, via
@@ -4297,12 +4297,12 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
  * calls rt_process_run_owned_observed_bounded_value, which could never run a
  * child at all.
  *
- * Scope, stated plainly: this branch implements the SYNCHRONOUS bounded family
+ * This branch implements the SYNCHRONOUS bounded family
  * (`rt_process_run_owned_bounded`, `..._observed_bounded`, and the two
  * `*_value` ABI wrappers) — the family the failing specs actually reach. The
- * asynchronous token-lease family (`rt_process_owned_start_v2/v3`, `poll_v2`,
- * `cancel_v2`, `result_v2`, and the `rt_process_owned_v3_*` opaque-handle
- * surface) is NOT implemented here and keeps its honest ENOTSUP answer below.
+ * asynchronous V2 token leases are implemented in the private include below.
+ * V3 immutable stdin, sealed pins and observation V4 retain ENOTSUP until their
+ * stronger contracts have a Windows provider.
  *
  * Bounded semantics are provided by a job object rather than a process group:
  * JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE means the whole child tree dies with the
@@ -4950,11 +4950,13 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
 #endif /* RT_PROCESS_OWNED_CORE_ONLY */
 
 #define RT_OWNED_WIN32_SYNC_IMPLEMENTED 1
+#include "runtime_process_owned_windows_async_private.h"
 #endif /* _WIN32 */
 
 #include <errno.h>
 #include <string.h>
 
+#ifndef RT_OWNED_WIN32_ASYNC_IMPLEMENTED
 bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
                                int64_t timeout_ms, int64_t term_grace_ms,
                                uint64_t max_output_bytes,
@@ -4966,6 +4968,7 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION; receipt->runtime_error = ENOTSUP;
     return false;
 }
+#endif
 
 bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
                                const uint8_t* input, uint64_t input_len,
@@ -5022,6 +5025,7 @@ bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* a
 }
 #endif
 
+#ifndef RT_OWNED_WIN32_ASYNC_IMPLEMENTED
 bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
                               char* out, uint64_t out_cap, char* err,
                               uint64_t err_cap,
@@ -5065,6 +5069,7 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
                                  RtOwnedProcessResultV2* result) {
     return rt_process_owned_result_v2(token, result);
 }
+#endif
 
 #ifndef RT_OWNED_WIN32_SYNC_IMPLEMENTED
 bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,

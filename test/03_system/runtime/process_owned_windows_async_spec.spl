@@ -1,0 +1,54 @@
+# Purpose and audience: runtime maintainers qualify the Windows V2 lease owner
+# using the production C implementation and a Windows-native child fixture.
+# @req REQ-WIN-OWN-001 REQ-WIN-OWN-002 REQ-WIN-OWN-003 REQ-WIN-OWN-004
+# @manual_section: Windows V2 process ownership
+# Evidence class: host-fixture. This does not qualify V3 input, V4, or SOSIX guests.
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+const WINDOWS_OWNER_FIXTURE: text = "build/runtime-process-owned-windows-async/runtime_process_owned_windows_async_selfcheck.exe"
+
+# @inline
+fn run_windows_owner_suite(suite: text) -> text:
+    step("Require a Windows-native producer and compiled owner fixture")
+    if not host_is_windows_host():
+        fail("MissingEvidence: this scenario requires a Windows-native producer")
+    if not file_exists(WINDOWS_OWNER_FIXTURE):
+        fail("MissingEvidence: run scripts/check/check-owned-process-windows-async.ps1 to build the owner fixture")
+    val (output, error, code) = process_run_bounded(WINDOWS_OWNER_FIXTURE, [suite], 30000, 65536)
+    expect(code).to_equal(0)
+    expect(error).to_equal("")
+    output
+
+describe "Windows V2 process ownership":
+    it "should preserve binary capture until every retained byte is delivered":
+        # @req REQ-WIN-OWN-001
+        step("Capture separate binary streams and poll without consuming bytes")
+        val output = run_windows_owner_suite("--suite-capture")
+        step("Verify partial delivery, busy collection and stale authority")
+        expect(output).to_contain("PASS: capture binary-prefix retention partial-delivery collect-busy stale-token shared-cap")
+
+    it "should terminate owned jobs and observe descendant handles before terminal collection":
+        # @req REQ-WIN-OWN-002
+        step("Exercise unlimited useful work, a finite deadline and cancellation")
+        val output = run_windows_owner_suite("--suite-lifecycle")
+        step("Verify exact exit 259 and a signalled descendant process handle")
+        expect(output).to_contain("PASS: lifecycle unlimited-work deadline cancellation exit259 descendant-handle-wait")
+
+    it "should keep eighty distinct live leases safe during concurrent cleanup":
+        # @req REQ-WIN-OWN-003
+        step("Start eighty children with distinct random lease capabilities")
+        val output = run_windows_owner_suite("--suite-concurrency")
+        step("Verify two threads cancel, poll and collect their owned children")
+        expect(output).to_contain("PASS: concurrency 80-unique-live-leases threaded-cancel-poll-collect")
+
+    it "should reject invalid admission without granting authority or leaking handles":
+        # @req REQ-WIN-OWN-004
+        step("Reject a negative budget and repeatedly reject a missing executable")
+        val output = run_windows_owner_suite("--suite-admission")
+        step("Verify zero authority, stale-token rejection and unchanged handle count")
+        expect(output).to_contain("PASS: admission invalid-budget missing-executable zero-authority no-handle-leak")
