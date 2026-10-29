@@ -6,8 +6,7 @@ use std.nogc_sync_mut.io.process_ops.{shell_int, shell_bool}
 use std.nogc_sync_mut.io.process_ops.{shell_output_default}
 use std.nogc_sync_mut.io.env_ops.{host_os}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
-use std.nogc_sync_mut.test_runner.monitor_process_launch.{launch_monitor_script_detached}
-use std.nogc_sync_mut.io.process_ops.{process_spawn_async}
+use std.nogc_sync_mut.sosix.host_process_launch.{sosix_launch_background_script}
 
 extern fn rt_thread_sleep(millis: i64)
 
@@ -615,8 +614,9 @@ fn ensure_kill_monitor_running():
 
     Platform logic:
     - Linux/macOS/FreeBSD: run .sh via sh
-    - MinGW/MSYS2/Cygwin: run .sh via sh (has bash, can see native Windows procs via cmd.exe)
-    - Native Windows (cmd/MSVC): run .bat via cmd /c
+    - MinGW/MSYS2/Cygwin labels: run .sh via sh
+    - Windows label (including MSYS/MinGW detected as Windows): unsupported
+      until detached stdio is bound
     """
     val sh_path = "scripts/resource/kill_simple_monitor.shs"
     val bat_path = "scripts/resource/kill_simple_monitor.bat"
@@ -637,22 +637,22 @@ fn ensure_kill_monitor_running():
             # Stale PID file — process died, remove and re-launch
             shell_output_default("rm -f /tmp/kill_simple_monitor.pid", "")
 
-    # Launch the monitor
+    # Launch the monitor through the provider that owns detached stdio.
     if is_windows() and not is_mingw_or_msys():
-        # Native Windows (cmd.exe / MSVC Developer Prompt): use .bat
-        if file_exists(bat_path):
-            val pid = process_spawn_async("cmd", ["/c", bat_path])
-            if pid > 0:
-                print "[safeguard] Started kill_simple_monitor.bat in background (pid {pid})"
-            else:
-                eprint "[safeguard] WARNING: could not start kill_simple_monitor.bat"
+        val pid = sosix_launch_background_script(sh_path, bat_path)
+        if pid == "unsupported":
+            eprint "[safeguard] WARNING: resource monitor unsupported on {host_os()}"
+        elif pid != "":
+            print "[safeguard] Started kill_simple_monitor.bat in background (pid {pid})"
         else:
-            print "[safeguard] WARNING: {bat_path} not found, skipping resource monitor"
+            eprint "[safeguard] WARNING: could not start kill_simple_monitor.bat"
     else:
         # Linux / macOS / FreeBSD / MinGW / MSYS2 / Cygwin: use .sh
         if file_exists(sh_path):
-            val pid = launch_monitor_script_detached(sh_path)
-            if pid != "":
+            val pid = sosix_launch_background_script(sh_path, bat_path)
+            if pid == "unsupported":
+                eprint "[safeguard] WARNING: resource monitor unsupported on {host_os()}"
+            elif pid != "":
                 print "[safeguard] Started kill_simple_monitor.shs in background (pid {pid})"
             else:
                 eprint "[safeguard] WARNING: could not start kill_simple_monitor.shs"
