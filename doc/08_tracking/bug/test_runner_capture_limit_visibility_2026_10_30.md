@@ -20,5 +20,17 @@ Producer SHA256:
 Focused native regression:
 `test/fixtures/test_runner/native_output_capture_limit.spl` imports the shared
 scalar from another module and requires its exact value before printing a
-success marker. Its native red/green validation and the full runner rebuild
-are pending. This record does not claim native SSpec or HAL/SOSIX execution.
+success marker. Native red/green validation passed; the full runner rebuild
+remains pending. This record does not claim native SSpec or HAL/SOSIX execution.
+
+Actual native regression evidence:
+- Red: build exit1 with the exact private-static diagnostic; log SHA256
+  `a17096977122787cfda8f645835b63f58941648bede9fddb8aa04757ec8d0735`.
+- Green: build exit0, no backend rejection, run exit0, exact stdout
+  `PASS native test runner capture limit: 4194304` plus LF, empty stderr.
+  Artifact SHA256 `a4bfdd366c00a488d1d15f81e427358e15b002e1b17bc1125dcdccd1a82a6073`.
+  Build log SHA256 `f993a1b81c2ef739839421f2ceeca859f34c17b5a98162a7052328e1b02618df`.
+- Evidence roots: `/work/native-capture-visibility-20261030/{red,green}`.
+  Green source is b9c91 plus the reviewed source patch (commit
+  `71cfe696ed9d6b80513a63da7039e1912e4231b6`); producer/runtime remained pinned.
+  Both build receipts completed below their 6 GiB bound with quiescent trees.
