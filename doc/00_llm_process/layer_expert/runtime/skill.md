@@ -159,3 +159,12 @@ explicit archive through the same scalar public ABI; the default still tests C.
 The source-matched Rust archive fixture and focused ownership unit have passed;
 its RSS probe releases resident pages at session end. Final P2 linkage and
 actual manager memory qualification remain separate required observations.
+
+## Windows descriptor snapshot include order
+
+`runtime_native.c` selects the existing `_WIN32_WINNT` floor 0x0602 before
+any includes; preserve explicitly newer values. The defensive definition in
+`runtime_fd_stat_v1.h` alone is too late after transitive Windows includes.
+Check the production translation unit as well as the standalone header:
+header-first selfchecks cannot reproduce this include-order defect. GNU Clang
+syntax and native fd-stat selfcheck evidence do not establish runner admission.

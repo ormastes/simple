@@ -86,3 +86,10 @@ to prove that empty and Windows layout fields cannot change their POSIX meaning.
 Publication occurs once per admitted compiler. The source snapshot check runs
 once when Phase 2 verification starts. Neither operation belongs to a compiler
 or language-server request path. No performance improvement is claimed.
+
+Windows GNU runtime compilation must select the descriptor snapshot's existing
+Windows 8 minimum (`_WIN32_WINNT=0x0602`, preserving newer selections) before
+the first transitive Windows include in `runtime_native.c`. Setting it only
+inside the later descriptor-stat header cannot expose guarded `FILE_ID_INFO`
+declarations. Production translation-unit syntax and the native descriptor
+selfcheck are component evidence; neither qualifies a Phase2 runner.
