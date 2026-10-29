@@ -1,0 +1,34 @@
+# Intermediate closure records belong to a session, not to any one admission
+# stage. Each stage can reclaim its complete inventory/hash scratch before the
+# next stage begins. An inherited session remains entirely caller-owned.
+use std.nogc_sync_mut.sffi.transient.{rt_session_heap_begin, rt_session_heap_id,
+    rt_session_heap_end, rt_transient_heap_adopt, transient_scope_end}
+
+struct NativeBuildParseClosureSessionV1:
+    id: u32
+    owned: bool
+
+fn native_build_parse_closure_session_open_v1() -> NativeBuildParseClosureSessionV1:
+    unsafe(capabilities: [ffi]):
+        val inherited = rt_session_heap_id()
+        if inherited != 0u32:
+            return NativeBuildParseClosureSessionV1(inherited, false)
+        NativeBuildParseClosureSessionV1(rt_session_heap_begin(), true)
+
+# The owner pauses and detaches its globals before handing us its root. Adopt
+# must see the caller's root in place, just as transient_promote does.
+fn native_build_parse_closure_stage_end_v1<T>(mut value: T) -> bool:
+    var retained = false
+    unsafe(capabilities: [ffi]):
+        retained = rt_transient_heap_adopt(value)
+    val ended = transient_scope_end()
+    retained and ended
+
+fn native_build_parse_closure_session_end_v1(session: NativeBuildParseClosureSessionV1) -> bool:
+    if not session.owned:
+        return session.id != 0u32
+    unsafe(capabilities: [ffi]):
+        rt_session_heap_end(session.id)
+
+export NativeBuildParseClosureSessionV1, native_build_parse_closure_session_open_v1
+export native_build_parse_closure_stage_end_v1, native_build_parse_closure_session_end_v1

@@ -1,0 +1,102 @@
+# Native diagnostic: compile with the current core-C runtime. The pinned P1
+# interpreter has no session-heap SFFI contract and cannot run this fixture.
+use app.cli.native_build_parse_closure_scratch.*
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end}
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_session_heap_id() -> u32
+extern fn rt_transient_array_scope_state_v1() -> i64
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_exit(code: i64)
+
+var diagnostic_cache: [text] = []
+
+struct ClosureScratchHandoff:
+    label: text
+    paths: [text]
+
+fn staged_scratch_peak(staged: bool) -> i64:
+    val session = native_build_parse_closure_session_open_v1()
+    if session.id == 0u32 or not session.owned: return -1
+    if not transient_scope_begin(): return -2
+    val before = rt_heap_registry_count()
+    var peak = 0
+    var stage = 0
+    while stage < 4:
+        var i = 0
+        while i < 128:
+            # Each read's discarded line/field graph remains scope-owned,
+            # even though its local root is overwritten on the next row.
+            val scratch = ["row-{stage}-{i}".split("-")]
+            i = i + 1
+        val handoff = ClosureScratchHandoff("stage-{stage}", ["src/kept-{stage}.spl"])
+        val live = rt_heap_registry_count() - before
+        if live > peak: peak = live
+        if staged:
+            if not transient_scope_pause(): return -3
+            if not native_build_parse_closure_stage_end_v1(handoff): return -4
+            # Check a nested struct/array graph after its source scope ended.
+            if handoff.label != "stage-{stage}" or handoff.paths[0] != "src/kept-{stage}.spl": return -5
+            if not transient_scope_begin(): return -6
+        stage = stage + 1
+    if not transient_scope_end(): return -7
+    if not native_build_parse_closure_session_end_v1(session): return -8
+    if rt_session_heap_id() != 0u32 or rt_transient_array_scope_state_v1() != 0: return -9
+    peak
+
+fn main() -> i64:
+    val outer = staged_scratch_peak(false)
+    val staged = staged_scratch_peak(true)
+    print "outer_peak_objects={outer} staged_peak_objects={staged}"
+    if outer <= 0 or staged <= 0 or staged * 2 >= outer: return 1
+    # An inherited session is borrowed; ending this nested owner must not
+    # retire its caller's objects or clear its id.
+    val owner = native_build_parse_closure_session_open_v1()
+    val borrower = native_build_parse_closure_session_open_v1()
+    if owner.id == 0u32 or borrower.id != owner.id or borrower.owned: return 2
+    if not native_build_parse_closure_session_end_v1(borrower): return 3
+    if rt_session_heap_id() != owner.id: return 4
+    if not native_build_parse_closure_session_end_v1(owner): return 5
+    # Refusing a session under an unrelated active scope leaves it untouched.
+    if not transient_scope_begin(): return 6
+    val refused = native_build_parse_closure_session_open_v1()
+    if refused.id != 0u32 or rt_transient_array_scope_state_v1() != 1: return 7
+    if not transient_scope_end(): return 8
+    # Failed adoption still retires the stage exactly once. Do not dereference
+    # the discarded root after this failure.
+    val failure_owner = native_build_parse_closure_session_open_v1()
+    if not transient_scope_begin(): return 9
+    val discarded = ["discarded".replace("d", "D")]
+    if native_build_parse_closure_stage_end_v1(discarded): return 10
+    if rt_transient_array_scope_state_v1() != 0: return 11
+    if not native_build_parse_closure_session_end_v1(failure_owner): return 12
+    # The publication must be consumed before either owner ends. Paused cache
+    # resets are session-owned, so replace them again after session end before
+    # the next cache use. The environment owns an independent byte copy.
+    val final_owner = native_build_parse_closure_session_open_v1()
+    if not transient_scope_begin(): return 13
+    val publication_path = "selection-{128}.v1"
+    if not rt_env_set("SIMPLE_PARSE_CLOSURE_NATIVE_DIAGNOSTIC", publication_path): return 14
+    if not transient_scope_pause(): return 15
+    diagnostic_cache = []
+    if not transient_scope_end(): return 16
+    if not native_build_parse_closure_session_end_v1(final_owner): return 17
+    diagnostic_cache = []
+    val copied = rt_env_get("SIMPLE_PARSE_CLOSURE_NATIVE_DIAGNOSTIC")
+    if copied != "selection-128.v1" or diagnostic_cache.len() != 0: return 18
+    diagnostic_cache = diagnostic_cache.push(copied)
+    if diagnostic_cache[0] != "selection-128.v1": return 19
+    print "staged-handoffs-owned-borrowed-refused-and-failed-adoption=pass"
+    print "publication-copy-and-post-session-cache-reset=pass"
+    0
+
+# P1 compile --native requires this entry shim even without source globals.
+# Diagnostic only: no production module initialization is replaced.
+fn __module_init() -> i64:
+    0
+
+# The diagnostic core-C capsule's Darwin thread marker is an unresolved weak
+# symbol. This single-threaded fixture must never enter that unsupported path.
+fn simple_note_user_threads_started():
+    rt_exit(97)
