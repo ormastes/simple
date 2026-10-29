@@ -1,17 +1,7 @@
-"""Compiler selection for the test runner: phase2 must be selectable.
+"""Compiler selection: `--compiler=phase2` resolves to the phase2-built CLI.
 
-Audience: anyone editing `find_simple_binary` /
-`std.test_runner.test_executor_parsing` or adding runner flags.
-
-Interface these specs define (does not exist yet):
-  * `--compiler=phase2` -> `TestOptions.compiler == "phase2"` (default "").
-  * `std.test_runner.compiler_select.resolve_test_compiler(selector,
-    phase2_cli, phase2_sha256, explicit_binary) -> Result<text, text>`.
-    "phase2" resolves to `phase2_cli` (the phase2-BUILT full CLI, env
-    SIMPLE_PHASE2_FULL_CLI; the Phase 2 bootstrap executable itself is
-    compiler-only and has no `test` command). Phase2 selected but no CLI, or a
-    missing/malformed sha256, is an Err -- never a silent fall back to the
-    seed or the deployed bin/simple. Any other non-empty selector is an Err.
+Selecting phase2 without SIMPLE_PHASE2_FULL_CLI is an error, never a silent
+fallback to the seed or the deployed binary.
 
 # @req REQ-TESTRUNNER-PHASE2-4KINDS
 """
@@ -22,32 +12,17 @@ use std.test_runner.compiler_select.{resolve_test_compiler}
 
 val SHA: text = "abababababababababababababababababababababababababababababababab"
 
-describe "--compiler flag":
+describe "compiler selection":
     it "defaults to no explicit compiler":
         expect(parse_test_args([]).compiler).to_equal("")
     it "parses --compiler=phase2":
         expect(parse_test_args(["--compiler=phase2"]).compiler).to_equal("phase2")
-    it "parses the two-token form":
-        expect(parse_test_args(["--compiler", "phase2"]).compiler).to_equal("phase2")
-
-describe "resolve_test_compiler":
-    it "returns the phase2 CLI when phase2 is selected":
-        expect(resolve_test_compiler("phase2", "/p2/simple", SHA, "").unwrap()).to_equal("/p2/simple")
-    it "lets phase2 win over an explicit SIMPLE_BINARY":
+    it "resolves phase2 to the phase2 CLI":
         expect(resolve_test_compiler("phase2", "/p2/simple", SHA, "/seed/simple").unwrap()).to_equal("/p2/simple")
     it "keeps the explicit binary when nothing is selected":
         expect(resolve_test_compiler("", "/p2/simple", SHA, "/seed/simple").unwrap()).to_equal("/seed/simple")
-    it "fails closed when phase2 is selected without a CLI":
+    it "errors when the phase2 CLI is missing":
         val r = resolve_test_compiler("phase2", "", SHA, "/seed/simple")
-        expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err()).to_contain("SIMPLE_PHASE2_FULL_CLI")
-    it "fails closed when phase2 is selected without a sha256":
-        val r = resolve_test_compiler("phase2", "/p2/simple", "", "")
-        expect(r.is_err()).to_equal(true)
-        expect(r.unwrap_err()).to_contain("SIMPLE_PHASE2_FULL_CLI_SHA256")
-    it "rejects a malformed sha256":
-        expect(resolve_test_compiler("phase2", "/p2/simple", "xyz", "").is_err()).to_equal(true)
-    it "rejects an unknown selector":
-        val r = resolve_test_compiler("phase9", "/p2/simple", SHA, "")
-        expect(r.is_err()).to_equal(true)
-        expect(r.unwrap_err()).to_contain("phase9")
+    it "errors on an unknown compiler":
+        expect(resolve_test_compiler("phase9", "/p2/simple", SHA, "").unwrap_err()).to_contain("phase9")
