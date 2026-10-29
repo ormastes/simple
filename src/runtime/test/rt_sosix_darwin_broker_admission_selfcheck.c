@@ -11,6 +11,8 @@ static void wait_clean(pid_t pid) {
     int status; while (waitpid(pid, &status, 0) < 0) assert(errno == EINTR);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
+static void foreign_reaper(int signal_number) { (void)signal_number; }
+
 int main(int argc, char **argv) {
     assert(argc == 5);
     int source = open(argv[1], O_RDONLY); assert(source >= 0);
@@ -29,6 +31,23 @@ int main(int argc, char **argv) {
     assert(!setenv("MallocStackLoggingDirectory", argv[2], 1));
     char injected[PATH_MAX]; snprintf(injected, sizeof(injected), "%s/injected", argv[2]);
     assert(!setenv("SOSIX_INJECTION_MARKER", injected, 1));
+    /* No helper may run when its exit could erase our PID ownership guard. */
+    struct sigaction original, unsafe = {0};
+    assert(!sigaction(SIGCHLD, NULL, &original));
+    sigemptyset(&unsafe.sa_mask);
+    for (int mode = 0; mode < 3; ++mode) {
+        unsafe.sa_handler = mode == 0 ? SIG_IGN : mode == 1 ? SIG_DFL : foreign_reaper;
+        unsafe.sa_flags = mode == 1 ? SA_NOCLDWAIT : 0;
+        assert(!sigaction(SIGCHLD, &unsafe, NULL));
+        SosixDarwinBrokerAdmission rejected = {0};
+        int result = sosix_darwin_broker_spawn_closed(&image, image.generation, endpoint, &rejected);
+        assert(!sigaction(SIGCHLD, &original, NULL));
+        assert(result == ENOTSUP);
+        assert(!rejected.pid && !rejected.admitted && !rejected.reaped);
+        assert(accept_for(listener, 0) < 0);
+        assert(access(entered, F_OK) != 0);
+    }
+    puts("unsafe_sigchld_disposition: rejected_before_spawn");
     SosixDarwinBrokerAdmission owner = {0};
     assert(!sosix_darwin_broker_spawn_closed(&image, image.generation, endpoint, &owner));
     assert(sosix_darwin_broker_spawn_closed(&image, image.generation, endpoint, &owner) == EALREADY);

@@ -3,7 +3,8 @@
  * before dyld runs. Caller supplies a trusted bound canonical helper image.
  * No workload launcher, disjoint coalition, descendant confinement or V4 claim.
  * Single owner: retain the image through spawn and never let a SIGCHLD handler
- * or another thread reap this child. The unreaped child pins its PID. */
+ * or another thread reap this child. Keep SIGCHLD at SIG_DFL without
+ * SA_NOCLDWAIT throughout ownership. The unreaped child pins its PID. */
 #ifndef RUNTIME_SOSIX_DARWIN_BROKER_ADMISSION_PRIVATE_H
 #define RUNTIME_SOSIX_DARWIN_BROKER_ADMISSION_PRIVATE_H
 #ifdef __APPLE__
@@ -76,6 +77,13 @@ static int sosix_darwin_broker_spawn_closed(SosixDarwinImage *image, uint64_t ge
     if (owner->pid) return EALREADY;
     if (!image->kernel_bound) return ENOTSUP;
     if (strlen(endpoint) >= sizeof(((struct sockaddr_un *)0)->sun_path)) return ENAMETOOLONG;
+    /* Auto-reaping or a foreign handler invalidates the unreaped-PID guard
+     * used by close. Reject before creating a child or running constructors.
+     * The caller must serialize disposition changes for the owner lifetime. */
+    struct sigaction disposition;
+    if (sigaction(SIGCHLD, NULL, &disposition)) return errno;
+    if (disposition.sa_handler != SIG_DFL || (disposition.sa_flags & SA_NOCLDWAIT))
+        return ENOTSUP;
     SosixDarwinProcessIdentity controller;
     int e = sosix_darwin_coalition_identity(getpid(), &controller, 0);
     if (e) return e;
