@@ -83,3 +83,13 @@ It is diagnostic evidence, not pure-Simple P2 release qualification. An initial
 run referencing the unrelated main worktree's library returned failure; after
 materializing the sparse worktree's library and using it, the diagnostic passed.
 No runtime rebuild or deployment was performed.
+
+## Landing validation
+
+The native strict checker was rerun on macOS against the current release base:
+all six escape markers, the kqueue refusal, and Seatbelt denial reproduced;
+`--require-strict` returned the intentional status 78. The SSpec now registers
+an explicit non-macOS skip, preserving every Darwin assertion. This platform
+guard is source-reviewed; the updated SSpec has not been executed through a
+qualified pure-Simple runner. No strict containment or release qualification is
+claimed.

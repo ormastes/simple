@@ -9,6 +9,8 @@ and is retired through a pipe with kernel exit notification. The checker also
 confirms Darwin rejects recursive kqueue tracking. A bounded Seatbelt probe
 reports whether process creation denial is available.
 
+The SSpec explicitly skips non-macOS hosts; that skip is not containment evidence.
+
 The strict checker exits 78 because no OS-enforced all-descendant owner is
 installed. SSpec requires that failure plus every escape marker. Passing this
 spec verifies honest refusal, not strict containment or V4 capability.
