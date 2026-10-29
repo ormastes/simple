@@ -1,0 +1,42 @@
+#!/bin/sh
+# Positive kernel-coalition retirement evidence; not full strict V4 admission.
+set -eu
+if [ "$(uname -s)" != Darwin ]; then
+    echo 'SKIP: Darwin coalition evidence requires macOS'; exit 77
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/sosix-darwin-coalition.XXXXXXXX")
+service=''
+cleanup() {
+    if [ -n "$service" ]; then /bin/launchctl bootout "$service" >/dev/null 2>&1 || :; fi
+    rm -rf "$scratch"
+}
+trap cleanup EXIT HUP INT TERM
+"${CC:-cc}" -std=c11 -O0 -Wall -Wextra -Werror -Wno-deprecated-declarations \
+    "$root/src/runtime/test/rt_sosix_darwin_coalition_selfcheck.c" -o "$scratch/probe"
+domain="gui/$(id -u)"
+/bin/launchctl print "$domain" >/dev/null
+for mode in kill exit; do
+    label="org.simple.coalition-probe.$$.$mode"
+    service="$domain/$label"
+    python3 - "$scratch" "$label" "$mode" <<'PY'
+import pathlib, plistlib, sys
+directory, label, mode = sys.argv[1:]
+root = pathlib.Path(directory)
+job = {'Label': label, 'ProgramArguments': [str(root/'probe'), 'worker', mode],
+       'RunAtLoad': True, 'LaunchOnlyOnce': True,
+       'StandardOutPath': str(root/'worker.out'), 'StandardErrorPath': str(root/'worker.err')}
+(root/'worker.out').write_text('')
+(root/'job.plist').write_bytes(plistlib.dumps(job))
+PY
+    /bin/launchctl bootstrap "$domain" "$scratch/job.plist"
+    if "$scratch/probe" controller "$scratch/worker.out" "$service" "$mode"; then
+        :
+    else
+        result=$?
+        cat "$scratch/worker.err" >&2
+        exit "$result"
+    fi
+    service=''
+done
+echo 'darwin_coalition_retirement: pass'
