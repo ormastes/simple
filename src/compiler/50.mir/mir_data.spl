@@ -1376,6 +1376,35 @@ impl MirBuilder:
         if val capture = self.loop_view_capture_v1:
             capture.fail(MirLoopShapeErrorV1.Unsupported)
             return nil
+        var call_func = func
+        var call_args = args
+        if args.len() == 1:
+            var panic_message = false
+            match func.kind:
+                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                    panic_message = name == "rt_panic"
+                case _: ()
+            if panic_message:
+                # Generated guards and builtin panic share the C (ptr, byte
+                # length) ABI. Reuse the evaluated message, including tagged
+                # strings; never reevaluate it or unwrap away its byte length.
+                var message = args[0]
+                match message.kind:
+                    case MirOperandKind.Move(local): message = mir_operand_copy(local)
+                    case _: ()
+                val helper_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [], return_type: MirType.i64(), is_variadic: false)))
+                val data_fn = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_string_data"), helper_type))
+                val len_fn = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_string_len"), helper_type))
+                val data = self.emit_call_value(data_fn, [message], MirType.i64())
+                val length = self.emit_call_value(len_fn, [message], MirType.i64())
+                val pointer_type = MirType.ptr(MirType(kind: MirTypeKind.I8), false)
+                val pointer = self.emit_cast(mir_operand_copy(data), pointer_type)
+                call_func = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_panic"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [pointer_type, MirType.i64()], return_type: MirType.unit(),
+                        is_variadic: false, params_known: true)))))
+                call_args = [mir_operand_copy(pointer), mir_operand_copy(length)]
         # Bare-lift (no explicit Some): an explicit Some(...) builds a heap
         # Option box on the stage4 native lane; downstream readers of the
         # flat LocalId? payload then see the box header as the id.
@@ -1385,10 +1414,10 @@ impl MirBuilder:
             val optional_unwind: BlockId? = unwind
             val normal = self.new_block(Some("invoke_cont"))
             self.set_terminator(MirTerminator.CallTerminator(
-                dest, func, args, normal, optional_unwind, self.unwind_payload, self.unwind_type_tag))
+                dest, call_func, call_args, normal, optional_unwind, self.unwind_payload, self.unwind_type_tag))
             self.switch_to_block(normal)
         else:
-            self.emit(MirInst(kind: MirInstKind.Call(dest, func, args), span: self.current_span))
+            self.emit(MirInst(kind: MirInstKind.Call(dest, call_func, call_args), span: self.current_span))
 
         dest
 

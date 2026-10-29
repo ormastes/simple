@@ -598,3 +598,16 @@ programs never change layout. Rules to keep when editing:
   native target, mode), and only while the driver declared marker mode (`pp_declare_parse_scope`).
   A target-receipted parse (flat-strips chains) or an unknown entry is never neutral; the key path
   never re-runs the preprocessor in another mode to manufacture a neutral answer.
+
+## Panic call ABI (2026-10-30)
+
+Generated one-message panic calls must split the evaluated text into raw bytes
+and byte length at MirBuilder.emit_call. Keep Abort and explicit two-argument
+calls intact. A successful native build can still contain logged rejected
+declarations; inspect those diagnostics before qualification. See
+[panic ABI evidence](../../../08_tracking/bug/cranelift_panic_call_abi_conflict_2026_10_30.md).
+
+The a52 producer's four native panic controls passed with clean compiler
+diagnostics, including runtime-concatenated text evaluated once and the cast's
+intended panic. Its separate full CLI matrix exceeded the enforced RSS cap;
+native SSpec/docgen and complete BuildRunner admission are not implied.

@@ -2442,15 +2442,18 @@ impl MirLowering:
         # string literal, or the decimal cstr just produced above for a
         # numeric arg) passes through unchanged, so this is a no-op for every
         # case that worked before.
-        val concat_cstr_op = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_interp_cstr"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: self.bootstrap_text_type(), is_variadic: false)))
-        ))
-        var b_concat_cstr = self.builder
-        val concat_cstr_res = b_concat_cstr.emit_call(concat_cstr_op, [print_arg], self.bootstrap_text_type())
-        self.builder = b_concat_cstr
-        if val concat_cstr_local = concat_cstr_res:
-            print_arg = mir_operand_copy(concat_cstr_local)
+        # Panic's builder-owned ABI split needs the original tagged byte
+        # length. Ordinary printing still consumes a C string.
+        if rt_name != "rt_panic":
+            val concat_cstr_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_interp_cstr"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: self.bootstrap_text_type(), is_variadic: false)))
+            ))
+            var b_concat_cstr = self.builder
+            val concat_cstr_res = b_concat_cstr.emit_call(concat_cstr_op, [print_arg], self.bootstrap_text_type())
+            self.builder = b_concat_cstr
+            if val concat_cstr_local = concat_cstr_res:
+                print_arg = mir_operand_copy(concat_cstr_local)
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(rt_name),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
@@ -2518,12 +2521,10 @@ impl MirLowering:
         panic as an ordinary returning call.
 
         The lowering now has two independent halves, both required:
-          1. `rt_panic(msg)` -- the REAL runtime entry (registered in
-             text_extern_abi.spl, `void rt_panic(const char*)` ->
-             `spl_panic`), reached through lower_bootstrap_print_call so the
-             message argument gets the exact same tagged/raw/numeric/aggregate
-             coercion a `print` argument does. This is what makes the message
-             survive.
+          1. The message reaches lower_bootstrap_print_call for text/numeric
+             coercion, retaining tagged text until MirBuilder.emit_call splits
+             it into raw bytes and byte length for the real C runtime entry
+             `void rt_panic(const uint8_t*, uint64_t)` -> `spl_panic`.
           2. `MirTerminator.Abort` -- so the block DIVERGES. Backends lower
              Abort to a hard trap (INT3/BRK/EBREAK, see 30743ecd674). If
              rt_panic is ever missing, stubbed, or returns, the trap still
