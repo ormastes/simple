@@ -52,3 +52,22 @@ actual child argv observation, and cross-architecture execution remain separate
 validation gates. The pre-existing imported `vmm_copyin_packed_string_vector`
 has no definition in the current VMM copy-in sources; this change uses the
 existing char** decoder and does not claim the old packed path is supported.
+
+## Review corrections (2026-10-29)
+
+Review traced the newly selected image-construction path into the scheduler and
+found two existing defects that also affect argv spawn. The syscall handler
+replaced the scheduler's registered physical child address space with a zero-root
+placeholder. It now preserves the scheduler's registration, including the
+mapping that owns the argv stack. The scheduler also reserved a second lifecycle
+identity after creating the initial context. It now retains the single task and
+generation pair reserved after mapping and entry validation.
+
+Two step-based SSpec source-contract scenarios reproduce both defects before the
+fix: the syscall body still registered a placeholder root, and the image owner
+contained two identity reservations. With the same authorized P1 diagnostic
+interpreter and flags above, all six scenarios execute: before correction,
+4 pass and 2 fail; after correction, 6 pass and 0 fail. These assertions inspect
+production ownership boundaries. They do not prove physical mappings, scheduler
+execution, successful native kernel linking, or guest argv delivery. The legacy
+packed-decoder gap above remains explicitly unverified.

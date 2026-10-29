@@ -1,5 +1,5 @@
 # Source wiring evidence; physical guest execution remains a separate gate.
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 extern fn rt_file_read_text(path: text) -> text
 
 describe "SOSIX spawn argv production wiring":
@@ -28,3 +28,23 @@ describe "SOSIX spawn argv production wiring":
         val rv64 = rt_file_read_text("src/os/kernel/arch/riscv64/syscall.spl")
         expect(x86).to_contain("val spawn_state = dispatch_spawn_binary_syscall_state(")
         expect(rv64).to_contain("val spawned = dispatch_spawn_binary_syscall_state(")
+
+    it "preserves the child's mapped address space after argv spawn [source-contract]":
+        # @req REQ-SOSIX-SPAWN-ARGV-001
+        step("Inspect the argument-aware syscall owner after child construction")
+        val source = rt_file_read_text("src/os/kernel/ipc/syscall_process.spl")
+        val spawn = source.slice(source.index_of("fn _handle_spawn_binary_state("), source.index_of("fn _handle_spawn_binary("))
+        expect(spawn).to_contain("sched.create_user_task_pid(image_result.unwrap(), priority, caps)")
+        step("Reject replacement of the scheduler-owned physical page-table root")
+        expect(spawn.contains("vmm_new_process_space(0, 0)")).to_equal(false)
+        expect(spawn.contains("register_task_vmspace(")).to_equal(false)
+
+    it "reserves one paired task identity for an argv child [source-contract]":
+        # @req REQ-SOSIX-SPAWN-ARGV-001
+        step("Inspect the image creation owner reached by argument-aware spawn")
+        val source = rt_file_read_text("src/os/kernel/scheduler/scheduler_exec.spl")
+        val create = source.slice(source.index_of("pub fn sched_create_user_task_pid_impl("), source.index_of("pub fn sched_create_user_task_from_bytes_pid_impl("))
+        step("Require one identity reservation and retain that identity's generation")
+        expect(create.count("scheduler_next_task_lifecycle_identity_take_v1()")).to_equal(1)
+        expect(create).to_contain("val user_next_id = identity.task_id")
+        expect(create).to_contain("lifecycle_generation: identity.lifecycle_generation")
