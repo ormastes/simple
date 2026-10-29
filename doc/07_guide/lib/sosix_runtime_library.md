@@ -82,6 +82,22 @@ methods reject unavailable providers. Neither this test nor an import-only
 facade probe proves a deployed native Simple call path. No P2 rebuild or
 strict Mac provider qualification was performed for #5233/#5234.
 
+### Darwin process foundation checks
+
+Run `sh scripts/check/check-sosix-darwin-process.shs` on macOS to check the
+trusted snapshot process component and the V4 cwd pin foundation. The V4
+foundation can also be run alone with
+`sh scripts/check/check-sosix-v4-darwin-foundation.shs`; it exits 77 on other
+hosts. Its native C selfcheck verifies pin identity, rebinding, close and
+capacity. It does not qualify V4 launch or the compiled Simple facade.
+
+The SSpec `test/02_integration/lib/io/process_observation_hal_capabilities_v4_spec.spl`
+requires a compiled native runner for its host checks; interpreter runs execute
+the portable deadline check and report the two native checks as skipped. The SOSIX V1 boundary spec
+`test/02_integration/lib/sosix/process_observation_boundary_v1_spec.spl`
+checks unsupported-provider refusal and malformed receipts. It does not
+establish a V4 SOSIX route or a positive host process provider.
+
 ## Current qualification note — 2026-10-11
 
 Availability statements elsewhere in this guide are dated observations, not a current cross-platform certification matrix. Use the [variation/SOSIX integration](../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) and exact source-matched provider receipts for support claims.

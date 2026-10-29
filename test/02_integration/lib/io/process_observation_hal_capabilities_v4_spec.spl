@@ -1,0 +1,47 @@
+# Native HAL checks: interpreter V4 stubs cannot supply host evidence.
+# @req REQ-POV4-C02
+use std.spec.{describe, it, expect, fail, skip, skip_on_interpreter}
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{platform_name}
+use std.common.process.deadline_v4.{process_observation_deadlines_v4}
+use std.nogc_sync_mut.io.process_observation_v4.{process_observation_capabilities_v4, OwnedCwdPinV4}
+
+fn check_native_capabilities_v4():
+    step("Read the native host capability receipt")
+    match process_observation_capabilities_v4():
+        Ok(capabilities):
+            if platform_name() == "macos":
+                step("Keep strict V4 unavailable on the Darwin foundation")
+                expect(capabilities.available).to_equal(false)
+            if capabilities.available:
+                expect(capabilities.capability_bits).to_be_greater_than(0)
+                expect(capabilities.max_live_tickets).to_be_greater_than(0)
+                expect(capabilities.max_capture_bytes).to_be_greater_than(0)
+                expect(capabilities.max_caller_wait_ns).to_be_greater_than(0)
+                expect(capabilities.runtime_error).to_equal(0)
+            else:
+                expect(capabilities.capability_bits).to_equal(0)
+                expect(capabilities.max_live_tickets).to_equal(0)
+                expect(capabilities.max_capture_bytes).to_equal(0)
+                expect(capabilities.max_caller_wait_ns).to_equal(0)
+                expect(capabilities.runtime_error).to_be_greater_than(0)
+        Err(reason): fail(reason)
+
+fn check_native_darwin_cwd_v4():
+    step("Pin the host root directory and close its authority")
+    match OwnedCwdPinV4.pin("/"):
+        Ok(pin):
+            expect(pin.digest().unwrap().len()).to_equal(32)
+            expect(pin.close().unwrap()).to_equal(true)
+            expect(pin.digest().is_err()).to_equal(true)
+        Err(reason): fail(reason)
+
+describe "V4 process observation HAL host admission":
+    it "rejects a deadline that overflows the clock domain":
+        step("Construct deadlines at the signed integer limit")
+        expect(process_observation_deadlines_v4(9223372036854775807, 1, 0, 0).is_err()).to_equal(true)
+    skip_on_interpreter("reports the native capability receipt", check_native_capabilities_v4)
+    if platform_name() == "macos":
+        skip_on_interpreter("pins and closes a Darwin cwd", check_native_darwin_cwd_v4)
+    else:
+        skip("pins and closes a Darwin cwd", "requires the Darwin cwd provider")
