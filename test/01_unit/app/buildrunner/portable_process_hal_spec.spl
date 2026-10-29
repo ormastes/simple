@@ -1,0 +1,44 @@
+# The portable BuildRunner process port must keep process ownership in the
+# SOSIX-backed app.io.process_ops facade. This is a real host child smoke, not
+# a scheduler simulation; supported-host failures are assertions, never skips.
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.io.env_ops.{host_os}
+use app.io.file_ops.{path_absolute}
+
+fn buildrunner_hal_exit_command_v1() -> (text, [text]):
+    if host_os() == "windows":
+        ("cmd.exe", ["/c", "exit", "7"])
+    else:
+        ("sh", ["-c", "exit 7"])
+
+describe "BuildRunner portable host process HAL":
+    it "launches through the process port and preserves the host exit status":
+        val host = host_os()
+        if host != "windows" and host != "linux" and host != "macos" and host != "darwin":
+            fail("BuildRunner process HAL is not qualified on host: " + host)
+        val process = builder_process_portable_v1()
+        val (program, args) = buildrunner_hal_exit_command_v1()
+        val token = process.spawn_operation(program, "", args, path_absolute("."))
+        match token:
+            case Err(reason): fail("SOSIX-backed process spawn failed: " + reason)
+            case Ok(pid):
+                expect(pid > 0).to_equal(true)
+                match process.wait_operation(pid, 10000):
+                    case Ok(code): expect(code).to_equal(7)
+                    case Err(reason):
+                        # Attempt both cleanup and reaping before the scenario
+                        # reports a wait failure, so a broken host observation
+                        # cannot leave its child behind.
+                        val _terminated = process.terminate_operation(pid)
+                        val _reaped = process.wait_operation(pid, 10000)
+                        fail("SOSIX-backed process wait failed: " + reason)
+
+    it "turns host spawn and observation failures into port errors":
+        val process = builder_process_portable_v1()
+        match process.spawn_operation("/simple-buildrunner-no-such-executable", "",
+                [], path_absolute(".")):
+            case Ok(_pid): fail("missing host executable unexpectedly spawned")
+            case Err(reason): expect(reason).to_contain("spawn failed")
+        expect(process.wait_operation(-1, 10).is_err()).to_equal(true)
+        expect(process.terminate_operation(-1).is_err()).to_equal(true)
