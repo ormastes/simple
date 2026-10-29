@@ -1,0 +1,26 @@
+# Run with a native runtime or the P1 hybrid diagnostic (default run mode).
+use std.scv.compile_source_inventory.*
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+extern fn rt_heap_registry_count() -> i64
+fn main() -> i64:
+    val digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    var rows = ["simple-compile-source-inventory-v1", "generation=128", "count=128"]
+    var i = 0
+    while i < 128:
+        rows = rows.push("src/item{1000 + i}.spl|{digest}|{digest}|{digest}|{digest}|{digest}|1")
+        i = i + 1
+    val content = rows.join("\n")
+    val warm = compile_source_inventory_decode_v1(content)
+    if not warm.valid: return 1
+    if not transient_scope_begin(): return 2
+    val before = rt_heap_registry_count()
+    val read = compile_source_inventory_decode_v1(content)
+    val live = rt_heap_registry_count() - before
+    val valid = read.valid and read.inventory!.entries.len() == 128
+    print "rows=128 live_delta={live} valid={valid}"
+    val ended = transient_scope_end()
+    # Allocation counters must be real: the pure interpreter returns zero.
+    # Eighteen objects per row allows fixed-cost headroom; the old decoder
+    # retains 2,454 objects and the direct validator 2,191 on the pinned P1
+    # hybrid diagnostic. This ceiling is not a coordinator RSS acceptance.
+    if valid and ended and live > 0 and live < 2304: 0 else: 3

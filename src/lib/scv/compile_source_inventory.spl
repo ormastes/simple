@@ -457,6 +457,8 @@ fn compile_source_inventory_decode_content_v1(
     if not generation_valid or not count_valid or count != lines.len() - 3:
         return CompileSourceInventoryReadV1(false, "inventory-count-invalid", "", nil)
     var entries: [CompileSourceInventoryEntryV1] = []
+    var previous = ""
+    var canonical = true
     var index = 3
     while index < lines.len():
         val fields = lines[index].split("|")
@@ -465,11 +467,23 @@ fn compile_source_inventory_decode_content_v1(
         val (size_valid, size) = compile_source_inventory_decimal_v1(fields[6])
         if not size_valid:
             return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
-        entries = entries.push(CompileSourceInventoryEntryV1(
-            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], size))
+        val entry = CompileSourceInventoryEntryV1(
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], size)
+        # The wire header and decimal parser already enforce their canonical
+        # spellings. Validate the remaining encoder invariants directly:
+        # valid fields and strictly increasing byte-ordered unique identities.
+        # Re-encoding every admitted generation duplicates all row strings and
+        # the entire inventory inside a caller-owned transient scope.
+        if not compile_source_inventory_entry_valid_v1(entry) or
+                compile_source_inventory_identity_cmp_v1(previous, entry.source_identity) >= 0:
+            canonical = false
+        previous = entry.source_identity
+        entries = entries.push(entry)
         index = index + 1
     val inventory = CompileSourceInventoryV1(1, generation, entries)
-    if compile_source_inventory_encode_v1(inventory) != content:
+    # Preserve malformed-row precedence over canonicality, as in the original
+    # decode-then-encode validator, even when an earlier row is noncanonical.
+    if not canonical:
         return CompileSourceInventoryReadV1(false, "inventory-noncanonical", "", nil)
     val digest = if verified_digest == "": sha256_text(content) else: verified_digest
     CompileSourceInventoryReadV1(true, "ok", digest, Some(inventory))
