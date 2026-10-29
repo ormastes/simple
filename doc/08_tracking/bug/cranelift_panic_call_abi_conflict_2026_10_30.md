@@ -48,8 +48,10 @@ Log: `/private/tmp/astra-panic-abi-spec-ready.log`, SHA256
 `ab0e79dc790ea03724fc1254325b3f1c6651476198ba5f138520407728141dc8`.
 
 Native validation must rebuild the changed producer, compile the durable probe
-without any declaration/import/zero-reference diagnostic, and execute all
-three modes. The cast must report its intended panic, not merely exit nonzero.
+without any declaration/import/zero-reference diagnostic, and execute the original
+three modes plus the added `--dynamic` mode. The latter prints a producer marker
+once and panics with runtime-concatenated tagged text; it is authored but not yet
+executed. The cast must report its intended panic, not merely exit nonzero.
 Rerun the Linux capacity ABI probe with similarly clean compiler diagnostics
 before treating its earlier successful execution as clean worker qualification.
 Generic Cranelift Unit-return policy and failure latching are separate open
