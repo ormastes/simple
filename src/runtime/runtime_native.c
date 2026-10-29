@@ -1,6 +1,13 @@
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
+/* Descriptor snapshots use Windows 8 FILE_ID_INFO. Select the existing
+ * runtime_fd_stat_v1.h minimum before any transitive Windows header, whose
+ * include guards would otherwise hide declarations from a later definition. */
+#if defined(_WIN32) && (!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602)
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
 #include "runtime_alloc_observer.h"
 #if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
 const volatile int rt_alloc_observer_native_owner_v1 = 1;
