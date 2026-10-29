@@ -19,14 +19,15 @@ producer. Publication uses exclusive creation so an existing receipt or final
 destination symlink fails instead of being overwritten; callers must provide a
 trusted parent directory and a fresh output filename.
 
-Before landing, build the native fixture and application from the same source
+For pending native qualification, build the fixture and application from the same source
 revision with an admitted surviving pure-Simple producer. Run the green, red
 and empty controls; execute the SSpec; exercise actual entrypoint opt-in,
 unset/empty opt-out, descendant environment removal, fresh output publication,
 existing-file and symlink rejection, unavailable parent and failure-exit
-preservation. Review the exact final changes independently. Those checks remain
-pending; the scoped candidate must not be represented as a merged or qualified
-whole-runner coverage implementation.
+preservation. Those execution checks remain pending. Following independent
+source review, the user explicitly authorized landing without native
+qualification. Landing does not qualify the fixture or entrypoint and does not
+establish whole-runner coverage.
 
 The 2026-10-28 runner coverage attempt used the `aa58...` runtime generation's
 Rust seed as its compiler child. It timed out after 240,034 ms while building
