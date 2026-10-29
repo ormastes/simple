@@ -641,3 +641,14 @@ remain required independently of the shell/protocol controls.
 ## Native tool aliases and receipt artifacts
 
 PATH-selected native tools are resolved to executable physical regular-file targets before hashing (for example Debian llvm-config aliases). Receipt-named compiler artifacts retain strict rejection of symlink leaves. Dangling/cyclic/nonexecutable tool targets fail closed. The focused harness is `sh scripts/check/check-bootstrap-native-command-alias.shs`; it does not qualify Windows execution or a bootstrap stage.
+
+## Rust authority host selection
+
+When the pinned Rust channel differs from rustup's fully qualified default
+toolchain, the authority resolver selects the installed pinned-channel directory
+with that default's host suffix. Multiple installed Windows ABIs therefore do
+not require deleting toolchains or changing the repository's pinned channel.
+Missing or ambiguous matching hosts fail closed. Ambient `RUSTUP_TOOLCHAIN`
+does not override this fingerprint selection. The focused regression is
+`scripts/check/check-bootstrap-channel-host-selection.shs`; on MSYS, run with
+Unix tools on PATH and `MSYS=winsymlinks:nativestrict` for real symlink fixtures.

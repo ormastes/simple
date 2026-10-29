@@ -1709,12 +1709,14 @@ bootstrap_stage3_native_metadata_probe() (
 # `rustup show active-toolchain` / `RUSTUP_TOOLCHAIN=<channel> rustc` would
 # also resolve correctly, but only by executing rustup/rustc; this reads the
 # filesystem the same way the rest of this file already does. Requires
-# EXACTLY one non-symlink "<channel>-*" directory -- zero or several (e.g. a
-# dated nightly alongside a plain one) is ambiguous and fails closed.
+# EXACTLY one non-symlink "<channel>-*" directory, optionally restricted to
+# the host suffix of a fully qualified default toolchain. Zero or several
+# matches remain ambiguous and fail closed.
 bootstrap_stage3_channel_toolchain_host() (
-    [ "$#" -eq 2 ] || return 1
+    [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || return 1
     bootstrap_stage3_scan_home=$1
     bootstrap_stage3_scan_channel=$2
+    bootstrap_stage3_scan_default=${3-}
     case "$bootstrap_stage3_scan_channel" in
         ''|*[!A-Za-z0-9._-]*) return 1 ;;
     esac
@@ -1726,6 +1728,17 @@ bootstrap_stage3_channel_toolchain_host() (
     do
         [ -d "$bootstrap_stage3_scan_dir" ] || continue
         [ ! -L "$bootstrap_stage3_scan_dir" ] || continue
+        # A different default channel still names the authoritative host.
+        # Match its full host suffix rather than guessing an ABI or accepting
+        # an ambient RUSTUP_TOOLCHAIN that the execution path does not use.
+        if [ -n "$bootstrap_stage3_scan_default" ]; then
+            bootstrap_stage3_scan_candidate=${bootstrap_stage3_scan_dir##*/}
+            bootstrap_stage3_scan_host=${bootstrap_stage3_scan_candidate#"$bootstrap_stage3_scan_prefix"}
+            case "$bootstrap_stage3_scan_default" in
+                *-"$bootstrap_stage3_scan_host") ;;
+                *) continue ;;
+            esac
+        fi
         bootstrap_stage3_scan_count=$((bootstrap_stage3_scan_count + 1))
         bootstrap_stage3_scan_match=$bootstrap_stage3_scan_dir
     done
@@ -1840,7 +1853,7 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
                     # no host at all) does not and stays a hard parse-fail.
                     modern_dashes = modern
                     dash_count = gsub(/-/, "-", modern_dashes)
-                    if (dash_count >= 2) exit 3
+                    if (dash_count >= 2) { print modern; exit 3 }
                     exit 1
                 }
                 host = substr(modern, length(prefix) + 1)
@@ -1857,7 +1870,8 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
         bootstrap_stage3_installed_host=$(
             bootstrap_stage3_channel_toolchain_host \
                 "$bootstrap_stage3_installed_home" \
-                "$bootstrap_stage3_installed_channel"
+                "$bootstrap_stage3_installed_channel" \
+                "$bootstrap_stage3_installed_host"
         ) || {
             bootstrap_stage3_rust_toolchain_trace settings-host=channel-toolchain-absent
             return 1
