@@ -120,27 +120,36 @@ static SplArray* ticket_from(const SplArray* words) {
     return t;
 }
 
-static void check_unavailable_descendants(const char* cwd, int64_t cwd_pin,
+static void check_unavailable_policies(const char* cwd, int64_t cwd_pin,
                                          const uint8_t cwd_digest[32]) {
     SplArray* capability = rt_process_observation_v4_capabilities_value();
     /* Current host owns only the leader; no ProcessGroup/Tree capability. */
     assert(rt_array_get(capability, 3) == POV4_CAPABILITIES);
     assert((rt_array_get(capability, 3) & ~((1 << 9) - 1)) == 0);
-    for (int policy = 2; policy <= 3; policy++) {
+    for (int policy = 1; policy <= 3; policy++) {
+      for (int cgroup = 0; cgroup <= 1; cgroup++) {
+        if (policy == 1 && !cgroup) continue;
         SplArray* request = request_bytes(cwd, cwd_pin, cwd_digest, "--pov4-child", 1024);
         set_u64_at(request, 80, (uint64_t)policy);
+        if (cgroup) {
+            set_u64_at(request, 64, 64 * 1024 * 1024);
+            set_u64_at(request, 72, POV4_ENFORCEMENT_CGROUP);
+        }
         int acquisitions = test_exec_acquisitions;
         SplArray* rejected = rt_process_observation_v4_start_pinned_value(77, cwd_pin, request);
         SplArray* words = tuple_item(rejected, 3);
         assert(rt_array_get(words, POV4_STATUS) == POV4_STATUS_REJECTED);
         assert(rt_array_get(words, POV4_ERRNO) == ENOTSUP);
         assert(rt_array_get(words, POV4_FAILURE_PHASE) == POV4_FAIL_ADMISSION);
+        assert(rt_array_get(words, POV4_FAILURE_REASON) ==
+               (cgroup ? POV4_REASON_MEMORY : POV4_REASON_PROVIDER));
         assert(rt_array_get(words, POV4_PID) == 0);
         assert(rt_array_get(words, POV4_TREE_EMPTY) == 0);
         assert(rt_array_get(words, POV4_TREE_EMPTY_NS) == -1);
         assert(rt_array_get(words, POV4_TICKET_HIGH) == 0);
         assert(rt_array_get(words, POV4_TICKET_LOW) == 0);
         assert(test_exec_acquisitions == acquisitions);
+      }
     }
 }
 
@@ -251,10 +260,10 @@ int main(int argc, char** argv) {
     SplArray* cwd_digest_value=rt_process_observation_v4_cwd_digest_value(cwd_pin);
     uint8_t cwd_digest[32]; assert(rt_array_bytes_copy_checked(
         (int64_t)(uintptr_t)cwd_digest_value,cwd_digest,32)==32);
-    check_unavailable_descendants(cwd,cwd_pin,cwd_digest);
+    check_unavailable_policies(cwd,cwd_pin,cwd_digest);
     if (argc == 2 && strcmp(argv[1], "--admission-only") == 0) {
         assert(rt_process_observation_v4_close_cwd_value(cwd_pin) == 1);
-        puts("runtime_process_observation_v4_admission_selfcheck: PASS (group/tree rejected before executable acquisition)");
+        puts("runtime_process_observation_v4_admission_selfcheck: PASS (unsupported policies rejected before executable acquisition)");
         return 0;
     }
     check_work_deadlines(cwd,cwd_pin,cwd_digest);
