@@ -16,7 +16,8 @@ use std.common.build_manager.memory_policy.{builder_memory_enforcement_bytes_v1,
 use std.common.process.observation_v4.{ProcessObservationTreeMetricKindV4, POV4_VALID_DIRECT_RSS}
 use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
 use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1, builder_capacity_settlement_encode_v1}
-use std.nogc_sync_mut.io.process_observation_v4.{OwnedExecutablePin, OwnedCwdPinV4, ProcessObservationLeaseV4, process_observation_capabilities_v4, process_observation_start_pinned_v4}
+use std.nogc_sync_mut.io.process_observation_v4.{OwnedCwdPinV4, ProcessObservationLeaseV4, process_observation_capabilities_v4}
+use std.nogc_sync_mut.sosix.memory_executable_v1.{SosixMemoryExecutableV1}
 use std.common.process.observation_v4.{ProcessObservationRequestV4, ProcessObservationEnvironmentV4, ProcessObservationPacketKindV4, ProcessObservationEnforcementKindV4, ProcessObservationDescendantPolicyV4, ProcessObservationFailureReasonV4, freeze_process_observation_receipt_v4, freeze_process_observation_cleanup_receipt_v4}
 
 pub fn builder_worker_verify_inputs_v1(task: BuildTaskV1, root: text) -> text:
@@ -157,7 +158,8 @@ fn builder_worker_abort_v1(owner: ProcessObservationLeaseV4, root: text, identit
     false
 
 fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result<(text, i64), text>:
-    # This provider has process-group containment but no per-tree memory cap.
+    # This worker requires process-group retirement from its provider. The
+    # current native V4 owner rejects that policy; it has no per-tree memory cap.
     val admitted = builder_worker_memory_admit_v1(task, root, host_id)?
     val capabilities = match process_observation_capabilities_v4():
         Ok(value): value
@@ -172,7 +174,7 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
             val context = build_runner_context_decode_v1(file_read_regular_no_follow_bounded(root + "/work/" + input.path, 2048)?)?
             if context.environment_digest != build_runner_environment_digest_v1(environment, root)?:
                 return Err("compiler environment differs from admitted task context")
-    var executable = OwnedExecutablePin.pin(root + "/producer.exe")?
+    var executable = SosixMemoryExecutableV1.prepare(root + "/producer.exe")?
     var directory = match OwnedCwdPinV4.pin(root + "/work"):
         Ok(value): value
         Err(message):
@@ -180,7 +182,9 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
             return Err(message)
     var argv: [text] = [root + "/producer.exe"]
     for arg in task.args: argv = argv.push(arg)
-    val executable_digest = match executable.digest():
+    # Validate the immutable snapshot against the admitted task, not the earlier
+    # pathname hash: producer.exe may have changed between staging and pinning.
+    val executable_digest = match executable.digest_expected(task.producer_digest):
         Ok(value): value
         Err(message):
             val _directory_closed = directory.close()
@@ -203,7 +207,7 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
         enforcement_kind: ProcessObservationEnforcementKindV4.None,
         descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup,
         max_clock_resolution_ns: 10000000)
-    val started = process_observation_start_pinned_v4(executable, directory, request)
+    val started = executable.start_expected(directory, request, executable_digest)
     val _directory_closed = directory.close()
     val _executable_closed = executable.close()
     val start = started?
