@@ -652,3 +652,19 @@ Missing or ambiguous matching hosts fail closed. Ambient `RUSTUP_TOOLCHAIN`
 does not override this fingerprint selection. The focused regression is
 `scripts/check/check-bootstrap-channel-host-selection.shs`; on MSYS, run with
 Unix tools on PATH and `MSYS=winsymlinks:nativestrict` for real symlink fixtures.
+
+## Narrow hosted runtime owners
+
+Bootstrap callers needing CPU queries, hosted text or refcount operations use
+`std.nogc_sync_mut.sffi.cpu`, `.host_text` and `.rc_graph` respectively. The
+broad `.host` facade retains compatibility exports, but retaining its object
+can introduce unrelated privileged hardware, rendering and TLS dependencies.
+
+The focused fixture is `test/fixtures/bootstrap_builder/host_owner_closure_probe.spl`.
+Use the exact bootstrap runtime authority and no-stub lane for diagnostics;
+feed BOM-free `owner-probe` plus LF through a raw pipe. A PowerShell
+`StandardInput.BaseStream` byte buffer alone does not prove BOM-free child input.
+The fixture checks CPU queries, signed text, stdin and refcount operations;
+its PASS does not qualify the full compiler or runner. Retained evidence and
+limitations are recorded in
+`doc/08_tracking/bug/windows_stage2_broad_host_closure_2026-10-29.md`.
