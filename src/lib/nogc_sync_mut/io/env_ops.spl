@@ -4,15 +4,32 @@
 # The environment snapshot is runtime-owned and may fail allocation. Preserve
 # its tuple-array representation; converting it to a Dict here would both lie
 # about the ABI and allocate on every snapshot.
-@unsafe(reason: "raw nullable environment snapshot returns a runtime-owned tuple array", capabilities: [ffi])
-extern fn rt_env_vars() -> [(text, text)]?
+@unsafe(reason: "decode the runtime-owned environment tuple array at its ABI boundary", capabilities: [ffi])
+extern fn rt_env_vars() -> i64
+extern fn rt_array_len(array: i64) -> i64
+extern fn rt_array_get(array: i64, index: i64) -> i64
+extern fn rt_tuple_len(tuple: i64) -> i64
+extern fn rt_tuple_get(tuple: i64, index: i64) -> text
+extern fn rt_value_nil() -> i64
 use std.io_runtime.{process_run, env_set_process, env_get_opt}
 use std.io_runtime.{cwd_process}
 
-@always_inline
 fn _env_vars_raw() -> [(text, text)]?:
     unsafe(capabilities: [ffi]):
-        rt_env_vars()
+        val raw = rt_env_vars()
+        if raw == rt_value_nil(): return nil
+        val count = rt_array_len(raw)
+        if count < 0: return nil
+        var result: [(text, text)] = []
+        var index = 0
+        while index < count:
+            val pair = rt_array_get(raw, index)
+            if rt_tuple_len(pair) != 2: return nil
+            val key = rt_tuple_get(pair, 0)
+            val value = rt_tuple_get(pair, 1)
+            result = result.push((key, value))
+            index = index + 1
+        return result
 
 # Nil comparisons do not narrow optional receivers. Bind the text payload
 # before invoking text methods; keep detection pure for parallel tests.
