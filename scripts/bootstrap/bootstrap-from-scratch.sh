@@ -2393,6 +2393,12 @@ bootstrap_stage_sanity() (
     esac
     # For a 19-digit value starting with 9, compare its 18-digit tail so
     # the shell never has to parse an overflowing signed integer.
+    # The compiler converts bytes to KiB. Reject truncation to a zero floor.
+    if [ "${#sanity_memory_reserve}" -lt 4 ] ||
+       { [ "${#sanity_memory_reserve}" -eq 4 ] && [ "$sanity_memory_reserve" -lt 1024 ]; }; then
+      echo 'bootstrap-sanity-error: phase=resource-validation reason=invalid-build-memory-reserve raw_status=125' >&2
+      return 125
+    fi
     if [ "${#sanity_memory_reserve}" -gt 19 ] ||
        { [ "${#sanity_memory_reserve}" -eq 19 ] &&
          [ "${sanity_memory_reserve%??????????????????}" = 9 ] &&
@@ -2690,6 +2696,8 @@ bootstrap_stage_sanity() (
     {
       echo "schema=simple-bootstrap-sanity-evidence-v1"
       echo "status=${sanity_status}"
+      echo "build_memory_reserve_bytes=${sanity_memory_reserve:-25769803776}"
+      echo "build_memory_reserve_source=$([ "$sanity_memory_reserve_present" = x ] && echo explicit || echo default)"
       echo "candidate_sha256_before=${candidate_sha_before}"
       echo "version_status=${version_status}"
       echo "version_output=${version}"
