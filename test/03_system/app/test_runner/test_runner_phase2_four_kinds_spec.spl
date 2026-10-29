@@ -1,0 +1,99 @@
+# @req REQ-TESTRUNNER-PHASE2-4KINDS
+# @cover src/app/test_runner_new/test_runner_args.spl 10%
+"""
+# Test runner runs the 4 test kinds with the phase2 compiler
+
+**Feature IDs:** #test-runner-phase2
+**Category:** Tooling
+
+## Overview
+
+An operator runs `simple test --compiler=phase2` over a tiny spec of each
+kind (unit, integration, system, smoke). A passing spec must be reported PASS
+with exit 0, a failing spec FAIL with exit 1. The phase2-built CLI named by
+SIMPLE_PHASE2_FULL_CLI must be the one that runs the spec, and a missing
+SIMPLE_PHASE2_FULL_CLI must produce a clear error.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, secure_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.io_runtime.{file_hash_sha256_or_empty}
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn tier_dir(kind: text) -> text:
+    if kind == "unit":
+        return "01_unit"
+    if kind == "integration":
+        return "02_integration"
+    if kind == "system":
+        return "03_system"
+    "04_smoke"
+
+# Writes <root>/<tier>/<kind>_<color>_spec.spl and returns its path.
+fn write_spec(root: text, kind: text, expected: i64) -> text:
+    val dir = root + "/" + tier_dir(kind)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    val path = dir + "/" + kind + "_" + ("green" if expected == 42 else "red") + "_spec.spl"
+    file_write(path, "use std.spec\ndescribe \"tiny\":\n    it \"checks\":\n        expect(6 * 7).to_equal({expected})\n")
+    path
+
+# Recording stand-in for the phase2-built CLI: logs its argv, runs the real binary.
+fn write_phase2_cli(root: text) -> text:
+    val path = root + "/phase2_simple"
+    file_write(path, "#!/bin/sh\necho \"phase2-invoked $*\" >> \"{path}.log\"\nexec \"{real_binary()}\" \"$@\"\n")
+    process_run_bounded("chmod", ["+x", path], 10000, 65536)
+    path
+
+fn run_phase2(cli: text, spec: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded("env", ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=" + file_hash_sha256_or_empty(cli), real_binary(), "test", "--compiler=phase2", "--no-session-daemon", spec], 300000, 4194304)
+    (out + err, code)
+
+fn new_root() -> text:
+    secure_temp_dir(_tp_get_temp_dir(), "phase2-accept-").unwrap().replace("\\", "/")
+
+describe "simple test --compiler=phase2":
+    # @capture(exec)
+    it "reports a passing spec of each kind as PASS":
+        val root = new_root()
+        val cli = write_phase2_cli(root)
+        for kind in ["unit", "integration", "system", "smoke"]:
+            step("Run a passing {kind} spec with phase2")
+            val (report, code) = run_phase2(cli, write_spec(root, kind, 42))
+            expect(code).to_equal(0)
+            expect(report).to_contain("PASS")
+
+    # @capture(exec)
+    it "reports a failing spec of each kind as FAIL":
+        val root = new_root()
+        val cli = write_phase2_cli(root)
+        for kind in ["unit", "integration", "system", "smoke"]:
+            step("Run a failing {kind} spec with phase2")
+            val (report, code) = run_phase2(cli, write_spec(root, kind, 43))
+            expect(code).to_equal(1)
+            expect(report).to_contain("FAIL")
+
+    # @capture(exec)
+    it "runs the spec with the phase2 CLI":
+        val root = new_root()
+        val cli = write_phase2_cli(root)
+        step("Run a passing unit spec with phase2")
+        run_phase2(cli, write_spec(root, "unit", 42))
+        step("The phase2 CLI saw the spec")
+        expect(file_read(cli + ".log")).to_contain("unit_green_spec.spl")
+
+    # @capture(exec)
+    it "gives a clear error when SIMPLE_PHASE2_FULL_CLI is missing":
+        val root = new_root()
+        step("Run with SIMPLE_PHASE2_FULL_CLI unset")
+        val (out, err, code) = process_run_bounded("env", ["-u", "SIMPLE_PHASE2_FULL_CLI", real_binary(), "test", "--compiler=phase2", "--no-session-daemon", write_spec(root, "unit", 42)], 300000, 4194304)
+        expect(code).to_equal(2)
+        expect(out + err).to_contain("SIMPLE_PHASE2_FULL_CLI")
