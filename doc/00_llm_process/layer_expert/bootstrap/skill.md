@@ -915,3 +915,10 @@ environment fingerprint. See `doc/00_llm_process/feature_expert/host_config/skil
 - 2026-10-25 (later): Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs.
 
 - Per-file pipeline default (P-F): latest user override (2026-10-26): unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` (`native_file_worker_v1.spl`), leaving the true `src → obj` worker pool off. `SIMPLE_FILE_WORKERS=1` explicitly opts in; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` preserves the whole-program route. Stage 3 scripts pass a set value (0|1) through and hash it into the args receipt (unset = unchanged hash; worker gets `per-file:fw=0|1`). The shared default flip is not native qualification evidence: prove overlap with `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>` (`obj_done(A) < hir_start(B)`, first-object ms, objects/min) after a Stage 3 self-rebuild. See `doc/07_guide/tooling/bootstrap_options.md`.
+
+## BuildRunner collection identity (2026-10-29)
+
+Transport collection checks task name, attempt, host and immutable task digest
+before output handling, even for failures with no outputs. Later manager
+admission does not replace this boundary. See
+[collection guide](../../../07_guide/tooling/buildrunner_collection_identity.md).
