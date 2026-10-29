@@ -153,6 +153,135 @@ class BundleTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "executable identity"):
                 module.unpack_verified_lane(corrupted, root / "verified", expected)
 
+    def test_rejects_every_unbound_lane_identity_before_extracting(self):
+        changes = {"format": "hello-buildrunner-lane-v0", "lane": "two-objects",
+            "backend": "cranelift", "phase": 3, "compile_route": "coordinator",
+            "compiler_sha256": "b" * 64, "status": "FAIL", "admitted": "true"}
+        for field, changed in changes.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                bundle, expected = self.bundle(root)
+                expected[field] = changed
+                with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                    module.unpack_verified_lane(bundle, root / "verified", expected)
+                self.assertFalse((root / "verified").exists())
+
+    def test_rejects_unsafe_member_kinds_and_names_before_extracting(self):
+        import stat
+        for name, mode in (("escape", stat.S_IFLNK | 0o777), ("device", stat.S_IFCHR | 0o600),
+                           ("dir", stat.S_IFDIR | 0o700), ("dir/file", 0),
+                           ("C:escape", 0), ("..", 0), ("/absolute", 0), ("a\\b", 0)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                bundle, expected = self.bundle(root)
+                with zipfile.ZipFile(bundle, "a") as archive:
+                    item = zipfile.ZipInfo(name)
+                    item.external_attr = mode << 16
+                    archive.writestr(item, "target")
+                with self.assertRaisesRegex(ValueError, "unsafe"):
+                    module.unpack_verified_lane(bundle, root / "verified", expected)
+                self.assertFalse((root / "verified").exists())
+
+    def test_rejects_excess_member_count_and_duplicate_identity_fields(self):
+        for case in ("member-count", "duplicate-field"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                bundle, expected = self.bundle(root)
+                changed = root / "changed.zip"
+                with zipfile.ZipFile(bundle) as source, zipfile.ZipFile(changed, "w") as target:
+                    for item in source.infolist():
+                        content = source.read(item)
+                        if case == "duplicate-field" and item.filename == "managed-lane.sdn":
+                            content += b'status: "PASS"\n'
+                        target.writestr(item, content)
+                    if case == "member-count":
+                        for index in range(126):
+                            target.writestr("extra-" + str(index), b"")
+                with self.assertRaisesRegex(ValueError, "oversized|duplicate"):
+                    module.unpack_verified_lane(changed, root / "verified", expected)
+                self.assertFalse((root / "verified").exists())
+
+
+class MemoryAdmissionTest(unittest.TestCase):
+    """Call the production verifier with hostile receipts; no compiler is run."""
+
+    def fixture(self, root):
+        artifact = root / "bundle"
+        artifact.write_bytes(b"manager-verified bundle fixture")
+        identity = "a" * 64
+        receipt = root / "receipt"
+        receipt.write_text("\n".join(["SIMPLE-BUILD-RESULT-1", "hello", "2", identity,
+            "worker1", "OK", "0", "0", "0", "0", "1", "bundle", module.matrix_digest(artifact)]) + "\n")
+        memory = root / "attempts/hello/2/worker1/compiler.memory"
+        memory.parent.mkdir(parents=True)
+        fields = {"format": "simple-build-memory-v1", "task_identity": identity,
+            "requested_policy": "enforce", "reserved_bytes": "1024", "enforcement": "job-memory",
+            "enforced_bytes": "1024", "observed_peak_bytes": "500", "peak_metric": "job-commit-peak"}
+        return artifact, receipt, memory, fields
+
+    def verify(self, root, artifact, receipt, memory, fields):
+        memory.write_text("".join(key + "=" + value + "\n" for key, value in fields.items()))
+        return module.verified_memory_receipt(root, receipt, "bundle", artifact, 1024)
+
+    def test_only_bound_kernel_enforcement_metrics_are_accepted(self):
+        for enforcement, metric in (("job-memory", "job-commit-peak"),
+                                    ("cgroup-memory-max", "cgroup-memory-peak")):
+            with self.subTest(enforcement=enforcement), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                artifact, receipt, memory, fields = self.fixture(root)
+                fields.update(enforcement=enforcement, peak_metric=metric)
+                self.assertEqual(self.verify(root, artifact, receipt, memory, fields), memory)
+
+    def test_mismatched_memory_fields_fail_closed(self):
+        cases = (("format", "unknown"), ("task_identity", "b" * 64),
+            ("requested_policy", "monitor"), ("reserved_bytes", "1023"),
+            ("reserved_bytes", "01024"), ("enforced_bytes", "0"),
+            ("enforcement", "rss-watchdog"), ("enforcement", "none"),
+            ("peak_metric", "rss"), ("peak_metric", "cgroup-memory-peak"),
+            ("observed_peak_bytes", "-1"), ("observed_peak_bytes", "+1"),
+            ("observed_peak_bytes", "01"), ("observed_peak_bytes", "1.0"),
+            ("observed_peak_bytes", ""), ("observed_peak_bytes", "1junk"))
+        for field, value in cases:
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                artifact, receipt, memory, fields = self.fixture(root)
+                fields[field] = value
+                with self.assertRaises(ValueError):
+                    self.verify(root, artifact, receipt, memory, fields)
+
+    def test_missing_extra_and_malformed_memory_fields_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            artifact, receipt, memory, fields = self.fixture(root)
+            for field in fields:
+                with self.subTest(missing=field):
+                    partial = dict(fields)
+                    del partial[field]
+                    with self.assertRaisesRegex(ValueError, "identity or format"):
+                        self.verify(root, artifact, receipt, memory, partial)
+            with self.assertRaisesRegex(ValueError, "identity or format"):
+                self.verify(root, artifact, receipt, memory, dict(fields, unexpected="1"))
+            memory.write_text("broken-line\n")
+            with self.assertRaisesRegex(ValueError, "malformed"):
+                module.verified_memory_receipt(root, receipt, "bundle", artifact, 1024)
+            memory.unlink()
+            with self.assertRaisesRegex(ValueError, "missing"):
+                module.verified_memory_receipt(root, receipt, "bundle", artifact, 1024)
+
+    def test_result_identity_status_and_artifact_must_match(self):
+        cases = ((0, "SIMPLE-BUILD-RESULT-0"), (1, "other-task"), (2, "0"),
+            (2, "../2"), (3, "not-a-hash"), (4, "../../worker"), (5, "FAIL"),
+            (6, "1"), (10, "0"), (10, "2"), (11, "other-output"), (12, "b" * 64))
+        for index, value in cases:
+            with self.subTest(index=index, value=value), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                artifact, receipt, memory, fields = self.fixture(root)
+                lines = receipt.read_text().splitlines()
+                lines[index] = value
+                receipt.write_text("\n".join(lines) + "\n")
+                with self.assertRaises(ValueError):
+                    self.verify(root, artifact, receipt, memory, fields)
+
 
 if __name__ == "__main__":
     unittest.main()
