@@ -14,3 +14,9 @@ The Hello fixture declares a native executable only and pins one-binary mode
 in argv and versioned cache identity. Darwin callers supply SDKROOT and
 MACOSX_DEPLOYMENT_TARGET; the worker retains them in its bound snapshot. See
 [Hello prerequisites](../../../07_guide/tooling/buildrunner_stage_trace.md#native-hello-fixture-prerequisites).
+
+Frozen P2 loses the imported database session receiver after Result-match and
+optional bang-unwrap. Keep the explicit BuildRunnerDatabaseSessionV1 binding
+until a new producer passes the unannotated native probe. Settlement and finish
+are ownership gates, never optional diagnostics. See
+[tracked inference boundary](../../../08_tracking/bug/buildrunner_database_match_unwrap_owner_2026_10_29.md).

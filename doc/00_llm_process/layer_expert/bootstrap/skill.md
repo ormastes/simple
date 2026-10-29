@@ -927,3 +927,8 @@ The native BuildRunner Hello fixture selects one-binary mode and versions its
 cache identity. Preserve Darwin SDKROOT/deployment target before manager launch;
 compiler exit zero, direct Hello and production worker admission are distinct
 gates. See the BuildRunner stage-trace guide's native Hello prerequisites.
+
+A source type annotation can preserve a frozen producer's imported optional
+class owner without removing its methods. The BuildRunner session probe
+requires a real state mutation and native42 result; keep compiler-inference
+status open until the unannotated source works with a rebuilt producer.

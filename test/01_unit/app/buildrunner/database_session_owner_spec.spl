@@ -1,0 +1,29 @@
+"""Preserve imported session ownership and require its settlement effects.
+
+The paired native mains session_unwrap_repro.spl and session_unwrap_typed.spl
+test the frozen compiler's type-loss boundary. These scenarios exercise both
+error and success behavior through the explicitly typed receiver.
+"""
+use std.spec.{describe, it, expect}
+use std.spec.step
+use test.fixtures.buildrunner.session_unwrap_owner.{SessionProbe, session_probe_open}
+
+describe "BuildRunner imported optional session receiver":
+    it "retains finish refusal until settle actually changes the session":
+        step("Open an imported Result containing an optional session")
+        val maybe_database = match session_probe_open():
+            Ok(value): value
+            Err(reason):
+                fail(reason)
+                nil
+        expect(maybe_database != nil).to_equal(true)
+        val database: SessionProbe = maybe_database!
+        step("Require the real error before terminal rows are settled")
+        val before = database.finish()
+        expect(before.is_err()).to_equal(true)
+        expect(before.unwrap_err()).to_equal("settle did not execute")
+        step("Settle the same owner and require the resulting state")
+        expect(database.settle().unwrap()).to_equal(true)
+        val finished = database.finish()
+        expect(finished.is_err()).to_equal(false)
+        expect(finished.unwrap()).to_equal(42)
