@@ -1,0 +1,37 @@
+# Native-only process capture ABI probe. This does not depend on the test runner.
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_host_os}
+
+@unsafe(reason: "inspect the borrowed text bytes while their owner is live", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_u8(address: i64, offset: i64) -> i64
+
+fn check_bytes(value: text) -> bool:
+    val expected: [i64] = [65, 237, 149, 156, 234, 184, 128, 240, 159, 153, 130]
+    if value.len() != 11: return false
+    val address = value.ptr()
+    if address == 0: return false
+    var index = 0
+    while index < expected.len():
+        val byte = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_u8(address, index)
+        if byte != expected[index]: return false
+        index = index + 1
+    true
+
+fn main() -> i64:
+    val literal = "A한글🙂"
+    val owned = "A" + "한글🙂"
+    if not check_bytes(literal) or not check_bytes(owned):
+        print "FAIL text-byte-abi"
+        return 1
+    val windows = sosix_test_host_os() == "windows"
+    val command = if windows: "cmd.exe" else: "/bin/sh"
+    val args = if windows:
+        ["/d", "/c", "echo CAPTURE_OUT & echo CAPTURE_ERR 1>&2 & exit /b 7"]
+    else:
+        ["-c", "printf CAPTURE_OUT; printf CAPTURE_ERR >&2; exit 7"]
+    val (stdout, stderr, status) = process_capture_bounded_native(command, args, 10000, 4096)
+    if status != 7 or not stdout.contains("CAPTURE_OUT") or not stderr.contains("CAPTURE_ERR"):
+        print "FAIL capture status={status} stdout={stdout} stderr={stderr}"
+        return 1
+    print "PASS native-process-capture-word-abi"
+    0
