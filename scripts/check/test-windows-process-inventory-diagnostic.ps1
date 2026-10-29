@@ -44,16 +44,17 @@ function Get-CimInstance {
         }
         return
     }
-    return @(
-        [pscustomobject]@{ ProcessId = 500; ParentProcessId = 1; WorkingSetSize = 1024; Name = 'cmd.exe'; CommandLine = $null },
-        [pscustomobject]@{ ProcessId = 501; ParentProcessId = 1; WorkingSetSize = 2048; Name = 'system.exe'; CommandLine = 'system.exe' }
-    )
+    $rows = @([pscustomobject]@{ ProcessId = 500; ParentProcessId = 1; WorkingSetSize = 1024; Name = 'cmd.exe'; CommandLine = $null })
+    if ($env:SIMPLE_INVENTORY_FIXTURE_LIVE -ne 'empty') {
+        $rows += [pscustomobject]@{ ProcessId = 501; ParentProcessId = 1; WorkingSetSize = 2048; Name = 'system.exe'; CommandLine = 'system.exe' }
+    }
+    return $rows
 }
 '@
 $raceFixture = Join-Path $evidence 'race-provider.ps1'
 $raceText = $text.Replace('Set-StrictMode -Version Latest', "Set-StrictMode -Version Latest`n$mock")
 [System.IO.File]::WriteAllText($raceFixture, $raceText, [System.Text.UTF8Encoding]::new($false))
-foreach ($live in @('0', '1')) {
+foreach ($live in @('0', '1', 'empty')) {
     $env:SIMPLE_INVENTORY_FIXTURE_LIVE = $live
     $raceSnapshot = Join-Path $evidence "race-$live.snapshot"
     $raceStdout = Join-Path $evidence "race-$live.stdout"
@@ -69,13 +70,18 @@ foreach ($live in @('0', '1')) {
             if ($race.ExitCode -ne 0) { throw 'confirmed exited process was not omitted' }
             $rows = [System.IO.File]::ReadAllText($raceSnapshot)
             if ($rows -match '(?m)^500\|' -or $rows -notmatch '(?m)^501\|') { throw 'stale-process snapshot was incorrect' }
-        } else {
+        } elseif ($live -eq '1') {
             if ($race.ExitCode -eq 0) { throw 'live process without a command line was accepted' }
             if (-not ([System.IO.File]::ReadAllText($raceStderr)).Contains('command line unavailable for gate-sensitive PID 500')) {
                 throw 'live-process refusal lost its diagnostic'
+            }
+        } else {
+            if ($race.ExitCode -eq 0) { throw 'empty revalidated inventory was accepted' }
+            if (-not ([System.IO.File]::ReadAllText($raceStderr)).Contains('no live rows after revalidation')) {
+                throw 'empty-inventory refusal lost its diagnostic'
             }
         }
     } finally { $race.Dispose() }
 }
 Remove-Item Env:SIMPLE_INVENTORY_FIXTURE_LIVE -ErrorAction SilentlyContinue
-Write-Output 'PASS — exited process omitted and live unknown process refused'
+Write-Output 'PASS — exited process omitted; live unknown and empty inventory refused'

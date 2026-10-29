@@ -49,6 +49,7 @@ if ($Worker) {
             if ($size -gt 16777216) { throw 'Windows process inventory exceeds 16 MiB; refusing partial inventory' }
             $rows.Add($row)
         }
+        if ($rows.Count -eq 0) { throw 'Windows process inventory has no live rows after revalidation' }
         [System.IO.File]::WriteAllText($OutputPath, ($rows -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
         exit 0
     } catch {
