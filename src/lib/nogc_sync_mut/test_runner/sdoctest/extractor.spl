@@ -37,10 +37,20 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
     var ignore_next = false
     var ignore_region = false
     var pending_run_config = ""
+    # A fence of any other language (python, bash, untagged, 4+ backticks) is
+    # opaque: nothing inside it is a marker or a simple block.
+    var other_fence_len = 0
+    var simple_fence_len = 3
 
     while i < lines.len():
         val line = lines[i]
         val trimmed = line.trim()
+
+        if other_fence_len > 0:
+            if fence_closes(trimmed, other_fence_len):
+                other_fence_len = 0
+            i = i + 1
+            continue
 
         # Check for HTML comment markers
         if trimmed == "<!--sdoctest:skip-next-->":
@@ -85,6 +95,7 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
                 in_code_block = true
                 code_lines = []
                 start_line = i + 1
+                simple_fence_len = fence_tick_count(trimmed)
 
                 # Parse language and modifiers from fence line
                 val fence_info = parse_fence_line(trimmed)
@@ -113,9 +124,11 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
                 # Apply ignore-region
                 if ignore_region:
                     current_modifiers.push(SdoctestModifier.Ignore)
+            elif trimmed.starts_with("```"):
+                other_fence_len = fence_tick_count(trimmed)
         else:
             # Inside a code block
-            if trimmed == "```":
+            if fence_closes(trimmed, simple_fence_len):
                 in_code_block = false
                 # For sdoctest blocks, strip >>> prompts and remove output lines
                 var final_lines = code_lines
@@ -142,6 +155,17 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
 # =========================================================================
 # Fence Line Parsing
 # =========================================================================
+
+fn fence_tick_count(trimmed: text) -> i64:
+    var n = 0
+    while n < trimmed.len() and trimmed[n:n + 1] == "`":
+        n = n + 1
+    n
+
+# A closing fence is only backticks (no info string), at least as long as the opener.
+fn fence_closes(trimmed: text, open_len: i64) -> bool:
+    val n = fence_tick_count(trimmed)
+    n >= open_len and n == trimmed.len()
 
 fn parse_fence_line(fence: text) -> (text, [SdoctestModifier]):
     # Input examples:
