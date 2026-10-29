@@ -13,7 +13,9 @@ awk '
   END { if (!finished) exit 2 }
 ' "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$tmp/header.sh"
 . "$tmp/header.sh"
-os=linux progress_log=present log_dir=/logs
+os=linux progress_log=present log_dir=/logs rust_shared_cache_root=
+# Cache locking is unrelated to this isolated progress-routing test.
+bootstrap_acquire_shared_rust_cargo_cache() { return 0; }
 absolute_path() { printf '%s\n' "$1"; }
 bootstrap_progress_mark() { milestone=$1; }
 for label in bootstrap-preflight rust-seed-build; do
@@ -25,3 +27,44 @@ for label in bootstrap-preflight rust-seed-build; do
   esac
 done
 echo 'PASS: common authority helper preserves preflight and Cargo error milestones'
+
+# Extract the actual prerequisite functions without executing bootstrap stages.
+awk '
+  /^bootstrap_native_archive_works_v1\(\) \{/ { copying=1 }
+  copying && /^if \[ "\$\{os\}" = linux \]; then$/ { finished=1; exit }
+  copying { print }
+  END { if (!finished) exit 2 }
+' "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$tmp/archive.sh"
+. "$tmp/archive.sh"
+# The real probe must reject an existing executable that cannot start/use its
+# runtime dependencies, not merely check command -v.
+printf '#!/bin/sh\nexit 0\n' >"$tmp/working"
+printf '#!/bin/sh\nexit 127\n' >"$tmp/broken"
+chmod +x "$tmp/working" "$tmp/broken"
+bootstrap_native_archive_works_v1 "$tmp/working"
+if bootstrap_native_archive_works_v1 "$tmp/broken"; then exit 1; fi
+if bootstrap_native_archive_works_v1 "$tmp/absent"; then exit 1; fi
+# Stub only execution to make all four fixed candidate paths deterministic on
+# any host; the actual selection function and its order remain under test.
+bootstrap_native_archive_works_v1() {
+  printf '%s\n' "$1" >>"$tmp/probes"
+  [ "$1" = "$selected" ]
+}
+selected=none
+AR="$tmp/working"; export AR
+: >"$tmp/probes"
+if bootstrap_linux_native_archive_preflight_v1 2>"$tmp/refusal"; then exit 1; fi
+[ "$(wc -l <"$tmp/probes" | tr -d ' ')" -eq 4 ]
+grep -q 'requires a working llvm-ar before source compilation' "$tmp/refusal"
+selected=/opt/homebrew/opt/llvm@18/bin/llvm-ar
+: >"$tmp/probes"
+bootstrap_linux_native_archive_preflight_v1
+[ "$(wc -l <"$tmp/probes" | tr -d ' ')" -eq 2 ]
+[ "$(sed -n 1p "$tmp/probes")" = /opt/homebrew/opt/llvm/bin/llvm-ar ]
+[ "$(sed -n 2p "$tmp/probes")" = "$selected" ]
+selected=llvm-ar
+: >"$tmp/probes"
+bootstrap_linux_native_archive_preflight_v1
+[ "$(wc -l <"$tmp/probes" | tr -d ' ')" -eq 4 ]
+[ "$(sed -n 4p "$tmp/probes")" = llvm-ar ]
+echo 'PASS: native archiver preflight rejects absent/broken tools and AR substitution; preserves native candidate priority'

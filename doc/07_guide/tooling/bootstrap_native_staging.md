@@ -131,3 +131,18 @@ The b58 source is `b58baa89e4d65a40768fceaf8221fdbdbe58da24`;
 its materialization receipt SHA-256 is
 `46ff60a06bd24c460497a318c6cd2cd0bfccb84dd0ade19cbf1b9ef26a7e4340`.
 These pins preserve the scope of the observations, not an executable promotion.
+
+### Linux native archive prerequisite
+
+Before pure-stage source compilation, the canonical bootstrap checks that the
+native owner's LLVM archiver can run `--version`. It follows the owner's
+non-Windows candidate order (the three supported Homebrew paths, then PATH
+`llvm-ar`). GNU `ar` and an `AR` override do not satisfy that owner. A missing or
+broken LLVM archiver now refuses before compiling the source closure, rather
+than failing later while creating the core-C runtime archive. Seed-only
+preparation remains separate. This availability check does not replace pinned
+tool authority, runtime inventory or Stage2/native Hello admission.
+
+The focused shell regression is
+`scripts/bootstrap/tests/preflight-authority-milestone-test.shs`; it tests failed
+executable probes, candidate priority and refusal despite a working AR override.

@@ -932,3 +932,13 @@ A source type annotation can preserve a frozen producer's imported optional
 class owner without removing its methods. The BuildRunner session probe
 requires a real state mutation and native42 result; keep compiler-inference
 status open until the unannotated source works with a rebuilt producer.
+
+### Linux native archiver preflight (2026-10-29)
+
+Canonical bootstrap now checks the strict native owner's working LLVM archiver
+before pure-stage source compilation on Linux. Seed-only preparation is separate;
+GNU ar or AR overrides do not satisfy this check. Candidate ordering and broken
+executable refusal are covered by `preflight-authority-milestone-test.shs`.
+This is availability evidence, not tool-byte authority or Stage2 admission.
+See [failure evidence](../../../08_tracking/bug/bootstrap_linux_archiver_late_failure_2026_10_29.md)
+and [native staging](../../../07_guide/tooling/bootstrap_native_staging.md).

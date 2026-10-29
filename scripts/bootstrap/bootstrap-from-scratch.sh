@@ -3760,6 +3760,28 @@ if [ "${stop_after_seed}" -eq 1 ]; then
   exit 0
 fi
 
+# Mirror native_project's strict LLVM archive prerequisite before source
+# compilation. cc_detect probes these non-Windows candidates in this order and
+# ignores AR; accepting GNU ar or an AR override here would give false assurance.
+bootstrap_native_archive_works_v1() {
+  "$1" --version >/dev/null 2>&1
+}
+bootstrap_linux_native_archive_preflight_v1() {
+  for bootstrap_archive_candidate in \
+    /opt/homebrew/opt/llvm/bin/llvm-ar \
+    /opt/homebrew/opt/llvm@18/bin/llvm-ar \
+    /usr/local/opt/llvm/bin/llvm-ar llvm-ar; do
+    if bootstrap_native_archive_works_v1 "$bootstrap_archive_candidate"; then
+      return 0
+    fi
+  done
+  echo 'error: Linux native bootstrap requires a working llvm-ar before source compilation; GNU ar and AR overrides do not satisfy the native archive owner' >&2
+  return 1
+}
+if [ "${os}" = linux ]; then
+  bootstrap_linux_native_archive_preflight_v1 || exit 1
+fi
+
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
 # The full CLI `build bootstrap` command doesn't forward the runtime path
 can_full_bootstrap=0
