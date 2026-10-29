@@ -156,3 +156,6 @@ separate from the valid C-owner fix above. Require archive-linked owner tests
 and final compiler disassembly before attributing manager behavior to either
 implementation. `check-session-heap-reclaim.shs --runtime-archive PATH` links the
 explicit archive through the same scalar public ABI; the default still tests C.
+The source-matched Rust archive fixture and focused ownership unit have passed;
+its RSS probe releases resident pages at session end. Final P2 linkage and
+actual manager memory qualification remain separate required observations.

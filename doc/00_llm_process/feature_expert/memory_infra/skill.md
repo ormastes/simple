@@ -182,5 +182,6 @@ bookkeeping before Linux GNU `libc::malloc_trim(0)`. Check the final artifact's
 symbol/disassembly; allocator imports alone cannot identify its owner. The
 same real-owner fixture accepts `--runtime-archive PATH` for the Rust archive.
 Rust heap snapshot bytes count headers; backing bytes are a separate counter.
-The C experiments do not establish P2 improvement; rebuilt Rust/P2 validation
-remains required. See the provider correction in the linked research evidence.
+The C experiments do not establish P2 improvement. The rebuilt Rust archive
+ABI fixture and focused Rust unit now pass; final P2 linkage and manager RSS
+remain pending. See the provider correction in the linked research evidence.
