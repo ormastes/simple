@@ -40,6 +40,7 @@ use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_ke
     MonoObservedGenericUseV1, mono_generic_uses_of_type_v1, mono_type_source_text_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.return_type_interface_v1.{rti_semantic_callable_return_v1}
 use std.io_runtime.{env_get, time_now_monotonic_ms}
 use compiler.mono.mono_archive_types_v1.{
     MonoTemplateBodyModeV1, MonoTemplateSignatureV1, MonoTemplateRecipeV1,
@@ -160,9 +161,12 @@ class MonomorphizationPass:
     # global i64 key let module B's symbol 5 resolve to module A's generic
     # at id 5 (mis-specialization) -- measured on a 2-module fixture 2026-08-22.
     sym_names: Dict<text, text>
-    # Symbol id -> declared return type of every NON-generic function, used by
-    # local argument-type inference.
+    # Symbol id -> semantic declared return type, including generic originals
+    # and concrete specializations. Physical function signatures stay separate.
     fn_returns: Dict<text, HirType>
+    # Canonical semantic template results, derived once after discovery. This
+    # invocation-owned cache never changes the physical archive signatures.
+    semantic_template_returns_v1: Dict<text, HirType> = {}
     # Same key -> full `fn(params) -> ret` type of every NON-generic
     # function, so a bare function REFERENCE passed as an argument
     # (`walk(e, acc, collect)`) binds a `fn(..., C) -> C` parameter.
@@ -1139,6 +1143,12 @@ impl MonomorphizationPass:
         # the fresh-symbol counter past every id already in use.
         val fsym: SymbolId = func.symbol
         self.sym_names[mono_sym_key(module_name, fsym.id)] = func.name
+        # Inference needs the declared result, even when bootstrap keeps an
+        # erased physical return ABI. Cache once per function, including
+        # generic declarations whose signatures are instantiated later.
+        val semantic_return: HirType = self.semantic_function_return_v1(module_name, func)
+        self.fn_returns[mono_sym_key(module_name, fsym.id)] = semantic_return
+        self.semantic_template_returns_v1.remove(func.name)
         if fsym.id >= self.next_symbol:
             self.next_symbol = fsym.id + 1
         if is_generic_function(func):
@@ -1155,14 +1165,13 @@ impl MonomorphizationPass:
             self.template_module[func.name] = module_name
             self.stats.generic_functions_found = self.stats.generic_functions_found + 1
         else:
-            self.fn_returns[mono_sym_key(module_name, fsym.id)] = func.return_type
             self.plain_fn_symbols[mono_sym_key(module_name, fsym.id)] = true
             if not func.is_method:
                 var ptys: [HirType] = []
                 for p in func.params:
                     val pp: HirParam = p
                     ptys = ptys.push(pp.type_)
-                self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, func.return_type, []), span: func.span)
+                self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, semantic_return, []), span: func.span)
 
     me collect_local_inherent_method_owners_v1(module: HirModule, module_name: text):
         if module.impls.len() == 0:
@@ -1369,6 +1378,29 @@ impl MonomorphizationPass:
             mono_scoped_generic_seen_v1[seen_key] = true
             mono_scoped_generic_uses_v1 = mono_scoped_generic_uses_v1.push(use_)
 
+    me semantic_function_return_v1(module_name: text, func: HirFunction) -> HirType:
+        # Keep semantic evidence separate from HirFunction.return_type: the
+        # latter may deliberately carry the bootstrap physical ABI.
+        if not self.module_symbols.has(module_name): return func.return_type
+        rti_semantic_callable_return_v1(module_name, self.module_symbols[module_name],
+            func.symbol, func.name, func.return_type)
+
+    me template_semantic_return_v1(template: MonoTemplateSignatureV1) -> HirType:
+        if self.semantic_template_returns_v1.has(template.name):
+            return self.semantic_template_returns_v1[template.name]
+        if not self.template_recipes.has(template.name): return template.return_type
+        val recipe = self.template_recipes[template.name]
+        val key = mono_sym_key(recipe.module_name, recipe.original_symbol.id)
+        if not self.fn_returns.has(key): return template.return_type
+        # The declared symbol may still spell a binder as Named(T, []). Use
+        # the exact-symbol recipe used by the template's physical signature.
+        var substitution = typesubstitution_canonical(recipe.canonical_type_params)
+        substitution.budget = self.invocation_budget
+        val semantic_return = substitute_type(self.fn_returns[key], substitution)
+        if not self.invocation_failed_v1():
+            self.semantic_template_returns_v1[template.name] = semantic_return
+        semantic_return
+
     me rewrite_function(func: HirFunction) -> HirFunction:
         if not self.invocation_enter_v1(): return func
         self.observe_generic_uses_v1(func.return_type)
@@ -1379,7 +1411,8 @@ impl MonomorphizationPass:
         val previous_return_type = self.current_return_type
         val previous_match_hint = self.match_enum_hint
         self.env = {}
-        self.current_return_type = func.return_type
+        val expected_return: HirType = self.fn_returns[mono_sym_key(self.current_module, func.symbol.id)] ?? func.return_type
+        self.current_return_type = expected_return
         var out = func
         var params: [HirParam] = []
         for raw in func.params:
@@ -1401,7 +1434,7 @@ impl MonomorphizationPass:
             if self.invocation_diag_enabled_v1():
                 eprint("[mono-diag] rewrite_function {func.name} stmts={func.body.stmts.len()}")
             self.collect_lets_block(func.body)
-            out.body = self.rewrite_block(func.body, func.return_type)
+            out.body = self.rewrite_block(func.body, expected_return)
         self.current_return_type = previous_return_type
         if self.invocation_budget != nil:
             self.env = previous_env
@@ -1540,15 +1573,21 @@ impl MonomorphizationPass:
     me specialization_signature_in_caller(spec_name: text, span: Span) -> HirType?:
         val specialized = self.specialization_signature_v1(spec_name)
         val signature = HirType(kind: HirTypeKind.Function(specialized.param_types, specialized.return_type, specialized.effects), span: span)
-        if val transported = self.relocate_mono_types([signature], self.spec_module[spec_name], self.current_module, "signature of `{spec_name}`"):
+        val owner_key = mono_sym_key(self.spec_module[spec_name], self.spec_symbols[spec_name])
+        val semantic_return: HirType = self.fn_returns[owner_key] ?? specialized.return_type
+        # Transport both views in the same owner-qualified operation. The
+        # physical call stamp must not overwrite the semantic result cache,
+        # including when caller and specialization share a module.
+        if val transported = self.relocate_mono_types([signature, semantic_return], self.spec_module[spec_name], self.current_module, "signature of `{spec_name}`"):
             val caller_signature: HirType = transported[0]
+            val caller_return: HirType = transported[1]
             match caller_signature.kind:
-                case HirTypeKind.Function(_, ret, _):
+                case HirTypeKind.Function(_, _, _):
                     if specialized.is_extern:
                         self.sym_names[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = spec_name
-                    self.fn_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = ret
+                    self.fn_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = caller_return
                     if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
-                        self.archive_caller_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = ret
+                        self.archive_caller_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = caller_return
                 case _: ()
             return caller_signature
         nil
@@ -1695,7 +1734,10 @@ impl MonomorphizationPass:
             signature = mono_template_signature_v1(specialized)
         # A specialization is a concrete callee from here on: its return
         # type feeds the inference of an ENCLOSING generic call (`wrap(wrap(v))`).
-        self.fn_returns[mono_sym_key(spec_mod, sym)] = signature.return_type
+        val inference_template = self.template_signature_v1(func_name)
+        var return_substitution = typesubstitution_from_params(inference_template.type_params, local_type_args)
+        return_substitution.budget = self.invocation_budget
+        self.fn_returns[mono_sym_key(spec_mod, sym)] = substitute_type(self.template_semantic_return_v1(inference_template), return_substitution)
         # Keep the instance lookup identity separate from an extern's C name.
         self.sym_names[mono_sym_key(spec_mod, sym)] = mangled
         self.spec_template[mangled] = func_name
@@ -2281,9 +2323,10 @@ impl MonomorphizationPass:
         if expected_result != nil:
             val expected: HirType = expected_result
             if hir_type_is_concrete(expected):
-                if nominal_context == nil and (hir_type_has_nominal(template.return_type) or hir_type_has_nominal(expected)):
+                val semantic_return = self.template_semantic_return_v1(template)
+                if nominal_context == nil and (hir_type_has_nominal(semantic_return) or hir_type_has_nominal(expected)):
                     return Err("result inference lacks declaration/caller nominal context")
-                if not bind_type_params(template.return_type, expected, bindings, nominal_context):
+                if not bind_type_params(semantic_return, expected, bindings, nominal_context):
                     return Err("result inference conflicts with argument bindings")
         Ok(bindings)
 
@@ -2813,16 +2856,17 @@ impl MonomorphizationPass:
         val tps: [HirTypeParam] = template.type_params
         if targs.len() == 0 or targs.len() != tps.len() or not all_concrete(targs):
             return nil
+        val semantic_return: HirType = self.template_semantic_return_v1(template)
         # A nominal type the TEMPLATE spells carries its declaring module's
         # SymbolId, which means something else in the caller's table; only the
         # caller's own type arguments may name one across modules.
         if self.template_module.has(template.name):
             val owner: text = self.template_module[template.name]
-            if owner != self.current_module and hir_type_has_nominal(template.return_type):
+            if owner != self.current_module and hir_type_has_nominal(semantic_return):
                 return nil
         var substitution = typesubstitution_from_params(tps, targs)
         substitution.budget = self.invocation_budget
-        val out = substitute_type(template.return_type, substitution)
+        val out = substitute_type(semantic_return, substitution)
         if self.invocation_failed_v1(): return nil
         if hir_type_is_concrete(out):
             return out
