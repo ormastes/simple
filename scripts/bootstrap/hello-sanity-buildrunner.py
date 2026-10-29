@@ -44,62 +44,159 @@ def verified_memory_receipt(state, receipt, output, artifact, limit):
     return memory
 
 
-def run_one_source(matrix, backend, manager, manifest_writer, template, target):
-    """Run and verify a one-source compiler task through the production manager."""
-    lane = matrix.out / ("buildrunner-" + backend + "-one-source")
+def unpack_verified_lane(bundle, destination, expected):
+    """Read only flat, bounded artifacts from a manager-verified task output."""
+    import ast
+    import stat
+    import zipfile
+    with zipfile.ZipFile(bundle) as archive:
+        members = archive.infolist()
+        names = [item.filename for item in members]
+        if len(names) != len(set(names)) or len(names) > 128:
+            raise ValueError("ambiguous or oversized worker bundle")
+        if sum(item.file_size for item in members) > 128 * 1024 * 1024:
+            raise ValueError("worker bundle exceeds extraction budget")
+        for item in members:
+            mode = item.external_attr >> 16
+            if (not re.fullmatch(r"[A-Za-z0-9_.-]+", item.filename) or
+                    item.filename in {".", ".."} or item.is_dir() or
+                    (stat.S_IFMT(mode) and not stat.S_ISREG(mode))):
+                raise ValueError("unsafe worker bundle member")
+        def record(name):
+            fields = {}
+            for line in archive.read(name).decode().splitlines():
+                key, value = line.split(": ", 1)
+                if key in fields:
+                    raise ValueError("duplicate worker evidence field")
+                fields[key] = value if value in {"true", "false"} else ast.literal_eval(value)
+            return fields
+        identity = record("managed-lane.sdn")
+        if identity != expected:
+            raise ValueError("managed lane identity mismatch")
+        result = record("result.sdn")
+        if (result.get("status") != "PASS" or
+                any(result.get(key) != expected[key] for key in
+                    ("phase", "compiler_sha256", "compile_route"))):
+            raise ValueError("managed lane did not pass with exact producer")
+        executable = "hello.exe" if os.name == "nt" else "hello"
+        import hashlib
+        if hashlib.sha256(archive.read(executable)).hexdigest() != result.get("executable_sha256"):
+            raise ValueError("worker executable identity mismatch")
+        destination.mkdir()
+        archive.extractall(destination)
+    artifact = destination / executable
+    artifact.chmod(artifact.stat().st_mode | 0o100)
+    return artifact
+
+
+def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
+    """Dispatch compile, explicit link and execution within one enforced task."""
+    import sys
+    lane = matrix.out / ("buildrunner-" + backend + "-" + name)
     lane.mkdir()
-    values = {"phase": matrix.args.phase, "backend": backend,
-              "compiler_sha256": matrix.sha, "status": "FAIL"}
+    values = {"phase": matrix.args.phase, "backend": backend, "lane": name,
+              "compile_route": matrix.args.compile_route,
+              "compiler_sha256": matrix.sha, "status": "FAIL", "admitted": False}
     try:
-        pinned = {Path(path): matrix_digest(path) for path in (manager, manifest_writer, template)}
+        if name not in ("one-source", "two-objects", "static-library", "shared-library"):
+            raise ValueError("unsupported Hello form")
+        # The existing matrix's platform-specific link captures are native-host
+        # evidence. A cross target must not be silently relabeled as native.
+        import platform
+        machine = platform.machine().lower()
+        architecture = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64" if machine in {"amd64", "x86_64"} else machine
+        host = "windows" if os.name == "nt" else "darwin" if sys.platform == "darwin" else "linux"
+        suffixes = {"darwin": {"darwin", "apple-darwin", "macos"},
+                    "linux": {"linux", "linux-gnu", "unknown-linux-gnu"},
+                    "windows": {"windows", "pc-windows-msvc"} if matrix.args.windows_abi == "msvc"
+                    else {"windows-gnu", "pc-windows-gnu"}}
+        if target not in {architecture + "-" + suffix for suffix in suffixes[host]}:
+            raise ValueError("BuildRunner target differs from native linkage host")
+        producer = Path(sys.executable).resolve()
+        pinned = {Path(path): matrix_digest(path) for path in (manager, manifest_writer, template, producer)}
         source = lane / "source"
         source.mkdir()
-        (source / "src").mkdir()
-        fixture = matrix.root / "test/fixtures/bootstrap/hello_sanity_matrix/single.spl"
-        shutil.copyfile(fixture, source / "src/main.spl")
-        shutil.copytree(matrix.runtime, source / "runtime", symlinks=False)
+        for relative in (
+                "scripts/bootstrap/hello-sanity-buildrunner-worker.py",
+                "scripts/bootstrap/hello-sanity-matrix.py",
+                "scripts/bootstrap/hello-sanity-matrix-darwin.py",
+                "scripts/bootstrap/hello-sanity-matrix-windows.py",
+                "scripts/bootstrap/run-process-group-bounded-log-windows.py",
+                "scripts/bootstrap/bootstrap-session-exec.c",
+                "scripts/resource/macos-process-observer.c",
+                "scripts/resource/macos-observer-denial-policy.h",
+                "scripts/resource/process-tree-rss-watchdog.pl"):
+            destination = source / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(matrix.root / relative, destination)
+        fixtures = Path("test/fixtures/bootstrap/hello_sanity_matrix")
+        shutil.copytree(matrix.root / fixtures, source / fixtures)
+        shutil.copyfile(matrix.compiler, source / ("compiler.exe" if os.name == "nt" else "compiler"))
+        for relative, expected_hash in matrix.runtime_hashes.items():
+            destination = source / "runtime" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(matrix.runtime / relative, destination)
+            if matrix_digest(destination) != expected_hash:
+                raise ValueError("runtime authority changed during staging")
+        if matrix_digest(source / ("compiler.exe" if os.name == "nt" else "compiler")) != matrix.sha:
+            raise ValueError("compiler changed during staging")
         paths = sorted((p.relative_to(source).as_posix() for p in source.rglob("*")
                         if p.is_file()), key=str.lower)
         if not paths or len({p.lower() for p in paths}) != len(paths):
             raise ValueError("invalid or ambiguous BuildRunner input inventory")
         (source / "inputs.txt").write_text("".join(p + "\n" for p in paths))
         (source / "links.txt").write_text("")
-        manifest = lane / "manifest.sdn"
-        state = lane / "state"
-        published = lane / "published"
-        output = "hello.exe" if os.name == "nt" else "hello"
-        cmd = [manifest_writer, "--job-from-inventory", template, matrix.compiler,
+        manifest, state, published = lane / "manifest.sdn", lane / "state", lane / "published"
+        output = "hello-result.zip"
+        # A form has up to eight sequential commands. The worker retains each
+        # per-command bound; the production owner also caps the complete task.
+        task_seconds = matrix.args.timeout_seconds * 8 + 30
+        cmd = [manifest_writer, "--job-from-inventory", template, producer,
                source, "hello", "sanity", output, "inputs.txt",
                "--memory-limit-bytes", str(matrix.args.max_rss_kib * 1024),
                "--links-inventory", "links.txt", "--work-timeout-ms",
-               str(matrix.args.timeout_seconds * 1000), "--manifest", manifest,
-               "--", "native-build", "--source", "src", "--entry", "src/main.spl",
-               "--entry-closure", "--target", target, "--backend", backend,
-               "--runtime-path", "runtime", "--runtime-bundle", "core-c-bootstrap",
-               "--threads", "1", "--output", output]
+               str(task_seconds * 1000), "--manifest", manifest, "--",
+               "scripts/bootstrap/hello-sanity-buildrunner-worker.py",
+               "--backend", backend, "--lane", name, "--phase", str(matrix.args.phase),
+               "--target", target,
+               "--compile-route", matrix.args.compile_route, "--compiler-sha256", matrix.sha,
+               "--timeout-seconds", str(matrix.args.timeout_seconds),
+               "--max-rss-kib", str(matrix.args.max_rss_kib),
+               "--min-free-disk-bytes", str(matrix.args.min_free_disk_bytes),
+               "--max-log-bytes", str(matrix.args.max_log_bytes),
+               "--linker", str(matrix.linker), "--windows-abi", matrix.args.windows_abi,
+               "--output", output]
         matrix.run(lane, "manifest", cmd)
         args = ["--manifest", manifest, "--state", state, "--source-root", source,
                 "--output-root", published]
-        matrix.run(lane, "manager-run", [manager, "run", *args])
+        matrix.run(lane, "manager-run", [manager, "run", *args], seconds=task_seconds + 30)
         out, _ = matrix.run(lane, "manager-verify", [manager, "verify", *args])
         if b"builder: verified tasks=1" not in out:
             raise ValueError("manager did not verify the expected task")
-        receipt = state / "receipts/hello.sdn"
-        artifact = published / output
-        if not receipt.is_file() or not artifact.is_file() or not artifact.stat().st_size:
-            raise ValueError("verified receipt or published executable missing")
-        verified_memory_receipt(state, receipt, output, artifact, matrix.args.max_rss_kib * 1024)
+        receipt, bundle = state / "receipts/hello.sdn", published / output
+        if not receipt.is_file() or not bundle.is_file() or not bundle.stat().st_size:
+            raise ValueError("verified receipt or published bundle missing")
+        memory = verified_memory_receipt(state, receipt, output, bundle, matrix.args.max_rss_kib * 1024)
+        artifact = unpack_verified_lane(bundle, lane / "verified", {
+            "format": "hello-buildrunner-lane-v1", "lane": name, "backend": backend,
+            "phase": matrix.args.phase, "compile_route": matrix.args.compile_route,
+            "compiler_sha256": matrix.sha, "status": "PASS", "admitted": "false"})
         matrix.check_executable(lane, artifact)
         if any(matrix_digest(path) != sha for path, sha in pinned.items()):
             raise ValueError("BuildRunner provider identity changed during execution")
         values.update(status="PASS", executable_sha256=matrix_digest(artifact),
-                      receipt_sha256=matrix_digest(receipt),
+                      receipt_sha256=matrix_digest(receipt), memory_receipt_sha256=matrix_digest(memory),
+                      bundle_sha256=matrix_digest(bundle), python_sha256=pinned[producer],
                       manager_sha256=pinned[Path(manager)],
                       manifest_writer_sha256=pinned[Path(manifest_writer)],
                       template_sha256=pinned[Path(template)])
     except Exception as error:
         values["reason"] = str(error)
     return values
+
+
+def run_one_source(matrix, backend, manager, manifest_writer, template, target):
+    return run_lane(matrix, backend, "one-source", manager, manifest_writer, template, target)
 
 
 def matrix_digest(path):

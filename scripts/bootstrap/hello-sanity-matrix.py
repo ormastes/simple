@@ -357,6 +357,8 @@ class Matrix:
             if self.darwin:
                 command.extend(["--source", str(entry.parent)])
         command.extend(flags)
+        if getattr(self.args, "target", None):
+            command.extend(["--target", self.args.target])
         capture = None
         if self.darwin and not flags and not (extra or {}).get("SIMPLE_CC"):
             capture = lane / (name + ".link.json")
@@ -696,7 +698,8 @@ class Matrix:
             spec = importlib.util.spec_from_file_location("hello_sanity_buildrunner", helper)
             adapter = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(adapter)
-            buildrunner_rows["one-source"] = adapter.run_one_source(self, self.args.backend, *provider)
+            for name in self.args.lanes:
+                buildrunner_rows[name] = adapter.run_lane(self, self.args.backend, name, *provider)
         for name, record in buildrunner_rows.items():
             sdn(self.out / ("buildrunner-" + name + ".sdn"), record)
         for name, sha in fixture_hashes.items():
