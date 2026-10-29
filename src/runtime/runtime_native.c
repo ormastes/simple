@@ -36,6 +36,9 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include <sys/stdio.h>
 #endif
 #include <stdlib.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
@@ -3436,6 +3439,13 @@ int8_t rt_session_heap_end(uint32_t s) {
     rt_core_session_heap_live_id = 0;
     rt_core_session_alloc_depth = 0;
     rt_core_heap_lifecycle_release();
+#if defined(__GLIBC__)
+    /* A completed build session can leave gigabytes of freed small objects
+     * resident in libc arenas while its coordinator waits for child builds.
+     * Return those unused pages at this coarse epoch boundary. Trimming does
+     * not change live object ownership; run outside the lifecycle lock. */
+    (void)malloc_trim(0);
+#endif
     return 1;
 }
 
