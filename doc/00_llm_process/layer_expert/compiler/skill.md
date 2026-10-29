@@ -82,3 +82,13 @@ Template: [layer_skill.md](../../template/layer_skill.md)
   scope (needs a module-level node). The interpreter shares the preprocessor: do not set the flag
   for interpreted runs. Spec: `test/01_unit/compiler/20.hir/hir_cfg_select_source_spec.spl`.
 - Marker mode is statement-only: a chain whose arm declares a `val`/`var`/`let` at the chain indent, has `{`/`}` in a condition, or has an empty/comment-only arm keeps flat-strip semantics (binding-declaring chains keep flat-strip semantics until a non-scoping CfgSelect design lands). Marker lowering is also gated on the flag and requires every arm to be a string-literal marker.
+
+### Frontend core RTI owner alias (2026-10-30)
+
+The native SSpec runner exposed mixed `compiler.core.types` /
+`compiler.frontend.core.types` declaration ownership. Shared HIR owner normalization
+now folds the loader alias; RTI mixed-provider rejection remains intact. Focused
+seed red/green tests pass. The matched native runner now clears HIR/MIR/AOP
+304/304 without E-RTI-006; later code generation hit a temporary RSS limit,
+so runner execution and HAL/SOSIX acceptance remain pending.
+See `doc/08_tracking/bug/rti_frontend_core_alias_owner_2026_10_30.md`.
