@@ -372,6 +372,20 @@ int main(void) {
     int acquired = pov4_acquire_cwd((uint64_t)pin, canonical, digest); assert(acquired >= 0);
     assert((fcntl(acquired, F_GETFD) & FD_CLOEXEC) != 0);
     assert(close(acquired) == 0);
+    /* A successful fstat leaves errno untouched. A changed directory identity
+     * must report ESTALE rather than an error from the caller's earlier work. */
+    assert(chmod(original, 0750) == 0);
+    int stale_fd_baseline = open_fd_count();
+    errno = EIO;
+    assert(pov4_acquire_cwd((uint64_t)pin, canonical, digest) < 0);
+    assert(errno == ESTALE);
+    assert(open_fd_count() == stale_fd_baseline);
+    errno = 0;
+    assert(pov4_acquire_cwd((uint64_t)pin, canonical, digest) < 0);
+    assert(errno == ESTALE);
+    assert(chmod(original, 0700) == 0);
+    acquired = pov4_acquire_cwd((uint64_t)pin, canonical, digest);
+    assert(acquired >= 0 && close(acquired) == 0);
     uint8_t bad_digest[32]; memcpy(bad_digest, digest, 32); bad_digest[0] ^= 1;
     errno = EIO;
     assert(pov4_acquire_cwd((uint64_t)pin, canonical, bad_digest) < 0);
