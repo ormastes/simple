@@ -299,6 +299,15 @@ Lower is better for all metrics. LLVM produces the fastest and smallest binaries
 
 ## Related Documentation
 
+For Cranelift native failures, preserve the first `declare_function failed`
+diagnostic before later zero-handle or verifier errors. It records the symbol,
+module, requested signature and original refusal. An `import_function failed`
+diagnostic identifies which declaration/context/builder/module is absent.
+These diagnostics do not establish the root cause by themselves. Use a
+matching rebuilt compiler bridge; a runtime archive replacement cannot update
+a statically linked producer. The current investigation is recorded in
+`doc/08_tracking/bug/buildrunner_cranelift_zero_function_ref_2026_10_29.md`.
+
 - **LLVM backend policy**: `doc/07_guide/backend/llvm_backend_policy.md`
 - GPU backends: `doc/07_guide/apps/gpu.md`
 - Bare-metal targets: `doc/07_guide/backend/baremetal.md`
