@@ -12,6 +12,35 @@ if ($Worker) {
         if ($processes.Count -eq 0 -or $processes.Count -gt 16384) {
             throw 'Windows process inventory count outside bounded contract'
         }
+        # Identify this query's proven parent chain in the same native snapshot.
+        # PowerShell, Git Bash and sh can each carry the same resume argv; they
+        # are wrappers of this admission, not independent bootstrap jobs.
+        $byPid = @{}
+        foreach ($process in $processes) {
+            if ($null -eq $process.ProcessId -or $null -eq $process.ParentProcessId) {
+                throw 'Windows process inventory has an incomplete PID record'
+            }
+            $key = [uint32]$process.ProcessId
+            if ($byPid.ContainsKey($key)) { throw 'Windows process inventory has duplicate PID records' }
+            $byPid[$key] = $process
+        }
+        $ancestors = [System.Collections.Generic.HashSet[uint32]]::new()
+        $cursor = [uint32]$PID
+        while ($byPid.ContainsKey($cursor)) {
+            if (-not $ancestors.Add($cursor) -or $ancestors.Count -gt 256) {
+                throw 'Windows process inventory ancestry is cyclic or too deep'
+            }
+            $child = $byPid[$cursor]
+            $next = [uint32]$child.ParentProcessId
+            if ($next -eq 0 -or -not $byPid.ContainsKey($next)) { break }
+            $parent = $byPid[$next]
+            # A reused parent PID must never excuse another process. Stop the
+            # proven chain when either creation time is unavailable or the
+            # recorded parent is newer than its child.
+            if ($null -eq $child.CreationDate -or $null -eq $parent.CreationDate -or
+                $parent.CreationDate -gt $child.CreationDate) { break }
+            $cursor = $next
+        }
         $rows = [System.Collections.Generic.List[string]]::new()
         $size = 0
         foreach ($process in ($processes | Sort-Object ProcessId)) {
@@ -37,6 +66,11 @@ if ($Worker) {
                 $command = [string]$process.Name
             }
             $command = $command.Replace('\', '/').Replace('|', ' ').Replace("`r", ' ').Replace("`n", ' ')
+            if ($ancestors.Contains([uint32]$process.ProcessId) -and
+                $process.Name -match '^(?i:bash|sh|cmd|powershell|pwsh|perl|timeout)\.exe$' -and
+                $command.Contains('scripts/bootstrap/bootstrap-from-scratch.sh')) {
+                continue
+            }
             if ($process.Name -ieq 'simple.exe') {
                 # Preserve the existing classifier's /simple argv identity. Use
                 # the real image name, not an executable guessed from argv[0].

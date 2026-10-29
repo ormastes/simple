@@ -1,0 +1,32 @@
+#!/bin/sh
+# Contract of the post-filter Windows admission gate; no real process is killed.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
+evidence=$(mktemp "${TMPDIR:-/tmp}/stage3-own-ancestry.XXXXXX")
+trap 'rm -f "$evidence"' EXIT HUP INT TERM
+
+check_gate() {
+    source=$1 bootstrap=$2 native=$3 expected=$4
+    {
+        printf 'process_scan_status=available\nprocess_scan_source=%s\n' "$source"
+        printf 'concurrent_bootstrap_count=%s\nconcurrent_native_build_count=%s\n' "$bootstrap" "$native"
+        printf 'concurrent_qemu_count=0\n'
+    } >"$evidence"
+    status=0
+    bootstrap_stage3_memory_require_exclusive_heavy "$evidence" 16777216 >/dev/null 2>&1 || status=$?
+    [ "$status" -eq "$expected" ] || {
+        echo "FAIL source=$source bootstrap=$bootstrap native=$native expected=$expected got=$status" >&2
+        exit 1
+    }
+}
+
+check_gate windows-cim 0 0 0
+check_gate windows-cim 1 0 75
+check_gate windows-cim 0 1 75
+check_gate ps 1 0 0
+check_gate ps 2 0 75
+echo 'PASS — Windows peer work remains blocked and POSIX threshold is unchanged'

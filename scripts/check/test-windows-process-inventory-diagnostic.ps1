@@ -85,3 +85,45 @@ foreach ($live in @('0', '1', 'empty')) {
 }
 Remove-Item Env:SIMPLE_INVENTORY_FIXTURE_LIVE -ErrorAction SilentlyContinue
 Write-Output 'PASS — exited process omitted; live unknown and empty inventory refused'
+
+# Native PID ancestry fixture: only the current query's proven wrapper chain
+# may be ignored. Peers and even native children of a wrapper stay visible.
+$ancestryMock = @'
+function Get-CimInstance {
+    param($ClassName, $OperationTimeoutSec, $Filter)
+    $now = Get-Date
+    $parentTime = if ($env:SIMPLE_INVENTORY_FIXTURE_REUSED -eq '1') { $now.AddSeconds(10) } else { $now.AddSeconds(-1) }
+    return @(
+        [pscustomobject]@{ ProcessId = $PID; ParentProcessId = 900001; WorkingSetSize = 1024; Name = 'powershell.exe'; CommandLine = 'inventory worker'; CreationDate = $now },
+        [pscustomobject]@{ ProcessId = 900001; ParentProcessId = 900002; WorkingSetSize = 1024; Name = 'sh.exe'; CommandLine = 'sh scripts/bootstrap/bootstrap-from-scratch.sh --resume'; CreationDate = $parentTime },
+        [pscustomobject]@{ ProcessId = 900002; ParentProcessId = 1; WorkingSetSize = 1024; Name = 'bash.exe'; CommandLine = 'bash scripts/bootstrap/bootstrap-from-scratch.sh --resume'; CreationDate = $now.AddSeconds(-2) },
+        [pscustomobject]@{ ProcessId = 1; ParentProcessId = 0; WorkingSetSize = 1024; Name = 'system.exe'; CommandLine = 'system.exe'; CreationDate = $now.AddSeconds(-3) },
+        [pscustomobject]@{ ProcessId = 900003; ParentProcessId = 1; WorkingSetSize = 1024; Name = 'sh.exe'; CommandLine = 'sh scripts/bootstrap/bootstrap-from-scratch.sh --peer'; CreationDate = $now },
+        [pscustomobject]@{ ProcessId = 900004; ParentProcessId = 900001; WorkingSetSize = 1024; Name = 'simple.exe'; CommandLine = 'simple.exe native-build peer.spl'; CreationDate = $now }
+    )
+}
+'@
+$ancestryFixture = Join-Path $evidence 'ancestry-provider.ps1'
+$ancestryText = $text.Replace('Set-StrictMode -Version Latest', "Set-StrictMode -Version Latest`n$ancestryMock")
+[System.IO.File]::WriteAllText($ancestryFixture, $ancestryText, [System.Text.UTF8Encoding]::new($false))
+foreach ($reused in @('0', '1')) {
+    $env:SIMPLE_INVENTORY_FIXTURE_REUSED = $reused
+    $ancestrySnapshot = Join-Path $evidence "ancestry-$reused.snapshot"
+    $ancestryStdout = Join-Path $evidence "ancestry-$reused.stdout"
+    $ancestryStderr = Join-Path $evidence "ancestry-$reused.stderr"
+    $ancestryArgs = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', ('"' + $ancestryFixture + '"'), '-OutputPath', ('"' + $ancestrySnapshot + '"'))
+    $ancestry = Start-Process -FilePath $nativePowerShell -ArgumentList $ancestryArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $ancestryStdout -RedirectStandardError $ancestryStderr
+    try {
+        $null = $ancestry.Handle
+        if (-not $ancestry.WaitForExit(45000)) { $ancestry.Kill(); throw 'ancestry fixture exceeded 45 seconds' }
+        $ancestry.Refresh()
+        if ($ancestry.ExitCode -ne 0) { throw "ancestry fixture failed; see $ancestryStderr" }
+        $rows = [System.IO.File]::ReadAllText($ancestrySnapshot)
+        if ($rows -notmatch '(?m)^900003\|' -or $rows -notmatch '(?m)^900004\|') { throw 'independent bootstrap or native child was hidden' }
+        if ($reused -eq '0' -and ($rows -match '(?m)^900001\|' -or $rows -match '(?m)^900002\|')) { throw 'own wrapper was counted as a peer' }
+        if ($reused -eq '1' -and ($rows -notmatch '(?m)^900001\|' -or $rows -notmatch '(?m)^900002\|')) { throw 'unproven reused ancestor was hidden' }
+    } finally { $ancestry.Dispose() }
+}
+Remove-Item Env:SIMPLE_INVENTORY_FIXTURE_REUSED -ErrorAction SilentlyContinue
+Write-Output 'PASS — proven own wrappers omitted; peer and unproven ancestry retained'
