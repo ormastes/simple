@@ -96,6 +96,11 @@ static int64_t sosix_darwin_coalition_now_ns(void) {
     return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
+static int sosix_darwin_coalition_check_deadline(int64_t deadline) {
+    int64_t now = sosix_darwin_coalition_now_ns();
+    return now < 0 ? EIO : now >= deadline ? ETIMEDOUT : 0;
+}
+
 /* Bounded full census. A full buffer never means a complete process list. */
 static int sosix_darwin_coalition_pids(pid_t **out, size_t *count) {
     size_t capacity = 1024;
@@ -122,6 +127,9 @@ static int sosix_darwin_coalition_retire(uint64_t coalition, int64_t timeout_ns,
     if (!coalition || !receipt || timeout_ns <= 0 || timeout_ns > 30000000000LL)
         return EINVAL;
     memset(receipt, 0, sizeof(*receipt));
+    int64_t start = sosix_darwin_coalition_now_ns();
+    if (start < 0 || start > INT64_MAX - timeout_ns) return EIO;
+    int64_t deadline = start + timeout_ns;
     SosixDarwinCoalitionInfo own;
     int e = sosix_darwin_coalition_info(getpid(), &own);
     if (e) return e;
@@ -129,22 +137,24 @@ static int sosix_darwin_coalition_retire(uint64_t coalition, int64_t timeout_ns,
     if (coalition == own.ids[0] || coalition <= 1) return EPERM;
     e = sosix_darwin_coalition_counts(coalition, &receipt->started, &receipt->exited);
     if (e) return e; /* Unknown IDs are not successful empty containers. */
-    int64_t start = sosix_darwin_coalition_now_ns();
-    if (start < 0 || start > INT64_MAX - timeout_ns) return EIO;
     for (;;) {
+        e = sosix_darwin_coalition_check_deadline(deadline); if (e) return e;
         if (receipt->started == receipt->exited) { receipt->tasks_empty = 1; return 0; }
-        int64_t now = sosix_darwin_coalition_now_ns();
-        if (now < 0) return EIO;
-        if (now - start >= timeout_ns) return ETIMEDOUT;
         pid_t *pids = NULL; size_t count = 0;
         e = sosix_darwin_coalition_pids(&pids, &count); if (e) return e;
+        e = sosix_darwin_coalition_check_deadline(deadline);
+        if (e) { free(pids); return e; }
         receipt->passes++;
         SOSIX_DARWIN_COALITION_AFTER_CENSUS();
         for (size_t i = 0; i < count; i++) {
+            e = sosix_darwin_coalition_check_deadline(deadline);
+            if (e) { free(pids); return e; }
             if (pids[i] <= 1 || pids[i] == getpid()) continue;
             audit_token_t token;
             e = sosix_darwin_coalition_member_token(pids[i], coalition, &token);
             if (e == ESRCH || e == EAGAIN || e == EXDEV) continue;
+            if (e) { free(pids); return e; }
+            e = sosix_darwin_coalition_check_deadline(deadline);
             if (e) { free(pids); return e; }
             e = sosix_darwin_coalition_signal(&token, SIGKILL);
             if (e && e != ESRCH) { free(pids); return e; }
@@ -154,7 +164,10 @@ static int sosix_darwin_coalition_retire(uint64_t coalition, int64_t timeout_ns,
         e = sosix_darwin_coalition_counts(coalition, &receipt->started, &receipt->exited);
         /* Deallocation requires kernel-empty + launchd coalition reap. We
          * retain the last observed counters; do not invent exit totals. */
-        if (e == ESRCH) { receipt->tasks_empty = 1; return 0; }
+        if (e == ESRCH) {
+            e = sosix_darwin_coalition_check_deadline(deadline); if (e) return e;
+            receipt->tasks_empty = 1; return 0;
+        }
         if (e) return e;
         struct timespec delay = {0, 1000000}; nanosleep(&delay, NULL);
     }

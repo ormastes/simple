@@ -36,6 +36,15 @@ installation is performed. Requires a C compiler and Python's plist encoder.
 - A deliberately unreaped zombie already increments `tasks_exited`. Therefore
   equal task counters cannot stand in for a generic reap receipt.
 - The current coalition and an unknown coalition are rejected without signals.
+- The final double-fork child explicitly rearms its alarm, since fork clears
+  inherited alarms. A watchdog-only scenario omits retirement signals, observes
+  `SIGALRM` exit and kernel reap for the escaped fixtures, and waits until the
+  whole coalition is empty, including later churn children.
+- Deadlines are checked after census, for each candidate, before signalling,
+  and before accepting completion. A deterministic post-census delay crosses
+  the deadline and must return `ETIMEDOUT` with no signal issued. Scheduling or
+  a single kernel call can still cross a deadline; expired work cannot be
+  reported as successful completion after that call returns.
 
 The first integration run exposed `LaunchOnlyOnce` auto-removal on normal exit:
 `bootout` returns 3 after launchd has already removed that job. The fixture now

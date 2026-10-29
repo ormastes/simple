@@ -13,6 +13,10 @@ V4/reap capability remains unclaimed.
 
 Required host: macOS GUI launchd domain, C compiler, Python plist encoder.
 
+Watchdog-only cleanup verifies orphan exits without supervisor kill signals.
+An injected post-census delay must expire before any signal or successful
+receipt, covering the deadline within a retirement pass.
+
 Validation: one native-backed SSpec executed and passed with no skips/drops on
 Darwin 25.5.0 using the designated P1 diagnostic runtime. This is not P2 release
 qualification.
