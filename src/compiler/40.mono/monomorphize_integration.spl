@@ -2288,6 +2288,45 @@ impl MonomorphizationPass:
         if completed.is_err(): return []
         completed.unwrap()
 
+    me missing_call_argument_type_reason_v1(expr: HirExpr) -> text:
+        # Bounded failure evidence only. Never render the recursive HIR graph
+        # or change the binding decision; checked invocations suppress trace
+        # logging, so the actual failure must carry its own local evidence.
+        if expr == nil: return "expression=nil"
+        match expr.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                val key = mono_sym_key(self.current_module, symbol.id)
+                return "symbol={symbol.id};env={self.env.has(symbol.id)};named={self.named_symbol_names.has(key)}"
+            case HirExprKind.Field(base, field, _):
+                # Inspect only a stored annotation or a direct local's existing
+                # environment row. Do not rerun inference, walk a field chain,
+                # hydrate archive symbols or rebuild nominal suffix indexes.
+                if base == nil: return "field={field};base=nil"
+                var base_type: HirType? = nil
+                if base.has_type_: base_type = base.type_
+                if base_type == nil:
+                    match base.kind:
+                        case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                            if self.env.has(symbol.id): base_type = self.env[symbol.id]
+                        case _: ()
+                if base_type == nil: return "field={field};base_type=unavailable;coordinate={self.current_module}"
+                val type_: HirType = base_type
+                match type_.kind:
+                    case HirTypeKind.Named(symbol, args):
+                        val coordinate = mono_sym_key(self.current_module, symbol.id)
+                        if not self.named_symbol_names.has(coordinate):
+                            return "field={field};coordinate={coordinate};name=unavailable;owner=unavailable"
+                        val name: text = self.named_symbol_names[coordinate]
+                        val key = "{name}::{field}"
+                        val owner: text = self.field_owner_modules[key] ?? "unavailable"
+                        return "field={field};coordinate={coordinate};stored_field_owner={owner};name={name};type_args={args.len()};ambiguous={self.named_ambiguous.has(name)};field_record={self.field_types.has(key)}"
+                    case _: return "field={field};coordinate={self.current_module};base_type=non-nominal"
+            case HirExprKind.MethodCall(_, method, _, _):
+                return "method={method};result_type=missing"
+            case HirExprKind.Binary(_, _, _): return "expression=binary"
+            case HirExprKind.Call(_, _, _): return "expression=call"
+            case _: return "expression=other"
+
     me infer_call_bindings_signature_v1(template: MonoTemplateSignatureV1, args: [HirCallArg], explicit_prefix: [HirType], expected_result: HirType? = nil) -> Result<Dict<text, HirType>, text>:
         var bindings: Dict<text, HirType> = {}
         val tps: [HirTypeParam] = template.type_params
@@ -2321,7 +2360,7 @@ impl MonomorphizationPass:
                 if not bind_type_params(pt, arg_ty, bindings, nominal_context):
                     return Err("argument inference conflicts with another argument or explicit prefix")
             elif not hir_type_is_concrete(pt) and not mono_call_evidence_is_absent_v1(mono_arg_value(at)):
-                return Err("argument inference has no concrete local type")
+                return Err("argument inference has no concrete local type; argument={i}; {self.missing_call_argument_type_reason_v1(mono_arg_value(at))}")
             i = i + 1
         if expected_result != nil:
             val expected: HirType = expected_result
