@@ -37,16 +37,17 @@ class MissingReceiptTest(unittest.TestCase):
                     commands.append(argv)
                 return b"builder: verified tasks=1\n", b""
             matrix.run = run
+            target = "x86_64-windows" if os.name == "nt" else "x86_64-linux"
             with mock.patch("platform.machine", return_value="x86_64"), mock.patch("sys.platform", "linux"):
                 for backend in ("llvm", "cranelift"):
                     for lane in ("one-source", "two-objects", "static-library", "shared-library"):
-                        result = module.run_lane(matrix, backend, lane, root / "manager", root / "writer", root / "template", "x86_64-linux")
+                        result = module.run_lane(matrix, backend, lane, root / "manager", root / "writer", root / "template", target)
                         self.assertEqual(result["status"], "FAIL")
                         self.assertIn("receipt", result["reason"])
                         command = commands[-1]
                         self.assertEqual(command[command.index("--lane") + 1], lane)
                         self.assertEqual(command[command.index("--backend") + 1], backend)
-                        self.assertEqual(command[command.index("--target") + 1], "x86_64-linux")
+                        self.assertEqual(command[command.index("--target") + 1], target)
             self.assertEqual(len(commands), 8)
 
 
