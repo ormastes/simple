@@ -1,0 +1,67 @@
+"""`--compiler` flag matrix: parsing, tier-flag combinations, hash checking.
+
+Defines (does not exist yet): `TestOptions.compiler`, `--smoke` ->
+`TestLevel.Smoke`, and `std.test_runner.compiler_select.compiler_sha256_matches(
+actual, expected) -> bool` (case-insensitive hex, exactly 64 chars, no
+whitespace tolerance). An empty selector means "no explicit compiler" and
+resolves to the explicit binary (here "").
+
+# @req REQ-TESTRUNNER-PHASE2-4KINDS
+"""
+
+use std.spec.*
+use app.test_runner_new.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_types.{TestLevel}
+use std.test_runner.compiler_select.{compiler_sha256_matches, resolve_test_compiler}
+
+val SHA_A: text = "abababababababababababababababababababababababababababababababab"
+val SHA_B: text = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+
+describe "--compiler combined with tier flags":
+    it "keeps phase2 with --unit":
+        val o = parse_test_args(["--compiler=phase2", "--unit"])
+        expect(o.compiler).to_equal("phase2")
+        expect(o.level == TestLevel.Unit).to_equal(true)
+    it "keeps phase2 with --integration":
+        val o = parse_test_args(["--integration", "--compiler=phase2"])
+        expect(o.compiler).to_equal("phase2")
+        expect(o.level == TestLevel.Integration).to_equal(true)
+    it "keeps phase2 with --system":
+        val o = parse_test_args(["--compiler=phase2", "--system"])
+        expect(o.compiler).to_equal("phase2")
+        expect(o.level == TestLevel.System).to_equal(true)
+    it "keeps phase2 with --smoke":
+        val o = parse_test_args(["--compiler=phase2", "--smoke"])
+        expect(o.compiler).to_equal("phase2")
+        expect(o.level == TestLevel.Smoke).to_equal(true)
+    it "does not let --compiler disturb a positional path":
+        val o = parse_test_args(["--compiler=phase2", "test/04_smoke/x_spec.spl"])
+        expect(o.path).to_equal("test/04_smoke/x_spec.spl")
+
+describe "--compiler parse errors":
+    it "keeps the last --compiler when given twice":
+        expect(parse_test_args(["--compiler=seed", "--compiler=phase2"]).compiler).to_equal("phase2")
+    it "treats an empty value as no explicit compiler":
+        val r = resolve_test_compiler(parse_test_args(["--compiler="]).compiler, SHA_A, SHA_A, "")
+        expect(r.unwrap()).to_equal("")
+    it "rejects an unknown (wrong-case) value at resolution":
+        val r = resolve_test_compiler(parse_test_args(["--compiler=Phase2"]).compiler, "/p2", SHA_A, "")
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("Phase2")
+    it "does not swallow the next flag when the value is missing":
+        val o = parse_test_args(["--compiler", "--smoke"])
+        expect(o.level == TestLevel.Smoke).to_equal(true)
+
+describe "sha256 verification":
+    it "accepts an identical digest":
+        expect(compiler_sha256_matches(SHA_A, SHA_A)).to_equal(true)
+    it "accepts differing hex case":
+        expect(compiler_sha256_matches(SHA_A.upper(), SHA_A)).to_equal(true)
+    it "rejects a different digest":
+        expect(compiler_sha256_matches(SHA_B, SHA_A)).to_equal(false)
+    it "rejects a truncated digest":
+        expect(compiler_sha256_matches(SHA_A[0:63], SHA_A[0:63])).to_equal(false)
+    it "rejects an empty actual digest":
+        expect(compiler_sha256_matches("", SHA_A)).to_equal(false)
+    it "rejects trailing whitespace on the expected digest":
+        expect(compiler_sha256_matches(SHA_A, SHA_A + " ")).to_equal(false)
