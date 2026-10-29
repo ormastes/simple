@@ -113,3 +113,13 @@ on each append without changing packed bytes, validation or authority. Keep
 format/input-preservation tests and native mutable-buffer ABI evidence separate
 from rebuilt-producer memory qualification. See
 `doc/08_tracking/bug/packed_encoder_repeated_buffer_copy_2026_10_30.md`.
+### Bootstrap native SSpec authority refresh (2026-10-30)
+
+The native runner emits `--refresh-source-authority` for generated source.
+The bootstrap CLI must route ordinary refresh intent to the canonical native
+coordinator before raw worker-option validation or stale-authority prepasses.
+Forward original argv; worker/profile/grouped refresh remains refused.
+Focused route cases and evidence are in
+`test/01_unit/app/cli/bootstrap_source_authority_refresh_spec.spl` and
+`doc/08_tracking/bug/bootstrap_refresh_source_authority_route_2026_10_30.md`.
+Native execution requires a rebuilt producer; seed diagnostics do not qualify it.
