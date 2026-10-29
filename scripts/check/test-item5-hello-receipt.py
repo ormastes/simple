@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import platform
 from pathlib import Path
 import subprocess
 import struct
@@ -45,7 +46,8 @@ class ReceiptTests(unittest.TestCase):
             "source_commit": self.git("rev-parse", "HEAD"),
             "source_tree_oid": self.git("rev-parse", "HEAD^{tree}"),
             "runtime_archive_sha256": receipt.digest(self.runtime),
-            "backend": "llvm", "target": "x86_64-unknown-linux-gnu",
+            "backend": "llvm", "target": {"x86_64": "x86_64-unknown-linux-gnu",
+                                          "aarch64": "aarch64-unknown-linux-gnu"}[platform.machine()],
             "producer_backend": "cranelift",
         }
         self.identity_path = self.root / "identity.json"
@@ -118,7 +120,7 @@ class ReceiptTests(unittest.TestCase):
     def test_identity_mismatches_rejected(self):
         for field, value in (("compiler_sha256", "0" * 64), ("runtime_archive_sha256", "0" * 64),
                              ("source_commit", "0" * 40), ("source_tree_oid", "0" * 40),
-                             ("backend", "cranelift"), ("target", "aarch64-unknown-linux-gnu")):
+                             ("backend", "cranelift"), ("target", "riscv64-unknown-linux-gnu")):
             with self.subTest(field=field):
                 identity = dict(self.identity, **{field: value})
                 self.identity_path.write_text(json.dumps(identity))
@@ -179,19 +181,38 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "oversize"):
             self.capture()
 
-    def test_native_format_refuses_scripts_wrong_arch_and_unsupported_target(self):
+    def test_supported_targets_capture_and_validate_matching_elf(self):
+        binary = self.root / "format-fixture"
+        for target, machine in (("x86_64-unknown-linux-gnu", 62),
+                                ("aarch64-unknown-linux-gnu", 183)):
+            with self.subTest(target=target):
+                self.identity["target"] = target
+                self.identity_path.write_text(json.dumps(self.identity))
+                self.assertEqual(self.capture()["identity"]["target"], target)
+                for kind in (2, 3):
+                    header = bytearray(64)
+                    header[:7] = b"\x7fELF\x02\x01\x01"
+                    struct.pack_into("<HHI", header, 16, kind, machine, 1)
+                    binary.write_bytes(header)
+                    self.assertEqual(receipt.native_digest(binary, target), receipt.digest(binary))
+                    struct.pack_into("<H", header, 18, 183 if machine == 62 else 62)
+                    binary.write_bytes(header)
+                    with self.assertRaisesRegex(ValueError, "architecture mismatch"):
+                        receipt.native_digest(binary, target)
+
+    def test_native_format_refuses_scripts_and_unsupported_target(self):
         binary = self.root / "format-fixture"
         binary.write_bytes(b'#!/bin/sh\necho hello\n')
         with self.assertRaisesRegex(ValueError, "not a Linux ELF64"):
             receipt.native_digest(binary, self.identity["target"])
-        header = bytearray(64)
-        header[:7] = b"\x7fELF\x02\x01\x01"
-        struct.pack_into("<HHI", header, 16, 3, 183, 1)
-        binary.write_bytes(header)
-        with self.assertRaisesRegex(ValueError, "architecture mismatch"):
-            receipt.native_digest(binary, self.identity["target"])
-        with self.assertRaisesRegex(ValueError, "unsupported"):
-            receipt.native_digest(binary, "aarch64-unknown-linux-gnu")
+        for target in ("riscv64-unknown-linux-gnu", "aarch64-unknown-linux-musl"):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(ValueError, "unsupported"):
+                    receipt.native_digest(binary, target)
+                self.identity["target"] = target
+                self.identity_path.write_text(json.dumps(self.identity))
+                with self.assertRaisesRegex(ValueError, "unsupported"):
+                    self.capture()
 
 
 if __name__ == "__main__":
