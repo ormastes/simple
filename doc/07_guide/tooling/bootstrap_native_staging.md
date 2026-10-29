@@ -152,10 +152,17 @@ executable probes, candidate priority and refusal despite a working AR override.
 `SIMPLE_BUILD_MEMORY_RESERVE_BYTES` is the compiler's positive byte-valued
 headroom threshold, separate from process-tree and cgroup memory caps. Canonical
 sanity preserves an explicit canonical decimal value up to signed i64 maximum
-through its environment scrub; empty, zero, signed, leading-zero, malformed or
+through its environment scrub. Values below 1024 bytes are rejected because
+the compiler converts the reserve to KiB; empty, zero, signed, leading-zero, malformed or
 overflowing settings refuse before candidate execution. Unset keeps the
 compiler-owned default. Set a justified lane-specific reserve while retaining
 actual hard bounds and single-worker policy; a diagnostic rerun never rewrites
 failed canonical admission evidence. The focused `ReserveScrubTests` in
 `scripts/bootstrap/tests/sanity-base-controls-test.py` execute the real scrub
 and a child environment witness, not a compiler qualification run.
+
+Sanity receipts record `build_memory_reserve_bytes` and
+`build_memory_reserve_source` (explicit/default). Unset remains absent in the
+child environment and selects the current compiler default of 24 GiB. The
+full shell-boundary regression is
+`scripts/check/check-bootstrap-stage2-sanity-environment.shs`.

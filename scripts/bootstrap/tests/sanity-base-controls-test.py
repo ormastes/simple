@@ -214,14 +214,14 @@ class ReserveScrubTests(unittest.TestCase):
         self.assertEqual(result.stdout, 'reserve=ABSENT\nforeign=ABSENT\n')
 
     def test_positive_i64_reserve_reaches_child_exactly(self):
-        for value in ['1073741824', '1', '9223372036854775807']:
+        for value in ['1073741824', '1024', '9223372036854775807']:
             with self.subTest(value=value):
                 result = self.run_scrub(value)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, 'reserve='+value+'\nforeign=ABSENT\n')
 
     def test_invalid_reserve_refuses_before_child(self):
-        for value in ['', '0', '-1', '+1', '01', ' 1', '1\n', 'x',
+        for value in ['', '0', '1', '1023', '-1', '+1', '01', ' 1', '1\n', 'x',
                       '9223372036854775808', '99999999999999999999']:
             with self.subTest(value=value):
                 result = self.run_scrub(value)
