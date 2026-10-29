@@ -78,5 +78,7 @@ native SSpec/docgen and complete BuildRunner admission are not implied.
 The native SSpec runner exposed mixed `compiler.core.types` /
 `compiler.frontend.core.types` declaration ownership. Shared HIR owner normalization
 now folds the loader alias; RTI mixed-provider rejection remains intact. Focused
-seed red/green tests pass; newly matched native runner validation is pending.
+seed red/green tests pass. The matched native runner now clears HIR/MIR/AOP
+304/304 without E-RTI-006; later code generation hit a temporary RSS limit,
+so runner execution and HAL/SOSIX acceptance remain pending.
 See `doc/08_tracking/bug/rti_frontend_core_alias_owner_2026_10_30.md`.
