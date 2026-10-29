@@ -4434,7 +4434,9 @@ pub fn compile_call<M: Module>(
                         .declare_function(rt_name, cranelift_module::Linkage::Import, &sig)
                         .ok()
                         .map(|fid| {
-                            ctx.func_ids.insert(rt_name.to_string(), fid);
+                            // Do not replace a local body with an on-demand
+                            // runtime import before that body is compiled.
+                            ctx.func_ids.entry(rt_name.to_string()).or_insert(fid);
                             fid
                         })
                 };

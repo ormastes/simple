@@ -3381,6 +3381,113 @@ mod tests {
     }
 
     #[test]
+    fn builtin_hash_method_does_not_replace_local_rt_hash_text_body_id() {
+        use object::{Object, ObjectSymbol};
+
+        // The hash module defines a local `rt_hash_text` body, while
+        // `MethodCallStatic("str.hash")` is lowered by Cranelift to the
+        // runtime symbol of the same name. Keep the local MIR name mapped to
+        // its prefixed definition when the method dispatcher lazily declares
+        // the raw runtime import. Put the caller first so its codegen runs
+        // before the bridge body's codegen, matching the Stage 2 failure.
+        let mut caller = MirFunction::new("hash_caller".to_string(), TypeId::I64, Visibility::Public);
+        let receiver = caller.new_vreg();
+        let result = caller.new_vreg();
+        let block = caller.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: receiver, value: 0 });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(result),
+            receiver,
+            func_name: "str.hash".to_string(),
+            args: Vec::new(),
+        });
+        block.terminator = Terminator::Return(Some(result));
+
+        let mut bridge = MirFunction::new("rt_hash_text".to_string(), TypeId::I64, Visibility::Public);
+        let bridge_result = bridge.new_vreg();
+        bridge
+            .block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: bridge_result, value: 42 });
+        bridge.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(bridge_result));
+
+        let mut module = MirModule::new();
+        module.functions.push(caller);
+        module.functions.push(bridge);
+
+        let mut backend = test_backend();
+        backend.set_module_prefix("lib__nogc_sync_mut__src__hash".to_string());
+        backend.compile_all_functions(&module).expect("compile hash module");
+
+        let local_id = backend.func_ids["rt_hash_text"];
+        assert_ne!(
+            backend.module.declarations().get_function_decl(local_id).linkage,
+            cranelift_module::Linkage::Import,
+            "on-demand hash runtime import replaced the local bridge FuncId"
+        );
+
+        let object_bytes = backend.module.finish().emit().expect("emit object");
+        let object = object::File::parse(object_bytes.as_slice()).expect("parse object");
+        assert!(object.symbols().any(|symbol| {
+            symbol.name().ok() == Some("lib__nogc_sync_mut__src__hash__rt_hash_text") && symbol.is_definition()
+        }), "the local qualified rt_hash_text bridge must be emitted");
+    }
+
+    #[test]
+    fn builtin_direct_call_does_not_replace_local_rt_string_trim_body_id() {
+        use object::{Object, ObjectSymbol};
+
+        // Dotted direct calls use calls.rs rather than the MethodCallStatic
+        // dispatcher. Compile the caller before the same-named local body so
+        // a lazily declared runtime import cannot silently suppress that body.
+        let mut caller = MirFunction::new("trim_caller".to_string(), TypeId::I64, Visibility::Public);
+        let receiver = caller.new_vreg();
+        let result = caller.new_vreg();
+        let block = caller.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: receiver, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(result),
+            target: CallTarget::from_name("str.trim"),
+            args: vec![receiver],
+        });
+        block.terminator = Terminator::Return(Some(result));
+
+        let mut bridge = MirFunction::new("rt_string_trim".to_string(), TypeId::I64, Visibility::Public);
+        let bridge_result = bridge.new_vreg();
+        bridge
+            .block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: bridge_result, value: 42 });
+        bridge.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(bridge_result));
+
+        let mut module = MirModule::new();
+        module.functions.push(caller);
+        module.functions.push(bridge);
+
+        let mut backend = test_backend();
+        backend.set_module_prefix("local_text".to_string());
+        backend.compile_all_functions(&module).expect("compile direct builtin call module");
+
+        let local_id = backend.func_ids["rt_string_trim"];
+        assert_ne!(
+            backend.module.declarations().get_function_decl(local_id).linkage,
+            cranelift_module::Linkage::Import,
+            "on-demand trim runtime import replaced the local bridge FuncId"
+        );
+
+        let object_bytes = backend.module.finish().emit().expect("emit object");
+        let object = object::File::parse(object_bytes.as_slice()).expect("parse object");
+        assert!(object.symbols().any(|symbol| {
+            symbol.name().ok() == Some("local_text__rt_string_trim") && symbol.is_definition()
+        }), "the local qualified rt_string_trim bridge must be emitted");
+        assert!(object.symbols().any(|symbol| {
+            symbol.name().ok() == Some("rt_string_trim") && symbol.is_undefined()
+        }), "the direct builtin call must retain its raw runtime import");
+    }
+
+    #[test]
     fn local_runtime_neq_resolves_generated_noteq_call() {
         let mut runtime_neq = MirFunction::new("rt_native_neq".to_string(), TypeId::I64, Visibility::Public);
         for name in ["left", "right"] {
