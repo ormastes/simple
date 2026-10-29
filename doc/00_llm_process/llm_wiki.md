@@ -18,12 +18,21 @@ change defaults or replace real execution evidence.
 
 ## Phase compiler Hello sanity
 
-Use the [four-executable Hello linkage matrix](../07_guide/app/llm/bootstrap_parallel_handoff.md#four-executable-hello-linkage-sanity)
-with the exact Phase 1, 2, or 3 compiler. Preserve individual native and
-interpreter and BuildRunner results and backend identity; phase 1 skips
-BuildRunner, phase 2 skips interpreter, and phase 3 requires both. Phase 3 needs
-a qualified full CLI built by that phase. Do not promote diagnostic results to
-bootstrap admission.
+Use the [Hello sanity matrix](../07_guide/app/llm/bootstrap_parallel_handoff.md#hello-sanity-16-native-execution-cases-and-phase-interpreter-checks)
+with the exact Phase 1, 2, or 3 compiler. The native target is 16 separately
+evidenced cells: four forms (source, two objects, static library, shared
+library) × LLVM/Cranelift × direct/BuildRunner. Keep each cell's status and
+receipt; `UNRUN` and `UNSUPPORTED` are not passes. Current driver coverage is
+four direct cases per selected backend invocation, plus optional one-source
+BuildRunner execution with a complete qualified provider. The remaining three
+BuildRunner forms stay `UNRUN`; pending required cells prevent overall `PASS`.
+All eight P2 direct macOS attempts on 2026-10-29 hit RSS bounds; the BuildRunner
+cells remain unrun. Adapter transport tests do not qualify the phase compiler.
+Interpreter qualification is additional and phase-specific: Phase 1 requires
+the phase 1 seed in interpreter mode; Phase 2 records the configured skip;
+Phase 3 requires a full CLI qualified to its exact phase 3 producer, source, and
+runtime. Do not promote partial diagnostics to phase completion or bootstrap
+admission.
 
 ## Bootstrap failure collection
 
