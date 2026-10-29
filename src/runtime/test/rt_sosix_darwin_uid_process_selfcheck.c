@@ -21,11 +21,19 @@ static int resize_count;
 static pid_t reap_after_snapshot;
 static pid_t transitional_record;
 static int transitional_observed;
+static pid_t observed_descendant_root;
+static int retained_descendant_seen;
 
 static int test_sysctl(int *mib, unsigned count, void *out, size_t *size, void *value, size_t length) {
     if (inject_permission) { errno = EACCES; return -1; }
     if (out && inject_short) { inject_short--; resize_count++; errno = ENOMEM; return -1; }
     int e = sysctl(mib, count, out, size, value, length);
+    if (!e && out && observed_descendant_root) {
+        struct kinfo_proc *records = out;
+        for (size_t i = 0; i < *size / sizeof(*records); i++)
+            if (records[i].kp_eproc.e_ppid == observed_descendant_root &&
+                records[i].kp_proc.p_stat == SZOMB) retained_descendant_seen = 1;
+    }
     if (!e && out && transitional_record) {
         struct kinfo_proc *records = out;
         int found = 0;
@@ -105,9 +113,11 @@ static void unobserved_descendant_case(void) {
     close(ready[0]);
     /* The observer was never told the descendant PID and cannot waitpid it. */
     SosixDarwinUidProcessObservation observation;
+    observed_descendant_root = root;
     assert(sosix_darwin_uid_process_barrier(getuid(), identity.unique_id, 10000000,
         &observation) == ETIMEDOUT);
-    assert(observation.blocking_processes && !observation.no_new_uid_processes);
+    assert(retained_descendant_seen && observation.blocking_processes >= 2 && !observation.no_new_uid_processes);
+    observed_descendant_root = 0;
     assert(write(release[1], "R", 1) == 1); close(release[1]);
     assert(waitpid(root, NULL, 0) == root);
     assert(!sosix_darwin_uid_process_barrier(getuid(), identity.unique_id, 1000000000, &observation));
