@@ -942,3 +942,11 @@ executable refusal are covered by `preflight-authority-milestone-test.shs`.
 This is availability evidence, not tool-byte authority or Stage2 admission.
 See [failure evidence](../../../08_tracking/bug/bootstrap_linux_archiver_late_failure_2026_10_29.md)
 and [native staging](../../../07_guide/tooling/bootstrap_native_staging.md).
+
+### Sanity memory reserve preservation (2026-10-30)
+
+The canonical sanity scrub preserves an explicitly configured positive canonical
+i64 `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`; absence retains the compiler default,
+and malformed values refuse before candidate execution. This does not change
+hard memory enforcement or admit a previously rejected compiler. See
+[reserve scrub evidence](../../../08_tracking/bug/bootstrap_sanity_memory_reserve_scrub_2026_10_30.md).

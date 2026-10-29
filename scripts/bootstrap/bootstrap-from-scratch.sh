@@ -2381,6 +2381,26 @@ bootstrap_stage_sanity() (
   # control family, including exported caller overrides: unset below removes
   # exported shell variables as well as their environment entries. Export all
   # restored controls because Darwin's pinned smoke starts a fresh shell.
+  # This supported caller policy must survive the sanity environment scrub.
+  # Preserve absence (the compiler owns its default), but never turn a malformed
+  # explicit reserve into a silent default or an overflowing i64 conversion.
+  sanity_memory_reserve_present=${SIMPLE_BUILD_MEMORY_RESERVE_BYTES+x}
+  sanity_memory_reserve=${SIMPLE_BUILD_MEMORY_RESERVE_BYTES-}
+  if [ "$sanity_memory_reserve_present" = x ]; then
+    case "$sanity_memory_reserve" in ''|0*|*[!0-9]*)
+      echo 'bootstrap-sanity-error: phase=resource-validation reason=invalid-build-memory-reserve raw_status=125' >&2
+      return 125 ;;
+    esac
+    # For a 19-digit value starting with 9, compare its 18-digit tail so
+    # the shell never has to parse an overflowing signed integer.
+    if [ "${#sanity_memory_reserve}" -gt 19 ] ||
+       { [ "${#sanity_memory_reserve}" -eq 19 ] &&
+         [ "${sanity_memory_reserve%??????????????????}" = 9 ] &&
+         [ "${sanity_memory_reserve#?}" -gt 223372036854775807 ]; }; then
+      echo 'bootstrap-sanity-error: phase=resource-validation reason=invalid-build-memory-reserve raw_status=125' >&2
+      return 125
+    fi
+  fi
   sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS}
   sanity_exec_timeout=${COMPILER_EXEC_TIMEOUT_SECONDS}
   sanity_scv_prime_timeout=${COMPILER_SCV_PRIME_TIMEOUT_SECONDS}
@@ -2437,6 +2457,10 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_llvm_prefix}" ]; then
     LLVM_SYS_231_PREFIX=${sanity_llvm_prefix}
     export LLVM_SYS_231_PREFIX
+  fi
+  if [ "$sanity_memory_reserve_present" = x ]; then
+    SIMPLE_BUILD_MEMORY_RESERVE_BYTES=${sanity_memory_reserve}
+    export SIMPLE_BUILD_MEMORY_RESERVE_BYTES
   fi
   COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
   COMPILER_EXEC_TIMEOUT_SECONDS=${sanity_exec_timeout}

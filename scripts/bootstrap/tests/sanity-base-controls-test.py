@@ -188,5 +188,46 @@ printf 'DISPATCH-STATUS=%s\\n' "$code"
                 with self.subTest(job=key), self.assertRaisesRegex(ValueError, 'historical job: ' + key):
                     m.controls(original_sanity, changed)
 
+@unittest.skipUnless(os.name == 'posix', 'POSIX shell scrub execution fixture')
+class ReserveScrubTests(unittest.TestCase):
+    """Execute the real sanity prefix/scrub with a child environment witness."""
+    def run_scrub(self, value):
+        owner = HELPER.parents[3] / 'bootstrap/bootstrap-from-scratch.sh'
+        source = owner.read_text()
+        prefix = source.split('bootstrap_stage_sanity() (', 1)[1].split('  sanity_evidence_stem=', 1)[0]
+        script = 'set -eu\nbootstrap_stage_sanity() (' + prefix + '\n  /bin/sh -c \'printf "reserve=%s\\nforeign=%s\\n" "${SIMPLE_BUILD_MEMORY_RESERVE_BYTES-ABSENT}" "${SIMPLE_RESERVE_UNRELATED-ABSENT}"\'\n)\n' + \
+            'repo_root=/unused; os=linux\n' + \
+            'COMPILER_BUILD_TIMEOUT_SECONDS=180; COMPILER_EXEC_TIMEOUT_SECONDS=5\n' + \
+            'COMPILER_SCV_PRIME_TIMEOUT_SECONDS=180; COMPILER_PROBE_TIMEOUT_SECONDS=5\n' + \
+            'COMPILER_CHECK_KILL_GRACE_SECONDS=1; CANDIDATE_FRONTEND_MAX_LOG_BYTES=65536\n' + \
+            'CANDIDATE_FRONTEND_ROOT=/unused\n' + \
+            'bootstrap_stage_sanity /unused /unused /tmp /tmp "$PATH"\n'
+        environment = {'PATH': os.environ['PATH'], 'SIMPLE_RESERVE_UNRELATED': 'must-be-scrubbed'}
+        if value is not None:
+            environment['SIMPLE_BUILD_MEMORY_RESERVE_BYTES'] = value
+        return subprocess.run(['/bin/sh', '-c', script], env=environment,
+                              text=True, capture_output=True, timeout=10)
+
+    def test_absent_keeps_default_selection(self):
+        result = self.run_scrub(None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'reserve=ABSENT\nforeign=ABSENT\n')
+
+    def test_positive_i64_reserve_reaches_child_exactly(self):
+        for value in ['1073741824', '1', '9223372036854775807']:
+            with self.subTest(value=value):
+                result = self.run_scrub(value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, 'reserve='+value+'\nforeign=ABSENT\n')
+
+    def test_invalid_reserve_refuses_before_child(self):
+        for value in ['', '0', '-1', '+1', '01', ' 1', '1\n', 'x',
+                      '9223372036854775808', '99999999999999999999']:
+            with self.subTest(value=value):
+                result = self.run_scrub(value)
+                self.assertEqual(result.returncode, 125, result.stderr)
+                self.assertIn('invalid-build-memory-reserve', result.stderr)
+                self.assertEqual(result.stdout, '')
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
