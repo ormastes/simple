@@ -49,13 +49,20 @@ fn builder_windows_environment_v1(root: text) -> Result<[text], text>:
     if snapshot == nil: return Err("Windows environment snapshot unavailable")
     var result: [text] = []
     var names: [text] = []
+    val shape_trace = (env_get("SIMPLE_BUILD_ENV_SHAPE_TRACE") ?? "") == "1"
+    var shape_count = 0
     val replaced = ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK", "TEMP", "TMP", "TMPDIR"]
     for pair in snapshot ?? []:
         val name = pair.0.to_upper()
         # Hidden per-drive cwd entries are superseded by the explicit cwd.
         if pair.0 != "" and not pair.0.contains("=") and not replaced.contains(name) and not names.contains(name):
             names = names.push(name)
-            result = result.push(pair.0 + "=" + pair.1)
+            val assignment = pair.0 + "=" + pair.1
+            val separator = assignment.find("=")
+            if shape_trace and shape_count < 8:
+                print "windows-env stage=construct index={shape_count} key_len={pair.0.len()} value_len={pair.1.len()} assignment_len={assignment.len()} separator={separator}"
+            shape_count = shape_count + 1
+            result = result.push(assignment)
     result = result.push("SIMPLE_NATIVE_BUILD_CACHE_DIR=" + root + "/work/.builder-cache/native")
     result = result.push("SIMPLE_RT_OBJ_CACHE_DIR=" + root + "/work/.builder-cache/runtime")
     result = result.push("SIMPLE_HIR_CACHE_DIR=" + root + "/work/.builder-cache/hir")
@@ -108,6 +115,13 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text, trace_stage
         args: task.args, environment: environment,
         directory: root + "/work", inputs: inputs, stdout_path: root + "/stdout.log",
         stderr_path: root + "/stderr.log", timeout_ms: task.timeout_ms)
+    if (env_get("SIMPLE_BUILD_ENV_SHAPE_TRACE") ?? "") == "1":
+        var trace_index = 0
+        for assignment in environment:
+            val separator = assignment.find("=")
+            if trace_index < 8:
+                print "windows-env stage=admission index={trace_index} assignment_len={assignment.len()} separator={separator}"
+            trace_index = trace_index + 1
     val identity = builder_task_identity_v1(task)
     val ready_links = builder_link_inputs_match_v1(task, root + "/work")
     if ready_links != "":
