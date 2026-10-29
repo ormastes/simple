@@ -1,0 +1,63 @@
+"""Real MountTable source acquisition; hosted evidence does not qualify QEMU."""
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
+use os.kernel.loader.executable_sealed_source_v1.{executable_sealed_source_acquire_v1}
+use os.kernel.loader.anonymous_executable_image_v1.{anonymous_executable_image_charged_bytes_v1}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerErrorV1}
+
+fn sealed_source_handle(file_id: u64, bytes: [u8]) -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1, open_handle_id: file_id,
+        mount_id: 1u64, filesystem_name: "diagnostic",
+        canonical_source_path: "/intentionally-not-the-source-name.elf",
+        mount_generation: 1u64, file_id: file_id, file_generation: 1u64,
+        size_bytes: bytes.len() as u64, role: "test-image",
+        target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+        verified_load_ranges: [], image_hash: sha256_u8_hex(bytes), admission_id: "diagnostic",
+        trust_epoch: 1u64, read_count: 0u64, read_bytes: 0u64, consumed: false)
+
+fn check_sealed_backend(driver: DriverInstance):
+    var table = MountTable.new()
+    table.mount("/", driver, MountOptions.default()).unwrap()
+    val file = table.open("/retained-image.bin", OpenFlags.read_write().with_create()).unwrap()
+    val bytes: [u8] = [0u8, 255u8, 128u8, 65u8]
+    table.positioned_write_bytes(file.id, PositionedDriverKind.Auto, 0u64, bytes).unwrap()
+    val handle = sealed_source_handle(file.id, bytes)
+    val before = anonymous_executable_image_charged_bytes_v1()
+    val acquired = executable_sealed_source_acquire_v1(table, handle).unwrap()
+    expect(acquired).to_equal(bytes)
+    expect(anonymous_executable_image_charged_bytes_v1()).to_equal(before)
+    table.positioned_write_bytes(file.id, PositionedDriverKind.Auto, 0u64, [9u8]).unwrap()
+    expect(acquired).to_equal([0u8, 255u8, 128u8, 65u8])
+    expect(executable_sealed_source_acquire_v1(table, handle).unwrap_err()).to_equal(ExecutableLoadConsumerErrorV1.DigestMismatch)
+    expect(anonymous_executable_image_charged_bytes_v1()).to_equal(before)
+    var short = handle
+    short.size_bytes = 5u64
+    expect(executable_sealed_source_acquire_v1(table, short).unwrap_err()).to_equal(ExecutableLoadConsumerErrorV1.SourceReadFailed)
+    table.close(file).unwrap()
+    expect(executable_sealed_source_acquire_v1(table, handle).is_err()).to_equal(true)
+    expect(anonymous_executable_image_charged_bytes_v1()).to_equal(before)
+
+describe "authenticated loader sealed source acquisition":
+    it "acquires binary DBFS bytes and releases source leases after success or rejected reads":
+        # @req REQ-SOSIX-MEMORY-SOURCE-002
+        step("Acquire, mutate, retry and close a real hosted DBFS source")
+        check_sealed_backend(DriverInstance.DbFs(DbFsDriver.new_hosted()))
+
+    it "acquires binary NVFS bytes and releases source leases after success or rejected reads":
+        # @req REQ-SOSIX-MEMORY-SOURCE-002
+        step("Acquire, mutate, retry and close the hosted NVFS facade source")
+        check_sealed_backend(DriverInstance.Nvfs(NvfsDriver.new("sealed-source-nvfs")))
+
+    it "acquires binary NVFS POSIX bytes without depending on mutable array readback":
+        # @req REQ-SOSIX-MEMORY-SOURCE-002
+        step("Use the POSIX facade's owned byte reader through MountTable")
+        check_sealed_backend(DriverInstance.NvfsPosix(NvfsPosixDriver.new("sealed-source-posix")))

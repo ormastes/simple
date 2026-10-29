@@ -1,0 +1,70 @@
+"""Acquire immutable loader bytes from an already retained filesystem handle.
+
+This source owner grants no executable authority. Its caller must retain the
+existing authenticated loader token and its exact open binding until adoption
+or unwind. DBFS/NVFS reads use that handle directly, never a reopened pathname.
+The returned copy is independent of the source file and of registry storage.
+"""
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
+use os.kernel.loader.anonymous_executable_image_v1.{
+    anonymous_executable_image_seal_v1, anonymous_executable_image_read_v1,
+    anonymous_executable_image_release_v1
+}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerErrorV1}
+
+pub fn executable_sealed_source_max_bytes_v1() -> u64:
+    67108864u64
+
+pub(package) fn executable_source_read_exact_v1(
+    mut table: MountTable, handle: ExecutableImageHandleV1
+) -> [u8]?:
+    if handle.size_bytes == 0u64 or handle.size_bytes > executable_sealed_source_max_bytes_v1():
+        return nil
+    var bytes: [u8] = []
+    var offset = 0u64
+    while offset < handle.size_bytes:
+        val remaining = handle.size_bytes - offset
+        val chunk_len = if remaining > 16777216u64: 16777216u64 else: remaining
+        val chunk = table.positioned_read_bytes(
+            handle.open_handle_id, PositionedDriverKind.Auto, offset, chunk_len)
+        if chunk.is_err(): return nil
+        val chunk_bytes = chunk.unwrap()
+        if chunk_bytes.len() != chunk_len as i64: return nil
+        for byte in chunk_bytes: bytes.push(byte)
+        offset = offset + chunk_len
+    Some(bytes)
+
+pub(package) fn executable_sealed_source_acquire_v1(
+    mut table: MountTable, handle: ExecutableImageHandleV1
+) -> Result<[u8], ExecutableLoadConsumerErrorV1>:
+    """Snapshot, verify, seal, copy out, and retire one temporary source lease.
+
+    The caller owns input/mapping allocations separately from the 64 MiB
+    aggregate retained-image budget. No live image reference escapes this
+    operation; lock failure quarantines retained charges in the storage owner.
+    """
+    if (handle.open_handle_id == 0u64 or
+        handle.open_handle_id > 9223372036854775807u64 or handle.file_generation == 0u64):
+        return Err(ExecutableLoadConsumerErrorV1.InvalidImage)
+    val source = executable_source_read_exact_v1(table, handle)
+    if not source.?: return Err(ExecutableLoadConsumerErrorV1.SourceReadFailed)
+    val bytes = source.unwrap()
+    if sha256_u8_hex(bytes) != handle.image_hash:
+        return Err(ExecutableLoadConsumerErrorV1.DigestMismatch)
+    val owner = handle.open_handle_id as i64
+    val image = anonymous_executable_image_seal_v1(
+        owner, handle.file_generation, bytes, handle.image_hash)
+    if not image.?: return Err(ExecutableLoadConsumerErrorV1.ConsumerExhausted)
+    val retained = image.unwrap()
+    val owned = anonymous_executable_image_read_v1(retained, owner, handle.file_generation)
+    # Release on both success and failed read. Never map a copy if cleanup is
+    # indeterminate; the registry retains its quarantine charge in that case.
+    if not anonymous_executable_image_release_v1(retained, owner, handle.file_generation):
+        return Err(ExecutableLoadConsumerErrorV1.CloseFailed)
+    if not owned.?: return Err(ExecutableLoadConsumerErrorV1.SourceReadFailed)
+    val sealed_bytes = owned.unwrap()
+    if sealed_bytes.len() as u64 != handle.size_bytes or sha256_u8_hex(sealed_bytes) != handle.image_hash:
+        return Err(ExecutableLoadConsumerErrorV1.DigestMismatch)
+    Ok(sealed_bytes)

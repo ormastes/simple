@@ -1,0 +1,69 @@
+"""Loader storage ownership evidence; no guest execution is claimed."""
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.loader.anonymous_executable_image_v1.{
+    AnonymousExecutableImageRefV1,
+    anonymous_executable_image_provider_known_v1,
+    anonymous_executable_image_seal_v1, anonymous_executable_image_read_v1,
+    anonymous_executable_image_release_v1, anonymous_executable_image_charged_bytes_v1
+}
+
+describe "loader anonymous executable source ownership":
+    it "excludes freestanding mutex stubs from registry installation":
+        # @req REQ-SOSIX-MEMORY-SOURCE-001
+        step("Check audited runtime identities without treating a lock probe as mutual exclusion")
+        expect(anonymous_executable_image_provider_known_v1("riscv64-baremetal-simpleos")).to_equal(true)
+        expect(anonymous_executable_image_provider_known_v1("simpleos-arm64")).to_equal(false)
+        expect(anonymous_executable_image_provider_known_v1("x86_64-baremetal-simpleos")).to_equal(false)
+        expect(anonymous_executable_image_provider_known_v1("simpleos")).to_equal(false)
+        expect(anonymous_executable_image_provider_known_v1("")).to_equal(false)
+
+    it "isolates sealed bytes, rejects foreign identities and retires exact generations":
+        # @req REQ-SOSIX-MEMORY-SOURCE-001
+        step("Seal arbitrary binary bytes and mutate the caller array")
+        val before = anonymous_executable_image_charged_bytes_v1()
+        var input: [u8] = [0u8, 255u8, 128u8, 65u8]
+        val digest = sha256_u8_hex(input)
+        val image = anonymous_executable_image_seal_v1(1, 7u64, input, digest).unwrap()
+        input[0] = 9u8
+        expect(anonymous_executable_image_charged_bytes_v1()).to_equal(before + 4)
+        step("Reject another owner or generation before returning any bytes")
+        expect(anonymous_executable_image_read_v1(image, 2, 7u64).?).to_equal(false)
+        expect(anonymous_executable_image_read_v1(image, 1, 8u64).?).to_equal(false)
+        expect(anonymous_executable_image_release_v1(image, 2, 7u64)).to_equal(false)
+        var output = anonymous_executable_image_read_v1(image, 1, 7u64).unwrap()
+        expect(output).to_equal([0u8, 255u8, 128u8, 65u8])
+        output[0] = 8u8
+        expect(anonymous_executable_image_read_v1(image, 1, 7u64).unwrap()[0]).to_equal(0u8)
+        step("Release once, recycle the slot and reject the stale reference")
+        expect(anonymous_executable_image_release_v1(image, 1, 7u64)).to_equal(true)
+        expect(anonymous_executable_image_release_v1(image, 1, 7u64)).to_equal(false)
+        val replacement = anonymous_executable_image_seal_v1(1, 7u64, output, sha256_u8_hex(output)).unwrap()
+        expect(anonymous_executable_image_read_v1(image, 1, 7u64).?).to_equal(false)
+        expect(anonymous_executable_image_release_v1(replacement, 1, 7u64)).to_equal(true)
+        expect(anonymous_executable_image_charged_bytes_v1()).to_equal(before)
+
+    it "rejects digest and identity failures without a retained charge":
+        # @req REQ-SOSIX-MEMORY-SOURCE-001
+        step("Attempt invalid source admissions")
+        val before = anonymous_executable_image_charged_bytes_v1()
+        expect(anonymous_executable_image_seal_v1(1, 1u64, [1u8], "bad").?).to_equal(false)
+        expect(anonymous_executable_image_seal_v1(0, 1u64, [1u8], sha256_u8_hex([1u8])).?).to_equal(false)
+        expect(anonymous_executable_image_seal_v1(1, 0u64, [1u8], sha256_u8_hex([1u8])).?).to_equal(false)
+        expect(anonymous_executable_image_seal_v1(1, 1u64, [], sha256_u8_hex([])).?).to_equal(false)
+        expect(anonymous_executable_image_charged_bytes_v1()).to_equal(before)
+
+    it "enforces live slot capacity and releases each retained charge":
+        # @req REQ-SOSIX-MEMORY-SOURCE-001
+        step("Fill the bounded registry using independent owned references")
+        val before = anonymous_executable_image_charged_bytes_v1()
+        val digest = sha256_u8_hex([42u8])
+        var images: [AnonymousExecutableImageRefV1] = []
+        for index in 0..256:
+            images.push(anonymous_executable_image_seal_v1(3, 1u64, [42u8], digest).unwrap())
+        expect(anonymous_executable_image_seal_v1(3, 1u64, [42u8], digest).?).to_equal(false)
+        expect(anonymous_executable_image_charged_bytes_v1()).to_equal(before + 256)
+        step("Retire all references and recover the complete retained-byte budget")
+        for image in images:
+            expect(anonymous_executable_image_release_v1(image, 3, 1u64)).to_equal(true)
+        expect(anonymous_executable_image_charged_bytes_v1()).to_equal(before)
