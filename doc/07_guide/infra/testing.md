@@ -142,6 +142,10 @@ branches.
 
 Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
 UI-facing specs must capture visible state when practical: GUI screenshots or rendered-image captures go under `doc/06_spec/image/<spec-relative-path>/`; TUI text/ANSI captures, logs, JSON summaries, and other non-image artifacts go under `build/test-artifacts/<spec-relative-path>/`.
+The Rust diagnostic driver's scenario directories retain short readable names.
+Long names use a bounded readable prefix plus a digest; consult the manifest
+for complete group and scenario names. A warning that artifact writing failed
+does not explain or replace the recorded test assertion outcomes.
 Interactive GUI specs must also use actual GUI access when available. Prefer `ui_access_snapshot`, `ui_access_surface`, `ui_access_find`, `ui_access_act`, `ui_access_history`, `ui_access_observe`, `ui_access_state`, or adapter wrappers such as `simple play wm-text-*` and `play_wm_text_*` to locate a real surface, perform the action, and assert the resulting state. Screenshots prove visual evidence; they do not replace interaction coverage.
 SGTTI evidence is test/debug-only. Production entrypoints must not import `std.ui_test.sgtti`, `SgttiTestDriver`, or SGTTI capture builders unless the feature is explicitly a debug/test surface. When SGTTI is compile-time disabled or absent, the normal product path must have no snapshot construction, polling, capture allocation, or dispatch overhead. Add an import-boundary system spec beside any new SGTTI-backed UI evidence.
 After adding or moving a UI-facing app feature spec, run `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl`. That audit verifies the critical UI SSPEC lane has executable specs, mirrored generated manuals under `doc/06_spec/03_system/app/...`, and concrete UI evidence markers.
