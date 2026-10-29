@@ -1028,7 +1028,7 @@ pub fn rt_process_owned_v3_capabilities_unavailable(_args: &[Value]) -> Result<V
 
 /// Cooperative snapshots are native-only; interpreter never acquires authority.
 pub fn rt_sosix_darwin_snapshot_v1_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::array([1,0,0,0,0,1,95,0,0,0].iter().map(|v| Value::Int(*v)).collect()))
+    Ok(Value::array([1,0,0,0,0,1,95,0,0,0].iter().map(|v| Value::Int(*v)).collect::<Vec<_>>()))
 }
 pub fn rt_sosix_darwin_snapshot_v1_provider_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("Darwin snapshot V1 requires the native Darwin runtime; interpreter cannot acquire process authority"))
