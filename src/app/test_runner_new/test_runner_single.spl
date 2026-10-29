@@ -41,6 +41,9 @@ use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
 # than reimplemented on purpose -- a second copy of this classification would
 # drift out of sync exactly as the duplicated composite-grammar parsers did.
 use std.test_runner.compiler_select.{select_test_child_binary}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_config.{load_test_config}
+use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use std.test_runner.test_executor_parsing.{make_result_from_output, spec_source_has_raw_assert}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
@@ -1191,8 +1194,28 @@ fn _cov_branch_report_for_file(path: text, dec_total: dict<text, i64>,
     val pct = (hit * 100) / total
     "coverage-branch: {path} {pct}% ({hit}/{total} decisions)"
 
+fn _single_run_spl_doctest(args: [text]) -> i64:
+    # `--no-session-daemon` routes every `simple test` here (driver main.rs
+    # test_should_use_single_runner), so `--spl-doctest <file.spl>` used to be
+    # run as a plain spec: "no main function" / zero-examples, never a doctest.
+    val options = parse_test_args(args)
+    # Same refusal exit (2) as the spec lane when --compiler cannot be pinned.
+    val selection = select_test_child_binary(options.compiler)
+    if selection.is_err():
+        print "error: test-runner: {selection.unwrap_err()}"
+        return 2
+    print "=== Running SPL Doctests ==="
+    print ""
+    val result = run_spl_doctest_mode(options, load_test_config())
+    print "SPL Doctest: {result.passed} passed, {result.failed} failed, {result.skipped} skipped"
+    if result.is_ok():
+        return 0
+    1
+
 fn main() -> i64:
     val args = clean_args()
+    if args.contains("--spl-doctest"):
+        return _single_run_spl_doctest(args)
     var run = parse_child_run(args)
     if not run.valid:
         print "Simple Test Runner child"
