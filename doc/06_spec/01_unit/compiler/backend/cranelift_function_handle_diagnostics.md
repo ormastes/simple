@@ -1,7 +1,8 @@
 # Retain the first Cranelift function-handle refusal
 
 Authored manual for native Rust bridge regressions; not generated SSpec output.
-Execution is pending on a matching canonical compiler build.
+The three native Rust library tests passed on Linux arm64. The canonical
+Simple producer rebuild and original manager diagnosis remain pending.
 
 1. Declare an imported function returning i64, then redeclare the same symbol
    returning f64. Require the actual Cranelift incompatible-signature error

@@ -55,7 +55,8 @@ calls do not format diagnostic strings.
 Three authored Rust bridge tests exercise conflicting i64/f64 declarations,
 successful import of the valid original after that refusal, missing declaration
 versus missing context, and missing signature versus missing module. These
-tests are currently unexecuted. The original manager root cause remains OPEN;
+tests passed on Linux arm64 after correcting the assertion for Cranelift's
+uppercase `types::I64`/`types::F64` debug names. The original manager root cause remains OPEN;
 the change makes a matching rebuilt producer report the earlier failure instead
 of losing it at `.ok()`.
 
@@ -64,3 +65,22 @@ MIR child caused a wait-error/kill sequence before declarations; substituting
 a launcher through `SIMPLE_BINARY` was refused by producer identity checks.
 No interposition or ownership bypass is used. A canonical rebuilt producer
 with the diagnostic bridge is the next route.
+
+## Focused execution evidence
+
+The first native Rust library run reported two passing tests and one failed
+assertion: the diagnostic retained both types, but the test expected lowercase
+names while the underlying Cranelift Debug representation uses uppercase.
+The follow-up changes only that assertion and still requires both distinct
+types. The repeated focused run exited 0: 3 passed, 0 failed, 4527 filtered.
+Log SHA-256: `71c0dbd22830d278b5b646e27d366ecb078d9618b15ce469fc1e37a9cd83c313`.
+
+Review-lane code is `d66bf7342672059c9f78b687c8736fd94c34582e` plus the test
+assertion correction `77d6489cb49f6596e11896a7d22a6a82a1491180`. The Linux
+execution head `f444b9d502cb65ae271d0818c960fc39e1a42bec` rebases these changes
+onto current release source; this is bridge
+regression evidence, not a native Simple compiler or manager admission. The
+canonical producer rebuild and exact original manager diagnosis remain pending.
+
+Linux test log: `/work/bootstrap-seed-20261029/cranelift-function-handle-tests-lib-rerun.log`
+in the dedicated container.
