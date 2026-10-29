@@ -92,3 +92,13 @@ seed red/green tests pass. The matched native runner now clears HIR/MIR/AOP
 304/304 without E-RTI-006; later code generation hit a temporary RSS limit,
 so runner execution and HAL/SOSIX acceptance remain pending.
 See `doc/08_tracking/bug/rti_frontend_core_alias_owner_2026_10_30.md`.
+
+## Packed encoder growing-buffer copies (2026-10-30)
+
+The packed frontend encoder uses private mutable destinations for scalar writes,
+appends and padding. Each destination is an owned construction buffer; do not
+pass an aliased input or its own tail. This avoids copying all accumulated bytes
+on each append without changing packed bytes, validation or authority. Keep
+format/input-preservation tests and native mutable-buffer ABI evidence separate
+from rebuilt-producer memory qualification. See
+`doc/08_tracking/bug/packed_encoder_repeated_buffer_copy_2026_10_30.md`.
