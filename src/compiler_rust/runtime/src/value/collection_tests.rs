@@ -3778,3 +3778,30 @@ fn test_array_insert_in_place() {
     assert_eq!(rt_array_len(array), 5);
     assert!(!rt_array_insert(RuntimeValue::NIL, 0, RuntimeValue::from_int(9)));
 }
+
+/// Large module scratch retirement must preserve the surrounding session and
+/// promoted values; allocator trimming must never replace ownership checks.
+#[test]
+fn module_scope_large_reclaim_preserves_session_and_promoted_roots() {
+    let unrelated = super::rt_array_new(4);
+    assert!(super::rt_array_push(unrelated, RuntimeValue::from_int(91)));
+    let session = super::rt_session_heap_begin();
+    assert_ne!(session, 0);
+    let session_root = bsm_p1_row(8);
+    assert!(super::rt_transient_array_scope_begin());
+    let promoted = bsm_p1_row(16);
+    for _ in 0..4096 { let _ = super::rt_array_new(1024); }
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(super::rt_transient_heap_promote(promoted));
+    assert!(super::rt_transient_array_scope_end());
+    assert!(!super::rt_transient_array_scope_end());
+    assert_eq!(super::rt_session_heap_id(), session);
+    assert!(bsm_p1_live(session_root));
+    assert!(bsm_p1_live(promoted));
+    assert_eq!(super::rt_array_get(unrelated, 0), RuntimeValue::from_int(91));
+    assert!(super::rt_session_heap_end(session));
+    assert!(!bsm_p1_live(session_root));
+    assert!(!bsm_p1_live(promoted));
+    assert!(bsm_p1_live(unrelated));
+    super::rt_array_free(unrelated);
+}

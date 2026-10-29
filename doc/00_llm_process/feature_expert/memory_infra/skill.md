@@ -185,3 +185,13 @@ Rust heap snapshot bytes count headers; backing bytes are a separate counter.
 The C experiments do not establish P2 improvement. The rebuilt Rust archive
 ABI fixture and focused Rust unit now pass; final P2 linkage and manager RSS
 remain pending. See the provider correction in the linked research evidence.
+
+## Large module scratch residency (2026-10-30)
+
+The actual Rust module owner can reclaim objects while libc retains resident
+pages inside a live build session. The isolated fix requests glibc trim after
+successful scope/raw retirement when tracked reclaimed bytes reach 16 MiB; it
+preserves raw ownership and avoids tiny-scope sweeps. The focused Rust unit,
+actual archive ABI fixture and LLDB boundary control pass. Rebuilt manager
+acceptance remains pending. See
+`doc/01_research/local/native_module_scope_allocator_residency_2026_10_30.md`.
