@@ -1,0 +1,112 @@
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.test_runner.test_runner_files.{discover_test_files_fast}
+use std.test_runner.test_runner_args.{parse_test_args}
+
+# Discovery over a real temp tree: spec files found, non-specs skipped, each of
+# the four levels filters, and the result order is sorted and repeatable.
+# @req REQ-TESTRUNNER-DISCOVERY-COVERAGE
+
+val ROOT = "tmp/discovery_tree_cov"
+val BODY = "use std.spec.*\ndescribe \"p\":\n    it \"x\":\n        expect(1).to_equal(1)\n"
+
+fn build_tree():
+    dir_remove_all(ROOT)
+    dir_create_all("{ROOT}/01_unit")
+    dir_create_all("{ROOT}/02_integration")
+    dir_create_all("{ROOT}/03_system")
+    dir_create_all("{ROOT}/04_smoke")
+    file_write("{ROOT}/01_unit/b_spec.spl", BODY)
+    file_write("{ROOT}/01_unit/a_spec.spl", BODY)
+    file_write("{ROOT}/01_unit/helper.spl", "fn helper(): 1\n")
+    file_write("{ROOT}/01_unit/notes.md", "notes\n")
+    file_write("{ROOT}/01_unit/skipped_spec.spl", "# @skip\n{BODY}")
+    file_write("{ROOT}/02_integration/i_spec.spl", BODY)
+    file_write("{ROOT}/03_system/s_spec.spl", BODY)
+    file_write("{ROOT}/04_smoke/m_spec.spl", BODY)
+
+fn discover(flags: [text]) -> [text]:
+    discover_test_files_fast(ROOT, parse_test_args(flags), false)
+
+fn has_suffix(files: [text], suffix: text) -> bool:
+    for f in files:
+        if f.ends_with(suffix):
+            return true
+    false
+
+describe "discovery over a temp tree":
+    it "finds every _spec.spl file at the default level":
+        build_tree()
+        val files = discover([])
+        expect(files.len()).to_equal(5)
+        dir_remove_all(ROOT)
+    it "skips a helper .spl that is not a spec":
+        build_tree()
+        expect(has_suffix(discover([]), "helper.spl")).to_equal(false)
+        dir_remove_all(ROOT)
+    it "skips a non-.spl file":
+        build_tree()
+        expect(has_suffix(discover([]), "notes.md")).to_equal(false)
+        dir_remove_all(ROOT)
+    it "skips a spec carrying a skip directive":
+        build_tree()
+        expect(has_suffix(discover([]), "skipped_spec.spl")).to_equal(false)
+        dir_remove_all(ROOT)
+    it "returns nothing for a directory with no specs":
+        build_tree()
+        dir_create_all("{ROOT}/empty")
+        expect(discover_test_files_fast("{ROOT}/empty", parse_test_args([]), false).len()).to_equal(0)
+        dir_remove_all(ROOT)
+
+describe "discovery level filters":
+    it "--unit keeps only the unit specs":
+        build_tree()
+        val files = discover(["--unit"])
+        expect(files.len()).to_equal(2)
+        expect(has_suffix(files, "a_spec.spl")).to_equal(true)
+        dir_remove_all(ROOT)
+    it "--integration keeps only the integration spec":
+        build_tree()
+        val files = discover(["--integration"])
+        expect(files.len()).to_equal(1)
+        expect(has_suffix(files, "i_spec.spl")).to_equal(true)
+        dir_remove_all(ROOT)
+    it "--system keeps only the system spec":
+        build_tree()
+        val files = discover(["--system"])
+        expect(files.len()).to_equal(1)
+        expect(has_suffix(files, "s_spec.spl")).to_equal(true)
+        dir_remove_all(ROOT)
+    it "--smoke keeps only the smoke spec":
+        build_tree()
+        val files = discover(["--smoke"])
+        expect(files.len()).to_equal(1)
+        expect(has_suffix(files, "m_spec.spl")).to_equal(true)
+        dir_remove_all(ROOT)
+
+describe "discovery order":
+    it "returns a sorted list":
+        build_tree()
+        val files = discover([])
+        var i = 1
+        var sorted = true
+        while i < files.len():
+            if files[i - 1] > files[i]:
+                sorted = false
+            i = i + 1
+        expect(sorted).to_equal(true)
+        dir_remove_all(ROOT)
+    it "returns the same list on a second run":
+        build_tree()
+        expect(discover([])).to_equal(discover([]))
+        dir_remove_all(ROOT)
+    it "an explicit spec path returns just that path":
+        build_tree()
+        val one = "{ROOT}/01_unit/a_spec.spl"
+        expect(discover_test_files_fast(one, parse_test_args([]), false)).to_equal([one])
+        dir_remove_all(ROOT)
+    it "an explicit non-spec path returns nothing":
+        build_tree()
+        expect(discover_test_files_fast("{ROOT}/01_unit/helper.spl", parse_test_args([]), false).len()).to_equal(0)
+        dir_remove_all(ROOT)
