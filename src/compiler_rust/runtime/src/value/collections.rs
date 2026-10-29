@@ -3266,8 +3266,26 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
         let promoted = std::mem::take(&mut scope.promoted);
         scope.objects.retain(|object| !promoted.contains(&object.0));
     }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let live_before = super::heap::rt_heap_live_bytes()
+        .saturating_add(super::heap::rt_heap_aux_live_bytes());
     free_transient_objects(&scope.objects);
-    unsafe { rt_transient_raw_scope_end() != 0 }
+    // Retire the scope's Vec/HashSets and the C raw scratch owner before
+    // returning unused allocator pages. Promoted/session roots remain live.
+    drop(scope);
+    let ended = unsafe { rt_transient_raw_scope_end() != 0 };
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if ended {
+        let live_after = super::heap::rt_heap_live_bytes()
+            .saturating_add(super::heap::rt_heap_aux_live_bytes());
+        // A coarse reclamation threshold avoids a process-wide libc sweep
+        // for tiny scratch scopes. These approximate process counters affect
+        // only this advisory optimization, never ownership or admission.
+        if live_before.saturating_sub(live_after) >= 16 * 1024 * 1024 {
+            unsafe { libc::malloc_trim(0); }
+        }
+    }
+    ended
 }
 
 /// Free every still-registered object in `objects` (module-scope end and

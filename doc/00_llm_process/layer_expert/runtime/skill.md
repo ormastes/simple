@@ -168,3 +168,13 @@ any includes; preserve explicitly newer values. The defensive definition in
 Check the production translation unit as well as the standalone header:
 header-first selfchecks cannot reproduce this include-order defect. GNU Clang
 syntax and native fd-stat selfcheck evidence do not establish runner admission.
+
+## Large module scratch residency (2026-10-30)
+
+The actual Rust module owner can reclaim objects while libc retains resident
+pages inside a live build session. The isolated fix requests glibc trim after
+successful scope/raw retirement when tracked reclaimed bytes reach 16 MiB; it
+preserves raw ownership and avoids tiny-scope sweeps. The focused Rust unit,
+actual archive ABI fixture and LLDB boundary control pass. Rebuilt manager
+acceptance remains pending. See
+`doc/01_research/local/native_module_scope_allocator_residency_2026_10_30.md`.
