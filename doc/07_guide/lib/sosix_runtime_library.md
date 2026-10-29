@@ -1,5 +1,87 @@
 # SOSIX runtime library (`std.nogc_async_mut.sosix`)
 
+## Host process integration workflow — 2026-10-29
+
+Read the [host coordination contract](../../05_design/runtime/sosix_runtime_unification_design.md#2026-10-29-host-process-coordination-contract)
+before editing a host adapter. The process baseline is `release/1.0.0` at
+`f0d6c75f235` (#5234); older file-provider status below is dated and separate.
+Mac has a cooperative native snapshot runner and API. Strict V4 remains
+unavailable on Mac; Linux/Windows/FreeBSD/SimpleOS claims require their own
+profile-specific host receipts.
+
+1. Fetch the intended integration branch and inspect active lanes/dirty paths.
+   Create a unique isolated worktree (sparse where useful) from the recorded
+   base. Preserve unrelated worktrees, staged files and runtime artifacts.
+   State the host/profile, owner, shared paths and dependent PRs before edits.
+2. Agree shared ABI and lifecycle changes with the integration owner. Reuse
+   the versioned SOSIX owners; keep host mechanisms in their adapter. Land a
+   shared-contract prerequisite before consumers, or explicitly stack the
+   consumer PR on it. Do not independently rename facade functions, reorder
+   receipt fields or broaden capability bits on each OS.
+3. Write the acceptance manual and executable SSpec, then demonstrate RED
+   against the missing or incorrect behavior before implementation. A
+   missing-host implementation placeholder must fail immediately with an
+   explicit assertion/failure; no empty class, successful no-op, fabricated
+   receipt or pass-todo counts as an adapter. Keep public unavailable-provider
+   responses truthful and separate from internal development placeholders.
+4. Implement and run the real host gate to GREEN. Include refusal before
+   spawn, argv/env/cwd, output bounds, timeout/cancel, descendant retirement,
+   handle reuse/fork authority and ACK behavior as applicable. Test strict
+   requirements with adversarial cases, including escapes and image mutation;
+   a cooperative-profile pass cannot discharge a strict-profile requirement.
+5. Record exact source/runtime identity, host/architecture, selected profile,
+   command, executed/passed/failed/skipped counts, and retained output. Mark
+   native C, diagnostic P1, deployed native Simple and P2 evidence separately.
+   A mock, allocator stub, foreign-host skip or expected strict refusal cannot
+   silently become an end-to-end provider pass. Run affected ABI/registration,
+   source-list, fallback-compile and direct-environment guards as appropriate.
+6. Integrate only owned paths on the latest target branch. Inspect concurrent
+   changes in shared files; reconcile semantics with their owner rather than
+   taking an entire side of a conflict. Rerun checks affected by that change,
+   obtain independent review of the final commit and read PR comments before
+   merging. Land through a PR into the recorded target branch; do not merge
+   another agent's active draft or bypass a failure caused by this change.
+7. Update this matrix/guide and evidence links with the merged SHA. A merged
+   source change is not deployment: report outstanding rebuild, runtime-route
+   qualification and host validation explicitly. Never rebuild or replace a
+   shared P2 artifact as an incidental documentation or adapter task.
+
+### Using the landed cooperative Mac surface
+
+The standalone source is
+`src/runtime/tools/sosix_darwin_snapshot_runner.c`. Its explicit profile is
+`trusted-snapshot-group`; `sealed-v4` rejects before executable acquisition.
+The native runtime facade is `std.nogc_sync_mut.io.darwin_snapshot_v1`:
+`darwin_snapshot_capabilities`, `darwin_snapshot_start`,
+`darwin_snapshot_poll`, `darwin_snapshot_cancel`, `darwin_snapshot_output`,
+and `darwin_snapshot_ack`. Only explicit profile `1` is accepted by start.
+Invocation is `[absolute executable, cwd, args...]`; environment is complete,
+not inherited by implication. Limits are wall/grace/cleanup nanoseconds and
+stdout/stderr capture caps, in the order documented by the facade.
+
+Use a locally owned Mach-O under the documented trust assumptions. Keep the
+opaque handle until poll reports frozen; errors and cancellation do not free
+it. Read replayable frozen output, then ACK to consume ownership. Poll has a
+bounded wait. Do not replace the handle with a PID or share authority across
+fork. Capability checks must retain sealed-image, escaped-descendant and
+platform-signed-copy qualification as unavailable. Existing strict runner
+admission is unchanged; no automatic fallback to this trusted profile exists.
+
+Run on the Mac host from a source-matched checkout:
+
+```sh
+sh scripts/check/check-sosix-darwin-snapshot-runner.shs
+sh scripts/check/check-sosix-darwin-snapshot-api.shs
+```
+
+See the [runner acceptance/evidence](../../06_spec/03_system/lib/process/darwin_snapshot_runner_spec.md)
+and [API acceptance/evidence](../../06_spec/03_system/lib/process/darwin_snapshot_api_spec.md).
+The API check compiles the production process owner with local value/array
+allocator stubs. Its P1 SSpec executes that C gate; interpreter authority
+methods reject unavailable providers. Neither this test nor an import-only
+facade probe proves a deployed native Simple call path. No P2 rebuild or
+strict Mac provider qualification was performed for #5233/#5234.
+
 ## Current qualification note — 2026-10-11
 
 Availability statements elsewhere in this guide are dated observations, not a current cross-platform certification matrix. Use the [variation/SOSIX integration](../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) and exact source-matched provider receipts for support claims.

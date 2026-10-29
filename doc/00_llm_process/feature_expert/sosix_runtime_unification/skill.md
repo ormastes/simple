@@ -1,5 +1,9 @@
 # SOSIX runtime unification feature expert
 
+## 2026-10-29 host process handoff
+
+Use the [shared-contract/platform-owner design](../../../05_design/runtime/sosix_runtime_unification_design.md#2026-10-29-host-process-coordination-contract) and [integration/TDD guide](../../../07_guide/lib/sosix_runtime_library.md#host-process-integration-workflow--2026-10-29). Release baseline `f0d6c75f235` includes #5233/#5234 cooperative Darwin snapshot V1. Strict V4 stays unavailable on Mac; image/tree experiments are unlanded and do not change admission. Coordinate shared runtime/registry edits; each host owns its adapter and evidence. C gate/P1 diagnostic results do not qualify deployed native Simple/P2.
+
 ## 2026-10-11 variation handoff
 
 The [selected Item 5 integration](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) extends this existing expert. Earlier seed-era status below remains dated history. Before proposing a new body, identify its current semantic owner, callers and reused/moved/retired implementation. Do not duplicate a Future, schema, feature decoder, service-ID table, GPU runtime or selection ladder.

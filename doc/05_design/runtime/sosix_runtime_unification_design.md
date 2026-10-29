@@ -1,5 +1,73 @@
 # SOSIX Runtime Library Unification — Design
 
+## 2026-10-29 host process coordination contract
+
+This section governs new host-process work; the dated filesystem and GPU
+milestones below keep their original scope. Baseline: `release/1.0.0` at
+`f0d6c75f2359ce2b4a41305d618ba612d492a676`, after
+[#5233](https://github.com/ormastes/simple/pull/5233) and
+[#5234](https://github.com/ormastes/simple/pull/5234). A process provider does
+not qualify native asynchronous file I/O, GPU execution, or an entire OS.
+
+### Shared owners and platform adapters
+
+| Concern | Semantic owner and coordination boundary |
+|---|---|
+| Pure lifecycle, errors, service IDs, completion and lease rules | `src/lib/common/contracts/sosix/`; one shared-contract owner reviews changes affecting every adapter. Preserve versioned schemas and frozen IDs. |
+| Process ABI, registry, handle lifetime and capability receipts | `src/runtime/runtime.h`, `src/runtime/runtime_process_owned.c`, and the matching `src/lib/nogc_sync_mut/io/` facade; the process integration owner coordinates shared-file edits. Never use a PID as opaque authority. |
+| Darwin cooperative implementation | `runtime_sosix_darwin_image_private.h`, `runtime_sosix_darwin_process_private.h`, `runtime_sosix_darwin_snapshot_v1_impl.h`; Mac adapter owner maintains its explicit trusted profile. The last header is included by the production process owner. |
+| Other host implementations | Linux, Windows, FreeBSD and SimpleOS adapter owners own their platform mechanics and live-host tests. Reuse the shared contract; isolate platform internals and avoid another lifecycle or registry with conflicting semantics. |
+| Registration/build integration | Shared owner coordinates `src/compiler_rust/common/src/runtime_symbols.rs`, `compiler/src/codegen/runtime_sffi.rs`, `compiler/src/interpreter_extern/{mod,system}.rs`, `runtime/build.rs`, runtime source lists and parity baseline. A facade declaration alone is not a callable provider. |
+| Runner admission | BuildRunner/TestRunner owners select a versioned profile only after its required capabilities and source-matched evidence exist. Platform adapters cannot relax this gate to make their host pass. |
+
+Assign one integration owner and one reviewer for each change; record their
+agent/lane identifiers, base SHA, owned paths, dependent commits and acceptance
+commands in the PR. Host agents agree on schema, names, error/status meanings,
+capability bits and retirement/ACK behavior before parallel implementation.
+Changes to shared paths go through the integration owner or a separately
+reviewed prerequisite PR. Platform-private changes can proceed independently.
+Do not replace a shared file with a copy from an older host branch.
+
+### Profile-specific implementation status
+
+| Host/profile | Baseline evidence and remaining boundary |
+|---|---|
+| Darwin `trusted-snapshot-group`, snapshot V1 | Landed native runner (#5233) and production runtime API/facade wiring (#5234). Native API gate linked the actual `runtime_process_owned.c` object with local value/array allocator stubs: 8/8; diagnostic P1 SSpec: 8/8. This is not a deployed native Simple facade or P2 qualification. |
+| Darwin strict sealed V4 | Unavailable; public V4 and strict runner admission remain closed. Cooperative snapshot copying is pathname-based and does not seal same-UID mutation or contain escaped descendants. |
+| Linux V4 | Baseline has a Linux-specific implementation/capability branch in `runtime_process_owned.c`. Its host admission and live receipts belong to the Linux owner; the Mac evidence adds no Linux qualification. |
+| Windows V4 | Baseline V4 fallback reports unavailable/`ENOTSUP`. Existing bounded Windows process support is a separate surface. Windows owner must supply the strict adapter and Windows execution receipts before changing that status. |
+| FreeBSD V4 | Baseline non-Linux V4 capability branch reports unavailable/`ENOTSUP`. FreeBSD owner must establish the provider and host receipts; local candidate work is not release support. |
+| SimpleOS | Separate `src/os/sosix/` provider/guest authority. Hosted Mac process results do not qualify SimpleOS spawn, tree retirement, or QEMU matrix cells. |
+
+The cooperative Mac API requires trusted same-UID processes and temporary
+ancestors, default/waitable SIGCHLD, exclusive wait ownership, and descendants
+remaining in the created process group. It provides bounded capture,
+deadline/cancel handling, a bounded opaque registry, frozen output replay and
+consume-on-ACK. Fork-inherited registry authority rejects before locking.
+Platform-signed executable copies and executable-relative dependencies remain
+unqualified. Its profile number and result arrays are specified in
+`src/lib/nogc_sync_mut/io/darwin_snapshot_v1.spl`; they must not be aliased to
+the strict V4 ABI or treated as interchangeable capability receipts.
+
+Two unlanded experiments are evidence leads, not providers in this baseline:
+
+- Image commit `4bc384933f9`: tested AMFI CodeDirectory-hash constraints and
+  signed dependency policy on Darwin 25.5.0 arm64. It uses private SPI and
+  establishes rejection of tested image/dependency substitutions, not an
+  immutable filesystem object. Production admission still needs an
+  authenticated content-digest/CDHash/dependency manifest, provisioning and
+  OS-version qualification. It does not establish descendant containment.
+- Tree commit `f409734dbfb`: live `setsid`, `setpgid` and double-fork escapes
+  survive process-group cleanup; the observer lacks their wait authority.
+  The strict gate intentionally fails (exit 78). Green negative-qualification
+  tests establish correct refusal, not strict support. A broker or VM needs
+  its own proven membership, admission closure, termination and reap model.
+
+The [operator/agent guide](../../07_guide/lib/sosix_runtime_library.md#host-process-integration-workflow--2026-10-29)
+sets the TDD, integration and merge procedure. Do not advertise whole-host
+support from source presence, a capability constant, a compile-only probe, an
+expected refusal, or another host's passing tests.
+
 ## 2026-10-11 SIMD/GPU variation boundary
 
 Use the [integrated proposal](../compiler/simd_gpu_sosix_variation_final_2026-10-10.md) with the [current Item 5 reconciliation](../compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration). SOSIX/common contracts and SimpleRing own host-service operations, result/wake, lease and retirement; compiler/ProcessingIR/library owners retain arithmetic, algorithm choice and kernel planning.
