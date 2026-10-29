@@ -1,0 +1,58 @@
+# Canonical wire behavior for the allocation-bounded decoder.
+use std.spec.*
+use std.scv.compile_source_inventory.*
+
+fn decode_scratch_digest() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn decode_scratch_row(identity: text) -> text:
+    val digest = decode_scratch_digest()
+    "{identity}|{digest}|{digest}|{digest}|{digest}|{digest}|1"
+
+fn decode_scratch_wire(rows: [text]) -> text:
+    "simple-compile-source-inventory-v1\ngeneration=128\ncount={rows.len()}" +
+        (if rows.len() == 0: "" else: "\n" + rows.join("\n"))
+
+describe "inventory decoder validates canonical bytes without a second wire graph":
+    it "round trips empty and nonempty canonical inventories":
+        for rows in [[], [decode_scratch_row("src/a.spl")]]:
+            val wire = decode_scratch_wire(rows)
+            val decoded = compile_source_inventory_decode_v1(wire)
+            expect(decoded.valid).to_equal(true)
+            expect(compile_source_inventory_encode_v1(decoded.inventory!)).to_equal(wire)
+
+    it "rejects trailing newlines for empty and nonempty records":
+        for rows in [[], [decode_scratch_row("src/a.spl")]]:
+            expect(compile_source_inventory_decode_v1(decode_scratch_wire(rows) + "\n").valid).to_equal(false)
+
+    it "rejects duplicate and descending identities":
+        val a = decode_scratch_row("src/a.spl")
+        val b = decode_scratch_row("src/b.spl")
+        for rows in [[a, a], [b, a]]:
+            expect(compile_source_inventory_decode_v1(decode_scratch_wire(rows)).reason).to_equal("inventory-noncanonical")
+
+    it "uses byte order for unicode identities":
+        val a = decode_scratch_row("src/z.spl")
+        val b = decode_scratch_row("src/é.spl")
+        expect(compile_source_inventory_decode_v1(decode_scratch_wire([a, b])).valid).to_equal(true)
+        expect(compile_source_inventory_decode_v1(decode_scratch_wire([b, a])).reason).to_equal("inventory-noncanonical")
+
+    it "validates every digest facet and path":
+        var facet = 1
+        while facet <= 5:
+            var fields = decode_scratch_row("src/a.spl").split("|")
+            fields[facet] = "BAD"
+            expect(compile_source_inventory_decode_v1(decode_scratch_wire([fields.join("|")])).reason).to_equal("inventory-noncanonical")
+            facet = facet + 1
+        expect(compile_source_inventory_decode_v1(decode_scratch_wire([decode_scratch_row("../a.spl")])).reason).to_equal("inventory-noncanonical")
+
+    it "preserves malformed-row precedence after an earlier noncanonical row":
+        val bad = decode_scratch_row("../a.spl")
+        expect(compile_source_inventory_decode_v1(decode_scratch_wire([bad, "malformed"])).reason).to_equal("inventory-row-invalid")
+
+    it "rejects noncanonical and overflowing decimals":
+        val wire = decode_scratch_wire([decode_scratch_row("src/a.spl")])
+        expect(compile_source_inventory_decode_v1(wire.replace("generation=128", "generation=0128")).reason).to_equal("inventory-count-invalid")
+        expect(compile_source_inventory_decode_v1(wire.replace("count=1", "count=01")).reason).to_equal("inventory-count-invalid")
+        expect(compile_source_inventory_decode_v1(wire.substring(0, wire.len() - 1) + "01").reason).to_equal("inventory-row-invalid")
+        expect(compile_source_inventory_decode_v1(wire.substring(0, wire.len() - 1) + "9223372036854775808").reason).to_equal("inventory-row-invalid")
