@@ -675,104 +675,100 @@ pub unsafe extern "C" fn rt_cranelift_declare_function(
     linkage: i64,
 ) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
-    if name.is_empty() {
-        return 0;
-    }
-
-    let signature = {
-        let sigs = SIGNATURES.lock().unwrap();
-        match sigs.get(&sig) {
-            Some(s) => s.clone(),
-            None => return 0,
+    match declare_function_checked(module, &name, sig, linkage) {
+        Ok(handle) => handle,
+        Err(reason) => {
+            eprintln!("cranelift: declare_function failed: {reason}");
+            0
         }
-    };
+    }
+}
 
+fn declare_function_checked(module: i64, name: &str, sig: i64, linkage: i64) -> Result<i64, String> {
+    let identity = || format!("module={module} symbol={name:?} signature_handle={sig} linkage={linkage}");
+    if name.is_empty() {
+        return Err(format!("{}: empty symbol", identity()));
+    }
+    let signature = SIGNATURES.lock().unwrap().get(&sig).cloned()
+        .ok_or_else(|| format!("{}: missing signature", identity()))?;
+    let detailed_identity = || format!("{} signature={signature}", identity());
     let mut link = linkage_from_code(linkage);
     if linkage == CRANELIFT_LINKAGE_COMDAT {
-        // JIT: one module, nothing to dedupe -- plain export.
         link = Linkage::Export;
     }
-
-    // Try JIT module first, then AOT
     let func_id = {
         let mut jit = JIT_MODULES.lock().unwrap();
         if let Some(mod_ctx) = jit.get_mut(&module) {
-            let id = mod_ctx.module.declare_function(&name, link, &signature).ok();
-            if let Some(id) = id {
-                mod_ctx.func_ids.insert(name.clone(), id);
-            }
+            let id = mod_ctx.module.declare_function(name, link, &signature)
+                .map_err(|error| format!("{}: {}", detailed_identity(), describe_module_error(&error)))?;
+            mod_ctx.func_ids.insert(name.to_owned(), id);
             id
         } else {
             drop(jit);
             let mut aot = AOT_MODULES.lock().unwrap();
-            if let Some(mod_ctx) = aot.get_mut(&module) {
-                let mut needs_group = false;
-                if linkage == CRANELIFT_LINKAGE_COMDAT {
-                    let (comdat_link, group) =
-                        comdat_instance_linkage(mod_ctx.module.isa().triple().binary_format);
-                    link = comdat_link;
-                    needs_group = group;
-                }
-                let id = mod_ctx.module.declare_function(&name, link, &signature).ok();
-                if let Some(id) = id {
-                    mod_ctx.func_ids.insert(name.clone(), id);
-                    if needs_group {
-                        mod_ctx.comdat_funcs.push(id);
-                    }
-                }
-                id
-            } else {
-                None
+            let mod_ctx = aot.get_mut(&module)
+                .ok_or_else(|| format!("{}: missing JIT/AOT module", detailed_identity()))?;
+            let mut needs_group = false;
+            if linkage == CRANELIFT_LINKAGE_COMDAT {
+                let (comdat_link, group) =
+                    comdat_instance_linkage(mod_ctx.module.isa().triple().binary_format);
+                link = comdat_link;
+                needs_group = group;
             }
+            let id = mod_ctx.module.declare_function(name, link, &signature)
+                .map_err(|error| format!("{}: {}", detailed_identity(), describe_module_error(&error)))?;
+            mod_ctx.func_ids.insert(name.to_owned(), id);
+            if needs_group {
+                mod_ctx.comdat_funcs.push(id);
+            }
+            id
         }
     };
-
-    match func_id {
-        Some(id) => {
-            let handle = next_handle();
-            DECLARED_FUNCS.lock().unwrap().insert(handle, id);
-            own_func_handle(module, handle);
-            note_sig_use(sig, module);
-            handle
-        }
-        None => 0,
-    }
+    let handle = next_handle();
+    DECLARED_FUNCS.lock().unwrap().insert(handle, func_id);
+    own_func_handle(module, handle);
+    note_sig_use(sig, module);
+    Ok(handle)
 }
 
 /// Import a declared function into the current function being built.
 /// Returns a func_ref handle for use with call instructions, or 0 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_import_function(ctx: i64, func_handle: i64) -> i64 {
-    let func_id = {
-        let declared = DECLARED_FUNCS.lock().unwrap();
-        match declared.get(&func_handle) {
-            Some(&id) => id,
-            None => return 0,
+    match import_function_checked(ctx, func_handle) {
+        Ok(handle) => handle,
+        Err(reason) => {
+            eprintln!("cranelift: import_function failed: {reason}");
+            0
         }
-    };
+    }
+}
 
+fn import_function_checked(ctx: i64, func_handle: i64) -> Result<i64, String> {
+    let identity = || format!("context={ctx} declaration_handle={func_handle}");
+    let func_id = DECLARED_FUNCS.lock().unwrap().get(&func_handle).copied()
+        .ok_or_else(|| format!("{}: missing declared function", identity()))?;
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
-    let Some(ab) = active.get_mut(&ctx) else { return 0 };
-    let Some(builder) = ab.builder.as_mut() else { return 0 };
-
+    let ab = active.get_mut(&ctx)
+        .ok_or_else(|| format!("{}: missing active context", identity()))?;
+    let module_handle = ab.module_handle;
+    let builder = ab.builder.as_mut()
+        .ok_or_else(|| format!("{} module={module_handle}: missing function builder", identity()))?;
     let func_ref = if ab.is_jit {
         let mut modules = JIT_MODULES.lock().unwrap();
-        let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else {
-            return 0;
-        };
+        let mod_ctx = modules.get_mut(&module_handle)
+            .ok_or_else(|| format!("{} module={module_handle}: missing JIT module", identity()))?;
         mod_ctx.module.declare_func_in_func(func_id, builder.func)
     } else {
         let mut modules = AOT_MODULES.lock().unwrap();
-        let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else {
-            return 0;
-        };
+        let mod_ctx = modules.get_mut(&module_handle)
+            .ok_or_else(|| format!("{} module={module_handle}: missing AOT module", identity()))?;
         mod_ctx.module.declare_func_in_func(func_id, builder.func)
     };
-
     let id = ab.next_value_id;
     ab.next_value_id += 1;
     ab.func_refs.insert(id, func_ref);
-    id
+    Ok(id)
 }
 
 // ============================================================================
@@ -3011,6 +3007,72 @@ mod owned_handle_tests {
             rt_cranelift_free_module(b);
             assert!(!MODULE_OWNED.lock().unwrap().contains_key(&a));
             assert!(!MODULE_OWNED.lock().unwrap().contains_key(&b));
+        }
+    }
+}
+
+#[cfg(test)]
+mod function_handle_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn conflicting_declaration_retains_symbol_signatures_and_valid_original() {
+        unsafe {
+            let name = "handle_diagnostic_conflict";
+            let module = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            assert!(module > 0);
+            let original = rt_cranelift_new_signature(0);
+            rt_cranelift_sig_set_return(original, CL_TYPE_I64);
+            let conflicting = rt_cranelift_new_signature(0);
+            rt_cranelift_sig_set_return(conflicting, CL_TYPE_F64);
+            let symbol = "diagnostic_callee";
+            let declared = declare_function_checked(module, symbol, original, 1).unwrap();
+            let reason = declare_function_checked(module, symbol, conflicting, 1).unwrap_err();
+            assert!(reason.contains(&format!("module={module}")), "{reason}");
+            assert!(reason.contains("symbol=\"diagnostic_callee\""), "{reason}");
+            assert!(reason.contains("incompatible with previous declaration"), "{reason}");
+            assert!(reason.contains("types::I64") && reason.contains("types::F64"), "{reason}");
+            assert_eq!(rt_cranelift_declare_function(module, symbol.as_ptr() as i64,
+                symbol.len() as i64, conflicting, 1), 0);
+            // A rejected redeclaration must not erase the valid original.
+            let caller = "diagnostic_caller";
+            let ctx = rt_cranelift_begin_function(module, caller.as_ptr() as i64, caller.len() as i64, original);
+            assert!(ctx > 0);
+            assert!(import_function_checked(ctx, declared).unwrap() > 0);
+            rt_cranelift_free_module(module);
+            SIGNATURES.lock().unwrap().remove(&conflicting);
+        }
+    }
+
+    #[test]
+    fn invalid_import_distinguishes_declaration_from_context() {
+        unsafe {
+            let name = "handle_diagnostic_import";
+            let module = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            assert!(module > 0);
+            let sig = rt_cranelift_new_signature(0);
+            let declared = declare_function_checked(module, "valid_callee", sig, 1).unwrap();
+            let absent_declaration = import_function_checked(0, 0).unwrap_err();
+            assert!(absent_declaration.contains("missing declared function"));
+            let absent_context = import_function_checked(0, declared).unwrap_err();
+            assert!(absent_context.contains("missing active context"));
+            assert!(absent_context.contains(&format!("declaration_handle={declared}")));
+            assert_eq!(rt_cranelift_import_function(0, declared), 0);
+            assert!(declare_function_checked(module, "valid_callee", sig, 1).is_ok());
+            rt_cranelift_free_module(module);
+        }
+    }
+
+    #[test]
+    fn declaration_distinguishes_missing_signature_from_missing_module() {
+        unsafe {
+            let missing_signature = declare_function_checked(0, "probe", 0, 1).unwrap_err();
+            assert!(missing_signature.contains("missing signature"));
+            let sig = rt_cranelift_new_signature(0);
+            let missing_module = declare_function_checked(0, "probe", sig, 1).unwrap_err();
+            assert!(missing_module.contains("missing JIT/AOT module"));
+            assert!(missing_module.contains("symbol=\"probe\""));
+            SIGNATURES.lock().unwrap().remove(&sig);
         }
     }
 }

@@ -301,3 +301,13 @@ Board-side consequences: [os layer expert](../os/skill.md).
 The MIR-side member of the same admission family — `starts_with`/`ends_with`
 returning the wrong boolean on the native path — is written up once in
 [mir_lowering](../mir_lowering/skill.md) § 2026-09-26.
+
+### Cranelift function-handle refusals (2026-10-29)
+
+A zero import/call handle is not enough to identify the failing source module.
+Retain the bridge's declaration diagnostic, including symbol, module, requested
+signature and underlying Cranelift error. Import diagnostics distinguish stale
+declarations from missing builder/module state. Return-zero ABI and fail-closed
+build aggregation remain unchanged. The rebuilt bridge must be qualified;
+editing its source cannot change a statically linked frozen producer. See
+`doc/08_tracking/bug/buildrunner_cranelift_zero_function_ref_2026_10_29.md`.
