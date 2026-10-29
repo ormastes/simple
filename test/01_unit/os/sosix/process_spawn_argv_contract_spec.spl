@@ -1,0 +1,30 @@
+# Source wiring evidence; physical guest execution remains a separate gate.
+use std.spec.{describe, it, expect}
+extern fn rt_file_read_text(path: text) -> text
+
+describe "SOSIX spawn argv production wiring":
+    it "dispatches supplied arguments through the scoped userspace owner":
+        val source = rt_file_read_text("src/os/sosix/process.spl")
+        val spawn = source.slice(source.index_of("fn sosix_process_spawn("), source.index_of("fn sosix_process_waitpid("))
+        expect(spawn).to_contain("user_spawn(path, args, priority)")
+        expect(spawn.contains("_ignored_args")).to_equal(false)
+
+    it "retains priority separately from the owned argv pointer":
+        val source = rt_file_read_text("src/os/userlib/spawn.spl")
+        expect(source).to_contain("priority as u64, allocation as u64, SYSCALL13_SPAWN_ARGV_ABI_V1")
+        expect(source).to_contain("execve_plan_v1(path, argv, [])")
+        expect(source).to_contain("raw_free(allocation, size)")
+        expect(source.contains(".ptr()")).to_equal(false)
+
+    it "copies tagged char pointer vectors before constructing the child image":
+        val source = rt_file_read_text("src/os/kernel/ipc/syscall_process.spl")
+        expect(source).to_contain("if args.arg4 == SYSCALL13_SPAWN_ARGV_ABI_V1:")
+        expect(source).to_contain("vmm_copyin_string_vector(\n            args.arg3,")
+        expect(source).to_contain("build_user_process_image(path, bytes_result.unwrap(), arch, sp_argv, sp_envp)")
+        expect(source).to_contain("fn dispatch_spawn_binary_syscall_state(")
+
+    it "routes installed x86 and RV64 dispatch through the argument aware owner":
+        val x86 = rt_file_read_text("src/os/kernel/arch/x86_64/interrupt.spl")
+        val rv64 = rt_file_read_text("src/os/kernel/arch/riscv64/syscall.spl")
+        expect(x86).to_contain("val spawn_state = dispatch_spawn_binary_syscall_state(")
+        expect(rv64).to_contain("val spawned = dispatch_spawn_binary_syscall_state(")
