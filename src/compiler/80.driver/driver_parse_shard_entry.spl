@@ -28,6 +28,7 @@ use compiler.frontend.frontend_advisory_preprocess_port_v1.{
 use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1}
 use compiler.driver.driver_build.file_fiber_v1.{FileFiberEntryV1, FileFiberRunV1,
     file_fiber_begin_v1, file_fiber_finished_v1, file_fiber_end_v1}
+use compiler.driver.driver_build.parse_fiber_claim_window_v1.{parse_fiber_claim_window_v1}
 use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_owns_v1,
     driver_publish_frontend_cache_scope_v1}
 use compiler.driver.driver_source_loading.{_driver_unique_physical_sources}
@@ -224,44 +225,65 @@ fn _driver_run_parse_fibers(
     val _scope = driver_publish_frontend_cache_scope_v1(driver.ctx)
     val tldr_root = env_get("SIMPLE_FRONTEND_CACHE_DIR")
     val tldr_dir = if tldr_root != "": tldr_root + "/tldr" else: ""
-    var entries: [FileFiberEntryV1] = []
-    _g_parse_fiber_keys = {}
-    for source in _driver_unique_physical_sources(driver.ctx.sources):
-        if driver_parse_shard_owns_v1(source.path):
+    # Claim only a bounded window before doing useful work. Claiming the whole
+    # closure here let the first child reserve every module before peers had
+    # finished source loading (3024/3024 versus zero in six other children).
+    # Imports outside the current window are treated exactly like imports
+    # owned by another child: parse cache warming never waits across owners.
+    val sources = _driver_unique_physical_sources(driver.ctx.sources)
+    var paths: [text] = []
+    for source in sources:
+        paths.push(source.path)
+    var source_index = 0
+    var claimed = 0
+    var parsed = 0
+    var done = 0
+    var import_parks = 0
+    var errors = 0
+    while source_index < sources.len():
+        var entries: [FileFiberEntryV1] = []
+        _g_parse_fiber_keys = {}
+        val window = parse_fiber_claim_window_v1(paths, source_index, driver_parse_shard_owns_v1)
+        source_index = window.next_index
+        for i in window.indices:
+            val source = sources[i]
             entries = entries.push(FileFiberEntryV1(module_key: source.module_name, path: source.path,
                 est_bytes: source.content.len() * 64, content: source.content))
             _g_parse_fiber_keys[source.module_name] = true
-    var run = file_fiber_begin_v1(entries, [0], _driver_parse_fiber_budget_bytes())
-    var parsed = 0
-    while not file_fiber_finished_v1(run):
-        run.advance(driver_parse_fiber_imports_v1)
-        for i in run.take_parse_requests():
-            val e = run.entries[i]
-            val selected = driver.parse_full_frontend_selected_v1(e.content, e.path, e.module_key)
-            if selected.is_err():
-                run.parse_done(i, "", selected.unwrap_err())
-            elif par_had_error_get():
-                run.parse_done(i, "", driver_parse_error_message(e.path))
-            else:
-                parsed = parsed + 1
-                val module_id = module_artifact_module_id_v1(e.path)
-                val (sections, _refusal) = module_tldr_companion_view_sections_v1(selected.unwrap(),
-                    e.path, e.content, module_id)
-                val tldr = module_tldr_companion_render_sections_v1(module_id, e.content, sections)
-                if tldr_dir != "":
-                    val _published = module_artifact_publish_atomic_v1(
-                        module_tldr_companion_path_v1(tldr_dir, e.path), tldr)
-                run.parse_done(i, tldr, "")
-    file_fiber_end_v1(run)
-    var errors = 0
-    var ei = 0
-    while ei < run.error.len():
-        val err = run.error[ei]
-        if err != "":
-            if errors < 5: eprint "error: parse fiber {run.entries[ei].path}: {err}"
-            errors = errors + 1
-        ei = ei + 1
-    print "[parse-fibers] files={entries.len()} parsed={parsed} done={run.done_order.len()} errors={errors} import_parks={run.dep_parks} cache_hits={frontend_parse_cache_hits()} cache_misses={frontend_parse_cache_misses()}"
+        if entries.len() == 0: continue
+        claimed = claimed + entries.len()
+        var run = file_fiber_begin_v1(entries, [0], _driver_parse_fiber_budget_bytes())
+        while not file_fiber_finished_v1(run):
+            run.advance(driver_parse_fiber_imports_v1)
+            for i in run.take_parse_requests():
+                val e = run.entries[i]
+                val selected = driver.parse_full_frontend_selected_v1(e.content, e.path, e.module_key)
+                if selected.is_err():
+                    run.parse_done(i, "", selected.unwrap_err())
+                elif par_had_error_get():
+                    run.parse_done(i, "", driver_parse_error_message(e.path))
+                else:
+                    parsed = parsed + 1
+                    val module_id = module_artifact_module_id_v1(e.path)
+                    val (sections, _refusal) = module_tldr_companion_view_sections_v1(selected.unwrap(),
+                        e.path, e.content, module_id)
+                    val tldr = module_tldr_companion_render_sections_v1(module_id, e.content, sections)
+                    if tldr_dir != "":
+                        val _published = module_artifact_publish_atomic_v1(
+                            module_tldr_companion_path_v1(tldr_dir, e.path), tldr)
+                    run.parse_done(i, tldr, "")
+        file_fiber_end_v1(run)
+        done = done + run.done_order.len()
+        import_parks = import_parks + run.dep_parks
+        var ei = 0
+        while ei < run.error.len():
+            val err = run.error[ei]
+            if err != "":
+                if errors < 5: eprint "error: parse fiber {run.entries[ei].path}: {err}"
+                errors = errors + 1
+            ei = ei + 1
+    _g_parse_fiber_keys = {}
+    print "[parse-fibers] files={claimed} parsed={parsed} done={done} errors={errors} import_parks={import_parks} cache_hits={frontend_parse_cache_hits()} cache_misses={frontend_parse_cache_misses()}"
     # This result controls the parse-shard child's exit status.
     errors == 0
 

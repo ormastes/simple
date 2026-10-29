@@ -1,0 +1,51 @@
+use compiler.driver.driver_build.parse_fiber_claim_window_v1.{parse_fiber_claim_window_v1}
+
+var claimed_paths: Dict<text, bool> = {}
+var claim_calls: i64 = 0
+
+fn claim_once(path: text) -> bool:
+    claim_calls = claim_calls + 1
+    if claimed_paths.contains_key(path): return false
+    claimed_paths[path] = true
+    true
+
+fn main() -> i64:
+    var paths: [text] = []
+    for i in 0..40:
+        paths.push("source_{i}.spl")
+    # The first child must stop reserving before it owns the whole closure.
+    val first = parse_fiber_claim_window_v1(paths, 0, claim_once)
+    if first.indices.len() != 16 or first.next_index != 16 or claim_calls != 16:
+        eprint "first child reserved beyond its parse window"
+        return 1
+    # A second child starts from the same inventory and can acquire real work
+    # before the first child asks for its next window.
+    val second = parse_fiber_claim_window_v1(paths, 0, claim_once)
+    if second.indices.len() != 16 or second.next_index != 32:
+        eprint "second child could not acquire its parse window"
+        return 1
+    for i in 0..16:
+        if first.indices[i] != i or second.indices[i] != i + 16:
+            eprint "claim ownership overlapped or inventory order changed"
+            return 1
+    # Resume after earlier window; skip peer-owned work without dropping tail.
+    val tail = parse_fiber_claim_window_v1(paths, first.next_index, claim_once)
+    if tail.indices.len() != 8 or tail.next_index != 40:
+        eprint "partial final parse window lost work"
+        return 1
+    for i in 0..8:
+        if tail.indices[i] != i + 32:
+            eprint "tail claim ownership changed"
+            return 1
+    val exhausted = parse_fiber_claim_window_v1(paths, 0, claim_once)
+    if exhausted.indices.len() != 0 or exhausted.next_index != 40:
+        eprint "already-owned files were claimed twice"
+        return 1
+    val before_empty = claim_calls
+    val empty = parse_fiber_claim_window_v1([], 0, claim_once)
+    val finished = parse_fiber_claim_window_v1(paths, 40, claim_once)
+    if empty.indices.len() != 0 or empty.next_index != 0 or finished.indices.len() != 0 or finished.next_index != 40 or claim_calls != before_empty:
+        eprint "empty or completed inventory called the claim owner"
+        return 1
+    print "PASS parse fiber claim windows: bounded reservation, peer progress, exact coverage, no duplicate claims"
+    0
