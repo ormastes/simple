@@ -1,0 +1,110 @@
+# Native Windows BuildRunner transport -> worker -> SOSIX-owned child probe.
+# The caller supplies an existing private root and a separately built real
+# bootstrap-builder-windows-worker executable. No fake process port is used.
+use app.io.args_ops.{get_args}
+use app.io.env_ops.{env_get, env_set}
+use app.io.file_ops.{file_atomic_write, file_hash_sha256, file_is_regular_no_follow, file_read}
+use app.io.time_ops.{sleep_ms, current_time_ms}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, windows_process_request_valid_v1}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_host_os}
+use std.nogc_sync_mut.sosix.windows_memory_v1.{sosix_windows_memory_headroom_v1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildInputV1}
+use app.bootstrap_builder.process_port_windows.{builder_process_windows_v1}
+use app.bootstrap_builder.transport.{builder_transport_start_v1, builder_transport_poll_v1,
+    builder_transport_cancel_v1, builder_transport_reaped_v1, builder_transport_collect_v1}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 3 or sosix_test_host_os() != "windows":
+        print "UNSUPPORTED Windows native BuildRunner HAL probe requires private root and compiled worker"
+        return 2
+    val base = args[1]
+    val worker = args[2]
+    val system_root = (env_get("SystemRoot") ?? "").replace("\\", "/")
+    if system_root == "":
+        print "UNSUPPORTED Windows SystemRoot is unavailable"
+        return 2
+    val producer = system_root + "/System32/cmd.exe"
+    if not dir_is_real_no_follow(base) or not file_is_regular_no_follow(worker) or not file_is_regular_no_follow(producer):
+        print "UNSUPPORTED missing private root, native worker, or Windows cmd.exe"
+        return 2
+    # This SOSIX owner calls the real rt_host_memory_headroom_bytes_v1 ABI on
+    # native Windows; unavailable/zero capacity must never be synthetic PASS.
+    val memory_result = unsafe(capabilities: [ffi, raw_ptr]): sosix_windows_memory_headroom_v1()
+    val headroom = match memory_result:
+        Ok(value): value
+        Err(reason):
+            print "FAIL SOSIX host memory: {reason}"
+            return 12
+    if headroom <= 0: return 13
+    # This probe owns its process environment. Test the default local worker
+    # path with a reservation matching its enforced Job Object memory bound.
+    val _git_policy = env_set("SIMPLE_BUILD_STAGED_GIT", "0")
+    val _memory = env_set("SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES", "268435456")
+    val _empty = env_set("SIMPLE_HAL_EMPTY_VALUE", "")
+    val _trace = env_set("SIMPLE_BUILD_ENV_SHAPE_TRACE", "1")
+    val run = base + "/sosix-hal-" + str(getpid()) + "-" + str(current_time_ms())
+    if not dir_create_all(run) or not file_atomic_write(run + "/input.txt", "SOSIX_INPUT\n"):
+        return 3
+    val producer_digest = file_hash_sha256(producer)
+    val worker_digest = file_hash_sha256(worker)
+    val input_digest = file_hash_sha256(run + "/input.txt")
+    if producer_digest.len() != 64 or worker_digest.len() != 64 or input_digest.len() != 64:
+        return 4
+    val request = WindowsProcessRequestV1(producer, producer_digest, [], ["EMPTY=", "EQUALS=a=b"],
+        run, [], run + "/out", run + "/err", 1000)
+    if windows_process_request_valid_v1(request) != "": return 14
+    val no_separator = WindowsProcessRequestV1(producer, producer_digest, [], ["NAME"],
+        run, [], run + "/out", run + "/err", 1000)
+    if windows_process_request_valid_v1(no_separator) == "": return 15
+    val no_name = WindowsProcessRequestV1(producer, producer_digest, [], ["=value"],
+        run, [], run + "/out", run + "/err", 1000)
+    if windows_process_request_valid_v1(no_name) == "": return 16
+    val task = BuildTaskV1(id: "hal-probe", attempt: 1, phase: "compile",
+        producer_digest: producer_digest, source_digest: input_digest, toolchain_digest: producer_digest,
+        dependencies: [], program: producer,
+        args: ["/d", "/c", "type input.txt > result.o & echo HAL_STDOUT & echo HAL_STDERR 1>&2 & exit /b 0"],
+        inputs: [BuildInputV1("input.txt", input_digest)], outputs: ["result.o"],
+        cache_key: input_digest, timeout_ms: 10000, memory_limit_bytes: 268435456,
+        links: [], memory_policy: "enforce")
+    val host = BuildHostV1("local", "local", "", run, worker, worker_digest, 1)
+    val attempt = builder_transport_start_v1(task, host, run, run, builder_process_windows_v1())
+    if attempt.error != "" or attempt.pid <= 0:
+        print "FAIL manager launch: {attempt.error}"
+        return 5
+    val deadline = current_time_ms() + 30000
+    var status: i64 = -2
+    while status == -2 and current_time_ms() < deadline:
+        status = builder_transport_poll_v1(attempt)
+        if status == -2: sleep_ms(25)
+    if status == -2:
+        val cancelled = builder_transport_cancel_v1(attempt)
+        print "FAIL manager timeout; cancellation acknowledged={cancelled}"
+        return 6
+    if status != 0 or not builder_transport_reaped_v1(attempt):
+        print "FAIL manager status={status}; exact child-tree reaping unproven"
+        return 7
+    val result = match builder_transport_collect_v1(attempt):
+        Ok(value): value
+        Err(reason):
+            print "FAIL result: {reason}"
+            return 8
+    if result.status != "OK" or result.exit_code != 0 or result.outputs.len() != 1:
+        return 9
+    val output = file_read(attempt.local_root + "/work/result.o")
+    val stdout = file_read(attempt.local_root + "/stdout.log")
+    val stderr = file_read(attempt.local_root + "/stderr.log")
+    val memory = file_read(attempt.local_root + "/compiler.memory")
+    if not output.contains("SOSIX_INPUT") or not stdout.contains("HAL_STDOUT") or not stderr.contains("HAL_STDERR"):
+        return 10
+    if not memory.contains("enforcement=job-memory") or not memory.contains("peak_metric=job-commit-peak"):
+        return 11
+    val peak_fields = memory.split("observed_peak_bytes=")
+    if peak_fields.len() != 2: return 14
+    val peak = peak_fields[1].split("\n")[0].to_i64() ?? -1
+    if peak <= 0 or peak > task.memory_limit_bytes: return 15
+    print "PASS windows-buildrunner-sosix-hal"
+    print "evidence={attempt.local_root}"
+    0
