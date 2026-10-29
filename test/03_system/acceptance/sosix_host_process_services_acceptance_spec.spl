@@ -1,0 +1,154 @@
+use std.spec.step
+use std.spipe.*
+use std.nogc_sync_mut.io_runtime.{platform_name}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError}
+use std.nogc_async_mut.io.process_ops.{process_wait}
+use std.nogc_async_mut.sosix.{
+    SosixRun, sosix_run_checked, sosix_run_bounded_checked,
+    sosix_which_checked, sosix_spawn_checked, sosix_is_running, sosix_kill,
+}
+
+# @manual_section Running a program and preserving its result
+
+describe "SOSIX host process and executable services":
+    """
+    # SOSIX process and executable services on the current host
+
+    As a tool author, I want SOSIX to run a real executable, return its output
+    and exit status, find executables explicitly, and manage a child where this
+    host provides that capability. This scenario exercises the host's installed
+    provider. It does not use a mock process table or infer support from source
+    text.
+
+    On macOS, Linux, BSD runtimes reporting `freebsd` or `unix`, and POSIX
+    runtimes reporting `illumos` or `solaris`, the cases use `/bin/sh` and cover
+    capture, input rejection, lookup, and child lifecycle. On Windows, the
+    synchronous case uses `cmd.exe` through the byte-capture provider and the
+    lifecycle section checks the current explicit unsupported result. SimpleOS
+    uses its separate QEMU system-test surface; this host spec does not claim
+    SimpleOS execution evidence.
+
+    Run on the host being qualified:
+    `bin/simple test test/03_system/acceptance/sosix_host_process_services_acceptance_spec.spl`
+    """
+
+    it "captures real child output and preserves its exit status on this host":
+        # @req REQ-SOSIX-HOSTPROC-001
+        # @req REQ-SSPEC-SYSTEM
+        # @capture(text): child stdout, stderr, and the returned exit code
+        step("Run one real command using the provider selected by this host")
+        val host = platform_name()
+        var result: SosixRun
+        if host == "windows":
+            val found = sosix_which_checked("cmd.exe")
+            match found:
+                case Ok(Some(path)):
+                    result = sosix_run_checked(path, ["/c", "echo SOSIX-HOSTPROC-OUT & echo SOSIX-HOSTPROC-ERR 1>&2 & exit /b 7"]).unwrap()
+                case _:
+                    assert_true(false)
+                    result = SosixRun(stdout: "", stderr: "", exit_code: -1)
+        else:
+            val found = sosix_which_checked("sh")
+            match found:
+                case Ok(Some(path)):
+                    result = sosix_run_checked(path, ["-c", "printf 'SOSIX-HOSTPROC-OUT'; printf 'SOSIX-HOSTPROC-ERR' >&2; exit 7"]).unwrap()
+                case _:
+                    assert_true(false)
+                    result = SosixRun(stdout: "", stderr: "", exit_code: -1)
+
+        step("Confirm both streams and the nonzero child status reached the caller")
+        expect(result.stdout).to_contain("SOSIX-HOSTPROC-OUT")
+        expect(result.stderr).to_contain("SOSIX-HOSTPROC-ERR")
+        expect(result.exit_code).to_equal(7)
+
+    it "rejects invalid command text and capture bounds before starting a child":
+        # @req REQ-SOSIX-HOSTPROC-001
+        # @capture(text): typed failures returned for invalid SOSIX inputs
+        step("Submit an executable name with an embedded NUL byte")
+        val bad_name = sosix_run_checked("bad\0name", [])
+        match bad_name:
+            case Err(_): assert_true(true)
+            case Ok(_): assert_true(false)
+
+        step("Submit a capture bound above the documented SOSIX text limit")
+        val bad_bound = sosix_run_bounded_checked("/bin/sh", ["-c", "exit 0"], 0, 16777217)
+        match bad_bound:
+            case Err(_): assert_true(true)
+            case Ok(_): assert_true(false)
+
+    it "locates an installed executable and reports an absent one":
+        # @req REQ-SOSIX-HOSTPROC-002
+        # @capture(text): checked lookup results for present and absent names
+        step("Ask SOSIX to resolve a command that is expected on every supported host")
+        val host = platform_name()
+        var existing_name = "sh"
+        if host == "windows": existing_name = "cmd.exe"
+        val existing = sosix_which_checked(existing_name)
+        match existing:
+            case Ok(Some(path)):
+                expect(path.len()).to_be_greater_than(0)
+            case _:
+                assert_true(false)
+
+        step("Ask SOSIX to resolve a deliberately unique name that is not installed")
+        val absent = sosix_which_checked("sosix_acceptance_missing_73e8f55d")
+        match absent:
+            case Ok(None): assert_true(true)
+            case _:
+                assert_true(false)
+
+        step("Check the missing executable result returned by actual execution")
+        val missing_run = sosix_run_checked("sosix_acceptance_missing_73e8f55d", [])
+        match missing_run:
+            case Ok(result):
+                expect(result.exit_code).to_equal(127)
+                expect(result.stderr).to_contain("not found")
+            case _:
+                assert_true(false)
+
+        step("Reject a lookup name containing an embedded NUL")
+        val invalid = sosix_which_checked("bad\0name")
+        match invalid:
+            case Err(TextIoError.Io(_)): assert_true(true)
+            case _:
+                assert_true(false)
+
+# @manual_section Managing a child process where the host supports it
+
+    it "observes and terminates a live child on POSIX hosts":
+        # @req REQ-SOSIX-HOSTPROC-003
+        # @capture(text): child identifier, live observation, kill, bounded wait, and final liveness
+        val host = platform_name()
+        if host == "macos" or host == "linux" or host == "freebsd" or host == "unix" or host == "illumos" or host == "solaris":
+            step("Start a sleeping child with the POSIX SOSIX provider")
+            val spawned = sosix_spawn_checked("/bin/sh", ["-c", "exec sleep 30"])
+            match spawned:
+                case Ok(pid):
+                    val was_live = sosix_is_running(pid)
+
+                    step("Terminate the returned child before checking its earlier liveness")
+                    val was_terminated = sosix_kill(pid)
+                    var wait_status = process_wait(pid, 5000)
+                    if wait_status == -2 or (wait_status == -1 and sosix_is_running(pid)):
+                        sosix_kill(pid)
+                        wait_status = process_wait(pid, 5000)
+                    val still_running = sosix_is_running(pid)
+                    expect(was_live).to_equal(true)
+                    expect(was_terminated).to_equal(true)
+                    # Some runtimes reap synchronously in process_kill; then
+                    # process_wait reports an absent child (-1). A timeout
+                    # (-2) is never accepted, and liveness must be false.
+                    expect(wait_status != -2).to_equal(true)
+                    expect(still_running).to_equal(false)
+                case Err(_):
+                    assert_true(false)
+        else:
+            # @req REQ-SOSIX-HOSTPROC-004
+            step("Confirm unsupported lifecycle service stays an explicit error on this host")
+            val spawned = sosix_spawn_checked("sh", ["-c", "exec sleep 1"])
+            match spawned:
+                case Err(TextIoError.Unsupported(_)): assert_true(true)
+                case Err(_): assert_true(false)
+                case Ok(pid):
+                    sosix_kill(pid)
+                    assert_true(false)
