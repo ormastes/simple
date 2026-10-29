@@ -1,0 +1,277 @@
+"""Test runner argument parsing: level, compiler, mode, timeout, path flags.
+
+Audience: anyone editing `parse_test_args` / `test_args_validation_error` in
+`src/lib/nogc_sync_mut/test_runner/test_runner_args.spl`.
+
+Complements `test/01_unit/app/test_runner/args_spec.spl`, which does not cover
+--smoke, --compiler, --compile, --timeout=, --seed=, native backend flags,
+unstable/whole/ci presets, session flags, or most validation errors.
+
+# @req REQ-TESTRUNNER-ARGS-COVERAGE
+"""
+
+use std.spec.*
+use std.test_runner.test_runner_args.{parse_test_args, parse_mode_str, test_args_validation_error}
+use std.test_runner.test_runner_types.{TestExecutionMode, TestLevel}
+
+describe "level flags":
+    it "parses --smoke":
+        expect(parse_test_args(["--smoke"]).level).to_equal(TestLevel.Smoke)
+    it "lets the last level flag win":
+        expect(parse_test_args(["--unit", "--system"]).level).to_equal(TestLevel.System)
+    it "keeps the level when a path follows":
+        expect(parse_test_args(["--integration", "test/x"]).level).to_equal(TestLevel.Integration)
+
+describe "--compiler":
+    it "defaults to no compiler":
+        expect(parse_test_args([]).compiler).to_equal("")
+    it "parses the space form":
+        expect(parse_test_args(["--compiler", "phase2"]).compiler).to_equal("phase2")
+    it "parses the equals form":
+        expect(parse_test_args(["--compiler=phase2"]).compiler).to_equal("phase2")
+    it "lets the last --compiler win":
+        expect(parse_test_args(["--compiler=seed", "--compiler=phase2"]).compiler).to_equal("phase2")
+    it "does not treat the compiler value as a path":
+        val o = parse_test_args(["--compiler", "phase2"])
+        expect(o.path_explicit).to_equal(false)
+    it "reports a missing value":
+        expect(test_args_validation_error(["--compiler"])).to_equal("missing value for --compiler")
+    it "reports an empty equals value":
+        expect(test_args_validation_error(["--compiler="])).to_equal("missing value for --compiler")
+    it "accepts a valid selector":
+        expect(test_args_validation_error(["--compiler=phase2"])).to_equal("")
+
+describe "--mode":
+    it "defaults to interpreter":
+        expect(parse_test_args([]).mode).to_equal(TestExecutionMode.Interpreter)
+    it "parses the space form":
+        expect(parse_test_args(["--mode", "smf"]).mode).to_equal(TestExecutionMode.Smf)
+    it "parses the equals form":
+        expect(parse_test_args(["--mode=native"]).mode).to_equal(TestExecutionMode.Native)
+    it "treats --compile as compile mode":
+        expect(parse_test_args(["--compile"]).mode).to_equal(TestExecutionMode.Compile)
+    it "parses a composite container mode":
+        expect(parse_mode_str("container(x)")).to_equal(TestExecutionMode.Composite("interpreter(container(x))"))
+    it "parses a remote composite mode":
+        expect(parse_mode_str("remote(x)")).to_equal(TestExecutionMode.Composite("interpreter(remote(x))"))
+    it "keeps a jit-prefixed composite unchanged":
+        expect(parse_mode_str("jit(remote(x))")).to_equal(TestExecutionMode.Composite("jit(remote(x))"))
+    it "reports a missing value":
+        expect(test_args_validation_error(["--mode"])).to_equal("missing value for --mode")
+    it "reports an empty equals value":
+        expect(test_args_validation_error(["--mode="])).to_equal("missing value for --mode")
+
+describe "--timeout":
+    it "defaults to 120":
+        expect(parse_test_args([]).timeout).to_equal(120)
+    it "parses the space form":
+        expect(parse_test_args(["--timeout", "30"]).timeout).to_equal(30)
+    it "parses the equals form":
+        expect(parse_test_args(["--timeout=45"]).timeout).to_equal(45)
+    it "keeps the path next to the timeout":
+        val o = parse_test_args(["--timeout", "30", "test/a"])
+        expect(o.path).to_equal("test/a")
+    it "reports a missing value":
+        expect(test_args_validation_error(["--timeout"])).to_equal("missing value for --timeout")
+    it "reports a flag where the value should be":
+        expect(test_args_validation_error(["--timeout", "--unit"])).to_equal("missing value for --timeout")
+    it "reports an empty equals value":
+        expect(test_args_validation_error(["--timeout="])).to_equal("missing value for --timeout")
+    it "accepts a numeric value":
+        expect(test_args_validation_error(["--timeout", "30"])).to_equal("")
+
+describe "paths":
+    it "defaults to test/":
+        expect(parse_test_args([]).path).to_equal("test/")
+    it "defaults paths to the default path":
+        expect(parse_test_args([]).paths).to_equal(["test/"])
+    it "keeps the first positional as the path":
+        expect(parse_test_args(["a", "b"]).path).to_equal("a")
+    it "keeps every positional in order":
+        expect(parse_test_args(["a", "b", "c"]).paths).to_equal(["a", "b", "c"])
+    it "marks an explicit path":
+        expect(parse_test_args(["a"]).path_explicit).to_equal(true)
+    it "does not treat a single dash flag as a path":
+        expect(parse_test_args(["-v"]).path_explicit).to_equal(false)
+
+describe "unknown and malformed options":
+    it "rejects an unknown long option":
+        expect(test_args_validation_error(["--bogus"])).to_equal("unknown option: --bogus")
+    it "rejects an unknown short option":
+        expect(test_args_validation_error(["-x"])).to_equal("unknown option: -x")
+    it "rejects an unknown option after a path":
+        expect(test_args_validation_error(["test/a", "--bogus"])).to_equal("unknown option: --bogus")
+    it "rejects an unknown equals option":
+        expect(test_args_validation_error(["--bogus=1"])).to_equal("unknown option: --bogus=1")
+    it "accepts a bare path":
+        expect(test_args_validation_error(["test/a"])).to_equal("")
+    it "accepts --smoke":
+        expect(test_args_validation_error(["--smoke"])).to_equal("")
+    it "rejects a negative value for a non-numeric option":
+        expect(test_args_validation_error(["--mode", "-1"])).to_equal("missing value for --mode")
+    it "accepts a negative value for --timeout":
+        expect(test_args_validation_error(["--timeout", "-1"])).to_equal("")
+    it "rejects a negative non-number for --timeout":
+        expect(test_args_validation_error(["--timeout", "-x"])).to_equal("missing value for --timeout")
+    it "rejects the retired json format in space form":
+        expect(test_args_validation_error(["--format", "json"])).to_contain("retired")
+    it "rejects the retired json format in equals form":
+        expect(test_args_validation_error(["--format=json"])).to_contain("retired")
+    it "rejects an unknown equals format":
+        expect(test_args_validation_error(["--format=xml"])).to_equal("invalid value for --format: xml")
+    it "rejects a missing --tag value":
+        expect(test_args_validation_error(["--tag"])).to_equal("missing value for --tag")
+
+describe "native backend flags":
+    it "defaults the backend to empty":
+        expect(parse_test_args([]).native_backend).to_equal("")
+    it "parses --native-backend":
+        expect(parse_test_args(["--native-backend", "cranelift"]).native_backend).to_equal("cranelift")
+    it "parses --native-backend=":
+        expect(parse_test_args(["--native-backend=llvm"]).native_backend).to_equal("llvm")
+    it "forces native mode":
+        expect(parse_test_args(["--native-backend=llvm"]).mode).to_equal(TestExecutionMode.Native)
+    it "disables the cache":
+        expect(parse_test_args(["--native-backend=llvm"]).no_cache).to_equal(true)
+    it "disables the session daemon":
+        expect(parse_test_args(["--native-backend=llvm"]).session_daemon).to_equal(false)
+    it "turns on assert_ran":
+        expect(parse_test_args(["--native-backend=llvm"]).assert_ran).to_equal(true)
+    it "records a native source root":
+        expect(parse_test_args(["--native-source=src/x"]).native_source_roots).to_equal(["src/x"])
+    it "defaults the backend to llvm when a source root is given":
+        expect(parse_test_args(["--native-source", "src/x"]).native_backend).to_equal("llvm")
+    it "rejects an unknown backend":
+        expect(test_args_validation_error(["--native-backend", "gcc"])).to_contain("invalid value for --native-backend")
+    it "rejects an unknown backend in equals form":
+        expect(test_args_validation_error(["--native-backend=gcc"])).to_contain("expected llvm or cranelift")
+    it "accepts cranelift":
+        expect(test_args_validation_error(["--native-backend=cranelift"])).to_equal("")
+
+describe "presets and toggles":
+    it "treats --unstable as explicit":
+        val o = parse_test_args(["--unstable"])
+        expect(o.unstable_mode).to_equal(true)
+        expect(o.unstable_mode_set).to_equal(true)
+    it "treats --no-unstable as explicit off":
+        val o = parse_test_args(["--no-unstable"])
+        expect(o.unstable_mode).to_equal(false)
+        expect(o.unstable_mode_set).to_equal(true)
+    it "leaves unstable unset by default":
+        expect(parse_test_args([]).unstable_mode_set).to_equal(false)
+    it "lets the last unstable flag win":
+        expect(parse_test_args(["--unstable", "--no-unstable"]).unstable_mode).to_equal(false)
+    it "makes --whole run everything":
+        expect(parse_test_args(["--whole"]).run_all).to_equal(true)
+    it "makes --whole enable sdoctest":
+        expect(parse_test_args(["--whole"]).sdoctest).to_equal(true)
+    it "makes --whole enable spl doctest":
+        expect(parse_test_args(["--whole"]).spl_doctest).to_equal(true)
+    it "makes --ci run everything":
+        expect(parse_test_args(["--ci"]).run_all).to_equal(true)
+    it "makes --ci turn off fail-fast":
+        expect(parse_test_args(["--fail-fast", "--ci"]).fail_fast).to_equal(false)
+    it "switches --parallel off sequential":
+        val o = parse_test_args(["--parallel"])
+        expect(o.parallel).to_equal(true)
+        expect(o.sequential).to_equal(false)
+    it "switches -s back to sequential":
+        expect(parse_test_args(["--parallel", "-s"]).sequential).to_equal(true)
+    it "zeroes memory and process caps for --no-limits":
+        val o = parse_test_args(["--max-mem", "4", "--no-limits"])
+        expect(o.max_mem_gb).to_equal(0)
+        expect(o.max_procs).to_equal(0)
+
+describe "numeric and valued options":
+    it "parses --seed=":
+        val o = parse_test_args(["--seed=7"])
+        expect(o.seed).to_equal(7)
+        expect(o.seed_set).to_equal(true)
+    it "parses --max-mem":
+        expect(parse_test_args(["--max-mem", "8"]).max_mem_gb).to_equal(8)
+    it "parses --max-mem=":
+        expect(parse_test_args(["--max-mem=2"]).max_mem_gb).to_equal(2)
+    it "parses --worker-memory-mb":
+        expect(parse_test_args(["--worker-memory-mb", "512"]).worker_memory_mb).to_equal(512)
+    it "falls back to zero for an out-of-range worker memory":
+        expect(parse_test_args(["--worker-memory-mb=0"]).worker_memory_mb).to_equal(0)
+    it "rejects an out-of-range worker memory":
+        expect(test_args_validation_error(["--worker-memory-mb=0"])).to_contain("invalid value for --worker-memory-mb")
+    it "parses --cpu-threshold":
+        expect(parse_test_args(["--cpu-threshold", "50"]).cpu_threshold).to_equal(50.0)
+    it "parses a fractional --mem-threshold=":
+        expect(parse_test_args(["--mem-threshold=62.5"]).mem_threshold).to_equal(62.5)
+    it "parses --max-workers=":
+        expect(parse_test_args(["--max-workers=3"]).max_workers).to_equal(3)
+    it "parses --parallel-timeout":
+        expect(parse_test_args(["--parallel-timeout", "90"]).parallel_timeout).to_equal(90)
+    it "parses --execution-mode=":
+        expect(parse_test_args(["--execution-mode=container"]).execution_mode).to_equal("container")
+    it "sets container-seq for --container-seq":
+        expect(parse_test_args(["--container-seq"]).execution_mode).to_equal("container-seq")
+    it "parses --session-kind=":
+        expect(parse_test_args(["--session-kind=fast"]).session_kind).to_equal("fast")
+    it "parses --max-sessions":
+        expect(parse_test_args(["--max-sessions", "4"]).max_sessions).to_equal(4)
+    it "parses --batch-manifest=":
+        expect(parse_test_args(["--batch-manifest=m.sdn"]).batch_manifest).to_equal("m.sdn")
+    it "parses --batch-result=":
+        expect(parse_test_args(["--batch-result=r.sdn"]).batch_result).to_equal("r.sdn")
+    it "parses --deploy-platform=":
+        expect(parse_test_args(["--deploy-platform=arm"]).deploy_platform).to_equal("arm")
+    it "parses --fuzz-time=":
+        expect(parse_test_args(["--fuzz-time=5"]).fuzz_time_secs).to_equal(5)
+    it "parses --chaos-trials":
+        expect(parse_test_args(["--chaos-trials", "9"]).chaos_trials).to_equal(9)
+    it "normalizes an unknown --profile to unresolved":
+        expect(parse_test_args(["--profile", "bogus"]).profile).to_equal("")
+
+describe "session flags":
+    it "enables session sharing by default":
+        expect(parse_test_args([]).session_share).to_equal(true)
+    it "enables the session daemon by default":
+        expect(parse_test_args([]).session_daemon).to_equal(true)
+    it "turns off daemon and sharing for --no-session-daemon":
+        val o = parse_test_args(["--no-session-daemon"])
+        expect(o.session_daemon).to_equal(false)
+        expect(o.session_share).to_equal(false)
+    it "turns sharing back on for --session-daemon":
+        expect(parse_test_args(["--no-session-share", "--session-daemon"]).session_share).to_equal(true)
+    it "turns off sharing for --no-session-share":
+        expect(parse_test_args(["--no-session-share"]).session_share).to_equal(false)
+
+describe "TestOptions defaults":
+    it "defaults self_protect on":
+        expect(parse_test_args([]).self_protect).to_equal(true)
+    it "defaults to sequential":
+        expect(parse_test_args([]).sequential).to_equal(true)
+    it "defaults parallel off":
+        expect(parse_test_args([]).parallel).to_equal(false)
+    it "defaults cpu threshold to 75":
+        expect(parse_test_args([]).cpu_threshold).to_equal(75.0)
+    it "defaults mem threshold to 75":
+        expect(parse_test_args([]).mem_threshold).to_equal(75.0)
+    it "defaults max memory to 16 GB":
+        expect(parse_test_args([]).max_mem_gb).to_equal(16)
+    it "defaults the resource limit to 75 percent":
+        expect(parse_test_args([]).resource_limit_pct).to_equal(75)
+    it "defaults parallel timeout to 300":
+        expect(parse_test_args([]).parallel_timeout).to_equal(300)
+    it "defaults fuzz time to 60":
+        expect(parse_test_args([]).fuzz_time_secs).to_equal(60)
+    it "defaults fuzz shrink on":
+        expect(parse_test_args([]).fuzz_shrink).to_equal(true)
+    it "defaults chaos trials to 100":
+        expect(parse_test_args([]).chaos_trials).to_equal(100)
+    it "defaults chaos fault rate to 10":
+        expect(parse_test_args([]).chaos_fault_rate).to_equal(10)
+    it "defaults whole off":
+        expect(parse_test_args([]).whole).to_equal(false)
+    it "defaults native source roots to empty":
+        expect(parse_test_args([]).native_source_roots).to_equal([])
+    it "defaults worker memory to zero":
+        expect(parse_test_args([]).worker_memory_mb).to_equal(0)
+    it "defaults batch size to zero":
+        expect(parse_test_args([]).batch_size).to_equal(0)
+    it "defaults no_cache off":
+        expect(parse_test_args([]).no_cache).to_equal(false)
