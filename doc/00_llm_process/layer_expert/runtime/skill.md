@@ -133,3 +133,16 @@ fixtures. Run `scripts/check/check-linux-capacity-containment.shs` only with an
 already-delegated isolated memory controller; missing prerequisites are errors.
 Native C evidence remains distinct from the authored, unexecuted SSpec and full
 BuildRunner qualification. See `doc/08_tracking/bug/buildrunner_linux_containment_evidence_2026_10_29.md`.
+
+## Completed session page release (2026-10-30)
+
+The native C session owner requests `malloc_trim(0)` only on glibc, after
+successful `rt_session_heap_end` reclamation and after releasing its lifecycle
+lock. A trim failure is advisory; ownership and session completion are unchanged.
+Do not move this into hot per-module boundaries without separate evidence.
+`scripts/check/check-session-heap-reclaim.shs` links the actual runtime and checks
+surviving unrelated allocations, refused ends and one trim per successful end;
+its advisory push gate is `push-session-heap-reclaim`. Non-glibc hosts exercise
+the unchanged owner path. Controlled RSS evidence and remaining native manager
+qualification are recorded in
+`doc/01_research/local/native_session_allocator_residency_2026_10_30.md`.
