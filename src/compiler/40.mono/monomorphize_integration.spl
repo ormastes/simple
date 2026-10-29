@@ -1165,6 +1165,27 @@ impl MonomorphizationPass:
                 self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, func.return_type, []), span: func.span)
 
     me collect_local_inherent_method_owners_v1(module: HirModule, module_name: text):
+        if module.impls.len() == 0:
+            return
+        # Impl references may contain a different SymbolId wrapper from the
+        # function dictionary key. Resolve their scalar identity once, using
+        # actual dictionary keys to retrieve authoritative declarations.
+        var declarations: Dict<i64, HirFunction> = {}
+        var rejected_ids: Dict<i64, bool> = {}
+        val declaration_keys: [SymbolId] = module.functions.keys()
+        for stored_key in declaration_keys:
+            if module.functions[stored_key] == nil:
+                rejected_ids[stored_key.id] = true
+                continue
+            val declaration: HirFunction = module.functions[stored_key]
+            val declared_symbol: SymbolId = declaration.symbol
+            if stored_key.id != declared_symbol.id:
+                rejected_ids[stored_key.id] = true
+                rejected_ids[declared_symbol.id] = true
+            elif declarations.has(stored_key.id):
+                rejected_ids[stored_key.id] = true
+            else:
+                declarations[stored_key.id] = declaration
         # Every association participates: a trait or unsupported association
         # poisons the same symbol even if a later inherent impl names it too.
         for raw_impl in module.impls:
@@ -1180,8 +1201,8 @@ impl MonomorphizationPass:
                 val target: SymbolId = impl_.methods[method_name]
                 val key = mono_sym_key(module_name, target.id)
                 var admitted = false
-                if identity != "" and module.functions[target] != nil:
-                    val declaration: HirFunction = module.functions[target]
+                if identity != "" and not rejected_ids.has(target.id) and declarations.has(target.id):
+                    val declaration: HirFunction = declarations[target.id]
                     admitted = declaration.symbol.id == target.id and declaration.is_method and
                         not declaration.is_static and declaration.type_params.len() == 0 and
                         not declaration.is_generic_template and hir_type_is_concrete(declaration.return_type)
