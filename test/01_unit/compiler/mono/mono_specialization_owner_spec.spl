@@ -11,6 +11,7 @@ use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics, MonomorphizationPass}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.return_type_interface_v1.{rti_rows_from_hir_v1, ReturnTypeInterfaceTable}
 
 
 fn mk_span() -> Span:
@@ -249,6 +250,36 @@ describe "fixed-point specialization inventory placement":
             val spec: HirFunction = pass_.specialized_functions[mangled]
             expect(output["owner"].functions.has(spec.symbol)).to_equal(true)
 
+    it "registers original and specialized rows under one physical provider through aliases":
+        step("retain canonical and historical keys for one numbered physical provider")
+        val canonical = "compiler.frontend.core.provider"
+        val historical = "compiler.core.provider"
+        var modules = make_modules(canonical, canonical, "identity", mk_type(HirTypeKind.Int(64, true)))
+        var provider: HirModule = modules[canonical]
+        provider.path = "src/compiler/10.frontend/core/provider.spl"
+        modules[canonical] = provider
+        modules[historical] = provider
+        var pass_ = MonomorphizationPass.create()
+        val output = pass_.process_modules(modules)
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(output.keys()).to_equal(modules.keys())
+        step("strict RTI accepts the original caller and specialized declaration together")
+        for key in [canonical, historical]:
+            val module: HirModule = output[key]
+            expect(module.functions.len()).to_equal(2)
+            val extracted = rti_rows_from_hir_v1(module)
+            expect(extracted.is_ok()).to_equal(true)
+            match extracted:
+                case Ok(value):
+                    expect(value.rows.len()).to_equal(2)
+                    for row in value.rows:
+                        expect(row.decl.module_id).to_equal(canonical)
+                    var table = ReturnTypeInterfaceTable.new()
+                    expect(table.register_rows(value.rows).is_ok()).to_equal(true)
+                case Err(_):
+                    expect(false).to_equal(true)
+
     it "preserves module and specialization order across owners and aliases":
         step("request two concrete instances and retain two logical aliases of one provider")
         var modules = make_modules("pkg.provider", "text_caller", "identity", mk_type(HirTypeKind.Str))
@@ -289,7 +320,8 @@ describe "fixed-point specialization inventory placement":
                     if val row = module.symbols.get_symbol_raw(spec.symbol.id):
                         found_row = true
                         expect(row.name).to_equal(mangled)
-                        expect(row.defining_module).to_equal(name)
+                        val expected_owner = if module.path != "": module.path else: name
+                        expect(row.defining_module).to_equal(expected_owner)
                     expect(found_row).to_equal(true)
             var actual: [text] = []
             for symbol in module.functions.keys():
