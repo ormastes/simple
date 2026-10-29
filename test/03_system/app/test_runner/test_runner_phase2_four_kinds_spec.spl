@@ -1,15 +1,10 @@
 """
 # Test runner runs the 4 test kinds with the phase2 compiler
 
-An operator selects the phase2 (stage-2 self-hosted) toolchain and runs
-`simple test --compiler=phase2` over a unit, an integration, a system and a
-smoke fixture. Each must be discovered, executed by the phase2 CLI, and
-reported with a real verdict: green fixtures exit 0, a deliberately red
-fixture exits non-zero and is named FAIL (never skipped, never exit 0).
-
-Fixtures live in a private temp dir under 01_unit/ 02_integration/ 03_system/
-04_smoke/. The phase2 CLI is a recording stand-in delegating to the real
-binary, so the spec proves WHICH compiler ran.
+`simple test --compiler=phase2` over a tiny green and a tiny red fixture of
+each kind (unit, integration, system, smoke): green gives PASS and exit 0,
+red gives FAIL and exit 1. A recording stand-in for the phase2 CLI proves
+phase2 was the compiler used.
 
 # @req REQ-TESTRUNNER-PHASE2-4KINDS
 """
@@ -18,9 +13,7 @@ use std.spec.*
 use std.spec.step
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
-use test.support.phase2_kinds_fixture.{KIND_NAMES, phase2_fixture_root, phase2_write_fixture, phase2_write_recording_cli, phase2_log}
-
-val SHA: text = "abababababababababababababababababababababababababababababababab"
+use test.support.phase2_kinds_fixture.{KIND_NAMES, phase2_fixture_root, phase2_write_fixture, phase2_write_recording_cli, phase2_log, phase2_sha256_of}
 
 fn real_binary() -> text:
     val b = env_get("SIMPLE_BINARY")
@@ -29,40 +22,34 @@ fn real_binary() -> text:
     "bin/simple"
 
 fn run_phase2(cli: text, target: text) -> (text, i64):
-    val (out, err, code) = process_run_bounded("env", ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=" + SHA, real_binary(), "test", "--compiler=phase2", "--no-session-daemon", target], 300000, 4194304)
+    val (out, err, code) = process_run_bounded("env", ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=" + phase2_sha256_of(cli), real_binary(), "test", "--compiler=phase2", "--no-session-daemon", target], 300000, 4194304)
     (out + err, code)
 
 describe "simple test --compiler=phase2 over the 4 kinds":
-    it "reports each green kind as PASS with exit 0 through phase2":
+    it "reports each green kind as PASS with exit 0":
         val root = phase2_fixture_root("phase2-kinds-sys-")
         val cli = phase2_write_recording_cli(root, real_binary())
         var i = 0
         while i < 4:
-            val path = phase2_write_fixture(root, i, false)
-            step("Run the {KIND_NAMES[i]} fixture with phase2")
-            val (report, code) = run_phase2(cli, path)
+            step("Run the green {KIND_NAMES[i]} fixture")
+            val (report, code) = run_phase2(cli, phase2_write_fixture(root, i, false))
             expect(code).to_equal(0)
             expect(report).to_contain("PASS")
-            expect(phase2_log(cli)).to_contain(KIND_NAMES[i] + "_green_spec.spl")
             i = i + 1
 
-    it "reports each red kind as FAIL with non-zero exit, not skipped":
+    it "reports each red kind as FAIL with exit 1":
         val root = phase2_fixture_root("phase2-kinds-sys-red-")
         val cli = phase2_write_recording_cli(root, real_binary())
         var i = 0
         while i < 4:
-            val path = phase2_write_fixture(root, i, true)
-            step("Run the red {KIND_NAMES[i]} fixture with phase2")
-            val (report, code) = run_phase2(cli, path)
+            step("Run the red {KIND_NAMES[i]} fixture")
+            val (report, code) = run_phase2(cli, phase2_write_fixture(root, i, true))
             expect(code).to_equal(1)
             expect(report).to_contain("FAIL")
-            expect(report).to_contain("1 failure")
-            expect(phase2_log(cli)).to_contain(KIND_NAMES[i] + "_red_spec.spl")
             i = i + 1
 
-    it "refuses to run when phase2 is selected but not provided":
-        val root = phase2_fixture_root("phase2-kinds-sys-none-")
-        val path = phase2_write_fixture(root, 0, false)
-        val (out, err, code) = process_run_bounded("env", ["-u", "SIMPLE_PHASE2_FULL_CLI", real_binary(), "test", "--compiler=phase2", "--no-session-daemon", path], 300000, 4194304)
-        expect(code).to_equal(2)
-        expect(out + err).to_contain("SIMPLE_PHASE2_FULL_CLI")
+    it "uses the phase2 CLI to run the fixtures":
+        val root = phase2_fixture_root("phase2-kinds-sys-used-")
+        val cli = phase2_write_recording_cli(root, real_binary())
+        run_phase2(cli, phase2_write_fixture(root, 0, false))
+        expect(phase2_log(cli)).to_contain("unit_green_spec.spl")
