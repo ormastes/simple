@@ -6,6 +6,65 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Get-MsysParentBridge {
+    # MSYS exec can leave native PPID pointing to an exited fork intermediate.
+    # Query the live POSIX table, never accept an exclusion list from argv/env.
+    $bridge = @{}
+    $psCommand = Get-Command ps.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $psCommand) { return $bridge }
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $psCommand.Source
+    $start.Arguments = '-l'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $query = [System.Diagnostics.Process]::new()
+    $query.StartInfo = $start
+    try {
+        if (-not $query.Start()) { throw 'MSYS ancestry query did not start' }
+        # Drain both pipes asynchronously to avoid deadlock. The query has a
+        # time bound; the size check below is post-capture validation, not a
+        # hard bound on stream-buffer memory (stderr is drained and discarded).
+        $stdout = $query.StandardOutput.ReadToEndAsync()
+        $stderr = $query.StandardError.ReadToEndAsync()
+        if (-not $query.WaitForExit(10000)) {
+            $query.Kill()
+            $null = $query.WaitForExit(5000)
+            throw 'MSYS ancestry query exceeded 10 seconds'
+        }
+        $table = $stdout.GetAwaiter().GetResult()
+        $null = $stderr.GetAwaiter().GetResult()
+        if ($query.ExitCode -ne 0 -or $table.Length -gt 16777216) {
+            throw 'MSYS ancestry query failed or exceeded size limit'
+        }
+        $lines = @($table -split '\r?\n' | Where-Object { $_.Trim().Length -gt 0 })
+        if ($lines.Count -eq 0 -or $lines[0] -notmatch '^\s*PID\s+PPID\s+PGID\s+WINPID\s') {
+            throw 'MSYS ancestry table has an unknown schema'
+        }
+        $rows = @{}
+        $nativeIds = [System.Collections.Generic.HashSet[uint32]]::new()
+        foreach ($line in ($lines | Select-Object -Skip 1)) {
+            if ($line -notmatch '^\s*(?:[A-Z]\s+)?(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s') {
+                throw 'MSYS ancestry table contains a malformed row'
+            }
+            $posix = [uint32]$Matches[1]
+            $parent = [uint32]$Matches[2]
+            $native = [uint32]$Matches[4]
+            if ($rows.ContainsKey($posix) -or -not $nativeIds.Add($native) -or $rows.Count -ge 16384) {
+                throw 'MSYS ancestry table contains duplicate or excess rows'
+            }
+            $rows[$posix] = @{ Parent = $parent; Native = $native }
+        }
+        foreach ($row in $rows.Values) {
+            if ($rows.ContainsKey($row.Parent)) {
+                $bridge[$row.Native] = $rows[$row.Parent].Native
+            }
+        }
+        return $bridge
+    } finally { $query.Dispose() }
+}
+
 if ($Worker) {
     try {
         $processes = @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 30)
@@ -24,22 +83,31 @@ if ($Worker) {
             if ($byPid.ContainsKey($key)) { throw 'Windows process inventory has duplicate PID records' }
             $byPid[$key] = $process
         }
+        $msysParents = Get-MsysParentBridge
         $ancestors = [System.Collections.Generic.HashSet[uint32]]::new()
-        $cursor = [uint32]$PID
-        while ($byPid.ContainsKey($cursor)) {
-            if (-not $ancestors.Add($cursor) -or $ancestors.Count -gt 256) {
-                throw 'Windows process inventory ancestry is cyclic or too deep'
-            }
+        $pending = [System.Collections.Generic.Stack[uint32]]::new()
+        $pending.Push([uint32]$PID)
+        while ($pending.Count -gt 0) {
+            $cursor = $pending.Pop()
+            if (-not $byPid.ContainsKey($cursor) -or -not $ancestors.Add($cursor)) { continue }
+            if ($ancestors.Count -gt 256) { throw 'Windows process inventory ancestry is too deep' }
             $child = $byPid[$cursor]
-            $next = [uint32]$child.ParentProcessId
-            if ($next -eq 0 -or -not $byPid.ContainsKey($next)) { break }
-            $parent = $byPid[$next]
-            # A reused parent PID must never excuse another process. Stop the
-            # proven chain when either creation time is unavailable or the
-            # recorded parent is not strictly older than its child.
-            if ($null -eq $child.CreationDate -or $null -eq $parent.CreationDate -or
-                $parent.CreationDate -ge $child.CreationDate) { break }
-            $cursor = $next
+            # Retain both edges: the native waiting wrapper and its MSYS exec
+            # successor can coexist. Replacing PPID with the logical edge
+            # would incorrectly leave the waiting wrapper classified as busy.
+            $parents = @([uint32]$child.ParentProcessId)
+            if ($msysParents.ContainsKey($cursor)) {
+                $parents += [uint32]$msysParents[$cursor]
+            }
+            foreach ($next in $parents) {
+                if ($next -eq 0 -or -not $byPid.ContainsKey($next)) { continue }
+                $parent = $byPid[$next]
+                # A reused parent PID must never excuse another process. Both
+                # native and MSYS edges require a strictly older live parent.
+                if ($null -eq $child.CreationDate -or $null -eq $parent.CreationDate -or
+                    $parent.CreationDate -ge $child.CreationDate) { continue }
+                $pending.Push($next)
+            }
         }
         $rows = [System.Collections.Generic.List[string]]::new()
         $size = 0
