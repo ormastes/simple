@@ -5,7 +5,7 @@
 
 use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text_at, file_size, file_delete, file_exists}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.io.sysinfo_ops.{cpu_count}
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output, make_result_from_structured_evidence}
@@ -17,7 +17,7 @@ use std.nogc_sync_mut.io.signal_handlers.{install_signal_handlers}
 use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
 use std.nogc_sync_mut.io.process_governor.{proc_slot_configure_requested_workers, proc_slot_active, proc_slot_max}
 use std.nogc_sync_mut.io.process_ops.{process_is_running}
-use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_failure_reason, windows_redirected_completion}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_owned_capture, sosix_test_has_owned_completion, sosix_test_temp_dir, sosix_test_path_separator, sosix_test_spawn_plan, sosix_test_process_failure_reason, sosix_test_process_completion}
 use std.common.task_runner.execution_schedule.{TaskExecutionScheduleV1,
     task_execution_schedule_v1, task_execution_ready_v1,
     task_execution_host_active_v1, task_execution_dispatch_v1,
@@ -57,7 +57,7 @@ fn _cleanup_tracked_test_children():
     val _ = cleanup_all_children()
 
 fn _ensure_runner_signal_handlers():
-    if not _runner_signal_handlers_installed and host_os() != "windows":
+    if not _runner_signal_handlers_installed and not sosix_test_owned_capture():
         _runner_signal_handlers_installed = install_signal_handlers(_cleanup_tracked_test_children)
 
 # ============================================================================
@@ -66,25 +66,7 @@ fn _ensure_runner_signal_handlers():
 
 fn _get_temp_dir() -> text:
     """Get platform-appropriate temp directory"""
-    val os = host_os()
-    if os == "windows":
-        # NIL-GUARD: `std.nogc_sync_mut.io.env_ops.env_get` is declared `-> text`
-        # but is a bare `rt_env_get(key)` passthrough, and the runtime returns
-        # nil for an UNSET variable. Calling `.trim()` on that aborts the whole
-        # enclosing function -- `_get_temp_dir` never reached ANY return, so
-        # every temp-file creation in the async runner died silently. TMPDIR is
-        # unset on a stock Linux shell, i.e. this was the DEFAULT path.
-        # `?? ""` is the codebase's dominant idiom (282 sites) and is proven to
-        # coalesce nil correctly. The wrapper itself cannot be guarded: 36 call
-        # sites rely on the nil leak to apply a NON-EMPTY `??` default.
-        val temp_env = (env_get("TEMP") ?? "").trim()
-        if temp_env != "":
-            return temp_env
-        return "C:\\Temp"
-    val tmpdir = (env_get("TMPDIR") ?? "").trim()
-    if tmpdir != "":
-        return tmpdir
-    "/tmp"
+    sosix_test_temp_dir()
 
 fn create_temp_files(file_path: text, initialize: bool = true) -> (text, text):
     """
@@ -115,10 +97,7 @@ fn create_temp_files(file_path: text, initialize: bool = true) -> (text, text):
     base = temp_chars.join("")
 
     val tmp_dir = _get_temp_dir()
-    val os = host_os()
-    var sep = "/"
-    if os == "windows":
-        sep = "\\"
+    val sep = sosix_test_path_separator()
     val stdout_file = "{tmp_dir}{sep}simple_test_{parent_id}_{base}_{timestamp}_{sequence}_out.txt"
     val stderr_file = "{tmp_dir}{sep}simple_test_{parent_id}_{base}_{timestamp}_{sequence}_err.txt"
 
@@ -175,7 +154,7 @@ fn spawn_async_test(file_path: text, options: TestOptions, inventory_index: i64 
     val timeout_ms = options.timeout * 1000
 
     # Create temp files for stdout/stderr
-    val (stdout_file, stderr_file) = create_temp_files(file_path, initialize: host_os() != "windows")
+    val (stdout_file, stderr_file) = create_temp_files(file_path, initialize: not sosix_test_owned_capture())
 
     # Each interpreter child configures its own receipt through the CLI flag.
     # Mutating the parent's SIMPLE_TEST_RESULT_FILE races concurrent children.
@@ -193,17 +172,14 @@ fn spawn_async_test(file_path: text, options: TestOptions, inventory_index: i64 
         file_write(stderr_file, "cannot prepare unique structured child evidence")
         # This run never acquired that receipt path; collection must not clean it.
         evidence_file = ""
-    elif host_os() == "windows":
-        pid = spawn_tracked_redirected_process(binary, child_args, stdout_file,
-            stderr_file, timeout_ms)
-        if pid == -1:
-            file_write(stderr_file, "Windows owned redirected child admission failed")
     else:
-        val redirect_script = "out=$1; err=$2; shift 2; exec \"$@\" >\"$out\" 2>\"$err\""
-        var shell_args = ["-c", redirect_script, "simple-test", stdout_file, stderr_file, binary]
-        for arg in child_args:
-            shell_args.push(arg)
-        pid = spawn_tracked_process("/bin/sh", shell_args)
+        val (owned_capture, program, args) = sosix_test_spawn_plan(binary, child_args, stdout_file, stderr_file)
+        if owned_capture:
+            pid = spawn_tracked_redirected_process(program, args, stdout_file, stderr_file, timeout_ms)
+            if pid == -1:
+                file_write(stderr_file, "Windows owned redirected child admission failed")
+        else:
+            pid = spawn_tracked_process(program, args)
 
     val start_time = time_now_unix_micros()
 
@@ -225,8 +201,8 @@ fn spawn_async_test(file_path: text, options: TestOptions, inventory_index: i64 
 fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64, deadline_expired: bool = false) -> TestFileResult:
     var result = _collect_async_result_output(run, observed_exit_code, deadline_expired)
     var child_reaped = run.pid <= 0
-    if run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
-        match windows_redirected_completion(run.pid):
+    if sosix_test_has_owned_completion(run.pid):
+        match sosix_test_process_completion(run.pid):
             case Ok(receipt):
                 result.process_completion = Some(receipt)
                 child_reaped = receipt.tree_reaped
@@ -272,7 +248,7 @@ fn _collect_async_result_output(run: AsyncTestRun, observed_exit_code: i64, dead
         match read_bounded_temp_output(run.stderr_file):
             case Ok(value): stderr = value
             case Err(message): capture_error = message
-    if run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE and (not file_exists(run.stdout_file) or not file_exists(run.stderr_file)):
+    if sosix_test_has_owned_completion(run.pid) and (not file_exists(run.stdout_file) or not file_exists(run.stderr_file)):
         capture_error = "owned Windows capture file missing"
 
     # Cleanup temp files
@@ -304,8 +280,8 @@ fn _collect_async_result_output(run: AsyncTestRun, observed_exit_code: i64, dead
     if capture_error != "":
         return _parallel_admission_failure(run.file_path,
             "bounded child capture failure: " + capture_error + "\n" + stderr, duration_ms)
-    if host_os() == "windows" and (run.pid == -1 or (run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE and exit_code < 0)):
-        val reason = if run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE: windows_redirected_failure_reason(run.pid) else: "child admission refused"
+    if sosix_test_owned_capture() and (run.pid == -1 or (sosix_test_has_owned_completion(run.pid) and exit_code < 0)):
+        val reason = if sosix_test_has_owned_completion(run.pid): sosix_test_process_failure_reason(run.pid) else: "child admission refused"
         return _parallel_admission_failure(run.file_path,
             "owned Windows child admission or collection failed: " + reason + "\n" + stderr, duration_ms)
 
@@ -353,7 +329,7 @@ fn _collect_scheduled_async_result_v1(schedule: TaskExecutionScheduleV1,
         next = task_execution_spawn_denied_v1(next, run.inventory_index)
         next = task_execution_block_v1(next, run.inventory_index)
     else:
-        if run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
+        if sosix_test_has_owned_completion(run.pid):
             match result.process_completion:
                 case Some(completion):
                     if not completion.tree_reaped:

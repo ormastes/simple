@@ -1,0 +1,37 @@
+"""Platform policy for tracked test children and their capture files."""
+
+use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
+use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE}
+export use std.nogc_sync_mut.io.windows_redirected_process.{
+    windows_redirected_completion as sosix_test_process_completion,
+    windows_redirected_failure_reason as sosix_test_process_failure_reason
+}
+
+fn sosix_test_owned_capture() -> bool:
+    host_os() == "windows"
+
+fn sosix_test_has_owned_completion(token: i64) -> bool:
+    token >= WINDOWS_REDIRECTED_TOKEN_BASE
+
+fn sosix_test_temp_dir() -> text:
+    if sosix_test_owned_capture():
+        val temp = (env_get("TEMP") ?? "").trim()
+        if temp != "": return temp
+        return "C:\\Temp"
+    val temp = (env_get("TMPDIR") ?? "").trim()
+    if temp != "": return temp
+    "/tmp"
+
+fn sosix_test_path_separator() -> text:
+    if sosix_test_owned_capture(): return "\\"
+    "/"
+
+fn sosix_test_spawn_plan(binary: text, args: [text], stdout_path: text,
+        stderr_path: text) -> (bool, text, [text]):
+    if sosix_test_owned_capture():
+        return (true, binary, args)
+    val script = "out=$1; err=$2; shift 2; exec \"$@\" >\"$out\" 2>\"$err\""
+    var shell_args = ["-c", script, "simple-test", stdout_path, stderr_path, binary]
+    for arg in args:
+        shell_args.push(arg)
+    (false, "/bin/sh", shell_args)
