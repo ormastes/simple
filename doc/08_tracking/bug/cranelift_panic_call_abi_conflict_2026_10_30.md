@@ -1,6 +1,7 @@
 # Mixed panic ABI declarations produce zero function references
 
-Status: implemented; MIR diagnostic regression passes; changed-producer native validation pending.
+Status: implemented; MIR diagnostic regression and four native panic controls pass.
+Full CLI matrix and native SSpec qualification remain incomplete.
 
 The C runtime requires `rt_panic(raw_bytes_pointer, byte_length) -> void`.
 Generated MIR guards and builtin panic/assert supplied one text operand while
@@ -47,12 +48,35 @@ source diagnostic evidence, not a qualified native Simple test run.
 Log: `/private/tmp/astra-panic-abi-spec-ready.log`, SHA256
 `ab0e79dc790ea03724fc1254325b3f1c6651476198ba5f138520407728141dc8`.
 
-Native validation must rebuild the changed producer, compile the durable probe
-without any declaration/import/zero-reference diagnostic, and execute the original
-three modes plus the added `--dynamic` mode. The latter prints a producer marker
-once and panics with runtime-concatenated tagged text; it is authored but not yet
-executed. The cast must report its intended panic, not merely exit nonzero.
-Rerun the Linux capacity ABI probe with similarly clean compiler diagnostics
-before treating its earlier successful execution as clean worker qualification.
-Generic Cranelift Unit-return policy and failure latching are separate open
-issues: build exit0 alone does not prove every emitted call survived.
+## Changed-producer native validation
+
+Source `a52b25c0eb689d8313baebd9443f0f048e1a3857` produced candidate SHA256
+`cef67a241aae27c9a98839158fd88255ce15f140dc79e8efeee565252a28ce0a`.
+Its canonical sanity and structural receiver controls passed. The full CLI
+matrix separately exceeded its enforced RSS cap: peak 10,113,012 KiB versus
+9,961,472 KiB. This resource refusal does not prove a source failure and does
+not qualify the whole compiler. The scoped panic validation below is separate.
+
+The changed producer compiled the durable fixture with exit0 and no rejected
+declaration, failed import or zero function-reference diagnostic. All four
+executed native modes passed their expected outcomes:
+
+| Mode | Exit | Exact stdout | Exact stderr |
+| --- | --- | --- | --- |
+| Default | 0 | `PANIC_ABI_SUCCESS\n` | empty |
+| `--explicit` | 1 | empty | `panic: panic-abi-explicit-marker\n` |
+| `--dynamic` | 1 | `PANIC_ABI_MESSAGE_EVALUATED\n` (28 bytes, once) | `panic: panic-abi-dynamic--dynamic\n` |
+| `--cast` | 1 | empty | `panic: type mismatch: cannot cast str to i64\n` |
+
+No fallthrough markers or SIGILL occurred. Build peak RSS was 2,922,708 KiB,
+with quiescent completion and complete observation. Evidence directory:
+`/work/native-hello-diagnostic-20261030/panic-a52/logs`.
+Build log SHA256: `9c15f64772902c22ae223f3bbecfe9dabc963fef831b50e2e86a6e194dbe2699`.
+Artifact SHA256: `4ad58054405802dea85e35455f9e88beff6a051720a9eb16dd9a9bd78927abc2`.
+
+The native SSpec runner and generated docgen output remain pending. Hello and
+Linux capacity ABI checks are tracked separately; this four-mode result does
+not establish full BuildRunner admission. The separate provider failure-latch
+fix landed in PR5310 but is absent from this frozen candidate, so clean build
+diagnostics were checked explicitly. Generic Cranelift Unit-return policy is
+outside this change.

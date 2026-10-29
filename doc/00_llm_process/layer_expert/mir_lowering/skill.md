@@ -606,3 +606,8 @@ and byte length at MirBuilder.emit_call. Keep Abort and explicit two-argument
 calls intact. A successful native build can still contain logged rejected
 declarations; inspect those diagnostics before qualification. See
 [panic ABI evidence](../../../08_tracking/bug/cranelift_panic_call_abi_conflict_2026_10_30.md).
+
+The a52 producer's four native panic controls passed with clean compiler
+diagnostics, including runtime-concatenated text evaluated once and the cast's
+intended panic. Its separate full CLI matrix exceeded the enforced RSS cap;
+native SSpec/docgen and complete BuildRunner admission are not implied.

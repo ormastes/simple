@@ -3,8 +3,9 @@
 Authored manual for `test/01_unit/compiler/mir/panic_message_call_abi_spec.spl`.
 This file was written by the developer; it is not generated docgen output.
 The four MIR scenarios executed under the explicitly enabled Rust seed
-interpreter (4 passed, 0 failed). Qualified native SSpec execution and native
-validation of the changed producer are pending.
+interpreter (4 passed, 0 failed). The changed producer also passed all four
+native fixture modes with clean build diagnostics. Qualified native SSpec
+execution and generated docgen output remain pending.
 
 | Scenario | Steps and required result |
 | --- | --- |
@@ -29,5 +30,9 @@ references. Then execute each mode separately:
   and retain the tagged text until pointer/byte-length extraction. No fallthrough.
 
 The initial native fixture reproduced the ABI conflict with literal and cast
-modes. The dynamic mode was added afterwards and has not yet executed. See the
+modes. Candidate `cef67a241aae27c9a98839158fd88255ce15f140dc79e8efeee565252a28ce0a`
+subsequently passed all four native modes: default exit0, explicit/dynamic/cast
+exit1 with their expected messages, dynamic producer marker exactly once, no
+fallthrough or SIGILL. Its separate full CLI matrix exceeded the enforced RSS
+cap and remains unqualified; this is scoped native regression evidence. See the
 [bug and evidence record](../../08_tracking/bug/cranelift_panic_call_abi_conflict_2026_10_30.md).
