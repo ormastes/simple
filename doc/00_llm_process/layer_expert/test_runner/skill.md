@@ -525,6 +525,14 @@ surfaces per spec from proven copies of the real scorer modules. Feature
 expert: [modern_sspec](../../feature_expert/modern_sspec/skill.md).
 
 
+## HAL scenario execution evidence
+
+Follow the [HAL testing procedure](../../../07_guide/infra/testing.md#hal-and-runtime-tests-through-simple)
+for Simple facade/FFI tests. Retain actual compiler/runtime/provider identity
+and executed example counts; host guards, interpreter emulation, missing
+externs, and supporting C-harness passes cannot qualify native Simple HAL
+acceptance.
+
 ## Native resource projection regression (2026-10-28)
 
 Retained phase2 code can read imported `ScopedChildRun.usage` and

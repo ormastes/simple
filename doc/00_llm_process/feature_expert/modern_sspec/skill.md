@@ -21,6 +21,11 @@ separate processes that share only files.
 
 ## Feature Links
 
+- HAL behavior scenarios prefer Simple SSpec through production SOSIX/HAL,
+  with focused runtime FFI where needed; see the
+  [HAL testing procedure](../../../07_guide/infra/testing.md#hal-and-runtime-tests-through-simple).
+  Native acceptance requires real provider execution; C probes remain
+  supporting evidence for documented gaps in Simple reachability.
 - Research: [doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md](../../../01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md)
 - Design: [doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md](../../../05_design/infra/sspec/modern_sspec_typed_evidence_design.md)
 - Plan (wave breakdown E0-E9, design authority for scope/sequencing):
