@@ -1,0 +1,106 @@
+"""App-side test runner argument parser: level, compiler, mode, timeout, path.
+
+Audience: anyone editing `src/app/test_runner_new/test_runner_args.spl`.
+This parser is a separate copy from the std one; it has no validation
+function, so unknown flags are simply ignored here.
+
+# @req REQ-TESTRUNNER-ARGS-COVERAGE
+"""
+
+use std.spec.*
+use app.test_runner_new.test_runner_args.{parse_test_args, parse_mode_str}
+use app.test_runner_new.test_runner_types.{TestExecutionMode, TestLevel}
+
+describe "app parser defaults":
+    it "defaults the path to test/":
+        expect(parse_test_args([]).path).to_equal("test/")
+    it "defaults the level to All":
+        expect(parse_test_args([]).level).to_equal(TestLevel.All)
+    it "defaults the mode to interpreter":
+        expect(parse_test_args([]).mode).to_equal(TestExecutionMode.Interpreter)
+    it "defaults the timeout to 120":
+        expect(parse_test_args([]).timeout).to_equal(120)
+    it "defaults the compiler to empty":
+        expect(parse_test_args([]).compiler).to_equal("")
+    it "defaults to sequential":
+        expect(parse_test_args([]).sequential).to_equal(true)
+    it "defaults self_protect on":
+        expect(parse_test_args([]).self_protect).to_equal(true)
+    it "defaults cpu threshold to 75":
+        expect(parse_test_args([]).cpu_threshold).to_equal(75.0)
+
+describe "app parser level flags":
+    it "parses --unit":
+        expect(parse_test_args(["--unit"]).level).to_equal(TestLevel.Unit)
+    it "parses --integration":
+        expect(parse_test_args(["--integration"]).level).to_equal(TestLevel.Integration)
+    it "parses --system":
+        expect(parse_test_args(["--system"]).level).to_equal(TestLevel.System)
+    # KNOWN BUG (RED): app parser assigns TestLevel.Smoke but app TestLevel has no Smoke variant.
+    it "parses --smoke":
+        expect(parse_test_args(["--smoke"]).level).to_equal(TestLevel.Smoke)
+    # KNOWN BUG (RED): same missing TestLevel.Smoke variant as above.
+    it "lets the last level flag win":
+        expect(parse_test_args(["--smoke", "--unit"]).level).to_equal(TestLevel.Unit)
+
+describe "app parser --compiler":
+    it "parses the space form":
+        expect(parse_test_args(["--compiler", "phase2"]).compiler).to_equal("phase2")
+    it "parses the equals form":
+        expect(parse_test_args(["--compiler=phase2"]).compiler).to_equal("phase2")
+    it "lets the last --compiler win":
+        expect(parse_test_args(["--compiler=a", "--compiler=b"]).compiler).to_equal("b")
+
+describe "app parser --mode":
+    it "parses the space form":
+        expect(parse_test_args(["--mode", "smf"]).mode).to_equal(TestExecutionMode.Smf)
+    it "parses the equals form":
+        expect(parse_test_args(["--mode=native"]).mode).to_equal(TestExecutionMode.Native)
+    it "maps compile":
+        expect(parse_mode_str("compile")).to_equal(TestExecutionMode.Compile)
+    it "maps binary to native":
+        expect(parse_mode_str("binary")).to_equal(TestExecutionMode.Native)
+    it "maps loader to smf":
+        expect(parse_mode_str("loader")).to_equal(TestExecutionMode.Smf)
+    it "maps jit to a composite":
+        expect(parse_mode_str("jit")).to_equal(TestExecutionMode.Composite("jit"))
+    it "wraps a baremetal spec in interpreter":
+        expect(parse_mode_str("baremetal(riscv32)")).to_equal(TestExecutionMode.Composite("interpreter(baremetal(riscv32))"))
+    it "keeps a native-prefixed composite":
+        expect(parse_mode_str("native(container(x))")).to_equal(TestExecutionMode.Composite("native(container(x))"))
+    it "falls back to interpreter for an unknown name":
+        expect(parse_mode_str("warp")).to_equal(TestExecutionMode.Interpreter)
+
+describe "app parser --timeout":
+    it "parses the space form":
+        expect(parse_test_args(["--timeout", "30"]).timeout).to_equal(30)
+    # KNOWN BUG (RED): app parser has no --timeout= arm; the std parser does.
+    it "parses the equals form":
+        expect(parse_test_args(["--timeout=45"]).timeout).to_equal(45)
+    it "does not treat the value as a path":
+        expect(parse_test_args(["--timeout", "30"]).path).to_equal("test/")
+
+describe "app parser path":
+    it "takes a positional as the path":
+        expect(parse_test_args(["test/a"]).path).to_equal("test/a")
+    it "keeps the first of two positionals":
+        expect(parse_test_args(["test/a", "test/b"]).path).to_equal("test/a")
+    it "finds the path after flags":
+        expect(parse_test_args(["--unit", "--fail-fast", "test/a"]).path).to_equal("test/a")
+
+describe "app parser toggles":
+    it "parses --fail-fast":
+        expect(parse_test_args(["--fail-fast"]).fail_fast).to_equal(true)
+    it "parses --tag":
+        expect(parse_test_args(["--tag", "slow"]).tag).to_equal("slow")
+    it "parses --ci as run_all":
+        expect(parse_test_args(["--ci"]).run_all).to_equal(true)
+    it "parses --parallel":
+        expect(parse_test_args(["--parallel"]).sequential).to_equal(false)
+    it "parses --seed":
+        expect(parse_test_args(["--seed", "5"]).seed).to_equal(5)
+    # KNOWN BUG (RED): app parser has no --seed= arm; the std parser does.
+    it "marks the seed as set":
+        expect(parse_test_args(["--seed=5"]).seed_set).to_equal(true)
+    it "parses --no-session-daemon":
+        expect(parse_test_args(["--no-session-daemon"]).session_daemon).to_equal(false)
