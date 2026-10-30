@@ -35,6 +35,37 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+BUILDRUNNER_KNOWN_STATES = frozenset({"PASS", "FUNCTIONAL", "UNRUN"})
+
+
+def buildrunner_summary(states):
+    """Summarise per-lane BuildRunner states. Unknown or empty input is never PASS."""
+    if "FAIL" in states:
+        return "FAIL"
+    if not states or states - BUILDRUNNER_KNOWN_STATES:
+        return "PARTIAL"
+    if "FUNCTIONAL" in states:
+        return "FUNCTIONAL"
+    if states == {"UNRUN"}:
+        return "UNRUN"
+    if "UNRUN" in states:
+        return "PARTIAL"
+    return "PASS"
+
+
+def apply_buildrunner_status(status, buildrunner_status):
+    """A non-PASS BuildRunner summary can never leave the matrix green."""
+    if buildrunner_status == "FAIL":
+        return "FAIL"
+    if status == "PASS" and buildrunner_status != "PASS":
+        return "PARTIAL"
+    return status
+
+
+def matrix_exit_code(status):
+    return 0 if status == "PASS" else 1
+
+
 def sdn(path, values):
     """Write inert SDN, never source evidence as executable shell code."""
     lines = []
@@ -735,12 +766,8 @@ class Matrix:
         native_status = "FAIL" if passed != len(rows) else "PASS" if complete_native else "PARTIAL"
         status = matrix_status(self.args.phase, native_status, interpreter_result["status"])
         if phase_capabilities(self.args.phase)[1]:
-            states = {row["status"] for row in buildrunner_rows.values()}
-            buildrunner_status = "FAIL" if "FAIL" in states else "UNRUN" if states == {"UNRUN"} else "PARTIAL" if "UNRUN" in states else "PASS"
-            if buildrunner_status == "FAIL":
-                status = "FAIL"
-            elif status == "PASS" and buildrunner_status != "PASS":
-                status = "PARTIAL"
+            buildrunner_status = buildrunner_summary({row["status"] for row in buildrunner_rows.values()})
+            status = apply_buildrunner_status(status, buildrunner_status)
         else:
             buildrunner_status = "SKIPPED"
         if self.children:
@@ -754,7 +781,7 @@ class Matrix:
             "required_native_lanes": 4, "selected_native_lanes": len(rows),
             "interpreter_status": interpreter_result["status"], "executed_lanes": len(rows),
             "passed_lanes": passed, "failed_lanes": len(rows) - passed, "admitted": False})
-        return 0 if status == "PASS" else 1
+        return matrix_exit_code(status)
 
 
 def main():
@@ -790,6 +817,8 @@ def main():
                         help="explicitly unrun interpreter case when reusing separate retained evidence")
     parser.add_argument("--prior-interpreter-evidence", type=Path,
                         help="reuse exact phase/compiler/fixture interpreter evidence across code-generation backend reports")
+    parser.add_argument("--memory-policy", choices=["enforce", "monitor"], default="enforce",
+                        help="monitor: functional-only; never a qualified PASS")
     parser.add_argument("--buildrunner-manager", type=Path)
     parser.add_argument("--buildrunner-manifest-writer", type=Path)
     parser.add_argument("--buildrunner-template", type=Path)
