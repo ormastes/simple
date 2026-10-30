@@ -1063,7 +1063,9 @@ pub(crate) fn compile_file_to_object(
     codegen.set_fn_arities(imports.fn_arities.clone());
     codegen.set_function_return_types(function_return_types);
     codegen.set_enum_defs(imports.enum_defs.clone());
-    codegen.set_tag_runtime_pool_join_result(true);
+    // rt_pool_join returns the task's raw i64 result (the C pool unboxes a
+    // boxed closure's tagged return), so native-project builds no longer tag it.
+    codegen.set_tag_runtime_pool_join_result(false);
     if !no_mangle {
         codegen.set_module_prefix(module_prefix);
     }
