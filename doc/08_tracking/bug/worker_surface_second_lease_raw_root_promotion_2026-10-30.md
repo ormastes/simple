@@ -14,4 +14,16 @@ Retain the full table graph exactly once. The private owner exposes only lookup 
 
 This is an owner-local repair, not a claim that arbitrary mutable raw objects can be re-promoted after their original lease. The wider raw aggregate registration limitation remains attributable to the compiler/runtime ABI. A global change from rt_alloc to rt_struct_alloc would add lifetime registry cost to every aggregate and is outside this minimal repair.
 
-The native regression exercises 66 publication leases with allocation churn, reads the first and newest exact values after each lease, requires pre-pause promotion to fail before successful paused retry, and keeps the complete-class graph control and omitted-retention negative control. Native RED is retained in `/tmp/simple-phase2-runner-native-attempt13-20261030/worker-surface-lifetime-owner-debug-run2`: build exit 0, artifact SHA 7a8849cea75befaeb68ce35db4811d7924d7628ed1378ad75525be43ea66eb97, runtime exit 4 at the second publication. `run.stderr` reports `[transient-promote] root refused: value=0x0000b3c4bca1efb1 class=0 heap=1`. Runtime peak RSS was 8,852 KiB; source/runtime hashes stayed unchanged. Native GREEN remains pending the execution owner. Active attempt13 source/evidence remains untouched.
+The native regression exercises 66 publication leases with allocation churn, reads the first and newest exact values after each lease, requires pre-pause promotion to fail before successful paused retry, and keeps the complete-class graph control and omitted-retention negative control. Native RED is retained in `/tmp/simple-phase2-runner-native-attempt13-20261030/worker-surface-lifetime-owner-debug-run2`: build exit 0, artifact SHA 7a8849cea75befaeb68ce35db4811d7924d7628ed1378ad75525be43ea66eb97, runtime exit 4 at the second publication. `run.stderr` reports `[transient-promote] root refused: value=0x0000b3c4bca1efb1 class=0 heap=1`. Runtime peak RSS was 8,852 KiB; source/runtime hashes stayed unchanged. The original attempt13 source/evidence remains untouched.
+
+## Focused native GREEN
+
+The repaired production owner at source `32c8faf064a9dab9e9fa1ae2795fc6ae27895596` built and ran with exit 0 using admitted producer `516c26c664452096ec47496ad771d20e121fd9fefc4a300bf549e7803240918c` and runtime archive `71f640495fa831bf0fbe860fce05495e62161000c1a62594f8c34e5cc47d3501`. The actual output was `PASS: production surface owner retains 66 publications and complete class graph`; stderr was empty. Artifact SHA-256: `f75a6cf9966a2c72a276d02bfdb60d4d356547d39676c44021766a6677d79f37`. Source inventory remained `e282fea39d98a4b58bf173f74e664b088ce52d1f36bca2bbd3a40a60f74e395d` before and after.
+
+Receipts are retained under `/tmp/simple-phase2-runner-native-attempt13-20261030/worker-surface-table-entry-retention-green-run2`:
+
+- `inputs.sdn`: SHA-256 `b823f13dd3fe55f21802566b4ab438a84932b14646500ff4c55edc524b647585`.
+- `status.env`: SHA-256 `d7e1aae7e2854a22ca0c31e5601c7d93219c30a5691e03d2b2ae2a8869a68852`.
+- `run.stdout`: SHA-256 `186b2f4de0064ee526803d6851719506641df656cada29efc1d8889b6fd8537f`.
+
+This qualifies the production owner across the exercised leases and class graph. It does not qualify a full CLI build, session-daemon test execution, a general raw-object promotion ABI, or an aggregate RSS improvement. The reader/table split is a dependency-boundary repair that lets this focused probe compile without pulling unrelated async reader code.
