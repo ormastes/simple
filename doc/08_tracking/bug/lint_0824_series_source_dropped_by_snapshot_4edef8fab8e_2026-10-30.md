@@ -19,9 +19,11 @@ Found by: lint spec sweep of test/01_unit/compiler/lint (22 failing files)
 
 - in `35.semantics/lint/raw_rt_access.spl` (-340 lines): `raw_rt_wrapper_binding_is_unshadowed`,
   grouped-callee and parenthesized-import detection, allowlist suffix semantics
-- in `lint_checks.spl` and `registry.spl`: `RawSffiCodeSnapshot` / `raw_sffi_code_snapshot`,
-  `check_all_rules_with_lines`, `easy_fix_source_view`, the `*_with_view` / `*_snapshot` rule entry
-  points, and `lint_source_for_parsed_append` siblings
+- in `lint_checks.spl`: the call sites that used the shared lexical snapshot
+  (`RawSffiCodeSnapshot` / `raw_sffi_code_snapshot`, the `*_snapshot` / `*_lines` rule entry
+  points) and `check_all_rules_with_lines`. The helpers themselves still exist
+  (`raw_sffi_call.spl:32`; `registry.spl:83,112-117`, re-added by `325221fdf18`); only the
+  lint_checks wiring is missing.
 - `35.semantics/lint/cow_alias_hotpath.spl` (deleted) and parts of `nonexistent_type_lints.spl`
 
 The specs from that series were not rewound. The 2026-09-29 transplant `88aac2ffe28` then carried
