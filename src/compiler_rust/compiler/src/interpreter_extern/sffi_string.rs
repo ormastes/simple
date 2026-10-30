@@ -36,10 +36,21 @@ thread_local! {
 // String Creation
 // ============================================================================
 
-/// Create new string from text
+/// Create new string.
+///
+/// Two call forms are accepted:
+/// - `rt_string_new(text)`: interpreter-only legacy form, returns the raw
+///   runtime string handle as an `Int`.
+/// - `rt_string_new(bytes: i64, len: i64) -> text`: the runtime ABI form
+///   (`rt_string_new(const uint8_t*, uint64_t)` in both the Rust and C
+///   runtimes). The `len` bytes at `bytes` are copied into a `text` value,
+///   matching the `-> text` extern declarations in the stdlib.
 pub fn rt_string_new_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let text = match args.first() {
-        Some(Value::Str(s)) => s.as_str(),
+    if let [Value::Int(addr), Value::Int(len)] = args {
+        return rt_string_new_from_bytes(*addr, *len);
+    }
+    let text = match args {
+        [Value::Str(s)] => s.as_str(),
         _ => {
             return Err(CompileError::semantic_with_context(
                 "rt_string_new expects text argument".to_string(),
@@ -51,6 +62,27 @@ pub fn rt_string_new_fn(args: &[Value]) -> Result<Value, CompileError> {
     let bytes = text.as_bytes();
     let rv = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
     Ok(Value::Int(rv.to_raw() as i64))
+}
+
+/// ABI form of `rt_string_new`: copy `len` bytes at `addr` into a `text`.
+/// A null pointer is accepted only with a zero length, mirroring the
+/// runtime's `rt_string_new(NULL, 0)` empty-string form.
+fn rt_string_new_from_bytes(addr: i64, len: i64) -> Result<Value, CompileError> {
+    if len < 0 {
+        return Err(CompileError::runtime("rt_string_new requires a nonnegative length"));
+    }
+    if len == 0 {
+        return Ok(Value::text(String::new()));
+    }
+    if addr <= 0 {
+        return Err(CompileError::runtime(
+            "rt_string_new requires a nonnull address for a nonzero length",
+        ));
+    }
+    // SAFETY: the caller passes (addr, len) from an `unsafe(capabilities: [ffi])`
+    // block, the same contract the native runtime's rt_string_new relies on.
+    let bytes = unsafe { std::slice::from_raw_parts(addr as usize as *const u8, len as usize) };
+    Ok(Value::text(String::from_utf8_lossy(bytes).into_owned()))
 }
 
 // ============================================================================
@@ -577,6 +609,26 @@ mod tests {
         );
         assert!(rt_string_substr_from_fn(&[Value::Int(0), Value::Int(0)]).is_err());
         assert!(rt_string_substr_from_fn(&[Value::text("x")]).is_err());
+    }
+
+    #[test]
+    fn string_new_accepts_runtime_abi_pointer_length_form() {
+        let bytes = b"hello world";
+        let addr = bytes.as_ptr() as usize as i64;
+        assert_eq!(
+            rt_string_new_fn(&[Value::Int(addr), Value::Int(5)]).unwrap(),
+            Value::text("hello")
+        );
+        assert_eq!(
+            rt_string_new_fn(&[Value::Int(addr + 6), Value::Int(5)]).unwrap(),
+            Value::text("world")
+        );
+        assert_eq!(rt_string_new_fn(&[Value::Int(0), Value::Int(0)]).unwrap(), Value::text(""));
+        assert!(rt_string_new_fn(&[Value::Int(0), Value::Int(3)]).is_err());
+        assert!(rt_string_new_fn(&[Value::Int(addr), Value::Int(-1)]).is_err());
+        // Legacy text form still returns a runtime handle.
+        assert!(matches!(rt_string_new_fn(&[Value::text("a")]).unwrap(), Value::Int(_)));
+        assert!(rt_string_new_fn(&[Value::Int(7)]).is_err());
     }
 
     #[test]

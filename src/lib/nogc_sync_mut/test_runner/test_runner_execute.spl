@@ -17,10 +17,13 @@ use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_
 use std.test_runner.compiler_select.{select_test_child_binary}
 use std.test_runner.native_compile_contract.{native_test_request_error, native_test_compile_threads, native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt, native_test_source_roots_identity}
 use std.test_runner.native_compile_contract.{native_test_artifact_path_v1}
-use std.common.test_runner.native_framework_wrapper.{spipe_partition_source, spipe_rewrite_infix_expect_line, native_framework_wrapper_source}
-use std.nogc_sync_mut.test_runner.source_route.{interpreter_snippet_source}
+use std.nogc_sync_mut.test_runner.native_execution_evidence.{native_execution_completion_v1}
+use std.common.test_runner.native_framework_wrapper.{spipe_partition_source, spipe_rewrite_infix_expect_line, native_framework_wrapper_source, native_plain_wrapper_source}
+use std.nogc_sync_mut.test_runner.source_route.{interpreter_snippet_source, source_has_bdd_structure}
 use std.test_runner.test_result_wrapper.{result_wrapper_path}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute}
 use std.test_runner.native_owned_process.{ScopedChildRun, run_scoped_child as _run_scoped_child, scoped_child_usage, scoped_child_budget_status}
 export use std.nogc_sync_mut.test_runner.resource_policy.{safe_mode_caps}
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines, simple_string_byte_ranges}
@@ -678,16 +681,43 @@ fn spipe_helpers_used(body: text, top_level: text) -> bool:
         i = i + 1
     false
 
-fn preprocess_spipe_file(file_path: text, native_framework: bool = false) -> text:
+pub fn native_test_source_kind_v1(file_path: text, content: text) -> Result<text, text>:
+    # Classify authored bytes before instrumentation can add executable setup.
+    if file_path.ends_with("_spec.spl") or source_has_bdd_structure(content): return Ok("spec")
+    # Explicit framework imports may alias every BDD keyword. Conservatively
+    # require framework counts rather than treating its failed checks as plain.
+    for line in simple_code_lines(content):
+        val code = line.trim().replace("\t", " ")
+        val import_tail = if code.starts_with("use "): code.substring(4).trim()
+            elif code.starts_with("import "): code.substring(7).trim()
+            else: ""
+        for owner in ["std.spec", "std.nogc_sync_mut.spec", "std.nogc_async_mut.spec", "std.gc_sync_mut.spec", "std.gc_async_mut.spec"]:
+            # Include namespace aliases, with a module token boundary so
+            # unrelated std.specification providers remain plain.
+            if import_tail == owner or import_tail.starts_with(owner + ".") or import_tail.starts_with(owner + " "):
+                return Ok("spec")
+    val checked = native_plain_wrapper_source(content, simple_code_lines(content), simple_string_continuation_lines(content), simple_string_byte_ranges(content))
+    if checked.is_err(): return Err(checked.unwrap_err())
+    Ok("plain")
+
+fn preprocess_spipe_file(file_path: text, native_framework: bool = false, completion_evidence: bool = false, completion_kind: text = "", source_override: text = "") -> text:
     """Wrap specs with legacy SMF helpers or the complete configured framework.
     Native AOT preserves framework calls and obtains its actual result status.
     Returns an empty path on native refusal, never an alternative test engine."""
-    if not file_path.ends_with("_spec.spl"):
+    if not file_path.ends_with("_spec.spl") and not completion_evidence:
         return file_path
 
-    var content = read_file_content(file_path)
+    var content = if source_override != "": source_override else: read_file_content(file_path)
     if content == "":
         return if native_framework: "" else: file_path
+
+    var selected_kind = completion_kind
+    if completion_evidence and selected_kind == "":
+        val selected = native_test_source_kind_v1(file_path, content)
+        if selected.is_err():
+            print selected.unwrap_err()
+            return ""
+        selected_kind = selected.unwrap()
 
     # Coverage wraps before SPipe preprocessing. Preserve its authenticated
     # source marker at byte zero instead of indenting it into generated main.
@@ -707,13 +737,24 @@ fn preprocess_spipe_file(file_path: text, native_framework: bool = false) -> tex
     val code_lines = simple_code_lines(content)
     val string_continuation = simple_string_continuation_lines(content)
     if native_framework:
-        val native_source = native_framework_wrapper_source(content, code_lines, string_continuation, simple_string_byte_ranges(content))
-        if native_source.is_err(): return ""
+        val native_source = if completion_evidence and selected_kind == "plain":
+            native_plain_wrapper_source(content, code_lines, string_continuation, simple_string_byte_ranges(content))
+        else:
+            native_framework_wrapper_source(content, code_lines, string_continuation, simple_string_byte_ranges(content), completion_evidence)
+        if native_source.is_err():
+            print "native-test: " + native_source.unwrap_err()
+            return ""
         var wrapped = native_source.unwrap()
         if coverage_source_marker != "": wrapped = coverage_source_marker + "\n" + wrapped
         val safe_name = file_path.replace("/", "_").replace("\\", "_").replace(":", "_")
-        val tmp_path = _tp_get_temp_dir() + "/spipe_wrapped_" + getpid().to_text() + "_" + safe_name[0:safe_name.len() - 4] + "_native.spl"
-        if not file_write(tmp_path, wrapped): return ""
+        var invocation_suffix = ""
+        if completion_evidence:
+            val nonce = test_runner_random_hex(16)
+            if nonce == nil: return ""
+            invocation_suffix = "_" + nonce.unwrap()
+        val tmp_path = _tp_get_temp_dir() + "/spipe_wrapped_" + getpid().to_text() + "_" + safe_name[0:safe_name.len() - 4] + invocation_suffix + "_native.spl"
+        val persisted = if completion_evidence: file_create_exclusive(tmp_path, wrapped) else: file_write(tmp_path, wrapped)
+        if not persisted: return ""
         return tmp_path
 
     var rendered_lines: [text] = []
@@ -1097,11 +1138,22 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-unavailable",
             MCDC_UNAVAILABLE_REASON, MCDC_UNAVAILABLE_DEGRADE_TOKEN)
 
+    var native_kind = ""
+    var authored_source = ""
+    if explicit_aot:
+        authored_source = read_file_content(file_path)
+        val selected_kind = native_test_source_kind_v1(file_path, authored_source)
+        if selected_kind.is_err():
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: 0, error: selected_kind.unwrap_err(), timed_out: false, cached: false)
+        native_kind = selected_kind.unwrap()
+
     # Native mode normally compiles SMF. Coverage must execute the MIR probes,
     # so it uses the LLVM AOT path and the core-C coverage owner instead.
     # Step 1: Preprocess SPipe files (wrap in fn main())
-    val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options)
-    val preprocessed_path = preprocess_spipe_file(wrapped_path, options.coverage or explicit_aot)
+    val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options, authored_source)
+    val preprocessed_path = preprocess_spipe_file(wrapped_path, options.coverage or explicit_aot, explicit_aot, native_kind,
+        if wrapped_path == file_path: authored_source else: "")
     var source_path = preprocessed_path
     var generated_stage: Option<NativeTestSourceStageV1> = nil
     if options.coverage or explicit_aot:
@@ -1423,12 +1475,29 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 timed_out: false, cached: false
             )
 
+    # Each explicit native invocation owns fresh evidence. Passing it via argv
+    # avoids changing the parent environment across concurrent children.
+    var native_evidence_path = ""
+    if explicit_aot:
+        for attempt in 0..4:
+            if native_evidence_path != "": break
+            val nonce = test_runner_random_hex(16)
+            if nonce != nil:
+                val candidate = smf_path + ".evidence-" + nonce.unwrap()
+                native_evidence_path = allocate_native_completion_path_v1(candidate)
+        if native_evidence_path == "":
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, smf_path + ".cache", native_quarantine_path)
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
+                error: "native-test: cannot allocate invocation evidence", timed_out: false, cached: false)
+
     # Step 3: Run the compiled .smf
     if options.verbose:
         print "[native] Running {smf_path}"
 
     val run_binary = if options.coverage or explicit_aot: smf_path else: binary
     var run_args: [text] = if options.coverage or explicit_aot: [] else: [smf_path]
+    if explicit_aot: run_args.push("--simple-native-evidence=" + native_evidence_path)
     if options.gc_log and not options.coverage:
         run_args.push("--gc-log")
     if options.gc_off and not options.coverage:
@@ -1447,6 +1516,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     stderr = run_scoped.result.stderr
     exit_code = run_scoped.result.exit_code
     if run_scoped.result.limit_exceeded:
+        if not options.keep_artifacts: remove_native_completion_evidence_v1(native_evidence_path)
         val end2 = time_now_unix_micros()
         val dur = (end2 - start) / 1000
         cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
@@ -1473,7 +1543,11 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         stdout = strip_coverage_blocks(stdout)
         stderr = strip_coverage_blocks(stderr)
 
-    val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    val base_result = if explicit_aot:
+        make_native_completion_result_v1(file_path, stdout, stderr, exit_code, duration_ms, options.timeout, native_evidence_path, native_kind)
+    else:
+        make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    if explicit_aot and not options.keep_artifacts: remove_native_completion_evidence_v1(native_evidence_path)
     if explicit_aot and not final_cache_clean:
         val cleanup_failed = TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: duration_ms, setup_ms: 0, error: "NATIVE-CACHE-CLEANUP-FAILED: private cache was quarantined",
@@ -1485,6 +1559,35 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             timed_out: false, cached: false)
         return _attach_scope_evidence(empty_result, _combine_usage(compile_scoped.usage, run_scoped.usage), run_scoped.budget_status, file_path, options, compile_ms, execution_ms)
     _attach_scope_evidence(base_result, _combine_usage(compile_scoped.usage, run_scoped.usage), run_scoped.budget_status, file_path, options, compile_ms, execution_ms, run_scoped.completion)
+
+pub fn allocate_native_completion_path_v1(candidate: text) -> text:
+    if file_exists(candidate + ".complete") or not file_create_exclusive(candidate, ""): return ""
+    val absolute_candidate = path_absolute(candidate)
+    if host_path_is_absolute(absolute_candidate): return absolute_candidate
+    file_delete(candidate)
+    ""
+
+fn remove_native_completion_evidence_v1(path: text):
+    if path == "": return
+    remove_structured_evidence(path)
+    if file_exists(path + ".complete"): file_delete(path + ".complete")
+    if file_exists(path + ".trace-events.sdnstream"): file_delete(path + ".trace-events.sdnstream")
+
+pub fn make_native_completion_result_v1(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text, kind: text) -> TestFileResult:
+    if kind != "spec" and kind != "plain":
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: duration_ms, setup_ms: 0, error: "native-test: invalid source classification", timed_out: false, cached: false)
+    val complete = if evidence_path == "": "" else: read_file_content(evidence_path + ".complete")
+    if complete != native_execution_completion_v1(evidence_path, kind, exit_code):
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: duration_ms, setup_ms: 0,
+            error: "native-test: normal completion evidence missing or invalid (exit " + exit_code.to_text() + ")", timed_out: false, cached: false)
+    if kind == "spec":
+        return make_result_from_structured_evidence(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs, evidence_path, true)
+    # One completed plain program, not a fabricated BDD example/assertion.
+    TestFileResult(path: file_path, passed: if exit_code == 0: 1 else: 0, failed: if exit_code == 0: 0 else: 1, skipped: 0, pending: 0,
+        duration_ms: duration_ms, setup_ms: 0,
+        error: if exit_code == 0: "" else: "native-test: plain program returned failure", timed_out: false, cached: false)
 
 fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResult:
     """Compile mode: compile test file to .smf and run it.
@@ -1566,4 +1669,4 @@ export smf_compile_degrade_token, scoped_limit_exceeded_result, mcdc_manifest_ab
 export mcdc_compiler_lacks_probes, mcdc_compiler_identity_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN, MCDC_UNAVAILABLE_REASON
 export native_test_request_error, native_test_compile_threads, native_test_compile_args
 export native_test_compile_args_with_threads, native_test_invocation_receipt
-export cleanup_native_generated_files
+export cleanup_native_generated_files, make_native_completion_result_v1, native_test_source_kind_v1, allocate_native_completion_path_v1

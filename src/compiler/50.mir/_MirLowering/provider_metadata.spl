@@ -833,6 +833,37 @@ fn mir_trait_dispatch_identity(symbol: HirSymbol, fallback_module: text) -> text
         owner = _hir_symbol_owner_module(fallback_module)
     "{owner}.{symbol.name}"
 
+fn mir_scalar_trait_owner_key_v1(kind: HirTypeKind) -> text:
+    match kind:
+        case Int(bits, signed): "scalar:int:{bits}:{signed}"
+        case Float(bits): "scalar:float:{bits}"
+        case Bool: "scalar:bool"
+        case Char: "scalar:char"
+        case Str: "scalar:str"
+        case Unit: "scalar:unit"
+        case _: ""
+
+fn mir_visible_scalar_traits_v1(symbols: SymbolTable, module_name: text) -> Dict<text, SymbolId>:
+    # Walk lexical bindings, not every transported symbol. Aliases retain
+    # their canonical declaration name in HirSymbol and local spelling here.
+    var visible: Dict<text, SymbolId> = {}
+    var scope_id = symbols.current_scope
+    var remaining = symbols.next_scope_id
+    while remaining > 0 and scope_id.id >= 0 and scope_id.id < symbols.next_scope_id:
+        remaining = remaining - 1
+        val scope = symbols.scopes[scope_id.id]
+        for local_name in scope.symbols.keys():
+            val raw: i64 = scope.symbols[local_name]
+            if symbols.lookup_or_invalid(local_name).id == raw:
+                if val symbol = symbols.get_symbol_raw(raw):
+                    if symbol.kind == SymbolKind.Trait:
+                        visible[mir_trait_dispatch_identity(symbol, module_name)] = SymbolId(id: raw)
+        if val parent = scope.parent:
+            scope_id = parent
+        else:
+            break
+    visible
+
 impl MirLowering:
     me register_trait_receiver_impls(module: HirModule, providers: [HirModule],
             provider_links_by_index: [Dict<i64, text>], provider_links_ready: [bool]):
@@ -853,7 +884,8 @@ impl MirLowering:
         (no table passed, or the trait-provider fallback list) is rebuilt
         exactly as before. The tables are consumer-call scratch owned by the
         caller's lower_module frame; nothing here retains them."""
-        self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true)
+        val visible_scalar_traits = mir_visible_scalar_traits_v1(module.symbols, module.name)
+        self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true, visible_scalar_traits)
         val use_cached = providers.len() > 0
         val trait_providers = if providers.len() > 0: providers else: self.trait_impl_provider_modules
         var provider_i = 0
@@ -864,14 +896,14 @@ impl MirLowering:
             if provider_module.name != module.name and provider_module.impls.len() > 0:
                 if use_cached and cached_i < provider_links_ready.len() and cached_i < provider_links_by_index.len() and provider_links_ready[cached_i]:
                     val cached_links: Dict<i64, text> = provider_links_by_index[cached_i]
-                    self.register_trait_impls_of(provider_module.name, provider_module.symbols, provider_module.impls, cached_links, false)
+                    self.register_trait_impls_of(provider_module.name, provider_module.symbols, provider_module.impls, cached_links, false, visible_scalar_traits)
                     continue
                 var provider_links: Dict<i64, text> = {}
                 for provider_func in provider_module.functions.values():
                     provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
-                self.register_trait_impls_of(provider_module.name, provider_module.symbols, provider_module.impls, provider_links, false)
+                self.register_trait_impls_of(provider_module.name, provider_module.symbols, provider_module.impls, provider_links, false, visible_scalar_traits)
 
-    me register_trait_impls_of(module_name: text, symbols: SymbolTable, impls: [HirImpl], links: Dict<i64, text>, is_local: bool):
+    me register_trait_impls_of(module_name: text, symbols: SymbolTable, impls: [HirImpl], links: Dict<i64, text>, is_local: bool, visible_scalar_traits: Dict<text, SymbolId>):
         var ii = 0
         while ii < impls.len():
             val impl_def: HirImpl = impls[ii]
@@ -885,11 +917,13 @@ impl MirLowering:
             # wrap/unwrap transport is a proven ABI defect class. Test the
             # concrete slot and bind a concrete local (4710b22a991 pattern).
             var trait_key = ""
+            var scalar_trait_id: i64 = -1
+            var scalar_impl_settled = false
             if impl_def.trait_ != nil:
                 val impl_trait: HirType = impl_def.trait_
                 val trait_kind: HirTypeKind = impl_trait.kind
                 match trait_kind:
-                    case Named(trait_sym, _):
+                    case Named(trait_sym, trait_args):
                         if symbols.symbols.has(trait_sym.id):
                             # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
                             val optional_trait_symbol: HirSymbol? = symbols.get_symbol_raw(trait_sym.id)
@@ -897,6 +931,12 @@ impl MirLowering:
                                 val trait_symbol: HirSymbol = present_trait_symbol
                                 if trait_symbol.kind == SymbolKind.Trait:
                                     trait_key = mir_trait_dispatch_identity(trait_symbol, module_name)
+                                    # Only a trait bound in this consumer's scope can
+                                    # supply scalar extension methods. Same leaf names
+                                    # from another provider do not establish identity.
+                                    if visible_scalar_traits.has(trait_key):
+                                        scalar_trait_id = visible_scalar_traits[trait_key].id
+                                        scalar_impl_settled = trait_args.len() == 0 and impl_def.type_params.len() == 0
                     case _: ()
             if trait_key != "":
                 # A generic or unnamed implementing type still counts as an
@@ -922,6 +962,31 @@ impl MirLowering:
                     val target = if is_local: method_id else: self.relocate_provider_callable(method_id, symbols, links)
                     if target.id >= 0:
                         self.trait_impl_methods["{trait_key}::{owner_key}::{method_name}"] = target
+                    var scalar_owner = mir_scalar_trait_owner_key_v1(impl_def.type_.kind)
+                    # An unresolved blanket Self might apply to any scalar.
+                    # It must block recovery rather than silently disappear
+                    # while a competing concrete implementation wins.
+                    if scalar_owner == "":
+                        match impl_def.type_.kind:
+                            case TypeParam(_, _) | Infer(_, _): scalar_owner = "scalar:generic"
+                            case Named(owner_id, _):
+                                if val owner_symbol = symbols.get_symbol_raw(owner_id.id):
+                                    if owner_symbol.kind == SymbolKind.TypeParam:
+                                        scalar_owner = "scalar:generic"
+                            case _: ()
+                    var scalar_method_settled = false
+                    if val method_symbol = symbols.get_symbol_raw(method_id.id):
+                        scalar_method_settled = method_symbol.generic_param_count == 0
+                    if scalar_trait_id >= 0 and scalar_owner != "":
+                        val scalar_key = "{scalar_owner}::{method_name}"
+                        val candidate = if scalar_impl_settled and scalar_method_settled and scalar_owner != "scalar:generic": target else: SymbolId(id: -1)
+                        # Unsupported generic candidates and distinct visible
+                        # implementations reject selection. Exact repeats are
+                        # idempotent; a rejected key cannot become admissible.
+                        if self.trait_impl_methods.has(scalar_key) and self.trait_impl_methods[scalar_key].id != candidate.id:
+                            self.trait_impl_methods[scalar_key] = SymbolId(id: -1)
+                        else:
+                            self.trait_impl_methods[scalar_key] = candidate
 
     me trait_receiver_identity(receiver: HirExpr, method: text = "") -> text:
         """Canonical trait identity when the receiver's STATIC type is a

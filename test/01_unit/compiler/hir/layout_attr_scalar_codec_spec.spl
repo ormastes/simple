@@ -1,0 +1,68 @@
+"""Layout producers initialize the scalar alignment presence/value pair.
+
+Exercise the real generated codec: a missing required bool was serialized as N
+and refused for every newly cached HIR module containing a struct or class.
+"""
+use std.spec.*
+use compiler.common.attributes.{parse_layout_attrs}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{Attribute}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.types.type_layout.{LayoutAttr,
+    layoutattr_default_, layoutattr_c_repr, layoutattr_packed}
+use compiler.hir.generated.hir_codec.{hc_enc_layout_attr, hc_dec_layout_attr}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+
+fn alignment_attribute(value: i64) -> Attribute:
+    val span = Span(start: 0, end_pos: 0, line: 1, col: 1)
+    Attribute(name: "align", args: [Expr(kind: ExprKind.IntLit(value), span: span)], span: span)
+
+fn check_layout_roundtrip(layout: LayoutAttr, present: bool, alignment: i64):
+    expect(layout.has_explicit_align).to_equal(present)
+    expect(layout.explicit_align).to_equal(alignment)
+    val writer = HirCodecWriter.create()
+    hc_enc_layout_attr(writer, layout)
+    expect(writer.ok).to_equal(true)
+    val wire = writer.finish()
+    expect(wire.contains("N\n")).to_equal(false)
+    val reader = FlatPoolReader.new(wire)
+    val restored = hc_dec_layout_attr(reader)
+    expect(reader.ok).to_equal(true)
+    expect(restored.layout_kind).to_equal(layout.layout_kind)
+    expect(restored.has_explicit_align).to_equal(present)
+    expect(restored.explicit_align).to_equal(alignment)
+    expect(restored.is_packed).to_equal(layout.is_packed)
+    expect(restored.is_preserve_order).to_equal(layout.is_preserve_order)
+    expect(restored.is_compactq).to_equal(layout.is_compactq)
+    val again = HirCodecWriter.create()
+    hc_enc_layout_attr(again, restored)
+    expect(again.ok).to_equal(true)
+    expect(again.finish()).to_equal(wire)
+
+describe "layout alignment scalar producer invariant":
+    it "roundtrips all factory defaults without nil scalar fields":
+        check_layout_roundtrip(layoutattr_default_(), false, 0)
+        check_layout_roundtrip(layoutattr_c_repr(), false, 0)
+        check_layout_roundtrip(layoutattr_packed(), false, 0)
+
+    it "roundtrips a parsed declaration without alignment":
+        check_layout_roundtrip(parse_layout_attrs([]), false, 0)
+
+    it "roundtrips explicit unit and larger power-of-two alignments":
+        for alignment in [1, 16]:
+            check_layout_roundtrip(parse_layout_attrs([alignment_attribute(alignment)]), true, alignment)
+
+    it "keeps zero and non-power-of-two alignment absent":
+        # Zero is not a valid explicit alignment; zero is the absent payload.
+        for alignment in [0, 3]:
+            check_layout_roundtrip(parse_layout_attrs([alignment_attribute(alignment)]), false, 0)
+
+    it "still rejects nil in either required alignment scalar":
+        # Present Simple kind (1,0), then presence/value and three layout flags.
+        val missing_presence = FlatPoolReader.new("1\n0\nN\n0\n0\n0\n0\n")
+        val ignored_presence = hc_dec_layout_attr(missing_presence)
+        expect(missing_presence.ok).to_equal(false)
+        val missing_value = FlatPoolReader.new("1\n0\n0\nN\n0\n0\n0\n")
+        val ignored_value = hc_dec_layout_attr(missing_value)
+        expect(missing_value.ok).to_equal(false)

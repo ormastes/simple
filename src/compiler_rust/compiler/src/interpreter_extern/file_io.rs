@@ -875,27 +875,16 @@ fn snapshot_token(value: &str) -> String {
     out
 }
 
-fn process_status_kib(key: &str) -> i64 {
-    fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status
-                .lines()
-                .find(|line| line.starts_with(key))
-                .and_then(|line| line[key.len()..].split_whitespace().next())
-                .and_then(|value| value.parse::<i64>().ok())
-        })
-        .unwrap_or(-1)
-}
-
 /// Return current resident memory in KiB, or -1 when host status is unavailable.
 pub fn rt_process_rss_kib(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(process_status_kib("VmRSS:")))
+    Ok(Value::Int(simple_runtime::mem_snapshot::rt_process_rss_kib()))
 }
 
 /// Return peak resident memory in KiB, or -1 when host status is unavailable.
 pub fn rt_process_hwm_kib(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(process_status_kib("VmHWM:")))
+    // Delegate to the runtime twin: it covers Linux /proc, macOS/FreeBSD
+    // getrusage and Windows, where /proc/self/status alone returned -1.
+    Ok(Value::Int(simple_runtime::mem_snapshot::rt_process_hwm_kib()))
 }
 
 fn snapshot_monotonic_ms() -> i64 {
@@ -942,7 +931,7 @@ pub fn rt_mem_snapshot_record(args: &[Value]) -> Result<Value, CompileError> {
         std::process::id(), snapshot_monotonic_ms(),
         if path.is_empty() { "none" } else { "recorded" }, if path.is_empty() { "-" } else { &path },
         counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
-        process_status_kib("VmRSS:"), process_status_kib("VmHWM:"));
+        simple_runtime::mem_snapshot::rt_process_rss_kib(), simple_runtime::mem_snapshot::rt_process_hwm_kib());
     let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
     let ok = files
         .1
@@ -1921,6 +1910,26 @@ pub fn rt_file_truncate(args: &[Value]) -> Result<Value, CompileError> {
         Ok(_) => Ok(Value::Bool(true)),
         Err(_) => Ok(Value::Bool(false)),
     }
+}
+
+/// `rt_mmap(path, size, offset, readonly) -> addr`: map an existing file
+/// via the linked runtime twin (`simple_runtime::value::rt_mmap`). 0 on any
+/// failure (missing file, short file, capability denied).
+pub fn rt_mmap(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let int_at = |idx: usize| match args.get(idx) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(Value::UInt { value, .. }) => Ok(*value as i64),
+        Some(Value::Bool(b)) => Ok(*b as i64),
+        other => Err(CompileError::semantic(format!(
+            "rt_mmap() expects (path: text, size: i64, offset: i64, readonly: i64), got {:?}",
+            other
+        ))),
+    };
+    let (size, offset, readonly) = (int_at(1)?, int_at(2)?, int_at(3)?);
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    let addr = simple_runtime::value::rt_mmap(path_rv.to_raw() as i64, size, offset, readonly);
+    Ok(Value::Int(addr))
 }
 
 /// `rt_mmap_create(path, size) -> addr`: create/truncate `path` to exactly

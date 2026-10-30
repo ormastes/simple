@@ -1,0 +1,114 @@
+# Protocol tests only. Real child execution is covered by the native fixtures.
+use std.spec.{describe, it, expect}
+use std.test_runner.test_runner_execute.{make_native_completion_result_v1, preprocess_spipe_file, native_test_source_kind_v1, allocate_native_completion_path_v1}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.test_runner.test_runner_files.{read_file_content}
+use std.nogc_sync_mut.test_runner.native_execution_evidence.{native_execution_completion_v1, native_execution_evidence_path_from_args_v1}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+
+fn native_verdict_path() -> text:
+    _tp_get_temp_dir() + "/native-verdict-protocol-" + time_now_unix_micros().to_text()
+
+describe "native completion verdict":
+    it "refuses stdout pass markers when completion is absent":
+        val result = make_native_completion_result_v1("plain_test.spl", "1 passed, 0 failed", "", 0, 1, 30, native_verdict_path(), "plain")
+        expect(result.passed).to_equal(0)
+        expect(result.failed).to_equal(1)
+
+    it "binds completion to the invocation and process status":
+        val path = native_verdict_path()
+        expect(file_write(path + ".complete", native_execution_completion_v1(path + "other", "plain", 0))).to_equal(true)
+        expect(make_native_completion_result_v1("plain_test.spl", "", "", 0, 1, 30, path, "plain").failed).to_equal(1)
+        expect(file_write(path + ".complete", native_execution_completion_v1(path, "plain", 0))).to_equal(true)
+        expect(make_native_completion_result_v1("plain_test.spl", "", "", 139, 1, 30, path, "plain").failed).to_equal(1)
+        expect(make_native_completion_result_v1("plain_test.spl", "", "", 0, 1, 30, path, "plain").passed).to_equal(1)
+        file_delete(path + ".complete")
+
+    it "uses real structured counts instead of stdout counts":
+        val path = native_verdict_path()
+        expect(file_write(path, "simple-bdd-v1\n2\n1\n")).to_equal(true)
+        expect(file_write(path + ".expectations", "simple-bdd-expectations-v1\n3\n")).to_equal(true)
+        expect(file_write(path + ".complete", native_execution_completion_v1(path, "spec", 1))).to_equal(true)
+        val result = make_native_completion_result_v1("actual_spec.spl", "999 passed", "", 1, 1, 30, path, "spec")
+        expect(result.passed).to_equal(2)
+        expect(result.failed).to_equal(1)
+        file_delete(path)
+        file_delete(path + ".expectations")
+        file_delete(path + ".complete")
+
+    it "refuses completed SSpec with missing or zero counts":
+        val path = native_verdict_path()
+        expect(file_write(path + ".complete", native_execution_completion_v1(path, "spec", 0))).to_equal(true)
+        expect(make_native_completion_result_v1("empty_spec.spl", "1 passed", "", 0, 1, 30, path, "spec").failed).to_equal(1)
+        expect(file_write(path, "simple-bdd-v1\n0\n0\n")).to_equal(true)
+        expect(make_native_completion_result_v1("empty_spec.spl", "1 passed", "", 0, 1, 30, path, "spec").failed).to_equal(1)
+        file_delete(path)
+        file_delete(path + ".complete")
+
+    it "parses only the reserved argument and rejects duplicate transport":
+        val args = ["artifact", "--test-filter=other", "--simple-native-evidence=/tmp/owned-case"]
+        expect(native_execution_evidence_path_from_args_v1(args, "linux")).to_equal("/tmp/owned-case")
+        expect(args[1]).to_equal("--test-filter=other")
+        expect(args.len()).to_equal(3)
+        expect(native_execution_evidence_path_from_args_v1(["--simple-native-evidence=", "--simple-native-evidence=/tmp/owned-case"])).to_equal("")
+        expect(native_execution_evidence_path_from_args_v1(["--simple-native-evidence=relative"])).to_equal("")
+
+    it "accepts Windows absolute drive and UNC paths without shell rewriting":
+        expect(native_execution_evidence_path_from_args_v1(["--simple-native-evidence=C:/test cases/owned"], "windows")).to_equal("C:/test cases/owned")
+        expect(native_execution_evidence_path_from_args_v1(["--simple-native-evidence=\\\\server\\share\\owned"], "windows")).to_equal("\\\\server\\share\\owned")
+        expect(native_execution_evidence_path_from_args_v1(["--simple-native-evidence=C:relative"], "windows")).to_equal("")
+        expect(native_execution_evidence_path_from_args_v1(["--simple-native-evidence=/current-drive-relative"], "windows")).to_equal("")
+
+    it "does not let another invocation or malformed completion satisfy this case":
+        val first = native_verdict_path()
+        val second = first + "-parallel"
+        expect(file_write(first + ".complete", native_execution_completion_v1(first, "plain", 0))).to_equal(true)
+        expect(make_native_completion_result_v1("plain_test.spl", "", "", 0, 1, 30, second, "plain").failed).to_equal(1)
+        expect(file_write(second + ".complete", "simple-native-completion-v1\nplain\n")).to_equal(true)
+        expect(make_native_completion_result_v1("plain_test.spl", "", "", 0, 1, 30, second, "plain").failed).to_equal(1)
+        file_delete(first + ".complete")
+        file_delete(second + ".complete")
+
+    it "routes an actual plain file through completion preprocessing with unique invocation outputs":
+        val original = "test/fixtures/test_runner/native_completion/plain_green_test.spl"
+        val first = preprocess_spipe_file(original, true, true)
+        val second = preprocess_spipe_file(original, true, true)
+        expect(first != "").to_equal(true)
+        expect(second != "").to_equal(true)
+        expect(first != original and second != original and first != second).to_equal(true)
+        val output = read_file_content(first)
+        expect(output.starts_with(read_file_content(original))).to_equal(true)
+        expect(output).to_contain("native_execution_finish_v1")
+        file_delete(first)
+        file_delete(second)
+
+    it "classifies real BDD source independently of its filename":
+        val path = "test/fixtures/test_runner/native_completion/non_suffix_red_test.spl"
+        val source = read_file_content(path)
+        expect(native_test_source_kind_v1(path, source).unwrap()).to_equal("spec")
+        val wrapped = preprocess_spipe_file(path, true, true)
+        expect(wrapped != "").to_equal(true)
+        expect(read_file_content(wrapped)).to_contain("set_test_evidence_path_v1")
+        file_delete(wrapped)
+
+    it "recognizes namespace-alias imports without matching unrelated module prefixes":
+        val path = "test/fixtures/test_runner/native_completion/namespace_alias_red_test.spl"
+        expect(native_test_source_kind_v1(path, read_file_content(path)).unwrap()).to_equal("spec")
+        expect(native_test_source_kind_v1("alias_test.spl", "import std.spec as spec\nspec.expect(false)\n").unwrap()).to_equal("spec")
+        expect(native_test_source_kind_v1("alias_test.spl", "use\tstd.spec\tas spec\nspec.expect(false)\n").unwrap()).to_equal("spec")
+        expect(native_test_source_kind_v1("plain_test.spl", "use std.specification as specification\nprint 1\n").unwrap()).to_equal("plain")
+
+    it "rejects original declaration-only bytes before instrumentation can add a body":
+        val path = "test/fixtures/test_runner/native_completion/declarations_only_test.spl"
+        val source = read_file_content(path)
+        expect(native_test_source_kind_v1(path, source).is_err()).to_equal(true)
+        expect(native_test_source_kind_v1(path, "use std.spec.\{describe as suite, it as example, expect as verify}\nsuite(\"x\", fn(): example(\"y\", fn(): verify(1).to_equal(2)))\n").unwrap()).to_equal("spec")
+
+    it "canonicalizes a newly allocated relative receipt and refuses reuse":
+        val relative = "native-relative-protocol-" + time_now_unix_micros().to_text()
+        val absolute = allocate_native_completion_path_v1(relative)
+        expect(absolute != "" and absolute != relative).to_equal(true)
+        expect(absolute.ends_with(relative)).to_equal(true)
+        expect(allocate_native_completion_path_v1(relative)).to_equal("")
+        file_delete(absolute)

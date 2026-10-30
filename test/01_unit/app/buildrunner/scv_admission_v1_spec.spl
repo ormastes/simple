@@ -200,6 +200,36 @@ describe "BuildRunner SCV source-only admission (REQ-009/010/013/014)":
         task.outputs = ["src/generated.o"]
         expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV source namespace contains a link or output: src/generated.o"))
 
+    it "refuses a directory alias whose target has no pinned input (trace32_tools case)":
+        # Mirrors src/app/mcp_t32 -> ../../examples/10_tooling/trace32_tools/t32_mcp
+        # with the target tree absent from the task inputs (e.g. a sparse checkout).
+        val adapter = gate_fixture()
+        var task = gate_task(adapter)
+        task.links = [BuildLinkV1(kind: "dir", path: "tools/mcp_t32",
+            target: "../examples/10_tooling/trace32_tools/t32_mcp",
+            resolved_path: "examples/10_tooling/trace32_tools/t32_mcp", target_digest: "")]
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV task contract: link target has no pinned regular input"))
+
+    it "admits the same directory alias once its target tree is a pinned input":
+        val adapter = gate_fixture()
+        var task = gate_task(adapter)
+        task.inputs = task.inputs.push(BuildInputV1(path: "examples/10_tooling/trace32_tools/t32_mcp/main.spl",
+            digest: sha256_text("t32 mcp main")))
+        task.links = [BuildLinkV1(kind: "dir", path: "tools/mcp_t32",
+            target: "../examples/10_tooling/trace32_tools/t32_mcp",
+            resolved_path: "examples/10_tooling/trace32_tools/t32_mcp", target_digest: "")]
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter)).is_ok()).to_equal(true)
+
+    it "refuses a directory alias that would land inside the source scope":
+        val adapter = gate_fixture()
+        var task = gate_task(adapter)
+        task.inputs = task.inputs.push(BuildInputV1(path: "examples/10_tooling/trace32_tools/t32_mcp/main.spl",
+            digest: sha256_text("t32 mcp main")))
+        task.links = [BuildLinkV1(kind: "dir", path: "src/app/mcp_t32",
+            target: "../../examples/10_tooling/trace32_tools/t32_mcp",
+            resolved_path: "examples/10_tooling/trace32_tools/t32_mcp", target_digest: "")]
+        expect(build_runner_scv_bind_v1(task, adapter, gate_witnesses(adapter))).to_equal(Err("build SCV source namespace contains a link or output: src/app/mcp_t32"))
+
     it "reconstructs the task, receipt and mapping before accepting a supplied digest":
         var binding = gate_binding()
         binding.admission_digest = sha256_text("forged")

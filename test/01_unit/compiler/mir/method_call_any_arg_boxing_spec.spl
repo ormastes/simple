@@ -1,0 +1,94 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.semantics.resolve.{resolve_methods_quiet}
+
+val METHOD_ANY_SOURCE = (
+    "class Probe:\n    value: any\n" +
+    "    fn matches(expected) -> bool:\n        self.value == expected\n" +
+    "    fn explicit(expected: any) -> bool:\n        self.value == expected\n" +
+    "    fn typed(expected: i64) -> i64:\n        expected\n" +
+    "    fn defaulted(expected: any = 41) -> bool:\n        self.value == expected\n" +
+    "    fn default_typed(expected: i64 = 41) -> i64:\n        expected\n" +
+    "fn literal(probe: Probe) -> bool:\n    probe.matches(41)\n" +
+    "fn annotated(probe: Probe) -> bool:\n    probe.explicit(41)\n" +
+    "fn scalar(probe: Probe, value: i64) -> bool:\n    probe.matches(value)\n" +
+    "fn floating(probe: Probe, value: f64) -> bool:\n    probe.matches(value)\n" +
+    "fn forwarded(probe: Probe, value: any) -> bool:\n    probe.matches(value)\n" +
+    "fn raw_typed(probe: Probe) -> i64:\n    probe.typed(41)\n" +
+    "fn omitted(probe: Probe) -> bool:\n    probe.defaulted()\n" +
+    "fn omitted_typed(probe: Probe) -> i64:\n    probe.default_typed()\n"
+)
+
+fn method_any_function_json(target: text, resolved: bool) -> text:
+    val ast = parse_full_frontend(METHOD_ANY_SOURCE, "method_any_arg.spl", "method_any_arg.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("method_any_arg.spl")
+    var hir = hir_lowering.lower_module(ast)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    if resolved:
+        val (resolved_hir, errors) = resolve_methods_quiet(hir)
+        expect(errors.len()).to_equal(0)
+        hir = resolved_hir
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with(".{target}"):
+            return serialize_mir_function(function)
+    fail("method Any fixture did not emit requested function: " + target)
+
+fn method_any_occurrences(hay: text, needle: text) -> i64:
+    var count = 0
+    var index = 0
+    while index + needle.len() <= hay.len():
+        if hay.substring(index, index + needle.len()) == needle:
+            count = count + 1
+            index = index + needle.len()
+        else:
+            index = index + 1
+    count
+
+fn method_any_named_rejected(resolved: bool) -> bool:
+    val source = "class NamedProbe:\n    value: any\n    fn matches(expected: any, count: i64) -> bool:\n        self.value == expected and count == 1\nfn inspect(probe: NamedProbe) -> bool:\n    probe.matches(count: 1, expected: 41)\n"
+    val ast = parse_full_frontend(source, "method_any_named.spl", "method_any_named.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("method_any_named.spl")
+    var hir = hir_lowering.lower_module(ast)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    if resolved:
+        val (resolved_hir, errors) = resolve_methods_quiet(hir)
+        expect(errors.len()).to_equal(0)
+        hir = resolved_hir
+    var lowering = MirLowering.new(hir.symbols)
+    val _mir = lowering.lower_module(hir)
+    for error in lowering.errors:
+        if error.fatal and error.message.contains("named argument to Any-bearing method requires declared parameter binding"):
+            return true
+    false
+
+describe "native method Any arguments preserve RuntimeValue representation", tag: ["only-compiled"]:
+    it "boxes literals and typed integer values for inferred and explicit Any parameters":
+        for resolved in [false, true]:
+            for target in ["literal", "annotated", "scalar", "omitted"]:
+                val mir = method_any_function_json(target, resolved)
+                expect(method_any_occurrences(mir, "rt_value_int_wide")).to_equal(1)
+
+    it "boxes a floating argument through the float RuntimeValue constructor":
+        for resolved in [false, true]:
+            val mir = method_any_function_json("floating", resolved)
+            expect(method_any_occurrences(mir, "rt_value_float")).to_equal(1)
+
+    it "preserves already tagged Any forwarding and leaves typed scalar slots raw":
+        for resolved in [false, true]:
+            for target in ["forwarded", "raw_typed", "omitted_typed"]:
+                val mir = method_any_function_json(target, resolved)
+                expect(method_any_occurrences(mir, "rt_value_int_wide")).to_equal(0)
+                expect(method_any_occurrences(mir, "rt_value_float")).to_equal(0)
+
+    it "rejects named Any-bearing calls without guessing parameter order":
+        expect(method_any_named_rejected(false)).to_be(true)
+        expect(method_any_named_rejected(true)).to_be(true)

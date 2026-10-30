@@ -17,7 +17,23 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-const PAGE_SIZE: usize = 4096;
+/// Host VM page size. Hard-coding 4096 broke every sampled slot on hosts with
+/// larger pages (Apple Silicon macOS uses 16 KiB): the trailing guard page
+/// landed mid-page, `mprotect` failed with EINVAL, and every sample silently
+/// fell back to the normal allocator.
+fn page_size() -> usize {
+    static PAGE: OnceLock<usize> = OnceLock::new();
+    *PAGE.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            if raw > 0 {
+                return raw as usize;
+            }
+        }
+        4096
+    })
+}
 /// Bound on slots awaiting real `munmap` after being guard-protected — keeps
 /// address-space growth bounded under sustained sampled alloc/free traffic.
 const FREE_RING_CAP: usize = 256;
@@ -99,9 +115,9 @@ pub fn guard_alloc_sampled(size: usize, owner: u32) -> Option<usize> {
     if size == 0 {
         return None;
     }
-    let data_pages = size.div_ceil(PAGE_SIZE).max(1);
+    let data_pages = size.div_ceil(page_size()).max(1);
     let total_pages = data_pages + 2; // leading + trailing guard page
-    let map_len = total_pages * PAGE_SIZE;
+    let map_len = total_pages * page_size();
 
     unsafe {
         let base = libc::mmap(
@@ -116,16 +132,16 @@ pub fn guard_alloc_sampled(size: usize, owner: u32) -> Option<usize> {
             return None;
         }
         let page_base = base as usize;
-        let trailing_page = page_base + PAGE_SIZE * (1 + data_pages);
+        let trailing_page = page_base + page_size() * (1 + data_pages);
 
-        if libc::mprotect(page_base as *mut libc::c_void, PAGE_SIZE, libc::PROT_NONE) != 0
-            || libc::mprotect(trailing_page as *mut libc::c_void, PAGE_SIZE, libc::PROT_NONE) != 0
+        if libc::mprotect(page_base as *mut libc::c_void, page_size(), libc::PROT_NONE) != 0
+            || libc::mprotect(trailing_page as *mut libc::c_void, page_size(), libc::PROT_NONE) != 0
         {
             libc::munmap(base, map_len);
             return None;
         }
 
-        // Right-align within the data region [page_base+PAGE_SIZE, trailing_page).
+        // Right-align within the data region [page_base+page_size(), trailing_page).
         let user_ptr = trailing_page - size;
 
         let mut st = guard_state().lock().unwrap_or_else(|e| e.into_inner());
@@ -175,7 +191,7 @@ pub fn guard_free_sampled(ptr: usize) -> bool {
     }
     slot.freed = true;
     let page_base = slot.page_base;
-    let map_len = slot.total_pages * PAGE_SIZE;
+    let map_len = slot.total_pages * page_size();
     unsafe {
         libc::mprotect(page_base as *mut libc::c_void, map_len, libc::PROT_NONE);
     }
@@ -186,7 +202,7 @@ pub fn guard_free_sampled(ptr: usize) -> bool {
         };
         if let Some(evicted) = st.slots.remove(&evict_ptr) {
             unsafe {
-                libc::munmap(evicted.page_base as *mut libc::c_void, evicted.total_pages * PAGE_SIZE);
+                libc::munmap(evicted.page_base as *mut libc::c_void, evicted.total_pages * page_size());
             }
         }
     }
@@ -223,7 +239,7 @@ mod tests {
         assert!(guard_is_slot(ptr));
         // Last byte of the allocation must be the last byte of a page
         // (right-aligned placement): (ptr + size) is page-aligned.
-        assert_eq!((ptr + 37) % PAGE_SIZE, 0);
+        assert_eq!((ptr + 37) % page_size(), 0);
         // Writing within bounds must not trap.
         unsafe {
             std::ptr::write_bytes(ptr as *mut u8, 0xAB, 37);
@@ -268,7 +284,7 @@ mod tests {
         // protection must succeed (0) — a legal no-op re-application,
         // proving the slot is still a valid, currently-PROT_NONE mapping
         // (not munmapped, not writable) without ever touching its bytes.
-        let rc = unsafe { libc::mprotect(page_base as *mut libc::c_void, total_pages * PAGE_SIZE, libc::PROT_NONE) };
+        let rc = unsafe { libc::mprotect(page_base as *mut libc::c_void, total_pages * page_size(), libc::PROT_NONE) };
         assert_eq!(rc, 0, "guarded slot must still be a valid PROT_NONE mapping");
     }
 

@@ -1606,6 +1606,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_stat_mtime", file_io::rt_file_stat_mtime);
     insert_simple!("rt_file_stat_size", file_io::rt_file_stat_size);
     insert_simple!("rt_file_truncate", file_io::rt_file_truncate);
+    insert_simple!("rt_mmap", file_io::rt_mmap);
     insert_simple!("rt_mmap_create", file_io::rt_mmap_create);
     insert_simple!("rt_munmap", file_io::rt_munmap);
     insert_simple!("rt_msync", file_io::rt_msync);
@@ -2465,6 +2466,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cpu_topology_field", concurrency::rt_cpu_topology_field);
     insert_simple!("rt_thread_pin_current", concurrency::rt_thread_pin_current);
     insert_simple!("rt_thread_current_cpu", concurrency::rt_thread_current_cpu);
+    insert_simple!("rt_par_atomic_i64_is_lock_free", concurrency::rt_par_atomic_i64_is_lock_free);
+    insert_simple!("rt_par_atomic_load_i64", concurrency::rt_par_atomic_load_i64);
     insert_simple!("rt_par_atomic_add_i64", concurrency::rt_par_atomic_add_i64);
     insert_simple!("rt_par_atomic_xchg_i64", concurrency::rt_par_atomic_xchg_i64);
     insert_simple!("rt_par_atomic_cmpxchg_i64", concurrency::rt_par_atomic_cmpxchg_i64);
@@ -3269,8 +3272,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
             )
         }) as ExternHandler,
     );
+    // Legacy numbered spelling (src/lib/nogc_sync_mut/sffi/concurrent.spl); same ABI as _with_args.
     m.insert(
-        "rt_thread_spawn_isolated_with_args",
+        "rt_thread_spawn_isolated2",
         (|evaluated, env, functions, classes, enums, impl_methods| {
             concurrency::rt_thread_spawn_isolated_with_args_context(
                 evaluated,

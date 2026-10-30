@@ -6,7 +6,7 @@
 use crate::concurrent_providers::ConcurrentBackend;
 use crate::concurrent_providers::registry::ConcurrentProviderRegistry;
 use crate::error::CompileError;
-use crate::interpreter::interpreter_state::{get_concurrent_registry, set_concurrent_registry};
+use crate::interpreter::interpreter_state::{get_concurrent_registry, set_concurrent_registry, InterpreterThreadState};
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -27,7 +27,7 @@ type InterpreterMutex = Arc<(Mutex<bool>, Condvar)>;
 
 // Global storage for thread handles, channels, and results
 lazy_static::lazy_static! {
-    static ref THREAD_HANDLES: Arc<Mutex<HashMap<i64, thread::JoinHandle<Value>>>> =
+    static ref THREAD_HANDLES: Arc<Mutex<HashMap<i64, thread::JoinHandle<Result<Value, CompileError>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     static ref THREAD_RESULTS: Arc<Mutex<HashMap<i64, Value>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -463,6 +463,7 @@ pub fn rt_thread_spawn_isolated_with_args_context(
     let data2 = args[2].clone();
 
     // Generate handle ID from whichever registry `rt_thread_join` will read.
+    // Done on the spawner: the concurrent registry is thread-local.
     let handle_id = alloc_thread_handle_id();
 
     // Execute the closure with bound parameters
@@ -479,29 +480,63 @@ pub fn rt_thread_spawn_isolated_with_args_context(
         local_env.insert(params[1].clone(), data2);
     }
 
-    // First evaluate the body expression — propagate timeout errors.
-    let body_value = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
+    // Run the closure on a real OS thread. It used to be evaluated inline on
+    // the spawner, so a closure that waits on the spawner (Barrier.wait(),
+    // channel recv, spin on an atomic) deadlocked: the spawner could not reach
+    // its side of the rendezvous until the "thread" returned.
+    // doc/08_tracking/bug/interpreter_isolated_thread_barrier_hang_2026-10-30.md
+    let state = InterpreterThreadState::capture();
+    let mut functions = functions.clone();
+    let mut classes = classes.clone();
+    let enums = enums.clone();
+    let impl_methods = impl_methods.clone();
+    let worker = thread::Builder::new()
+        .name(format!("simple-isolated-{handle_id}"))
+        .stack_size(ISOLATED_THREAD_STACK)
+        .spawn(move || {
+            state.install();
+            let body_value = evaluate_expr(&body, &mut local_env, &mut functions, &mut classes, &enums, &impl_methods)?;
+            match &body_value {
+                Value::BlockClosure { .. } => exec_block_value(
+                    body_value.clone(),
+                    &mut local_env,
+                    &mut functions,
+                    &mut classes,
+                    &enums,
+                    &impl_methods,
+                ),
+                _ => Ok(body_value),
+            }
+        })
+        .map_err(|e| CompileError::Runtime(format!("rt_thread_spawn_isolated_with_args: spawn failed: {e}")))?;
 
-    // If it's a BlockClosure, execute it; otherwise use the value directly
-    let result = match &body_value {
-        Value::BlockClosure { .. } => exec_block_value(
-            body_value.clone(),
-            &mut local_env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?,
-        _ => body_value,
-    };
-
-    // Store the result where `rt_thread_join` will look for it.
-    store_thread_result(handle_id, result)?;
+    THREAD_HANDLES.lock().unwrap().insert(handle_id, worker);
     Ok(Value::Int(handle_id))
+}
+
+/// Same stack the driver gives the main interpreter thread.
+const ISOLATED_THREAD_STACK: usize = 64 * 1024 * 1024;
+
+/// Join a real isolated worker thread if `handle_id` names one.
+fn join_isolated_thread(handle_id: i64) -> Option<Result<Value, CompileError>> {
+    let worker = THREAD_HANDLES.lock().unwrap().remove(&handle_id)?;
+    Some(match worker.join() {
+        Ok(result) => result,
+        Err(_) => Err(CompileError::Runtime(format!("isolated thread {handle_id} panicked"))),
+    })
+}
+
+fn isolated_thread_is_done(handle_id: i64) -> Option<bool> {
+    THREAD_HANDLES.lock().unwrap().get(&handle_id).map(|w| w.is_finished())
 }
 
 /// Join a thread and get its result
 pub fn rt_thread_join(args: &[Value]) -> Result<Value, CompileError> {
+    if let Some(Value::Int(id)) = args.first() {
+        if let Some(result) = join_isolated_thread(*id) {
+            return result;
+        }
+    }
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
         let handle_id = match &args[0] {
@@ -542,6 +577,11 @@ pub fn rt_thread_join(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Check if thread is done
 pub fn rt_thread_is_done(args: &[Value]) -> Result<Value, CompileError> {
+    if let Some(Value::Int(id)) = args.first() {
+        if let Some(done) = isolated_thread_is_done(*id) {
+            return Ok(Value::Int(if done { 1 } else { 0 }));
+        }
+    }
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
         let handle = match &args[0] {
@@ -604,6 +644,12 @@ pub fn rt_thread_id(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Free thread handle
 pub fn rt_thread_free(args: &[Value]) -> Result<Value, CompileError> {
+    if let Some(Value::Int(id)) = args.first() {
+        // Dropping an unjoined worker's JoinHandle detaches it.
+        if THREAD_HANDLES.lock().unwrap().remove(id).is_some() {
+            return Ok(Value::Nil);
+        }
+    }
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
         let handle = match &args[0] {
@@ -1282,6 +1328,21 @@ fn atomic_cell(args: &[Value], symbol: &str) -> Result<*mut i64, CompileError> {
         return Err(CompileError::runtime(format!("{symbol}: address must be non-null and 8-byte aligned")));
     }
     Ok(addr as usize as *mut i64)
+}
+
+/// `rt_par_atomic_i64_is_lock_free(addr) -> i64`: 1 when `addr` names an
+/// aligned i64 cell on a lock-free target. Null/misaligned yields 0 (not an
+/// error), matching the runtime contract.
+pub fn rt_par_atomic_i64_is_lock_free(args: &[Value]) -> Result<Value, CompileError> {
+    let addr = int_arg(args, 0, "rt_par_atomic_i64_is_lock_free")?;
+    Ok(Value::Int(unsafe {
+        simple_runtime::rt_par_atomic_i64_is_lock_free(addr as usize as *mut i64)
+    }))
+}
+
+pub fn rt_par_atomic_load_i64(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = atomic_cell(args, "rt_par_atomic_load_i64")?;
+    Ok(Value::Int(unsafe { simple_runtime::rt_par_atomic_load_i64(ptr) }))
 }
 
 pub fn rt_par_atomic_add_i64(args: &[Value]) -> Result<Value, CompileError> {
