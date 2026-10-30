@@ -1098,10 +1098,28 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
         if callee_variant != "":
             return match_enum_variant_pattern(value_id, callee_variant, e_node.args)
 
+    # `case Type.Variant(x):` -- the core parser builds a qualified call as
+    # EXPR_METHOD_CALL (receiver `Type`, method `Variant`), not EXPR_CALL over
+    # an EXPR_FIELD_ACCESS callee. Without this arm the pattern fell through to
+    # the equality default, which evaluated `x` unbound ("undefined variable").
+    if tag == EXPR_METHOD_CALL:
+        val mc_receiver = expr_get(e_node.left)
+        if mc_receiver.tag == EXPR_IDENT and name_is_spelled_like_a_variant(mc_receiver.s_val):
+            val mc_variant = e_node.s_val
+            val mc_is_option = mc_variant == "Some" or mc_variant == "None" or mc_variant == "Ok" or mc_variant == "Err"
+            if val_is_boxed_enum(value_id) or mc_is_option or enum_variant_is_declared(mc_variant):
+                return match_enum_variant_pattern(value_id, mc_variant, e_node.args)
+
     if tag == EXPR_FIELD_ACCESS:
         # `case Type.Variant:` — only claim it when the scrutinee really is a
         # boxed enum, so ordinary constant patterns (`case Colors.RED:`) keep
         # falling through to the equality default below.
+        # `case Option.None:` on a FLAT Option (raw-or-nil word, e.g. a
+        # Dict.get miss) is the nil test, same as bare `case None:`.
+        if e_node.s_val == "None" and val_is_boxed_enum(value_id) == false:
+            val fa_receiver = expr_get(e_node.left)
+            if fa_receiver.tag == EXPR_IDENT and fa_receiver.s_val == "Option":
+                return val_is_nil(value_id)
         if val_is_boxed_enum(value_id):
             val fa_variant = e_node.s_val
             if fa_variant != "":

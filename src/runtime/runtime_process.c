@@ -366,6 +366,7 @@ static int win_capture_drain(HANDLE pipe, struct WinCapture* capture, size_t bud
     }
 }
 
+/* The separate piped-process owner still uses its established ANSI path. */
 static char* win_filtered_environment(void) {
     static const char hidden[] = "_SIMPLE_STACK_SET=";
     LPCH source = GetEnvironmentStringsA();
@@ -403,7 +404,8 @@ static char* win_filtered_environment(void) {
     return filtered;
 }
 
-static wchar_t* win_bytes_command_wide(const char* value) {
+/* Both capture modes receive UTF-8 text at the public command/argv ABI. */
+static wchar_t* win_capture_command_wide(const char* value) {
     int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
     if (count <= 0) return NULL;
     wchar_t* wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
@@ -414,7 +416,7 @@ static wchar_t* win_bytes_command_wide(const char* value) {
     return wide;
 }
 
-static wchar_t* win_bytes_environment(void) {
+static wchar_t* win_capture_environment(void) {
     LPWCH source = GetEnvironmentStringsW();
     if (!source) return NULL;
     size_t total = 2;
@@ -447,7 +449,6 @@ static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplA
     const char** child_args = NULL;
     char* cmd_c = NULL;
     char* cmdline = NULL;
-    char* environment = NULL;
     wchar_t* wide_command = NULL;
     wchar_t* wide_environment = NULL;
     HANDLE stdout_read = NULL;
@@ -507,11 +508,11 @@ static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplA
         }
     }
     cmdline = win_cmd_build_line(cmd_c, child_args, argc);
-    if (raw_bytes && cmdline) {
-        wide_command = win_bytes_command_wide(cmdline);
-        wide_environment = win_bytes_environment();
-    } else environment = win_filtered_environment();
-    if (!cmdline || (raw_bytes ? (!wide_command || !wide_environment) : !environment)) {
+    if (cmdline) {
+        wide_command = win_capture_command_wide(cmdline);
+        wide_environment = win_capture_environment();
+    }
+    if (!cmdline || !wide_command || !wide_environment) {
         failure = "process spawn failed";
         goto finish;
     }
@@ -559,22 +560,17 @@ static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplA
         goto finish;
     }
 
-    STARTUPINFOEXA startup = {0};
+    STARTUPINFOEXW startup = {0};
     startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = attributes;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     startup.StartupInfo.hStdInput = null_input;
     startup.StartupInfo.hStdOutput = stdout_write;
     startup.StartupInfo.hStdError = stderr_write;
     DWORD creation_flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
-    BOOL launched;
-    if (raw_bytes) {
-        /* STARTUPINFOEXA/W contain identical scalar/handle fields; no text
-         * pointers are populated. Keep the same inherited-handle list. */
-        launched = CreateProcessW(NULL, wide_command, NULL, NULL, TRUE,
-            creation_flags | CREATE_UNICODE_ENVIRONMENT, wide_environment, NULL,
-            (LPSTARTUPINFOW)&startup.StartupInfo, &process);
-    } else launched = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, creation_flags, environment, NULL,
-                        &startup.StartupInfo, &process);
+    BOOL launched = CreateProcessW(NULL, wide_command, NULL, NULL, TRUE,
+        creation_flags | CREATE_UNICODE_ENVIRONMENT, wide_environment, NULL,
+        &startup.StartupInfo, &process);
     if (!launched) {
         failure = "process spawn failed";
         goto finish;
@@ -676,7 +672,6 @@ finish:
     win_close_handle(&job);
     if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
     free(attributes);
-    free(environment);
     free(wide_environment);
     free(wide_command);
     free(cmdline);

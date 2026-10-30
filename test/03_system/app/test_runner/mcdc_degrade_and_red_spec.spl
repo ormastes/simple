@@ -13,6 +13,12 @@ use std.spec.step
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.file_ops.{file_write}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_runner_execute.{mcdc_compiler_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN}
+
+# Same gate as mcdc_real_instrumentation_spec: only a pure-Simple-built
+# compiler emits MC/DC probes; the Rust seed never does.
+val MCDC_COMPILER_GATE_REASON = "requires SIMPLE_MCDC_COMPILER naming a self-hosted (pure-Simple-built) compiler that emits MC/DC probes; the Rust seed cannot"
+val SEED_GATE_REASON = "SIMPLE_BINARY emits MC/DC probes, so the seed's mcdc-unavailable degrade does not apply"
 
 val GREEN = "use std.spec\ndescribe \"g\":\n    it \"green\":\n        val a = 3\n        if a > 1 and a < 5:\n            expect(a).to_equal(3)\n"
 val RED = "use std.spec\ndescribe \"r\":\n    it \"red\":\n        val a = 3\n        if a > 1 and a < 5:\n            expect(a).to_equal(4)\n"
@@ -35,10 +41,28 @@ fn make_case(case: text, name: text, body: text) -> text:
     file_write(dir + "/" + name + "_spec.spl", body)
     dir
 
+fn mcdc_compiler() -> text:
+    env_get("SIMPLE_MCDC_COMPILER")
+
+fn probe_capable_compiler_absent() -> bool:
+    val compiler = mcdc_compiler()
+    compiler == "" or mcdc_compiler_lacks_probes(compiler)
+
+# An unset SIMPLE_BINARY is NOT a skip: the seed example then fails with NO_BINARY.
+fn binary_emits_probes() -> bool:
+    real_binary() != "" and not mcdc_compiler_lacks_probes(real_binary())
+
 fn run_dir(dir: text, envs: [text], extra: [text]) -> (text, i64):
-    if real_binary() == "":
+    run_dir_with(real_binary(), dir, envs, extra)
+
+# The probe-capable lane forces MC/DC on, so "no degrade" cannot mean "MC/DC was off".
+fn run_dir_mcdc(dir: text) -> (text, i64):
+    run_dir_with(mcdc_compiler(), dir, ["SIMPLE_MCDC_MODE=on"], [])
+
+fn run_dir_with(binary: text, dir: text, envs: [text], extra: [text]) -> (text, i64):
+    if binary == "":
         return (NO_BINARY, 127)
-    val argv = UNSET_MCDC_ENV + envs + [real_binary(), "test", dir, "--no-db", "--no-cache", "--assert-ran"] + extra
+    val argv = UNSET_MCDC_ENV + envs + ["SIMPLE_BINARY=" + binary, binary, "test", dir, "--no-db", "--no-cache", "--assert-ran"] + extra
     val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
     (out + err, code)
 
@@ -47,17 +71,6 @@ fn verdict_line(output: text) -> text:
         if line.starts_with("SPEC FILE VERDICT:"):
             return line
     ""
-
-# Body of the skipped "does not degrade a clean green spec" example: the
-# non-degraded branch, so no fallback line either.
-fn check_clean_green_not_degraded():
-    step("A green spec instruments without a degrade")
-    val dir = make_case("degrade_clean_green", "g", GREEN)
-    val (output, _code) = run_dir(dir, [], [])
-    expect(verdict_line(output)).to_contain("passed=1")
-    expect(verdict_line(output).contains("degraded=")).to_equal(false)
-    expect(output.contains("[mcdc-fallback]")).to_equal(false)
-    expect(output.contains("[mcdc-unavailable]")).to_equal(false)
 
 describe "instrumentation failure is explicit":
     it "marks a spec that cannot compile standalone with degraded= on the verdict line":
@@ -86,9 +99,28 @@ describe "instrumentation failure is explicit":
         expect(output.contains("MC/DC: all decisions covered")).to_equal(false)
         expect(output.contains("mcdc=covered")).to_equal(false)
 
-    # RED until the wrapper stops degrading plain specs (i64.recorder); restore as
-    # `it "does not degrade a clean green spec": check_clean_green_not_degraded()`.
-    skip("does not degrade a clean green spec", "red until fixed: doc/08_tracking/bug/mcdc_runner_never_finalizes_evidence_2026-10-30.md")
+    skip_if(fn(): probe_capable_compiler_absent(), MCDC_COMPILER_GATE_REASON)(
+        "does not degrade a clean green spec",
+        fn():
+            step("A green spec instruments without a degrade on a probe-capable compiler")
+            val dir = make_case("degrade_clean_green", "g", GREEN)
+            val (output, _code) = run_dir_mcdc(dir)
+            expect(verdict_line(output)).to_contain("passed=1")
+            expect(verdict_line(output).contains("degraded=")).to_equal(false)
+            expect(output.contains("[mcdc-fallback]")).to_equal(false)
+            expect(output.contains("[mcdc-unavailable]")).to_equal(false)
+    )
+
+    skip_if(fn(): binary_emits_probes(), SEED_GATE_REASON)(
+        "degrades a clean green spec explicitly as mcdc-unavailable on the seed",
+        fn():
+            step("The seed cannot emit probes, so the degrade is named, not silent")
+            val dir = make_case("degrade_clean_green_seed", "g", GREEN)
+            val (output, _code) = run_dir(dir, [], [])
+            expect(verdict_line(output)).to_contain("passed=1")
+            expect(verdict_line(output)).to_contain(MCDC_UNAVAILABLE_DEGRADE_TOKEN)
+            expect(output).to_contain("MC/DC: NOT compliant")
+    )
 
 describe "a red spec stays FAIL under MC/DC":
     it "reports failed=1 and a non-zero exit":
