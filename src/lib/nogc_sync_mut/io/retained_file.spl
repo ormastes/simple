@@ -114,7 +114,13 @@ fn _retained_free(ptr: i64):
 @unsafe(reason: "encodes bounded native path without embedded NUL", capabilities: [ffi, raw_ptr])
 fn _retained_path(path: text) -> i64:
     if path.len() == 0 or path.len() > 32760: return 0
-    val ptr = _retained_alloc(65536u64)
+    @when(os="windows"):
+    # UTF-16 units never exceed the UTF-8 byte count; reserve a terminator too.
+    val ptr = _retained_alloc(((path.len() + 1) * 2) as u64)
+    @else:
+    val bytes = base_encoding_text_to_bytes(path)
+    val ptr = _retained_alloc((bytes.len() + 1) as u64)
+    @end
     if ptr == 0: return 0
     @when(os="windows"):
     var consumed = 0
@@ -139,7 +145,6 @@ fn _retained_path(path: text) -> i64:
         elif scalar < 65536: consumed = consumed + 3
         else: consumed = consumed + 4
     @else:
-    val bytes = base_encoding_text_to_bytes(path)
     for index in 0..bytes.len():
         if bytes[index] == 0u8:
             _retained_free(ptr)
