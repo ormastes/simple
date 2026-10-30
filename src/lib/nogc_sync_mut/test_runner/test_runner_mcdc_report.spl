@@ -644,3 +644,74 @@ pub fn test_runner_finalize_mcdc_report(
     evidence: McdcRuntimeCoverageEvidence?
 ) -> McdcReportCompletion:
     driver_complete_mcdc_report(mode_text, profile, evidence)
+
+# End-of-run MC/DC gate shared by the full runner and the single-file lane.
+# `required` mirrors resolve_mcdc_mode_for_profile: MC/DC is mandatory when the
+# mode is on/dynamic and the profile is not one of the two explicit
+# below-normal development spellings.
+#
+# Degrade policy (user ruling 2026-10-30): the Rust seed cannot emit MC/DC
+# probes, so a degraded file (or one with no evidence) is reported, counted
+# and never called MC/DC-compliant, but it does not change the test verdict.
+# Coverage gating applies only to real evidence: when any executed file
+# carried evidence, an under-covered or invalid report fails a required run.
+pub struct TestRunnerMcdcRunGate:
+    required: bool
+    failed: bool
+    lines: [text]
+
+pub fn test_runner_mcdc_run_gate(
+    mode_text: text,
+    profile_text: text,
+    results: [TestFileResult]
+) -> TestRunnerMcdcRunGate:
+    if mode_text != "on" and mode_text != "dynamic":
+        return TestRunnerMcdcRunGate(required: false, failed: false, lines: [])
+    val below_normal = profile_text == "dev" or profile_text == "advisory"
+    val required = not below_normal
+    var lines: [text] = []
+    var degraded_count = 0
+    var missing_count = 0
+    # Only files that executed this run owe evidence. Skip-marker, mode- and
+    # feature-gated files never ran (0 passed, 0 failed, no error, no
+    # evidence, not degraded).
+    var with_evidence: [TestFileResult] = []
+    for result in results:
+        val never_ran = result.passed == 0 and result.failed == 0 and
+            result.error == "" and result.mcdc_evidence_v1 == "" and
+            result.mcdc_skip_reason == "" and not result.timed_out
+        if never_ran:
+            continue
+        if result.mcdc_skip_reason != "":
+            degraded_count = degraded_count + 1
+            lines.push("MC/DC: DEGRADED {result.path}: {result.mcdc_skip_reason}")
+        elif result.mcdc_evidence_v1 == "":
+            missing_count = missing_count + 1
+            lines.push("MC/DC: NO EVIDENCE {result.path}")
+        else:
+            with_evidence.push(result)
+    lines.push("=== MC/DC decision report (mode={mode_text}) ===")
+    val not_instrumented = degraded_count + missing_count
+    if not_instrumented > 0:
+        lines.push("MC/DC: NOT COMPLIANT: {degraded_count} degraded, " +
+            "{missing_count} without evidence; test verdict unaffected")
+    if with_evidence.len() == 0:
+        lines.push("MC/DC: no runtime evidence collected; no decision report")
+        return TestRunnerMcdcRunGate(required: required, failed: false, lines: lines)
+    val completion = test_runner_finalize_mcdc_results(
+        mode_text, AssuranceStrictness.from_name(profile_text), with_evidence)
+    if completion.human_diagnostic != "":
+        for line in completion.human_diagnostic.split("\n"):
+            lines.push(line)
+    val failed = required and not completion.accepted
+    if failed:
+        lines.push("error: MC/DC required (mode={mode_text}) and not satisfied: " +
+            completion.machine_diagnostic.split("\n")[0])
+    elif not completion.accepted:
+        lines.push("MC/DC: advisory only (profile={profile_text}); not satisfied: " +
+            completion.machine_diagnostic.split("\n")[0])
+    elif not_instrumented == 0:
+        lines.push("MC/DC: PASS")
+    else:
+        lines.push("MC/DC: instrumented files covered; run not compliant")
+    TestRunnerMcdcRunGate(required: required, failed: failed, lines: lines)
