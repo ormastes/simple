@@ -29,7 +29,8 @@ use std.io_runtime.{file_exists, file_read, file_write, file_rename, dir_create,
 use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1, GenericSpecializationListV1}
 use compiler.driver.cache.generic_instance_build_plan_v1.{GenericInstanceBuildPlanV1, GenericInstanceDemandV1,
     generic_instance_build_plan_v1,
-    generic_instance_needed_v1, generic_instance_object_path_v1, generic_instance_cached_v1,
+    generic_instance_needed_v1, generic_instance_demands_v1,
+    generic_instance_object_path_v1, generic_instance_cached_v1,
     generic_instance_cache_publish_v1, generic_instance_build_plan_of_tldr_v1}
 
 pub struct FileWorkerInstanceRunV1:
@@ -38,7 +39,7 @@ pub struct FileWorkerInstanceRunV1:
     built: [text]          # keys this claimant compiled and published
     reused: [text]         # keys whose cached object verified
     joined: [text]         # keys another claimant built (single flight)
-    dropped: [text]        # keys no list needs any more; object deleted
+    dropped: [text]        # keys whose demand retired; artifact bytes remain retained
     failed: [text]         # keys with no verified object after the run
     link_objects: [text]   # instance objects to link ([] unless retire_comdat)
     retire_comdat: bool    # using objects may drop their COMDAT copies
@@ -82,13 +83,18 @@ fn _claim_v1(ledger: text, owner: text, key: text) -> bool:
 
 # Plan from in-memory lists against the on-disk cache and previous needed set.
 pub fn file_worker_instances_plan_v1(lists: [GenericSpecializationListV1?], cache_root: text,
-        producer: text) -> GenericInstanceBuildPlanV1:
-    val (needed, _complete) = generic_instance_needed_v1(lists)
+        producer: text, module_paths: [text]) -> GenericInstanceBuildPlanV1:
+    val (needed, list_complete) = generic_instance_needed_v1(lists)
+    val (demands, demand_complete) = generic_instance_demands_v1(module_paths, lists)
     var cached: [text] = []
     for s in needed:
         if generic_instance_cached_v1(cache_root, producer, s.concrete_key):
             cached.push(s.concrete_key)
-    generic_instance_build_plan_v1(file_worker_instances_previous_v1(cache_root, producer), lists, cached)
+    var plan = generic_instance_build_plan_v1(file_worker_instances_previous_v1(cache_root, producer), lists, cached)
+    plan.demands = demands
+    plan.complete = plan.complete and list_complete and demand_complete
+    if not plan.complete: plan.drop = []
+    plan
 
 # Coordinator entry: every module's fresh TLDR list (P-G5 loader).
 pub fn file_worker_instances_plan_of_tldr_v1(module_paths: [text], tldr_root: text, cache_root: text,
@@ -168,8 +174,9 @@ export prelink_instances_run_v1, prelink_instances_blocks_link_v1, prelink_insta
 # `needed - present` and reuses the rest. An incomplete plan builds nothing
 # (fail closed: COMDAT copies stay). Returns the plan with the run.
 pub fn prelink_instances_run_v1(lists: [GenericSpecializationListV1?], cache_root: text, producer: text,
-        ledger: text, owner: text, build: fn(RequiredSpecializationV1) -> text) -> (GenericInstanceBuildPlanV1, FileWorkerInstanceRunV1):
-    val plan = file_worker_instances_plan_v1(lists, cache_root, producer)
+        ledger: text, owner: text, build: fn(RequiredSpecializationV1) -> text,
+        module_paths: [text]) -> (GenericInstanceBuildPlanV1, FileWorkerInstanceRunV1):
+    val plan = file_worker_instances_plan_v1(lists, cache_root, producer, module_paths)
     val run = file_worker_instances_run_v1(plan, cache_root, producer, ledger, owner, true, build)
     (plan, run)
 
