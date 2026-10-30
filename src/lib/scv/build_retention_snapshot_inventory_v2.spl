@@ -1,0 +1,176 @@
+"""Bounded physical snapshot-unit accounting; caller holds retention lock.
+
+The unit contains its immutable source tree, provenance, inventory and receipt.
+Twenty bytes are reserved for its mutable decimal last-use hint. Shared chunks,
+source-inventory history and private staging are separate stores, not reclaimed
+by snapshot GC. Unknown units fail closed and are never deleted for accounting.
+"""
+use std.scv.build_retention_v1.{BuildRetentionNodeV1, BuildRetentionLimitsV1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
+use std.scv.core.{scv_worktree_path_safe}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional}
+use app.io.mod.{dir_is_real_no_follow, file_is_regular_no_follow,
+    file_read_regular_no_follow_bounded, file_size, file_hash_sha256, file_exists}
+
+struct RetentionSnapshotUnitV2:
+    node: BuildRetentionNodeV1
+    work: i64
+    verification_bytes: i64
+
+fn retention_snapshot_add_bytes_v2(total: i64, bytes: i64) -> Result<i64, text>:
+    if bytes < 0 or total > 9223372036854775807 - bytes: return Err("retention_snapshot_bytes_overflow")
+    Ok(total + bytes)
+
+fn retention_snapshot_name_v2(name: text) -> bool:
+    if name == "" or name == "." or name == ".." or name.len() > 256: return false
+    for byte in name.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+                (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 58 or byte == 95): return false
+    true
+
+fn retention_snapshot_unit_v2(checkout: text, cache_root: text, revision: text,
+        limits: BuildRetentionLimitsV1, now: i64, byte_budget: i64) -> Result<RetentionSnapshotUnitV2, text>:
+    val root = cache_root + "/snapshots/" + revision
+    if not retention_snapshot_name_v2(revision) or not dir_is_real_no_follow(root):
+        return Err("retention_snapshot_unknown_unit")
+    val provenance = file_read_regular_no_follow_bounded(root + "/SCV_COMPILE_SNAPSHOT", 4096)?
+    val lines = provenance.split("\n")
+    if (lines.len() != 6 or not lines[1].starts_with("revision=") or
+            not lines[2].starts_with("commit=") or not lines[3].starts_with("tree=") or
+            not lines[4].starts_with("inventory=") or lines[1].substring(9) != revision):
+        return Err("retention_snapshot_unknown_provenance")
+    val inventory = file_read_regular_no_follow_bounded(root + "/SCV_COMPILE_INVENTORY", 8388608)?
+    val receipt_path = cache_root + "/receipts/" + revision + ".receipt"
+    val receipt = file_read_regular_no_follow_bounded(receipt_path, 4096)?
+    val provenance_bytes = provenance.bytes()
+    val inventory_bytes = inventory.bytes()
+    val receipt_bytes = receipt.bytes()
+    var verification_bytes: i64 = (provenance_bytes.len() + inventory_bytes.len() + receipt_bytes.len()) * 2 + 20
+    if verification_bytes > byte_budget: return Err("retention_snapshot_verify_bytes_budget")
+    var expected: Dict<text, text> = {"SCV_COMPILE_SNAPSHOT": "", "SCV_COMPILE_INVENTORY": ""}
+    var sizes: Dict<text, i64> = {"SCV_COMPILE_SNAPSHOT": provenance_bytes.len(), "SCV_COMPILE_INVENTORY": inventory_bytes.len()}
+    val rows: [text] = if inventory == "": [] else: inventory.split("\n")
+    if rows.len() * 2 + 2 > limits.max_work: return Err("retention_snapshot_inventory_budget")
+    for row in rows:
+        val fields = row.split("|")
+        if (fields.len() != 3 or not scv_worktree_path_safe(fields[0]) or expected.contains_key(fields[0]) or
+                not fields[1].starts_with("sha256_") or fields[1].len() != 71 or
+                (fields[2].to_i64() ?? -1) < 0):
+            return Err("retention_snapshot_inventory_path")
+        expected[fields[0]] = fields[1].substring(7)
+        sizes[fields[0]] = fields[2].to_i64() ?? -1
+    # Bound metadata and row processing before the legacy identity validator.
+    # These store-owned immutable paths are not a descriptor-custody claim
+    # against arbitrary external filesystem mutation.
+    val opened = scv_compile_snapshot_open_v1(checkout, root, revision,
+        lines[2].substring(7), lines[3].substring(5), lines[4].substring(10))
+    if not opened.valid: return Err("retention_snapshot_invalid:" + opened.reason)
+    var directories = [""]
+    var cursor = 0
+    var work: i64 = rows.len() * 2 + 2
+    var observed: Dict<text, bool> = {}
+    var bytes: i64 = 0
+    while cursor < directories.len():
+        val relative = directories[cursor]
+        cursor = cursor + 1
+        val directory = if relative == "": root else: root + "/" + relative
+        val listed = dir_list_optional(directory)
+        if listed == nil: return Err("retention_snapshot_directory_unreadable")
+        val children: [text] = listed!
+        if children.len() > limits.max_work - work: return Err("retention_snapshot_inventory_budget")
+        for name in children:
+            work = work + 1
+            if name == "" or name == "." or name == ".." or name.contains("/") or name.contains("\\"):
+                return Err("retention_snapshot_unknown_path")
+            val path = if relative == "": name else: relative + "/" + name
+            val physical = root + "/" + path
+            if dir_is_real_no_follow(physical):
+                var needed = false
+                for allowed in expected.keys():
+                    work = work + 1
+                    if work > limits.max_work: return Err("retention_snapshot_inventory_budget")
+                    if allowed.starts_with(path + "/"): needed = true
+                if not needed: return Err("retention_snapshot_unknown_directory")
+                directories.push(path)
+            else:
+                if not expected.contains_key(path) or not file_is_regular_no_follow(physical):
+                    return Err("retention_snapshot_unknown_file")
+                val size = file_size(physical)
+                if size != sizes[path]: return Err("retention_snapshot_file_size")
+                bytes = retention_snapshot_add_bytes_v2(bytes, size)?
+                if expected[path] != "":
+                    verification_bytes = retention_snapshot_add_bytes_v2(verification_bytes, size)?
+                    if verification_bytes > byte_budget: return Err("retention_snapshot_verify_bytes_budget")
+                    if file_hash_sha256(physical) != expected[path]: return Err("retention_snapshot_file_digest")
+                observed[path] = true
+    if observed.len() != expected.len(): return Err("retention_snapshot_missing_file")
+    val used_path = cache_root + "/receipts/" + revision + ".used"
+    if file_exists(used_path):
+        val used = file_read_regular_no_follow_bounded(used_path, 20)?
+        if (used.trim().to_i64() ?? -1) < 0: return Err("retention_snapshot_usage_metadata")
+    bytes = retention_snapshot_add_bytes_v2(bytes, receipt_bytes.len())?
+    bytes = retention_snapshot_add_bytes_v2(bytes, 20)?
+    # Integrity is not an independent reconstruction proof. Only a previously
+    # admitted owner classification may make this unit eligible for eviction.
+    val node = BuildRetentionNodeV1(namespace: "snapshot", id: revision, dependencies: [],
+        authoritative: true, rebuildable: false, bytes: bytes, last_used: now)
+    Ok(RetentionSnapshotUnitV2(node: node, work: work, verification_bytes: verification_bytes))
+
+fn build_retention_snapshot_inventory_v2(checkout: text, cache_root: text,
+        limits: BuildRetentionLimitsV1, now: i64) -> Result<[BuildRetentionNodeV1], text>:
+    if now < 0: return Err("retention_snapshot_time")
+    if limits.max_nodes < 1 or limits.max_nodes > 4096 or limits.max_work < 1 or limits.max_work > 16777216:
+        return Err("retention_snapshot_inventory_limits")
+    var result: [BuildRetentionNodeV1] = []
+    val snapshots = cache_root + "/snapshots"
+    val receipts = cache_root + "/receipts"
+    # Absence is established by successful enumeration of the parent, never
+    # by a false stat/existence result that could also represent an IO error.
+    val cache_listing = dir_list_optional(cache_root)
+    if cache_listing == nil: return Err("retention_cache_directory_unreadable")
+    val children: [text] = cache_listing!
+    if children.len() > limits.max_work: return Err("retention_snapshot_inventory_budget")
+    val has_snapshots = children.contains("snapshots")
+    val has_receipts = children.contains("receipts")
+    if has_snapshots and not dir_is_real_no_follow(snapshots):
+        return Err("retention_snapshot_store_incomplete")
+    if has_receipts and not dir_is_real_no_follow(receipts):
+        return Err("retention_snapshot_store_incomplete")
+    var names: [text] = []
+    if has_snapshots:
+        val listed = dir_list_optional(snapshots)
+        if listed == nil: return Err("retention_snapshot_directory_unreadable")
+        names = listed!
+    if names.len() > limits.max_nodes: return Err("retention_snapshot_count_budget")
+    var known: Dict<text, bool> = {}
+    var total: i64 = 0
+    var verification_bytes: i64 = 0
+    var work: i64 = children.len() + names.len()
+    if work > limits.max_work: return Err("retention_snapshot_inventory_budget")
+    for name in names:
+        # A private/incomplete publisher is preserved and blocks a complete
+        # accounting claim; dead PID and age are not source disposal proofs.
+        if name.starts_with("."): return Err("retention_snapshot_unpublished_unit")
+        var remaining = limits
+        remaining.max_work = limits.max_work - work
+        val unit = retention_snapshot_unit_v2(checkout, cache_root, name, remaining, now, 1073741824 - verification_bytes)?
+        val node = unit.node
+        work = work + unit.work
+        total = retention_snapshot_add_bytes_v2(total, node.bytes)?
+        verification_bytes = retention_snapshot_add_bytes_v2(verification_bytes, unit.verification_bytes)?
+        result.push(node)
+        known[name + ".receipt"] = true
+        known[name + ".used"] = true
+    var receipt_names: [text] = []
+    if has_receipts:
+        val listed = dir_list_optional(receipts)
+        if listed == nil: return Err("retention_receipt_directory_unreadable")
+        receipt_names = listed!
+    if receipt_names.len() > limits.max_nodes * 2: return Err("retention_receipt_count_budget")
+    if receipt_names.len() > limits.max_work - work: return Err("retention_snapshot_inventory_budget")
+    for name in receipt_names:
+        if not known.contains_key(name) or not file_is_regular_no_follow(receipts + "/" + name):
+            return Err("retention_orphan_receipt")
+    Ok(result)
+
+export build_retention_snapshot_inventory_v2

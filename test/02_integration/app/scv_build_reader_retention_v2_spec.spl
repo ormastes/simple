@@ -1,0 +1,180 @@
+"""Real immutable snapshot units and reader ownership; execution deferred.
+
+The fixtures write actual source bytes/provenance/inventory/receipt files. They
+do not execute a compiler or turn authored assertions into admission evidence.
+"""
+use std.spec.{describe, it, expect, step}
+use std.scv.build_retention_v1.*
+use std.scv.build_retention_store_v1.*
+use std.scv.build_retention_snapshot_inventory_v2.{build_retention_snapshot_inventory_v2}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_revision_id_v1,
+    scv_compile_snapshot_provenance_v1, scv_compile_snapshot_receipt_v1,
+    scv_compile_snapshot_gc_v1, scv_compile_snapshot_recover_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{dir_create_all, dir_exists, file_exists, file_atomic_write,
+    file_read, secure_temp_dir, dir_remove_all}
+
+fn reader_limits() -> BuildRetentionLimitsV1:
+    BuildRetentionLimitsV1(max_nodes: 64, max_edges: 128, max_work: 4096,
+        max_bytes: 1048576, max_retained: 4, max_remove: 0)
+
+fn reader_fixture(label: text) -> (text, text, text, ScvCompileSnapshotV1):
+    val root = secure_temp_dir("/tmp", "scv-reader-" + label).unwrap()
+    val checkout = root + "/checkout"
+    val cache = checkout + "/build/scv"
+    val source = "fn main(): 7\n"
+    val inventory = "src/main.spl|sha256_" + sha256_text(source) + "|" + str(source.len())
+    val digest = sha256_text(inventory)
+    val tree = "scv-tree-v1-" + digest
+    val revision = scv_compile_snapshot_revision_id_v1(tree, digest)
+    val commit = "scv-compile-v1-" + sha256_text("simple/scv-compile-commit/v1|" + tree + "|1")
+    val snapshot_root = cache + "/snapshots/" + revision
+    val provenance = scv_compile_snapshot_provenance_v1(revision, commit, tree, digest, 1)
+    val receipt_path = cache + "/receipts/" + revision + ".receipt"
+    expect(dir_create_all(snapshot_root + "/src")).to_equal(true)
+    expect(dir_create_all(cache + "/receipts")).to_equal(true)
+    expect(file_atomic_write(snapshot_root + "/src/main.spl", source)).to_equal(true)
+    expect(file_atomic_write(snapshot_root + "/SCV_COMPILE_INVENTORY", inventory)).to_equal(true)
+    expect(file_atomic_write(snapshot_root + "/SCV_COMPILE_SNAPSHOT", provenance)).to_equal(true)
+    expect(file_atomic_write(receipt_path, scv_compile_snapshot_receipt_v1(provenance, revision))).to_equal(true)
+    val snapshot = ScvCompileSnapshotV1(valid: true, reason: "fixture", revision_id: revision,
+        commit_id: commit, tree_id: tree, inventory_digest: digest, inventory_count: 1,
+        snapshot_root: snapshot_root, provenance_path: snapshot_root + "/SCV_COMPILE_SNAPSHOT",
+        receipt_path: receipt_path, source_drifted: false)
+    (root, checkout, cache, snapshot)
+
+fn reader_has_pin(state: BuildRetentionStateV1, ref: text, root: text) -> bool:
+    for pin in state.pins:
+        if pin.ref == ref and pin.root == root: return true
+    false
+
+describe "BuildRunner reader retention store lifecycle":
+    it "aborts only an unattached reservation while retaining independent owners":
+        val (root, checkout, cache, snapshot) = reader_fixture("abort-unattached")
+        build_retention_store_collect_v2(cache, checkout, reader_limits(), 10).unwrap()
+        build_retention_store_capture_begin_v2(cache, "manager-A", reader_limits()).unwrap()
+        build_retention_store_capture_begin_v2(cache, "manager-B", reader_limits()).unwrap()
+        val before = build_retention_store_load_v1(cache).unwrap()
+        step("Explicit abort releases only A without reclassifying or deleting its inputs")
+        build_retention_store_capture_abort_unattached_v2(cache, "manager-A", reader_limits()).unwrap()
+        val after = build_retention_store_load_v1(cache).unwrap()
+        expect(after.capture_owners).to_equal(["manager-B"])
+        expect(after.nodes[0].authoritative).to_equal(before.nodes[0].authoritative)
+        expect(after.nodes[0].rebuildable).to_equal(before.nodes[0].rebuildable)
+        expect(dir_exists(snapshot.snapshot_root)).to_equal(true)
+        step("Repeating the same no-reader abort does not advance authority")
+        build_retention_store_capture_abort_unattached_v2(cache, "manager-A", reader_limits()).unwrap()
+        expect(build_retention_root_v1(build_retention_store_load_v1(cache).unwrap())).to_equal(build_retention_root_v1(after))
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "refuses abort for an own pin or an expired but unreleased reader lease":
+        val (root, checkout, cache, snapshot) = reader_fixture("abort-attached")
+        build_retention_store_collect_v2(cache, checkout, reader_limits(), 10).unwrap()
+        build_retention_store_capture_begin_v2(cache, "manager-A", reader_limits()).unwrap()
+        val current = build_retention_store_load_v1(cache).unwrap()
+        val key = "snapshot/" + snapshot.revision_id
+        val pinned = build_retention_pin_v1(current, current.generation, "snapshot_dependents/manager-A", key).unwrap()
+        build_retention_store_commit_v1(cache, current.generation, build_retention_root_v1(current), pinned, reader_limits()).unwrap()
+        expect(build_retention_store_capture_abort_unattached_v2(cache, "manager-A", reader_limits()).unwrap_err()).to_equal("retention_capture_attached")
+        val unpinned = build_retention_unpin_v1(pinned, pinned.generation, "snapshot_dependents/manager-A").unwrap()
+        build_retention_store_commit_v1(cache, pinned.generation, build_retention_root_v1(pinned), unpinned, reader_limits()).unwrap()
+        val leased = build_retention_lease_v1(unpinned, unpinned.generation, "manager-A", key, 1).unwrap()
+        build_retention_store_commit_v1(cache, unpinned.generation, build_retention_root_v1(unpinned), leased, reader_limits()).unwrap()
+        expect(build_retention_store_capture_abort_unattached_v2(cache, "manager-A", reader_limits()).unwrap_err()).to_equal("retention_capture_attached")
+        expect(build_retention_store_load_v1(cache).unwrap().capture_owners).to_equal(["manager-A"])
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "accounts real legacy units without inventing a reconstruction proof":
+        step("Migrate the actual source tree and its immutable metadata")
+        val (root, checkout, cache, snapshot) = reader_fixture("migration")
+        val report = build_retention_store_collect_v2(cache, checkout, reader_limits(), 10).unwrap()
+        val state = build_retention_store_load_v1(cache).unwrap()
+        expect(state.nodes.len()).to_equal(1)
+        expect(state.nodes[0].bytes).to_be_greater_than("fn main(): 7\n".len())
+        expect(state.nodes[0].authoritative).to_equal(true)
+        expect(state.nodes[0].rebuildable).to_equal(false)
+        expect(report.protected).to_contain("snapshot/" + snapshot.revision_id)
+        expect(scv_compile_snapshot_gc_v1(cache, [], 1)).to_equal(0)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "atomically exchanges its reservation for reader protection and preserves other owners":
+        val (root, checkout, cache, snapshot) = reader_fixture("owners")
+        build_retention_store_collect_v2(cache, checkout, reader_limits(), 10).unwrap()
+        val initial = build_retention_store_load_v1(cache).unwrap()
+        val key = "snapshot/" + snapshot.revision_id
+        val draft = build_retention_pin_v1(initial, initial.generation, "drafts/offline", key).unwrap()
+        build_retention_store_commit_v1(cache, initial.generation, build_retention_root_v1(initial), draft, reader_limits()).unwrap()
+        step("Two independent captures exist; finishing one cannot clear the other")
+        build_retention_store_capture_begin_v2(cache, "manager-A", reader_limits()).unwrap()
+        build_retention_store_capture_begin_v2(cache, "manager-B", reader_limits()).unwrap()
+        build_retention_store_snapshot_admit_v2(cache, checkout, snapshot, "manager-A", reader_limits(), 11).unwrap()
+        val admitted = build_retention_store_load_v1(cache).unwrap()
+        expect(admitted.capture_owners).to_equal(["manager-B"])
+        expect(reader_has_pin(admitted, "snapshot_dependents/manager-A", key)).to_equal(true)
+        expect(reader_has_pin(admitted, "active_builds/manager-A", key)).to_equal(true)
+        expect(admitted.leases.len()).to_equal(1)
+        step("Terminal reader release retains the verification snapshot and offline draft")
+        build_retention_store_reader_release_v2(cache, "manager-A", snapshot.revision_id, reader_limits()).unwrap()
+        val released = build_retention_store_load_v1(cache).unwrap()
+        expect(released.leases.len()).to_equal(0)
+        expect(reader_has_pin(released, "active_builds/manager-A", key)).to_equal(false)
+        expect(reader_has_pin(released, "snapshot_dependents/manager-A", key)).to_equal(true)
+        step("Explicit retirement removes only this session's independent roots")
+        build_retention_store_session_retire_v2(cache, "manager-A", snapshot.revision_id, reader_limits()).unwrap()
+        val retired = build_retention_store_load_v1(cache).unwrap()
+        expect(reader_has_pin(retired, "snapshot_dependents/manager-A", key)).to_equal(false)
+        expect(reader_has_pin(retired, "drafts/offline", key)).to_equal(true)
+        expect(retired.capture_owners).to_equal(["manager-B"])
+        expect(retired.nodes[0].authoritative).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "keeps failed admission reserved and preserves corrupt or unpublished bytes":
+        val (root, checkout, cache, snapshot) = reader_fixture("failure")
+        build_retention_store_capture_begin_v2(cache, "manager-A", reader_limits()).unwrap()
+        expect(file_atomic_write(snapshot.snapshot_root + "/src/main.spl", "fn main(): 8\n")).to_equal(true)
+        expect(build_retention_store_snapshot_admit_v2(cache, checkout, snapshot, "manager-A", reader_limits(), 10).unwrap_err()).to_equal("retention_snapshot_file_digest")
+        expect(build_retention_store_load_v1(cache).unwrap().capture_owners).to_equal(["manager-A"])
+        expect(file_read(snapshot.snapshot_root + "/src/main.spl")).to_equal("fn main(): 8\n")
+        step("Dead-process-looking private source is not disposable in a managed store")
+        val pending = cache + "/snapshots/.tmp.999999999.reader"
+        expect(dir_create_all(pending)).to_equal(true)
+        expect(file_atomic_write(pending + "/unpublished.spl", "invalid retained work")).to_equal(true)
+        expect(scv_compile_snapshot_recover_v1(cache)).to_equal(0)
+        expect(file_exists(pending + "/unpublished.spl")).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "keeps a proven rebuildable snapshot pinned until explicit session retirement":
+        val (root, checkout, cache, snapshot) = reader_fixture("eligible")
+        # This fixture supplies an independent owner's classification as test
+        # input. Production migration never manufactures that classification.
+        var node = build_retention_snapshot_inventory_v2(checkout, cache, reader_limits(), 10).unwrap()[0]
+        node.authoritative = false
+        node.rebuildable = true
+        val initial = BuildRetentionStateV1(generation: 1, nodes: [node], pins: [], leases: [])
+        build_retention_store_commit_v1(cache, 0, "", initial, reader_limits()).unwrap()
+        build_retention_store_capture_begin_v2(cache, "manager-A", reader_limits()).unwrap()
+        build_retention_store_snapshot_admit_v2(cache, checkout, snapshot, "manager-A", reader_limits(), 11).unwrap()
+        build_retention_store_reader_release_v2(cache, "manager-A", snapshot.revision_id, reader_limits()).unwrap()
+        var evict = reader_limits()
+        evict.max_bytes = 0
+        evict.max_retained = 0
+        evict.max_remove = 1
+        expect(build_retention_store_collect_v2(cache, checkout, evict, 12).unwrap().status).to_equal("protected_over_budget")
+        expect(dir_exists(snapshot.snapshot_root)).to_equal(true)
+        build_retention_store_session_retire_v2(cache, "manager-A", snapshot.revision_id, reader_limits()).unwrap()
+        expect(build_retention_store_collect_v2(cache, checkout, evict, 13).unwrap().status).to_equal("within_budget")
+        expect(dir_exists(snapshot.snapshot_root)).to_equal(false)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "refuses orphan receipts and global count budgets without deleting unknown units":
+        val (root, checkout, cache, snapshot) = reader_fixture("unknown")
+        expect(build_retention_snapshot_inventory_v2(checkout, cache + "/absent", reader_limits(), 10).unwrap_err()).to_equal("retention_cache_directory_unreadable")
+        expect(file_atomic_write(cache + "/receipts/orphan.receipt", "unclassified retained work")).to_equal(true)
+        expect(build_retention_store_collect_v2(cache, checkout, reader_limits(), 10).unwrap_err()).to_equal("retention_orphan_receipt")
+        expect(file_exists(cache + "/receipts/orphan.receipt")).to_equal(true)
+        expect(dir_create_all(cache + "/snapshots/unknown")).to_equal(true)
+        var bounded = reader_limits()
+        bounded.max_nodes = 1
+        expect(build_retention_store_collect_v2(cache, checkout, bounded, 10).unwrap_err()).to_equal("retention_snapshot_count_budget")
+        expect(dir_exists(snapshot.snapshot_root)).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)

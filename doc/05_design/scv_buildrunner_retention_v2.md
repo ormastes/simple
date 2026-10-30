@@ -40,6 +40,11 @@ The existing store owns these transactions under its stable lock:
 - `build_retention_store_session_retire_v2`: remove only the matching durable
   session pin after the manager records retirement and independently verifies
   no running, unknown, cancelled or unreaped work remains.
+- `build_retention_store_capture_abort_unattached_v2`: remove only an explicitly
+  aborted reservation after the manager proves no source, journal, attempt or
+  retirement evidence exists. The store also refuses every own active/durable
+  pin and lease, regardless of expiry. Independent roots and captures survive;
+  an already absent reservation is idempotent only after those checks.
 
 Migration inventories the bounded snapshot store while reserved. Proven legacy
 units are accounted without inferring disposability; unknown/invalid physical
@@ -47,6 +52,27 @@ units remain protected and cause explicit incomplete accounting. Snapshot bytes
 are distinguished from separately retained shared chunks and source history.
 No blanket rebuildable classification or claim about whole-store bounds follows
 from tracking a subset.
+
+Physical accounting measures snapshot source/metadata and immutable receipt
+payload bytes, plus a stable twenty-byte upper bound for the mutable decimal
+usage hint. It excludes filesystem allocation overhead, shared chunk objects,
+source-inventory generations and private staging. Migration verifies at most
+1 GiB of payload and 16,777,216 graph/path operations per call; counters decrease
+across snapshot units. Metadata reads are bounded before legacy validation.
+The existing directory-list owner allocates one directory result before its
+count can be checked; this lane does not claim descriptor-safe traversal against
+arbitrary external mutation or measured warm-start performance. Unknown paths,
+orphans, unpublished units and exhausted budgets preserve bytes and refuse a
+complete accounting claim. Full verification is required before production
+performance admission.
+
+Snapshots without an independently admitted reconstruction/disposal proof remain
+nonrebuildable even after their session retires. Retirement removes session roots
+only. Prior owner-classified rebuildable snapshots can become eligible after
+their last independent pin/lease is explicitly released. Protected storage
+pressure is reported; it never authorizes reclassification or deletion of
+unpublished work. Ordinary preflight uses `max_remove: 0` for accounting only;
+a nonzero removal policy is an explicit request to the checked managed collector.
 
 ## Production order
 

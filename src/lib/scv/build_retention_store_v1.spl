@@ -7,7 +7,8 @@ requires a separate checked store owner and is rejected here before any I/O.
 """
 use std.scv.build_retention_v1.*
 use std.scv.build_retention_codec_v1.{build_retention_parse_v1}
-use std.scv.compile_snapshot.{scv_compile_snapshot_gc_authorized_v1}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_provenance_v1, scv_compile_snapshot_gc_authorized_v1}
+use std.scv.build_retention_snapshot_inventory_v2.{build_retention_snapshot_inventory_v2}
 use app.io.mod.{file_exists, file_read_regular_no_follow_bounded,
     dir_exists, file_delete}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write}
@@ -92,7 +93,8 @@ fn retention_capture_begin_locked_v2(cache_root: text, owner: text,
     if file_exists(retention_authority_path_v1(cache_root)):
         current = build_retention_store_load_v1(cache_root)?
         expected_root = build_retention_root_v1(current)
-        if current.capture_owners.contains(owner): return Ok(expected_root)
+        if current.capture_owners.contains(owner):
+            return retention_store_commit_locked_v1(cache_root, current.generation, expected_root, current, limits)
     if current.generation == 9223372036854775807: return Err("retention_generation_exhausted")
     var candidate = current
     candidate.generation = current.generation + 1
@@ -170,3 +172,211 @@ fn build_retention_store_execute_v1(cache_root: text, plan: BuildRetentionPlanV1
 export build_retention_store_load_v1, build_retention_store_commit_v1
 export build_retention_store_execute_v1
 export build_retention_store_capture_begin_v2
+
+fn retention_inventory_merge_locked_v2(cache_root: text, checkout: text,
+        state: BuildRetentionStateV1, limits: BuildRetentionLimitsV1, now: i64) -> Result<BuildRetentionStateV1, text>:
+    var validation = limits
+    validation.max_bytes = 9223372036854775807
+    validation.max_retained = limits.max_nodes
+    validation.max_remove = 0
+    build_retention_plan_v1(state, validation, now)?
+    val physical = build_retention_snapshot_inventory_v2(checkout, cache_root, limits, now)?
+    var by: Dict<text, i64> = {}
+    var seen: Dict<text, bool> = {}
+    var candidate = state
+    for index in 0..state.nodes.len(): by[build_retention_key_v1(state.nodes[index])] = index
+    for node in physical:
+        val key = build_retention_key_v1(node)
+        seen[key] = true
+        if by.contains_key(key):
+            val old = state.nodes[by[key]]
+            if old.bytes != node.bytes: return Err("retention_snapshot_accounting_changed")
+            # Keep the existing owner's identity, dependency closure and
+            # disposal classification; physical provenance grants none of them.
+        else:
+            candidate.nodes.push(node)
+    for node in state.nodes:
+        if node.namespace == "snapshot" and not seen.contains_key(build_retention_key_v1(node)):
+            return Err("retention_tracked_snapshot_missing")
+    Ok(candidate)
+
+fn retention_session_pin_checked_v2(candidate: BuildRetentionStateV1, ref: text,
+        root: text) -> Result<BuildRetentionStateV1, text>:
+    var next = candidate
+    for pin in candidate.pins:
+        if pin.ref == ref:
+            if pin.root != root: return Err("retention_session_root_changed")
+            return Ok(next)
+    next.pins.push(BuildRetentionPinV1(ref: ref, root: root))
+    Ok(next)
+
+fn retention_snapshot_admit_locked_v2(cache_root: text, checkout: text,
+        snapshot: ScvCompileSnapshotV1, session_id: text, limits: BuildRetentionLimitsV1,
+        now: i64) -> Result<text, text>:
+    val current = build_retention_store_load_v1(cache_root)?
+    if not current.capture_owners.contains(session_id): return Err("retention_capture_owner_missing")
+    if not snapshot.valid or snapshot.snapshot_root != cache_root + "/snapshots/" + snapshot.revision_id:
+        return Err("retention_session_snapshot_owner")
+    var candidate = retention_inventory_merge_locked_v2(cache_root, checkout, current, limits, now)?
+    var known = false
+    for node in candidate.nodes:
+        if node.namespace == "snapshot" and node.id == snapshot.revision_id: known = true
+    if not known: return Err("retention_session_snapshot_missing")
+    # The bounded inventory walk already validated the physical unit. Bind
+    # the supplied owner value to its exact checked provenance without a
+    # second unbudgeted legacy inventory open.
+    val provenance = file_read_regular_no_follow_bounded(snapshot.snapshot_root + "/SCV_COMPILE_SNAPSHOT", 4096)?
+    val expected = scv_compile_snapshot_provenance_v1(snapshot.revision_id, snapshot.commit_id,
+        snapshot.tree_id, snapshot.inventory_digest, snapshot.inventory_count)
+    if (provenance != expected or snapshot.provenance_path != snapshot.snapshot_root + "/SCV_COMPILE_SNAPSHOT" or
+            snapshot.receipt_path != cache_root + "/receipts/" + snapshot.revision_id + ".receipt"):
+        return Err("retention_session_snapshot_invalid")
+    val root = "snapshot/" + snapshot.revision_id
+    candidate = retention_session_pin_checked_v2(candidate, "snapshot_dependents/" + session_id, root)?
+    candidate = retention_session_pin_checked_v2(candidate, "active_builds/" + session_id, root)?
+    var leased = false
+    for lease in candidate.leases:
+        if lease.owner == session_id:
+            if lease.root != root: return Err("retention_lease_owner_collision")
+            leased = true
+    if not leased: candidate.leases.push(BuildRetentionLeaseV1(owner: session_id, root: root, expires_at: 0))
+    var captures: [text] = []
+    for owner in candidate.capture_owners:
+        if owner != session_id: captures.push(owner)
+    candidate.capture_owners = captures
+    if current.generation == 9223372036854775807: return Err("retention_generation_exhausted")
+    candidate.generation = current.generation + 1
+    retention_store_commit_locked_v1(cache_root, current.generation, build_retention_root_v1(current), candidate, limits, session_id)
+
+fn build_retention_store_snapshot_admit_v2(cache_root: text, checkout: text,
+        snapshot: ScvCompileSnapshotV1, session_id: text, limits: BuildRetentionLimitsV1,
+        now: i64) -> Result<text, text>:
+    val lock = file_lock(retention_lock_path_v1(cache_root), 1)
+    if lock < 0: return Err("retention_busy")
+    val result = retention_snapshot_admit_locked_v2(cache_root, checkout, snapshot, session_id, limits, now)
+    if not file_unlock(lock): return Err("retention_unlock")
+    result
+
+fn retention_session_release_locked_v2(cache_root: text, session_id: text, revision_id: text,
+        limits: BuildRetentionLimitsV1, retire: bool) -> Result<text, text>:
+    val current = build_retention_store_load_v1(cache_root)?
+    val root = "snapshot/" + revision_id
+    var candidate = current
+    var pins: [BuildRetentionPinV1] = []
+    var session_known = false
+    for pin in current.pins:
+        val active = pin.ref == "active_builds/" + session_id
+        val durable = pin.ref == "snapshot_dependents/" + session_id
+        if active or durable:
+            if pin.root != root: return Err("retention_session_root_changed")
+            if durable: session_known = true
+        if not active and not (retire and durable): pins.push(pin)
+    if not session_known:
+        # A retirement retry after its durable marker/unpin transaction is
+        # harmless; a missing active-session anchor is otherwise incomplete.
+        if retire and pins.len() == current.pins.len() and not current.capture_owners.contains(session_id):
+            var own_lease = false
+            for lease in current.leases:
+                if lease.owner == session_id: own_lease = true
+            if not own_lease: return Ok(build_retention_root_v1(current))
+        return Err("retention_session_pin_missing")
+    var leases: [BuildRetentionLeaseV1] = []
+    for lease in current.leases:
+        if lease.owner == session_id:
+            if lease.root != root: return Err("retention_lease_owner_collision")
+        else: leases.push(lease)
+    candidate.pins = pins
+    candidate.leases = leases
+    if retire:
+        var captures: [text] = []
+        for owner in current.capture_owners:
+            if owner != session_id: captures.push(owner)
+        candidate.capture_owners = captures
+    # Idempotence preserves generation for an already released reader.
+    if build_retention_root_v1(candidate) == build_retention_root_v1(current): return Ok(build_retention_root_v1(current))
+    if current.generation == 9223372036854775807: return Err("retention_generation_exhausted")
+    candidate.generation = current.generation + 1
+    val released = if retire: session_id else: ""
+    retention_store_commit_locked_v1(cache_root, current.generation, build_retention_root_v1(current), candidate, limits, released)
+
+fn build_retention_store_reader_release_v2(cache_root: text, session_id: text,
+        revision_id: text, limits: BuildRetentionLimitsV1) -> Result<text, text>:
+    val lock = file_lock(retention_lock_path_v1(cache_root), 1)
+    if lock < 0: return Err("retention_busy")
+    val result = retention_session_release_locked_v2(cache_root, session_id, revision_id, limits, false)
+    if not file_unlock(lock): return Err("retention_unlock")
+    result
+
+# Caller is the existing manager's settled/reaped retirement boundary. It
+# persists the retired marker before invoking this narrow owner-only release.
+fn build_retention_store_session_retire_v2(cache_root: text, session_id: text,
+        revision_id: text, limits: BuildRetentionLimitsV1) -> Result<text, text>:
+    val lock = file_lock(retention_lock_path_v1(cache_root), 1)
+    if lock < 0: return Err("retention_busy")
+    val result = retention_session_release_locked_v2(cache_root, session_id, revision_id, limits, true)
+    if not file_unlock(lock): return Err("retention_unlock")
+    result
+
+fn retention_collect_locked_v2(cache_root: text, checkout: text,
+        limits: BuildRetentionLimitsV1, now: i64) -> Result<BuildRetentionPlanV1, text>:
+    if not file_exists(retention_authority_path_v1(cache_root)):
+        val empty = BuildRetentionStateV1(generation: 1, nodes: [], pins: [], leases: [])
+        retention_store_commit_locked_v1(cache_root, 0, "", empty, limits)?
+    var current = build_retention_store_load_v1(cache_root)?
+    if current.capture_owners.len() != 0 and limits.max_remove > 0: return Err("retention_capture_active")
+    var candidate = retention_inventory_merge_locked_v2(cache_root, checkout, current, limits, now)?
+    if build_retention_root_v1(candidate) != build_retention_root_v1(current):
+        if current.generation == 9223372036854775807: return Err("retention_generation_exhausted")
+        candidate.generation = current.generation + 1
+        retention_store_commit_locked_v1(cache_root, current.generation, build_retention_root_v1(current), candidate, limits)?
+        current = candidate
+    val plan = build_retention_plan_v1(current, limits, now)?
+    if plan.deletions.len() > 0:
+        retention_store_execute_locked_v1(cache_root, plan, limits, now)?
+    val retained = build_retention_store_load_v1(cache_root)?
+    build_retention_plan_v1(retained, limits, now)
+
+fn build_retention_store_collect_v2(cache_root: text, checkout: text,
+        limits: BuildRetentionLimitsV1, now: i64) -> Result<BuildRetentionPlanV1, text>:
+    if cache_root == "" or not dir_exists(cache_root): return Err("retention_store_root")
+    val lock = file_lock(retention_lock_path_v1(cache_root), 1)
+    if lock < 0: return Err("retention_busy")
+    val result = retention_collect_locked_v2(cache_root, checkout, limits, now)
+    file_delete(cache_root + "/.build-retention-v1.permit.sdn")
+    if not file_unlock(lock): return Err("retention_unlock")
+    result
+
+export build_retention_store_snapshot_admit_v2, build_retention_store_reader_release_v2
+export build_retention_store_session_retire_v2, build_retention_store_collect_v2
+
+fn retention_capture_abort_unattached_locked_v2(cache_root: text, session_id: text,
+        limits: BuildRetentionLimitsV1) -> Result<text, text>:
+    val current = build_retention_store_load_v1(cache_root)?
+    for pin in current.pins:
+        val active = "active_builds/" + session_id
+        val durable = "snapshot_dependents/" + session_id
+        if pin.ref == active or pin.ref.starts_with(active + "/") or pin.ref == durable or pin.ref.starts_with(durable + "/"):
+            return Err("retention_capture_attached")
+    for lease in current.leases:
+        if lease.owner == session_id: return Err("retention_capture_attached")
+    if not current.capture_owners.contains(session_id): return Ok(build_retention_root_v1(current))
+    var candidate = current
+    var captures: [text] = []
+    for owner in current.capture_owners:
+        if owner != session_id: captures.push(owner)
+    candidate.capture_owners = captures
+    if current.generation == 9223372036854775807: return Err("retention_generation_exhausted")
+    candidate.generation = current.generation + 1
+    retention_store_commit_locked_v1(cache_root, current.generation, build_retention_root_v1(current), candidate, limits, session_id)
+
+# Production caller holds the manager lock and proves that its state has no
+# source/session/journal/attempt/retirement evidence before this narrow abort.
+fn build_retention_store_capture_abort_unattached_v2(cache_root: text, session_id: text,
+        limits: BuildRetentionLimitsV1) -> Result<text, text>:
+    val lock = file_lock(retention_lock_path_v1(cache_root), 1)
+    if lock < 0: return Err("retention_busy")
+    val result = retention_capture_abort_unattached_locked_v2(cache_root, session_id, limits)
+    if not file_unlock(lock): return Err("retention_unlock")
+    result
+
+export build_retention_store_capture_abort_unattached_v2
