@@ -273,7 +273,8 @@ pub(crate) fn bind_args_with_injected(
                     other => other,
                 }
             }
-            _ => value,
+            // A bare literal bound to `[u8]` packs like every other typed binding.
+            _ => crate::interpreter::coerce_to_declared_type(value, ty),
         };
         // A non-bool landing on a `bool` parameter is a PRESENCE test, not an
         // unwrap. Must run BEFORE the generic Some(x) -> x below, which would
@@ -641,7 +642,8 @@ pub(crate) fn bind_args_with_values_named(
                     other => other,
                 }
             }
-            _ => value,
+            // A bare literal bound to `[u8]` packs like every other typed binding.
+            _ => crate::interpreter::coerce_to_declared_type(value, ty),
         };
         // A non-bool landing on a `bool` parameter is a PRESENCE test, not an
         // unwrap. Must run BEFORE the generic Some(x) -> x below, which would
