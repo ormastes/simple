@@ -27,7 +27,9 @@ if let Value::Str(ref s) = recv_val {
             let chars: Vec<Value> = s.chars().map(|c| Value::text(c.to_string())).collect();
             return Ok(Value::array(chars));
         }
-        "bytes" => {
+        // `to_bytes` is the same operation: the compiled lanes lower both
+        // names to `rt_string_bytes` (one tagged int per UTF-8 byte).
+        "bytes" | "to_bytes" => {
             let bytes: Vec<Value> = s.bytes().map(|b| Value::Int(b as i64)).collect();
             return Ok(Value::array(bytes));
         }
