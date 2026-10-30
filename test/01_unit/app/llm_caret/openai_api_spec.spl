@@ -1,37 +1,13 @@
 # codex-system-test
 """
 # LLM Caret OpenAI API Exchange
+"""
+use std.spec.*
+use app.io.mod.{file_read}
+use app.llm_caret.openai_api.*
 
-fn _RB() -> text:
-    "{(125 as char)}"
-
-fn _Q() -> text:
-    "\""
-
-fn _unwrap_idx(opt) -> i64:
-    match opt:
-        Some(i): return i
-        nil: return -1
-
-fn _escape_json(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        if ch == "\\":
-            result = result + "\\\\"
-        elif ch == "\"":
-            result = result + "\\\""
-        elif ch == "\n":
-            result = result + "\\n"
-        elif ch == "\r":
-            result = result + "\\r"
-        elif ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
-        i = i + 1
-    result
+fn count_openai_source_occurrences(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
 
 describe "LLM Caret OpenAI API exchange":
     describe "request construction":
@@ -46,67 +22,10 @@ describe "LLM Caret OpenAI API exchange":
             expect(request.headers).to_equal("Authorization: Bearer sk-live\nContent-Type: application/json")
             expect(request.body).to_equal("{\"model\":\"gpt-4.1\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":512,\"temperature\":0.25}")
 
-fn _extract_json_value(json: text, key: text) -> text:
-    val search = _Q() + key + _Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return "null"
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
-        if ch == "," or ch == _RB() or ch == "]":
-            break
-        end = end + 1
-    trimmed.substring(0, end).trim()
 
-fn _extract_json_int(json: text, key: text) -> i64:
-    val raw = _extract_json_value(json, key)
-    if raw == "null" or raw == "":
-        return 0
-    int(raw)
 
-# Inline struct
-struct OpenAIResponse:
-    content: text
-    model: text
-    finish_reason: text
-    prompt_tokens: i64
-    completion_tokens: i64
-    total_tokens: i64
-    error: text
-    is_error: bool
-    raw: text
 
-# Functions under test
-fn build_openai_body(model: text, messages_json: text, max_tokens: i64, temperature: f64) -> text:
-    var parts: [text] = []
-    var model_val = model
-    if model_val == "":
-        model_val = "gpt-4o"
-    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model_val + _Q()]
-    parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
-    if max_tokens > 0:
-        parts = parts + [_Q() + "max_tokens" + _Q() + ":" + "{max_tokens}"]
-    if temperature >= 0.0:
-        parts = parts + [_Q() + "temperature" + _Q() + ":" + "{temperature}"]
-    var body = _LB()
-    var i = 0
-    for part in parts:
-        if i > 0:
-            body = body + ","
-        body = body + part
-        i = i + 1
-    body = body + _RB()
-    body
 
-fn build_openai_headers(api_key: text) -> text:
-    var h = "Authorization: Bearer " + api_key + "\n"
-    h = h + "Content-Type: application/json"
-    h
 
     describe "response completion":
         it "should preserve exact successful response fields":
@@ -125,66 +44,16 @@ fn build_openai_headers(api_key: text) -> text:
             expect(response.is_error).to_equal(false)
             expect(response.raw).to_equal(raw)
 
-fn parse_openai_response(raw: text) -> OpenAIResponse:
-    if raw.trim() == "":
-        return OpenAIResponse(
-            content: "",
-            model: "",
-            finish_reason: "",
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            error: "empty response",
-            is_error: true,
-            raw: ""
-        )
-    val error_msg = _extract_json_string(raw, "message")
-    val has_content = _extract_json_string(raw, "content")
-    if error_msg != "" and has_content == "":
-        return OpenAIResponse(
-            content: "",
-            model: "",
-            finish_reason: "error",
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            error: error_msg,
-            is_error: true,
-            raw: raw
-        )
-    val content_text = _extract_json_string(raw, "content")
-    val model_val = _extract_json_string(raw, "model")
-    val finish = _extract_json_string(raw, "finish_reason")
-    val p_tok = _extract_json_int(raw, "prompt_tokens")
-    val c_tok = _extract_json_int(raw, "completion_tokens")
-    val t_tok = _extract_json_int(raw, "total_tokens")
-    var final_finish = finish
-    if final_finish == "":
-        final_finish = "stop"
-    OpenAIResponse(
-        content: content_text,
-        model: model_val,
-        finish_reason: final_finish,
-        prompt_tokens: p_tok,
-        completion_tokens: c_tok,
-        total_tokens: t_tok,
-        error: "",
-        is_error: false,
-        raw: raw
-    )
 
-# ============================================================================
-# Tests
-# ============================================================================
 
-describe "build_openai_body":
-    it "includes model":
-        val body = build_openai_body("gpt-4-turbo", "[]", 0, -1.0)
-        expect(body).to_contain("gpt-4-turbo")
+    describe "body defaults":
+        it "includes model":
+            val body = build_openai_body("gpt-4-turbo", "[]", 0, -1.0)
+            expect(body).to_contain("gpt-4-turbo")
 
-    it "defaults to gpt-4o":
-        val body = build_openai_body("", "[]", 0, -1.0)
-        expect(body).to_contain("gpt-4o")
+        it "defaults to gpt-4o":
+            val body = build_openai_body("", "[]", 0, -1.0)
+            expect(body).to_contain("gpt-4o")
 
         it "should default valid empty content finish reason and token counts":
             step("Prepare OpenAI API request inputs")
