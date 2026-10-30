@@ -7,8 +7,25 @@ use compiler.loader.loader.object_mapper.{
     LoaderMapper, LoaderMapperConfig, JitMapper, JitMapperConfig
 }
 use compiler.loader.loader.smf_mmap_native.{compat_native_call_function_0_i64}
+use std.platform.{get_host_arch}
+
+
+# Host-native fixture: the code below is EXECUTED, so it must be in the host's
+# instruction set. arm64 (Apple Silicon, aarch64 Linux): `movz w0, #imm16; ret`.
+# Any other host keeps the historical x86-64 `mov eax, imm32; ret` bytes.
+fn _host_is_arm64() -> bool:
+    val arch = get_host_arch()
+    arch == "aarch64" or arch == "arm64"
+
+fn _arm64_ret_const(value: i64) -> [u8]:
+    val word = 0x52800000 | ((value & 0xFFFF) << 5)
+    [(word & 0xFF) as u8, ((word >> 8) & 0xFF) as u8,
+     ((word >> 16) & 0xFF) as u8, ((word >> 24) & 0xFF) as u8,
+     0xC0u8, 0x03u8, 0x5Fu8, 0xD6u8]
 
 fn nested_tiny_code(value: i64) -> [u8]:
+    if _host_is_arm64():
+        return _arm64_ret_const(value & 0xFF)
     [184, (value & 0xFF) as u8, 0, 0, 0, 195]
 
 fn nested_execute(address: i64) -> i64:
