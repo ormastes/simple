@@ -1,0 +1,41 @@
+# Guards e606125a541: decoded Dict fields must hold real values, never nil.
+# The decoder used to store the decoded optional straight into the dict slot,
+# leaving nil HirFunction values after a cache-hit decode (stage2 p2_add SIGSEGV).
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+
+fn lowered(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "dict_decode.spl", "dict_decode", Logger(level: 0))
+    var lowering = HirLowering.with_filename("dict_decode.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+# Needs the real frontend (parse_full_frontend -> HirLowering), which the Rust
+# seed cannot run (rt_tuple_len is unknown there); run with a self-hosted or
+# stage2 binary. Source-shape twin: hir_codec_dict_decode_not_nil_spec.spl.
+describe "HIR codec decode keeps dict values":
+    it "keeps every function in module.functions non-nil":
+        val encoded = hir_module_encode(lowered("fn answer() -> i64:\n    41\nfn other() -> i64:\n    1\n"))
+        expect(encoded != "").to_equal(true)
+        val decoded = hir_module_decode(encoded).unwrap()
+        expect(decoded.functions.len()).to_equal(2)
+        for key in decoded.functions.keys():
+            val function: HirFunction = decoded.functions[key]
+            expect(function != nil).to_equal(true)
+    it "keeps function names readable after decode":
+        val encoded = hir_module_encode(lowered("fn answer() -> i64:\n    41\n"))
+        val decoded = hir_module_decode(encoded).unwrap()
+        val keys = decoded.functions.keys()
+        expect(decoded.functions[keys[0]].name).to_equal("answer")
+    it "keeps dict values after a second encode":
+        val encoded = hir_module_encode(lowered("fn answer() -> i64:\n    41\n"))
+        val decoded = hir_module_decode(encoded).unwrap()
+        expect(hir_module_encode(decoded)).to_equal(encoded)
