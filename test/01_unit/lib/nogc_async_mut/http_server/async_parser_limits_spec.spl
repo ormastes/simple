@@ -205,6 +205,32 @@ describe "async parser — header policy parity with the shared core":
         expect(feed_ok(mismatch, "GET http://safe.test/a HTTP/1.1\r\nHost: attacker.test\r\n\r\n")).to_be(false)
         expect(mismatch.is_complete()).to_be(false)
 
+    it "keeps HTTP/1.0 optional Host but still validates a present Host":
+        var legacy = HttpRequestParser.new()
+        expect(feed_ok(legacy, "GET / HTTP/1.0\r\n\r\n")).to_be(true)
+        expect(legacy.is_complete()).to_be(true)
+        var path_in_host = HttpRequestParser.new()
+        expect(feed_ok(path_in_host, "GET / HTTP/1.0\r\nHost: a.test/evil\r\n\r\n")).to_be(false)
+        var space_in_host = HttpRequestParser.new()
+        expect(feed_ok(space_in_host, "GET / HTTP/1.1\r\nHost: a.test b.test\r\n\r\n")).to_be(false)
+        expect(space_in_host.error_message).to_contain("Invalid Host")
+
+    it "accepts well-formed host:port and IPv6 authorities, rejects malformed ones":
+        var v6 = HttpRequestParser.new()
+        expect(feed_ok(v6, "GET / HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n")).to_be(true)
+        var abs_port = HttpRequestParser.new()
+        expect(feed_ok(abs_port, "GET http://a.test:8080/x HTTP/1.1\r\nHost: a.test:8080\r\n\r\n")).to_be(true)
+        for bad in ["a.test:abc", "a:1:2", "[::1", ":::[]", "a%zz.test", "a.test:"]:
+            var p = HttpRequestParser.new()
+            expect(feed_ok(p, "GET / HTTP/1.1\r\nHost: " + bad + "\r\n\r\n")).to_be(false)
+            expect(p.error_message).to_contain("Invalid Host")
+        var empty_abs = HttpRequestParser.new()
+        expect(feed_ok(empty_abs, "GET http:///a HTTP/1.1\r\nHost: a.test\r\n\r\n")).to_be(false)
+        expect(empty_abs.error_message).to_contain("does not match")
+        var unknown_version = HttpRequestParser.new()
+        expect(feed_ok(unknown_version, "GET / HTTP/1.2\r\n\r\n")).to_be(false)
+        expect(unknown_version.error_message).to_contain("Missing Host")
+
     it "rejects whitespace before a framing header colon":
         step("Send a Content-Length field with forbidden whitespace before its colon")
         var p = HttpRequestParser.new()
