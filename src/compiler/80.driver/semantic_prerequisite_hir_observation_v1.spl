@@ -1,0 +1,44 @@
+# Observe the actual lowered literal nodes. No evaluator or alternate IR.
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirFunction, HirStmtKind}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.driver.semantic_prerequisite_types_v1.{FrozenSemanticFunctionObservationV1}
+
+fn _observe_literal_v1(expression: HirExpr, observation: FrozenSemanticFunctionObservationV1) -> Result<FrozenSemanticFunctionObservationV1, text>:
+    var out = observation
+    match expression.kind:
+        case HirExprKind.IntLit(value, suffix):
+            if suffix != nil: return Err("lowered-literal-suffix-unsupported")
+            out.literal_kind = "i64"
+            out.integer_literal = value
+        case HirExprKind.BoolLit(value):
+            out.literal_kind = "bool"
+            out.boolean_literal = value
+        case _: return Err("lowered-terminal-not-literal")
+    Ok(out)
+
+pub fn frozen_semantic_observe_hir_function_v1(function_: HirFunction) -> Result<FrozenSemanticFunctionObservationV1, text>:
+    var out = FrozenSemanticFunctionObservationV1(function_name: function_.name,
+        declared_type: "", literal_kind: "", integer_literal: 0, boolean_literal: false)
+    match function_.return_type.kind:
+        case HirTypeKind.Int(bits, signed):
+            if bits != 64 or not signed: return Err("lowered-return-type-unsupported")
+            out.declared_type = "i64"
+        case HirTypeKind.Bool: out.declared_type = "bool"
+        case _: return Err("lowered-return-type-unsupported")
+    if function_.body.has:
+        if function_.body.stmts.len() != 0: return Err("lowered-body-shape-unsupported")
+        val expression = function_.body.value
+        match expression.kind:
+            case HirExprKind.Return(value):
+                if val terminal = value: return _observe_literal_v1(terminal, out)
+                return Err("lowered-return-value-missing")
+            case _: return _observe_literal_v1(expression, out)
+    if function_.body.stmts.len() != 1: return Err("lowered-body-shape-unsupported")
+    match function_.body.stmts[0].kind:
+        case HirStmtKind.Expr(expression):
+            match expression.kind:
+                case HirExprKind.Return(value):
+                    if val terminal = value: return _observe_literal_v1(terminal, out)
+                    Err("lowered-return-value-missing")
+                case _: _observe_literal_v1(expression, out)
+        case _: Err("lowered-body-shape-unsupported")

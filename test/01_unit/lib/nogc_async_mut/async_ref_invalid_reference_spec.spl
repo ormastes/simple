@@ -1,0 +1,37 @@
+# @req REQ-ASYNC-REF-INVALID-001
+# Live-scope invalid entry checks; never dereference freed or arbitrary pointers.
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.concurrent.lockless_map_i64.LocklessMapI64
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefStateI64, AsyncRefError, AsyncSubscriptionI64, async_ref_from_core_i64}
+use std.common.contracts.execution.simple_ring_async_v1.{RingToken, RingGeneration, TaskPollResult}
+
+describe "AsyncRef invalid live-scope entry":
+    it "rejects invalid entries without confusing them with valid pending work":
+        unsafe(capabilities: [ffi]):
+            val map = LocklessMapI64.create(2, 2, 2, 1).unwrap()
+            val valid = map.request(11, 22).unwrap()
+            for entry in [-1, 0, 3]:
+                val invalid = async_ref_from_core_i64(map.scope_address(), entry)
+                match invalid.try_ready():
+                    case AsyncRefStateI64.InvalidReference: ()
+                    case state: fail("invalid entry became work: {state}")
+                val token = RingToken(ring_id: 1u64, slot: 0u64, generation: RingGeneration(value: 1u64))
+                match invalid.subscribe(token):
+                    case Err(AsyncRefError.InvalidReference): ()
+                    case other: fail("invalid entry accepted subscription: {other}")
+                val subscription = AsyncSubscriptionI64(reference: invalid, _subscriber: 0)
+                match subscription.poll():
+                    case TaskPollResult.Ready(Err(AsyncRefError.InvalidReference)): ()
+                    case other: fail("invalid reference did not terminate explicitly: {other}")
+                match invalid.complete(91):
+                    case Err(AsyncRefError.InvalidReference): ()
+                    case other: fail("invalid publication misclassified: {other}")
+            match valid.try_ready():
+                case AsyncRefStateI64.Pending: ()
+                case state: fail("valid work lost pending state: {state}")
+            expect(valid.try_start()).to_equal(true)
+            expect(valid.complete(99).unwrap()).to_equal(true)
+            match valid.try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(99)
+                case state: fail("valid result lost: {state}")
+            map.close_quiescent()

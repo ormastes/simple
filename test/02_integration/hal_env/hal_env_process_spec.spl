@@ -1,0 +1,96 @@
+# HAL environment integration: capture, exit codes, large output, timeout
+# kill of descendants, memory receipt under an unenforced cap.
+# Timeout marker / truncation-marker formats are covered by
+# process_run_bounded_timeout_vs_kill_spec and
+# test_runner_bounded_output_contract_spec; not repeated here.
+# Per host: macOS/Linux/FreeBSD run all via /bin/sh. Windows: pending (POSIX
+# scripts; Job-object path is in windows_sosix_hal_spec). SimpleOS
+# (SIMPLE_OS_KERNEL=simpleos): pending, no hosted spawn. Other hosts fail.
+use std.spec.{describe, it, expect, fail, pending}
+use std.nogc_sync_mut.io_runtime.{host_os, file_read_text, file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope, resource_scope_memory_enforcement}
+use std.common.perf.execution_metrics.{ResourceBudget, ResourceEvidenceQuality}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_temp_dir, sosix_test_is_simpleos}
+
+# "run" | "pending" | "fail"
+fn hal_env_host_mode() -> text:
+    if sosix_test_is_simpleos(): return "pending"
+    val os = host_os()
+    if os == "macos" or os == "linux" or os == "freebsd" or os == "darwin": return "run"
+    if os == "windows": return "pending"
+    "fail"
+
+fn hal_env_gate() -> bool:
+    val mode = hal_env_host_mode()
+    if mode == "pending":
+        pending("POSIX /bin/sh scenario: Windows covered by windows_sosix_hal_spec; SimpleOS has no hosted spawn")
+        return false
+    if mode == "fail":
+        fail("unqualified host for HAL process spec: " + host_os())
+        return false
+    true
+
+fn hal_env_sh(script: text, timeout_ms: i64, cap: i64) -> (text, text, i64):
+    process_run_bounded("/bin/sh", ["-c", script], timeout_ms, cap)
+
+describe "HAL process capture and exit codes":
+    it "separates stdout from stderr and preserves exit codes 0, 3 and 255":
+        if not hal_env_gate(): return
+        val (out, err, code) = hal_env_sh("printf out-1; printf err-1 >&2; exit 3", 10000, 4096)
+        expect(out).to_equal("out-1")
+        expect(err).to_equal("err-1")
+        expect(code).to_equal(3)
+        val (_o0, _e0, zero) = hal_env_sh("exit 0", 10000, 4096)
+        expect(zero).to_equal(0)
+        val (_o255, _e255, high) = hal_env_sh("exit 255", 10000, 4096)
+        expect(high).to_equal(255)
+
+    it "delivers 1 MiB of stdout byte-exact under a larger cap":
+        if not hal_env_gate(): return
+        val (out, err, code) = hal_env_sh("head -c 1048576 /dev/zero | tr '\\0' 'a'", 30000, 2097152)
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out.len()).to_equal(1048576)
+        expect(out.contains("[output truncated")).to_equal(false)
+
+describe "HAL timeout kill":
+    it "kills a backgrounded descendant when the parent times out":
+        if not hal_env_gate(): return
+        val (nonce, _ne, _nc) = hal_env_sh("echo $$-$(date +%s)", 5000, 64)
+        val pid_file = sosix_test_temp_dir() + "/hal_env_desc_" + nonce.trim() + ".pid"
+        val (_out, err, code) = hal_env_sh("sleep 30 & echo $! > '" + pid_file + "'; wait", 500, 4096)
+        expect(process_bounded_timed_out(code, err)).to_equal(true)
+        expect(file_exists(pid_file)).to_equal(true)
+        val pid = file_read_text(pid_file).trim()
+        val (_r1, _r2, _r3) = hal_env_sh("rm -f '" + pid_file + "'", 5000, 256)
+        # probe-validity control: kill -0 on a live process succeeds
+        val (_a, _b, self_alive) = hal_env_sh("kill -0 $$", 5000, 256)
+        expect(self_alive).to_equal(0)
+        val (_c, _d, alive) = hal_env_sh("sleep 0.3; kill -0 " + pid + " 2>/dev/null", 5000, 256)
+        if alive == 0:
+            val (_x, _y, _z) = hal_env_sh("kill -9 " + pid, 5000, 256)
+            fail("descendant pid " + pid + " survived the parent timeout")
+            return
+        expect(alive).to_equal(1)
+
+describe "HAL memory receipt":
+    it "runs the child under a memory cap and the receipt never claims exact tree evidence it lacks":
+        if not hal_env_gate(): return
+        val defaults = standard_resource_budget(ExecutionResourceClass.Unit)
+        val budget = ResourceBudget(max_wall_ms: 60_000, max_cpu_ms: defaults.max_cpu_ms,
+            max_tree_charge_bytes: 268_435_456, max_direct_child_rss_bytes: 268_435_456,
+            max_io_read_bytes: defaults.max_io_read_bytes, max_io_write_bytes: defaults.max_io_write_bytes,
+            max_pids: defaults.max_pids, max_fds: defaults.max_fds)
+        val scope = execution_resource_scope_with_budget(ExecutionResourceClass.Unit, budget, 65_536)
+        val result = run_in_execution_resource_scope(scope, "/bin/sh", ["-c", "echo capped; exit 4"])
+        expect(result.process.usage.exit_code).to_equal(4)
+        expect(result.process.stdout.trim()).to_equal("capped")
+        expect(result.process.usage.wall_ms >= 0).to_equal(true)
+        val mechanism = resource_scope_memory_enforcement()
+        if mechanism == "none" or mechanism == "rlimit-as":
+            # No cgroup/scope counters exist, so the tree charge is not measured exactly.
+            expect(result.process.usage.evidence_quality == ResourceEvidenceQuality.ExactTree).to_equal(false)
+        else:
+            expect(result.process.usage.evidence_quality == ResourceEvidenceQuality.ExactTree).to_equal(true)
+            expect(result.process.usage.peak_tree_charge_bytes > 0).to_equal(true)

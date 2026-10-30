@@ -1,0 +1,39 @@
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{BuildRunV1}
+use std.common.task_runner.scheduler.{task_runner_decode_v1, task_runner_host_slots}
+use test.support.buildrunner_recovery_capacity.{recovery_capacity_run, recovery_capacity_journal}
+
+fn recovery_host_run_with_slots(slots: i64) -> BuildRunV1:
+    var run = recovery_capacity_run()
+    var host = run.hosts[0]
+    host.slots = slots
+    run.hosts[0] = host
+    run
+
+fn expect_recovery_host_rejected(run: BuildRunV1, journal: text, host: text):
+    val decoded = task_runner_decode_v1(run, journal)
+    expect(decoded.is_err()).to_equal(true)
+    expect(decoded.unwrap_err()).to_equal("manager journal reservations exceed host slots: " + host)
+
+describe "BuildRunner recovery host boundaries":
+    it "should accept exactly the configured slots for one host":
+        val run = recovery_host_run_with_slots(2)
+        val journal = recovery_capacity_journal(run, ["RUNNING", "RUNNING"], ["local", "local"])
+        val restored = task_runner_decode_v1(run, journal).unwrap()
+        expect(restored.statuses).to_equal(["RUNNING", "RUNNING"])
+        expect(task_runner_host_slots(restored, "local")).to_equal(0)
+
+    it "should reject one host overflowing while another has spare capacity":
+        var run = recovery_capacity_run(true)
+        var first = run.hosts[0]
+        first.slots = 1
+        run.hosts[0] = first
+        val journal = recovery_capacity_journal(run, ["RUNNING", "RUNNING"], ["local", "local"])
+        expect_recovery_host_rejected(run, journal, "local")
+
+    it "should not count terminal rows as reserved host work":
+        val run = recovery_host_run_with_slots(1)
+        val journal = recovery_capacity_journal(run, ["SUCCEEDED", "FAILED"], ["local", "local"])
+        val restored = task_runner_decode_v1(run, journal).unwrap()
+        expect(restored.statuses).to_equal(["PENDING", "FAILED"])
+        expect(task_runner_host_slots(restored, "local")).to_equal(1)

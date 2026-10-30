@@ -1,0 +1,142 @@
+"""Logical bridge contracts. DTO fixtures are not compiler/filesystem admission.
+Execution NOT_RUN: no admitted general-purpose runtime is currently available.
+"""
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{BuildTaskV1}
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1, build_runner_context_decode_v1}
+use app.buildrunner.scv_managed_session_v1.{build_runner_scv_managed_construct_v1,
+    build_runner_scv_managed_check_v1, build_runner_scv_managed_unknown_v1,
+    build_runner_scv_managed_record_v1, build_runner_scv_managed_context_error_v1,
+    build_runner_scv_managed_identity_error_v1, build_runner_scv_managed_restore_error_v1,
+    build_runner_scv_managed_epoch_v1}
+use std.scv.build_capture_v1.{BuildInputEntryV1, ScvBuildCursorV1, scv_build_capture_reconcile_v1}
+use test.fixtures.buildrunner.scv_cli_fixture_v1.{setup_scv_cli_task_v1}
+
+fn setup_managed_context() -> BuildRunnerTaskContextV1:
+    BuildRunnerTaskContextV1(backend: "llvm", runtime_digest: sha256_text("runtime"),
+        policy_digest: sha256_text("policy"), environment_digest: sha256_text("environment"),
+        target_layout_digest: sha256_text("actual-target-layout"),
+        configuration_digest: sha256_text("actual-configuration"))
+
+fn setup_managed_entries() -> [BuildInputEntryV1]:
+    val task = setup_scv_cli_task_v1()
+    [BuildInputEntryV1(path: task.inputs[0].path, kind: "regular", mode: 420,
+        bytes: "fn main(): 1\n".bytes(), origin: "committed", producer_digest: task.producer_digest),
+     BuildInputEntryV1(path: task.inputs[1].path, kind: "regular", mode: 420,
+        bytes: "context".bytes(), origin: "configuration", producer_digest: task.producer_digest)]
+
+fn setup_managed_task() -> BuildTaskV1:
+    var task = setup_scv_cli_task_v1()
+    task.inputs[1].digest = sha256_text("context")
+    task
+
+describe "BuildRunner managed logical input bridge":
+    it "uses valid retry-stable task identities for distinct capture epochs":
+        val task = setup_managed_task()
+        val epoch = build_runner_scv_managed_epoch_v1(task).unwrap()
+        expect(epoch.len()).to_be_greater_than("buildrunner-declared-inputs-v1-".len())
+        var retry = task
+        retry.attempt = 2
+        expect(build_runner_scv_managed_epoch_v1(retry).unwrap()).to_equal(epoch)
+        var different = task
+        different.args.push("--different-build-subject")
+        expect(build_runner_scv_managed_epoch_v1(different).unwrap() == epoch).to_equal(false)
+        var invalid = task
+        invalid.attempt = 0
+        expect(build_runner_scv_managed_epoch_v1(invalid).is_err()).to_equal(true)
+        expect(build_runner_scv_managed_construct_v1(invalid, setup_managed_context(), setup_managed_entries(), epoch).is_err()).to_equal(true)
+
+    it "keeps legacy contexts source-only and requires actual target and configuration subjects":
+        val context = BuildRunnerTaskContextV1("llvm", sha256_text("runtime"), sha256_text("policy"), sha256_text("environment"))
+        val payload = build_runner_context_encode_v1(context).unwrap()
+        expect(payload).to_start_with("SIMPLE-BUILD-TASK-CONTEXT-1\n")
+        val decoded = build_runner_context_decode_v1(payload).unwrap()
+        expect(build_runner_scv_managed_context_error_v1(decoded)).to_equal("scv-managed-target-and-configuration-unavailable")
+
+    it "roundtrips V2 exact target and configuration bindings and refuses partial upgrades":
+        val context = setup_managed_context()
+        val payload = build_runner_context_encode_v1(context).unwrap()
+        expect(payload).to_start_with("SIMPLE-BUILD-TASK-CONTEXT-2\n")
+        val decoded = build_runner_context_decode_v1(payload).unwrap()
+        expect(decoded.target_layout_digest).to_equal(context.target_layout_digest)
+        expect(decoded.configuration_digest).to_equal(context.configuration_digest)
+        var partial = context
+        partial.target_layout_digest = ""
+        expect(build_runner_context_encode_v1(partial).is_err()).to_equal(true)
+        expect(build_runner_context_decode_v1(payload + "extra\n").is_err()).to_equal(true)
+
+    it "pins exactly declared regular inputs with explicit unavailable broader domains":
+        val owner = build_runner_scv_managed_construct_v1(setup_managed_task(), setup_managed_context(), setup_managed_entries(), "owner-epoch").unwrap()
+        expect(owner.snapshot.entries.len()).to_equal(2)
+        expect(owner.snapshot.universe.complete_scopes).to_equal(["src/main.spl", "task-context/compile.sdn"])
+        expect(owner.snapshot.universe.target_digest).to_equal(setup_managed_context().target_layout_digest)
+        expect(owner.snapshot.universe.compiler_digest).to_equal(setup_managed_task().producer_digest)
+        expect(owner.unavailable).to_contain("editor-overlays")
+        expect(owner.unavailable).to_contain("generated-producer-receipts")
+        expect(owner.unavailable).to_contain("external-producer-receipts")
+        expect(owner.unavailable).to_contain("filesystem-event-coverage")
+        expect(owner.unavailable).to_contain("compiler-semantic-producer")
+        expect(owner.graph.manifests.len()).to_equal(0)
+        expect(build_runner_scv_managed_check_v1(owner, owner.snapshot.cursor).unwrap()).to_equal(owner.snapshot.snapshot_id)
+
+    it "rejects missing extra changed and untyped input layers rather than expanding completeness":
+        val task = setup_managed_task()
+        val entries = setup_managed_entries()
+        expect(build_runner_scv_managed_construct_v1(task, setup_managed_context(), [entries[0]], "epoch").is_err()).to_equal(true)
+        var changed = setup_managed_entries()
+        changed[1].bytes = "changed".bytes()
+        expect(build_runner_scv_managed_construct_v1(task, setup_managed_context(), changed, "epoch").is_err()).to_equal(true)
+        var generated = setup_managed_entries()
+        generated[0].origin = "generated"
+        expect(build_runner_scv_managed_construct_v1(task, setup_managed_context(), generated, "epoch").is_err()).to_equal(true)
+        var linked = setup_managed_entries()
+        linked[0].kind = "symlink"
+        linked[0].mode = 511
+        expect(build_runner_scv_managed_construct_v1(task, setup_managed_context(), linked, "epoch").is_err()).to_equal(true)
+
+    it "does not mistake a foreign cursor or sticky gap for unchanged input":
+        val owner = build_runner_scv_managed_construct_v1(setup_managed_task(), setup_managed_context(), setup_managed_entries(), "epoch").unwrap()
+        expect(build_runner_scv_managed_check_v1(owner, ScvBuildCursorV1("foreign", 0)).is_err()).to_equal(true)
+        val unknown = build_runner_scv_managed_unknown_v1(owner, "editor-queue-overflow")
+        expect(build_runner_scv_managed_check_v1(unknown, owner.snapshot.cursor).is_err()).to_equal(true)
+        expect(build_runner_scv_managed_check_v1(unknown, unknown.capture.cursor).is_err()).to_equal(true)
+
+    it "binds persisted IDs to source-session and task and never authorizes artifact reuse":
+        val owner = build_runner_scv_managed_construct_v1(setup_managed_task(), setup_managed_context(), setup_managed_entries(), "epoch").unwrap()
+        val payload = build_runner_scv_managed_record_v1(sha256_text("source-session"), {"compile": owner}, {})
+        expect(payload).to_contain(owner.snapshot.snapshot_id)
+        expect(payload).to_contain("full_artifact_authorized: false")
+        expect(payload).to_contain("physical_filesystem_complete: false")
+        expect(payload).to_contain("source_only: true")
+        expect(payload == build_runner_scv_managed_record_v1(sha256_text("different-session"), {"compile": owner}, {})).to_equal(false)
+
+    it "records legacy unavailability explicitly instead of synthesizing managed inputs":
+        val payload = build_runner_scv_managed_record_v1(sha256_text("source-session"), {}, {"compile": "scv-managed-target-and-configuration-unavailable"})
+        expect(payload).to_contain("scv-managed-target-and-configuration-unavailable")
+        expect(payload).to_contain("full_artifact_authorized: false")
+
+    it "makes durable gap metadata differ and refuses to restore it as a fresh capture":
+        val owner = build_runner_scv_managed_construct_v1(setup_managed_task(), setup_managed_context(), setup_managed_entries(), "epoch-A").unwrap()
+        val unknown = build_runner_scv_managed_unknown_v1(owner, "producer-gap")
+        val known_payload = build_runner_scv_managed_record_v1(sha256_text("session"), {"compile": owner}, {})
+        val unknown_payload = build_runner_scv_managed_record_v1(sha256_text("session"), {"compile": unknown}, {})
+        expect(known_payload == unknown_payload).to_equal(false)
+        expect(unknown_payload).to_contain("producer-gap")
+        expect(unknown_payload).to_contain(owner.capture.epoch_history_digest)
+        expect(build_runner_scv_managed_restore_error_v1(unknown)).to_equal("scv-managed-capture-not-initial")
+        var reconciled = owner
+        reconciled.capture = scv_build_capture_reconcile_v1(unknown.capture, owner.snapshot.universe, owner.snapshot.entries, "epoch-B").unwrap()
+        val reconciled_payload = build_runner_scv_managed_record_v1(sha256_text("session"), {"compile": reconciled}, {})
+        expect(reconciled_payload).to_contain("epoch-A")
+        expect(reconciled_payload).to_contain(reconciled.capture.epoch_history_digest)
+        expect(build_runner_scv_managed_restore_error_v1(reconciled)).to_equal("scv-managed-capture-not-initial")
+        expect(scv_build_capture_reconcile_v1(reconciled.capture, owner.snapshot.universe, owner.snapshot.entries, "epoch-A").is_err()).to_equal(true)
+
+    it "allows scheduler retries only after every other task field still matches":
+        val owner = build_runner_scv_managed_construct_v1(setup_managed_task(), setup_managed_context(), setup_managed_entries(), "epoch").unwrap()
+        var retry = setup_managed_task()
+        retry.attempt = retry.attempt + 1
+        expect(build_runner_scv_managed_identity_error_v1(owner, retry)).to_equal("")
+        retry.args.push("--unexpected")
+        expect(build_runner_scv_managed_identity_error_v1(owner, retry)).to_equal("scv-managed-task-identity-differs")

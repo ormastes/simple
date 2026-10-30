@@ -1,0 +1,277 @@
+"""Pinned declared-input bridge; no physical or semantic completeness claim.
+
+The production entrypoint is open_v1, after the source admission owner binds
+the compiler inventory. construct_v1 is a logical value constructor only.
+All scheduler/cache/resume/verify paths retain the source-only admission.
+"""
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, builder_task_identity_v1, builder_digest_valid_v1}
+use app.bootstrap_builder.link_inputs.{builder_regular_input_parents_safe_v1}
+use app.bootstrap_builder.worker.{builder_worker_environment_digest_v1}
+use std.scv.snapshot_v1_adapter.{CompileSnapshotV1Adapter}
+use std.scv.snapshot_v2.{scv_snapshot_file_index_v2, scv_snapshot_copy_bytes_v2}
+use std.scv.build_capture_v1.{BuildInputEntryV1, BuildInputUniverseV1, BuildFrozenSnapshotV1,
+    BuildCaptureStateV1, ScvBuildCursorV1, scv_build_path_policy_digest_v1,
+    scv_build_capture_open_v1, scv_build_freeze_v1, scv_build_capture_unknown_v1}
+use std.scv.build_change_feed_v1.{ScvBuildChangeFeedV1, scv_build_feed_new_v1,
+    scv_build_feed_subscribe_v1, scv_build_feed_poll_v1}
+use std.scv.build_derivations_v1.{ScvBuildGraphStateV1, scv_build_graph_empty_v1, scv_build_graph_valid_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use app.io.file_ops.{file_read_regular_no_follow_bounded_bytes, file_read_regular_no_follow_bounded,
+    file_hash_sha256, file_is_regular_no_follow, file_exists, file_write_bytes, secure_temp_dir, file_atomic_write}
+use app.io.dir_ops.{dir_create_all}
+
+pub struct BuildRunnerScvManagedV1:
+    task_identity: text
+    task_attempt: i64
+    capture: BuildCaptureStateV1
+    snapshot: BuildFrozenSnapshotV1
+    feed: ScvBuildChangeFeedV1
+    graph: ScvBuildGraphStateV1
+    staging_root: text
+    unavailable: [text]
+
+pub struct BuildRunnerScvManagedSetV1:
+    tasks: Dict<text, BuildRunnerScvManagedV1>
+    unavailable: Dict<text, text>
+    record_path: text
+    record_payload: text
+    source_session_digest: text
+
+pub fn build_runner_scv_managed_context_error_v1(context: BuildRunnerTaskContextV1) -> text:
+    if context.target_layout_digest == "" and context.configuration_digest == "":
+        return "scv-managed-target-and-configuration-unavailable"
+    for digest in [context.target_layout_digest, context.configuration_digest,
+            context.runtime_digest, context.policy_digest, context.environment_digest]:
+        if not builder_digest_valid_v1(digest): return "scv-managed-context-invalid"
+    ""
+
+# Retry attempts share one capture epoch, but unrelated task subjects cannot.
+pub fn build_runner_scv_managed_epoch_v1(task: BuildTaskV1) -> Result<text, text>:
+    if builder_task_identity_v1(task) == "": return Err("scv-managed-task-invalid")
+    var canonical = task
+    canonical.attempt = 1
+    val identity = builder_task_identity_v1(canonical)
+    if identity == "": return Err("scv-managed-task-invalid")
+    Ok("buildrunner-declared-inputs-v1-" + identity)
+
+# Logical construction alone never grants observation or compiler authority.
+pub fn build_runner_scv_managed_construct_v1(task: BuildTaskV1, context: BuildRunnerTaskContextV1,
+        entries: [BuildInputEntryV1], epoch: text) -> Result<BuildRunnerScvManagedV1, text>:
+    val refusal = build_runner_scv_managed_context_error_v1(context)
+    if refusal != "": return Err(refusal)
+    val task_identity = builder_task_identity_v1(task)
+    if task_identity == "": return Err("scv-managed-task-invalid")
+    if not builder_digest_valid_v1(task.producer_digest): return Err("scv-managed-compiler-digest-invalid")
+    if task.links.len() != 0: return Err("scv-managed-links-unavailable")
+    if entries.len() != task.inputs.len(): return Err("scv-managed-input-set-differs")
+    var scopes: [text] = []
+    for input in task.inputs:
+        if scopes.contains(input.path): return Err("scv-managed-input-duplicate")
+        scopes.push(input.path)
+        var found = false
+        for entry in entries:
+            if entry.path != input.path: continue
+            if found: return Err("scv-managed-input-duplicate")
+            found = true
+            if entry.kind != "regular" or entry.mode != 420: return Err("scv-managed-entry-kind-unavailable")
+            if not ["committed", "configuration", "worktree"].contains(entry.origin):
+                return Err("scv-managed-producer-receipt-unavailable")
+            if sha256_u8_hex(entry.bytes) != input.digest: return Err("scv-managed-input-digest-differs")
+        if not found: return Err("scv-managed-input-missing:" + input.path)
+    val universe = BuildInputUniverseV1(namespace: "managed-build-inputs-v1",
+        path_policy_digest: scv_build_path_policy_digest_v1(), complete_scopes: scopes,
+        configuration_digest: context.configuration_digest, target_digest: context.target_layout_digest,
+        compiler_digest: task.producer_digest, runtime_digest: context.runtime_digest,
+        environment_digest: context.environment_digest, external_roots: [])
+    val capture = scv_build_capture_open_v1(universe, entries, epoch)?
+    val snapshot = scv_build_freeze_v1(capture, capture.cursor)?
+    val feed = scv_build_feed_subscribe_v1(scv_build_feed_new_v1(snapshot, 64)?, task.id, snapshot.cursor)?
+    # No consumer manifest/receipt is fabricated from a successful task result.
+    val graph = scv_build_graph_empty_v1(snapshot.snapshot_id)?
+    Ok(BuildRunnerScvManagedV1(task_identity: task_identity, task_attempt: task.attempt, capture: capture,
+        snapshot: snapshot, feed: feed, graph: graph, staging_root: "",
+        unavailable: ["editor-overlays", "generated-producer-receipts", "external-producer-receipts",
+            "physical-file-modes", "physical-path-aliases", "filesystem-event-coverage",
+            "compiler-semantic-producer"]))
+
+pub fn build_runner_scv_managed_check_v1(owner: BuildRunnerScvManagedV1,
+        acknowledged: ScvBuildCursorV1) -> Result<text, text>:
+    val refusal = build_runner_scv_managed_restore_error_v1(owner)
+    if refusal != "": return Err(refusal)
+    val frozen = scv_build_freeze_v1(owner.capture, acknowledged)?
+    if frozen.snapshot_id != owner.snapshot.snapshot_id: return Err("scv-managed-pinned-snapshot-differs")
+    val delta = scv_build_feed_poll_v1(owner.feed, acknowledged)
+    if (delta.status != "CompleteDelta" or delta.from_snapshot_id != frozen.snapshot_id or
+            delta.to_snapshot_id != frozen.snapshot_id or delta.events.len() != 0 or
+            delta.changes.len() != 0 or delta.membership_changed or delta.universe_changed):
+        return Err("scv-managed-feed-not-pinned:" + delta.status)
+    if not scv_build_graph_valid_v1(owner.graph) or owner.graph.snapshot_id != frozen.snapshot_id:
+        return Err("scv-managed-graph-subject-differs")
+    Ok(frozen.snapshot_id)
+
+# This first production profile owns a fixed declared-input set, not a watcher
+# journal. It refuses all advanced/reconciled histories instead of resetting
+# their barriers on reopen. A future real producer must supply durable replay.
+pub fn build_runner_scv_managed_restore_error_v1(owner: BuildRunnerScvManagedV1) -> text:
+    if (owner.capture.unknown_reason != "" or owner.capture.cursor.sequence != 0 or
+            owner.capture.applied_sequence != 0 or owner.capture.pending.len() != 0 or
+            owner.capture.retired_epochs.len() != 0): return "scv-managed-capture-not-initial"
+    if (owner.feed.events.len() != 0 or owner.feed.floor_cursor.sequence != 0 or
+            owner.feed.floor_cursor.epoch != owner.snapshot.cursor.epoch or
+            owner.feed.floor_snapshot_id != owner.snapshot.snapshot_id): return "scv-managed-feed-not-initial"
+    if (owner.graph.manifests.len() != 0 or owner.graph.attempts.len() != 0 or
+            owner.graph.attempt_history.len() != 0 or owner.graph.receipts.len() != 0):
+        return "scv-managed-semantic-producer-unavailable"
+    ""
+
+pub fn build_runner_scv_managed_identity_error_v1(owner: BuildRunnerScvManagedV1, task: BuildTaskV1) -> text:
+    if task.attempt < owner.task_attempt: return "scv-managed-task-identity-differs"
+    var canonical = task
+    canonical.attempt = owner.task_attempt
+    if builder_task_identity_v1(canonical) != owner.task_identity: return "scv-managed-task-identity-differs"
+    ""
+
+pub fn build_runner_scv_managed_unknown_v1(owner: BuildRunnerScvManagedV1,
+        reason: text) -> BuildRunnerScvManagedV1:
+    var unknown = owner
+    unknown.capture = scv_build_capture_unknown_v1(owner.capture, reason)
+    unknown
+
+fn build_runner_scv_managed_parent_v1(path: text) -> text:
+    val parts = path.split("/")
+    var parent = ""
+    var index = 0
+    while index + 1 < parts.len():
+        if index > 0: parent = parent + "/"
+        parent = parent + parts[index]
+        index = index + 1
+    parent
+
+# The newly claimed private root has no untrusted preexisting children. Never
+# rewrite a retained tree; transport rehashes every copied input before launch.
+fn build_runner_scv_managed_stage_v1(owner: BuildRunnerScvManagedV1, state_root: text,
+        task: BuildTaskV1) -> Result<BuildRunnerScvManagedV1, text>:
+    val root = secure_temp_dir(state_root, "scv-managed")?
+    for entry in owner.snapshot.entries:
+        val parent = build_runner_scv_managed_parent_v1(entry.path)
+        if parent != "" and not dir_create_all(root + "/" + parent): return Err("scv-managed-staging-parent-failed")
+        if not file_write_bytes(root + "/" + entry.path, entry.bytes): return Err("scv-managed-staging-write-failed")
+    if not builder_regular_input_parents_safe_v1(task, root): return Err("scv-managed-staging-path-unsafe")
+    for input in task.inputs:
+        val bytes = file_read_regular_no_follow_bounded_bytes(root + "/" + input.path, 16777216)?
+        if sha256_u8_hex(bytes) != input.digest: return Err("scv-managed-staging-digest-differs")
+    var staged = owner
+    staged.staging_root = root
+    Ok(staged)
+
+pub fn build_runner_scv_managed_open_v1(task: BuildTaskV1, context: BuildRunnerTaskContextV1,
+        adapter: CompileSnapshotV1Adapter, source_paths: [text], checkout: text,
+        state_root: text) -> Result<BuildRunnerScvManagedV1, text>:
+    if not builder_regular_input_parents_safe_v1(task, checkout): return Err("scv-managed-live-path-unsafe")
+    # Compiler bytes below were already independently bound by source admission.
+    # Ordinary inputs are read without following links and checked against the
+    # actual task, including the exact authenticated V2 context payload.
+    var entries: [BuildInputEntryV1] = []
+    for input in task.inputs:
+        var bytes: [u8] = []
+        var origin = "worktree"
+        var producer = input.digest
+        if source_paths.contains(input.path):
+            val index = scv_snapshot_file_index_v2(adapter.snapshot, input.path)
+            if index < 0: return Err("scv-managed-source-input-missing")
+            bytes = scv_snapshot_copy_bytes_v2(adapter.snapshot.files[index].bytes)
+            origin = "worktree"
+            producer = adapter.legacy.inventory_digest
+        else:
+            bytes = file_read_regular_no_follow_bounded_bytes(checkout + "/" + input.path, 16777216)?
+            if input.path == "task-context/" + task.id + ".sdn": origin = "configuration"
+        entries.push(BuildInputEntryV1(path: input.path, kind: "regular", mode: 420,
+            bytes: bytes, origin: origin, producer_digest: producer))
+    var program = task.program
+    if not program.starts_with("/") and not program.contains(":"): program = checkout + "/" + program
+    if not file_is_regular_no_follow(program) or file_hash_sha256(program) != task.producer_digest:
+        return Err("scv-managed-compiler-digest-differs")
+    if builder_worker_environment_digest_v1()? != context.environment_digest: return Err("scv-managed-environment-differs")
+    val epoch = build_runner_scv_managed_epoch_v1(task)?
+    val owner = build_runner_scv_managed_construct_v1(task, context, entries, epoch)?
+    build_runner_scv_managed_stage_v1(owner, state_root, task)
+
+pub fn build_runner_scv_managed_record_v1(source_session_digest: text,
+        tasks: Dict<text, BuildRunnerScvManagedV1>, unavailable: Dict<text, text>) -> text:
+    var task_values: Dict<text, SdnValue> = {}
+    for id in tasks.keys():
+        val owner = tasks[id]
+        var missing: [SdnValue] = []
+        for domain in owner.unavailable: missing.push(SdnValue.String(domain))
+        var retired: [SdnValue] = []
+        for epoch in owner.capture.retired_epochs: retired.push(SdnValue.String(epoch))
+        var event_ids: [SdnValue] = []
+        for event in owner.feed.events: event_ids.push(SdnValue.String(event.event_id))
+        var validation_error = ""
+        match build_runner_scv_managed_check_v1(owner, owner.snapshot.cursor):
+            case Ok(_): ()
+            case Err(reason): validation_error = reason
+        task_values[id] = SdnValue.Dict({"snapshot_id": SdnValue.String(owner.snapshot.snapshot_id),
+            "task_identity": SdnValue.String(owner.task_identity),
+            "task_attempt": SdnValue.Int(owner.task_attempt),
+            "validation_error": SdnValue.String(validation_error),
+            "epoch": SdnValue.String(owner.snapshot.cursor.epoch), "sequence": SdnValue.Int(owner.snapshot.cursor.sequence),
+            "capture_epoch": SdnValue.String(owner.capture.cursor.epoch),
+            "capture_sequence": SdnValue.Int(owner.capture.cursor.sequence),
+            "capture_unknown_reason": SdnValue.String(owner.capture.unknown_reason),
+            "retired_epochs": SdnValue.Array(retired),
+            "epoch_history_digest": SdnValue.String(owner.capture.epoch_history_digest),
+            "feed_floor_snapshot": SdnValue.String(owner.feed.floor_snapshot_id),
+            "feed_floor_epoch": SdnValue.String(owner.feed.floor_cursor.epoch),
+            "feed_floor_sequence": SdnValue.Int(owner.feed.floor_cursor.sequence),
+            "feed_event_ids": SdnValue.Array(event_ids),
+            "graph_root": SdnValue.String(owner.graph.root_id), "unavailable": SdnValue.Array(missing)})
+    var unavailable_values: Dict<text, SdnValue> = {}
+    for id in unavailable.keys(): unavailable_values[id] = SdnValue.String(unavailable[id])
+    sdn_encode_canonical(SdnValue.Dict({"schema_version": SdnValue.Int(1),
+        "source_session_digest": SdnValue.String(source_session_digest), "tasks": SdnValue.Dict(task_values),
+        "unavailable": SdnValue.Dict(unavailable_values), "source_only": SdnValue.Bool(true),
+        "physical_filesystem_complete": SdnValue.Bool(false), "full_artifact_authorized": SdnValue.Bool(false)})) + "\n"
+
+pub fn build_runner_scv_managed_retain_v1(source_payload: text, tasks: Dict<text, BuildRunnerScvManagedV1>,
+        unavailable: Dict<text, text>, state_root: text, require_existing: bool) -> Result<BuildRunnerScvManagedSetV1, text>:
+    val path = state_root + "/scv-managed-session.sdn"
+    val payload = build_runner_scv_managed_record_v1(sha256_text(source_payload), tasks, unavailable)
+    for id in tasks.keys():
+        val refusal = build_runner_scv_managed_restore_error_v1(tasks[id])
+        if refusal != "":
+            # Persist the poison before refusal. A later fresh capture must not
+            # silently erase a known gap or retired epoch through reconstruction.
+            if not file_atomic_write(path, payload): return Err("scv-managed-gap-persist-failed")
+            return Err(refusal)
+    if file_exists(path):
+        if file_read_regular_no_follow_bounded(path, 1048576)? != payload: return Err("scv-managed-retained-subject-differs")
+    elif require_existing: return Err("scv-managed-retained-binding-missing")
+    elif not file_atomic_write(path, payload): return Err("scv-managed-binding-publish-failed")
+    Ok(BuildRunnerScvManagedSetV1(tasks: tasks, unavailable: unavailable,
+        record_path: path, record_payload: payload, source_session_digest: sha256_text(source_payload)))
+
+pub fn build_runner_scv_managed_task_error_v1(owners: BuildRunnerScvManagedSetV1, task: BuildTaskV1) -> text:
+    match file_read_regular_no_follow_bounded(owners.record_path, 1048576):
+        case Ok(payload):
+            if payload != owners.record_payload: return "scv-managed-session-binding-changed"
+        case Err(_): return "scv-managed-session-binding-unavailable"
+    if not owners.tasks.contains_key(task.id):
+        if owners.unavailable.contains_key(task.id): return ""
+        return "scv-managed-task-not-bound"
+    val owner = owners.tasks[task.id]
+    val identity_error = build_runner_scv_managed_identity_error_v1(owner, task)
+    if identity_error != "": return identity_error
+    val checked = build_runner_scv_managed_check_v1(owner, owner.snapshot.cursor)
+    if checked.is_err():
+        val poison = build_runner_scv_managed_record_v1(owners.source_session_digest, owners.tasks, owners.unavailable)
+        if not file_atomic_write(owners.record_path, poison): return "scv-managed-gap-persist-failed"
+        return checked.unwrap_err()
+    if not builder_regular_input_parents_safe_v1(task, owner.staging_root): return "scv-managed-staging-path-unsafe"
+    for input in task.inputs:
+        if file_hash_sha256(owner.staging_root + "/" + input.path) != input.digest:
+            return "scv-managed-staging-input-changed:" + input.path
+    ""

@@ -5,11 +5,12 @@ an isolated miniature checkout; no compiler, native builder or worker executes.
 """
 use std.spec.{describe, it, expect, step}
 use app.buildrunner.scv_session_v1.{build_runner_scv_session_open_v1, build_runner_scv_task_error_v1}
+use app.buildrunner.scv_managed_session_v1.{build_runner_scv_managed_unknown_v1, build_runner_scv_managed_record_v1}
 use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1}
 use app.bootstrap_builder.worker.{builder_worker_environment_digest_v1}
 use app.bootstrap_builder.cli_args.{BuilderCliV1}
 use app.bootstrap_builder.contracts.{BuildRunV1, BuildInputV1, BuildHostV1}
-use app.io.file_ops.{secure_temp_dir_raw, file_atomic_write, file_read, file_hash_sha256}
+use app.io.file_ops.{secure_temp_dir_raw, file_atomic_write, file_read, file_hash_sha256, file_exists, file_remove}
 use app.io.dir_ops.{dir_create_all}
 use app.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
@@ -18,7 +19,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{compile_source_inventory_apply_and_publish_v1, compile_source_inventory_git_event_v1, compile_source_inventory_read_current_v1}
 use test.fixtures.buildrunner.scv_cli_fixture_v1.{setup_scv_cli_task_v1, setup_scv_cli_plan_v1}
 
-fn setup_scv_source_session_fixture() -> (text, BuildRunV1, BuilderCliV1, text):
+fn setup_scv_source_session_fixture(managed: bool = false) -> (text, BuildRunV1, BuilderCliV1, text):
     expect(env_get("SIMPLE_LIB") ?? "").to_equal("src")
     val root = secure_temp_dir_raw("/tmp", "buildrunner-scv-session-")
     expect(root.len()).to_be_greater_than(0)
@@ -30,8 +31,12 @@ fn setup_scv_source_session_fixture() -> (text, BuildRunV1, BuilderCliV1, text):
     for args in [["init", "-q"], ["add", "src"], ["-c", "user.name=SCV fixture", "-c", "user.email=scv@example.invalid", "commit", "-qm", "source fixture"]]:
         expect(sosix_run("git", ["-C", checkout] + args).exit_code).to_equal(0)
     val digest = sha256_text("fixture")
-    val context = build_runner_context_encode_v1(BuildRunnerTaskContextV1(backend: "llvm",
-        runtime_digest: digest, policy_digest: digest, environment_digest: builder_worker_environment_digest_v1().unwrap())).unwrap()
+    var subject = BuildRunnerTaskContextV1(backend: "llvm", runtime_digest: digest,
+        policy_digest: digest, environment_digest: builder_worker_environment_digest_v1().unwrap())
+    if managed:
+        subject.target_layout_digest = sha256_text("fixture-target-layout")
+        subject.configuration_digest = sha256_text("fixture-configuration")
+    val context = build_runner_context_encode_v1(subject).unwrap()
     expect(file_atomic_write(checkout + "/task-context/compile.sdn", context)).to_equal(true)
     var task = setup_scv_cli_task_v1()
     task.producer_digest = file_hash_sha256(checkout + "/tools/compiler")
@@ -47,6 +52,58 @@ fn setup_scv_source_session_fixture() -> (text, BuildRunV1, BuilderCliV1, text):
     (root, run, config, plan)
 
 describe "BuildRunner captures one actual frozen source session":
+    it "replays pinned initialization intent after actual managed compiler admission fails":
+        step("setup: prepare a managed task and substitute its physical compiler image")
+        val (root, run, config, plan) = setup_scv_source_session_fixture(true)
+        val compiler = config.source_root + "/tools/compiler"
+        val image = file_read(compiler)
+        expect(file_atomic_write(compiler, "substituted-image\n")).to_equal(true)
+        step("exercise: fail the first open after its immutable source intent is retained")
+        val failed = build_runner_scv_session_open_v1(run, config, plan, false)
+        expect(failed.unwrap_err()).to_equal("scv-managed-compiler-digest-differs")
+        val source_record = config.state + "/scv-session.sdn"
+        val managed_record = config.state + "/scv-managed-session.sdn"
+        expect(file_exists(source_record)).to_equal(true)
+        expect(file_exists(managed_record)).to_equal(false)
+        val intent = file_read(source_record)
+        step("assert: restore the exact image and complete the same pinned source session")
+        expect(file_atomic_write(compiler, image)).to_equal(true)
+        val recovered = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        expect(recovered.record_payload).to_equal(intent)
+        expect(recovered.managed.tasks.contains_key("compile")).to_equal(true)
+        expect(build_runner_scv_task_error_v1(Some(recovered), run.tasks[0], config.source_root)).to_equal("")
+        val reopened = build_runner_scv_session_open_v1(run, config, plan, true).unwrap().unwrap()
+        expect(reopened.managed.record_payload).to_equal(recovered.managed.record_payload)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "requires retained managed bindings for verification and journaled recovery":
+        step("setup: capture a real managed session then remove its retained managed record")
+        val (root, run, config, plan) = setup_scv_source_session_fixture(true)
+        val first = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        expect(file_remove(first.managed.record_path)).to_equal(true)
+        step("assert: verification cannot reconstruct a missing managed binding")
+        expect(build_runner_scv_session_open_v1(run, config, plan, true).unwrap_err()).to_equal("scv-managed-retained-binding-missing")
+        expect(file_exists(first.managed.record_path)).to_equal(false)
+        step("assert: any scheduler journal also prevents initialization replay")
+        expect(file_atomic_write(config.state + "/journal.sdn", "interrupted scheduler state\n")).to_equal(true)
+        expect(build_runner_scv_session_open_v1(run, config, plan, false).unwrap_err()).to_equal("scv-managed-retained-binding-missing")
+        expect(file_exists(first.managed.record_path)).to_equal(false)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "preserves an existing poisoned managed record during unjournaled initialization replay":
+        step("setup: capture a real managed session and retain a different gap record")
+        val (root, run, config, plan) = setup_scv_source_session_fixture(true)
+        val first = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        var tasks = first.managed.tasks
+        tasks["compile"] = build_runner_scv_managed_unknown_v1(tasks["compile"], "retained-producer-gap")
+        val poisoned = build_runner_scv_managed_record_v1(first.managed.source_session_digest, tasks, first.managed.unavailable)
+        expect(poisoned).to_contain("retained-producer-gap")
+        expect(file_atomic_write(first.managed.record_path, poisoned)).to_equal(true)
+        step("assert: replay refuses the gap and preserves the durable bytes")
+        expect(build_runner_scv_session_open_v1(run, config, plan, false).unwrap_err()).to_equal("scv-managed-retained-subject-differs")
+        expect(file_read(first.managed.record_path)).to_equal(poisoned)
+        expect(dir_remove_all(root)).to_equal(true)
+
     it "reopens the saved immutable inventory pointer after CURRENT advances":
         step("setup: prepare a real tiny checkout and exact task input context")
         val (root, run, config, plan) = setup_scv_source_session_fixture()
