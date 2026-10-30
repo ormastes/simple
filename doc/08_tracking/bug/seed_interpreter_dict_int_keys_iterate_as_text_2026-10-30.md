@@ -50,10 +50,15 @@ helpers and read the map raw. There are about 170 `Value::Dict(` match sites in
 readers that would start leaking `(__dict_entry__, k, v)` tuples for int-keyed
 dicts:
 
-- `interpreter_extern/sffi_dict.rs`: `rt_dict_get_fn` (`map.get(key)` raw),
-  `rt_dict_values_fn` (raw values), `rt_dict_keys_fn` (raw string keys)
+- `interpreter_extern/sffi_dict.rs`: `rt_dict_values_fn` (returns raw stored
+  values)
 - `runtime_bridge.rs` `values_to_runtime_dict` (marshals stored values raw to
   the native runtime)
+Related, though not a tuple leak: `rt_dict_keys_fn` returns raw string keys,
+which is the same text-key defect as `keys()`. `rt_dict_get_fn` looks a key up
+with `as_text_str()`, so it cannot read Int keys at all, either now or after
+wrapping.
+
 Not yet audited: `interpreter_module/module_loader.rs` (16 `Value::Dict(`
 sites), `module_cache.rs` (12), `interpreter_call/*`, `value_bridge.rs`,
 `di.rs`, and others. None of them call the helpers. Some may only build dicts
@@ -76,6 +81,10 @@ a bootstrap perf check, not a one-line seed fix.
    rerun the spec above.
 3. Measure a stage-2 native-build (or `test/01_unit/compiler`) wall time and
    RSS before and after step 2.
+
+Do not parse the string key back into an int in `dict_entry_key_for_iteration`.
+`to_key_string()` maps Int `7` and text `"7"` to the same slot, so parsing back
+cannot tell them apart. The wrap approach also leaves that collision.
 
 A cheaper alternative needs a design decision: a typed key enum in place of
 `String` in the backing map. That touches every `Value::Dict` site.
