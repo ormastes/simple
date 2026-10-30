@@ -125,3 +125,49 @@ fn daemon_response_to_test_result(resp: DaemonResponse) -> TestResult:
         output: resp.fields["output"] ?? "",
         cached: resp.fields["cached"] ?? "" == "true"
     )
+
+# ============================================================================
+# Per-request MC/DC mode (the CLIENT's resolved mode, never the daemon's env)
+# ============================================================================
+#
+# A daemon-run child used to inherit the DAEMON's environment, so a daemon
+# started with SIMPLE_MCDC_MODE=off plus a valid waiver kept MC/DC off for
+# every later client, waiver or not. The client resolves its own mode
+# (apply_mcdc_mode_env, which already refused invalid-off with exit 2) and
+# sends it here; the daemon applies exactly that to each child.
+# Fail closed both ways: a request without the field (old client) runs with
+# MC/DC on and no waiver, and a response without the echoed mode (old daemon)
+# is rejected by the client.
+
+val TEST_DAEMON_MCDC_WAIVER_VARS: [text] = [
+    "SIMPLE_MCDC_OFF_WAIVER_REASON", "SIMPLE_MCDC_OFF_WAIVER_REVIEWER",
+    "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", "SIMPLE_MCDC_OFF_WAIVER_VERSION"]
+
+fn test_request_set_mcdc(req: DaemonRequest, mode: text, waivers: [text]) -> DaemonRequest:
+    var out = req
+    out.fields["mcdc_mode"] = mode
+    var i = 0
+    while i < TEST_DAEMON_MCDC_WAIVER_VARS.len():
+        out.fields["mcdc_waiver_{i}"] = if mode == "off" and i < waivers.len(): waivers[i] else: ""
+        i = i + 1
+    out
+
+fn test_request_mcdc_mode(fields: {text: text}) -> text:
+    val mode = fields["mcdc_mode"] ?? ""
+    if mode == "off" or mode == "dynamic": mode else: "on"
+
+fn _test_daemon_shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+# Shell prefix that pins the child's MC/DC environment to the request,
+# overriding whatever the daemon inherited. Waivers travel only with "off".
+fn test_daemon_mcdc_child_env_prefix(fields: {text: text}) -> text:
+    val mode = test_request_mcdc_mode(fields)
+    var parts: [text] = ["SIMPLE_MCDC_MODE=" + _test_daemon_shell_quote(mode),
+        "SIMPLE_MCDC_MODE_ERROR="]
+    var i = 0
+    while i < TEST_DAEMON_MCDC_WAIVER_VARS.len():
+        val value = if mode == "off": fields["mcdc_waiver_{i}"] ?? "" else: ""
+        parts.push(TEST_DAEMON_MCDC_WAIVER_VARS[i] + "=" + _test_daemon_shell_quote(value))
+        i = i + 1
+    parts.join(" ")

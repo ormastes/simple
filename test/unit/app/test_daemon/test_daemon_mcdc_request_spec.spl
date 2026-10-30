@@ -1,0 +1,91 @@
+"""
+## Purpose and audience
+
+For test-runner maintainers: a session-daemon child must run with the MC/DC
+mode the CLIENT resolved, never the mode frozen into the daemon's own
+environment. A daemon started with `SIMPLE_MCDC_MODE=off` plus a valid waiver
+must not switch MC/DC off for a later client that supplied no waiver.
+
+## Operator workflow
+
+Run `bin/simple test test/unit/app/test_daemon/test_daemon_mcdc_request_spec.spl`
+with `SIMPLE_BINARY` naming the binary under test, and confirm 0 failed.
+
+## Compatibility and limitations
+
+The generic SDK test daemon has no CLI launcher in this build, so the
+acceptance scenarios replay the daemon's exact child command (the
+`execute_test` env prefix plus `test <spec> --no-session-daemon`) under a
+parent environment carrying the daemon's off-waiver, rather than starting a
+daemon process. No daemon is left running.
+
+## Recovery and troubleshooting
+
+If the acceptance scenarios fail, run the printed command by hand and read the
+`MC/DC: mode=` line of the child output.
+"""
+# @req REQ-MCDC-DAEMON-ENV-001
+use std.spec
+use std.io_runtime.{env_get}
+use app.io.process_ops.{process_run}
+use std.daemon_sdk.types.{daemon_request_new}
+use app.test_daemon.types.{test_request_set_mcdc, test_request_mcdc_mode, test_daemon_mcdc_child_env_prefix}
+
+val WAIVER = ["reviewed reason", "rev", "R-1", "1"]
+val DAEMON_ENV = "export SIMPLE_MCDC_MODE=off SIMPLE_MCDC_OFF_WAIVER_REASON=daemon SIMPLE_MCDC_OFF_WAIVER_REVIEWER=daemon SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID=D-1 SIMPLE_MCDC_OFF_WAIVER_VERSION=1;"
+val FIXTURE = "test/fixtures/test_runner_mcdc/quick_fixture.spl"
+
+fn child_output(fields: {text: text}) -> (text, i64):
+    val bin = env_get("SIMPLE_BINARY") ?? "bin/simple"
+    val cmd = "{DAEMON_ENV} {test_daemon_mcdc_child_env_prefix(fields)} SIMPLE_BINARY={bin} {bin} test {FIXTURE} --no-session-daemon 2>&1"
+    val (out, err, code) = process_run("/bin/sh", ["-c", cmd])
+    (out + err, code)
+
+fn client_fields(mode: text, waivers: [text]) -> {text: text}:
+    test_request_set_mcdc(daemon_request_new(1), mode, waivers).fields
+
+describe "session daemon request carries the client's MC/DC mode":
+    it "encodes the mode and sends waiver atoms only for off":
+        step("Verify an on-request carries no waiver even if one is passed")
+        val on_fields = client_fields("on", WAIVER)
+        expect(on_fields["mcdc_mode"] ?? "").to_equal("on")
+        expect(on_fields["mcdc_waiver_0"] ?? "x").to_equal("")
+        step("Verify an off-request carries all four waiver atoms")
+        val off_fields = client_fields("off", WAIVER)
+        expect(off_fields["mcdc_mode"] ?? "").to_equal("off")
+        expect(off_fields["mcdc_waiver_2"] ?? "").to_equal("R-1")
+
+    it "treats a request without a mode (old client) as MC/DC on":
+        step("Verify the absent and unknown modes resolve to on")
+        expect(test_request_mcdc_mode({})).to_equal("on")
+        expect(test_request_mcdc_mode({"mcdc_mode": "bogus"})).to_equal("on")
+        expect(test_request_mcdc_mode({"mcdc_mode": "dynamic"})).to_equal("dynamic")
+
+    it "pins every MC/DC variable on the child, blanking daemon waivers":
+        step("Verify the on-prefix overrides mode and clears every waiver")
+        val prefix = test_daemon_mcdc_child_env_prefix({})
+        expect(prefix).to_contain("SIMPLE_MCDC_MODE='on'")
+        expect(prefix).to_contain("SIMPLE_MCDC_OFF_WAIVER_REASON=''")
+        expect(prefix).to_contain("SIMPLE_MCDC_OFF_WAIVER_VERSION=''")
+        step("Verify waiver text is shell-quoted")
+        val quoted = test_daemon_mcdc_child_env_prefix(client_fields("off", ["it's", "a", "b", "c"]))
+        expect(quoted).to_contain("SIMPLE_MCDC_OFF_WAIVER_REASON='it'\\''s'")
+
+describe "daemon child under an off-waiver daemon environment":
+    it "runs MC/DC on for a client that supplied no waiver":
+        step("Run the daemon child command for a no-waiver client")
+        val (out, _code) = child_output(client_fields("on", []))
+        expect(out).to_contain("MC/DC: mode=on")
+
+    it "runs MC/DC off for a client with its own waiver":
+        step("Run the daemon child command for a waived off client")
+        val (out, code) = child_output(client_fields("off", WAIVER))
+        expect(out).to_contain("PASS")
+        assert_false(out.contains("MC/DC: mode=on"))
+        expect(code).to_equal(0)
+
+    it "refuses with exit 2 for an off client without a waiver":
+        step("Run the daemon child command for an invalid-off client")
+        val (out, code) = child_output(client_fields("off", []))
+        expect(code).to_equal(2)
+        expect(out).to_contain("SIMPLE_MCDC_MODE=off is refused")
