@@ -905,6 +905,12 @@ use std.io_runtime.{getpid}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 extern fn rt_stderr_flush()
 
+fn _is_shebang_script(path: text) -> bool:
+    if path.lower().ends_with(".exe") or not file_exists(path):
+        return false
+    # Whole read: a positioned read reports ENOSYS (-38) on the Windows seed.
+    file_read_text(path).starts_with("#!")
+
 pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
     # Test suites spawn POSIX tools by absolute path ("/bin/sh" 2000+, plus
     # /bin/echo, /usr/bin/grep, ...). Those paths do not exist on Windows;
@@ -917,6 +923,17 @@ pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
     if not _is_windows_platform():
         return (cmd, args)
     val unix = cmd.replace("\\", "/")
+    # CreateProcess only runs PE images, so an existing shebang script (a .shs
+    # fixture, or an extensionless wrapper like bin/caret) needs its interpreter
+    # named. A missing script passes through and fails at spawn.
+    if _is_shebang_script(cmd):
+        val script_shell = _windows_posix_shell_path()
+        if script_shell == "cmd.exe":
+            return (cmd, args)
+        var script_args: [text] = [cmd]
+        for a in args:
+            script_args = script_args.push(a)
+        return (script_shell, script_args)
     if not unix.starts_with("/bin/") and not unix.starts_with("/usr/bin/"):
         return (cmd, args)
     val parts = unix.split("/")
@@ -2534,8 +2551,10 @@ fn process_pid_exists(pid: i64) -> bool:
     # pids (piped children process_is_running cannot observe).
     if pid <= 0:
         return false
-    if _process_exists_raw(pid):
+    if process_exists(pid):
         return true
+    if _is_windows_platform():
+        return false
     val probe = process_run("/bin/ps", ["-p", pid.to_text()])
     probe.2 == 0
 

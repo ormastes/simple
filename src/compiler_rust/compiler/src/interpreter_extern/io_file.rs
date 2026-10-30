@@ -63,11 +63,19 @@ unsafe fn with_fd<T>(_fd: i64, default: T, _f: impl FnOnce(&mut File) -> T) -> T
 /// text and close reported false on a valid descriptor).
 #[cfg(windows)]
 unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
-    if fd <= 0 {
-        return default;
-    }
-    use std::os::windows::io::{FromRawHandle, IntoRawHandle};
-    let mut file = File::from_raw_handle(fd as *mut std::ffi::c_void);
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
+    // Descriptors 0..2 are the inherited standard streams, not HANDLE values.
+    let handle = match fd {
+        0 => std::io::stdin().as_raw_handle(),
+        1 => {
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::io::stdout().as_raw_handle()
+        }
+        2 => std::io::stderr().as_raw_handle(),
+        _ if fd < 0 => return default,
+        _ => fd as *mut std::ffi::c_void,
+    };
+    let mut file = File::from_raw_handle(handle);
     let out = f(&mut file);
     let _ = file.into_raw_handle();
     out

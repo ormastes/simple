@@ -1,0 +1,42 @@
+# @tag: unit, browser_engine
+"""
+Regression: fractional box admission reads authored geometry and transform
+identity from Style, but those fields did not exist, so any HTML lowered through
+Draw IR failed with `class Style has no field named box_geometry_raw_tokens`.
+Asserts both the defaults and that winning declarations are captured.
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{renderer_default_style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.{apply_decls}
+
+describe "Style authored raw fields":
+    it "defaults to no authored geometry and no transform":
+        step("Read a default Style")
+        val st = renderer_default_style()
+        expect(st.box_geometry_raw_tokens.len()).to_equal(0)
+        expect(st.box_geometry_unresolved).to_equal(false)
+        expect(st.fractional_authored_decls.len()).to_equal(0)
+        expect(st.transform_raw).to_equal("none")
+        expect(st.translate_raw).to_equal("none")
+        expect(st.scale_raw).to_equal("none")
+        expect(st.rotate_raw).to_equal("none")
+
+    it "captures winning transform declarations in normal form":
+        step("Apply declarations with a later winner")
+        val st = apply_decls(renderer_default_style(),
+            "transform: none; transform: Rotate(10DEG) ; scale: 2; width: 12.5px", 16)
+        expect(st.transform_raw).to_equal("rotate(10deg)")
+        expect(st.scale_raw).to_equal("2")
+        expect(st.translate_raw).to_equal("none")
+        expect(st.rotate_raw).to_equal("none")
+
+    it "keeps earlier raw values when a later rule does not restate them":
+        step("Merge a second rule over the first")
+        val first = apply_decls(renderer_default_style(), "rotate: 45deg", 16)
+        val second = apply_decls(first, "color: red", 16)
+        expect(second.rotate_raw).to_equal("45deg")
+
+    it "retains authored width beside the integer channel":
+        step("Apply a fractional width")
+        val st = apply_decls(renderer_default_style(), "width: 12.5px", 16)
+        expect(st.box_geometry_raw_tokens).to_contain("width=12.5px")

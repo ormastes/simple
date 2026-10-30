@@ -3555,10 +3555,33 @@ pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
         Ok(Value::Bool(exists))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // Fallback for non-Unix: always return true
-        // This is conservative - assume process might exist
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        if pid <= 0 || pid > u32::MAX as i64 {
+            return Ok(Value::Bool(false));
+        }
+        let exists = unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+            if handle.is_null() {
+                // A live process we may not inspect still exists.
+                GetLastError() == ERROR_ACCESS_DENIED
+            } else {
+                let mut code = 0u32;
+                let queried = GetExitCodeProcess(handle, &mut code) != 0;
+                CloseHandle(handle);
+                queried && code == STILL_ACTIVE as u32
+            }
+        };
+        Ok(Value::Bool(exists))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Fallback for other hosts: assume the process might exist.
         Ok(Value::Bool(true))
     }
 }
