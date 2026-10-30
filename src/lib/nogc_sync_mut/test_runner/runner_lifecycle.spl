@@ -7,7 +7,7 @@
 
 use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, tracker_container_runtime, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
 use std.test_runner.checkpoint.{checkpoint_save}
-use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_spawn_redirected, process_wait, process_kill, process_is_running, process_run_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_spawn_redirected, process_wait, process_kill, process_kill_tree, process_is_running, process_run_bounded}
 use std.nogc_sync_mut.sosix.test_process.{sosix_test_owned_capture, sosix_test_spawn_capture}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_try_acquire, proc_slot_release, proc_slot_reset)
@@ -90,7 +90,10 @@ fn untrack_process(pid: i64):
 fn wait_tracked_process(pid: i64, timeout_ms: i64) -> i64:
     val exit_code = process_wait(pid, timeout_ms)
     if exit_code == -2:
-        val killed = process_kill(pid)
+        # A timed-out test must take everything it started with it. The sosix
+        # plan spawned it as a session leader (or a Windows Job token), so this
+        # reaches the whole tree; for anything else it prints why it cannot.
+        val killed = process_kill_tree(pid)
         if killed or not process_is_running(pid):
             untrack_process(pid)
         return -1

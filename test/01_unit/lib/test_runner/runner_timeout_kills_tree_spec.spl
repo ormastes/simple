@@ -1,0 +1,86 @@
+"""A timed-out test kills everything it started, through the real runner path.
+
+Drives spawn_tracked_test_process + wait_tracked_process (the lib runner used
+by `simple test`) with a child that leaves an ESCAPED grandchild: a `sleep`
+started under job control from a subshell that exits at once. The sleep is
+reparented to init and sits in its own process group, so neither a kill of the
+leader nor a group kill reaches it. Only session ownership does: the sosix plan
+spawns the test as a session leader and the timeout kills every process whose
+session id is the test pid (src/runtime/runtime_process_tree.c).
+
+POSIX hosts only: the child is a /bin/sh script. On Windows the runner's Job
+object (KILL_ON_JOB_CLOSE) is the owner; the example is pending there. On a
+host without a session owner the example is pending with the owner's reason.
+"""
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_kill_tree_support, shell_bool, shell_int}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_delete}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.test_runner.test_runner_async.{create_temp_files, cleanup_temp_files}
+use std.test_runner.runner_lifecycle.{spawn_tracked_test_process, wait_tracked_process}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_owned_capture}
+
+# process_is_running answers only for pids this runner spawned; an escaped
+# grandchild is probed with `kill -0`, which answers for any owned process.
+fn alive(pid: i64) -> bool:
+    shell_bool("kill -0 {pid} 2>/dev/null")
+
+fn wait_until_dead(pid: i64, polls: i64) -> bool:
+    var attempts = 0
+    while attempts < polls and alive(pid):
+        shell_bool("sleep 0.1")
+        attempts = attempts + 1
+    not alive(pid)
+
+fn unsupported_reason() -> text:
+    match process_kill_tree_support():
+        case Ok(_): ""
+        case Err(reason): reason
+
+describe "runner timeout kills the whole tree it started":
+    it "kills an escaped grandchild (own process group, reparented to init) after the timeout":
+        if sosix_test_owned_capture():
+            pending("POSIX-only child script; Windows is owned by the Job object")
+            return
+        val reason = unsupported_reason()
+        if reason != "":
+            pending("no process-tree ownership on this host: {reason}")
+            return
+        dir_create_all("build/test_fixtures")
+        val stamp = time_now_unix_micros()
+        val pidfile = "build/test_fixtures/escaped_{stamp}.pid"
+        val (stdout_path, stderr_path) = create_temp_files("runner_kill_tree", initialize: true)
+        # The subshell runs with job control, so its background sleep gets its
+        # own process group; the subshell then exits and the sleep is orphaned.
+        # The outer exec keeps the test alive until the runner's timeout.
+        val script = "(set -m; sleep 300 & echo $! > \"$1\"); exec sleep 300"
+        val token = spawn_tracked_test_process("/bin/sh", ["-c", script, "escaped", pidfile],
+            stdout_path, stderr_path, 1500)
+        expect(token > 1).to_equal(true)
+
+        var grandchild = 0
+        var attempts = 0
+        while attempts < 50 and grandchild <= 1:
+            shell_bool("sleep 0.1")
+            grandchild = shell_int("cat '{pidfile}' 2>/dev/null", 0)
+            attempts = attempts + 1
+        expect(grandchild > 1).to_equal(true)
+        expect(alive(grandchild)).to_equal(true)
+
+        val started = time_now_unix_micros()
+        val exit_code = wait_tracked_process(token, 1500)
+        val waited_ms = (time_now_unix_micros() - started) / 1000
+        val grandchild_dead = wait_until_dead(grandchild, 30)
+        val leader_dead = wait_until_dead(token, 30)
+
+        # Clean up before asserting so a failure leaves no sleep behind.
+        if not grandchild_dead: shell_bool("kill -KILL {grandchild} 2>/dev/null")
+        if not leader_dead: shell_bool("kill -KILL {token} 2>/dev/null")
+        cleanup_temp_files(stdout_path, stderr_path)
+        if file_exists(pidfile): file_delete(pidfile)
+
+        # One verdict so a failure names what survived. The wait must also
+        # return within budget: no reader may block on a descendant.
+        val verdict = "exit={exit_code} leader_dead={leader_dead} grandchild_dead={grandchild_dead} wait_within_budget={waited_ms < 10000}"
+        expect(verdict).to_equal("exit=-1 leader_dead=true grandchild_dead=true wait_within_budget=true")
