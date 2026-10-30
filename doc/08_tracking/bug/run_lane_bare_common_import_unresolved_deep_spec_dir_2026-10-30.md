@@ -26,16 +26,19 @@ through this resolver.
 
 ## Fix
 `detect_stdlib_root` now climbs until it reaches the existing `.git`/`.jj`
-workspace boundary (or `/` when there is none, same as the interpreter lane),
+workspace boundary (or `/` when there is none; the interpreter lane instead
+keeps a 10-level cap there),
 with no fixed depth cap. On the climb it takes the first
 ancestor's `src/lib` before the other candidates. `find_project_root` is
 unchanged, so fixture projects with their own `src/` keep their roots.
 
 Blast radius: only files whose `project_root` has no stdlib candidate reach the
-climb. Shallow specs in the `gc_sync_mut`/`gc_async_mut`/`nogc_sync_mut` mirrors
-and `test/fixtures/arch_check` now get `src/lib` where they previously got the
-seed snapshot `src/compiler_rust/lib/std/src`. This matches the interpreter lane's
-ordering, and none of them import a seed-only module. Files whose project root
+climb. Shallow specs (four levels below the repo) in the `nogc_async_mut`,
+`gc_sync_mut`, `gc_async_mut` and `nogc_sync_mut` mirrors now get `src/lib` where
+they previously got the seed snapshot `src/compiler_rust/lib/std/src`. That
+matches the interpreter lane's ordering. Deeper files, including
+`test/fixtures/arch_check/src/**` (which imports no `std.*`), previously got no
+stdlib root at all. Files whose project root
 is the repo still go through the unchanged first loop, so seed-first ordering
 there is not addressed here.
 
