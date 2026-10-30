@@ -876,6 +876,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cpuid", simd::rt_cpuid);
     insert_simple!("rt_cpuid_tuple", simd::rt_cpuid);
     insert_simple!("rt_xgetbv", simd::rt_xgetbv);
+    // Host SIMD probes used by simd_capabilities.spl (missing until 2026-10-31:
+    // the seed native-build worker died with `unknown extern function:
+    // rt_is_darwin_arm64`).
+    insert_simple!("rt_getauxval", simd::rt_getauxval);
+    insert_simple!("rt_is_darwin_arm64", simd::rt_is_darwin_arm64);
+    insert_simple!("rt_sysctlbyname_i32", simd::rt_sysctlbyname_i32);
+    insert_simple!("rt_riscv_read_vlenb", simd::rt_riscv_read_vlenb);
+    insert_simple!("rt_riscv_has_v_ext", simd::rt_riscv_has_v_ext);
+    insert_simple!("rt_cuda_sm_version", simd::rt_cuda_sm_version);
     insert_simple!("rt_cargo_build", cargo::rt_cargo_build);
     insert_simple!("rt_cargo_check", cargo::rt_cargo_check);
     insert_simple!("rt_cargo_clean", cargo::rt_cargo_clean);
@@ -1602,6 +1611,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // (same class as the rt_enum_* gap in task #113). Alias to the Value-based
     // reader; the _rv boxing is transparent at the interpreter level.
     insert_simple!("rt_file_read_text_rv", file_io::rt_file_read_text);
+    // sffi/fs.spl `fs_read_text`: byte-exact, nil only on failure (C runtime
+    // parity) -- deliberately NOT aliased to the CR-stripping reader above.
+    insert_simple!("rt_fs_read_text", file_io::rt_fs_read_text);
     insert_simple!("rt_file_remove", file_io::rt_file_remove);
     insert_simple!("rt_file_rename", file_io::rt_file_rename);
     insert_simple!("rt_file_size", file_io::rt_file_size);

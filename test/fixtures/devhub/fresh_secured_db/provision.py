@@ -275,7 +275,7 @@ def main():
     environment = dict(os.environ)
     environment[SECRET_ENV] = passphrase
     environment["DEVHUB_FRESH_DB_DIR"] = str(directory).replace("\\", "/")
-    result = subprocess.run([str(native)], env=environment, timeout=180, check=False)
+    result = subprocess.run([str(native)], env=environment, timeout=int(os.environ.get("DEVHUB_FRESH_TIMEOUT_SECONDS", "180")), check=False)
     for name in variants:
         path = directory / name
         stat = path.stat()

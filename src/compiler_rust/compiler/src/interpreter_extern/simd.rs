@@ -2423,6 +2423,149 @@ pub fn rt_xgetbv(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(value))
 }
 
+// --- Host SIMD probes (interpreter twins) --------------------------------
+//
+// `src/compiler/30.types/simd_capabilities.spl` also declares these six as
+// `extern fn`. They had C (runtime_native.c) and Rust-runtime
+// (simple_runtime::value::sffi::env_process) owners but no interpreter twin, so
+// the seed's hybrid-interp native-build worker died in native_compile with
+// `semantic: unknown extern function: rt_is_darwin_arm64` (Phase 2 hello,
+// 2026-10-31). Each twin delegates to the Rust-runtime owner, so the
+// interpreter answers exactly what compiled code answers on the same host.
+use simple_runtime::value::sffi::env_process as host_probe;
+
+/// `rt_getauxval(key: i64) -> i64` — Linux auxv lookup, 0 elsewhere.
+pub fn rt_getauxval(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::semantic(format!(
+            "rt_getauxval expects 1 argument, got {}",
+            args.len()
+        )));
+    }
+    Ok(Value::Int(host_probe::rt_getauxval(args[0].as_int()?)))
+}
+
+/// `rt_is_darwin_arm64() -> bool`.
+pub fn rt_is_darwin_arm64(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_is_darwin_arm64", args)?;
+    Ok(Value::Bool(host_probe::rt_is_darwin_arm64()))
+}
+
+/// `rt_sysctlbyname_i32(name: text) -> i32` — a 32-bit Darwin sysctl, 0 when
+/// absent, not 32-bit, off Darwin, or for a name of 128+ bytes (the runtime
+/// owners' bound).
+pub fn rt_sysctlbyname_i32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::semantic(format!(
+            "rt_sysctlbyname_i32 expects 1 argument, got {}",
+            args.len()
+        )));
+    }
+    let name: String = match &args[0] {
+        Value::Str(s) => s.as_ref().to_string(),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "rt_sysctlbyname_i32: argument must be text, got {other:?}"
+            )))
+        }
+    };
+    Ok(Value::Int(sysctlbyname_i32_host(&name) as i64))
+}
+
+#[cfg(target_os = "macos")]
+fn sysctlbyname_i32_host(name: &str) -> i32 {
+    if name.is_empty() || name.len() >= 128 {
+        return 0;
+    }
+    let key = match std::ffi::CString::new(name) {
+        Ok(key) => key,
+        Err(_) => return 0,
+    };
+    let mut value = 0i32;
+    let mut value_len = std::mem::size_of::<i32>();
+    // SAFETY: key is a NUL-terminated C string; value/value_len point at live
+    // locals sized for one i32; no new value is written (null, 0).
+    let rc = unsafe {
+        libc::sysctlbyname(
+            key.as_ptr(),
+            (&mut value as *mut i32).cast(),
+            &mut value_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc == 0 && value_len == std::mem::size_of::<i32>() {
+        value
+    } else {
+        0
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sysctlbyname_i32_host(_name: &str) -> i32 {
+    0
+}
+
+/// `rt_riscv_read_vlenb() -> i32` — RVV vlenb, 0 without the V extension.
+pub fn rt_riscv_read_vlenb(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_riscv_read_vlenb", args)?;
+    Ok(Value::Int(host_probe::rt_riscv_read_vlenb() as i64))
+}
+
+/// `rt_riscv_has_v_ext() -> bool`.
+pub fn rt_riscv_has_v_ext(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_riscv_has_v_ext", args)?;
+    Ok(Value::Bool(host_probe::rt_riscv_has_v_ext()))
+}
+
+/// `rt_cuda_sm_version(device: i32) -> i32` — 0 (no CUDA probe), matching
+/// both runtime owners.
+pub fn rt_cuda_sm_version(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::semantic(format!(
+            "rt_cuda_sm_version expects 1 argument, got {}",
+            args.len()
+        )));
+    }
+    Ok(Value::Int(host_probe::rt_cuda_sm_version(args[0].as_int()? as i32) as i64))
+}
+
+#[cfg(test)]
+mod host_probe_tests {
+    use super::*;
+
+    #[test]
+    fn darwin_arm64_matches_target() {
+        let expected = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+        assert!(matches!(rt_is_darwin_arm64(&[]).unwrap(), Value::Bool(b) if b == expected));
+    }
+
+    #[test]
+    fn sysctlbyname_reads_a_real_key_on_darwin_and_zero_elsewhere() {
+        let ncpu = rt_sysctlbyname_i32(&[Value::text("hw.ncpu")]).unwrap();
+        let missing = rt_sysctlbyname_i32(&[Value::text("simple.no.such.key")]).unwrap();
+        let long = rt_sysctlbyname_i32(&[Value::text(&"x".repeat(200))]).unwrap();
+        assert!(matches!(missing, Value::Int(0)));
+        assert!(matches!(long, Value::Int(0)));
+        if cfg!(target_os = "macos") {
+            assert!(matches!(ncpu, Value::Int(n) if n > 0));
+        } else {
+            assert!(matches!(ncpu, Value::Int(0)));
+        }
+        assert!(rt_sysctlbyname_i32(&[Value::Int(1)]).is_err());
+    }
+
+    #[test]
+    fn remaining_probes_answer_like_the_runtime_owner() {
+        assert!(matches!(rt_getauxval(&[Value::Int(0x7fff_ffff)]).unwrap(), Value::Int(0)));
+        assert!(matches!(rt_cuda_sm_version(&[Value::Int(0)]).unwrap(), Value::Int(0)));
+        let vlenb = rt_riscv_read_vlenb(&[]).unwrap();
+        assert!(matches!(vlenb, Value::Int(n) if n >= 0));
+        assert!(matches!(rt_riscv_has_v_ext(&[]).unwrap(), Value::Bool(_)));
+        assert!(rt_is_darwin_arm64(&[Value::Int(1)]).is_err());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Percent-opacity constant-colour span blend (web renderer row kernel).
 //

@@ -149,35 +149,46 @@ pub fn rt_value_truthy_fn(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Check if value is nil
+// `classify_interpreter_carrier`: src/compiler/60.mir_opt/mir_opt/ssa_carrier_guard.spl
+// declares `extern fn rt_value_is_nil<T>(value: T)` / `rt_value_is_int<T>` and
+// passes a concrete MirOperand/LocalId record, deliberately without reboxing.
+// Compiled code receives the tagged word; the interpreter receives the record
+// as a `Value::Object`/`Value::Enum`, whose `as_int()` failed with "type
+// mismatch: cannot convert object to int" and killed the seed's hello
+// native-build in llvm_bootstrap_ssa_function (2026-10-31). A record is never
+// nil or int; an `Option::None` carrier is nil.
 pub fn rt_value_is_nil_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_value_is_nil expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
+    let value = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_value_is_nil expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
 
-    let rv = RuntimeValue::from_raw(raw as u64);
-    Ok(Value::Bool(rt_value_is_nil(rv)))
+    // A word-convertible argument keeps the raw RuntimeValue contract. A
+    // concrete carrier (struct/enum/object) is classified as the interpreter
+    // value itself; see `classify_interpreter_carrier`.
+    match value.as_int() {
+        Ok(raw) => Ok(Value::Bool(rt_value_is_nil(RuntimeValue::from_raw(raw as u64)))),
+        Err(_) => Ok(Value::Bool(value.is_nil_like())),
+    }
 }
 
 /// Check if value is int
 pub fn rt_value_is_int_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_value_is_int expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
+    let value = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_value_is_int expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
 
-    let rv = RuntimeValue::from_raw(raw as u64);
-    Ok(Value::Bool(rt_value_is_int(rv)))
+    // A concrete carrier that cannot be read as a word is not an int carrier,
+    // so callers never reach `rt_value_as_int` with it.
+    match value.as_int() {
+        Ok(raw) => Ok(Value::Bool(rt_value_is_int(RuntimeValue::from_raw(raw as u64)))),
+        Err(_) => Ok(Value::Bool(false)),
+    }
 }
 
 /// Check if value is float
@@ -416,4 +427,42 @@ pub fn rt_heap_ref_registered_fn(args: &[Value]) -> Result<Value, CompileError> 
     );
 
     Ok(Value::Bool(is_registered))
+}
+
+#[cfg(test)]
+mod carrier_probe_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn record() -> Value {
+        Value::Object {
+            class: "MirOperand".to_string(),
+            fields: Arc::new(HashMap::new()),
+        }
+    }
+
+    #[test]
+    fn record_carrier_is_neither_nil_nor_int() {
+        assert!(matches!(rt_value_is_nil_fn(&[record()]).unwrap(), Value::Bool(false)));
+        assert!(matches!(rt_value_is_int_fn(&[record()]).unwrap(), Value::Bool(false)));
+    }
+
+    #[test]
+    fn option_none_carrier_is_nil() {
+        let none = Value::none();
+        assert!(matches!(rt_value_is_nil_fn(&[none.clone()]).unwrap(), Value::Bool(true)));
+        assert!(matches!(rt_value_is_int_fn(&[none]).unwrap(), Value::Bool(false)));
+    }
+
+    #[test]
+    fn raw_word_contract_is_unchanged() {
+        let int_word = rt_value_int(7).to_raw() as i64;
+        let nil_word = rt_value_nil().to_raw() as i64;
+        assert!(matches!(rt_value_is_int_fn(&[Value::Int(int_word)]).unwrap(), Value::Bool(true)));
+        assert!(matches!(rt_value_is_nil_fn(&[Value::Int(int_word)]).unwrap(), Value::Bool(false)));
+        assert!(matches!(rt_value_is_nil_fn(&[Value::Int(nil_word)]).unwrap(), Value::Bool(true)));
+        assert!(rt_value_is_nil_fn(&[]).is_err());
+        assert!(rt_value_is_int_fn(&[]).is_err());
+    }
 }
