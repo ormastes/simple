@@ -10,7 +10,9 @@
 # a pending Future and queues ONE fill request for that module; the scheduler
 # drains the queue (take_fill_requests), produces the TLDR through the reader
 # chain (CacheReader -> daemon single-flight -> FileReader) and publishes it
-# here. From then on every importer's deref resolves to the same stored text.
+# here. Fresh legacy dereferences after publication return the same stored
+# text; an already-created legacy Future remains its original Pending snapshot.
+# Async consumers use request_async and the table-owned AsyncRef route below.
 #
 # Set-once: an entry, once published, is immutable. Republishing identical
 # text is accepted (racing producers of one source write the same bytes);
@@ -22,6 +24,20 @@
 use std.async.future.{Future}
 use std.async.poll.{Poll}
 use compiler.driver.cache.id_scope_v1.{IdScopeV1, id_scope_global_v1}
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64, MapError}
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefI64, AsyncRefError, AsyncRefStateI64}
+
+const _TLDR_ASYNC_RECIPE_ID: i64 = 84517001
+
+pub enum TldrAsyncErrorV1:
+    Disabled
+    InvalidHandle
+    MissingClaim
+    Conflict
+    Directory(MapError)
+    Outcome(AsyncRefError)
+    ForeignReference
+    ArtifactMismatch
 
 struct TldrHandleV1:
     module_key: text
@@ -34,9 +50,21 @@ class TldrTableV1:
     requested: Dict<text, bool>
     fill_queue: [text]
     ids: IdScopeV1
+    async_map: LocklessMapI64?
+    async_ids: Dict<text, i64>
+    async_next_id: i64
+    async_capacity: i64
 
     static fn create() -> TldrTableV1:
-        TldrTableV1(entries: {}, requested: {}, fill_queue: [], ids: id_scope_global_v1())
+        TldrTableV1(entries: {}, requested: {}, fill_queue: [], ids: id_scope_global_v1(),
+            async_map: nil, async_ids: {}, async_next_id: 1, async_capacity: 0)
+
+    pub static fn create_async(capacity: i64, waiter_capacity: i64) -> Result<TldrTableV1, MapError>:
+        match LocklessMapI64.create(capacity, capacity, capacity, waiter_capacity):
+            case Err(error): Err(error)
+            case Ok(map):
+                Ok(TldrTableV1(entries: {}, requested: {}, fill_queue: [], ids: id_scope_global_v1(),
+                    async_map: Some(map), async_ids: {}, async_next_id: 1, async_capacity: capacity))
 
     # Uninitialised pointer to `decl` in the module with `module_key`.
     me handle(module_key: text, decl: text) -> TldrHandleV1:
@@ -46,6 +74,138 @@ class TldrTableV1:
 
     fn is_loaded(module_key: text) -> bool:
         self.entries.contains_key(module_key)
+
+    fn _valid_handle(h: TldrHandleV1) -> bool:
+        h.module_key != ""
+
+    # Returned references are consumer handles only. The table owns the sole
+    # serialized producer authority and callers must not start, complete, fail,
+    # or use them after table quiescence/close.
+    @unsafe(reason: "the table owns the live lockless map scope and producer claim", capabilities: [ffi])
+    pub me request_async(h: TldrHandleV1) -> Result<AsyncRefI64, TldrAsyncErrorV1>:
+        if self.async_map == nil:
+            return Err(TldrAsyncErrorV1.Disabled)
+        if not self._valid_handle(h):
+            return Err(TldrAsyncErrorV1.InvalidHandle)
+
+        var is_new_id = false
+        var id = 0
+        if self.async_ids.contains_key(h.module_key):
+            id = self.async_ids[h.module_key]
+        else:
+            if self.async_next_id > self.async_capacity:
+                return Err(TldrAsyncErrorV1.Directory(MapError.Full))
+            id = self.async_next_id
+            is_new_id = true
+
+        var map: LocklessMapI64 = self.async_map.unwrap()
+        val reference = match map.request(id, _TLDR_ASYNC_RECIPE_ID):
+            case Ok(value): value
+            case Err(error): return Err(TldrAsyncErrorV1.Directory(error))
+
+        if is_new_id:
+            self.async_ids[h.module_key] = id
+            self.async_next_id = id + 1
+            if not reference.try_start():
+                return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.NotStarted))
+
+        if self.entries.contains_key(h.module_key):
+            match reference.try_ready():
+                case AsyncRefStateI64.Ready(value):
+                    if value != id:
+                        return Err(TldrAsyncErrorV1.ArtifactMismatch)
+                case AsyncRefStateI64.Failed(code):
+                    return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.Failed(code)))
+                case AsyncRefStateI64.InvalidReference:
+                    return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.InvalidReference))
+                case AsyncRefStateI64.Pending:
+                    match reference.complete(id):
+                        case Err(error): return Err(TldrAsyncErrorV1.Outcome(error))
+                        case Ok(_): ()
+            if self.requested.contains_key(h.module_key):
+                self.requested.remove(h.module_key)
+        else if is_new_id and not self.requested.contains_key(h.module_key):
+            self.requested[h.module_key] = true
+            self.fill_queue.push(h.module_key)
+        Ok(reference)
+
+    @unsafe(reason: "reads a same-process live map owned by this table; does not create or claim work", capabilities: [ffi])
+    pub fn async_fill_reference(module_key: text) -> Result<AsyncRefI64, TldrAsyncErrorV1>:
+        if self.async_map == nil:
+            return Err(TldrAsyncErrorV1.Disabled)
+        if module_key == "":
+            return Err(TldrAsyncErrorV1.InvalidHandle)
+        if not self.async_ids.contains_key(module_key):
+            return Err(TldrAsyncErrorV1.MissingClaim)
+        val id = self.async_ids[module_key]
+        var map: LocklessMapI64 = self.async_map.unwrap()
+        match map.find(id):
+            case Some(reference): Ok(reference)
+            case nil: Err(TldrAsyncErrorV1.ArtifactMismatch)
+
+    @unsafe(reason: "the table is sole publisher for its live AsyncRef map", capabilities: [ffi])
+    pub me publish_async(module_key: text, tldr: text) -> Result<bool, TldrAsyncErrorV1>:
+        if self.async_map == nil:
+            return Err(TldrAsyncErrorV1.Disabled)
+        if module_key == "" or tldr == "":
+            return Err(TldrAsyncErrorV1.InvalidHandle)
+        val reference = match self.async_fill_reference(module_key):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        val id = self.async_ids[module_key]
+        if self.entries.contains_key(module_key) and self.entries[module_key] != tldr:
+            return Err(TldrAsyncErrorV1.Conflict)
+        if not self.entries.contains_key(module_key):
+            self.entries[module_key] = tldr
+
+        match reference.try_ready():
+            case AsyncRefStateI64.Ready(value):
+                if value != id:
+                    return Err(TldrAsyncErrorV1.ArtifactMismatch)
+            case AsyncRefStateI64.Failed(code):
+                return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.Failed(code)))
+            case AsyncRefStateI64.InvalidReference:
+                return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.InvalidReference))
+            case AsyncRefStateI64.Pending:
+                match reference.complete(id):
+                    case Err(error): return Err(TldrAsyncErrorV1.Outcome(error))
+                    case Ok(_): ()
+        if self.requested.contains_key(module_key):
+            self.requested.remove(module_key)
+        Ok(true)
+
+    @unsafe(reason: "caller supplies a copyable reference; validate canonical scope/entry before dereferencing it", capabilities: [ffi])
+    pub fn resolve_async(h: TldrHandleV1, reference: AsyncRefI64) -> Result<text?, TldrAsyncErrorV1>:
+        if self.async_map == nil:
+            return Err(TldrAsyncErrorV1.Disabled)
+        if not self._valid_handle(h):
+            return Err(TldrAsyncErrorV1.InvalidHandle)
+        val canonical = match self.async_fill_reference(h.module_key):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        if not canonical.same_reference(reference):
+            return Err(TldrAsyncErrorV1.ForeignReference)
+        val expected_id = self.async_ids[h.module_key]
+        match reference.try_ready():
+            case AsyncRefStateI64.InvalidReference:
+                Err(TldrAsyncErrorV1.Outcome(AsyncRefError.InvalidReference))
+            case AsyncRefStateI64.Pending: Ok(nil)
+            case AsyncRefStateI64.Failed(code):
+                Err(TldrAsyncErrorV1.Outcome(AsyncRefError.Failed(code)))
+            case AsyncRefStateI64.Ready(value):
+                if value != expected_id or not self.entries.contains_key(h.module_key):
+                    return Err(TldrAsyncErrorV1.ArtifactMismatch)
+                Ok(Some(self.entries[h.module_key]))
+
+    @unsafe(reason: "all async references, subscriptions, and wake cursors must be quiescent before releasing the map", capabilities: [ffi])
+    pub me close_async_quiescent():
+        match self.async_map:
+            case Some(map): map.close_quiescent()
+            case nil: ()
+        self.async_map = nil
+        self.async_ids = {}
+        self.async_next_id = 1
+        self.async_capacity = 0
 
     # Set-once publication. True when stored or identical to what is stored.
     me publish(module_key: text, tldr: text) -> bool:
@@ -80,4 +240,4 @@ class TldrTableV1:
     fn loaded_count() -> i64:
         self.entries.len()
 
-export TldrHandleV1, TldrTableV1
+export TldrAsyncErrorV1, TldrHandleV1, TldrTableV1
