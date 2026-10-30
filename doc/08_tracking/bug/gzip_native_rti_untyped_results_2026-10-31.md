@@ -46,3 +46,44 @@ authored but **UNRUN**; no RED/GREEN result is claimed.
 Native behavior requires later qualification on an admitted producer against
 the frozen repaired sources. Neither the RTI declaration nor these unrun tests
 establish native behavior or close the older byte-boxing/optional-array bug.
+
+## Precise heterogeneous array and compile-only closure audit
+
+The language HIR contains `HirTypeKind.Union(members)` in
+`src/compiler/20.hir/hir_types.spl`. This does not make a union element
+representable in RTI v1: `RtType` has no union term, and
+`rti_term_of_hir_type` recursively converts array/optional elements without a
+Union case. A nullable array of the precise integer, float and integer-array
+alternatives would still reach E-RTI-007. `ReturnTypeEntry.Union` describes
+top-level declaration alternatives, not an array element; instantiation
+requires selecting an arm. `[Any]` also recursively fails the existing guard.
+No annotation-only compatible repair was established.
+
+A compatible compiler repair requires a deliberate representation contract:
+recursive union RTI serialization, canonicalization, substitution and binding;
+matching HIR-to-MIR tagged-value representation; and correct boxing/unboxing
+for integer, float and nested-array values on reads, writes and mutation.
+It must preserve nil, indexing and mutable-array behavior. Merely publishing
+a new RTI term without implementing those consumers is insufficient. Required
+qualification includes real-source RTI publication, native mixed-value reads
+and mutations, nil input, and cross-module caller/provider round trips.
+This design is not implemented or runtime-qualified.
+
+The compile-only entry also reaches the affected module. A read-only static
+audit of source `886fc03a71c7231b546debf0aa7d9bb5eaa48d32` found this chain of
+plain imports (paths below `src/`):
+
+`app/cli/bootstrap_main.spl:35` ->
+`app/compiler_entrypoint/source_authority.spl:20` ->
+`lib/scv/compile_snapshot.spl:33` -> `lib/scv/store.spl:16` ->
+`lib/scv/shadow_write.spl:29` -> `lib/scv/stabilize.spl:11` ->
+`lib/scv/journal.spl:19` -> `lib/scv/maintenance.spl:6` ->
+`lib/common/compress/gzip.spl:8` ->
+`lib/nogc_sync_mut/compression/gzip/compress.spl`.
+
+The common gzip module also imports LZ77 at line 6. This is static module
+reachability evidence, not a new execution result. With module-wide RTI
+publication, the unchanged analysis declaration remains a blocker for that
+closure as well as BuildRunner. The LZ77 repair alone does not unblock either
+build. A function-level reachability solution would need an authoritative
+export/provider policy; silently omitting this declaration is not a repair.
