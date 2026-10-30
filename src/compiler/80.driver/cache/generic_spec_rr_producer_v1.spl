@@ -17,7 +17,8 @@
 
 use std.io_runtime.{file_exists, file_read}
 use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
-    module_tldr_companion_body_v1, module_tldr_companion_sections_v1}
+    module_tldr_companion_body_v1, module_tldr_companion_sections_v1,
+    module_artifact_module_id_v1}
 use compiler.driver.cache.generic_specialization_list_v1.{GenericSpecializationListV1,
     generic_specialization_list_of_sections_v1, generic_spec_forward_manifest_v1,
     generic_spec_consumer_key_v1}
@@ -26,6 +27,13 @@ use compiler.driver.cache.reverse_reference_projection_v2.{SealedForwardManifest
     reverse_reference_publish_projection_v2}
 use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceReceiptReadV1,
     reverse_reference_read_current_v1}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{
+    macro_content_digest_v1, macro_use_table_decode_v1,
+    macro_use_forward_read_manifest_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticQueryKeyV1, SemanticQueryReadManifestV1,
+    semantic_query_key_canonical_v1}
+use std.common.crypto.sha256.{sha256_text}
 
 # The module's instance list from its fresh companion; nil when unknown.
 # A fresh source digest alone does not prove that the post-mono writer ran:
@@ -65,6 +73,55 @@ pub fn generic_spec_sealed_manifests_v1(module_paths: [text], tldr_root: text) -
     var out: [SealedForwardManifestV2] = []
     for path in module_paths:
         out.push(generic_spec_sealed_manifest_v1(path, generic_spec_list_of_module_v1(path, tldr_root)))
+        for macro_manifest in macro_reference_sealed_manifests_for_module_v1(path, tldr_root):
+            out.push(macro_manifest)
+    out
+
+# Convert the source-fresh macro-use table emitted by the parser-backed module
+# artifact producer into the same forward read manifests consumed by `.rr`.
+# Missing, stale, mismatched or corrupt sections stay unsealed; they never
+# establish an exact empty macro family.
+pub fn macro_reference_sealed_manifests_for_module_v1(module_path: text,
+        tldr_root: text) -> [SealedForwardManifestV2]:
+    val consumer = SemanticQueryKeyV1(kind: "macro.inventory",
+        stable_entity_id: module_path,
+        semantic_profile_digest: sha256_text("macro-profile/host"),
+        parameter_digest: sha256_text("macro-inventory:" + module_path))
+    val inventory = SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: [])
+    val fallback = SealedForwardManifestV2(
+        consumer_identity: semantic_query_key_canonical_v1(consumer),
+        sealed: false, manifest: Some(inventory))
+    val companion = module_tldr_companion_path_v1(tldr_root, module_path)
+    if not file_exists(module_path) or not file_exists(companion): return [fallback]
+    val source = file_read(module_path)
+    val content = file_read(companion)
+    if module_tldr_companion_body_v1(content, source) == "": return [fallback]
+    var encoded = ""
+    var found = false
+    var section_count = 0
+    for section in module_tldr_companion_sections_v1(content, source):
+        if section.starts_with("macro-use|"):
+            encoded = section.substring(10)
+            found = true
+            section_count = section_count + 1
+    if not found or section_count != 1: return [fallback]
+    val decoded = macro_use_table_decode_v1(encoded)
+    if not decoded.ok or decoded.value.module_id != module_artifact_module_id_v1(module_path):
+        return [fallback]
+    var out: [SealedForwardManifestV2] = []
+    # A valid empty use table is explicit complete-empty inventory for this
+    # producer. The sentinel has no outgoing reads and cannot add a fake user.
+    out.push(SealedForwardManifestV2(
+        consumer_identity: semantic_query_key_canonical_v1(consumer),
+        sealed: true, manifest: Some(inventory)))
+    val profile = macro_content_digest_v1("macro-profile/host")
+    for macro_use in decoded.value.uses:
+        if macro_use.invoking_source_id != module_path:
+            return [fallback]
+        val manifest = macro_use_forward_read_manifest_v1(macro_use, profile)
+        out.push(SealedForwardManifestV2(
+            consumer_identity: semantic_query_key_canonical_v1(manifest.consumer),
+            sealed: true, manifest: Some(manifest)))
     out
 
 # Project and publish one `.rr` generation; returns the read-back current
