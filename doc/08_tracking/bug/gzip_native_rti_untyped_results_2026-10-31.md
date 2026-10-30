@@ -87,3 +87,29 @@ publication, the unchanged analysis declaration remains a blocker for that
 closure as well as BuildRunner. The LZ77 repair alone does not unblock either
 build. A function-level reachability solution would need an authoritative
 export/provider policy; silently omitting this declaration is not a repair.
+
+## Decoder dependency factoring
+
+The common facade previously imported the monolithic `gzip.compress` module
+only to reach its decoder. `gzip_decompress` now has a dedicated owner module;
+the legacy `gzip.compress.gzip_decompress` entry forwards to that owner, and the
+common facade imports the owner directly. The public API and decoder body,
+including its optional-collection workaround, malformed-input behavior,
+multi-member concatenation, trailer checks, and nil result, are preserved.
+This factors the compile-only import edge but does not repair RTI publication:
+the common facade still imports LZ77 for compression, and the unresolved
+`gzip_analyze_data` declaration remains in `gzip.compress`.
+
+Historical bootstrap success does not qualify the current pure-Simple native
+producer. Historical source `2f55ac2a6d67` already had the same static import
+chain. Attempt 17's `stage2-native-build.log` says at line 1 that the Rust seed
+skipped unsupported `dynload` for one-binary emission, then reports 1,618
+compiled, 0 reused, and 0 failed at line 11. Its later pure-Simple RTI failure
+is consistent with that earlier seed-based success; no seed fallback or new
+execution was performed for this factoring change.
+
+The new decoder owner spec covers independent stored empty and `abc` members,
+concatenation, malformed header, truncated body/trailer, CRC mismatch, legacy
+wrapper parity, and common-facade roundtrip. It is authored but **UNRUN**. This
+change does not resolve the separate old native untyped byte boxing issue and
+does not qualify native behavior.
