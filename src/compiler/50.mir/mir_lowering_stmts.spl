@@ -2636,6 +2636,11 @@ impl MirLowering:
         `param_types[param_index]` (an empty list or an out-of-range index
         means "unknown": the argument stays raw, as before).
 
+        A known Any slot receives a tagged RuntimeValue, matching free calls;
+        an already-tagged local is unchanged. Named arguments to a known
+        Any-bearing signature are rejected until declaration-owned name
+        binding supplies their actual slot and ABI order.
+
         A SCALAR optional parameter (`i64?`, `bool?`, `f64?`, `char?`, ...)
         gets the same promotion the free-function call path applies
         (switch_operators_calls.spl, `case HirTypeKind.Optional(_)`): the
@@ -2644,11 +2649,26 @@ impl MirLowering:
         nil. Non-scalar optionals are left untouched here on purpose (a
         pointer / text handle cannot collide with the nil word).
         doc/08_tracking/bug/method_call_optional_param_arg_not_boxed_2026-10-11.md"""
-        if arg.has_name or param_index < 0 or param_index >= param_types.len():
+        if arg.has_name:
+            # This interface has types but no admitted name-to-slot binding.
+            # Guessing from source order can box a typed slot or leave an Any
+            # slot raw. Refuse that ABI until named binding owns the order.
+            for param_type in param_types:
+                match param_type.kind:
+                    case HirTypeKind.Any:
+                        self.error_fatal("named argument to Any-bearing method requires declared parameter binding", Some(arg.span))
+                        return self.builder.emit_const_int(0)
+                    case _: ()
+            return self.lower_expr(arg.value)
+        if param_index < 0 or param_index >= param_types.len():
             return self.lower_expr(arg.value)
         val declared_param_type: HirType = param_types[param_index]
         var arg_local: LocalId = self.lower_expr_for_slot(arg.value, declared_param_type)
         match declared_param_type.kind:
+            case HirTypeKind.Any:
+                # Method parameters use the same RuntimeValue ABI as free
+                # functions. Already tagged arguments remain tagged once.
+                arg_local = self.box_runtime_value(arg_local)
             case HirTypeKind.Optional(optional_inner):
                 val scalar_payload = match optional_inner.kind:
                     case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: true
