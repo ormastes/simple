@@ -26,3 +26,36 @@ Under the existing manager lock, the session acquires the actual compiler source
 Every startup resume, retained-output restoration, RUNNING recovery, failure re-admission, ready-task cache/dispatch, execution acceptance, `verify` and `verify-settled` uses the same additional source gate. Existing producer/declared-input/link/result/reap/output checks remain. The original live declared-input rehash is intentionally conservative: a concurrent checkout edit refuses admission even though dispatch always copies the selected source bytes from the frozen root. The unchanged transport copies ordinary inputs and relative producer bytes from their existing owner and verifies every staged digest; no second materializer or scheduler exists. Scheduler retries obtain an exact new attempt binding only after all other task fields match the saved request.
 
 `source_only: true` and `full_artifact_authorized: false` are explicit. V1 still discloses unsupported editor overlays, generated/external/configuration semantics, filesystem event coverage, physical modes and aliases. These checks do not introduce semantic or cross-commit artifact reuse authority. The later Phase 3 fixture must supply the admitted runtime/toolchain and any required archives/configuration as existing digest-bound ordinary inputs/environment at their actual worker read paths. No native builder, new compiler workaround or fabricated cache-hit evidence is part of this change.
+
+## Optional exact declared-input managed bridge
+
+Authenticated task contexts may use `SIMPLE-BUILD-TASK-CONTEXT-2` with the V1
+backend/runtime/policy/environment lines followed by exact target-layout and
+configuration SHA-256 lines. Both new fields are required together; a backend
+name or toolchain digest is not a target-layout digest. Existing V1 contexts
+retain source-only behavior and record managed target/configuration unavailable.
+No preparation command currently invents or upgrades these subjects.
+
+For V2, the parent freezes the finite declared regular input set using actual
+compiler frozen-inventory source bytes and no-follow digest-checked ordinary
+input bytes. Exact file scopes describe the logical managed universe. Mode 420
+describes normalized private staging, not observed physical source metadata.
+The existing transport copies every task input from this private frozen tree
+and rechecks each digest. Live checkout/producer checks remain conservative.
+
+`state/scv-managed-session.sdn` binds managed snapshot IDs and graph bookkeeping
+roots to the exact source-session record. The same additional gate covers
+resume, cached results, dispatch, task acceptance and both verification commands.
+This initial profile supports only its fixed sequence-zero set. Capture unknown
+reasons, retired epochs/history digests and feed floor/event IDs are retained;
+unknown or advanced histories refuse and cannot be reconstructed as complete.
+Recovery requires a new owned run/state until actual producer reconciliation
+and durable replay are integrated.
+
+Editor overlays, generated/external producer receipts, filesystem event coverage,
+physical modes/aliases and compiler semantic producers remain unavailable.
+An empty graph does not publish any outgoing-use manifest or semantic receipt.
+Artifact authorization and physical-filesystem completeness remain false.
+The bridge performs no eviction/GC: shared retention admission, active pins and
+worker-reap lease release are required before enabling managed eviction.
+Feature execution remains NOT_RUN without an admitted general-purpose runtime.
