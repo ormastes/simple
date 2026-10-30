@@ -1,0 +1,32 @@
+# Native regression for E-MONO-032 at runtime generic call boundaries.
+# Compile with the pinned pure bootstrap producer; execute the resulting binary.
+extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool
+
+struct RuntimeLookupKeys:
+    name: text
+    number: i64
+
+fn check_keys(names: Dict<text, i64>, numbers: Dict<i64, text>, keys: RuntimeLookupKeys) -> bool:
+    val name: text = keys.name
+    val number: i64 = keys.number
+    unsafe(capabilities: [ffi]):
+        rt_dict_contains(names, name) and rt_dict_contains(numbers, number)
+
+fn main() -> i32:
+    var names: Dict<text, i64> = {}
+    var numbers: Dict<i64, text> = {}
+    val present = RuntimeLookupKeys(name: "present", number: 17)
+    val absent = RuntimeLookupKeys(name: "absent", number: -17)
+    if check_keys(names, numbers, present): return 1
+    names["present"] = 0
+    numbers[17] = ""
+    if not check_keys(names, numbers, present): return 2
+    if check_keys(names, numbers, absent): return 3
+    # Check each missing-key branch independently, including integer boxing.
+    if check_keys(names, numbers, RuntimeLookupKeys(name: "present", number: -17)): return 4
+    if check_keys(names, numbers, RuntimeLookupKeys(name: "absent", number: 17)): return 5
+    var hits: i64 = 0
+    for index in 0..100000:
+        if check_keys(names, numbers, present): hits = hits + 1
+    if hits != 100000: return 6
+    0

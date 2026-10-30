@@ -133,6 +133,38 @@ impl Monomorphizer:
 # Function Specialization with HirFunction
 # ============================================================================
 
+# Admit semantic RuntimeValue transport only at the original generic declaration.
+# A fixed (i64, i64) C prototype is deliberately not admitted: its key is
+# already a machine word and boxing it again changes its identity.
+fn mono_runtime_value_extern_abi_v1(declaration: HirFunction) -> i64:
+    if not declaration.is_extern or declaration.is_method or declaration.is_static or declaration.is_async or declaration.has_export_attr or declaration.type_params.len() != 1:
+        return 0
+    var mode: i64 = 0
+    var value_index: i64 = 0
+    if declaration.name == "rt_dict_contains":
+        if declaration.params.len() != 2 or declaration.return_type.kind != HirTypeKind.Bool: return 0
+        if declaration.params[0].type_.kind != HirTypeKind.Int(64, true): return 0
+        mode = 1
+        value_index = 1
+    elif declaration.name == "rt_transient_heap_promote" or declaration.name == "rt_heap_ref_wellformed":
+        if declaration.params.len() != 1 or declaration.return_type.kind != HirTypeKind.Bool: return 0
+        mode = 2
+    elif declaration.name == "rt_enum_discriminant":
+        if declaration.params.len() != 1 or declaration.return_type.kind != HirTypeKind.Int(64, true): return 0
+        mode = 2
+    else:
+        return 0
+    for parameter in declaration.params:
+        if parameter.has_default: return 0
+    match declaration.params[value_index].type_.kind:
+        case HirTypeKind.TypeParam(name, _):
+            if name == declaration.type_params[0].name: return mode
+        case HirTypeKind.Named(symbol, arguments):
+            if arguments.len() == 0 and symbol.id >= 0 and symbol.id == declaration.type_params[0].symbol.id:
+                return mode
+        case _: ()
+    0
+
 fn specialize_function_with_types(func: HirFunction, type_args: [HirType],
     include_retained_defaults: bool = false, budget: MonoInvocationBudgetV1? = nil) -> HirFunction:
     """Create a specialized version of a generic function.
@@ -158,7 +190,10 @@ fn specialize_function_with_types(func: HirFunction, type_args: [HirType],
     val mangled = generate_mangled_name(func.name, type_args)
 
     # Apply substitution to create specialized function
-    substitute_function(func, subst, mangled, include_retained_defaults, budget)
+    var specialized = substitute_function(func, subst, mangled, include_retained_defaults, budget)
+    if specialized != nil:
+        specialized.extern_runtime_value_abi = mono_runtime_value_extern_abi_v1(func)
+    specialized
 
 fn generate_mangled_name(base_name: text, type_args: [HirType]) -> text:
     """Generate a unique mangled name for a specialization."""

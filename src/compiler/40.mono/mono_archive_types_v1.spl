@@ -6,6 +6,7 @@ use compiler.hir.generated.hir_codec.{hc_enc_hir_type, hc_enc_hir_type_param, hc
 use compiler.monomorphize.type_subst.{canonicalize_template, substitute_type, substitute_effects, typesubstitution_from_params, typesubstitution_canonical}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.mono.mono_invocation_policy_v1.MonoInvocationBudgetV1
+use compiler.monomorphize.engine.mono_runtime_value_extern_abi_v1
 
 enum MonoTemplateBodyModeV1:
     Retained
@@ -22,6 +23,7 @@ struct MonoTemplateSignatureV1:
     effects: [Effect] = []
     # An extern declaration's physical name is not its specialization key.
     is_extern: bool = false
+    extern_runtime_value_abi: i64 = 0
 
 struct MonoTemplateRecipeV1:
     module_name: text
@@ -48,7 +50,8 @@ fn mono_template_signature_v1(func: HirFunction) -> MonoTemplateSignatureV1:
     MonoTemplateSignatureV1(name: func.name, param_types: params,
         return_type: func.return_type, type_params: func.type_params,
         global_linkage: func.is_extern or func.has_export_attr or func.func_attr.is_global or func.func_attr.is_entry,
-        effects: func.effects, is_extern: func.is_extern)
+        effects: func.effects, is_extern: func.is_extern,
+        extern_runtime_value_abi: if func.extern_runtime_value_abi != 0: func.extern_runtime_value_abi else: mono_runtime_value_extern_abi_v1(func))
 
 fn mono_specialized_signature_v1(template: MonoTemplateSignatureV1, args: [HirType], name: text) -> MonoTemplateSignatureV1:
     val subst = typesubstitution_from_params(template.type_params, args)
@@ -58,13 +61,15 @@ fn mono_specialized_signature_v1(template: MonoTemplateSignatureV1, args: [HirTy
     MonoTemplateSignatureV1(name: if template.is_extern: template.name else: name, param_types: params,
         return_type: substitute_type(template.return_type, subst), type_params: [],
         global_linkage: template.global_linkage,
-        effects: substitute_effects(template.effects, subst), is_extern: template.is_extern)
+        effects: substitute_effects(template.effects, subst), is_extern: template.is_extern,
+        extern_runtime_value_abi: template.extern_runtime_value_abi)
 
 fn mono_template_signature_digest_v1(signature: MonoTemplateSignatureV1) -> text:
     var writer = HirCodecWriter.create()
     writer.put_text(signature.name)
     writer.put_bool(signature.global_linkage)
     writer.put_bool(signature.is_extern)
+    writer.put_i64(signature.extern_runtime_value_abi)
     writer.put_i64(signature.param_types.len())
     for param in signature.param_types:
         mono_archive_put_type_v1(writer, param)
@@ -85,7 +90,7 @@ fn mono_template_signature_digest_v1(signature: MonoTemplateSignatureV1) -> text
                 case _: ()
             hc_enc_effect(writer, effect)
     if not writer.ok: return ""
-    sha256_text("mono-template-signature-v4\n" + writer.finish())
+    sha256_text("mono-template-signature-v5-runtime-value-abi\n" + writer.finish())
 
 fn mono_archive_put_type_v1(writer: HirCodecWriter, type_: HirType):
     # Declaration summaries can contain an absent inferred type. Preserve its
@@ -123,7 +128,8 @@ fn mono_template_recipe_signature_v1(original: HirFunction, recipe: MonoTemplate
         return_type: substitute_type(signature.return_type, subst),
         type_params: recipe.bound_type_params,
         global_linkage: signature.global_linkage,
-        effects: substitute_effects(signature.effects, subst), is_extern: signature.is_extern)
+        effects: substitute_effects(signature.effects, subst), is_extern: signature.is_extern,
+        extern_runtime_value_abi: signature.extern_runtime_value_abi)
 
 export MonoTemplateBodyModeV1, MonoTemplateSignatureV1, MonoTemplateRecipeV1, MonoSpecializationRequestV1
 export mono_template_signature_v1, mono_specialized_signature_v1

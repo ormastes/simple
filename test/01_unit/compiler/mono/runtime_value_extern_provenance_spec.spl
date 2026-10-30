@@ -1,0 +1,102 @@
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.Span
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.HirFunction
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode_stable}
+use compiler.monomorphize.engine.{mono_runtime_value_extern_abi_v1, specialize_function_with_types}
+use compiler.mir.mir_lowering.MirLowering
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_types.MirTypeKind
+use compiler.mono.mono_archive_types_v1.{mono_template_signature_v1, mono_specialized_signature_v1}
+
+fn runtime_abi_fixture(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "runtime_abi.spl", "runtime_abi", Logger(level: 0))
+    var lowering = HirLowering.with_filename("runtime_abi.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(module.functions.len()).to_equal(1)
+    module
+
+describe "Generic runtime ABI declaration provenance":
+    it "admits the original generic key and serializes its concrete specialization":
+        var module = runtime_abi_fixture("extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool\n")
+        val declaration: HirFunction = module.functions.values()[0]
+        expect(declaration.extern_runtime_value_abi).to_equal(0)
+        expect(mono_runtime_value_extern_abi_v1(declaration)).to_equal(1)
+        val integer = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val specialized = specialize_function_with_types(declaration, [integer])
+        expect(specialized.extern_runtime_value_abi).to_equal(1)
+        expect(specialized.type_params.len()).to_equal(0)
+        val archive_signature = mono_specialized_signature_v1(mono_template_signature_v1(declaration), [integer], "instance")
+        expect(archive_signature.extern_runtime_value_abi).to_equal(1)
+        var mir_lowering = MirLowering.new(module.symbols)
+        mir_lowering.record_exact_extern_declaration_v1(specialized)
+        expect(mir_lowering.runtime_value_extern_abis[specialized.symbol.id]).to_equal(1)
+        expect(mir_lowering.exact_extern_signatures[specialized.symbol.id].params[1].kind).to_equal(MirTypeKind.I64)
+        expect(mir_lowering.exact_extern_signatures[specialized.symbol.id].return_type.kind).to_equal(MirTypeKind.I8)
+        module.functions[declaration.symbol] = specialized
+        val encoded = hir_module_encode(module)
+        expect(encoded.len()).to_be_greater_than(0)
+        val decoded = hir_module_decode_stable(encoded)
+        expect(decoded == nil).to_equal(false)
+        val restored_module = decoded.unwrap()
+        val restored: HirFunction = restored_module.functions.values()[0]
+        expect(restored.extern_runtime_value_abi).to_equal(1)
+        expect(hir_module_encode(restored_module)).to_equal(encoded)
+
+    it "does not reinterpret an already tagged raw machine word as a semantic integer":
+        val module = runtime_abi_fixture("extern fn rt_dict_contains(dict: i64, key: i64) -> bool\n")
+        val declaration: HirFunction = module.functions.values()[0]
+        expect(mono_runtime_value_extern_abi_v1(declaration)).to_equal(0)
+        expect(declaration.extern_runtime_value_abi).to_equal(0)
+        var mir_lowering = MirLowering.new(module.symbols)
+        mir_lowering.record_exact_extern_declaration_v1(declaration)
+        expect(mir_lowering.runtime_value_extern_abis.has(declaration.symbol.id)).to_equal(false)
+
+    it "rejects a generic spelling whose value parameter is not the generic binder":
+        val module = runtime_abi_fixture("extern fn rt_dict_contains<K>(dict: i64, key: i64) -> bool\n")
+        expect(mono_runtime_value_extern_abi_v1(module.functions.values()[0])).to_equal(0)
+
+    it "admits ownership and enum generic facades as mode2":
+        for declaration_text in [
+            "extern fn rt_transient_heap_promote<T>(value: T) -> bool\n",
+            "extern fn rt_heap_ref_wellformed<T>(value: T) -> bool\n",
+            "extern fn rt_enum_discriminant<T>(value: T) -> i64\n"]:
+            val module = runtime_abi_fixture(declaration_text)
+            val declaration: HirFunction = module.functions.values()[0]
+            expect(mono_runtime_value_extern_abi_v1(declaration)).to_equal(2)
+            val text_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+            val specialized = specialize_function_with_types(declaration, [text_type])
+            expect(specialized.extern_runtime_value_abi).to_equal(2)
+            val integer = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+            val scalar_specialized = specialize_function_with_types(declaration, [integer])
+            expect(scalar_specialized.extern_runtime_value_abi).to_equal(2)
+
+    it "keeps fixed machine-word ownership prototypes outside semantic boxing":
+        for declaration_text in [
+            "extern fn rt_transient_heap_promote(value: i64) -> bool\n",
+            "extern fn rt_heap_ref_wellformed(value: i64) -> bool\n",
+            "extern fn rt_enum_discriminant(value: i64) -> i64\n"]:
+            val module = runtime_abi_fixture(declaration_text)
+            val declaration: HirFunction = module.functions.values()[0]
+            expect(mono_runtime_value_extern_abi_v1(declaration)).to_equal(0)
+            var mir_lowering = MirLowering.new(module.symbols)
+            mir_lowering.record_exact_extern_declaration_v1(declaration)
+            expect(mir_lowering.runtime_value_extern_abis.has(declaration.symbol.id)).to_equal(false)
+
+    it "does not adapt a same-named Simple implementation":
+        val module = runtime_abi_fixture("fn rt_dict_contains<K>(dict: i64, key: K) -> bool:\n    false\n")
+        expect(mono_runtime_value_extern_abi_v1(module.functions.values()[0])).to_equal(0)
+
+    it "rejects an unknown serialized ABI mode before issuing an extern call":
+        val module = runtime_abi_fixture("extern fn rt_dict_contains(dict: i64, key: i64) -> bool\n")
+        var declaration: HirFunction = module.functions.values()[0]
+        declaration.extern_runtime_value_abi = 9
+        var mir_lowering = MirLowering.new(module.symbols)
+        mir_lowering.record_exact_extern_declaration_v1(declaration)
+        expect(mir_lowering.errors.len()).to_be_greater_than(0)
+        expect(mir_lowering.runtime_value_extern_abis.has(declaration.symbol.id)).to_equal(false)
