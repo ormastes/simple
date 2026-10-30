@@ -1,0 +1,81 @@
+"""End-of-run MC/DC gate: aggregation, decision report and fail-closed exit."""
+# @req: REQ-MCDC-ENFORCEMENT-005
+
+use std.spec
+use std.test_runner.test_runner_types.{TestFileResult}
+use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
+
+fn result(path: text, evidence: text, degrade_reason: text = "") -> TestFileResult:
+    TestFileResult(
+        path: path, passed: 1, failed: 0, skipped: 0, pending: 0,
+        duration_ms: 1, setup_ms: 0, error: "", timed_out: false,
+        cached: false, mcdc_evidence_v1: evidence, mcdc_skip_reason: degrade_reason
+    )
+
+fn obligation() -> text:
+    "obligation|7|decision-a|v1|0|0|0|0|0|false|compiler-boolean-projection-v1"
+
+fn evaluation(owner: i64, outcome: bool) -> text:
+    val outcome_text = if outcome: "true" else: "false"
+    val value_mask = if outcome: 1 else: 0
+    "evaluation|7|{owner}|1|{outcome_text}|1|0|0|0|{value_mask}|0|0|0|0|0|0|0"
+
+fn covered_evidence() -> text:
+    "MCDC-EVIDENCE-v1\ncounters|0|0\n" + obligation() + "\n" + evaluation(1, false)
+
+fn covered_evidence_other() -> text:
+    "MCDC-EVIDENCE-v1\ncounters|0|0\n" + obligation() + "\n" + evaluation(2, true)
+
+fn under_covered_evidence() -> text:
+    "MCDC-EVIDENCE-v1\ncounters|0|0\n" + obligation() + "\n" + evaluation(1, false)
+
+describe "test runner MC/DC run gate":
+    it "is silent and not required when MC/DC is off":
+        val gate = test_runner_mcdc_run_gate("off", "", [result("a", "")])
+        expect(gate.required).to_equal(false)
+        expect(gate.failed).to_equal(false)
+        expect(gate.lines.len()).to_equal(0)
+
+    it "passes and prints the decision report for covered evidence":
+        val gate = test_runner_mcdc_run_gate("on", "",
+            [result("a", covered_evidence()), result("b", covered_evidence_other())])
+        expect(gate.required).to_equal(true)
+        expect(gate.failed).to_equal(false)
+        val joined = gate.lines.join("\n")
+        expect(joined).to_contain("MC/DC decision report")
+        expect(joined).to_contain("covered 1 of 1 required conditions")
+        expect(joined).to_contain("MC/DC: PASS")
+
+    it "fails a required run with an under-covered decision":
+        val gate = test_runner_mcdc_run_gate("on", "strict", [result("a", under_covered_evidence())])
+        expect(gate.failed).to_equal(true)
+        expect(gate.lines.join("\n")).to_contain("MC/DC required (mode=on) and not satisfied")
+
+    it "reports a degraded file without failing the run or claiming compliance":
+        val gate = test_runner_mcdc_run_gate("on", "",
+            [result("ok", covered_evidence()), result("ok2", covered_evidence_other()), result("deg", "", "spec failed to compile")])
+        expect(gate.failed).to_equal(false)
+        val joined = gate.lines.join("\n")
+        expect(joined).to_contain("MC/DC: DEGRADED deg: spec failed to compile")
+        expect(joined).to_contain("NOT COMPLIANT: 1 degraded")
+        expect(joined.contains("MC/DC: PASS")).to_equal(false)
+
+    it "does not fail when every file degraded and no evidence exists":
+        val gate = test_runner_mcdc_run_gate("on", "strict", [result("deg", "", "seed emits no probes")])
+        expect(gate.failed).to_equal(false)
+        expect(gate.lines.join("\n")).to_contain("no runtime evidence collected")
+
+    it "reports but does not fail below the normal profile":
+        val gate = test_runner_mcdc_run_gate("on", "dev", [result("a", under_covered_evidence())])
+        expect(gate.required).to_equal(false)
+        expect(gate.failed).to_equal(false)
+        expect(gate.lines.join("\n")).to_contain("advisory only")
+
+    it "does not demand evidence from files that never ran":
+        val skipped = TestFileResult(
+            path: "gated", passed: 0, failed: 0, skipped: 3, pending: 0,
+            duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false)
+        val gate = test_runner_mcdc_run_gate("on", "",
+            [result("a", under_covered_evidence()), skipped])
+        expect(gate.lines.join("\n")).to_contain("covered 0 of 1 required conditions")
+        expect(gate.lines.join("\n").contains("path=gated")).to_equal(false)
