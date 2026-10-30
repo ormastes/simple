@@ -1,0 +1,105 @@
+#!/bin/sh
+# Exercise real land + tier dispatch in a scratch Git history. Rules gates and
+# receipt signing are boundary doubles; no network, real key or receipt needed.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+T=$(mktemp -d)
+trap 'rm -rf "$T"' EXIT HUP INT TERM
+mkdir -p "$T/scripts/check" "$T/scripts/lib" "$T/config/check"
+cp "$ROOT/scripts/check/land.shs" "$ROOT/scripts/check/run-gate-tier.shs" "$T/scripts/check/"
+cp "$ROOT/scripts/lib/recursion_guard.shs" "$T/scripts/lib/"
+cd "$T"
+git init -q
+git config user.name land-fixture
+git config user.email land-fixture@example.invalid
+git config core.hooksPath /dev/null
+printf 'root\n' > history
+git add history
+git commit -qm root
+MAIN=$(git rev-parse HEAD)
+git update-ref refs/remotes/origin/main "$MAIN"
+printf 'release\n' >> history
+git commit -qam release
+BASE=$(git rev-parse HEAD)
+git update-ref refs/remotes/origin/release/1.0.0 "$BASE"
+git checkout -qb work/fixture
+printf 'fix\n' >> history
+git commit -qam fix
+TIP=$(git rev-parse HEAD)
+
+for gate in check-rules-sdl.shs check-rules-sdl-integrity.shs; do
+    printf 'echo PASS\n' > "scripts/check/$gate"
+done
+cat > scripts/check/sign-local-ci-receipt.shs <<'SH'
+touch signed
+echo PASS
+SH
+cat > scripts/check/fixture-range.shs <<'SH'
+set -eu
+touch ran
+[ "$1" = "$EXPECTED_BASE..$EXPECTED_TIP" ]
+[ "$2" = "$EXPECTED_BASE" ]
+[ "$3" = "$EXPECTED_TIP" ]
+[ "$(git rev-list --count "$1")" = 1 ]
+[ "${FAIL_ROW:-0}" = 0 ]
+SH
+cat > config/check/must_check_gates.sdn <<'SDN'
+must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|
+    target-range, local, false, range, "sh scripts/check/fixture-range.shs {range} {base} {rev}", -, -, "pinned target and single owned commit"
+SDN
+touch fixture-key
+SIMPLE_CI_RECEIPT_KEY="$T/fixture-key"
+SIMPLE_CI_RECEIPT_IDENTITY=fixture
+SIMPLE_PUSH_RUSH=0
+EXPECTED_BASE=$BASE
+EXPECTED_TIP=$TIP
+export SIMPLE_CI_RECEIPT_KEY SIMPLE_CI_RECEIPT_IDENTITY SIMPLE_PUSH_RUSH
+export EXPECTED_BASE EXPECTED_TIP
+unset RUN_GATE_TIER_ROOT MUST_CHECK_MANIFEST_REL
+
+run_case() {
+    label=$1 expected=$2
+    rm -f ran signed
+    rc=0
+    sh scripts/check/land.shs --dry-run >out 2>&1 || rc=$?
+    if [ "$rc" != "$expected" ]; then
+        tail -20 out >&2
+        echo "FAIL: $label (exit $rc, wanted $expected)" >&2
+        exit 1
+    fi
+}
+LAND_TARGET_REF=release/1.0.0
+export LAND_TARGET_REF
+run_case release 0
+[ -f ran ]
+[ -f signed ]
+echo 'PASS: release target excludes unrelated history from origin/main'
+
+git update-ref -d refs/remotes/origin/main
+run_case release-without-main 0
+[ -f ran ]
+[ -f signed ]
+echo 'PASS: release target works without origin/main'
+
+git update-ref refs/remotes/origin/main "$BASE"
+unset LAND_TARGET_REF
+run_case default-main 0
+[ -f ran ]
+[ -f signed ]
+echo 'PASS: default main target keeps its single-commit range'
+
+FAIL_ROW=1
+export FAIL_ROW
+run_case failed-local-gate 1
+[ -f ran ]
+[ ! -f signed ]
+echo 'PASS: local gate failure prevents receipt signing'
+unset FAIL_ROW
+
+LAND_TARGET_REF=release/missing
+export LAND_TARGET_REF
+run_case missing-target 2
+[ ! -f ran ]
+[ ! -f signed ]
+echo 'PASS: missing target refuses before dispatch or signing'
+echo 'PASS: land target range, 5 cases'
