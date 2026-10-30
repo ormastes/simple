@@ -1,6 +1,7 @@
 # Native Result text payload loses its MIR text representation
 
-Status: source repair proposed; native validation with a rebuilt producer pending.
+Status: focused native regression PASS with rebuilt producer; private-daemon
+acceptance and broader compiler checks remain separate pending gates.
 
 Producer SHA-256: `c978ab12656b7bf67d4bf9b6cc6450d08181c9140b19266863e93b3eba57e5f4`.
 Runner SHA-256: `e9b8cf88c24d1f694dd4ad2d6e8b4b2fbe042b4dd60147fdc2d194e943acc8f8`.
@@ -30,5 +31,27 @@ it does not change the temporary-directory API or suppress errors.
 
 Regression: `test/fixtures/compiler/native_result_try_text_payload.spl` checks
 text equality, length, marker concatenation, and unchanged Err propagation.
-The rebuilt producer must compile and execute it, followed by the real private
-daemon calibration. A linked runner alone does not establish either result.
+The rebuilt producer compiled and executed this regression successfully. The
+real private-daemon calibration still requires a newly compiled runner.
+
+## Native regression evidence
+
+Producer SHA-256:
+`5dd85ea67087e063ae3a68ad0b282c82443e2ade6a178e0f10187fa93028260c`.
+The immutable generation-2 source manifest contains 69 paths and has SHA-256
+`06a77bfaa0be283ed1ca4a21686697444da3f39a14491f3e0117cdab6cc52beb`.
+It includes the original source repair commit
+`515b82418683ebc6f5d1fb7efe34964380e88202`, independently reviewed with no blockers.
+
+Receipts reside in
+`D:/dev/simple-runner-generation2-evidence-20261030/regression-result-text-01`:
+`compiler.sha256`, `identity.env`, `build-status.env`, `run-status.env`,
+`build-tree.env`, `run-tree.env`, and `run.stdout`.
+Build and execution both exited 0; stdout is exactly `result-try-text: PASS`.
+Build peak RSS was 2671356 KiB, peak job commit 2741580 KiB; run peak RSS was
+2564 KiB. Both process-tree receipts report quiescence.
+
+This validates heap-built and literal text extraction, equality, length,
+concatenation, and Err propagation in the fixture. Shared nested and multi-slot
+enum callers were source-reviewed, not independently exercised here. These
+receipts do not establish private-daemon startup or broad compiler acceptance.
