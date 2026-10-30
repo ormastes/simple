@@ -58,3 +58,12 @@ Close clears internal refs and marks the run closed before releasing the map; pr
 8. Preserve existing legacy FileFiber tests and write a scenario-oriented SSpec covering actual carrier steps (first caller, joined waiter, unrelated progress, failure/close), with real assertions and UNRUN status, no generated-manual PASS claim.
 
 Luna owns file_fiber_v1.spl, new bridge source, minimal driver_parse_shard_entry gate and dedicated unit/integration/SSpec tests. Astra owns this design and final review. Do not edit shared map/ring internals, worker_surface, AOP, RR, build loops or another lane's files. Report any missing actual cancellation/lifetime primitive before substituting fake success.
+
+## Authored evidence inventory
+
+The executable sources contain **16 scenarios: 11 unit, 2 integration and 3 system**. These are authored counts, not executed results. All remain **UNRUN**; source review, whitespace and environment guards do not establish parser or runtime correctness.
+
+- `test/01_unit/compiler/driver/file_fiber_tldr_bridge_v1_spec.spl`: 11 cases, including the fatal notification/acknowledgement lifetime regression.
+- `test/02_integration/compiler/file_fiber_tldr_async_bridge_integration_spec.spl`: 2 real FileFiber/FileReader success and missing-file cases.
+- `test/03_system/compiler/file_fiber_tldr_async_bridge_spec.spl`: 3 scenarios covering local progress, outside-source success and outside-source failure.
+- `doc/06_spec/03_system/compiler/file_fiber_tldr_async_bridge_spec.md`: authored companion manual describing those three system scenarios; not generated execution evidence.
