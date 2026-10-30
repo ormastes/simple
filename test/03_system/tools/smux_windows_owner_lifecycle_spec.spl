@@ -56,6 +56,10 @@ fn owner_binary() -> text:
 # array preserves shell metacharacters as data for the owner's real pane shell.
 # @inline
 fn owner_request(binary: text, endpoint: text, token: text, args: [text]) -> OwnerReply:
+    # expect() does not abort, so a missing fixture must not spend the whole budget
+    # retrying requests: owner_binary has already recorded the failure.
+    if binary == "" or not file_exists(binary):
+        return OwnerReply(output: "", errors: "SMUX_TEST_BINARY unavailable", code: -1)
     val (output, errors, code) = process_run_bounded(binary,
         ["--request", endpoint, token] + args, 7000, 131072)
     return OwnerReply(output: output.replace("\r\n", "\n").trim(), errors: errors, code: code)
@@ -68,7 +72,8 @@ fn owner_call(owner: OwnerFixture, args: [text]) -> OwnerReply:
 fn owner_start(binary: text, lane: i64) -> OwnerFixture:
     val endpoint = "127.0.0.1:" + (48000 + getpid() % 8000 + lane).to_text()
     val token = "smux-live-" + getpid().to_text() + "-" + lane.to_text()
-    val pid = process_spawn_async(binary, ["--serve", endpoint, token])
+    # owner_binary has already failed the example when the fixture is missing.
+    val pid = if binary != "" and file_exists(binary): process_spawn_async(binary, ["--serve", endpoint, token]) else: -1
     var owner = OwnerFixture(binary: binary, endpoint: endpoint,
         token: token, pid: pid, ready: false)
     var attempt = 0

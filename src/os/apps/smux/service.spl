@@ -47,10 +47,10 @@ class PaneRecord:
     ingestion_sequence: u64
     child_incarnation: u64
 
-    me with_input(input: PaneInput) -> PaneRecord:
+    fn with_input(input: PaneInput) -> PaneRecord:
         return PaneRecord(content_revision: me.content_revision, ingestion_sequence: me.ingestion_sequence, child_incarnation: me.child_incarnation, input: input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, tail_truncated: me.tail_truncated, screen: me.screen)
 
-    me feed_screen(raw: text) -> PaneRecord:
+    fn feed_screen(raw: text) -> PaneRecord:
         var out = me
         out.screen = vt_feed(me.screen, raw)
         out.ingestion_sequence = me.ingestion_sequence + (text_to_bytes(raw).len() as u64)
@@ -60,7 +60,7 @@ class PaneRecord:
 
     # Pipe output uses the same terminal model for shared capture; legacy tail
     # remains available. Count UTF-8 bytes delivered by the text-read provider.
-    me ingest_pipe(raw: text, cleaned: text) -> PaneRecord:
+    fn ingest_pipe(raw: text, cleaned: text) -> PaneRecord:
         var out = me
         # A pipe's LF starts a new text line (there is no terminal OPOST).
         # Account delivered text bytes, not native syscall bytes or inserted CR.
@@ -73,10 +73,10 @@ class PaneRecord:
         if retained.content != me.tail: out.content_revision = me.content_revision + 1
         return out
 
-    me feed(output: text) -> PaneRecord:
+    fn feed(output: text) -> PaneRecord:
         return me.ingest_pipe(output, output)
 
-    me resize(c: int, r: int) -> PaneRecord:
+    fn resize(c: int, r: int) -> PaneRecord:
         if me.pane.cols == c and me.pane.rows == r: return me
         val p = me.pane
         val np = MuxPane(
@@ -94,10 +94,10 @@ class PaneRecord:
         if out.screen.capture_dirty: out.content_revision = me.content_revision + 1
         return out
 
-    me with_focus(f: bool) -> PaneRecord:
+    fn with_focus(f: bool) -> PaneRecord:
         return PaneRecord(content_revision: me.content_revision, ingestion_sequence: me.ingestion_sequence, child_incarnation: me.child_incarnation, input: me.input, pane: me.pane, focus: f, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, tail_truncated: me.tail_truncated, screen: me.screen)
 
-    me with_child(pid: i64) -> PaneRecord:
+    fn with_child(pid: i64) -> PaneRecord:
         var out = me
         out.input = pane_input_new()
         out.child_pid = pid
@@ -105,7 +105,7 @@ class PaneRecord:
             out.child_incarnation = me.child_incarnation + 1
         return out
 
-    me with_pty(pid: i64, fd: i64) -> PaneRecord:
+    fn with_pty(pid: i64, fd: i64) -> PaneRecord:
         var out = me
         out.input = pane_input_new()
         out.child_pid = pid
@@ -122,17 +122,17 @@ class PaneRecord:
                     out.content_revision = me.content_revision + 1
         return out
 
-    me can_attach() -> bool:
+    fn can_attach() -> bool:
         return me.child_incarnation < 18446744073709551615u64 and me.content_revision < 18446744073709551615u64
 
-    me can_ingest() -> bool:
+    fn can_ingest() -> bool:
         # Native reads are bounded; reserve ample counter space before I/O.
         return me.ingestion_sequence <= 18446744073708503039u64 and me.content_revision < 18446744073709551615u64
 
-    me uses_tail_capture() -> bool:
+    fn uses_tail_capture() -> bool:
         return me.pty_fd < 0 and (me.child_pid > 0 or me.tail != "")
 
-    me capture(max_lines: int) -> MuxCapture:
+    fn capture(max_lines: int) -> MuxCapture:
         # A PTY child's output lives on its screen (only a PTY feeds it); a
         # piped child's in the tail. Trailing blank lines (the newline that
         # ended the last output line, an idle prompt's padding) are not content.
@@ -146,7 +146,7 @@ class PaneRecord:
 
     # A PTY history capture uses one frozen history+grid snapshot. Never fall
     # back to the live output tail when that complete snapshot happens empty.
-    me capture_history(max_lines: int) -> MuxCapture:
+    fn capture_history(max_lines: int) -> MuxCapture:
         if max_lines <= 0:
             return MuxCapture.create(me.pane.id, "", 0)
         if me.uses_tail_capture():
@@ -159,7 +159,7 @@ class PaneRecord:
 
     # Rows of the PTY screen with styling as ANSI SGR runs (the piped tail has
     # no styling, so it is returned plain).
-    me styled_capture(max_lines: int) -> text:
+    fn styled_capture(max_lines: int) -> text:
         var lines = if me.uses_tail_capture(): me.tail.split("\n") else: vt_styled_text(me.screen).split("\n")
         while lines.len() > 0 and lines[lines.len() - 1].trim() == "":
             lines = lines[0:lines.len() - 1]
@@ -168,13 +168,13 @@ class PaneRecord:
         return lines.join("\n")
 
     # Query replies the screen owes the child (DSR, DA, colours, ...).
-    me replies() -> text:
+    fn replies() -> text:
         return vt_replies(me.screen)
 
-    me without_replies() -> PaneRecord:
+    fn without_replies() -> PaneRecord:
         return PaneRecord(content_revision: me.content_revision, ingestion_sequence: me.ingestion_sequence, child_incarnation: me.child_incarnation, input: me.input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, tail_truncated: me.tail_truncated, screen: vt_clear_replies(me.screen))
 
-    me bracketed_paste() -> bool:
+    fn bracketed_paste() -> bool:
         return me.pty_fd >= 0 and vt_bracketed_paste(me.screen)
 
     static fn create(p: MuxPane) -> PaneRecord:
@@ -232,7 +232,7 @@ class ServiceState:
 
     # --- session helpers ---
 
-    me find_session_idx(sid: text) -> int:
+    fn find_session_idx(sid: text) -> int:
         if me.session_count > 0:
             if me.s0.id == sid:
                 return 0
@@ -259,7 +259,7 @@ class ServiceState:
                 return 7
         return -1
 
-    me get_session(idx: int) -> MuxSession:
+    fn get_session(idx: int) -> MuxSession:
         if idx == 0:
             return me.s0
         if idx == 1:
@@ -278,7 +278,7 @@ class ServiceState:
             return me.s7
         return me.s0
 
-    me add_session(s: MuxSession) -> ServiceState:
+    fn add_session(s: MuxSession) -> ServiceState:
         var st = me
         val n = me.session_count
         if n == 0:
@@ -301,7 +301,7 @@ class ServiceState:
 
     # --- window helpers ---
 
-    me find_window_idx(wid: text) -> int:
+    fn find_window_idx(wid: text) -> int:
         if me.window_count > 0:
             if me.w0.id == wid:
                 return 0
@@ -328,7 +328,7 @@ class ServiceState:
                 return 7
         return -1
 
-    me get_window(idx: int) -> MuxWindow:
+    fn get_window(idx: int) -> MuxWindow:
         if idx == 0:
             return me.w0
         if idx == 1:
@@ -347,7 +347,7 @@ class ServiceState:
             return me.w7
         return me.w0
 
-    me add_window(w: MuxWindow) -> ServiceState:
+    fn add_window(w: MuxWindow) -> ServiceState:
         var st = me
         val n = me.window_count
         if n == 0:
@@ -368,7 +368,7 @@ class ServiceState:
             st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: w, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
         return st
 
-    me replace_window(idx: int, w: MuxWindow) -> ServiceState:
+    fn replace_window(idx: int, w: MuxWindow) -> ServiceState:
         if idx == 0:
             return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: w, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
         if idx == 1:
@@ -389,7 +389,7 @@ class ServiceState:
 
     # --- pane helpers ---
 
-    me find_pane_idx(pid: text) -> int:
+    fn find_pane_idx(pid: text) -> int:
         if me.pane_count > 0:
             if me.p0.pane.id == pid:
                 return 0
@@ -416,7 +416,7 @@ class ServiceState:
                 return 7
         return -1
 
-    me get_pane(idx: int) -> PaneRecord:
+    fn get_pane(idx: int) -> PaneRecord:
         if idx == 0:
             return me.p0
         if idx == 1:
@@ -435,7 +435,7 @@ class ServiceState:
             return me.p7
         return me.p0
 
-    me replace_pane(idx: int, pr: PaneRecord) -> ServiceState:
+    fn replace_pane(idx: int, pr: PaneRecord) -> ServiceState:
         if idx == 0:
             return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: pr, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
         if idx == 1:
@@ -454,7 +454,7 @@ class ServiceState:
             return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: pr, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
         return me
 
-    me add_pane(pr: PaneRecord) -> ServiceState:
+    fn add_pane(pr: PaneRecord) -> ServiceState:
         val n = me.pane_count
         if n == 0:
             val stp0: ServiceState = me.replace_pane(0, pr)
@@ -488,7 +488,7 @@ class ServiceState:
     # a slot in place and decrementing the count (the old smux_close_pane) left
     # every LATER pane above the new count and therefore undiscoverable and
     # unwritable. Shift survivors down, blank the vacated tail, then decrement.
-    me remove_pane(idx: int) -> ServiceState:
+    fn remove_pane(idx: int) -> ServiceState:
         if idx < 0 or idx >= me.pane_count:
             return me
         val blank = PaneRecord.create(MuxPane.create("", "", ""))
@@ -504,18 +504,18 @@ class ServiceState:
         st = st.replace_pane(me.pane_count - 1, blank)
         return st.with_pane_count(me.pane_count - 1)
 
-    me with_pane_count(n: int) -> ServiceState:
+    fn with_pane_count(n: int) -> ServiceState:
         return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: n, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
 
-    me with_metrics(m: SmuxMetrics) -> ServiceState:
+    fn with_metrics(m: SmuxMetrics) -> ServiceState:
         return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: m)
 
-    me with_next_id(n: int) -> ServiceState:
+    fn with_next_id(n: int) -> ServiceState:
         return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: n, metrics: me.metrics)
 
     # --- client helpers ---
 
-    me find_client_idx(cid: text) -> int:
+    fn find_client_idx(cid: text) -> int:
         if me.client_count > 0:
             if me.c0.client_id == cid:
                 return 0
@@ -530,7 +530,7 @@ class ServiceState:
                 return 3
         return -1
 
-    me get_client(idx: int) -> MuxClientAttachment:
+    fn get_client(idx: int) -> MuxClientAttachment:
         if idx == 0:
             return me.c0
         if idx == 1:
@@ -539,7 +539,7 @@ class ServiceState:
             return me.c2
         return me.c3
 
-    me add_client(c: MuxClientAttachment) -> ServiceState:
+    fn add_client(c: MuxClientAttachment) -> ServiceState:
         val n = me.client_count
         if n == 0:
             return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: c, c1: me.c1, c2: me.c2, c3: me.c3, client_count: n + 1, next_id: me.next_id, metrics: me.metrics)
@@ -551,7 +551,7 @@ class ServiceState:
             return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: c, client_count: n + 1, next_id: me.next_id, metrics: me.metrics)
         return me
 
-    me remove_client(idx: int) -> ServiceState:
+    fn remove_client(idx: int) -> ServiceState:
         val detached = MuxClientAttachment(client_id: "", session_id: "", attached: false, cols: 0, rows: 0)
         # Compact on removal: find_client_idx only scans the first
         # client_count slots, so leaving a hole would orphan live clients.
