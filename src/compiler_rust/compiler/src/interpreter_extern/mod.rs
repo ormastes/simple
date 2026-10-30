@@ -3269,8 +3269,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
             )
         }) as ExternHandler,
     );
+    // Legacy numbered spelling (src/lib/nogc_sync_mut/sffi/concurrent.spl); same ABI as _with_args.
     m.insert(
-        "rt_thread_spawn_isolated_with_args",
+        "rt_thread_spawn_isolated2",
         (|evaluated, env, functions, classes, enums, impl_methods| {
             concurrency::rt_thread_spawn_isolated_with_args_context(
                 evaluated,
