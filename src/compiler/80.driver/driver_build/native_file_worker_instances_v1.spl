@@ -9,8 +9,9 @@
 #   - receipted: every claim gets a PASS/FAILED terminal record;
 #   - compiled once into an instance object published under the producer-keyed,
 #     header-verified cache (generic_instance_cache_publish_v1);
-#   - unchanged keys place the cached object, added keys build, removed keys
-#     drop their object and force a relink (P-E removed-module rule).
+#   - unchanged keys place the cached object, added keys build, removed demand
+#     is reported after a successful complete run. Cached bytes remain retained
+#     until a pin-aware storage owner admits reclamation.
 #
 # Fail closed: an incomplete plan (any module's list missing, stale or
 # incomplete) runs no instance job and attaches no instance object -- every
@@ -24,14 +25,16 @@
 # objects do not wait for it.
 
 use std.common.crypto.sha256.{sha256_text}
-use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, dir_create, dir_create_all, getpid}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, dir_create, dir_create_all, getpid}
 use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1, GenericSpecializationListV1}
-use compiler.driver.cache.generic_instance_build_plan_v1.{GenericInstanceBuildPlanV1, generic_instance_build_plan_v1,
+use compiler.driver.cache.generic_instance_build_plan_v1.{GenericInstanceBuildPlanV1, GenericInstanceDemandV1,
+    generic_instance_build_plan_v1,
     generic_instance_needed_v1, generic_instance_object_path_v1, generic_instance_cached_v1,
     generic_instance_cache_publish_v1, generic_instance_build_plan_of_tldr_v1}
 
 pub struct FileWorkerInstanceRunV1:
     complete: bool
+    demands: [GenericInstanceDemandV1]
     built: [text]          # keys this claimant compiled and published
     reused: [text]         # keys whose cached object verified
     joined: [text]         # keys another claimant built (single flight)
@@ -106,7 +109,7 @@ pub fn file_worker_instances_run_v1(plan: GenericInstanceBuildPlanV1, cache_root
     var failed: [text] = []
     if not plan.complete or ledger == "" or not dir_create_all(ledger):
         return FileWorkerInstanceRunV1(complete: false, built: [], reused: [], joined: [], dropped: [],
-            failed: [], link_objects: [], retire_comdat: false, relink: false)
+            demands: [], failed: [], link_objects: [], retire_comdat: false, relink: false)
     for s in plan.needed:
         val key = s.concrete_key
         if not plan.build.contains(key):
@@ -124,12 +127,16 @@ pub fn file_worker_instances_run_v1(plan: GenericInstanceBuildPlanV1, cache_root
             joined.push(key)
         else:
             failed.push(key)
+    if failed.len() > 0:
+        # A failed/cancelled producer cannot replace the last complete demand
+        # inventory or retire any prior key. Successfully published objects
+        # remain reusable but are not linked as a complete set.
+        return FileWorkerInstanceRunV1(complete: false, demands: [], built: built,
+            reused: plan.reuse, joined: joined, dropped: [], failed: failed,
+            link_objects: [], retire_comdat: false, relink: false)
     for key in plan.drop:
-        val path = generic_instance_object_path_v1(cache_root, producer, key)
-        if path != "" and file_exists(path):
-            val _gone = file_delete(path)
-        if path != "" and file_exists(path + ".hdr"):
-            val _gone_hdr = file_delete(path + ".hdr")
+        # Demand retirement is distinct from artifact reclamation. This plan
+        # has no projection pin/epoch authority to delete prior bytes safely.
         dropped.push(key)
     var keys: [text] = []
     var objects: [text] = []
@@ -137,9 +144,12 @@ pub fn file_worker_instances_run_v1(plan: GenericInstanceBuildPlanV1, cache_root
         keys.push(s.concrete_key)
         if not failed.contains(s.concrete_key):
             objects.push(generic_instance_object_path_v1(cache_root, producer, s.concrete_key))
-    val _recorded = _record_needed_v1(cache_root, producer, keys)
+    if not _record_needed_v1(cache_root, producer, keys):
+        return FileWorkerInstanceRunV1(complete: false, demands: [], built: built,
+            reused: plan.reuse, joined: joined, dropped: [], failed: [],
+            link_objects: [], retire_comdat: false, relink: false)
     val retire = instance_comdat and failed.len() == 0
-    FileWorkerInstanceRunV1(complete: true, built: built, reused: plan.reuse, joined: joined,
+    FileWorkerInstanceRunV1(complete: true, demands: plan.demands, built: built, reused: plan.reuse, joined: joined,
         dropped: dropped, failed: failed, link_objects: if retire: objects else: [],
         retire_comdat: retire, relink: built.len() > 0 or dropped.len() > 0)
 
