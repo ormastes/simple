@@ -14,6 +14,32 @@ use super::super::{
     MODULE_GLOBALS,
 };
 
+/// Refresh a stale same-file module `var` binding before a method call uses it
+/// as its receiver.
+///
+/// `interpreter/expr/literals.rs` already prefers `MODULE_GLOBALS` when an
+/// identifier is READ through a non-local binding, because a spec `it` body
+/// runs in a COPY of the caller env (`interpreter_call/bdd.rs`) and a helper's
+/// write to the module var lands only in `MODULE_GLOBALS`
+/// (doc/08_tracking/bug/spec_it_block_reads_stale_module_var_2026-08-04.md).
+/// The method-call receiver paths read `env` directly instead, so after a
+/// helper reassigned `g`, `g.f` saw the new value while `g.m()` ran on the old
+/// object and then wrote that stale object back over the live one
+/// (doc/08_tracking/bug/spec_it_method_receiver_stale_module_var_2026-10-30.md).
+/// Only bindings without owner provenance are refreshed; imported globals keep
+/// their existing owner-store refresh.
+pub(crate) fn refresh_stale_module_global_receiver(env: &mut Env, name: &str) {
+    if env.is_local(name) || env.is_refreshed_global(name) {
+        return;
+    }
+    if env.live_owned_global(name).is_some() || env.get(name).is_none() {
+        return;
+    }
+    if let Some(live) = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned()) {
+        env.insert(name.to_owned(), live);
+    }
+}
+
 fn write_back_identifier_receiver(env: &mut Env, name: &str, value: Value) {
     let owned_binding = if env.is_local(name) {
         None
@@ -174,6 +200,7 @@ pub(super) fn eval_call_expr(
             // Check if receiver is an identifier - if so, we may need to update it
             // after calling a mutating (me) method
             if let Expr::Identifier(var_name) = receiver.as_ref() {
+                refresh_stale_module_global_receiver(env, var_name);
                 // MECALL-OWNED (2026-08-22): expression-context twin of the
                 // statement fast path in interpreter_helpers::patterns. When the
                 // variable holds an Object whose class has the method, evaluate
