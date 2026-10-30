@@ -1,0 +1,646 @@
+# codex-impl
+# Bounded author-facing MC/DC scenario exclusion expression.
+#
+# Canonical form (one physical line, fields in this exact order):
+#   # @mcdc-exclude: scenario=<stable-id> | decision=u64:<16-hex> |
+#   source=u64:<16-hex> | conditions=u64:<16-hex> | condition-count=<1..63> |
+#   kind=<governed-kind> | code=<stable-id> | capability=<stable-id> |
+#   predicate=<registered-predicate> | producible=false |
+#   reason=<human reason> | evidence=sha256:<64 lowercase hex> |
+#   observed=<unix-seconds> | owner=<stable-id> |
+#   reviewed=<unix-seconds> | expires=<unix-seconds>
+#
+# This is intentionally not a generic test skip. It can represent only one of
+# the five REQ-018 causes and is consumed by the MC/DC verifier.
+
+use std.common.structural.mcdc.contracts.{
+    McdcNormalGateV1, mcdc_normal_gate_v1_passes
+}
+use compiler.tools.verify.mcdc_exclusion_evidence.{
+    MCDC_EXCLUSION_EVIDENCE_V1_BYTES, MCDC_EXCLUSION_EVIDENCE_MAX_ROWS,
+    McdcExclusionEvidenceStatusV1, validate_mcdc_exclusion_evidence_v1
+}
+
+val MCDC_EXCLUSION_PREFIX = "# @mcdc-exclude:"
+val MCDC_EXCLUSION_MAX_LINE_BYTES: i64 = 1024
+val MCDC_EXCLUSION_MAX_ID_BYTES: i64 = 96
+val MCDC_EXCLUSION_MAX_REASON_BYTES: i64 = 256
+val MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS: i64 = 7776000  # 90 days
+val MCDC_EXCLUSION_MAX_SOURCE_BYTES: i64 = 4194304
+val MCDC_EXCLUSION_MAX_DIRECTIVES: i64 = 256
+
+enum McdcScenarioExclusionStatusV1:
+    Accepted
+    NotDirective
+    Malformed
+    InvalidIdentity
+    InvalidReason
+    InvalidEvidence
+    InvalidReview
+    Stale
+
+enum McdcScenarioExclusionKindV1:
+    CapabilityUnavailable
+    FixtureUnavailable
+    PlatformInapplicable
+    SafetyProhibited
+    UncontrollableNondeterminism
+    Invalid
+
+struct McdcScenarioExclusionExpressionV1:
+    status: McdcScenarioExclusionStatusV1
+    scenario_id: text
+    kind: McdcScenarioExclusionKindV1
+    code: text
+    predicate: text
+    producible: bool
+    reason: text
+    evidence_sha256: text
+    observed_epoch: i64
+    owner_id: text
+    reviewed_epoch: i64
+    expiry_epoch: i64
+    decision_id: u64
+    source_digest: u64
+    condition_mask: u64
+    condition_count: i64
+    capability_id: text
+    binding_ready: bool
+
+struct McdcScenarioExclusionBindingV1:
+    audit: McdcScenarioExclusionAuditV1
+    binary_row_count: i64
+    bound_count: i64
+    exact: bool
+
+struct McdcScenarioExclusionAuditV1:
+    directive_count: i64
+    accepted_count: i64
+    rejected_count: i64
+    stale_count: i64
+
+fn _mcdc_exclusion_result(status: McdcScenarioExclusionStatusV1) -> McdcScenarioExclusionExpressionV1:
+    McdcScenarioExclusionExpressionV1(
+        status: status, scenario_id: "", kind: McdcScenarioExclusionKindV1.Invalid,
+        code: "", predicate: "", producible: true, reason: "",
+        evidence_sha256: "", observed_epoch: 0, owner_id: "", reviewed_epoch: 0,
+        expiry_epoch: 0, decision_id: 0u64, source_digest: 0u64,
+        condition_mask: 0u64, condition_count: 0, capability_id: "",
+        binding_ready: false)
+
+fn _mcdc_exclusion_hex_nibble(ch: text) -> i64:
+    val code = ch.ord()
+    if code >= 48 and code <= 57: return code - 48
+    if code >= 97 and code <= 102: return code - 87
+    -1
+
+fn _mcdc_exclusion_u64(value: text) -> u64?:
+    if not value.starts_with("u64:") or value.len() != 20: return nil
+    var result: u64 = 0u64
+    var i = 4
+    while i < 20:
+        val nibble = _mcdc_exclusion_hex_nibble(value[i])
+        if nibble < 0: return nil
+        result = (result << 4u64) | (nibble as u64)
+        i = i + 1
+    result
+
+fn _mcdc_exclusion_positive_count(value: text) -> i64?:
+    val parsed = _mcdc_exclusion_epoch(value)
+    if parsed == nil: return nil
+    val count = parsed ?? 0
+    if count <= 0 or count > 63: return nil
+    count
+
+fn _mcdc_exclusion_fnv1a(value: text) -> u64:
+    var hash: u64 = 14695981039346656037u64
+    for ch in value:
+        hash = hash ^ (ch.ord() as u64)
+        hash = hash * 1099511628211u64
+    hash
+
+fn _mcdc_exclusion_digest_word(value: text, start: i64) -> u64:
+    var result: u64 = 0u64
+    var i = start
+    while i < start + 16:
+        result = (result << 4u64) | (_mcdc_exclusion_hex_nibble(value[i]) as u64)
+        i = i + 1
+    result
+
+fn _mcdc_exclusion_read_u64(bytes: [u8], offset: i64) -> u64:
+    var result: u64 = 0u64
+    var i = 0
+    while i < 8:
+        result = result | ((bytes[offset + i] as u64) << ((i * 8) as u64))
+        i = i + 1
+    result
+
+fn _mcdc_exclusion_read_u32(bytes: [u8], offset: i64) -> i64:
+    var result: u64 = 0u64
+    var i = 0
+    while i < 4:
+        result = result | ((bytes[offset + i] as u64) << ((i * 8) as u64))
+        i = i + 1
+    result as i64
+
+fn _mcdc_exclusion_write_u64(bytes: [u8], offset: i64, value: u64):
+    var i = 0
+    while i < 8:
+        bytes[offset + i] = ((value >> ((i * 8) as u64)) & 255u64) as u8
+        i = i + 1
+
+fn _mcdc_exclusion_write_u32(bytes: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 4:
+        bytes[offset + i] = (((value as u64) >> ((i * 8) as u64)) & 255u64) as u8
+        i = i + 1
+
+fn _mcdc_exclusion_field(part: text, name: text) -> text?:
+    val prefix = name + "="
+    val trimmed = part.trim()
+    if not trimmed.starts_with(prefix): return nil
+    val value = trimmed.substring(prefix.len(), trimmed.len()).trim()
+    if value == "": return nil
+    value
+
+fn _mcdc_exclusion_stable_id(value: text) -> bool:
+    if value.len() <= 0 or value.len() > MCDC_EXCLUSION_MAX_ID_BYTES:
+        return false
+    for ch in value:
+        val code = ch.ord()
+        val lower = code >= 97 and code <= 122
+        val digit = code >= 48 and code <= 57
+        if not lower and not digit and ch != "." and ch != "_" and ch != "-":
+            return false
+    true
+
+fn _mcdc_exclusion_reason_valid(value: text) -> bool:
+    if value.len() < 8 or value.len() > MCDC_EXCLUSION_MAX_REASON_BYTES:
+        return false
+    val normalized = value.trim().to_lower()
+    if normalized == "unknown" or normalized == "todo" or normalized == "n/a" or
+            value.contains("|") or value.contains("\n"):
+        return false
+    for ch in value:
+        if ch.ord() < 32 or ch.ord() > 126: return false
+    true
+
+fn _mcdc_exclusion_evidence_valid(value: text) -> bool:
+    if not value.starts_with("sha256:") or value.len() != 71:
+        return false
+    val digest = value.substring(7, value.len())
+    var nonzero = false
+    for ch in digest:
+        val code = ch.ord()
+        val digit = code >= 48 and code <= 57
+        val lower_hex = code >= 97 and code <= 102
+        if not digit and not lower_hex: return false
+        if ch != "0": nonzero = true
+    nonzero
+
+fn _mcdc_exclusion_epoch(value: text) -> i64?:
+    if value == "": return nil
+    for ch in value:
+        val code = ch.ord()
+        if code < 48 or code > 57: return nil
+    value.to_int()
+
+fn _mcdc_exclusion_kind(value: text) -> McdcScenarioExclusionKindV1:
+    if value == "capability-unavailable":
+        return McdcScenarioExclusionKindV1.CapabilityUnavailable
+    if value == "fixture-unavailable":
+        return McdcScenarioExclusionKindV1.FixtureUnavailable
+    if value == "platform-inapplicable":
+        return McdcScenarioExclusionKindV1.PlatformInapplicable
+    if value == "safety-prohibited":
+        return McdcScenarioExclusionKindV1.SafetyProhibited
+    if value == "uncontrollable-nondeterminism":
+        return McdcScenarioExclusionKindV1.UncontrollableNondeterminism
+    McdcScenarioExclusionKindV1.Invalid
+
+fn _mcdc_exclusion_kind_text(value: McdcScenarioExclusionKindV1) -> text:
+    if value == McdcScenarioExclusionKindV1.CapabilityUnavailable:
+        return "capability-unavailable"
+    if value == McdcScenarioExclusionKindV1.FixtureUnavailable:
+        return "fixture-unavailable"
+    if value == McdcScenarioExclusionKindV1.PlatformInapplicable:
+        return "platform-inapplicable"
+    if value == McdcScenarioExclusionKindV1.SafetyProhibited:
+        return "safety-prohibited"
+    if value == McdcScenarioExclusionKindV1.UncontrollableNondeterminism:
+        return "uncontrollable-nondeterminism"
+    "invalid"
+
+fn _mcdc_exclusion_predicate_valid(kind: McdcScenarioExclusionKindV1,
+                                   predicate: text) -> bool:
+    if kind == McdcScenarioExclusionKindV1.CapabilityUnavailable:
+        return predicate == "capability.unavailable"
+    if kind == McdcScenarioExclusionKindV1.FixtureUnavailable:
+        return predicate == "fixture.unavailable"
+    if kind == McdcScenarioExclusionKindV1.PlatformInapplicable:
+        return predicate == "platform.inapplicable"
+    if kind == McdcScenarioExclusionKindV1.SafetyProhibited:
+        return predicate == "safety.prohibited"
+    if kind == McdcScenarioExclusionKindV1.UncontrollableNondeterminism:
+        return predicate == "nondeterminism.uncontrollable"
+    false
+
+fn parse_mcdc_scenario_exclusion_v1(line: text,
+                                    current_epoch: i64) -> McdcScenarioExclusionExpressionV1:
+    val trimmed = line.trim()
+    if not trimmed.starts_with(MCDC_EXCLUSION_PREFIX):
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.NotDirective)
+    if trimmed.len() > MCDC_EXCLUSION_MAX_LINE_BYTES or current_epoch < 0:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.Malformed)
+    val body = trimmed.substring(MCDC_EXCLUSION_PREFIX.len(), trimmed.len()).trim()
+    val parts = body.split("|")
+    # The legacy eleven-field spelling remains parseable for diagnostics, but
+    # is deliberately not binding-ready and therefore cannot pass a report
+    # gate.  This avoids silently assigning a source directive to an arbitrary
+    # binary decision.
+    val bound_form = parts.len() == 16
+    if parts.len() != 11 and not bound_form:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.Malformed)
+    val scenario = _mcdc_exclusion_field(parts[0], "scenario")
+    val decision_text = if bound_form: _mcdc_exclusion_field(parts[1], "decision") else: nil
+    val source_text = if bound_form: _mcdc_exclusion_field(parts[2], "source") else: nil
+    val mask_text = if bound_form: _mcdc_exclusion_field(parts[3], "conditions") else: nil
+    val count_text = if bound_form: _mcdc_exclusion_field(parts[4], "condition-count") else: nil
+    val kind_text = _mcdc_exclusion_field(parts[if bound_form: 5 else: 1], "kind")
+    val code = _mcdc_exclusion_field(parts[if bound_form: 6 else: 2], "code")
+    val capability = if bound_form: _mcdc_exclusion_field(parts[7], "capability") else: nil
+    val predicate = _mcdc_exclusion_field(parts[if bound_form: 8 else: 3], "predicate")
+    val producible_text = _mcdc_exclusion_field(parts[if bound_form: 9 else: 4], "producible")
+    val reason = _mcdc_exclusion_field(parts[if bound_form: 10 else: 5], "reason")
+    val evidence = _mcdc_exclusion_field(parts[if bound_form: 11 else: 6], "evidence")
+    val observed_text = _mcdc_exclusion_field(parts[if bound_form: 12 else: 7], "observed")
+    val owner = _mcdc_exclusion_field(parts[if bound_form: 13 else: 8], "owner")
+    val reviewed_text = _mcdc_exclusion_field(parts[if bound_form: 14 else: 9], "reviewed")
+    val expiry_text = _mcdc_exclusion_field(parts[if bound_form: 15 else: 10], "expires")
+    if scenario == nil or kind_text == nil or code == nil or predicate == nil or
+            producible_text == nil or reason == nil or evidence == nil or
+            observed_text == nil or owner == nil or reviewed_text == nil or
+            expiry_text == nil:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.Malformed)
+    val scenario_value = scenario ?? ""
+    val kind = _mcdc_exclusion_kind(kind_text ?? "")
+    val code_value = code ?? ""
+    val predicate_value = predicate ?? ""
+    val owner_value = owner ?? ""
+    val capability_value = capability ?? ""
+    if not _mcdc_exclusion_stable_id(scenario_value) or
+            not _mcdc_exclusion_stable_id(code_value) or
+            not _mcdc_exclusion_stable_id(owner_value) or
+            (bound_form and not _mcdc_exclusion_stable_id(capability_value)):
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidIdentity)
+    if not _mcdc_exclusion_predicate_valid(kind, predicate_value) or
+            producible_text != "false":
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidEvidence)
+    val reason_value = reason ?? ""
+    if not _mcdc_exclusion_reason_valid(reason_value):
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidReason)
+    val evidence_value = evidence ?? ""
+    if not _mcdc_exclusion_evidence_valid(evidence_value):
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidEvidence)
+    val observed = _mcdc_exclusion_epoch(observed_text ?? "")
+    val reviewed = _mcdc_exclusion_epoch(reviewed_text ?? "")
+    val expires = _mcdc_exclusion_epoch(expiry_text ?? "")
+    if observed == nil or reviewed == nil or expires == nil:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidReview)
+    val observed_value = observed ?? 0
+    val reviewed_value = reviewed ?? 0
+    val expiry_value = expires ?? 0
+    val decision = if bound_form: _mcdc_exclusion_u64(decision_text ?? "") else: nil
+    val source_digest = if bound_form: _mcdc_exclusion_u64(source_text ?? "") else: nil
+    val condition_mask = if bound_form: _mcdc_exclusion_u64(mask_text ?? "") else: nil
+    val condition_count = if bound_form: _mcdc_exclusion_positive_count(count_text ?? "") else: nil
+    if bound_form and (decision == nil or source_digest == nil or
+            condition_mask == nil or condition_count == nil or
+            (condition_mask ?? 0u64) == 0u64 or
+            ((condition_mask ?? 0u64) >> ((condition_count ?? 0) as u64)) != 0u64):
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidIdentity)
+    if observed_value <= 0 or observed_value > reviewed_value or
+            reviewed_value - observed_value > MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS or
+            reviewed_value <= 0 or reviewed_value > current_epoch or expiry_value <= reviewed_value or
+            expiry_value - reviewed_value > MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidReview)
+    if current_epoch - observed_value > MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.Stale)
+    if expiry_value <= current_epoch:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.Stale)
+    McdcScenarioExclusionExpressionV1(
+        status: McdcScenarioExclusionStatusV1.Accepted,
+        scenario_id: scenario_value, kind: kind, code: code_value,
+        predicate: predicate_value, producible: false,
+        reason: reason_value, evidence_sha256: evidence_value,
+        observed_epoch: observed_value,
+        owner_id: owner_value, reviewed_epoch: reviewed_value,
+        expiry_epoch: expiry_value,
+        decision_id: decision ?? 0u64, source_digest: source_digest ?? 0u64,
+        condition_mask: condition_mask ?? 0u64,
+        condition_count: condition_count ?? 0, capability_id: capability_value,
+        binding_ready: bound_form)
+
+fn mcdc_scenario_exclusion_accepted_v1(value: McdcScenarioExclusionExpressionV1) -> bool:
+    value.status == McdcScenarioExclusionStatusV1.Accepted
+
+fn mcdc_scenario_exclusion_report_v1(value: McdcScenarioExclusionExpressionV1) -> text:
+    if value.status == McdcScenarioExclusionStatusV1.Accepted:
+        return "EXCLUDED scenario={value.scenario_id} kind={_mcdc_exclusion_kind_text(value.kind)} code={value.code} predicate={value.predicate} producible=false reason={value.reason} evidence={value.evidence_sha256} observed={value.observed_epoch} owner={value.owner_id} reviewed={value.reviewed_epoch} expires={value.expiry_epoch}"
+    if value.status == McdcScenarioExclusionStatusV1.Stale:
+        return "ERROR mcdc-exclusion stale"
+    "ERROR mcdc-exclusion invalid"
+
+fn _mcdc_exclusion_kind_id(kind: McdcScenarioExclusionKindV1) -> i64:
+    if kind == McdcScenarioExclusionKindV1.CapabilityUnavailable: return 1
+    if kind == McdcScenarioExclusionKindV1.FixtureUnavailable: return 2
+    if kind == McdcScenarioExclusionKindV1.PlatformInapplicable: return 3
+    if kind == McdcScenarioExclusionKindV1.SafetyProhibited: return 4
+    if kind == McdcScenarioExclusionKindV1.UncontrollableNondeterminism: return 5
+    0
+
+fn _mcdc_exclusion_row_matches_v1(value: McdcScenarioExclusionExpressionV1,
+                                  rows: [u8], offset: i64) -> bool:
+    if not value.binding_ready: return false
+    if _mcdc_exclusion_read_u64(rows, offset) != value.decision_id or
+            _mcdc_exclusion_read_u64(rows, offset + 8) != value.source_digest or
+            _mcdc_exclusion_read_u64(rows, offset + 16) != value.condition_mask or
+            _mcdc_exclusion_read_u64(rows, offset + 24) != _mcdc_exclusion_fnv1a(value.scenario_id) or
+            _mcdc_exclusion_read_u64(rows, offset + 32) != _mcdc_exclusion_fnv1a(value.code) or
+            _mcdc_exclusion_read_u64(rows, offset + 40) != (_mcdc_exclusion_kind_id(value.kind) as u64) or
+            _mcdc_exclusion_read_u64(rows, offset + 48) != _mcdc_exclusion_fnv1a(value.capability_id) or
+            _mcdc_exclusion_read_u64(rows, offset + 56) != _mcdc_exclusion_digest_word(value.evidence_sha256, 7) or
+            _mcdc_exclusion_read_u64(rows, offset + 64) != _mcdc_exclusion_digest_word(value.evidence_sha256, 23) or
+            _mcdc_exclusion_read_u64(rows, offset + 72) != _mcdc_exclusion_fnv1a(value.owner_id) or
+            _mcdc_exclusion_read_u64(rows, offset + 80) != (value.observed_epoch as u64) or
+            _mcdc_exclusion_read_u64(rows, offset + 88) != (value.reviewed_epoch as u64) or
+            _mcdc_exclusion_read_u64(rows, offset + 96) != (value.expiry_epoch as u64) or
+            _mcdc_exclusion_read_u32(rows, offset + 104) != value.condition_count or
+            _mcdc_exclusion_read_u32(rows, offset + 108) != _mcdc_exclusion_kind_id(value.kind) or
+            _mcdc_exclusion_read_u32(rows, offset + 112) != value.reason.len() or
+            _mcdc_exclusion_read_u32(rows, offset + 116) != 0:
+        return false
+    var i = 0
+    while i < 256:
+        val expected = if i < value.reason.len(): value.reason[i].ord() else: 0
+        if (rows[offset + 120 + i] as i64) != expected: return false
+        i = i + 1
+    true
+
+fn encode_mcdc_scenario_exclusion_v1(
+        value: McdcScenarioExclusionExpressionV1) -> [u8]:
+    if value.status != McdcScenarioExclusionStatusV1.Accepted or
+            not value.binding_ready:
+        return []
+    var row: [u8] = [for _ in 0..376: 0u8]
+    _mcdc_exclusion_write_u64(row, 0, value.decision_id)
+    _mcdc_exclusion_write_u64(row, 8, value.source_digest)
+    _mcdc_exclusion_write_u64(row, 16, value.condition_mask)
+    _mcdc_exclusion_write_u64(row, 24, _mcdc_exclusion_fnv1a(value.scenario_id))
+    _mcdc_exclusion_write_u64(row, 32, _mcdc_exclusion_fnv1a(value.code))
+    _mcdc_exclusion_write_u64(row, 40, _mcdc_exclusion_kind_id(value.kind) as u64)
+    _mcdc_exclusion_write_u64(row, 48, _mcdc_exclusion_fnv1a(value.capability_id))
+    _mcdc_exclusion_write_u64(row, 56, _mcdc_exclusion_digest_word(value.evidence_sha256, 7))
+    _mcdc_exclusion_write_u64(row, 64, _mcdc_exclusion_digest_word(value.evidence_sha256, 23))
+    _mcdc_exclusion_write_u64(row, 72, _mcdc_exclusion_fnv1a(value.owner_id))
+    _mcdc_exclusion_write_u64(row, 80, value.observed_epoch as u64)
+    _mcdc_exclusion_write_u64(row, 88, value.reviewed_epoch as u64)
+    _mcdc_exclusion_write_u64(row, 96, value.expiry_epoch as u64)
+    _mcdc_exclusion_write_u32(row, 104, value.condition_count)
+    _mcdc_exclusion_write_u32(row, 108, _mcdc_exclusion_kind_id(value.kind))
+    _mcdc_exclusion_write_u32(row, 112, value.reason.len())
+    var i = 0
+    while i < value.reason.len():
+        row[120 + i] = value.reason[i].ord() as u8
+        i = i + 1
+    row
+
+fn bind_mcdc_scenario_exclusions_v1(
+        source: text, rows: [u8], current_epoch: i64) -> McdcScenarioExclusionBindingV1:
+    val row_bytes = 376
+    if source.len() > MCDC_EXCLUSION_MAX_SOURCE_BYTES or
+            rows.len() % row_bytes != 0 or
+            rows.len() / row_bytes > MCDC_EXCLUSION_MAX_DIRECTIVES:
+        return McdcScenarioExclusionBindingV1(
+            audit: McdcScenarioExclusionAuditV1(
+                directive_count: 1, accepted_count: 0, rejected_count: 1,
+                stale_count: 0),
+            binary_row_count: if rows.len() % row_bytes == 0: rows.len() / row_bytes else: -1,
+            bound_count: 0, exact: false)
+    var audit = mcdc_scenario_exclusion_audit_v1()
+    var seen: {text: bool} = {}
+    var bound_count = 0
+    var exact = true
+    var cursor: i64 = 0
+    while cursor <= source.len():
+        var line_end = source.index_of("\n", cursor)
+        if line_end < 0: line_end = source.len()
+        val next_cursor = line_end + 1
+        if mcdc_exclusion_line_is_directive_v1(source, cursor, line_end):
+            if audit.directive_count >= MCDC_EXCLUSION_MAX_DIRECTIVES or
+                    line_end - cursor > MCDC_EXCLUSION_MAX_LINE_BYTES:
+                audit = McdcScenarioExclusionAuditV1(
+                    directive_count: audit.directive_count + 1,
+                    accepted_count: audit.accepted_count,
+                    rejected_count: audit.rejected_count + 1,
+                    stale_count: audit.stale_count)
+                exact = false
+            else:
+                val parsed = parse_mcdc_scenario_exclusion_v1(
+                    source.substring(cursor, line_end), current_epoch)
+                val duplicate = parsed.status == McdcScenarioExclusionStatusV1.Accepted and
+                    seen.contains_key(parsed.scenario_id)
+                if duplicate:
+                    audit = McdcScenarioExclusionAuditV1(
+                        directive_count: audit.directive_count + 1,
+                        accepted_count: audit.accepted_count,
+                        rejected_count: audit.rejected_count + 1,
+                        stale_count: audit.stale_count)
+                    exact = false
+                else:
+                    audit = mcdc_scenario_exclusion_audit_add_v1(audit, parsed)
+                    if parsed.status == McdcScenarioExclusionStatusV1.Accepted:
+                        seen[parsed.scenario_id] = true
+                        if bound_count >= rows.len() / row_bytes or
+                                not _mcdc_exclusion_row_matches_v1(
+                                    parsed, rows, bound_count * row_bytes):
+                            exact = false
+                        else:
+                            bound_count = bound_count + 1
+                    else:
+                        exact = false
+        cursor = next_cursor
+        if line_end == source.len(): break
+    val row_count = rows.len() / row_bytes
+    exact = exact and bound_count == row_count and
+        audit.directive_count == row_count and
+        audit.accepted_count == row_count and
+        audit.rejected_count == 0 and audit.stale_count == 0
+    McdcScenarioExclusionBindingV1(
+        audit: audit, binary_row_count: row_count,
+        bound_count: bound_count, exact: exact)
+
+fn bind_mcdc_scenario_exclusions_with_evidence_v1(
+        source: text, rows: [u8], evidence_rows: [u8],
+        trusted_public_key: [u8], current_epoch: i64) -> McdcScenarioExclusionBindingV1:
+    val base = bind_mcdc_scenario_exclusions_v1(source, rows, current_epoch)
+    if not base.exact or evidence_rows.len() % MCDC_EXCLUSION_EVIDENCE_V1_BYTES != 0 or
+            evidence_rows.len() / MCDC_EXCLUSION_EVIDENCE_V1_BYTES > MCDC_EXCLUSION_EVIDENCE_MAX_ROWS or
+            evidence_rows.len() / MCDC_EXCLUSION_EVIDENCE_V1_BYTES != base.bound_count:
+        return McdcScenarioExclusionBindingV1(audit: base.audit,
+            binary_row_count: base.binary_row_count,
+            bound_count: base.bound_count, exact: false)
+    var evidence_index = 0
+    var cursor: i64 = 0
+    while cursor <= source.len():
+        var line_end = source.index_of("\n", cursor)
+        if line_end < 0: line_end = source.len()
+        val next_cursor = line_end + 1
+        if mcdc_exclusion_line_is_directive_v1(source, cursor, line_end):
+            val parsed = parse_mcdc_scenario_exclusion_v1(
+                source.substring(cursor, line_end), current_epoch)
+            if parsed.status != McdcScenarioExclusionStatusV1.Accepted:
+                return McdcScenarioExclusionBindingV1(audit: base.audit,
+                    binary_row_count: base.binary_row_count,
+                    bound_count: base.bound_count, exact: false)
+            val start = evidence_index * MCDC_EXCLUSION_EVIDENCE_V1_BYTES
+            var row: [u8] = []
+            row.reserve(MCDC_EXCLUSION_EVIDENCE_V1_BYTES)
+            var i = 0
+            while i < MCDC_EXCLUSION_EVIDENCE_V1_BYTES:
+                row.push(evidence_rows[start + i])
+                i = i + 1
+            val receipt = validate_mcdc_exclusion_evidence_v1(row,
+                trusted_public_key, _mcdc_exclusion_kind_id(parsed.kind),
+                _mcdc_exclusion_fnv1a(parsed.scenario_id),
+                _mcdc_exclusion_fnv1a(parsed.code),
+                _mcdc_exclusion_fnv1a(parsed.capability_id),
+                _mcdc_exclusion_fnv1a(parsed.owner_id), parsed.decision_id,
+                parsed.source_digest, parsed.condition_mask,
+                parsed.condition_count, parsed.evidence_sha256,
+                parsed.observed_epoch, current_epoch)
+            if receipt.status != McdcExclusionEvidenceStatusV1.Accepted:
+                return McdcScenarioExclusionBindingV1(audit: base.audit,
+                    binary_row_count: base.binary_row_count,
+                    bound_count: evidence_index, exact: false)
+            evidence_index = evidence_index + 1
+        cursor = next_cursor
+        if line_end == source.len(): break
+    McdcScenarioExclusionBindingV1(audit: base.audit,
+        binary_row_count: base.binary_row_count,
+        bound_count: base.bound_count, exact: evidence_index == base.bound_count)
+
+fn mcdc_scenario_exclusion_audit_v1() -> McdcScenarioExclusionAuditV1:
+    McdcScenarioExclusionAuditV1(
+        directive_count: 0, accepted_count: 0, rejected_count: 0,
+        stale_count: 0)
+
+fn mcdc_scenario_exclusion_audit_add_v1(
+        audit: McdcScenarioExclusionAuditV1,
+        value: McdcScenarioExclusionExpressionV1) -> McdcScenarioExclusionAuditV1:
+    if value.status == McdcScenarioExclusionStatusV1.NotDirective:
+        return audit
+    McdcScenarioExclusionAuditV1(
+        directive_count: audit.directive_count + 1,
+        accepted_count: audit.accepted_count + (if value.status == McdcScenarioExclusionStatusV1.Accepted: 1 else: 0),
+        rejected_count: audit.rejected_count + (if value.status != McdcScenarioExclusionStatusV1.Accepted: 1 else: 0),
+        stale_count: audit.stale_count + (if value.status == McdcScenarioExclusionStatusV1.Stale: 1 else: 0))
+
+fn mcdc_exclusion_line_is_directive_v1(source: text, start: i64,
+                                       end: i64) -> bool:
+    var cursor = start
+    while cursor < end and (source[cursor] == ' ' or source[cursor] == '\t'):
+        cursor = cursor + 1
+    if end - cursor < MCDC_EXCLUSION_PREFIX.len():
+        return false
+    source.substring(cursor, cursor + MCDC_EXCLUSION_PREFIX.len()) == MCDC_EXCLUSION_PREFIX
+
+fn scan_mcdc_scenario_exclusions_v1(
+        source: text, current_epoch: i64) -> McdcScenarioExclusionAuditV1:
+    var audit = mcdc_scenario_exclusion_audit_v1()
+    if source.len() > MCDC_EXCLUSION_MAX_SOURCE_BYTES:
+        return McdcScenarioExclusionAuditV1(
+            directive_count: 1, accepted_count: 0, rejected_count: 1,
+            stale_count: 0)
+    # Offset walking avoids materializing an array for every line in the
+    # bounded 4 MiB source. Only a candidate directive (at most 1024 bytes) is
+    # copied, and at most 256 stable scenario IDs are retained.
+    var seen_scenarios: {text: bool} = {}
+    var source_cursor: i64 = 0
+    while source_cursor <= source.len():
+        var line_end = source.index_of("\n", source_cursor)
+        if line_end < 0:
+            line_end = source.len()
+        val next_cursor = line_end + 1
+        if not mcdc_exclusion_line_is_directive_v1(source, source_cursor, line_end):
+            source_cursor = next_cursor
+            if line_end == source.len(): break
+            continue
+        if audit.directive_count >= MCDC_EXCLUSION_MAX_DIRECTIVES:
+            return McdcScenarioExclusionAuditV1(
+                directive_count: audit.directive_count + 1,
+                accepted_count: audit.accepted_count,
+                rejected_count: audit.rejected_count + 1,
+                stale_count: audit.stale_count)
+        if line_end - source_cursor > MCDC_EXCLUSION_MAX_LINE_BYTES:
+            return McdcScenarioExclusionAuditV1(
+                directive_count: audit.directive_count + 1,
+                accepted_count: audit.accepted_count,
+                rejected_count: audit.rejected_count + 1,
+                stale_count: audit.stale_count)
+        val line = source.substring(source_cursor, line_end)
+        val parsed = parse_mcdc_scenario_exclusion_v1(line, current_epoch)
+        if parsed.status == McdcScenarioExclusionStatusV1.Accepted  and
+                seen_scenarios.contains_key(parsed.scenario_id):
+            audit = McdcScenarioExclusionAuditV1(
+                directive_count: audit.directive_count + 1,
+                accepted_count: audit.accepted_count,
+                rejected_count: audit.rejected_count + 1,
+                stale_count: audit.stale_count)
+        else:
+            audit = mcdc_scenario_exclusion_audit_add_v1(audit, parsed)
+            if parsed.status == McdcScenarioExclusionStatusV1.Accepted:
+                seen_scenarios[parsed.scenario_id] = true
+        source_cursor = next_cursor
+        if line_end == source.len(): break
+    audit
+
+fn mcdc_scenario_exclusion_normal_gate_v1(audit: McdcScenarioExclusionAuditV1) -> bool:
+    audit.directive_count >= 0 and audit.accepted_count >= 0 and
+        audit.rejected_count == 0 and audit.stale_count == 0 and
+        audit.accepted_count == audit.directive_count
+
+fn mcdc_audited_normal_gate_v1_passes(
+        gate: McdcNormalGateV1,
+        audit: McdcScenarioExclusionAuditV1) -> bool:
+    # Denominator accounting remains owned by the stable decision/exclusion
+    # join in structural.mcdc.  This additional verifier gate proves every
+    # author-facing directive parsed, was fresh, and produced an EXCLUDED
+    # record.  Neither layer converts an exclusion to covered evidence.
+    mcdc_normal_gate_v1_passes(gate) and
+        mcdc_scenario_exclusion_normal_gate_v1(audit)
+
+fn mcdc_bound_normal_gate_v1_passes(
+        gate: McdcNormalGateV1,
+        binding: McdcScenarioExclusionBindingV1) -> bool:
+    binding.exact and mcdc_audited_normal_gate_v1_passes(gate, binding.audit)
+
+export MCDC_EXCLUSION_PREFIX, MCDC_EXCLUSION_MAX_LINE_BYTES
+export MCDC_EXCLUSION_MAX_ID_BYTES, MCDC_EXCLUSION_MAX_REASON_BYTES
+export MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS
+export MCDC_EXCLUSION_MAX_SOURCE_BYTES, MCDC_EXCLUSION_MAX_DIRECTIVES
+export McdcScenarioExclusionStatusV1, McdcScenarioExclusionExpressionV1
+export McdcScenarioExclusionKindV1
+export McdcScenarioExclusionAuditV1
+export McdcScenarioExclusionBindingV1
+export parse_mcdc_scenario_exclusion_v1, mcdc_scenario_exclusion_accepted_v1
+export encode_mcdc_scenario_exclusion_v1
+export mcdc_scenario_exclusion_report_v1
+export mcdc_exclusion_line_is_directive_v1
+export mcdc_scenario_exclusion_audit_v1, mcdc_scenario_exclusion_audit_add_v1
+export scan_mcdc_scenario_exclusions_v1
+export bind_mcdc_scenario_exclusions_v1
+export bind_mcdc_scenario_exclusions_with_evidence_v1
+export mcdc_scenario_exclusion_normal_gate_v1
+export mcdc_audited_normal_gate_v1_passes
+export mcdc_bound_normal_gate_v1_passes
