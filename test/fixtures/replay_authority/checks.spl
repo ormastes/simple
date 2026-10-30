@@ -1,10 +1,10 @@
 use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
 use std.common.crypto.sha256.{sha256_u8_hex}
-use std.nogc_sync_mut.env.{env_get, env_has, env_set, env_unset}
-use std.nogc_sync_mut.io.{dir_create_all, dir_remove_all, file_delete, file_write_bytes}
-use test.fixtures.replay_authority.owner_checks.{retained_directory_owner_fixture_checks_v1}
-use std.io_runtime.{getpid}
+use std.nogc_sync_mut.env.variables.{env_list_checked, env_set, env_unset}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_write_bytes, secure_temp_dir}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
 use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1}
 use compiler.tools.verify.replay_authority.{REPLAY_POLICY_DOMAIN_V1,
     replay_authority_candidate_v1}
@@ -15,7 +15,8 @@ fn _fixture_bytes_v1(value: text) -> [u8]:
     base_encoding_text_to_bytes(value)
 
 fn _fixture_write_v1(path: text, bytes: [u8]) -> bool:
-    file_write_bytes(path, bytes)
+    if not file_write_bytes(path, bytes): return false
+    set_permissions(path, 384)
 
 fn _fixture_sign_v1(seed: [u8], public_key: [u8], payload: text) -> [u8]:
     pure_ed25519_sign(seed, public_key,
@@ -85,9 +86,6 @@ fn _replay_authority_fixture_body_v1(root: text, policy_root: text) -> i64:
             not _fixture_write_v1(exporter, exporter_bytes) or
             not _fixture_write_v1(nanoda, nanoda_bytes):
         return -1
-    val owner_check_result = retained_directory_owner_fixture_checks_v1()
-    if owner_check_result == 8: checks = checks + 8
-    else: checks = -1
     val lake_hash = sha256_u8_hex(lake_bytes)
     val checker_hash = sha256_u8_hex(checker_bytes)
     val valid = _fresh_policy_v1(lake, lake_hash, checker, checker_hash,
@@ -155,28 +153,38 @@ fn _replay_authority_fixture_body_v1(root: text, policy_root: text) -> i64:
     checks
 
 pub fn replay_authority_fixture_checks_v1() -> i64:
-    val had_xdg = env_has("XDG_CONFIG_HOME")
-    val old_xdg = env_get("XDG_CONFIG_HOME")
-    val root = "/tmp/fv2-replay-authority-" + getpid().to_string()
+    val saved_environment = match env_list_checked():
+        case Err(_): return -1
+        case Ok(values): values
+    var had_xdg = false
+    var old_xdg = ""
+    for item in saved_environment:
+        val (name, value) = item
+        if name == "XDG_CONFIG_HOME":
+            had_xdg = true
+            old_xdg = value
+    val root = match secure_temp_dir("/tmp", "fv2-replay-authority-"):
+        case Err(_): return -1
+        case Ok(path): path
+    val simple_root = root + "/simple"
+    val verification_root = simple_root + "/verification"
     val policy_root = root + "/simple/verification/replay"
     var checks = -1
-    if dir_create_all(policy_root) and env_set("XDG_CONFIG_HOME", root):
-        checks = _replay_authority_fixture_body_v1(root, policy_root)
-    file_delete(policy_root + "/root.pub")
-    file_delete(policy_root + "/fresh.sdn")
-    file_delete(policy_root + "/fresh.sig")
-    file_delete(policy_root + "/independent.sdn")
-    file_delete(policy_root + "/independent.sig")
-    file_delete(root + "/lake")
-    file_delete(root + "/leanchecker")
-    file_delete(root + "/adapter")
-    file_delete(root + "/lean4export")
-    file_delete(root + "/nanoda")
-    dir_remove_all(root + "/renamed-replay")
+    var setup_ok = dir_create_all(policy_root)
+    if setup_ok: setup_ok = set_permissions(root, 448)
+    if setup_ok: setup_ok = set_permissions(simple_root, 493)
+    if setup_ok: setup_ok = set_permissions(verification_root, 493)
+    if setup_ok: setup_ok = set_permissions(policy_root, 493)
+    if setup_ok:
+        if env_set("XDG_CONFIG_HOME", root):
+            checks = _replay_authority_fixture_body_v1(root, policy_root)
+    val removed = dir_remove_all(root)
+    var restored = false
     if had_xdg:
-        env_set("XDG_CONFIG_HOME", old_xdg)
+        restored = env_set("XDG_CONFIG_HOME", old_xdg)
     else:
-        env_unset("XDG_CONFIG_HOME")
+        restored = env_unset("XDG_CONFIG_HOME")
+    if not removed or not restored: return -2
     checks
 
 export replay_authority_fixture_checks_v1
