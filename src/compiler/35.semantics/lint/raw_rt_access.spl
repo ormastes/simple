@@ -273,6 +273,16 @@ fn _rra_call_column(line: text, wanted: text) -> i64:
         i = i + 1
     0
 
+fn _rra_opens_multiline_import_group(line: text) -> bool:
+    # Both `use m.{` and `use m (` open a selective item list that may continue
+    # on later lines; each continuation line is import context, not code.
+    val opens_brace = line.contains("{") and not line.contains("}")
+    val opens_paren = line.contains("(") and not line.contains(")")
+    opens_brace or opens_paren
+
+fn _rra_closes_import_group(line: text) -> bool:
+    line.contains("}") or line.contains(")")
+
 fn _rra_direct_import_names(line: text, import_context: bool) -> [text]:
     var names: [text] = []
     val t = line.trim()
@@ -334,9 +344,9 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
             continue
         if not code_line.contains("rt_"):
             val starts_import = t.starts_with("use ") or t.starts_with("export use ")
-            if starts_import and code_line.contains("{") and not code_line.contains("}"):
+            if starts_import and _rra_opens_multiline_import_group(code_line):
                 in_selective_import = true
-            if in_selective_import and code_line.contains("}"):
+            if in_selective_import and _rra_closes_import_group(code_line):
                 in_selective_import = false
             if t != "" and not t.starts_with("@"):
                 pending_ffi_declaration = false
@@ -369,10 +379,10 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
             continue
         val starts_import = t.starts_with("use ") or t.starts_with("export use ")
         val import_context = starts_import or in_selective_import
-        if starts_import and code_line.contains("{") and not code_line.contains("}"):
+        if starts_import and _rra_opens_multiline_import_group(code_line):
             in_selective_import = true
         val import_names = _rra_direct_import_names(code_line, import_context)
-        if in_selective_import and code_line.contains("}"):
+        if in_selective_import and _rra_closes_import_group(code_line):
             in_selective_import = false
         if import_names.len() > 0:
             val name = import_names[0]
