@@ -1,0 +1,191 @@
+# Signed operator policy candidate resolver for FV2 replay.
+# A valid candidate is deliberately NOT execution authority: replay remains
+# blocked until every tool in the chain can be launched from pinned bytes.
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.value.{SdnValue}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
+use std.nogc_sync_mut.env.{get_config_dir}
+use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1}
+
+val REPLAY_POLICY_DOMAIN_V1: text = "FV2-REPLAY-POLICY-v1\n"
+val REPLAY_POLICY_MAX_BYTES_V1: i64 = 65536
+
+fn _policy_path_is_canonical_v1(path: text) -> bool:
+    if path == "" or not path.starts_with("/") or path.contains("\u0000"):
+        return false
+    if path.contains("//") or path.contains("/../") or path.ends_with("/..") or path.contains("/./") or path.ends_with("/."):
+        return false
+    true
+
+fn _policy_read_v1(directory: RetainedDirectoryOwnerV1, name: text, maximum: i64) -> Result<[u8], text>:
+    val opened = directory.open_file(name, maximum as u64)
+    match opened:
+        case Err(_): Err("FV2-E-REPLAY-AUTHORITY-READ")
+        case Ok(file):
+            var file_owner = file
+            val before = file_owner.security_metadata_v1()
+            match before:
+                case Err(_):
+                    file_owner.close()
+                    Err("FV2-E-REPLAY-AUTHORITY-METADATA")
+                case Ok(meta):
+                    if (meta.owner_uid != meta.effective_uid and meta.owner_uid != 0) or (meta.mode & 18u32) != 0:
+                        file_owner.close()
+                        return Err("FV2-E-REPLAY-AUTHORITY-OWNER")
+                    val bytes = file_owner.read_all_bounded_v1(maximum)
+                    val after = file_owner.security_metadata_v1()
+                    val closed = file_owner.close()
+                    match bytes:
+                        case Err(_): Err("FV2-E-REPLAY-AUTHORITY-READ")
+                        case Ok(payload):
+                            match after:
+                                case Err(_): Err("FV2-E-REPLAY-AUTHORITY-METADATA")
+                                case Ok(after_meta):
+                                    if not closed or after_meta.owner_uid != meta.owner_uid or after_meta.mode != meta.mode:
+                                        Err("FV2-E-REPLAY-AUTHORITY-CHANGED")
+                                    else: Ok(payload)
+
+fn _policy_hex_nibble_v1(code: i64) -> i64:
+    if code >= 48 and code <= 57: code - 48
+    elif code >= 97 and code <= 102: code - 87
+    else: -1
+
+fn _policy_decode_hex_v1(value: text, expected_bytes: i64) -> [u8]?:
+    if value.len() != expected_bytes * 2: return None
+    var out: [u8] = []
+    var i = 0
+    while i < value.len():
+        val high = _policy_hex_nibble_v1(value.char_code_at(i))
+        val low = _policy_hex_nibble_v1(value.char_code_at(i + 1))
+        if high < 0 or low < 0: return None
+        out.push(((high * 16 + low) as u8))
+        i = i + 2
+    Some(out)
+
+fn _policy_text_field_v1(value: SdnValue, key: text) -> text:
+    match value.get(key):
+        case Some(field):
+            match field.as_str():
+                case Some(text_value): text_value
+                case None: ""
+        case None: ""
+
+fn _policy_dict_len_v1(value: SdnValue) -> i64:
+    match value.as_dict():
+        case Some(fields): fields.len()
+        case None: -1
+
+fn _policy_hash_matches_v1(path: text, expected: text) -> bool:
+    if not _policy_path_is_canonical_v1(path) or not sha256_lower_hex_valid(expected):
+        return false
+    val observed = file_hash_sha256(path)
+    observed == expected
+
+fn _policy_root_v1(directory: RetainedDirectoryOwnerV1) -> Result<[u8], text>:
+    match _policy_read_v1(directory, "root.pub", 128):
+        case Err(reason): Err(reason)
+        case Ok(raw):
+            if raw.len() == 32: Ok(raw)
+            else:
+                val text_value = validated_utf8_bytes_to_text_linear(raw)
+                match text_value:
+                    case Err(_): Err("FV2-E-REPLAY-AUTHORITY-KEY")
+                    case Ok(hex):
+                        match _policy_decode_hex_v1(hex.trim(), 32):
+                            case Some(key): Ok(key)
+                            case None: Err("FV2-E-REPLAY-AUTHORITY-KEY")
+
+fn _policy_validate_schema_v1(value: SdnValue, class_: ReplayCheckerClassV1,
+    config_launcher: text, config_tool: text, config_name: text, config_version: text) -> bool:
+    val lane = match class_:
+        case ReplayCheckerClassV1.FreshLeanKernel: "fresh_lean_kernel"
+        case ReplayCheckerClassV1.IndependentKernel: "independent_kernel"
+    if _policy_text_field_v1(value, "schema") != "simple.fv2.replay-authority.v1" or
+            _policy_text_field_v1(value, "lane") != lane:
+        return false
+    if class_ == ReplayCheckerClassV1.FreshLeanKernel:
+        if _policy_dict_len_v1(value) != 8: return false
+        val lake = _policy_text_field_v1(value, "lake_path")
+        val lake_hash = _policy_text_field_v1(value, "lake_sha256")
+        val lake_version = _policy_text_field_v1(value, "lake_version")
+        val checker = _policy_text_field_v1(value, "leanchecker_path")
+        val checker_hash = _policy_text_field_v1(value, "leanchecker_sha256")
+        val checker_version = _policy_text_field_v1(value, "leanchecker_version")
+        return lake_version != "" and checker_version != "" and config_launcher == lake and config_tool == checker and
+            config_name == "leanchecker" and config_version == checker_version and
+            _policy_hash_matches_v1(lake, lake_hash) and _policy_hash_matches_v1(checker, checker_hash)
+    if _policy_dict_len_v1(value) != 14: return false
+    val adapter = _policy_text_field_v1(value, "adapter_path")
+    val adapter_hash = _policy_text_field_v1(value, "adapter_sha256")
+    val adapter_version = _policy_text_field_v1(value, "adapter_version")
+    val lake = _policy_text_field_v1(value, "lake_path")
+    val lake_hash = _policy_text_field_v1(value, "lake_sha256")
+    val lake_version = _policy_text_field_v1(value, "lake_version")
+    val exporter = _policy_text_field_v1(value, "lean4export_path")
+    val export_hash = _policy_text_field_v1(value, "lean4export_sha256")
+    val export_version = _policy_text_field_v1(value, "lean4export_version")
+    val nanoda = _policy_text_field_v1(value, "nanoda_path")
+    val nanoda_hash = _policy_text_field_v1(value, "nanoda_sha256")
+    val nanoda_version = _policy_text_field_v1(value, "nanoda_version")
+    adapter_version != "" and lake_version != "" and export_version != "" and nanoda_version != "" and
+        config_launcher == adapter and config_tool == adapter and config_name == "nanoda-adapter" and
+        config_version == adapter_version and _policy_hash_matches_v1(adapter, adapter_hash) and
+        _policy_hash_matches_v1(lake, lake_hash) and _policy_hash_matches_v1(exporter, export_hash) and
+        _policy_hash_matches_v1(nanoda, nanoda_hash)
+
+fn _replay_authority_candidate_from_owner_v1(directory: RetainedDirectoryOwnerV1,
+    class_: ReplayCheckerClassV1, launcher_path: text, tool_path: text,
+    tool_name: text, tool_version: text) -> Result<text, text>:
+    val key = _policy_root_v1(directory)?
+    val lane = match class_:
+        case ReplayCheckerClassV1.FreshLeanKernel: "fresh"
+        case ReplayCheckerClassV1.IndependentKernel: "independent"
+    val payload = _policy_read_v1(directory, lane + ".sdn", REPLAY_POLICY_MAX_BYTES_V1)?
+    val signature = _policy_read_v1(directory, lane + ".sig", 64)?
+    if signature.len() != 64:
+        return Err("FV2-E-REPLAY-AUTHORITY-SIGNATURE")
+    val signed_message = base_encoding_text_to_bytes(REPLAY_POLICY_DOMAIN_V1) + payload
+    if not pure_ed25519_verify(key, signed_message, signature):
+        return Err("FV2-E-REPLAY-AUTHORITY-SIGNATURE")
+    val parsed = sdn_parse_strict_bytes_v1(payload,
+        SdnStrictLimitsV1(max_source_bytes: REPLAY_POLICY_MAX_BYTES_V1,
+            max_depth: 4, max_nodes: 64, max_rows: 32, max_cells: 64,
+            max_columns: 16))
+    match parsed:
+        case Err(_): return Err("FV2-E-REPLAY-AUTHORITY-POLICY")
+        case Ok(document):
+            if not _policy_validate_schema_v1(document.value, class_, launcher_path,
+                    tool_path, tool_name, tool_version):
+                return Err("FV2-E-REPLAY-AUTHORITY-POLICY")
+    Ok(sha256_u8_hex(payload))
+
+# No caller supplies a policy/key path or an authority object. The only source
+# is the canonical platform config directory; all policy files are opened
+# relative to one retained, component-validated directory descriptor.
+pub fn replay_authority_candidate_v1(class_: ReplayCheckerClassV1,
+    launcher_path: text, tool_path: text, tool_name: text, tool_version: text) -> Result<text, text>:
+    @when(os="linux"):
+    val root = get_config_dir()
+    if not _policy_path_is_canonical_v1(root):
+        return Err("FV2-E-REPLAY-AUTHORITY-CONFIG")
+    val opened = retained_directory_open_trusted_v1(root + "/simple/verification/replay")
+    match opened:
+        case Err(_): Err("FV2-E-REPLAY-AUTHORITY-ROOT-PROVENANCE")
+        case Ok(directory):
+            var owner = directory
+            val candidate = _replay_authority_candidate_from_owner_v1(owner, class_,
+                launcher_path, tool_path, tool_name, tool_version)
+            val closed = owner.close()
+            if not closed: Err("FV2-E-REPLAY-AUTHORITY-ROOT-CLOSE")
+            else: candidate
+    @else:
+    Err("FV2-E-REPLAY-AUTHORITY-UNSUPPORTED")
+    @end
+
+export REPLAY_POLICY_DOMAIN_V1, replay_authority_candidate_v1
