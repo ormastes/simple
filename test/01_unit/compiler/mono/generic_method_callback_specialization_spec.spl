@@ -1,0 +1,263 @@
+# @req REQ-SSPEC-COMPILER
+# Source-bound callback signature inference through actual generic method mono.
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.Module
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization, MonomorphizationPass}
+use compiler.mono.monomorphize_integration.{mono_type_identity}
+use compiler.mir.mir.{MirLowering, MirTypeKind}
+
+val CALLBACK_FUTURE_SOURCE = "class HostFuture<T>:\n    value: T\n    fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:\n        f(self.value)\nfn invoke(input: HostFuture<i64>, output: HostFuture<text>) -> HostFuture<text>:\n    input.then(\\value: output)\n"
+
+fn callback_future_module(source: text, module_name: text = "generic_callback") -> HirModule:
+    val parsed = parse_full_frontend(source, "{module_name}.spl", module_name, Logger(level: 0))
+    var lowering = HirLowering.with_filename("{module_name}.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn callback_specialized_function(module: HirModule, name: text) -> HirFunction:
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.name == name: return function
+    fail("missing specialized method `{name}`")
+
+fn callback_future_imported_modules() -> Dict<text, HirModule>:
+    val provider_source = "class HostFuture<T>:\n    value: T\n    fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:\n        f(self.value)\n"
+    val consumer_source = "use provider.{HostFuture}\nfn invoke(input: HostFuture<i64>, output: HostFuture<text>) -> HostFuture<text>:\n    input.then(\\value: output)\n"
+    val sources = [
+        SourceFile(path: "provider.spl", content: provider_source, module_name: "provider"),
+        SourceFile(path: "consumer.spl", content: consumer_source, module_name: "consumer")]
+    var parsed: Dict<text, Module> = {}
+    for source in sources:
+        parsed[source.module_name] = parse_full_frontend(source.content, source.path, source.module_name, Logger(level: 0))
+    val surfaces = module_surfaces_from_modules(parsed, sources).unwrap()
+    var modules: Dict<text, HirModule> = {}
+    for source in sources:
+        var lowering = hirlowering_for_module(source.module_name, surfaces)
+        modules[source.module_name] = lowering.lower_module(parsed[source.module_name])
+        expect(lowering.errors.len()).to_equal(0)
+    modules
+
+describe "generic method callback specialization":
+    it "binds owner T and method U, then stamps the captured callback ABI from the specialized signature":
+        val hir = callback_future_module(CALLBACK_FUTURE_SOURCE)
+        var modules: Dict<text, HirModule> = {}
+        modules["generic_callback"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val rewritten: HirModule = output["generic_callback"]
+        var mir_lowering = MirLowering.new(rewritten.symbols)
+        val mir = mir_lowering.lower_module(rewritten)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        expect(mir.functions.len()).to_be_greater_than(0)
+        var mir_invoke = false
+        var mir_method = false
+        var mir_lambda = false
+        for mir_function in mir.functions.values():
+            if mir_function.name.ends_with(".invoke"): mir_invoke = true
+            if mir_function.name.contains("HostFuture__then"):
+                mir_method = true
+                expect(mir_function.signature.params.len()).to_equal(2)
+                match mir_function.signature.params[1].kind:
+                    case MirTypeKind.FuncPtr(callback_signature):
+                        expect(callback_signature.params.len()).to_equal(1)
+                        match callback_signature.params[0].kind:
+                            case MirTypeKind.I64: ()
+                            case _: fail("MIR callback input did not lower as i64")
+                        match callback_signature.return_type.kind:
+                            case MirTypeKind.Struct(_): ()
+                            case _: fail("MIR callback return did not retain the HostFuture struct")
+                    case _: fail("MIR method callback is not a function pointer")
+            if mir_function.name.contains("__lambda_lift_"):
+                mir_lambda = true
+                var has_i64 = false
+                for parameter in mir_function.signature.params:
+                    if parameter.kind == MirTypeKind.I64: has_i64 = true
+                expect(has_i64).to_equal(true)
+        expect(mir_invoke).to_equal(true)
+        expect(mir_method).to_equal(true)
+        expect(mir_lambda).to_equal(true)
+        var invoked = false
+        for key in rewritten.functions.keys():
+            val function: HirFunction = rewritten.functions[key]
+            if function.name != "invoke": continue
+            match function.body.value.kind:
+                case HirExprKind.Call(callee, args, type_args):
+                    expect(type_args.len()).to_equal(0)
+                    expect(args.len()).to_equal(2)
+                    match callee.kind:
+                        case HirExprKind.NamedVar(_, name): expect(name).to_contain("HostFuture__then")
+                        case _: fail("generic method call did not become a direct specialization call")
+                    val callback: HirExpr = args[1].value
+                    expect(callback.has_type_).to_equal(true)
+                    match callback.type_.kind:
+                        case HirTypeKind.Function(parameters, result, _):
+                            expect(parameters.len()).to_equal(1)
+                            match parameters[0].kind:
+                                case HirTypeKind.Int(bits, signed):
+                                    expect(bits).to_equal(64)
+                                    expect(signed).to_equal(true)
+                                case _: fail("callback owner T was not specialized to i64")
+                            match result.kind:
+                                case HirTypeKind.Named(_, result_args):
+                                    expect(result_args.len()).to_equal(1)
+                                    match result_args[0].kind:
+                                        case HirTypeKind.Str: ()
+                                        case _: fail("callback method U was not specialized to text")
+                                case _: fail("callback return lost its HostFuture owner")
+                        case _: fail("callback ABI slot is not a function signature")
+                    match callback.kind:
+                        case HirExprKind.Lambda(parameters, _, _):
+                            match parameters[0].type_.kind:
+                                case HirTypeKind.Int(bits, signed):
+                                    expect(bits).to_equal(64)
+                                    expect(signed).to_equal(true)
+                                case _: fail("lambda input was not contextually typed")
+                        case _: fail("captured callback lambda was rewritten away")
+                    invoked = true
+                case _: fail("generic method call was not rewritten")
+        expect(invoked).to_equal(true)
+        val specialized = callback_specialized_function(rewritten, "HostFuture__then$i64$text")
+        expect(specialized.type_params.len()).to_equal(0)
+        expect(specialized.params.len()).to_equal(2)
+        match specialized.params[1].type_.kind:
+            case HirTypeKind.Function(parameters, result, _):
+                expect(parameters.len()).to_equal(1)
+                match parameters[0].kind:
+                    case HirTypeKind.Int(bits, signed):
+                        expect(bits).to_equal(64)
+                        expect(signed).to_equal(true)
+                    case _: fail("specialized method callback input retained T")
+                match result.kind:
+                    case HirTypeKind.Named(_, result_args):
+                        match result_args[0].kind:
+                            case HirTypeKind.Str: ()
+                            case _: fail("specialized method callback result retained U")
+                    case _: fail("specialized method callback result is not HostFuture<text>")
+            case _: fail("specialized method callback slot is not a function type")
+
+    it "refuses a callback body whose concrete result conflicts with the expected method result":
+        val source = CALLBACK_FUTURE_SOURCE.replace("output: HostFuture<text>", "output: HostFuture<f64>")
+        val hir = callback_future_module(source)
+        var modules: Dict<text, HirModule> = {}
+        modules["generic_callback"] = hir
+        val (_, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+
+    it "infers method U from the callback body without a result context":
+        val source = "class HostFuture<T>:\n    value: T\n    fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:\n        f(self.value)\nfn invoke(input: HostFuture<i64>, output: HostFuture<text>):\n    input.then(\\value: output)\n"
+        val hir = callback_future_module(source)
+        var modules: Dict<text, HirModule> = {}
+        modules["generic_callback"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(output.has("generic_callback")).to_equal(true)
+
+    it "keeps method binder evidence local across sibling callback specializations":
+        val source = "class HostFuture<T>:\n    value: T\n    fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:\n        f(self.value)\nfn invoke(left: HostFuture<i64>, right: HostFuture<f64>, text_result: HostFuture<text>, number_result: HostFuture<i64>):\n    left.then(\\value: text_result)\n    right.then(\\value: number_result)\n"
+        val hir = callback_future_module(source)
+        var modules: Dict<text, HirModule> = {}
+        modules["generic_callback"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(2)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(callback_specialized_function(output["generic_callback"], "HostFuture__then$i64$text").type_params.len()).to_equal(0)
+        expect(callback_specialized_function(output["generic_callback"], "HostFuture__then$f64$i64").type_params.len()).to_equal(0)
+
+    it "refuses unresolved method U instead of assigning an ABI default":
+        val source = "class HostFuture<T>:\n    value: T\n    fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:\n        f(self.value)\nfn invoke(input: HostFuture<i64>):\n    input.then(\\value: nil)\n"
+        val hir = callback_future_module(source)
+        var modules: Dict<text, HirModule> = {}
+        modules["generic_callback"] = hir
+        val (_, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+
+    it "rejects a method binder that collides with the receiver owner binder":
+        var hir = callback_future_module(CALLBACK_FUTURE_SOURCE)
+        var changed = false
+        for key in hir.functions.keys():
+            var function: HirFunction = hir.functions[key]
+            if not function.name.ends_with("then") or function.type_params.len() == 0: continue
+            var type_params = function.type_params
+            var method_parameter = type_params[0]
+            method_parameter.name = "T"
+            type_params[0] = method_parameter
+            function.type_params = type_params
+            hir.functions[key] = function
+            changed = true
+        expect(changed).to_equal(true)
+        var mono = MonomorphizationPass.create()
+        mono.collect_generic_impl_methods(hir, "generic_callback")
+        expect(mono.generic_methods.len()).to_equal(0)
+        expect(mono.generic_method_rejected.len()).to_equal(1)
+
+    it "does not borrow an imported method template for a same-named caller owner":
+        val provider = callback_future_module(CALLBACK_FUTURE_SOURCE, "provider")
+        val consumer_source = "class HostFuture<T>:\n    value: T\nfn invoke(input: HostFuture<i64>, output: HostFuture<text>):\n    input.then(\\value: output)\n"
+        val consumer = callback_future_module(consumer_source, "consumer")
+        var mono = MonomorphizationPass.create()
+        mono.collect_generics(provider, "provider")
+        mono.module_symbols["consumer"] = consumer.symbols
+        expect(mono.generic_methods.len()).to_equal(1)
+        val method_template = mono.generic_methods.values()[0]
+        val distractor_owner = consumer.symbols.lookup_or_invalid("HostFuture")
+        expect(distractor_owner.is_valid()).to_equal(true)
+        expect(mono.generic_method_owner_prefix_len_v1(method_template, distractor_owner,
+            "consumer", 1)).to_equal(-1)
+
+    it "transports a positive callback specialization from an imported owner into the caller module":
+        val modules = callback_future_imported_modules()
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val caller: HirModule = output["consumer"]
+        var found = false
+        for key in caller.functions.keys():
+            val function: HirFunction = caller.functions[key]
+            if function.name != "invoke": continue
+            match function.body.value.kind:
+                case HirExprKind.Call(callee, args, type_args):
+                    expect(type_args.len()).to_equal(0)
+                    expect(args.len()).to_equal(2)
+                    match callee.type_.kind:
+                        case HirTypeKind.Function(parameters, _, _):
+                            match parameters[1].kind:
+                                case HirTypeKind.Function(_, result, _):
+                                    match result.kind:
+                                        case HirTypeKind.Named(symbol, type_args):
+                                            expect(type_args[0].kind).to_equal(HirTypeKind.Str)
+                                            expect(mono_type_identity(caller.symbols, symbol, "consumer")).to_equal("provider.HostFuture")
+                                        case _: fail("imported callback result lost provider nominal identity")
+                                case _: fail("imported callback signature was not transported")
+                        case _: fail("imported method call lacks a concrete function signature")
+                    found = true
+                case _: fail("imported method call was not rewritten")
+        expect(found).to_equal(true)
+        val provider: HirModule = output["provider"]
+        expect(callback_specialized_function(provider, "HostFuture__then$i64$text").type_params.len()).to_equal(0)
+
+    it "lowers the Result array match shape used by Future callback chaining":
+        val source = "class HostFuture<T>:\n    value: T\n    static fn from_value(value: T) -> HostFuture<T>:\n        HostFuture(value: value)\n    fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:\n        f(self.value)\nfn read_all(input: HostFuture<Result<[u8], i64>>, prefix: [u8]) -> HostFuture<Result<[u8], i64>>:\n    input.then(\\result:\n        match result:\n            case Ok(bytes):\n                HostFuture.from_value(Ok(prefix + bytes))\n            case Err(error):\n                HostFuture.from_value(Err(error))\n    )\n"
+        val hir = callback_future_module(source)
+        var modules: Dict<text, HirModule> = {}
+        modules["generic_callback"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_be_greater_than(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        var mir_lowering = MirLowering.new(output["generic_callback"].symbols)
+        val mir = mir_lowering.lower_module(output["generic_callback"])
+        expect(mir_lowering.errors.len()).to_equal(0)
+        expect(mir.functions.len()).to_be_greater_than(0)

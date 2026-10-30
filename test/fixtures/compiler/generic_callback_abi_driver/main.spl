@@ -1,0 +1,131 @@
+"""Parser → HIR → mono → MIR callback ABI assertion driver."""
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+use compiler.mir.mir.{MirLowering, MirTypeKind, MirFunction}
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_identity}
+
+val SOURCE = "class HostFuture<T>:\n    value: T\n    static fn from_value(value: T) -> HostFuture<T>:\n        HostFuture(value: value)\n    fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:\n        f(self.value)\nfn read_all(input: HostFuture<Result<[u8], i64>>, prefix: [u8]) -> HostFuture<Result<[u8], i64>>:\n    input.then(\\result:\n        match result:\n            case Ok(bytes):\n                HostFuture.from_value(Ok(prefix + bytes))\n            case Err(error):\n                HostFuture.from_value(Err(error))\n    )\nfn distinct(input: HostFuture<i64>, output: HostFuture<text>) -> HostFuture<text>:\n    input.then(\\value: output)\n"
+val NEGATIVE_SOURCE = "class HostFuture<T>:\n    value: T\n    fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:\n        f(self.value)\nfn bad(input: HostFuture<i64>, output: HostFuture<f64>) -> HostFuture<text>:\n    input.then(\\value: output)\n"
+val DIRECT_CALLBACK_SOURCE = "fn apply<T, U>(value: T, f: fn(T) -> U) -> U:\n    f(value)\nfn direct(value: i64) -> text:\n    apply(value, \\item: \"mapped\")\n"
+
+fn check(condition: bool, message: text):
+    if not condition:
+        panic(message)
+
+fn main():
+    val parsed = parse_full_frontend(SOURCE, "generic_callback.spl", "generic_callback", Logger(level: 0))
+    var lowering = HirLowering.with_filename("generic_callback.spl")
+    val hir = lowering.lower_module(parsed)
+    check(lowering.errors.len() == 0, "generic callback fixture did not lower to HIR")
+    var modules: Dict<text, HirModule> = {}
+    modules["generic_callback"] = hir
+    val (rewritten, stats) = run_monomorphization(modules)
+    check(stats.specializations_created > 0, "generic callback method was not specialized")
+    check(stats.unresolved_generic_calls == 0, "generic callback method retained unresolved binders")
+    val module: HirModule = rewritten["generic_callback"]
+    var saw_distinct_hir_signature = false
+    for raw_function in module.functions.values():
+        val function: HirFunction = raw_function
+        if function.name.contains("HostFuture__then$i64$text"):
+            check(function.type_params.len() == 0, "distinct method specialization retained type parameters")
+            check(function.params.len() == 2, "distinct method specialization has wrong arity")
+            match function.params[1].type_.kind:
+                case HirTypeKind.Function(callback_inputs, callback_result, _):
+                    check(callback_inputs.len() == 1, "distinct callback has wrong input arity")
+                    match callback_inputs[0].kind:
+                        case HirTypeKind.Int(64, true): ()
+                        case _: panic("distinct callback owner T is not i64")
+                    match callback_result.kind:
+                        case HirTypeKind.Named(_, result_args):
+                            check(result_args.len() == 1, "distinct callback result has wrong generic arity")
+                            match result_args[0].kind:
+                                case HirTypeKind.Str: ()
+                                case _: panic("distinct method U is not text")
+                        case _: panic("distinct callback result is not HostFuture<text>")
+                case _: panic("distinct method callback signature is not a function")
+            saw_distinct_hir_signature = true
+    check(saw_distinct_hir_signature, "mono output has no concrete i64-to-text method signature")
+    var mir_lowering = MirLowering.new(module.symbols)
+    val mir = mir_lowering.lower_module(module)
+    check(mir_lowering.errors.len() == 0, "concrete callback signature failed MIR lowering")
+    var saw_read_all = false
+    var saw_result_method = false
+    var saw_i64_method = false
+    var saw_result_lift = false
+    var saw_i64_lift = false
+    for raw_function in mir.functions.values():
+        val function: MirFunction = raw_function
+        if function.name == mir_provider_callable_identity("generic_callback", "read_all"): saw_read_all = true
+        if function.name.contains("HostFuture__then"):
+            check(function.is_generic_template == false, "MIR method still has generic parameters")
+            check(function.signature.params.len() == 2, "specialized method MIR signature has wrong arity")
+            match function.signature.params[1].kind:
+                case MirTypeKind.FuncPtr(callback_signature):
+                    check(callback_signature.params.len() == 1, "callback ABI input arity is wrong")
+                    match callback_signature.params[0].kind:
+                        case MirTypeKind.Result(_, _): saw_result_method = true
+                        case MirTypeKind.I64: saw_i64_method = true
+                        case _: panic("callback ABI input is not concrete Result or i64")
+                    match callback_signature.return_type.kind:
+                        case MirTypeKind.Struct(_): ()
+                        case _: panic("callback ABI return did not retain the HostFuture struct")
+                case _: panic("specialized method callback slot is not a MIR function pointer")
+        if function.name.starts_with(mir_provider_callable_identity("generic_callback", "__lambda_lift_")):
+            check(function.is_generic_template == false, "lifted callback is unexpectedly generic")
+            check(function.signature.params.len() == 2, "lifted callback lost its capture or explicit input")
+            match function.signature.params[1].kind:
+                case MirTypeKind.Result(_, _): saw_result_lift = true
+                case MirTypeKind.I64: saw_i64_lift = true
+                case _: panic("lifted callback explicit input is not Result or i64")
+            match function.signature.return_type.kind:
+                case MirTypeKind.Struct(_): ()
+                case _: panic("lifted callback return did not retain the HostFuture struct")
+    check(saw_read_all, "MIR output has no read_all function")
+    check(saw_result_method, "MIR output has no Result callback method ABI")
+    check(saw_i64_method, "MIR output has no distinct i64 callback method ABI")
+    check(saw_result_lift, "MIR output has no lifted Result callback")
+    check(saw_i64_lift, "MIR output has no lifted i64 callback")
+
+    val bad_parsed = parse_full_frontend(NEGATIVE_SOURCE, "generic_callback_bad.spl", "generic_callback_bad", Logger(level: 0))
+    var bad_lowering = HirLowering.with_filename("generic_callback_bad.spl")
+    val bad_hir = bad_lowering.lower_module(bad_parsed)
+    check(bad_lowering.errors.len() == 0, "negative callback fixture did not lower to HIR")
+    var bad_modules: Dict<text, HirModule> = {}
+    bad_modules["generic_callback_bad"] = bad_hir
+    val (_, bad_stats) = run_monomorphization(bad_modules)
+    check(bad_stats.specializations_created == 0, "conflicting callback body was specialized")
+    check(bad_stats.unresolved_generic_calls == 1, "conflicting callback body was not refused")
+
+    val direct_parsed = parse_full_frontend(DIRECT_CALLBACK_SOURCE, "generic_direct_callback.spl", "generic_direct_callback", Logger(level: 0))
+    var direct_lowering = HirLowering.with_filename("generic_direct_callback.spl")
+    val direct_hir = direct_lowering.lower_module(direct_parsed)
+    check(direct_lowering.errors.len() == 0, "direct generic callback fixture did not lower to HIR")
+    var direct_modules: Dict<text, HirModule> = {}
+    direct_modules["generic_direct_callback"] = direct_hir
+    val (direct_output, direct_stats) = run_monomorphization(direct_modules)
+    check(direct_stats.specializations_created == 1, "direct generic callback was not specialized once")
+    check(direct_stats.unresolved_generic_calls == 0, "direct generic callback retained unresolved binders")
+    val direct_module: HirModule = direct_output["generic_direct_callback"]
+    var saw_direct_signature = false
+    for raw_function in direct_module.functions.values():
+        val function: HirFunction = raw_function
+        if function.name != "apply$i64$text": continue
+        check(function.type_params.len() == 0, "direct callback specialization retained type parameters")
+        check(function.params.len() == 2, "direct callback specialization has wrong arity")
+        match function.params[1].type_.kind:
+            case HirTypeKind.Function(callback_inputs, callback_result, _):
+                check(callback_inputs.len() == 1, "direct callback input arity is wrong")
+                match callback_inputs[0].kind:
+                    case HirTypeKind.Int(64, true): ()
+                    case _: panic("direct callback T was not inferred as i64")
+                match callback_result.kind:
+                    case HirTypeKind.Str: ()
+                    case _: panic("direct callback U was not inferred as text")
+            case _: panic("direct callback specialization lost its function parameter")
+        saw_direct_signature = true
+    check(saw_direct_signature, "mono output has no direct callback T/U signature")
