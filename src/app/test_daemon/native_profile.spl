@@ -6,6 +6,7 @@ use std.test_runner.test_runner_types.{TestOptions, TestLevel}
 use std.test_runner.native_compile_contract.{native_test_request_error}
 use std.nogc_sync_mut.io.env_ops.{env_get, cwd}
 use std.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_capsule_archive_v1}
 use std.test_runner.compiler_select.{select_test_child_binary}
 use std.env.variables.{env_list_checked}
 use std.common.crypto.sha256.{sha256_text}
@@ -33,6 +34,11 @@ fn native_session_producer(compiler: text) -> text:
     if compiler == "": return env_get("SIMPLE_BINARY")
     match select_test_child_binary(compiler):
         case Ok(selected): selected
+        case Err(_): ""
+
+fn native_session_runtime_digest(root: text) -> text:
+    match native_runtime_capsule_archive_v1(root):
+        case Ok(archive): file_hash_sha256_or_empty(archive)
         case Err(_): ""
 
 fn native_session_request(req: DaemonRequest, options: TestOptions) -> DaemonRequest:
@@ -78,7 +84,7 @@ fn native_session_request(req: DaemonRequest, options: TestOptions) -> DaemonReq
     bound.fields["producer"] = producer
     bound.fields["producer_sha256"] = file_hash_sha256_or_empty(producer)
     bound.fields["runtime"] = env_get("SIMPLE_RUNTIME_PATH")
-    bound.fields["runtime_sha256"] = file_hash_sha256_or_empty(env_get("SIMPLE_RUNTIME_PATH") + "/libsimple_native_all.a")
+    bound.fields["runtime_sha256"] = native_session_runtime_digest(env_get("SIMPLE_RUNTIME_PATH"))
     bound.fields["cwd"] = cwd()
     # Includes SIMPLE_LIB/PROJECT_ROOT, native tools, MC/DC mode and every
     # waiver field, resource policy, and all other inherited test inputs.
@@ -137,7 +143,7 @@ fn native_session_binding_error(req: DaemonRequest) -> text:
     for field in ["worker", "producer"]:
         if file_hash_sha256_or_empty(req.fields[field] ?? "") != (req.fields[field + "_sha256"] ?? ""):
             return "native daemon artifact digest mismatch: " + field
-    if file_hash_sha256_or_empty(env_get("SIMPLE_RUNTIME_PATH") + "/libsimple_native_all.a") != (req.fields["runtime_sha256"] ?? ""):
+    if native_session_runtime_digest(env_get("SIMPLE_RUNTIME_PATH")) != (req.fields["runtime_sha256"] ?? ""):
         return "native daemon runtime archive digest mismatch"
     # The archive is only one member of the managed runtime capsule. Keep
     # snapshot and tool authority byte pins visible and checked too; native
