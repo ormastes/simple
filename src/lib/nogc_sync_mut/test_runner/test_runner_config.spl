@@ -221,6 +221,37 @@ fn resolve_edition_from_value(raw: text) -> text:
 fn resolve_edition() -> text:
     resolve_edition_from_value(_read_sdn_package_edition("simple.sdn"))
 
+# Resolve the effective MC/DC mode from the environment for `resolved_profile`
+# and publish it for child processes. Every runner lane (full runner, the
+# `--no-session-daemon` single lane, and the daemon's per-file children, which
+# use the single lane) goes through this one function, so they cannot disagree.
+# Returns "on", "dynamic", "off", "invalid-off" or "invalid-mode"; on an
+# invalid result SIMPLE_MCDC_MODE is left untouched and SIMPLE_MCDC_MODE_ERROR
+# names the reason -- the caller must refuse to run (mcdc_mode_error_message).
+fn apply_mcdc_mode_env(resolved_profile: text) -> text:
+    val effective_mcdc_mode = resolve_mcdc_mode_for_profile(
+        env_get("SIMPLE_MCDC_MODE") ?? "",
+        resolved_profile,
+        env_get("SIMPLE_MCDC_OFF_WAIVER_REASON") ?? "",
+        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEWER") ?? "",
+        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID") ?? "",
+        env_get("SIMPLE_MCDC_OFF_WAIVER_VERSION") ?? "")
+    if effective_mcdc_mode == "invalid-off" or effective_mcdc_mode == "invalid-mode":
+        env_set("SIMPLE_MCDC_MODE_ERROR", effective_mcdc_mode)
+    else:
+        env_set("SIMPLE_MCDC_MODE_ERROR", "")
+        env_set("SIMPLE_MCDC_MODE", effective_mcdc_mode)
+    effective_mcdc_mode
+
+# The refusal text for an invalid resolved MC/DC mode, or "" when the mode is
+# runnable. Shared by every lane so the diagnostic is identical.
+fn mcdc_mode_error_message(effective_mode: text) -> text:
+    if effective_mode == "invalid-off":
+        return "error: test-runner: SIMPLE_MCDC_MODE=off is refused for a normal-or-stricter profile without a complete waiver (SIMPLE_MCDC_OFF_WAIVER_REASON, _REVIEWER, _REVIEW_ID, _VERSION)"
+    if effective_mode == "invalid-mode":
+        return "error: test-runner: SIMPLE_MCDC_MODE has an unrecognised value (expected on, dynamic or off)"
+    ""
+
 fn propagate_env_vars(options: TestOptions):
     # Set SIMPLE_TEST_MODE for child processes
     val mode_str = mode_to_str(options.mode)
@@ -235,18 +266,7 @@ fn propagate_env_vars(options: TestOptions):
     if resolved_profile != "":
         env_set("SIMPLE_SAFETY_PROFILE", resolved_profile)
 
-    val effective_mcdc_mode = resolve_mcdc_mode_for_profile(
-        env_get("SIMPLE_MCDC_MODE") ?? "",
-        resolved_profile,
-        env_get("SIMPLE_MCDC_OFF_WAIVER_REASON") ?? "",
-        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEWER") ?? "",
-        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID") ?? "",
-        env_get("SIMPLE_MCDC_OFF_WAIVER_VERSION") ?? "")
-    if effective_mcdc_mode == "invalid-off" or effective_mcdc_mode == "invalid-mode":
-        env_set("SIMPLE_MCDC_MODE_ERROR", effective_mcdc_mode)
-    else:
-        env_set("SIMPLE_MCDC_MODE_ERROR", "")
-        env_set("SIMPLE_MCDC_MODE", effective_mcdc_mode)
+    val _ = apply_mcdc_mode_env(resolved_profile)
 
     if options.only_slow:
         env_set("SIMPLE_TEST_FILTER", "slow")
