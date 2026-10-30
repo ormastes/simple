@@ -519,6 +519,22 @@ fn strip_verbatim_prefix(path: String) -> String {
 mod canonicalize_tests {
     use super::*;
 
+    /// rt_path_absolute never fails: a missing path is made absolute against
+    /// the cwd (matching runtime/src/value/sffi/file_io/path.rs), unlike
+    /// rt_file_canonicalize which returns nil. std.sffi.io.path_absolute is
+    /// `-> text`, so nil here trips the non-optional return contract.
+    #[test]
+    fn path_absolute_of_missing_path_is_text_not_nil() {
+        let got = rt_path_absolute(&[Value::text("no_such_dir_xyz/child.spl".to_string())])
+            .expect("path_absolute call");
+        let text = match got {
+            Value::Str(s) => s.to_string(),
+            other => panic!("rt_path_absolute returned {other:?} for a missing path"),
+        };
+        assert!(std::path::Path::new(&text).is_absolute(), "not absolute: {text}");
+        assert!(text.ends_with("child.spl"), "lost leaf: {text}");
+    }
+
     /// Canonicalizing an existing file must not leak the Windows `\\?\`
     /// verbatim prefix (the runtime lane strips it; the lanes must agree).
     #[test]
@@ -3329,9 +3345,26 @@ pub fn rt_path_ext(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(ext.to_string()))
 }
 
-/// Get absolute path
+/// Get absolute path. Unlike `rt_file_canonicalize` (nil on failure), this
+/// never fails: it resolves symlinks when the path exists and otherwise joins
+/// it onto the cwd, matching the runtime's `rt_path_absolute`
+/// (runtime/src/value/sffi/file_io/path.rs). `std.sffi.io.path_absolute` is
+/// `-> text`, so nil here would break its non-optional return contract.
 pub fn rt_path_absolute(args: &[Value]) -> Result<Value, CompileError> {
-    rt_file_canonicalize(args)
+    let path = extract_path(args, 0)?;
+    let p = Path::new(&path);
+    if let Ok(canonical) = p.canonicalize() {
+        return Ok(Value::text(strip_verbatim_prefix(canonical.to_string_lossy().to_string())));
+    }
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => return Ok(Value::text(path)),
+        }
+    };
+    Ok(Value::text(abs.to_string_lossy().to_string()))
 }
 
 /// Get path separator
