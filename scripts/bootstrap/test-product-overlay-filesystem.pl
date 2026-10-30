@@ -10,9 +10,10 @@ use File::Basename qw(dirname);
 use JSON::PP;
 use Digest::SHA qw(sha256_hex);
 use Test::More;
+use Cwd ();
 
 my $windows = $^O eq 'msys' || $^O eq 'cygwin' || $^O eq 'MSWin32';
-my $base = $windows ? '/c/.simple-product-tests' : '/tmp';
+my $base = $windows ? '/c/.simple-product-tests' : Cwd::abs_path('/tmp');
 make_path($base);
 my $fixture = tempdir('overlay-XXXXXXXX', DIR => $base, CLEANUP => 0);
 note("retained real filesystem fixture: $fixture");
@@ -72,6 +73,23 @@ ok(verify_product_overlay($source, $overlay, $manifest), 'only existing generate
 put("$source/test/real_spec.spl", "version https://git-lfs.github.com/spec/v1\noid sha256:" . ('a' x 64) . "\nsize 123\n");
 rejects(sub { verify_product_overlay($source, $overlay, $manifest) }, qr/unhydrated LFS/, 'unhydrated fixture pointer is not source data');
 put("$source/test/real_spec.spl", "assert(7 == 7)\n");
+
+# trace32_tools case: a committed directory alias (src/app/mcp_t32 ->
+# examples/10_tooling/trace32_tools/t32_mcp) whose target directory has no
+# tracked members must refuse admission, never materialize an empty tree.
+put("$source/src/app/mcp_t32", '../../examples/10_tooling/trace32_tools/t32_mcp');
+git('add', 'src/app/mcp_t32');
+my $missing_oid = BootstrapProductOverlay::git_bytes($source, 'hash-object', 'src/app/mcp_t32'); chomp $missing_oid;
+git('update-index', '--cacheinfo', "120000,$missing_oid,src/app/mcp_t32");
+git('commit', '-qm', 'dangling directory alias');
+my $missing_overlay = "$fixture/overlay-missing-alias"; make_path($missing_overlay);
+rejects(sub { materialize_product_overlay($source, $missing_overlay, "$fixture/overlay-missing-alias.tsv") },
+    qr/missing declared overlay alias target/, 'directory alias with missing target rejected');
+ok(!-e "$missing_overlay/src/app/mcp_t32", 'rejected alias leaves no materialized member');
+ok(!-e "$fixture/overlay-missing-alias.tsv", 'rejected alias publishes no manifest');
+git('rm', '-q', '--cached', 'src/app/mcp_t32'); unlink "$source/src/app/mcp_t32" or die $!;
+git('commit', '-qm', 'drop dangling directory alias');
+ok(verify_product_overlay($source, $overlay, $manifest), 'original overlay still verifies after rejected alias');
 
 if ($windows) {
     my $anchor = "$fixture/" . ('long-owned-request/' x 7) . 'product-output'; make_path($anchor);
