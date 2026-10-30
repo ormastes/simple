@@ -30,7 +30,8 @@ use std.nogc_sync_mut.test_runner.source_route.{source_has_bdd_structure}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
 use std.test_runner.test_executor_lanes.{run_test_file_composite}
 use std.test_runner.test_runner_output.{combined_test_run_sdn, print_result, print_summary}
-use std.test_runner.test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, mcdc_mode_error_message, get_cli_args, get_flag_value, handle_run_management, has_run_management_flag}
+use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
+use std.test_runner.test_runner_config.{resolve_effective_profile, report_free_mem, mode_to_str, propagate_env_vars, mcdc_mode_error_message, get_cli_args, get_flag_value, handle_run_management, has_run_management_flag}
 use app.test_runner_new.cover_admission.{cover_admitted_files, cover_append_failures}
 use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
 use app.test_runner_new.sdn_wrapper.{run_test_sdn_wrapper}
@@ -1517,6 +1518,20 @@ fn run_test_cli() -> i64:
             print_feature_gate_summary(result_files)
 
         val inspection_only = options.list or options.manifest_status
+        # MC/DC end-of-run gate: aggregate per-file evidence, print the
+        # decision report, and fail a required-MC/DC run that is not satisfied.
+        if not inspection_only:
+            val mcdc_gate = test_runner_mcdc_run_gate(env_get("SIMPLE_MCDC_MODE") ?? "",
+                resolve_effective_profile(options), result_files)
+            if not sdn_worker:
+                for mcdc_line in mcdc_gate.lines:
+                    print mcdc_line
+            elif mcdc_gate.failed:
+                for mcdc_line in mcdc_gate.lines:
+                    if mcdc_line.starts_with("error: "):
+                        eprint mcdc_line
+            if mcdc_gate.failed and exit_code == 0:
+                exit_code = 1
         if coverage_session_should_finalize(options.coverage, inspection_only,
                 coverage_setup_failed(spec_result), spec_result.carried_from_checkpoint):
             val coverage = collect_coverage()

@@ -54,6 +54,7 @@ use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
 use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
 use std.test_runner.test_runner_config.{resolve_effective_profile, apply_mcdc_mode_env, mcdc_mode_error_message}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, mcdc_compiler_lacks_probes, MCDC_UNAVAILABLE_REASON}
+use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
 
 use std.io_runtime.{file_exists, file_read_nullable}
 @unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
@@ -1316,6 +1317,16 @@ fn _single_mcdc_attempt(args: [text], path: text, mcdc_mode: text, binary: text,
         print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {r.error}"
     else:
         print "MC/DC: mode={mcdc_mode} evidence=absent {path}"
+    # Report only. This lane is also the daemon's per-file worker, and a
+    # decision's independence pair may span spec files, so the MC/DC gate
+    # verdict belongs to the aggregating run (test_runner_main), never to one
+    # file's exit code. Per-file DEGRADED/evidence lines are printed above.
+    val mcdc_gate = test_runner_mcdc_run_gate(mcdc_mode,
+        resolve_effective_profile(options), [r])
+    for mcdc_line in mcdc_gate.lines:
+        if not mcdc_line.starts_with("MC/DC: DEGRADED ") and
+                not mcdc_line.starts_with("MC/DC: NO EVIDENCE "):
+            print mcdc_line
     if r.failed > 0:
         print "error: test-runner: MC/DC instrumented run failed ({r.failed}): {r.error}"
         return false
