@@ -3714,6 +3714,58 @@ char* rt_stdin_read_line(void) {
     return NULL; /* EOF */
 }
 
+/* Hosted text ABI: unlike the legacy raw/4096-byte helpers, read one complete
+ * UTF-8 line, preserve embedded NUL, and distinguish EOF (empty text) from an
+ * I/O or decoding error (NIL). Core-C has no Rust stdin-mock owner. */
+int64_t rt_read_stdin_line(void) {
+    uint8_t *bytes = NULL;
+    size_t length = 0, capacity = 0;
+    int failed = 0;
+#ifdef _WIN32
+    _lock_file(stdin);
+#else
+    flockfile(stdin);
+#endif
+    for (;;) {
+        int ch = fgetc(stdin);
+        if (ch == EOF) {
+            failed = ferror(stdin) != 0;
+            break;
+        }
+        if (length == capacity) {
+            if (capacity > (size_t)INT64_MAX / 2) {
+                failed = 1;
+                break;
+            }
+            size_t next_capacity = capacity ? capacity * 2 : 256;
+            uint8_t *next = (uint8_t *)rt_observed_realloc_v1(bytes, next_capacity);
+            if (!next) {
+                failed = 1;
+                break;
+            }
+            bytes = next;
+            capacity = next_capacity;
+        }
+        bytes[length++] = (uint8_t)ch;
+        if (ch == '\n') break;
+    }
+#ifdef _WIN32
+    _unlock_file(stdin);
+#else
+    funlockfile(stdin);
+#endif
+    int64_t result = 0; /* RuntimeValue::NIL */
+    if (!failed && splc_utf8_valid_up_to(bytes, (int64_t)length) == (int64_t)length) {
+        if (length && bytes[length - 1] == '\n') {
+            --length;
+            if (length && bytes[length - 1] == '\r') --length;
+        }
+        result = rt_string_new(bytes, (uint64_t)length);
+    }
+    free(bytes);
+    return result;
+}
+
 int64_t rt_stdin_read_line_text(void) {
     char buf[4096];
     if (!fgets(buf, sizeof(buf), stdin)) {
@@ -16802,6 +16854,12 @@ static char* rt_core_shell_quote(const char* s) {
  * declared result type. Same worker/entry-point split the (ptr, len) parameter
  * fixes used for rt_dir_create_cpath et al. */
 static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArray* args) {
+#if defined(_WIN32)
+    /* The Windows capture owner handles argv quoting, both output streams and
+     * raw exit codes. Zero deadline and -1 capture cap preserve unbounded run
+     * semantics; the POSIX popen/status encoding below is not a Windows ABI. */
+    return rt_process_run_bounded(cmd, cmd_len, args, 0, -1);
+#else
     SplArray* result = rt_array_new(3);
     if (!cmd || cmd_len == 0) {
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
@@ -16877,6 +16935,7 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
     rt_array_push(result, rt_value_int(exit_code));
     if (stdout_buf) free(stdout_buf);
     return result;
+#endif
 }
 
 int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args) {

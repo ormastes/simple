@@ -173,9 +173,11 @@ fn invoking_binary() -> text:
         val self_path = rt_path_absolute(current) ?? ""
         if self_path.len() > 0 and file_exists(self_path):
             return self_path
-    val process_args = sys_get_args()
-    if process_args.len() > 0 and file_exists(process_args[0]):
-        val argv_binary = rt_path_absolute(process_args[0]) ?? ""
+    val raw = sys_get_args()
+    # A source-mode argv[0] is a `.spl` path (this client's own source): it
+    # exists but is not executable, so it is never the compiler binary.
+    if raw.len() > 0 and not raw[0].ends_with(".spl") and file_exists(raw[0]):
+        val argv_binary = rt_path_absolute(raw[0]) ?? ""
         if argv_binary != "" and file_exists(argv_binary):
             return argv_binary
     ""
@@ -392,10 +394,20 @@ fn print_response(path: text, content: text) -> i64:
     fail_closed_on_no_examples(path, body, code)
 
 fn has_spl_doctest_flag(args: [text]) -> bool:
-    for a in args:
+    # The comment-doctest lane is .spl-only: an .md target runs the md lane.
+    var flag = false
+    var i = 0
+    while i < args.len():
+        val a = args[i]
         if a == "--spl-doctest":
-            return true
-    false
+            flag = true
+        elif client_flag_consumes_value(a):
+            # The next token is this option's value, even if it ends in .md.
+            i = i + 1
+        elif not a.starts_with("-") and a.ends_with(".md"):
+            return false
+        i = i + 1
+    flag
 
 fn run_scoped_spl_doctest(args: [text]) -> i64:
     """Handle `simple test --spl-doctest <target>` directly, in-process.
@@ -692,6 +704,31 @@ fn _test_env_gate_names() -> text:
             names.push(name)
     names.join(", ")
 
+struct DirectRun:
+    binary: text
+    paths: [text]
+    timeout_secs: i64
+    compiler: text
+
+fn daemon_child_marker_set() -> bool:
+    """True inside a worker the light daemon spawned (light_daemon.spl sets it)."""
+    env_get("SIMPLE_TEST_DAEMON_CHILD") == "1"
+
+fn run_direct(run: DirectRun) -> i64:
+    """Run every path on the direct lane; any failing spec fails the run."""
+    var worst = 0
+    for p in run.paths:
+        val code = run_one_direct(run.binary, p, run.timeout_secs, run.compiler)
+        if code != 0 and worst == 0:
+            worst = code
+    if run.paths.len() > 1:
+        print "Requested {run.paths.len()} spec file(s); executed {run.paths.len()}."
+    worst
+
+fn run_daemon_child_direct(binary: text, paths: [text], timeout_secs: i64, compiler: text) -> i64:
+    val run = DirectRun(binary: binary, paths: paths, timeout_secs: timeout_secs, compiler: compiler)
+    return run_direct(run)
+
 fn main() -> i64:
     val raw_cleaned = clean_args()
     val parsed_modes = parse_private_sdn_worker_args(raw_cleaned, false)
@@ -753,6 +790,11 @@ fn main() -> i64:
         print "ERROR: test-runner: canonical invoking candidate identity is unavailable or SIMPLE_BINARY does not match it"
         print "ERROR: refusing to fall back to deployed bin/simple or a Rust seed"
         return 1
+    # A spec served by the light daemon that itself runs `simple test <spec>`
+    # must not queue behind the single daemon worker that is busy serving it.
+    if daemon_child_marker_set():
+        print "test-daemon: nested run inside a daemon-served spec (SIMPLE_TEST_DAEMON_CHILD=1); running directly"
+        return run_daemon_child_direct(candidate_binary, requested, run.timeout_secs, client_options.compiler)
     # Daemon-lane timeout only: the light-request protocol clamps to
     # LIGHT_REQUEST_MAX_TIMEOUT_MS (600s). The direct lane must honor the
     # full requested --timeout — see long_timeout_bypass below and

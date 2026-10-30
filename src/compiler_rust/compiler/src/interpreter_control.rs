@@ -5422,6 +5422,7 @@ pub(crate) fn exec_match_core(
             if let Some(guard) = &arm.guard {
                 let mut guard_env = env.clone();
                 for (name, value) in &bindings {
+                    guard_env.enter_block_local(name.clone());
                     guard_env.insert(name.clone(), value.clone());
                 }
                 let guard_val = eval_decision_cond(

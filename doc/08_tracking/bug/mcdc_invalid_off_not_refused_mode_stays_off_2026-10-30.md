@@ -19,3 +19,6 @@
 - Env fail-closed: `apply_mcdc_mode_env` now also sets SIMPLE_MCDC_MODE=on on
   invalid-off / invalid-mode, so no child can inherit "off" or a bogus value even if a
   caller ignores the refusal. mcdc_propagate_env_spec.spl 8/8.
+
+- 2026-10-30: the two env examples now assert the fail-closed value exactly
+  (SIMPLE_MCDC_MODE == "on" after invalid-off / invalid-mode) instead of "!= off".

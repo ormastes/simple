@@ -640,7 +640,9 @@ pub(crate) fn call_method_on_value(
             "to_string" | "to_text" => return Ok(Value::text(n.to_string())),
             "to_float" | "to_f64" => return Ok(Value::Float(*n as f64)),
             "to_f32" => return Ok(Value::Float32(*n as f32)),
-            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+            // Unsigned view; see interpreter_method/primitives.rs.
+            "to_u64" => return Ok(Value::UInt { value: *n as u64, width: 64 }),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" => {
                 let tname = &method[3..];
                 let nt = NumericType::from_name(tname).expect("handled above");
                 return Ok(match cast_int_to_numeric(*n, nt) {
@@ -661,7 +663,8 @@ pub(crate) fn call_method_on_value(
             "to_string" | "to_text" => return Ok(Value::text(value.to_string())),
             "to_float" | "to_f64" => return Ok(Value::Float(*value as f64)),
             "to_f32" => return Ok(Value::Float32(*value as f32)),
-            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+            "to_u64" => return Ok(Value::UInt { value: *value, width: 64 }),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" => {
                 let tname = &method[3..];
                 let nt = NumericType::from_name(tname).expect("handled above");
                 return Ok(match cast_int_to_numeric(*value as i64, nt) {

@@ -5,6 +5,7 @@
 # test_incremental_state_shared.spl, and test_runner_files.spl.
 
 use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_stat}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
 
 # ============================================================================
 # Version
@@ -19,7 +20,7 @@ pub val TEST_RESULT_CACHE_VERSION: i64 = 3
 struct TestCacheEntry:
     """Cached result for a single test file."""
     test_path: text
-    dep_hash: text           # Hash of dep_paths mtimes for staleness check
+    dep_hash: text           # mtime+content digest of test and dep paths
     result_status: i64       # 0=pass, 1=fail, 2=error, 3=skip
     passed: i64
     failed: i64
@@ -46,14 +47,22 @@ fn stale_entry(test_path: text) -> TestCacheEntry:
 # Helpers
 # ============================================================================
 
+fn _dep_fingerprint(path: text) -> text:
+    # mtime alone has one-second resolution, so a same-size rewrite within
+    # that second kept the old fingerprint and served a stale cached result.
+    # The content digest decides. A missing path, a directory, or an open/read
+    # failure has no 64-hex digest; all of those fingerprint as "unreadable",
+    # which never matches a real digest.
+    val digest = file_hash_sha256_or_empty(path)
+    if digest.len() != 64:
+        return "unreadable"
+    "{file_stat(path)}@{digest}"
+
 fn _dep_hash(test_path: text, dep_paths: [text]) -> text:
-    """Build a simple fingerprint from file mtimes."""
-    var h: text = ""
-    val stat = file_stat(test_path)
-    h = h + stat.to_string()
+    """Build a fingerprint from file mtimes and content digests."""
+    var h: text = _dep_fingerprint(test_path)
     for p in dep_paths:
-        val s = file_stat(p)
-        h = h + ":" + s.to_string()
+        h = h + ":" + _dep_fingerprint(p)
     h
 
 # ============================================================================

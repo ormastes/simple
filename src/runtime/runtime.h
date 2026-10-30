@@ -368,6 +368,7 @@ int64_t  rt_time_ms(void);          /* Unix epoch milliseconds */
 /* ===== Stdin/Stdout I/O ===== */
 
 char*    rt_stdin_read_line(void);         /* reads line from stdin, NULL on EOF */
+int64_t  rt_read_stdin_line(void);         /* tagged UTF-8, strip LF/CRLF; empty EOF, NIL error */
 int64_t  rt_stdin_read_line_text(void);    /* reads line from stdin as tagged text, empty on EOF */
 int64_t  rt_stdin_read_chars_text(int64_t count); /* reads up to count bytes from stdin as tagged text */
 int64_t  stdin_read_char(void);            /* reads one byte from stdin as tagged text */

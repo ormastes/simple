@@ -13,14 +13,24 @@ use std.spec.step
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.file_ops.{file_write}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_runner_execute.{mcdc_compiler_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN}
+
+# Same gate as mcdc_real_instrumentation_spec: only a pure-Simple-built
+# compiler emits MC/DC probes; the Rust seed never does.
+val MCDC_COMPILER_GATE_REASON = "requires SIMPLE_MCDC_COMPILER naming a self-hosted (pure-Simple-built) compiler that emits MC/DC probes; the Rust seed cannot"
+val SEED_GATE_REASON = "SIMPLE_BINARY emits MC/DC probes, so the seed's mcdc-unavailable degrade does not apply"
 
 val FIXTURE = "use std.spec\ndescribe \"conditions\":\n    it \"if and or\":\n        val a = 3\n        val b = 7\n        var hits = 0\n        if a > 1 and b < 10:\n            hits = hits + 1\n        if a > 5 or b > 5:\n            hits = hits + 1\n        expect(hits).to_equal(2)\n"
 
+# MC/DC variables the outer runner may have set; each child run starts clean
+# so a CI waiver or mode cannot flip the default-profile examples.
+val UNSET_MCDC_ENV = ["-u", "SIMPLE_MCDC_MODE", "-u", "SIMPLE_MCDC_MODE_ERROR", "-u", "SIMPLE_MCDC_OFF_WAIVER_REASON", "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEWER", "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", "-u", "SIMPLE_MCDC_OFF_WAIVER_VERSION"]
+val NO_BINARY = "error: SIMPLE_BINARY is unset; set it to the compiler under test (no fallback to the deployed bin/simple)"
+
+# The compiler under test. Deliberately no fallback to bin/simple, which is
+# the deployed binary and may be stale.
 fn real_binary() -> text:
-    val b = env_get("SIMPLE_BINARY")
-    if b != "":
-        return b
-    "bin/simple"
+    env_get("SIMPLE_BINARY")
 
 fn make_case(case: text, name: text, body: text) -> text:
     val dir = "build/mcdc_kind/" + case
@@ -29,8 +39,28 @@ fn make_case(case: text, name: text, body: text) -> text:
     file_write(dir + "/" + name + "_spec.spl", body)
     dir
 
+fn mcdc_compiler() -> text:
+    env_get("SIMPLE_MCDC_COMPILER")
+
+fn probe_capable_compiler_absent() -> bool:
+    val compiler = mcdc_compiler()
+    compiler == "" or mcdc_compiler_lacks_probes(compiler)
+
+# An unset SIMPLE_BINARY is NOT a skip: the seed example then fails with NO_BINARY.
+fn binary_emits_probes() -> bool:
+    real_binary() != "" and not mcdc_compiler_lacks_probes(real_binary())
+
 fn run_dir(dir: text, envs: [text], extra: [text]) -> (text, i64):
-    val argv = envs + [real_binary(), "test", dir, "--no-db", "--no-cache", "--assert-ran"] + extra
+    run_dir_with(real_binary(), dir, envs, extra)
+
+# The probe-capable lane forces MC/DC on, so "no degrade" cannot mean "MC/DC was off".
+fn run_dir_mcdc(dir: text) -> (text, i64):
+    run_dir_with(mcdc_compiler(), dir, ["SIMPLE_MCDC_MODE=on"], [])
+
+fn run_dir_with(binary: text, dir: text, envs: [text], extra: [text]) -> (text, i64):
+    if binary == "":
+        return (NO_BINARY, 127)
+    val argv = UNSET_MCDC_ENV + envs + ["SIMPLE_BINARY=" + binary, binary, "test", dir, "--no-db", "--no-cache", "--assert-ran"] + extra
     val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
     (out + err, code)
 
@@ -39,6 +69,14 @@ fn verdict_line(output: text) -> text:
         if line.starts_with("SPEC FILE VERDICT:"):
             return line
     ""
+
+# True only when an MC/DC report line names decisions. The case path is
+# removed first so a fixture directory name can never satisfy the check.
+fn mcdc_report_names_decisions(output: text, dir: text) -> bool:
+    for line in output.replace(dir, "").split("\n"):
+        if line.contains("MC/DC") and line.contains("decision"):
+            return true
+    false
 
 describe "simple test <dir> over an if/and/or fixture":
     it "runs the spec and reports it passed with a verdict line":
@@ -56,17 +94,29 @@ describe "simple test <dir> over an if/and/or fixture":
         val (output, _code) = run_dir(dir, [], [])
         val verdict = verdict_line(output)
         val degraded = verdict.contains("degraded=") or output.contains("[mcdc-fallback]")
-        val evidenced = output.contains("MC/DC") and output.contains("decision")
+        val evidenced = mcdc_report_names_decisions(output, dir)
         expect(degraded or evidenced).to_equal(true)
 
-    it "reports MC/DC decisions for the fixture (instrumentation succeeded, no degrade)":
-        step("Require the instrumented path to succeed and name decisions")
-        val dir = make_case("applies_decisions", "cond", FIXTURE)
-        val (output, _code) = run_dir(dir, [], [])
-        expect(verdict_line(output).contains("degraded=")).to_equal(false)
-        expect(output.contains("[mcdc-fallback]")).to_equal(false)
-        expect(output).to_contain("MC/DC")
-        expect(output).to_contain("decision")
+    skip_if(fn(): probe_capable_compiler_absent(), MCDC_COMPILER_GATE_REASON)(
+        "reports MC/DC decisions for the fixture (instrumentation succeeded, no degrade)",
+        fn():
+            step("Require the instrumented path to succeed and name decisions")
+            val dir = make_case("applies_report", "cond", FIXTURE)
+            val (output, _code) = run_dir_mcdc(dir)
+            expect(verdict_line(output).contains("degraded=")).to_equal(false)
+            expect(output.contains("[mcdc-fallback]")).to_equal(false)
+            expect(mcdc_report_names_decisions(output, dir)).to_equal(true)
+    )
+
+    skip_if(fn(): binary_emits_probes(), SEED_GATE_REASON)(
+        "names the mcdc-unavailable degrade instead of decisions on the seed",
+        fn():
+            val dir = make_case("applies_report_seed", "cond", FIXTURE)
+            val (output, _code) = run_dir(dir, [], [])
+            expect(verdict_line(output)).to_contain("passed=1")
+            expect(verdict_line(output)).to_contain(MCDC_UNAVAILABLE_DEGRADE_TOKEN)
+            expect(output).to_contain("MC/DC: NOT compliant")
+    )
 
     it "keeps an explicit SIMPLE_MCDC_MODE=on in force":
         step("Run with the mode set explicitly")
@@ -74,7 +124,7 @@ describe "simple test <dir> over an if/and/or fixture":
         val (output, _code) = run_dir(dir, ["SIMPLE_MCDC_MODE=on"], [])
         val verdict = verdict_line(output)
         expect(verdict).to_contain("passed=1")
-        expect(verdict.contains("degraded=") or output.contains("decision")).to_equal(true)
+        expect(verdict.contains("degraded=") or mcdc_report_names_decisions(output, dir)).to_equal(true)
 
     it "treats dynamic-aspect like dynamic and still runs the spec":
         step("Run with the dynamic-aspect spelling")

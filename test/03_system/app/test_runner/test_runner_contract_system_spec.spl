@@ -33,7 +33,7 @@ the real seed binary end-to-end; nothing is mocked.
 
 use std.spec.*
 use std.io_runtime.{file_write, file_read, file_exists, dir_create_all, env_get}
-use test.support.compiled_child_authority_v1.{test_compiled_child_run_v1, test_compiled_child_text_v1}
+use test.support.compiled_child_authority_v1.{test_compiled_child_authority_v1, test_compiled_child_run_v1, test_compiled_child_text_v1}
 
 # Child execution now uses actual owner-v3 compiled CLI authority. Historical
 # seed descriptions below retain the original asserted behavior for review;
@@ -64,6 +64,21 @@ fn run_seed_test_dir(target: text, timeout_secs: i64) -> (text, text, i64):
     val result = test_compiled_child_run_v1("compiler_cli", ["test", target], [], timeout_secs * 1000).unwrap()
     (test_compiled_child_text_v1(result.stdout), test_compiled_child_text_v1(result.stderr), result.exit_code)
 
+# Every scenario needs the bootstrap controller's frozen owner-v3 receipt,
+# which only scripts/bootstrap/bootstrap-phase-verification.shs provides. In
+# any other lane the example FAILS with a BLOCKED reason and this link. It
+# is never a pass and never falls back to an uncertified binary. A runtime
+# pending() inside an `it` body is still counted as passed on the seed, which
+# would be a synthetic pass. See
+# doc/08_tracking/bug/test_runner_contract_system_spec_needs_owner_lane_2026-10-30.md
+fn owner_lane_absent() -> bool:
+    val authority = test_compiled_child_authority_v1("compiler_cli")
+    if authority.is_ok():
+        return false
+    fail("BLOCKED: needs the bootstrap owner-v3 receipt lane (" + authority.unwrap_err() +
+        "); doc/08_tracking/bug/test_runner_contract_system_spec_needs_owner_lane_2026-10-30.md")
+    true
+
 # Capture the runner's console report as manual evidence.
 fn capture_evidence(name: text, content: text) -> bool:
     dir_create_all(CAPTURE_DIR)
@@ -88,6 +103,7 @@ describe "Test runner operator contract":
     # @capture(protocol)
     # @req REQ-test_runner_operator_contract
     it "fails the build when a spec has a genuine expectation failure":
+        if owner_lane_absent(): return
         # @req REQ-SSPEC-SYSTEM
         step("fails the build when a spec has a genuine expectation failure")
         """The operator runs the runner against a fixture carrying one deliberately-red expectation. CI must see a nonzero exit and a `FAIL` line naming the file — not a swallowed error buried in scrollback."""
@@ -106,6 +122,7 @@ describe "Test runner operator contract":
     # @capture(protocol)
     # @req REQ-test_runner_operator_contract
     it "passes the build when every example in a spec is green":
+        if owner_lane_absent(): return
         # @req REQ-SSPEC-SYSTEM
         step("passes the build when every example in a spec is green")
         """The operator runs the runner against a minimal fixture whose single expectation holds. CI must see a zero exit and a `PASS` line naming the file."""
@@ -125,6 +142,7 @@ describe "Test runner operator contract":
     # @req REQ-test_runner_operator_contract
     # @troubleshooting(symptom: "a spec with zero real `it` executions reads as PASS", fix: "see doc/08_tracking/bug/test_runner_zero_executed_single_file_greenwash_2026-07-17.md; test_runner_single.spl counts real executed examples via count_real_examples() instead of trusting the aggregate summary line. NOTE: this fix is present in the working tree but has not yet landed in committed history (`git log -- src/app/test_runner_new` shows no commit for it) and was observed to drop out of the working copy mid-session on 2026-07-17 due to concurrent unrelated activity on that file; if this scenario goes red with a silent PASS instead of the fail-closed error below, that regression is why")
     it "refuses a synthetic pass when a spec executes zero real examples":
+        if owner_lane_absent(): return
         # @req REQ-SSPEC-SYSTEM
         step("refuses a synthetic pass when a spec executes zero real examples")
         """A spec whose only content is a bare `pending()` placeholder must not read as a build pass just because the interpreter's own aggregate summary line miscounts it as `1 example, 0 failures`. Regression coverage for doc/08_tracking/bug/test_runner_zero_executed_single_file_greenwash_2026-07-17.md."""
@@ -143,6 +161,7 @@ describe "Test runner operator contract":
     # @req REQ-test_runner_operator_contract
     # @troubleshooting(symptom: "`simple test <directory>` never reaches a per-file PASS/FAIL summary", fix: "the light test daemon fails to start on this seed (doc/08_tracking/bug/host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17.md: `unknown extern function: rt_cli_arg_count`); the aggregate path falls back to an unassisted direct interpreter run that does not finish within any operator-reasonable bound")
     it "cannot yet report a directory scan within an operator-reasonable time":
+        if owner_lane_absent(): return
         # @req REQ-SSPEC-SYSTEM
         step("cannot yet report a directory scan within an operator-reasonable time")
         """An operator pointing the runner at a directory holding two trivial green fixtures expects a per-file report within seconds — the single-file path above answers in well under a minute. Today the light test daemon fails to start on this seed (`error: semantic: unknown extern function: rt_cli_arg_count`, doc/08_tracking/bug/host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17.md), so the runner falls back to an unassisted direct interpreter run that discovers both files but does not reach a `Files: N` / `Passed: N` summary even after many times the single-file budget. This scenario records that gap honestly instead of asserting a directory result nobody can currently observe."""

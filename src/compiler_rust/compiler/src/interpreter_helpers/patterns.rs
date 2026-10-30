@@ -823,6 +823,11 @@ pub(crate) fn handle_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
+    if let Expr::MethodCall { receiver, .. } = value_expr {
+        if let Expr::Identifier(name) = receiver.as_ref() {
+            crate::interpreter::expr::refresh_stale_module_global_receiver(env, name);
+        }
+    }
     let out = handle_method_call_with_self_update_inner(value_expr, env, functions, classes, enums, impl_methods)?;
     // A bare `expect <subject>` statement (no matcher chained, so it is a plain
     // Call, not a MethodCall): outside any `it` there is no example end to judge
