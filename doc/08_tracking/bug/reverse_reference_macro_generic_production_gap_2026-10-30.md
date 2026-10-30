@@ -1,6 +1,6 @@
 # Macro and generic reverse-reference production gap
 
-**Date:** 2026-10-30  
+**Date:** 2026-10-30
 **Status:** Partial safe implementation; production admission and native acceptance remain unqualified.
 
 ## Implemented source behavior
