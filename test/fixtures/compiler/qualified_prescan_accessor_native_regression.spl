@@ -1,0 +1,156 @@
+# Standalone production-source regression for PRs #5445 and #5446.
+# Native-build this entry against the repaired source closure, then run it.
+# Builtin assertions intentionally avoid the older producer's std.spec Any matcher.
+# Success tests source methods, not admission of the compiler that built this file.
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Expressions.accessor_forwarding.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_data.{bootstrap_fn_param_hir_types_lookup}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1}
+use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+fn regression_hir(source: text, path: text) -> HirModule:
+    val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+    var frontend = HirLowering.with_filename(path)
+    val module = frontend.lower_module(ast)
+    assert(frontend.errors.len() == 0)
+    module
+
+fn regression_declarations(module: HirModule) -> MirHirModuleDeclarationsV1:
+    val context = hir_owned_artifact_context_v1()
+    val body = hir_module_encode(module)
+    val body_digest = sha256_text(body)
+    val diagnostic_identity = sha256_text("focused-prescan-NOT-admission-v1\n" + body)
+    assert(transient_scope_begin())
+    val projected = mir_hir_project_module_in_owned_scope_v1(context, module,
+        diagnostic_identity, body_digest, body_digest)
+    val paused = transient_scope_pause()
+    val promoted = if paused: transient_promote(projected) else: false
+    val ended = transient_scope_end()
+    assert(paused and promoted and ended)
+    assert(projected.is_ok())
+    projected.unwrap()
+
+fn regression_prescan(compact: bool):
+    val lane = if compact: "compact" else: "full"
+    val left = regression_hir("fn qualified_slot(value: any) -> bool:\n    true\n", "src/qualified_params/{lane}_left.spl")
+    val right = regression_hir("fn qualified_slot(value: i64) -> bool:\n    true\n", "src/qualified_params/{lane}_right.spl")
+    val nominal = regression_hir("class Payload:\n    value: i64\nfn qualified_slot(value: Payload) -> bool:\n    true\n", "src/qualified_params/{lane}_nominal.spl")
+    var lowering = MirLowering.new(left.symbols)
+    for provider in [left, right, nominal]:
+        if compact:
+            lowering.prescan_declaration_callables_v1(regression_declarations(provider))
+        else:
+            for key in provider.functions.keys():
+                val function: HirFunction = provider.functions[key]
+                lowering.prescan_one_function_v1(provider.name, provider.symbols,
+                    function.symbol, function.name, function.is_extern, function.is_method,
+                    function.is_static, function.has_export_attr, function.func_attr,
+                    function.return_type, function.params)
+    assert(lowering.errors.len() == 0)
+    assert(bootstrap_fn_param_hir_types_lookup("qualified_slot") == nil)
+    assert(bootstrap_fn_param_hir_types_lookup("qualified_params.{lane}_nominal.qualified_slot") == nil)
+    assert(bootstrap_fn_param_hir_types_lookup("qualified_params.{lane}_left.qualified_slot") != nil)
+    assert(bootstrap_fn_param_hir_types_lookup("qualified_params.{lane}_right.qualified_slot") != nil)
+    var consumer = SymbolTable.new()
+    val any_call = consumer.define("qualified_params.{lane}_left.qualified_slot", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, "qualified_params.{lane}_left")
+    val int_call = consumer.define("qualified_params.{lane}_right.qualified_slot", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, "qualified_params.{lane}_right")
+    var caller = MirLowering.new(consumer)
+    val any_params = caller.resolved_call_hir_param_types(any_call)
+    val int_params = caller.resolved_call_hir_param_types(int_call)
+    assert(any_params.len() == 1)
+    assert(int_params.len() == 1)
+    match any_params[0].kind:
+        case HirTypeKind.Any: ()
+        case _: assert(false)
+    match int_params[0].kind:
+        case HirTypeKind.Int(bits, signed):
+            assert(bits == 64)
+            assert(signed)
+        case _: assert(false)
+
+fn regression_accessor(method_type: HirType?) -> HirExpr?:
+    var lowering = HirLowering.new()
+    val span = Span.new(10, 20, 3, 4)
+    val owner = lowering.symbols.define("StorageOwner", SymbolKind.Struct, nil, span, Visibility.Public, false, nil)
+    val method = lowering.symbols.define("StorageOwner::get_value", SymbolKind.Method, method_type, span, Visibility.Public, false, nil)
+    val fields: Dict<text, HirType> = {}
+    lowering.struct_field_types_by_name["StorageOwner"] = fields
+    val base = HirExpr(kind: HirExprKind.UnitLit, has_type_: false, span: span)
+    lowering.lower_accessor_read(base, "value", owner.id, span)
+
+fn regression_accessor_call(expression: HirExpr):
+    match expression.kind:
+        case HirExprKind.MethodCall(base, name, arguments, resolution):
+            assert(name == "get_value")
+            assert(arguments.len() == 0)
+            match base.kind:
+                case HirExprKind.UnitLit: ()
+                case _: assert(false)
+            match resolution:
+                case MethodResolution.Unresolved: ()
+                case _: assert(false)
+        case _: assert(false)
+    assert(expression.span.start == 10)
+    assert(expression.span.end == 20)
+
+fn regression_accessor_absent(method_type: HirType?):
+    if val expression = regression_accessor(method_type):
+        regression_accessor_call(expression)
+        assert(not expression.has_type_)
+        match expression.type_.kind:
+            case HirTypeKind.Error: ()
+            case _: assert(false)
+    else: assert(false)
+
+fn regression_accessor_storage():
+    val returned = HirType(kind: HirTypeKind.Int(64, true), span: Span.new(31, 38, 7, 2))
+    val signature = HirType(kind: HirTypeKind.Function([], returned, []), span: Span.empty())
+    if val expression = regression_accessor(Some(signature)):
+        regression_accessor_call(expression)
+        assert(expression.has_type_)
+        match expression.type_.kind:
+            case HirTypeKind.Int(bits, signed):
+                assert(bits == 64)
+                assert(signed)
+            case _: assert(false)
+        assert(expression.type_.span.start == 31)
+        assert(expression.type_.span.end == 38)
+        assert(expression.type_.span.line == 7)
+        assert(expression.type_.span.col == 2)
+    else: assert(false)
+    val boolean_returned = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+    val boolean_signature = HirType(kind: HirTypeKind.Function([], boolean_returned, []), span: Span.empty())
+    if val expression = regression_accessor(Some(boolean_signature)):
+        regression_accessor_call(expression)
+        assert(expression.has_type_)
+        match expression.type_.kind:
+            case HirTypeKind.Bool: ()
+            case _: assert(false)
+    else: assert(false)
+    regression_accessor_absent(nil)
+    regression_accessor_absent(Some(HirType(kind: HirTypeKind.Error, span: Span.empty())))
+
+fn main() -> i32:
+    regression_prescan(false)
+    print "PASS qualified prescan full"
+    regression_prescan(true)
+    print "PASS qualified prescan compact"
+    regression_accessor_storage()
+    print "PASS accessor return storage"
+    0

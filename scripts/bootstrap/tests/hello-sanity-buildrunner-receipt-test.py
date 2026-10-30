@@ -132,6 +132,11 @@ class ReceiptTests(unittest.TestCase):
         self.write(lines=self.result_lines(path="other.zip"))
         self.refuses("result does not bind the published executable")
 
+    def test_output_path_traversal_refused(self):
+        # Positive control: test_well_formed_receipt_binds_memory_evidence binds OUTPUT.
+        self.write(lines=self.result_lines(path="../hello"))
+        self.refuses("result does not bind the published executable")
+
     def test_output_digest_mismatch_refused(self):
         self.write(lines=self.result_lines(digest="b" * 64))
         self.refuses("result does not bind the published executable")
