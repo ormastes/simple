@@ -1,0 +1,105 @@
+# @req REQ-HBR-006
+# @manual_section: primary
+"""
+## Purpose and audience
+A BuildRunner worker that exceeds its task timeout must stop the compiler, report
+TIMEOUT, and leave no process behind. Audience: QA reviewers of the hello build
+path, who need to see that a hung compile cannot outlive its budget.
+## Compatibility and limitations
+Needs a process observation V4 provider and /bin/sleep, /bin/cp, /bin/kill.
+Unsupported hosts skip explicitly with a reason: the seed interpreter cannot spawn
+processes on SimpleOS, and Windows needs the Job object provider.
+## Verification guidance and troubleshooting
+A RED means the timeout did not terminate the child tree or the status drifted
+from TIMEOUT. Check compiler.process and worker.error under the attempt root.
+"""
+use std.spec
+use std.nogc_sync_mut.spec.{skip}
+use std.nogc_sync_mut.io.process_observation_v4.{process_observation_capabilities_v4}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_hash_sha256, file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.io_runtime.{time_now_unix_micros}
+use std.common.crypto.sha256.{sha256_text}
+use app.bootstrap_builder.contracts.{BuildInputV1, BuildTaskV1}
+use app.bootstrap_builder.codec.{builder_write_task_v1, builder_read_result_v1}
+use app.bootstrap_builder.worker.{builder_worker_execute_v1}
+use app.buildrunner.process_evidence.{build_runner_process_evidence_decode_v1}
+
+fn timeout_fixture_task(program: text, args: [text], timeout_ms: i64, digest: text) -> BuildTaskV1:
+    BuildTaskV1(id: "timeout-probe", attempt: 1, phase: "test", producer_digest: digest,
+        source_digest: digest, toolchain_digest: digest, dependencies: [], program: program,
+        args: args, inputs: [BuildInputV1(path: "input.txt", digest: sha256_text("hello input\n"))],
+        outputs: ["output.txt"], cache_key: digest, timeout_ms: timeout_ms,
+        memory_limit_bytes: 1048576, links: [], memory_policy: "monitor")
+
+fn timeout_probe_root(suffix: text) -> text:
+    get_temp_dir().replace("\\", "/") + "/builder-timeout-cleanup-" + str(getpid()) + "-" + suffix
+
+fn prepare_timeout_root(suffix: text, program: text) -> text:
+    val root = timeout_probe_root(suffix)
+    if file_exists(root): dir_remove(root, true)
+    expect(dir_create_all(root + "/work")).to_equal(true)
+    val copied = process_run_timeout("/bin/cp", ["/bin/cp", program, root + "/producer.exe"], 10000)
+    expect(copied.2).to_equal(0)
+    expect(file_write(root + "/work/input.txt", "hello input\n")).to_equal(true)
+    root
+
+fn timeout_unsupported_reason() -> text:
+    if not file_exists("/bin/sleep") or not file_exists("/bin/cp"):
+        return "no POSIX /bin/sleep or /bin/cp on this host (Windows Job object provider or SimpleOS spawn unavailable)"
+    val capability = process_observation_capabilities_v4()
+    if capability.is_err():
+        return "process observation capability query failed"
+    if not capability.unwrap().available:
+        return "process observation V4 is unavailable on this host"
+    ""
+
+describe "BuildRunner worker timeout cleanup integration":
+    after_each:
+        val root = timeout_probe_root("sleep")
+        if file_exists(root): dir_remove(root, true)
+        val ok_root = timeout_probe_root("ok")
+        if file_exists(ok_root): dir_remove(ok_root, true)
+    val unsupported = timeout_unsupported_reason()
+    if unsupported != "":
+        skip("reports OK for a producer that finishes inside its timeout", unsupported)
+        skip("stops a sleeping producer at its timeout and leaves no process behind", unsupported)
+    else:
+        it "reports OK for a producer that finishes inside its timeout":
+            # Positive control: the same worker path with a producer that completes.
+            step("A copy task with a generous timeout is dispatched to the worker")
+            val root = prepare_timeout_root("ok", "/bin/cp")
+            val digest = file_hash_sha256(root + "/producer.exe")
+            val task = timeout_fixture_task("/bin/cp", ["input.txt", "output.txt"], 10000, digest)
+            expect(builder_write_task_v1(root + "/request.sdn", task)).to_equal(true)
+            expect(builder_worker_execute_v1(root + "/request.sdn", root, "local")).to_equal(0)
+            val receipt = builder_read_result_v1(root + "/result.sdn").unwrap()
+            expect(receipt.status).to_equal("OK")
+            expect(receipt.exit_code).to_equal(0)
+            expect(receipt.outputs.len()).to_equal(1)
+
+        it "stops a sleeping producer at its timeout and leaves no process behind":
+            step("A sleep task with a 200 millisecond timeout is dispatched to the worker")
+            val root = prepare_timeout_root("sleep", "/bin/sleep")
+            val digest = file_hash_sha256(root + "/producer.exe")
+            val task = timeout_fixture_task(root + "/producer.exe", ["30"], 200, digest)
+            expect(builder_write_task_v1(root + "/request.sdn", task)).to_equal(true)
+            step("The worker runs the task and the timeout expires")
+            val started = time_now_unix_micros()
+            val code = builder_worker_execute_v1(root + "/request.sdn", root, "local")
+            val elapsed_micros = time_now_unix_micros() - started
+            step("The result reports TIMEOUT with exit code 124")
+            expect(code).to_equal(124)
+            val receipt = builder_read_result_v1(root + "/result.sdn").unwrap()
+            expect(receipt.status).to_equal("TIMEOUT")
+            expect(receipt.exit_code).to_equal(124)
+            expect(elapsed_micros < 10000000).to_equal(true)
+            step("The process evidence records the producer as timed out and reaped")
+            val evidence = build_runner_process_evidence_decode_v1(file_read(root + "/compiler.process")).unwrap()
+            expect(evidence.outcome).to_equal("timed-out")
+            step("No child process with the recorded pid survives")
+            val probe = process_run_timeout("/bin/kill", ["/bin/kill", "-0", str(evidence.pid)], 5000)
+            expect(probe.2 != 0).to_equal(true)
