@@ -1,0 +1,49 @@
+#!/bin/sh
+# Sparse source snapshot whose tracked src/app/t32_cli alias points into an
+# absent examples/10_tooling/trace32_tools must be REFUSED by the product
+# overlay; the identical complete snapshot is the positive control.
+set -eu
+# Needs real POSIX symlinks, git and perl. Git Bash/MSYS ln -s copies instead
+# of linking, and SimpleOS has no sh/git/perl: skip there instead of failing.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) echo "SKIP: POSIX symlink fixture (Windows)"; exit 0 ;;
+esac
+for tool in git perl; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "SKIP: $tool unavailable"; exit 0; }
+done
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+lib="$here/../lib"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/overlay-t32-sparse.XXXXXX")
+# physical() refuses any linked path component; macOS /tmp -> /private/tmp.
+scratch=$(CDPATH= cd -P -- "$scratch" && pwd)
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+mk() {
+    src="$scratch/$1/source"
+    mkdir -p "$src/src/app" "$src/examples/10_tooling/trace32_tools/t32_cli"
+    printf 'fn main() -> i32: 0\n' > "$src/src/app/main.spl"
+    printf 'alias target\n' > "$src/examples/10_tooling/trace32_tools/t32_cli/main.spl"
+    ln -s ../../examples/10_tooling/trace32_tools/t32_cli "$src/src/app/t32_cli"
+    git -C "$src" init -q
+    git -C "$src" add .
+    git -C "$src" -c core.hooksPath=/dev/null -c user.name=f -c user.email=f@example.invalid commit -qm f
+    mkdir "$scratch/$1/overlay"
+}
+run() {
+    perl -I"$lib" -MBootstrapProductOverlay=materialize_product_overlay \
+        -e 'materialize_product_overlay(@ARGV)' \
+        "$scratch/$1/source" "$scratch/$1/overlay" "$scratch/$1/overlay.tsv"
+}
+mk good
+run good
+[ "$(cat "$scratch/good/overlay/src/app/t32_cli/main.spl")" = "alias target" ] || { echo "FAIL positive control: alias not expanded" >&2; exit 1; }
+mk sparse
+rm -rf "$scratch/sparse/source/examples/10_tooling/trace32_tools"
+status=0
+run sparse 2> "$scratch/sparse.err" || status=$?
+[ "$status" -ne 0 ] || { echo "FAIL: sparse snapshot was materialized" >&2; exit 1; }
+# The index still lists the target, so the physical check refuses first.
+expected="missing physical overlay input: $scratch/sparse/source/examples/10_tooling/trace32_tools/t32_cli/main.spl"
+[ "$(cat "$scratch/sparse.err")" = "$expected" ] || {
+    echo "FAIL: unexpected refusal:" >&2; cat "$scratch/sparse.err" >&2; exit 1; }
+[ ! -e "$scratch/sparse/overlay.tsv" ] || { echo "FAIL: manifest published for refused overlay" >&2; exit 1; }
+printf 'PASS: complete trace32 alias materializes; sparse snapshot refused (%s)\n' "$(head -1 "$scratch/sparse.err")"
