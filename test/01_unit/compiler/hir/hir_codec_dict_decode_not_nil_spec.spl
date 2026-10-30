@@ -1,39 +1,19 @@
-# Guards e606125a541 by behaviour: every module.functions dict entry decoded
-# from the HIR cache is a real HirFunction stored under its own key. Storing
-# the decoded optional instead left nil values after a cache-hit decode
-# (stage2 p2_add SIGSEGV). Twin: hir_codec_dict_decode_roundtrip_spec.spl.
+# Guards e606125a541 (source shape): the generated HIR decoder must store dict
+# values through a presence bind, never the decoded optional itself. Storing
+# the optional left nil HirFunction values after a cache-hit decode (stage2
+# p2_add SIGSEGV). Runtime round trip: hir_codec_dict_decode_roundtrip_spec.spl.
+# Kept as a source check on purpose: the defect only shows on the native
+# stage2 lane; the seed stores a T? into Dict<K,T> transparently, so a
+# behaviour spec run on the seed passes even with the broken decoder.
 use std.spec.*
-use compiler.common.config.{Logger}
-use compiler.frontend.frontend.parse_full_frontend
-use compiler.hir.hir_lowering.types.HirLowering
-use compiler.hir.hir_lowering.items.*
-use compiler.hir.hir_lowering.statements.*
-use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_definitions.{HirFunction}
-use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
 
-val FIVE_FUNCTIONS = "fn a1() -> i64:\n    1\nfn a2() -> i64:\n    2\nfn a3() -> i64:\n    3\nfn a4() -> i64:\n    4\nfn a5() -> i64:\n    5\n"
+extern fn rt_file_read_text(path: text) -> text?
 
-fn lowered(source: text) -> HirModule:
-    val parsed = parse_full_frontend(source, "dict_decode_many.spl", "dict_decode_many", Logger(level: 0))
-    var lowering = HirLowering.with_filename("dict_decode_many.spl")
-    val module = lowering.lower_module(parsed)
-    expect(lowering.errors.len()).to_equal(0)
-    module
-
-describe "HIR codec decode stores present dict values":
-    it "keeps every decoded function non-nil and under its original key":
-        val original = lowered(FIVE_FUNCTIONS)
-        val decoded = hir_module_decode(hir_module_encode(original)).unwrap()
-        expect(decoded.functions.len()).to_equal(5)
-        for key in original.functions.keys():
-            val function: HirFunction = decoded.functions[key]
-            expect(function != nil).to_equal(true)
-            expect(function.name).to_equal(original.functions[key].name)
-
-    it "decodes the same functions after a second cache round trip":
-        val once = hir_module_decode(hir_module_encode(lowered(FIVE_FUNCTIONS))).unwrap()
-        val twice = hir_module_decode(hir_module_encode(once)).unwrap()
-        expect(twice.functions.len()).to_equal(5)
-        for key in once.functions.keys():
-            expect(twice.functions[key].name).to_equal(once.functions[key].name)
+describe "HIR codec decoder source shape":
+    it "stores module.functions through a presence bind":
+        val generated = rt_file_read_text("src/compiler/20.hir/generated/hir_codec.spl") ?? ""
+        expect(generated).to_contain("f_functions[dk6] = present_v6")
+        expect(generated.contains("f_functions[dk6] = dv6")).to_equal(false)
+    it "keeps the generator emitting the presence bind":
+        val generator = rt_file_read_text("src/app/compiler_schema/codec_gen.spl") ?? ""
+        expect(generator).to_contain("if val present_v")

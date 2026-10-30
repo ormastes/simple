@@ -21,5 +21,7 @@ self-hosted binary, so it may be a seed interpreter gap rather than a codec bug.
 ## Unblock
 
 Reproduce on a Stage 2 binary; if it also fails, bisect `hc_dec_hir_class`
-(hir_codec.spl ~1918). Then add a class-module case (nested `HirClass.methods`
-dict) to `hir_codec_dict_decode_not_nil_spec.spl`.
+(hir_codec.spl ~1918). Then add a class-module round-trip case on a native/stage2
+lane. `hir_codec_dict_decode_not_nil_spec.spl` stays a source check: on the seed a
+`T?` stored into `Dict<K,T>` reads back transparently, so a seed behaviour spec
+cannot catch the e606125a541 regression.
