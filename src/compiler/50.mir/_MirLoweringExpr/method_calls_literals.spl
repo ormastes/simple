@@ -36,7 +36,7 @@ use compiler.semantics.perf_facts.builtin_collection.{resolve_builtin_collection
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
-use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity, mir_scalar_trait_owner_key_v1}
 use compiler.mir.mir_lowering_stmts.{mir_expr_kind_is_place}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.mir_instruction_support.{GpuBarrierScope, GpuMemoryScope}
@@ -2285,6 +2285,29 @@ impl MirLowering:
             val native_owner = self.native_trait_owner_for_type(native_receiver_type)
             if native_owner != "":
                 return self.lower_native_trait_method(receiver, native_owner, method, args)
+        # RTI supplies declared call returns independently of whether every
+        # parameter is annotated. A scalar receiver selects an exact visible
+        # trait implementation, never a same-name free function or record.
+        match resolution:
+            case Unresolved:
+                if val scalar_type = self.enum_match_expr_type(receiver):
+                    val scalar_owner = mir_scalar_trait_owner_key_v1(scalar_type.kind)
+                    val scalar_key = "{scalar_owner}::{method}"
+                    val generic_key = "scalar:generic::{method}"
+                    if scalar_owner != "" and self.trait_impl_methods.has(generic_key):
+                        self.error_fatal("unsupported generic scalar trait method: {method}", Some(receiver.span))
+                    elif scalar_owner != "" and self.trait_impl_methods.has(scalar_key):
+                        val target = self.trait_impl_methods[scalar_key]
+                        if not self.trait_impl_closure_complete:
+                            self.error_fatal("scalar trait method {method}: implementation closure is incomplete", Some(receiver.span))
+                        elif target.id < 0:
+                            self.error_fatal("ambiguous scalar trait method: {method}", Some(receiver.span))
+                        else:
+                            val trait_id = self.trait_impl_methods["trait:{scalar_key}"]
+                            return self.lower_method_call(receiver, method, args,
+                                MethodResolution.TraitMethod(trait_id, target),
+                                static_receiver_name_hint, static_receiver_symbol_hint)
+            case _: ()
         var resolution_admits_trait_dispatch = false
         match resolution:
             case Unresolved: resolution_admits_trait_dispatch = true
