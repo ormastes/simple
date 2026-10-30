@@ -195,3 +195,13 @@ preserves raw ownership and avoids tiny-scope sweeps. The focused Rust unit,
 actual archive ABI fixture and LLDB boundary control pass. Rebuilt manager
 acceptance remains pending. See
 `doc/01_research/local/native_module_scope_allocator_residency_2026_10_30.md`.
+
+## Packed encoder growing-buffer copies (2026-10-30)
+
+Do not alias-copy a growing owned byte array inside each scalar append helper.
+The packed frontend encoder's private helpers now take explicit mutable owned
+buffers; public input arrays and tail buffers remain readonly. LLDB isolated
+packed-store RSS growth and verified the mutable helper avoids per-append array
+allocation. Production format tests pass under seed diagnostics; full native
+encoder qualification remains pending. See
+`doc/08_tracking/bug/packed_encoder_repeated_buffer_copy_2026_10_30.md`.

@@ -62,6 +62,35 @@ transcript_explicit_env_names() {
     ' "$1"
 }
 
+transcript_frontend_env_names() {
+    # run_transcribed prepends these owner-controlled rows after the builder's
+    # canonical env check. Recognize the complete policy, never arbitrary names.
+    resume_frontend_names=$(transcript_explicit_env_names "$1") || return 1
+    case " $resume_frontend_names " in
+        *' SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB '*|*' SIMPLE_HIR_SHARD_WORKER_KB '*|\
+        *' SIMPLE_PARSE_SHARD_WORKER_KB '*|*' SIMPLE_PARSE_SHARD_MAX '*|*' SIMPLE_SHARD_MEM_CLAMP '*) ;;
+        *) return 0 ;;
+    esac
+    resume_frontend_budget=$(bootstrap_stage3_transcript_explicit_env_value \
+        "$1" SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB) || return 1
+    case "$resume_frontend_budget" in ''|*[!0-9]*) return 1 ;; esac
+    case "$2" in
+        *-pc-windows-msvc|*-pc-windows-gnu)
+            # Use the producer's scheduling-share validation and fixed values.
+            # Its default maximum is distinct from the enclosing RSS ceiling.
+            resume_frontend_rows=$(bootstrap_stage3_windows_frontend_environment \
+                3000000 monitor "$resume_frontend_budget") || return 1
+            for resume_frontend_row in $resume_frontend_rows; do
+                resume_frontend_name=${resume_frontend_row%%=*}
+                [ "$(bootstrap_stage3_transcript_explicit_env_value "$1" "$resume_frontend_name")" = \
+                    "${resume_frontend_row#*=}" ] || return 1
+            done
+            printf '%s\n' 'SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB SIMPLE_HIR_SHARD_WORKER_KB SIMPLE_PARSE_SHARD_WORKER_KB SIMPLE_PARSE_SHARD_MAX SIMPLE_SHARD_MEM_CLAMP'
+            ;;
+        *) printf '%s\n' SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB ;;
+    esac
+}
+
 [ "$#" = 1 ] || usage
 case "$1" in
     /*) ;;
@@ -210,8 +239,23 @@ case " $stage2_recorded_env_names " in
 esac
 expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform" "$stage2_recorded_cold_init" "$stage2_recorded_compiler_ceiling" "$stage2_diagnostic_names" "$stage2_recorded_preflight_names") ||
     resume_fail "canonical environment set is unavailable"
+stage2_recorded_frontend_names=$(transcript_frontend_env_names "$transcript" "$platform") ||
+    resume_fail "transcript frontend policy is invalid"
+if [ -n "$stage2_recorded_frontend_names" ]; then
+    expected_env_names="$stage2_recorded_frontend_names $expected_env_names"
+fi
 [ "$stage2_recorded_env_names" = "$expected_env_names" ] ||
     resume_fail "transcript environment set is not canonical"
+case "$platform:$stage2_recorded_frontend_names" in
+    *-pc-windows-*:?*)
+        stage2_recorded_frontend_budget=$(bootstrap_stage3_transcript_explicit_env_value \
+            "$transcript" SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB) || resume_fail "frontend budget is missing"
+        [ "${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB-$stage2_recorded_frontend_budget}" = "$stage2_recorded_frontend_budget" ] ||
+            resume_fail "ambient frontend budget conflicts with transcript"
+        SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB=$stage2_recorded_frontend_budget
+        export SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB
+        ;;
+esac
 # Replay exactly the recorded policy; an ambient export cannot change it.
 if [ "$stage2_recorded_cold_init" = 1 ]; then
     SIMPLE_SCV_INVENTORY_COLD_INIT=1

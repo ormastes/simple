@@ -103,3 +103,13 @@ Focused route cases and evidence are in
 `test/01_unit/app/cli/bootstrap_source_authority_refresh_spec.spl` and
 `doc/08_tracking/bug/bootstrap_refresh_source_authority_route_2026_10_30.md`.
 Native execution requires a rebuilt producer; seed diagnostics do not qualify it.
+
+## Packed encoder growing-buffer copies (2026-10-30)
+
+The packed frontend encoder uses private mutable destinations for scalar writes,
+appends and padding. Each destination is an owned construction buffer; do not
+pass an aliased input or its own tail. This avoids copying all accumulated bytes
+on each append without changing packed bytes, validation or authority. Keep
+format/input-preservation tests and native mutable-buffer ABI evidence separate
+from rebuilt-producer memory qualification. See
+`doc/08_tracking/bug/packed_encoder_repeated_buffer_copy_2026_10_30.md`.

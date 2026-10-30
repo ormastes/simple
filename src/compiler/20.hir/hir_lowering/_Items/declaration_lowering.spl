@@ -363,6 +363,7 @@ impl HirLowering:
         # Lower return type — use explicit check instead of .map() ?? default
         # to avoid crash with null coalescing on Option.map result
         var return_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
+        var semantic_return_type = return_type
         # Set when an UNANNOTATED function is typed from its own `return <value>`
         # (bootstrap arm, or the up-front symbol-type inference
         # below). Its body must then be lowered in value
@@ -388,6 +389,7 @@ impl HirLowering:
         # fallback for bootstrap functions with no declaration.
         if fn_.has_return_type:
             val declared_ret = self.lower_type(fn_.return_type)
+            semantic_return_type = declared_ret
             if self.ambient_bootstrap_enabled():
                 # NARROW (deliberate): in bootstrap mode scalar declarations
                 # whose ABI has an established direct MIR representation take
@@ -551,6 +553,19 @@ impl HirLowering:
         var initial_effects: [Effect] = []
         if fn_.is_async:
             initial_effects = initial_effects.push(Effect(kind: EffectKind.Async, span: fn_.span))
+
+        # Generic predeclarations are untyped until their binders are lowered.
+        # Publish their semantic signature independently of the bootstrap ABI;
+        # mono needs the declared result even when a binder occurs only there.
+        if fn_.has_return_type and type_params.len() > 0:
+            if val declared_symbol = self.symbols.get_symbol_raw(fn_symbol_id.id):
+                var semantic_symbol = declared_symbol
+                var semantic_params: [HirType] = []
+                for raw_param in params:
+                    val semantic_param: HirParam = raw_param
+                    semantic_params = semantic_params.push(semantic_param.type_)
+                semantic_symbol.type_ = Some(HirType(kind: HirTypeKind.Function(semantic_params, semantic_return_type, initial_effects), span: fn_.span))
+                self.symbols.symbols[fn_symbol_id.id] = semantic_symbol
 
         var hir_func = HirFunction(
             symbol: fn_symbol_id,

@@ -1,0 +1,112 @@
+"""
+Purpose: retain declared result evidence through bootstrap ABI erasure.
+Audience: compiler engineers maintaining HIR lowering and monomorphization.
+
+The bootstrap producer intentionally emits aggregate returns through i64.
+These tests reproduce that retained HIR state without changing ambient
+environment policy, and verify that inference does not rewrite the ABI.
+"""
+# @req: REQ-COMPILER-MONO-001
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization, hir_type_key}
+use compiler.verify.post_mono_verify.*
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, mono_sym_key}
+use compiler.mono.mono_archive_types_v1.MonoTemplateBodyModeV1
+
+describe "Bootstrap semantic result evidence":
+    it "collects declared results on the first visit without retaining archive symbol tables":
+        val source = "fn fail<T>(message: text) -> Result<T, text>:\n    Err(message)\n\nfn invoke() -> Result<i64, text>:\n    fail(\"failure\")\n"
+        val parsed = parse_full_frontend(source, "src/mono_first/main.spl", "mono_first.main", Logger(level: 0))
+        var lowering = HirLowering.with_filename("src/mono_first/main.spl")
+        var hir = lowering.lower_module(parsed)
+        for symbol in hir.functions.keys():
+            var function: HirFunction = hir.functions[symbol]
+            function.return_type = HirType(kind: HirTypeKind.Int(64, true), span: function.span)
+            hir.functions[symbol] = function
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            var collector = MonomorphizationPass.create()
+            collector.template_body_mode = mode
+            expect(collector.module_symbols.has("mono_first.main")).to_equal(false)
+            collector.collect_generics(hir, "mono_first.main")
+            var semantic_results = 0
+            for symbol in hir.functions.keys():
+                val function: HirFunction = hir.functions[symbol]
+                val result = collector.fn_returns[mono_sym_key("mono_first.main", function.symbol.id)]
+                match result.kind:
+                    case HirTypeKind.Result(_, _): semantic_results = semantic_results + 1
+                    case _: ()
+                expect(hir_type_key(function.return_type)).to_equal("i64")
+            expect(semantic_results).to_equal(2)
+            if mode == MonoTemplateBodyModeV1.ArchiveRequests:
+                expect(collector.module_symbols.has("mono_first.main")).to_equal(false)
+
+    it "infers root and specialized-body contexts while retaining physical i64 returns":
+        val source = "fn fail<T>(message: text) -> Result<T, text>:\n    Err(message)\n\nfn generic_fail<U>(value: U) -> Result<U, text>:\n    fail(\"generic\")\n\nfn explicit() -> Result<i64, text>:\n    return fail(\"explicit\")\n\nfn tail() -> Result<i64, text>:\n    fail(\"tail\")\n\nfn branch(flag: bool) -> Result<i64, text>:\n    if flag:\n        fail(\"branch\")\n    else:\n        generic_fail(42)\n"
+        val parsed = parse_full_frontend(source, "src/mono_semantic/main.spl", "mono_semantic.main", Logger(level: 0))
+        var lowering = HirLowering.with_filename("src/mono_semantic/main.spl")
+        var hir = lowering.lower_module(parsed)
+        var declared_generic_results = 0
+        for symbol in hir.functions.keys():
+            var function: HirFunction = hir.functions[symbol]
+            if function.type_params.len() > 0:
+                if val declared = hir.symbols.get_symbol_type(function.symbol):
+                    match declared.kind:
+                        case HirTypeKind.Function(_, returned, _):
+                            match returned.kind:
+                                case HirTypeKind.Result(_, _): declared_generic_results = declared_generic_results + 1
+                                case _: ()
+                        case _: ()
+            function.return_type = HirType(kind: HirTypeKind.Int(64, true), span: function.span)
+            hir.functions[symbol] = function
+        expect(declared_generic_results).to_equal(2)
+        var modules: Dict<text, HirModule> = {}
+        modules["mono_semantic.main"] = hir
+        val (rewritten, stats) = run_monomorphization(modules)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)
+        val result: HirModule = rewritten["mono_semantic.main"]
+        var concrete_functions = 0
+        for symbol in result.functions.keys():
+            val function: HirFunction = result.functions[symbol]
+            expect(hir_type_key(function.return_type)).to_equal("i64")
+            if function.type_params.len() == 0: concrete_functions = concrete_functions + 1
+        expect(concrete_functions).to_equal(5)
+        expect(post_mono_report_total(post_mono_verify_modules(rewritten))).to_equal(0)
+
+    it "rejects argument evidence conflicting with the semantic result":
+        val source = "fn keep<T>(value: T) -> Result<T, text>:\n    Ok(value)\n\nfn conflicting() -> Result<text, text>:\n    keep(42)\n"
+        val parsed = parse_full_frontend(source, "src/mono_semantic/conflict.spl", "mono_semantic.conflict", Logger(level: 0))
+        var lowering = HirLowering.with_filename("src/mono_semantic/conflict.spl")
+        var hir = lowering.lower_module(parsed)
+        for symbol in hir.functions.keys():
+            var function: HirFunction = hir.functions[symbol]
+            function.return_type = HirType(kind: HirTypeKind.Int(64, true), span: function.span)
+            hir.functions[symbol] = function
+        var modules: Dict<text, HirModule> = {}
+        modules["mono_semantic.conflict"] = hir
+        val (rewritten, stats) = run_monomorphization(modules)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(stats.specializations_created).to_equal(0)
+
+    it "does not invent a missing result type argument from the physical ABI":
+        val source = "fn fail<T>(message: text) -> Result<T, text>:\n    Err(message)\n\nfn discarded():\n    fail(\"missing context\")\n"
+        val parsed = parse_full_frontend(source, "src/mono_semantic/missing.spl", "mono_semantic.missing", Logger(level: 0))
+        var lowering = HirLowering.with_filename("src/mono_semantic/missing.spl")
+        var hir = lowering.lower_module(parsed)
+        for symbol in hir.functions.keys():
+            var function: HirFunction = hir.functions[symbol]
+            if function.type_params.len() > 0:
+                function.return_type = HirType(kind: HirTypeKind.Int(64, true), span: function.span)
+                hir.functions[symbol] = function
+        var modules: Dict<text, HirModule> = {}
+        modules["mono_semantic.missing"] = hir
+        val (rewritten, stats) = run_monomorphization(modules)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(stats.specializations_created).to_equal(0)
