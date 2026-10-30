@@ -1,5 +1,7 @@
 # Worker surface table escapes its parser lease
 
+This document records the initial repair and its then-pending qualification. Its repeated full-class/bloom promotion strategy is superseded by the [second-lease owner repair and native RED/GREEN evidence](worker_surface_second_lease_raw_root_promotion_2026-10-30.md). The final owner retains the class once and promotes only the mutable entries dictionary on later leases.
+
 Status: concrete ownership defect; relation to import failure unproven.
 Source repair and native lifetime qualification are pending.
 
