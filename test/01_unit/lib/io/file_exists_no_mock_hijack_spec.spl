@@ -1,0 +1,26 @@
+# Regression (hello native-build "configuration-read-failed", 2026-10-30):
+# std.{nogc_sync_mut,nogc_async_mut}.file_system.file_ops each defined a mock
+# `file_exists(path: text) -> bool` that answered true for every absolute
+# path. The JIT function registry is keyed on NAME ALONE, and identical
+# signatures produce no collision warning, so inside the native-build closure
+# the environment-variant policy owner's `file_exists(<cwd>/simple.sdn)`
+# reached the mock, reported a missing file as present, and the following
+# bounded read failed. The file_system modules now re-export the one real
+# host implementation instead of defining a second `file_exists`.
+use std.spec
+use std.nogc_sync_mut.file_system.file_ops.{file_exists as sync_fs_file_exists}
+use std.nogc_async_mut.file_system.file_ops.{file_exists as async_fs_file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_exists as io_file_exists, file_write, file_delete}
+
+describe "file_system.file_ops.file_exists":
+    it "reports a missing absolute path as absent":
+        expect(sync_fs_file_exists("/nonexistent/simple_file_exists_spec_zz")).to_equal(false)
+        expect(async_fs_file_exists("/nonexistent/simple_file_exists_spec_zz")).to_equal(false)
+        expect(io_file_exists("/nonexistent/simple_file_exists_spec_zz")).to_equal(false)
+
+    it "reports an existing file as present":
+        val p = "/tmp/simple_file_exists_no_mock_hijack_spec.txt"
+        file_write(p, "x")
+        expect(sync_fs_file_exists(p)).to_equal(true)
+        expect(async_fs_file_exists(p)).to_equal(true)
+        file_delete(p)
