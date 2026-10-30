@@ -4,15 +4,14 @@
 # Prepends init script content, sets up environment, enforces timeouts.
 
 use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_remove}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.doctest_child_execution.{execute_doctest_child_v1}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.sffi.cli_args.{cli_get_args}
 use std.test_runner.test_executor_parsing.{find_simple_binary}
 use std.test_runner.compiler_select.{select_test_child_binary}
 use nogc_sync_mut.platform.{get_host_os, get_host_arch}
-use std.test_runner.test_runner_types.{TestOptions, TEST_OUTPUT_CAPTURE_BYTES, doctest_discovery_scope_path}
+use std.test_runner.test_runner_types.{TestOptions, doctest_discovery_scope_path}
 use std.test_runner.test_runner_files.{strip_ansi}
 use std.test_runner.sdoctest.types.{BlockResult, BlockStatus, SdoctestBlock, SdoctestConfig, SdoctestFileResult, SdoctestRunResult, should_fail_infra_reason}
 use std.test_runner.sdoctest.config.{find_init_script_file, find_env_timeout, find_env_vars, find_env_run_config}
@@ -321,38 +320,26 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
     # Build code with init script and preamble prepended
     val code = build_temp_code(block, config, preamble)
 
-    # Write temp file
-    val temp_path = "/tmp/sdoctest_block_{block.line_number}.spl"
-    file_atomic_write(temp_path, code)
-
-    # Preserve argv boundaries through the native bounded process facade.
-    # --compiler=<sel> pins the child binary; refuse rather than fall back.
+    # Keep the requested compiler's hash admission before either child route.
     var binary = ""
     match select_test_child_binary(options.compiler):
         case Err(message):
-            return BlockResult(
-                block: block, status: BlockStatus.Error,
-                duration_ms: 0, stdout: "", stderr: "", error: "test-runner: " + message
-            )
+            return BlockResult(block: block, status: BlockStatus.Error,
+                duration_ms: 0, stdout: "", stderr: "", error: "test-runner: " + message)
         case Ok(selected):
             binary = if selected != "": selected else: find_sdoctest_binary()
-    # Block-level @modifier takes priority over env-level run-config
     val block_run_config = block.get_run_config()
     val run_config = if block_run_config != "": block_run_config else: find_env_run_config(config, env_name)
-    val run_args = if run_config != "":
-        ["--run-config={run_config}", temp_path]
-    else:
-        [temp_path]
     val start = time_now_unix_micros()
-    val run_result = process_run_bounded(binary, run_args, timeout, TEST_OUTPUT_CAPTURE_BYTES)
-    val stdout = run_result.0
-    val stderr = run_result.1
-    val exit_code = run_result.2
-    val end = time_now_unix_micros()
-    val duration_ms = (end - start) / 1000
-
-    # Cleanup temp file
-    file_remove(temp_path)
+    val child = execute_doctest_child_v1(code, binary, timeout, Some(options), run_config)
+    val stdout = child.stdout
+    val stderr = child.stderr
+    val exit_code = child.exit_code
+    val duration_ms = (time_now_unix_micros() - start) / 1000
+    if child.infrastructure_error != "":
+        return BlockResult(block: block, status: BlockStatus.Error,
+            duration_ms: duration_ms, stdout: stdout, stderr: stderr,
+            error: child.infrastructure_error)
 
     # Determine status
     val should_fail = block.has_modifier_should_fail()
