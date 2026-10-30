@@ -1,0 +1,177 @@
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.env.{env_get, env_has, env_set, env_unset}
+use std.nogc_sync_mut.io.{dir_create_all, file_delete, file_write_bytes}
+use std.io_runtime.{getpid}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1}
+use compiler.tools.verify.replay_authority.{REPLAY_POLICY_DOMAIN_V1,
+    replay_authority_candidate_v1}
+use compiler.tools.verify.replay_runner.{ReplayRunnerConfigV1,
+    run_fresh_leanchecker_v1, run_independent_replay_adapter_v1}
+
+fn _fixture_bytes_v1(value: text) -> [u8]:
+    base_encoding_text_to_bytes(value)
+
+fn _fixture_write_v1(path: text, bytes: [u8]) -> bool:
+    file_write_bytes(path, bytes)
+
+fn _fixture_sign_v1(seed: [u8], public_key: [u8], payload: text) -> [u8]:
+    pure_ed25519_sign(seed, public_key,
+        _fixture_bytes_v1(REPLAY_POLICY_DOMAIN_V1) + _fixture_bytes_v1(payload))
+
+fn _fixture_publish_v1(root: text, lane: text, payload: text,
+    seed: [u8], public_key: [u8]) -> bool:
+    val policy = root + "/simple/verification/replay/" + lane + ".sdn"
+    val signature = root + "/simple/verification/replay/" + lane + ".sig"
+    _fixture_write_v1(policy, _fixture_bytes_v1(payload)) and
+        _fixture_write_v1(signature, _fixture_sign_v1(seed, public_key, payload))
+
+fn _fresh_policy_v1(lake: text, lake_hash: text, checker: text,
+    checker_hash: text, checker_version: text, duplicate: bool = false,
+    extra: text = "") -> text:
+    val lane_lines = if duplicate:
+        "lane: \"fresh_lean_kernel\"\nlane: \"fresh_lean_kernel\"\n"
+    else:
+        "lane: \"fresh_lean_kernel\"\n"
+    "schema: \"simple.fv2.replay-authority.v1\"\n" + lane_lines +
+        "lake_path: \"" + lake + "\"\nlake_sha256: \"" + lake_hash + "\"\n" +
+        "lake_version: \"fixture-lake-v1\"\n" +
+        "leanchecker_path: \"" + checker + "\"\n" +
+        "leanchecker_sha256: \"" + checker_hash + "\"\n" +
+        "leanchecker_version: \"" + checker_version + "\"\n" + extra
+
+fn _independent_policy_v1(adapter: text, adapter_hash: text, lake: text,
+    lake_hash: text, exporter: text, exporter_hash: text, nanoda: text,
+    nanoda_hash: text) -> text:
+    "schema: \"simple.fv2.replay-authority.v1\"\n" +
+        "lane: \"independent_kernel\"\n" +
+        "adapter_path: \"" + adapter + "\"\nadapter_sha256: \"" + adapter_hash + "\"\n" +
+        "adapter_version: \"fixture-adapter-v1\"\n" +
+        "lake_path: \"" + lake + "\"\nlake_sha256: \"" + lake_hash + "\"\n" +
+        "lake_version: \"fixture-lake-v1\"\n" +
+        "lean4export_path: \"" + exporter + "\"\nlean4export_sha256: \"" + exporter_hash + "\"\n" +
+        "lean4export_version: \"fixture-export-v1\"\n" +
+        "nanoda_path: \"" + nanoda + "\"\nnanoda_sha256: \"" + nanoda_hash + "\"\n" +
+        "nanoda_version: \"fixture-nanoda-v1\"\n"
+
+fn _replay_authority_fixture_body_v1(root: text, policy_root: text) -> i64:
+    val seed: [u8] = [0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8,
+        8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8,
+        16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8,
+        24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8]
+    val pair = pure_ed25519_keypair_from_seed(seed)
+    val other_seed: [u8] = [32u8, 33u8, 34u8, 35u8, 36u8, 37u8, 38u8, 39u8,
+        40u8, 41u8, 42u8, 43u8, 44u8, 45u8, 46u8, 47u8,
+        48u8, 49u8, 50u8, 51u8, 52u8, 53u8, 54u8, 55u8,
+        56u8, 57u8, 58u8, 59u8, 60u8, 61u8, 62u8, 63u8]
+    val other_pair = pure_ed25519_keypair_from_seed(other_seed)
+    val lake = root + "/lake"
+    val checker = root + "/leanchecker"
+    val adapter = root + "/adapter"
+    val exporter = root + "/lean4export"
+    val nanoda = root + "/nanoda"
+    val lake_bytes = _fixture_bytes_v1("fixture lake bytes")
+    val checker_bytes = _fixture_bytes_v1("fixture checker bytes")
+    val adapter_bytes = _fixture_bytes_v1("fixture adapter bytes")
+    val exporter_bytes = _fixture_bytes_v1("fixture export bytes")
+    val nanoda_bytes = _fixture_bytes_v1("fixture nanoda bytes")
+    if not _fixture_write_v1(policy_root + "/root.pub", pair.1) or
+            not _fixture_write_v1(lake, lake_bytes) or
+            not _fixture_write_v1(checker, checker_bytes) or
+            not _fixture_write_v1(adapter, adapter_bytes) or
+            not _fixture_write_v1(exporter, exporter_bytes) or
+            not _fixture_write_v1(nanoda, nanoda_bytes):
+        return -1
+    val lake_hash = sha256_u8_hex(lake_bytes)
+    val checker_hash = sha256_u8_hex(checker_bytes)
+    val valid = _fresh_policy_v1(lake, lake_hash, checker, checker_hash,
+        "fixture-checker-v1")
+    if not _fixture_publish_v1(root, "fresh", valid, seed, pair.1):
+        return -1
+    var checks = 0
+    if replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+            lake, checker, "leanchecker", "fixture-checker-v1").is_ok(): checks = checks + 1
+    if replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+            lake, checker, "leanchecker", "wrong-version").is_err(): checks = checks + 1
+    val guarded = run_fresh_leanchecker_v1(ReplayRunnerConfigV1("/project",
+        "Fixture.Module", "Fixture", "/artifact", sha256_u8_hex(_fixture_bytes_v1("artifact")),
+        lake, checker, "leanchecker", "fixture-checker-v1", 1000))
+    if not guarded.accepted() and guarded.diagnostic.contains("ROOT-PROVENANCE-AND-PINNED-CHAIN-UNAVAILABLE"):
+        checks = checks + 1
+    val tampered = valid + "# tampered\n"
+    if _fixture_write_v1(policy_root + "/fresh.sdn", _fixture_bytes_v1(tampered)) and
+            replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+                lake, checker, "leanchecker", "fixture-checker-v1").is_err(): checks = checks + 1
+    val duplicate = _fresh_policy_v1(lake, lake_hash, checker, checker_hash,
+        "fixture-checker-v1", true)
+    if _fixture_publish_v1(root, "fresh", duplicate, seed, pair.1) and
+            replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+                lake, checker, "leanchecker", "fixture-checker-v1").is_err(): checks = checks + 1
+    val unknown = _fresh_policy_v1(lake, lake_hash, checker, checker_hash,
+        "fixture-checker-v1", false, "extra: \"unknown\"\n")
+    if _fixture_publish_v1(root, "fresh", unknown, seed, pair.1) and
+            replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+                lake, checker, "leanchecker", "fixture-checker-v1").is_err(): checks = checks + 1
+    val deep = _fresh_policy_v1(lake, lake_hash, checker, checker_hash,
+        "fixture-checker-v1", false, "nested: [[[[[0]]]]]\n")
+    if _fixture_publish_v1(root, "fresh", deep, seed, pair.1) and
+            replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+                lake, checker, "leanchecker", "fixture-checker-v1").is_err(): checks = checks + 1
+    val empty_version = _fresh_policy_v1(lake, lake_hash, checker, checker_hash, "")
+    if _fixture_publish_v1(root, "fresh", empty_version, seed, pair.1) and
+            replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+                lake, checker, "leanchecker", "").is_err(): checks = checks + 1
+    if _fixture_publish_v1(root, "fresh", valid, seed, pair.1) and
+            _fixture_write_v1(policy_root + "/root.pub", other_pair.1) and
+            replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+                lake, checker, "leanchecker", "fixture-checker-v1").is_err(): checks = checks + 1
+    if _fixture_write_v1(policy_root + "/root.pub", pair.1) and
+            _fixture_publish_v1(root, "fresh", valid, seed, pair.1):
+        if file_delete(policy_root + "/fresh.sig") and
+                replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+                    lake, checker, "leanchecker", "fixture-checker-v1").is_err(): checks = checks + 1
+        if _fixture_publish_v1(root, "fresh", valid, seed, pair.1) and
+                _fixture_write_v1(checker, _fixture_bytes_v1("changed checker bytes")) and
+                replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
+                    lake, checker, "leanchecker", "fixture-checker-v1").is_err(): checks = checks + 1
+        _fixture_write_v1(checker, checker_bytes)
+        val independent = _independent_policy_v1(adapter, sha256_u8_hex(adapter_bytes),
+            lake, lake_hash, exporter, sha256_u8_hex(exporter_bytes),
+            nanoda, sha256_u8_hex(nanoda_bytes))
+        if _fixture_publish_v1(root, "independent", independent, seed, pair.1) and
+                replay_authority_candidate_v1(ReplayCheckerClassV1.IndependentKernel,
+                    adapter, adapter, "nanoda-adapter", "fixture-adapter-v1").is_ok(): checks = checks + 1
+        val guarded_independent = run_independent_replay_adapter_v1(
+            ReplayRunnerConfigV1("/project", "Fixture.Module", "Fixture", "/artifact",
+                sha256_u8_hex(_fixture_bytes_v1("artifact")), adapter, adapter,
+                "nanoda-adapter", "fixture-adapter-v1", 1000))
+        if not guarded_independent.accepted() and guarded_independent.diagnostic.contains("PINNED-CHAIN-UNAVAILABLE"):
+            checks = checks + 1
+    checks
+
+pub fn replay_authority_fixture_checks_v1() -> i64:
+    val had_xdg = env_has("XDG_CONFIG_HOME")
+    val old_xdg = env_get("XDG_CONFIG_HOME")
+    val root = "/tmp/fv2-replay-authority-" + getpid().to_string()
+    val policy_root = root + "/simple/verification/replay"
+    var checks = -1
+    if dir_create_all(policy_root) and env_set("XDG_CONFIG_HOME", root):
+        checks = _replay_authority_fixture_body_v1(root, policy_root)
+    file_delete(policy_root + "/root.pub")
+    file_delete(policy_root + "/fresh.sdn")
+    file_delete(policy_root + "/fresh.sig")
+    file_delete(policy_root + "/independent.sdn")
+    file_delete(policy_root + "/independent.sig")
+    file_delete(root + "/lake")
+    file_delete(root + "/leanchecker")
+    file_delete(root + "/adapter")
+    file_delete(root + "/lean4export")
+    file_delete(root + "/nanoda")
+    if had_xdg:
+        env_set("XDG_CONFIG_HOME", old_xdg)
+    else:
+        env_unset("XDG_CONFIG_HOME")
+    checks
+
+export replay_authority_fixture_checks_v1
