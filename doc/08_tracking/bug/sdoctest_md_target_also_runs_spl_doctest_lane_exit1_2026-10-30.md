@@ -18,3 +18,17 @@
 - Spec marker: the md green check is a `skip(...)` linking here, and its body is
   kept in `check_md_green_passes()`. To unblock, restore it as
   `it "reports a green md example as PASS": check_md_green_passes()`.
+
+## Status: FIXED (2026-10-30)
+
+- Root cause: the comment-doctest lane was not restricted to `.spl` targets. The full
+  runner (`test_runner_main.spl`) cleared only the spec lane for an `.md` target and
+  kept `run_spl_doctests: true` from config; the single lane (`test_runner_single.spl`)
+  and the client lane (`test_runner_client.spl`) sent any `--spl-doctest` run to the
+  comment lane before checking for an `.md` target.
+- Fix: an `.md` target, or `--sdoctest` without `--spl-doctest`, runs only the
+  markdown lane in all three lanes; `--spl-doctest` applies only to non-`.md` targets.
+- Specs: `test/02_integration/app/test_runner_sdoctest_md_lane_only_spec.spl`
+  (reproducer: `--sdoctest green.md` exits 0 on both lanes; generalization: no `.md`
+  target form prints the SPL Doctest lane; red on the old runner, green now). The md
+  green example in `test_runner_phase2_four_formats_spec.spl` is unskipped (4/4 pass).
