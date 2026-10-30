@@ -32,6 +32,7 @@ use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_definitions.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
+use compiler.verify.post_mono_verify.{post_mono_archive_admission_v1}
 use compiler.driver.driver_pipeline_lowering.{driver_trait_devirtualization_allowed_v1}
 
 val TRAIT_SRC = "trait Store:\n    fn list(n: i64) -> i64\n\n"
@@ -203,3 +204,25 @@ describe "driver gate for trait-object devirtualization":
         expect(driver_trait_devirtualization_allowed_v1(true, false, true)).to_equal(false)
         # sources not all lowered from HIR here
         expect(driver_trait_devirtualization_allowed_v1(false, false, false)).to_equal(false)
+
+
+describe "lifted trait dispatch archive evidence":
+    it "retains actual full-HIR dispatch counts across sibling lifts":
+        val lifted_source = "fn invoke(callback: fn(Store) -> i64, s: Store) -> i64:\n    callback(s)\nfn via_lifts(s: Store) -> i64:\n    invoke(\\item: item.list(2), s) + invoke(\\item: item.list(3), s)\nfn main() -> i64:\n    0\n"
+        val parsed = parse_full_frontend(TRAIT_SRC + MEM_IMPL_SRC + lifted_source,
+            "lifted_trait_recv.spl", "lifted_trait_recv", Logger(level: 0))
+        var hl = HirLowering.with_filename("lifted_trait_recv.spl")
+        val hir = hl.lower_module(parsed)
+        expect(hl.errors.len()).to_equal(0)
+        var ml = MirLowering.new(hir.symbols)
+        ml.trait_impl_closure_complete = true
+        val before = ml.devirtualized_calls
+        val mir = ml.lower_module(hir)
+        val lowered = collect(ml, mir)
+        expect(lowered.fatal_count).to_equal(0)
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(2)
+        val delta = ml.devirtualized_calls - before
+        expect(delta).to_equal(2)
+        val archive_error = post_mono_archive_admission_v1("lifted_trait_recv", delta, true)
+        expect(archive_error ?? "").to_start_with("E-MONO-038")
+        expect(post_mono_archive_admission_v1("lifted_trait_recv", delta, false)).to_be_nil()
