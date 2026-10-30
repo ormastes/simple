@@ -43,7 +43,13 @@ The old-producer native baseline confirms the failure reproduction only. The
 first bounded source-import driver build parsed all 542 modules and HIR-lowered
 181 with zero HIR failures. It completed seven
 `monomorphize_integration` modules with no source errors, then hit its 240
-second timeout before the driver algorithm ran (peak 4.46 GiB). Preserved
-cache totals were 55 MiB and 101 MiB. The repair source, compiler-import
-driver, SSpec, and updated native fixture are not yet verified end to end;
-this note does not claim a regression pass.
+second timeout before the driver algorithm ran (peak 4.46 GiB). A second
+240-second attempt HIR-lowered 229 modules and timed out before driver
+execution (peak 4.94 GiB). The 900-second attempt parsed and HIR-lowered all
+542 modules and completed mono for all of them (`generic_fns=102`,
+`call_sites=1367`, `specializations=678`, `unresolved=0`), but reached the
+8-GiB RSS cap during MIR lowering (peak 8,399,280 KiB). The driver algorithm
+did not execute. The no-MIR parser/HIR/mono driver is now split from the MIR
+ABI driver to allow a smaller bounded execution attempt. The repair source,
+compiler-import drivers, SSpec, and updated native fixture remain unverified
+end to end; this note does not claim a regression pass.
