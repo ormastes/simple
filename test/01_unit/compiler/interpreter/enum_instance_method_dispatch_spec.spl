@@ -1,0 +1,49 @@
+# Regression: boxed Type::Variant receivers must resolve Type__method.
+# @req REQ-INTERP-ENUM-METHOD-OWNER
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error}
+use compiler.core.interpreter.value.{val_get_int}
+
+describe "pure-Simple enum instance method ownership":
+    it "resolves payload and unit variants through the enum impl":
+        step("Call the same enum method through payload and unit variants")
+        val source = "enum Ticket:\n" +
+            "    Ready(value: i64)\n" +
+            "    Empty\n" +
+            "impl Ticket:\n" +
+            "    fn score(self) -> i64:\n" +
+            "        match self:\n" +
+            "            case Ticket.Ready(value): value\n" +
+            "            case Ticket.Empty: 3\n" +
+            "fn main() -> i64:\n" +
+            "    val ready = Ticket.Ready(7)\n" +
+            "    val empty = Ticket.Empty\n" +
+            "    ready.score() * 10 + empty.score()\n"
+        val result = core_interpret(source, "enum_method_owner.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(73)
+
+    it "prefers declared enum methods over Option accessor names":
+        step("A user enum Some variant keeps its own unwrap implementation")
+        val source = "enum Parcel:\n" +
+            "    Some(value: i64)\n" +
+            "impl Parcel:\n" +
+            "    fn unwrap(self) -> i64:\n" +
+            "        91\n" +
+            "fn main() -> i64:\n" +
+            "    val parcel = Parcel.Some(7)\n" +
+            "    parcel.unwrap()\n"
+        val result = core_interpret(source, "enum_accessor_owner.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(91)
+
+    it "preserves built-in Option accessors when no method is declared":
+        step("A boxed parse_int Option still uses the built-in unwrap")
+        val source = "fn main() -> i64:\n" +
+            "    val parsed = \"42\".parse_int()\n" +
+            "    parsed.unwrap()\n"
+        val result = core_interpret(source, "enum_accessor_builtin.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(42)
