@@ -1,0 +1,91 @@
+use std.spec.{describe, it, expect}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrAsyncErrorV1}
+
+describe "bounded TLDR async owner admission":
+    it "terminalizes one source failure immutably with exact diagnostic identity":
+        unsafe(capabilities: [ffi]):
+            val table = TldrTableV1.create_async(2, 2).unwrap()
+            val handle = table.handle("module-failed", "Broken")
+            match table.fail_async("unclaimed-module", "source not found"):
+                case Err(TldrAsyncErrorV1.MissingClaim): ()
+                case other: fail("source failure created an implicit async claim: {other}")
+            val reference = table.request_async(handle).unwrap()
+            expect(table.take_fill_requests()).to_equal(["module-failed"])
+            val diagnostic = "source not found: missing.spl"
+            expect(table.fail_async("module-failed", diagnostic).unwrap()).to_equal(true)
+            expect(table.fail_async("module-failed", diagnostic).unwrap()).to_equal(true)
+            match table.fail_async("module-failed", "different source error"):
+                case Err(TldrAsyncErrorV1.Conflict): ()
+                case other: fail("terminal source diagnostic changed: {other}")
+            match table.publish_async("module-failed", "late TLDR"):
+                case Err(TldrAsyncErrorV1.Conflict): ()
+                case other: fail("failed claim accepted late artifact text: {other}")
+            expect(table.is_loaded("module-failed")).to_equal(false)
+            match table.resolve_async(handle, reference):
+                case Err(TldrAsyncErrorV1.Source(observed)): expect(observed).to_equal(diagnostic)
+                case other: fail("source failure identity was not preserved: {other}")
+            val repeated = table.request_async(handle).unwrap()
+            expect(repeated.same_reference(reference)).to_equal(true)
+            expect(table.take_fill_requests().len()).to_equal(0)
+            table.close_async_quiescent()
+
+    it "keeps one canonical reference and one fill claim for repeated module handles":
+        unsafe(capabilities: [ffi]):
+            val table = TldrTableV1.create_async(2, 2).unwrap()
+            val first_handle = table.handle("module-a", "First")
+            val second_handle = table.handle("module-a", "Second")
+            val first = table.request_async(first_handle).unwrap()
+            val second = table.request_async(second_handle).unwrap()
+            expect(second.same_reference(first)).to_equal(true)
+            expect(table.take_fill_requests()).to_equal(["module-a"])
+            expect(table.take_fill_requests().len()).to_equal(0)
+            match table.async_fill_reference("module-a"):
+                case Ok(claim): expect(claim.same_reference(first)).to_equal(true)
+                case other: fail("existing fill claim could not be read: {other}")
+            match table.async_fill_reference("module-missing"):
+                case Err(TldrAsyncErrorV1.MissingClaim): ()
+                case other: fail("fill reference accessor created an implicit claim: {other}")
+            expect(table.publish_async("module-a", "summary A").unwrap()).to_equal(true)
+            expect(table.resolve_async(first_handle, first).unwrap().unwrap()).to_equal("summary A")
+            expect(table.resolve_async(second_handle, second).unwrap().unwrap()).to_equal("summary A")
+            expect(table.publish_async("module-a", "summary A").unwrap()).to_equal(true)
+            table.close_async_quiescent()
+
+    it "rejects disabled and empty-key requests and foreign references":
+        unsafe(capabilities: [ffi]):
+            val legacy = TldrTableV1.create()
+            match legacy.request_async(legacy.handle("a", "")):
+                case Err(TldrAsyncErrorV1.Disabled): ()
+                case other: fail("legacy owner admitted async request: {other}")
+            val table = TldrTableV1.create_async(1, 1).unwrap()
+            val foreign = TldrTableV1.create_async(1, 1).unwrap()
+            match table.request_async(table.handle("", "")):
+                case Err(TldrAsyncErrorV1.InvalidHandle): ()
+                case other: fail("empty module key accepted: {other}")
+            val handle = table.handle("a", "Point")
+            val reference = table.request_async(handle).unwrap()
+            expect(table.request_async(table.handle("a", "Line")).unwrap().same_reference(reference)).to_equal(true)
+            val foreign_ref = foreign.request_async(foreign.handle("a", "Point")).unwrap()
+            # Both scopes allocate the first scalar entry for "a"; numeric
+            # entry equality must not authorize the foreign reference.
+            expect(foreign_ref.same_reference(reference)).to_equal(false)
+            expect(table.take_fill_requests()).to_equal(["a"])
+            expect(table.take_fill_requests().len()).to_equal(0)
+            match table.resolve_async(handle, foreign_ref):
+                case Err(TldrAsyncErrorV1.ForeignReference): ()
+                case other: fail("foreign scope accepted: {other}")
+            expect(table.resolve_async(handle, reference).unwrap()).to_be_nil()
+            expect(table.publish_async("a", "summary A").unwrap()).to_equal(true)
+            expect(table.resolve_async(handle, reference).unwrap().unwrap()).to_equal("summary A")
+            match table.publish_async("a", "conflict"):
+                case Err(TldrAsyncErrorV1.Conflict): ()
+                case other: fail("conflicting text accepted: {other}")
+            match table.request_async(table.handle("b", "")):
+                case Err(TldrAsyncErrorV1.Directory(_)): ()
+                case other: fail("bounded table grew: {other}")
+            expect(table.take_fill_requests().len()).to_equal(0)
+            table.close_async_quiescent()
+            match table.request_async(handle):
+                case Err(TldrAsyncErrorV1.Disabled): ()
+                case other: fail("closed table touched released scope: {other}")
+            foreign.close_async_quiescent()

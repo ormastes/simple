@@ -1,0 +1,56 @@
+# @req REQ-BUILDRUNNER-RECOVERY-CAPACITY
+# File-backed production CLI rejection. Does not qualify child-process custody.
+use std.spec.*
+use app.buildrunner.cli.{builder_cli_run_locked_v1}
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.io.file_ops.{file_atomic_write, file_read}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, is_dir, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use app.io.env_ops.{cwd}
+use test.support.buildrunner_recovery_capacity.{recovery_capacity_run, recovery_capacity_journal}
+
+var recovery_capacity_process_calls: i64 = 0
+
+fn recovery_capacity_spawn(program: text, digest: text, args: [text], directory: text) -> Result<i64, text>:
+    recovery_capacity_process_calls = recovery_capacity_process_calls + 1
+    fail("overbooked journal reached process spawn")
+    Err("forbidden spawn")
+
+fn recovery_capacity_wait(token: i64, timeout_ms: i64) -> Result<i64, text>:
+    recovery_capacity_process_calls = recovery_capacity_process_calls + 1
+    fail("overbooked journal reached process wait")
+    Err("forbidden wait")
+
+fn recovery_capacity_terminate(token: i64) -> Result<bool, text>:
+    recovery_capacity_process_calls = recovery_capacity_process_calls + 1
+    fail("overbooked journal reached process terminate")
+    Err("forbidden terminate")
+
+fn recovery_capacity_directory(path: text) -> bool:
+    recovery_capacity_process_calls = recovery_capacity_process_calls + 1
+    fail("overbooked journal reached process directory validation")
+    false
+
+describe "BuildRunner rejects overbooked recovery before process ownership":
+    it "returns infrastructure failure without changing the journal or opening recovery output":
+        step("Persist an overbooked journal for a one-slot build host")
+        val parent = cwd().replace("\\", "/") + "/build"
+        expect(dir_create_all(parent)).to_equal(true)
+        val root = secure_temp_dir(parent, "recovery-capacity-").unwrap()
+        val run = recovery_capacity_run()
+        val journal = recovery_capacity_journal(run, ["RUNNING", "REAPED"], ["local", "local"])
+        expect(journal.len()).to_be_greater_than(0)
+        expect(file_atomic_write(root + "/journal.sdn", journal)).to_equal(true)
+        expect(is_dir(root + "/receipts")).to_equal(false)
+        val config = BuilderCliV1(command: "run", manifest: "", state: root,
+            source_root: root, output_root: root + "/output", request: "", attempt_root: "", host: "", error: "")
+        val port = BuilderProcessPortV1(recovery_capacity_spawn, recovery_capacity_wait,
+            recovery_capacity_terminate, recovery_capacity_directory)
+        recovery_capacity_process_calls = 0
+        step("Reject the journal before recovery creates receipts or invokes a child")
+        expect(builder_cli_run_locked_v1(run, config, port, nil)).to_equal(2)
+        expect(recovery_capacity_process_calls).to_equal(0)
+        expect(file_read(root + "/journal.sdn")).to_equal(journal)
+        expect(is_dir(root + "/receipts")).to_equal(false)
+        expect(dir_remove_all(root)).to_equal(true)

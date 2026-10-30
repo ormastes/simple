@@ -1,0 +1,59 @@
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildRunV1, BuildResultV1, BuildInputV1,
+    builder_task_identity_v1}
+use app.buildrunner.runner.{BuildRunnerV1, build_runner_start, build_runner_dispatch,
+    build_runner_reap, build_runner_accept, build_runner_host_slots, build_runner_succeeded}
+use test.support.buildrunner_recovery_capacity.{recovery_capacity_run}
+
+fn result_failure_task_run() -> BuildRunV1:
+    var run = recovery_capacity_run()
+    var task = run.tasks[0]
+    task.outputs = ["first.bin", "second.bin"]
+    run.tasks = [task]
+    run
+
+fn result_failure_reaped_state(run: BuildRunV1) -> BuildRunnerV1:
+    val task = run.tasks[0]
+    var state = build_runner_start(run)
+    state = build_runner_dispatch(state, 0, "local")
+    state = build_runner_reap(state, task.id, task.attempt)
+    state
+
+fn result_failure_receipt(task: BuildTaskV1, status: text,
+        outputs: [BuildInputV1]) -> BuildResultV1:
+    BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: "local",
+        status: status, exit_code: if status == "OK": 0 elif status == "CRASHED": 139 else: 1,
+        outputs: outputs, cache_hits: -1, cache_misses: -1, cache_stores: -1)
+
+fn result_failure_outputs() -> [BuildInputV1]:
+    [BuildInputV1(path: "first.bin", digest: sha256_text("first")),
+        BuildInputV1(path: "second.bin", digest: sha256_text("second"))]
+
+describe "BuildRunner result admission failure contract":
+    # @req REQ-001
+    it "should preserve failed build status through the adapter":
+        step("Preserve failed build status through the build adapter")
+        val run = result_failure_task_run()
+        val task = run.tasks[0]
+        var state = result_failure_reaped_state(run)
+        state = build_runner_accept(state, result_failure_receipt(task, "ERROR", []), [])
+        expect(state.error).to_equal("")
+        expect(state.statuses).to_equal(["FAILED"])
+        expect(build_runner_succeeded(state)).to_equal(false)
+        expect(build_runner_host_slots(state, "local")).to_equal(1)
+
+    # @req REQ-001
+    it "should reject incomplete output evidence before reporting success":
+        step("Reject incomplete output evidence before reporting success")
+        val run = result_failure_task_run()
+        val task = run.tasks[0]
+        val outputs = result_failure_outputs()
+        val partial = [outputs[0]]
+        var state = result_failure_reaped_state(run)
+        state = build_runner_accept(state, result_failure_receipt(task, "OK", partial), partial)
+        expect(state.error).to_equal("incomplete output set")
+        expect(state.statuses).to_equal(["REAPED"])
+        expect(build_runner_succeeded(state)).to_equal(false)
+        expect(state.execution_host_active["local"] ?? 0).to_equal(1)

@@ -1,0 +1,230 @@
+# Resource Pool - Bounded Async Resource with Affine Leases
+#
+# A fixed set of i64 resources handed out to async callers. Every piece of
+# shared state is an atomic cell, so the pool is race-free under real threads:
+#   - permits: AtomicI64 counter of free leases (initial = capacity)
+#   - claims: per-slot AtomicBool CAS (false -> true); no index free-list,
+#     so the Treiber-style ABA on reused indices cannot occur
+#   - generations: per-slot AtomicI64, advanced on every release so a lease
+#     from an earlier grant is detected as stale even after its slot is
+#     leased again
+#   - closed / freed: AtomicBool lifecycle flags
+#
+# The pool no longer composes AsyncSemaphore: its permits field is a plain
+# i64 that is not atomic, so a permit CAS on it would race. The pool holds
+# its own AtomicI64 permit counter with the same public shape.
+#
+# close() drains every permit by one CAS (capacity -> 0), so it succeeds only
+# when no lease is outstanding; afterwards a racing try_acquire fails on the
+# empty counter. free() releases the atomic handles once; afterwards every
+# operation refuses without touching a handle. free() must not race with a
+# call still in flight on the same pool (single owner for the lifecycle).
+
+use std.nogc_async_mut.async.future.{Future}
+use std.nogc_sync_mut.atomic.{AtomicBool, AtomicI64, MemoryOrdering, atomic_bool_new, atomic_i64_new}
+
+# Process-wide pool identity source. Each pool takes a fresh serial so a
+# lease can be checked against the pool that issued it.
+var _resource_pool_serial: AtomicI64 = atomic_i64_new(0)
+
+# ============================================================
+# AsyncResourceLease
+# ============================================================
+
+struct AsyncResourceLease:
+    """Affine scalar lease: move-only in intent, released exactly once.
+
+    Carries the issuing pool, the slot, and the slot generation at grant
+    time. No resource reference escapes; read it through the pool.
+    """
+    pool_id: i64
+    slot: i64
+    generation: i64
+
+# ============================================================
+# AsyncResourcePool
+# ============================================================
+
+class AsyncResourcePool:
+    """Bounded async pool of i64 resources with generation-checked leases.
+
+    Example:
+        var pool = AsyncResourcePool.with_resources([10, 20]).unwrap()
+        val lease = pool.try_acquire().unwrap()
+        val value = pool.resource(lease).unwrap()   # 10
+        pool.release(lease)                         # true
+        pool.close()                                # true when idle
+    """
+    resources: [i64]
+    claims: [AtomicBool]
+    generations: [AtomicI64]
+    permits: AtomicI64
+    closed: AtomicBool
+    freed: AtomicBool
+    pool_id: i64
+
+impl AsyncResourcePool:
+    static fn with_resources(resources: [i64]) -> Result<AsyncResourcePool, text>:
+        """Create a pool over the given resources.
+
+        Refuses an empty set before any allocation. After that point there is
+        no early return: each resource gets a claim and a generation cell, and
+        the pool gets the permits, closed and freed cells.
+        """
+        if resources.len() == 0:
+            return Err("AsyncResourcePool requires at least one resource")
+        var claims: [AtomicBool] = []
+        var generations: [AtomicI64] = []
+        for resource in resources:
+            claims = claims.push(atomic_bool_new(false))
+            generations = generations.push(atomic_i64_new(0))
+        val count = resources.len()
+        val permits = atomic_i64_new(count)
+        val closed = atomic_bool_new(false)
+        val freed = atomic_bool_new(false)
+        val serial = _resource_pool_serial.fetch_add(1, MemoryOrdering.SeqCst) + 1
+        Ok(AsyncResourcePool(resources: resources, claims: claims, generations: generations,
+            permits: permits, closed: closed, freed: freed, pool_id: serial))
+
+    fn capacity() -> i64:
+        """Total number of resources the pool was created with."""
+        self.resources.len()
+
+    fn available() -> i64:
+        """Number of resources not currently leased. Zero once closed or freed."""
+        if self.freed.load(MemoryOrdering.SeqCst):
+            return 0
+        val free_permits = self.permits.load(MemoryOrdering.SeqCst)
+        if free_permits < 0:
+            return 0
+        free_permits
+
+    fn take_permit() -> bool:
+        """Take one permit by CAS loop: never drops the counter below zero."""
+        var taken = false
+        var retry = true
+        while retry:
+            val current = self.permits.load(MemoryOrdering.SeqCst)
+            if current <= 0:
+                retry = false
+            elif self.permits.compare_exchange(current, current - 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+                taken = true
+                retry = false
+        taken
+
+    fn claim_free_slot() -> i64:
+        """Claim the first free slot by CAS false -> true; -1 if none."""
+        var slot = -1
+        var index = 0
+        val count = self.claims.len()
+        while slot < 0 and index < count:
+            if self.claims[index].compare_exchange(false, true, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+                slot = index
+            index = index + 1
+        slot
+
+    me try_acquire() -> AsyncResourceLease?:
+        """Lease one resource without waiting.
+
+        Takes a permit first, then claims a slot. If no slot can be claimed
+        the permit is returned. Returns nil when the pool is freed, closed or
+        exhausted.
+        """
+        if self.freed.load(MemoryOrdering.SeqCst):
+            return nil
+        if self.closed.load(MemoryOrdering.SeqCst):
+            return nil
+        if not self.take_permit():
+            return nil
+        val slot = self.claim_free_slot()
+        if slot < 0:
+            self.permits.fetch_add(1, MemoryOrdering.SeqCst)
+            return nil
+        val generation = self.generations[slot].load(MemoryOrdering.SeqCst)
+        Some(AsyncResourceLease(pool_id: self.pool_id, slot: slot, generation: generation))
+
+    fn acquire() -> Future<AsyncResourceLease>:
+        """Return a Future that is Ready with a lease when one is available.
+
+        Under cooperative single-carrier, polls once: Ready with a lease if a
+        resource is free, otherwise Pending. A Pending future is a snapshot and
+        is never woken; the waiter calls acquire() again after a release.
+        After close() the future stays Pending.
+        """
+        val lease = self.try_acquire()
+        match lease:
+            case Some(granted):
+                Future.from_value(granted)
+            case nil:
+                Future.pending<AsyncResourceLease>()
+
+    fn lease_error(lease: AsyncResourceLease) -> text:
+        """Return "" for a live lease, or the exact refusal reason."""
+        if self.freed.load(MemoryOrdering.SeqCst):
+            return "stale resource lease"
+        if lease.pool_id != self.pool_id:
+            return "foreign resource lease"
+        if lease.slot < 0 or lease.slot >= self.claims.len():
+            return "stale resource lease"
+        if self.generations[lease.slot].load(MemoryOrdering.SeqCst) != lease.generation:
+            return "stale resource lease"
+        ""
+
+    fn resource(lease: AsyncResourceLease) -> i64?:
+        """Return the leased resource, or nil when the lease is not live."""
+        if self.lease_error(lease) != "":
+            return nil
+        Some(self.resources[lease.slot])
+
+    me release(lease: AsyncResourceLease) -> bool:
+        """Release a live lease exactly once. Returns false otherwise.
+
+        Order matters: the generation is advanced first by a CAS from the
+        lease's generation, and only then is the slot claim cleared, and only
+        then is the permit returned. A new acquirer can claim the slot only
+        after the clear, so it always reads the advanced generation. The
+        generation CAS is the single winner among concurrent releases of the
+        same lease.
+        """
+        if self.lease_error(lease) != "":
+            return false
+        val current = lease.generation
+        if not self.generations[lease.slot].compare_exchange(current, current + 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+            return false
+        self.claims[lease.slot].compare_exchange(true, false, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst)
+        self.permits.fetch_add(1, MemoryOrdering.SeqCst)
+        true
+
+    me close() -> bool:
+        """Terminal close. Drains every permit, so it refuses while leases are out.
+
+        Sets closed first, then takes all permits with one CAS (capacity -> 0).
+        If any lease is outstanding the CAS fails: closed is reset and false is
+        returned, so the pool stays usable. On success the pool holds every
+        permit permanently; available() reads 0 and try_acquire returns nil.
+        Returns false if already closed or freed.
+        """
+        if self.freed.load(MemoryOrdering.SeqCst):
+            return false
+        if not self.closed.compare_exchange(false, true, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+            return false
+        if self.permits.compare_exchange(self.capacity(), 0, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+            return true
+        self.closed.store(false, MemoryOrdering.SeqCst)
+        false
+
+    me free() -> bool:
+        """Release the atomic handles. Idempotent: true once, false after.
+
+        The freed flag is kept allocated as the guard that makes this idempotent.
+        After free, every operation refuses without touching a handle.
+        """
+        if not self.freed.compare_exchange(false, true, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+            return false
+        for claim in self.claims:
+            claim.free()
+        for generation in self.generations:
+            generation.free()
+        self.permits.free()
+        self.closed.free()
+        true

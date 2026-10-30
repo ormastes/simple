@@ -1,0 +1,44 @@
+use std.spec.{describe, it, expect, step}
+use std.common.build_manager.contracts.{BuildRunV1}
+use app.buildrunner.runner.{build_runner_decode_v1, build_runner_ready,
+    build_runner_dispatch, build_runner_host_slots}
+use test.support.buildrunner_recovery_capacity.{recovery_capacity_run, recovery_capacity_journal}
+
+fn recovery_host_run_with_slots(slots: i64) -> BuildRunV1:
+    var run = recovery_capacity_run(true)
+    var host = run.hosts[0]
+    host.slots = slots
+    run.hosts[0] = host
+    run
+
+describe "BuildRunner recovery host integration":
+    it "should keep another host available when one restored host reaches its limit":
+        step("Restore a journal at its declared host limits")
+        var run = recovery_host_run_with_slots(2)
+        var tasks = run.tasks
+        var third = tasks[1]
+        third.id = "third"
+        third.outputs = ["third.bin"]
+        tasks = tasks.push(third)
+        run.tasks = tasks
+
+        val journal = recovery_capacity_journal(run,
+            ["RUNNING", "RUNNING", "PENDING"], ["local", "local", ""])
+        val restored = build_runner_decode_v1(run, journal).unwrap()
+        step("Observe each host reservation independently")
+        expect(restored.statuses).to_equal(["RUNNING", "RUNNING", "PENDING"])
+        expect(build_runner_host_slots(restored, "local")).to_equal(0)
+        expect(build_runner_host_slots(restored, "other")).to_equal(1)
+        expect(build_runner_ready(restored)).to_equal([2])
+
+        val blocked = build_runner_dispatch(restored, 2, "local")
+        expect(blocked.error).to_equal("dispatch host absent or full")
+        expect(restored.statuses).to_equal(["RUNNING", "RUNNING", "PENDING"])
+        expect(build_runner_host_slots(restored, "local")).to_equal(0)
+        expect(build_runner_host_slots(restored, "other")).to_equal(1)
+
+        val dispatched = build_runner_dispatch(restored, 2, "other")
+        expect(dispatched.error).to_equal("")
+        expect(dispatched.statuses).to_equal(["RUNNING", "RUNNING", "RUNNING"])
+        expect(dispatched.host_ids).to_equal(["local", "local", "other"])
+        expect(build_runner_host_slots(dispatched, "other")).to_equal(0)

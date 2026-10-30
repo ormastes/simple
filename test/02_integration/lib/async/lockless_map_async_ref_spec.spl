@@ -6,7 +6,7 @@ use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64}
 use std.nogc_async_mut.async.async_ref.{
     AsyncRefError, AsyncWakeI64, AsyncWakeScanI64
 }
-use std.nogc_async_mut.async_ring.async_ref.{async_ref_deliver_wake_i64}
+use std.nogc_async_mut.async_ring.async_ref.{async_ref_deliver_wake_i64, async_ref_from_core_i64}
 use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError, RingCancelOutcome}
 use std.nogc_async_mut.async_ring.software_provider.{SoftwareRingProvider}
 use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult}
@@ -180,4 +180,32 @@ describe "AsyncRefI64 SimpleRing wake adapter":
                 case _: fail("terminal resubscription forgot the prior canceled interest")
             ring.release_retained_completion(883u64, first_submission.token).unwrap()
             ring.release_retained_completion(883u64, second_submission.token).unwrap()
+            _close_lockless_test_map(map)
+
+    it "rejects an invalid reference without consuming the real ring consumer interest":
+        unsafe(capabilities: [ffi]):
+            val map = _lockless_test_map(1, 1, 1, 1)
+            val reference = map.request(71, 710).unwrap()
+            val ring = SimpleRing<i64, i64>.create(901u64, 902u64, 1).unwrap()
+            val provider = SoftwareRingProvider<i64, i64>.create(903u64, 1).unwrap()
+            val reservation = ring.reserve(902u64, 904u64).unwrap()
+            ring.commit(902u64, reservation, 1).unwrap()
+            provider.take_one(ring).unwrap().unwrap()
+            val invalid = async_ref_from_core_i64(map.scope_address(), 2)
+            match invalid.subscribe(reservation.token):
+                case Err(AsyncRefError.InvalidReference): ()
+                case other: fail("invalid reference consumed ring interest: {other}")
+            val subscription = reference.subscribe(reservation.token).unwrap()
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.complete(7101).unwrap()).to_equal(true)
+            val wake = _lockless_expect_wake(reference.wake_cursor().unwrap().next_pending(1))
+            async_ref_deliver_wake_i64(ring, wake).unwrap()
+            val completion = ring.take_completion(902u64).unwrap().unwrap()
+            expect(completion.token.ring_id).to_equal(reservation.token.ring_id)
+            expect(completion.token.slot).to_equal(reservation.token.slot)
+            expect(completion.token.generation.value).to_equal(reservation.token.generation.value)
+            expect(completion.value.unwrap()).to_equal(7101)
+            match subscription.poll():
+                case TaskPollResult.Ready(Ok(value)): expect(value).to_equal(7101)
+                case other: fail("valid consumer did not complete: {other}")
             _close_lockless_test_map(map)
