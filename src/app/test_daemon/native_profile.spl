@@ -1,0 +1,198 @@
+# Native session requests bind the compiled worker and its inherited execution
+# environment. A daemon with a different profile refuses the request; it never
+# mutates process-global environment between clients or selects bin/simple.
+use std.daemon_sdk.types.{DaemonRequest}
+use std.test_runner.test_runner_types.{TestOptions, TestLevel}
+use std.test_runner.native_compile_contract.{native_test_request_error}
+use std.nogc_sync_mut.io.env_ops.{env_get, cwd}
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.test_runner.compiler_select.{select_test_child_binary}
+use std.env.variables.{env_list_checked}
+use std.common.crypto.sha256.{sha256_text}
+
+pub val NATIVE_SESSION_PROFILE_V1: text = "native-session-profile-v1"
+
+fn native_session_environment_digest(snapshot: [(text, text)]) -> text:
+    var rows: [text] = []
+    var seen: {text: bool} = {}
+    for pair in snapshot:
+        val (name, value) = pair
+        if name == "_" or name == "SHLVL" or name == "OLDPWD": continue
+        if seen.contains_key(name): return ""
+        seen[name] = true
+        rows.push("{name.len()}:{name}|{value.len()}:{value}")
+    rows = rows.sorted()
+    sha256_text(NATIVE_SESSION_PROFILE_V1 + "\n" + rows.join("\n"))
+
+fn native_session_current_environment() -> text:
+    match env_list_checked():
+        case Ok(snapshot): native_session_environment_digest(snapshot)
+        case Err(_): ""
+
+fn native_session_producer(compiler: text) -> text:
+    if compiler == "": return env_get("SIMPLE_BINARY")
+    match select_test_child_binary(compiler):
+        case Ok(selected): selected
+        case Err(_): ""
+
+fn native_session_request(req: DaemonRequest, options: TestOptions) -> DaemonRequest:
+    var bound = req
+    bound.fields["native_profile"] = NATIVE_SESSION_PROFILE_V1
+    bound.fields["native_backend"] = options.native_backend
+    bound.fields["library_mode"] = options.library_mode
+    bound.fields["timeout_seconds"] = "{options.timeout}"
+    bound.fields["source_count"] = "{options.native_source_roots.len()}"
+    var index = 0
+    for root in options.native_source_roots:
+        bound.fields["source_{index}"] = root
+        index = index + 1
+    bound.fields["coverage"] = if options.coverage: "true" else: "false"
+    bound.fields["keep_artifacts"] = if options.keep_artifacts: "true" else: "false"
+    bound.fields["verbose"] = if options.verbose: "true" else: "false"
+    bound.fields["gc_off"] = if options.gc_off: "true" else: "false"
+    bound.fields["gc_log"] = if options.gc_log: "true" else: "false"
+    bound.fields["safe_mode"] = if options.safe_mode: "true" else: "false"
+    bound.fields["no_limits"] = if options.no_limits: "true" else: "false"
+    bound.fields["max_procs"] = "{options.max_procs}"
+    bound.fields["max_mem_gb"] = "{options.max_mem_gb}"
+    bound.fields["seed_set"] = if options.seed_set: "true" else: "false"
+    bound.fields["seed"] = "{options.seed}"
+    bound.fields["run_all"] = if options.run_all: "true" else: "false"
+    bound.fields["only_slow"] = if options.only_slow: "true" else: "false"
+    bound.fields["only_skipped"] = if options.only_skipped: "true" else: "false"
+    bound.fields["fail_fast"] = if options.fail_fast: "true" else: "false"
+    bound.fields["unstable_mode"] = if options.unstable_mode: "true" else: "false"
+    bound.fields["unstable_mode_set"] = if options.unstable_mode_set: "true" else: "false"
+    bound.fields["tag"] = options.tag
+    bound.fields["level"] = match options.level:
+        case TestLevel.Unit: "--unit"
+        case TestLevel.Integration: "--integration"
+        case TestLevel.System: "--system"
+        case TestLevel.Smoke: "--smoke"
+        case TestLevel.All: ""
+    bound.fields["profile"] = options.profile
+    bound.fields["compiler"] = options.compiler
+    bound.fields["worker"] = env_get("SIMPLE_TEST_DAEMON_WORKER")
+    bound.fields["worker_sha256"] = env_get("SIMPLE_TEST_DAEMON_WORKER_SHA256")
+    val producer = native_session_producer(options.compiler)
+    bound.fields["producer"] = producer
+    bound.fields["producer_sha256"] = file_hash_sha256_or_empty(producer)
+    bound.fields["runtime"] = env_get("SIMPLE_RUNTIME_PATH")
+    bound.fields["runtime_sha256"] = file_hash_sha256_or_empty(env_get("SIMPLE_RUNTIME_PATH") + "/libsimple_native_all.a")
+    bound.fields["cwd"] = cwd()
+    # Includes SIMPLE_LIB/PROJECT_ROOT, native tools, MC/DC mode and every
+    # waiver field, resource policy, and all other inherited test inputs.
+    bound.fields["environment_sha256"] = native_session_current_environment()
+    bound
+
+fn native_session_source_roots(req: DaemonRequest) -> [text]:
+    var roots: [text] = []
+    val count = (req.fields["source_count"] ?? "").to_i64() ?? -1
+    if count < 0 or count > 5: return roots
+    var index = 0
+    while index < count:
+        roots.push(req.fields["source_{index}"] ?? "")
+        index = index + 1
+    roots
+
+fn native_session_shape_error(req: DaemonRequest) -> text:
+    if (req.fields["native_profile"] ?? "") != NATIVE_SESSION_PROFILE_V1:
+        return "unsupported native session profile"
+    # Generic SDK framing is line-based and trims lines. Refuse values it
+    # cannot preserve before submitting, as well as at the worker boundary.
+    for key in req.fields.keys():
+        val value = req.fields[key] ?? ""
+        if value.contains("\n") or value.contains("\r") or value.contains("\0") or value != value.trim():
+            return "native session field cannot be transported: " + key
+    val path = req.fields["test_path"] ?? ""
+    if path == "" or path.starts_with("-"): return "invalid native test path"
+    val count = (req.fields["source_count"] ?? "").to_i64() ?? -1
+    if count < 0 or count > 5: return "invalid native source count"
+    val seconds = (req.fields["timeout_seconds"] ?? "").to_i64() ?? -1
+    if seconds <= 0 or seconds > 2147483: return "native daemon requires a bounded positive timeout"
+    for field in ["worker", "producer", "runtime", "cwd"]:
+        if (req.fields[field] ?? "") == "": return "missing native session binding: " + field
+    for field in ["worker_sha256", "producer_sha256", "runtime_sha256", "environment_sha256"]:
+        if (req.fields[field] ?? "").len() != 64: return "invalid native session digest: " + field
+    if (req.fields["native_backend"] ?? "") == "": return "missing native backend"
+    native_test_request_error(req.fields["native_backend"] ?? "",
+        (req.fields["coverage"] ?? "") == "true", (req.fields["safe_mode"] ?? "") == "true",
+        native_session_source_roots(req), req.fields["library_mode"] ?? "")
+
+fn native_session_binding_error(req: DaemonRequest) -> text:
+    val shape_error = native_session_shape_error(req)
+    if shape_error != "": return shape_error
+    if (req.fields["cwd"] ?? "") != cwd(): return "native daemon working directory mismatch"
+    val environment = native_session_current_environment()
+    if environment == "" or environment != (req.fields["environment_sha256"] ?? ""):
+        return "native daemon execution environment mismatch; start a daemon with the caller profile"
+    if (req.fields["worker"] ?? "") != env_get("SIMPLE_TEST_DAEMON_WORKER"):
+        return "native daemon worker mismatch"
+    if (req.fields["worker_sha256"] ?? "") != env_get("SIMPLE_TEST_DAEMON_WORKER_SHA256"):
+        return "native daemon worker pin mismatch"
+    if (req.fields["producer"] ?? "") != native_session_producer(req.fields["compiler"] ?? ""):
+        return "native daemon producer mismatch"
+    if (req.fields["runtime"] ?? "") != env_get("SIMPLE_RUNTIME_PATH"):
+        return "native daemon runtime mismatch"
+    for field in ["worker", "producer"]:
+        if file_hash_sha256_or_empty(req.fields[field] ?? "") != (req.fields[field + "_sha256"] ?? ""):
+            return "native daemon artifact digest mismatch: " + field
+    if file_hash_sha256_or_empty(env_get("SIMPLE_RUNTIME_PATH") + "/libsimple_native_all.a") != (req.fields["runtime_sha256"] ?? ""):
+        return "native daemon runtime archive digest mismatch"
+    # The archive is only one member of the managed runtime capsule. Keep
+    # snapshot and tool authority byte pins visible and checked too; native
+    # build remains responsible for admitting their individual members.
+    for prefix in ["SIMPLE_MANAGED_RUNTIME_SNAPSHOT", "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY"]:
+        val path = env_get(prefix + "_PATH")
+        val digest = env_get(prefix + "_SHA256")
+        if path == "" or digest.len() != 64 or file_hash_sha256_or_empty(path) != digest:
+            return "native daemon authority digest mismatch: " + prefix
+    ""
+
+fn native_session_transport_output(output: text) -> text:
+    # Raw child newlines could inject field.passed/status lines into the
+    # generic SDK response. Keep diagnostics readable on one protocol line.
+    val escaped = output.replace("\\", "\\\\")
+    val no_cr = escaped.replace("\r", "\\r")
+    no_cr.replace("\n", "\\n")
+
+fn native_session_completed(code: i64, passed: i64, failed: i64, pending: i64) -> bool:
+    code == 0 and passed > 0 and failed == 0 and pending == 0
+
+fn native_session_worker_args(req: DaemonRequest) -> [text]:
+    # Standalone compiled test_runner_new/main receives targets directly.
+    var args = [req.fields["test_path"] ?? "", "--native-backend=" + (req.fields["native_backend"] ?? ""),
+        "--no-session-daemon", "--sequential", "--no-cache", "--no-db", "--assert-ran",
+        "--timeout", req.fields["timeout_seconds"] ?? ""]
+    for root in native_session_source_roots(req):
+        args.push("--native-source")
+        args.push(root)
+    val library_mode = req.fields["library_mode"] ?? ""
+    if library_mode != "": args = args + ["--library-mode", library_mode]
+    val profile = req.fields["profile"] ?? ""
+    if profile != "": args.push("--profile=" + profile)
+    val compiler = req.fields["compiler"] ?? ""
+    if compiler != "": args.push("--compiler=" + compiler)
+    if (req.fields["coverage"] ?? "") == "true": args.push("--coverage")
+    if (req.fields["keep_artifacts"] ?? "") == "true": args.push("--keep-artifacts")
+    if (req.fields["verbose"] ?? "") == "true": args.push("--verbose")
+    if (req.fields["gc_off"] ?? "") == "true": args.push("--gc=off")
+    if (req.fields["gc_log"] ?? "") == "true": args.push("--gc-log")
+    if (req.fields["safe_mode"] ?? "") == "true": args.push("--safe")
+    if (req.fields["no_limits"] ?? "") == "true": args.push("--no-limits")
+    val max_procs = req.fields["max_procs"] ?? ""
+    if max_procs != "": args = args + ["--max-procs", max_procs]
+    val max_mem = req.fields["max_mem_gb"] ?? ""
+    if max_mem != "": args = args + ["--max-mem", max_mem]
+    if (req.fields["seed_set"] ?? "") == "true": args = args + ["--seed", req.fields["seed"] ?? ""]
+    if (req.fields["run_all"] ?? "") == "true": args.push("--all")
+    if (req.fields["only_slow"] ?? "") == "true": args.push("--only-slow")
+    if (req.fields["only_skipped"] ?? "") == "true": args.push("--only-skipped")
+    if (req.fields["fail_fast"] ?? "") == "true": args.push("--fail-fast")
+    if (req.fields["unstable_mode_set"] ?? "") == "true":
+        args.push(if (req.fields["unstable_mode"] ?? "") == "true": "--unstable" else: "--no-unstable")
+    val tag = req.fields["tag"] ?? ""
+    if tag != "": args = args + ["--tag", tag]
+    val level = req.fields["level"] ?? ""
+    if level != "": args.push(level)
+    args

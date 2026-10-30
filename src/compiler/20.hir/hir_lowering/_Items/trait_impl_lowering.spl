@@ -11,6 +11,7 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_lowering.binding_types.{hir_const_type_settled}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -709,6 +710,16 @@ impl HirLowering:
                 if const_.has_type_: shape_type else: self.lowered_const_value_type(value, const_.span)
             case _: shape_type
 
+        # The declaration and reads of this exact binding must share its
+        # settled semantic type. Never locate a replacement by display name:
+        # a synthetic-main local or another owner may use the same spelling.
+        if hir_const_type_settled(type_):
+            if val definition = self.symbols.get_symbol_raw(symbol.id):
+                if definition.kind == SymbolKind.Const:
+                    var updated = definition
+                    updated.type_ = type_
+                    self.symbols.register_preserved_symbol(updated)
+
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(const_.name, const_.visibility)
 
@@ -766,55 +777,3 @@ impl HirLowering:
             trait_name: mock_decl.trait_name,
             span: mock_decl.span
         )
-
-fn hir_const_type_settled(type_: HirType) -> bool:
-    """True when `type_` is a concrete storage type for a module global:
-    no `Infer`/`Error`/`Any`/`Never`/type parameter/unresolved projection
-    at the top or inside any component (generic arguments, elements,
-    pointees, result arms, callable signature, union members)."""
-    match type_.kind:
-        case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any | HirTypeKind.Never: false
-        case HirTypeKind.TypeParam(_, _) | HirTypeKind.Projection(_, _): false
-        case HirTypeKind.Named(_, args):
-            val named_args: [HirType] = args
-            hir_const_types_settled(named_args)
-        case HirTypeKind.Union(members):
-            val union_members: [HirType] = members
-            hir_const_types_settled(union_members)
-        case HirTypeKind.Function(params, ret, _):
-            val fn_params: [HirType] = params
-            val fn_ret: HirType = ret
-            hir_const_types_settled(fn_params) and hir_const_type_settled(fn_ret)
-        case HirTypeKind.Result(ok, err):
-            val result_ok: HirType = ok
-            val result_err: HirType = err
-            hir_const_type_settled(result_ok) and hir_const_type_settled(result_err)
-        case HirTypeKind.Slice(elem):
-            val slice_elem: HirType = elem
-            hir_const_type_settled(slice_elem)
-        case HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) | HirTypeKind.Isolated(inner):
-            val pointee: HirType = inner
-            hir_const_type_settled(pointee)
-        case HirTypeKind.Unique(inner) | HirTypeKind.Shared(inner) | HirTypeKind.Weak(inner):
-            val owned_pointee: HirType = inner
-            hir_const_type_settled(owned_pointee)
-        case HirTypeKind.Array(elem, _):
-            val array_elem: HirType = elem
-            hir_const_type_settled(array_elem)
-        case HirTypeKind.Optional(inner):
-            val optional_inner: HirType = inner
-            hir_const_type_settled(optional_inner)
-        case HirTypeKind.Dict(key, value):
-            val dict_key: HirType = key
-            val dict_value: HirType = value
-            hir_const_type_settled(dict_key) and hir_const_type_settled(dict_value)
-        case HirTypeKind.Tuple(elements):
-            val tuple_elements: [HirType] = elements
-            hir_const_types_settled(tuple_elements)
-        case _: true
-
-fn hir_const_types_settled(types: [HirType]) -> bool:
-    for component in types:
-        if not hir_const_type_settled(component):
-            return false
-    true

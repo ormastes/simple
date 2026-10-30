@@ -6,6 +6,7 @@ struct SpipeSourceParts:
     imports: text
     declarations: text
     body: text
+    has_executable_body: bool = false
 
 fn spipe_rewrite_infix_expect_line(line: text) -> text:
     val trimmed = line.trim()
@@ -138,6 +139,17 @@ fn spipe_is_partition_declaration(trimmed: text, preserve_framework: bool) -> bo
         return spipe_is_top_level_start(declaration) or declaration.starts_with("struct ")
     false
 
+fn native_source_defines_main_v1(code: text) -> bool:
+    var declaration = code.trim()
+    if declaration.starts_with("pub "): declaration = declaration.substring(4).trim()
+    if declaration.starts_with("async "): declaration = declaration.substring(6).trim()
+    if not declaration.starts_with("fn "): return false
+    val tail = declaration.substring(3).trim()
+    val paren = tail.index_of("(")
+    if paren < 0: return false
+    val name = tail[0:paren].trim()
+    name == "main" or name.starts_with("main<")
+
 fn spipe_partition_source(content: text, rendered_lines: [text], code_lines: [text], string_continuation: [bool], preserve_framework: bool, string_byte_ranges: [[i64]] = []) -> Result<SpipeSourceParts, text>:
     val lines = content.split("\n")
     if rendered_lines.len() != lines.len() or code_lines.len() != lines.len() or string_continuation.len() != lines.len():
@@ -152,6 +164,7 @@ fn spipe_partition_source(content: text, rendered_lines: [text], code_lines: [te
     # nothing ever switched it off: every later import and top-level
     # declaration was pushed verbatim into the main body (1,657 spec files
     # carry a one-line docstring; measured 2026-09-06).
+    var has_executable_body = false
     var in_top_fn = false
     var top_fn_indent = 0
     var in_import_block = false
@@ -169,7 +182,7 @@ fn spipe_partition_source(content: text, rendered_lines: [text], code_lines: [te
         line_index = line_index + 1
         if preserve_framework and not string_continuation[fact_index]:
             val code = code_lines[fact_index]
-            if code.starts_with("fn main(") or code.starts_with("pub fn main(") or code.starts_with("async fn main("):
+            if not code.starts_with(" ") and not code.starts_with("\t") and native_source_defines_main_v1(code):
                 return Err("native-spec: source defines main")
             if code.trim().starts_with("expect "):
                 val rewritten = native_rewrite_infix_expect_line(line, string_byte_ranges[fact_index])
@@ -277,13 +290,17 @@ fn spipe_partition_source(content: text, rendered_lines: [text], code_lines: [te
                     continue
                 # Fall through to body processing
 
+        # Retain lexical body evidence separately from rendered comments/text.
+        val body_code = code_lines[fact_index].trim()
+        if not string_continuation[fact_index] and body_code != "" and body_code != "\"\"" and body_code != "pass" and body_code != "...":
+            has_executable_body = true
         # Everything else goes into fn main() body
         if trimmed.len() > 0:
             body_parts.push("    " + line)
         else:
             body_parts.push("")
 
-    Ok(SpipeSourceParts(imports: import_parts.join("\n"), declarations: top_level_parts.join("\n"), body: body_parts.join("\n")))
+    Ok(SpipeSourceParts(imports: import_parts.join("\n"), declarations: top_level_parts.join("\n"), body: body_parts.join("\n"), has_executable_body: has_executable_body))
 
 fn native_framework_result_prefix(content: text) -> text:
     for index in 0..32:
@@ -291,7 +308,7 @@ fn native_framework_result_prefix(content: text) -> text:
         if not content.contains(candidate): return candidate
     ""
 
-fn native_framework_wrapper_source(content: text, code_lines: [text], string_continuation: [bool], string_byte_ranges: [[i64]]) -> Result<text, text>:
+fn native_framework_wrapper_source(content: text, code_lines: [text], string_continuation: [bool], string_byte_ranges: [[i64]], completion_evidence: bool = false) -> Result<text, text>:
     """Preserve configured SSpec calls, using real lexer facts supplied by caller.
 
     This pure owner neither selects a family nor imports the compiler lexer.
@@ -306,13 +323,49 @@ fn native_framework_wrapper_source(content: text, code_lines: [text], string_con
     val summary = prefix + "summary"
     val executed = prefix + "executed"
     val exit_code = prefix + "exit_code"
-    val result_import = "use std.spec.{print_summary as " + summary + ", get_executed_test_count as " + executed + ", get_exit_code as " + exit_code + "}\n"
-    val finish = "\n    " + summary + "()\n" +
+    var result_import = "use std.spec.{print_summary as " + summary + ", get_executed_test_count as " + executed + ", get_exit_code as " + exit_code + "}\n"
+    var finish = "\n    " + summary + "()\n" +
         "    if " + executed + "() == 0:\n" +
         "        print \"test-runner: no examples executed\"\n" +
         "        return 2\n" +
         "    return " + exit_code + "()\n"
-    Ok(result_import + parts.imports + "\n" + parts.declarations + "\nfn main() -> i64:\n" + parts.body + finish)
+    var begin = ""
+    if completion_evidence:
+        val path = prefix + "evidence_path"
+        val status = prefix + "status"
+        result_import = result_import + native_completion_imports_v1(prefix) +
+            "use std.spec.{set_test_evidence_path_v1 as " + prefix + "set_path}\n"
+        begin = "    val " + path + " = " + prefix + "path()\n" +
+            "    if " + path + " == \"\": return 125\n" +
+            "    " + prefix + "set_path(" + path + ")\n"
+        finish = "\n    " + summary + "()\n" +
+            "    if " + executed + "() == 0: return 2\n" +
+            "    val " + status + " = " + exit_code + "()\n" +
+            "    if not " + prefix + "finish(" + path + ", \"spec\", " + status + "): return 125\n" +
+            "    return " + status + "\n"
+    Ok(result_import + parts.imports + "\n" + parts.declarations + "\nfn main() -> i64:\n" + begin + parts.body + finish)
+
+fn native_completion_imports_v1(prefix: text) -> text:
+    "use std.nogc_sync_mut.test_runner.native_execution_evidence.{native_execution_evidence_path_v1 as " + prefix + "path, native_execution_finish_v1 as " + prefix + "finish}\n"
+
+fn native_plain_wrapper_source(content: text, code_lines: [text], string_continuation: [bool], string_byte_ranges: [[i64]]) -> Result<text, text>:
+    # Keep the program untouched. The compiler's existing synthetic main owns
+    # binding replay, global visibility, and executable source order.
+    if content.trim() == "": return Err("native-plain: source is empty")
+    if code_lines.len() != string_continuation.len(): return Err("native-plain: source line mapping changed")
+    val partition = spipe_partition_source(content, content.split("\n"), code_lines, string_continuation, true, string_byte_ranges)
+    if partition.is_err(): return Err("native-plain: completion entry wrapper unavailable: " + partition.unwrap_err())
+    if not partition.unwrap().has_executable_body: return Err("native-plain: no executable body")
+    val prefix = native_framework_result_prefix(content)
+    if prefix == "": return Err("native-plain: result alias namespace exhausted")
+    val complete = prefix + "complete"
+    val helper = "\n" + native_completion_imports_v1(prefix) +
+        "fn " + complete + "() -> bool:\n" +
+        "    val path = " + prefix + "path()\n" +
+        "    if path == \"\": return false\n" +
+        "    " + prefix + "finish(path, \"plain\", 0)\n"
+    val finish = "\nif not " + complete + "():\n    panic(\"native-test: completion evidence could not be written\")\n"
+    Ok(content + helper + finish)
 
 export SpipeSourceParts, spipe_partition_source, spipe_rewrite_infix_expect_line
-export native_framework_wrapper_source
+export native_framework_wrapper_source, native_plain_wrapper_source

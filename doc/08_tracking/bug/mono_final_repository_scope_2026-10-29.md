@@ -65,8 +65,9 @@ confirmed that these checks separate issuance consumption from the later seal.
 The new MIR declaration repository is itself constructed before its seal scope.
 That is a plausible repeat ownership defect, but its combined error tests
 validity, pause, promotion and scope end; the failing predicate is not known.
-No fix for that second boundary is included. The coordinator attempted a
-replacement worker and the external 300-second watchdog ended collection with
+No fix for that second boundary is included. The coordinator selected one unsharded fallback after all three failed workers
+finished with zero claims; this was not a replacement generation. The external
+300-second watchdog ended collection with
 exit 124, peak RSS 4,606,188 KiB and `quiescent=1`. No object was published or
 executed. This is not a successful full VMM compilation, CLI build, runner build,
 or release qualification; those failures remain explicit.

@@ -47,7 +47,7 @@ use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, prin
 use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode}
 use std.nogc_sync_mut.test_runner.test_db_trace_record.{TestDbTraceFile, TestDbTraceRecord, test_db_trace_record_encode}
 use std.nogc_sync_mut.test_runner.trace_transport.{validate_requested_trace_transport}
-use std.nogc_sync_mut.test_runner.test_executor_parsing.{find_simple_binary}
+use std.nogc_sync_mut.test_runner.test_executor_parsing.{find_simple_binary, shell_safe_child_binary_path}
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
 # GROUP 5: Doc generation & sdoctest
@@ -75,7 +75,7 @@ use std.test_runner.test_runner_async.{run_tests_parallel_with_monitoring, get_c
 use std.test_runner.test_classification.{separate_qemu_tests, classify_test_session, separate_session_tests}
 use std.test_runner.qemu_test_runner.{run_qemu_tests_all}
 # Session sharing: daemon client + broker
-use app.test_daemon.client.{test_daemon_ensure_responsive, test_submit_and_wait, test_daemon_status, test_daemon_stop}
+use app.test_daemon.client.{test_daemon_ensure_responsive, test_submit_and_wait, test_submit_native_and_wait, test_daemon_status, test_daemon_stop}
 use app.test_daemon.types.{TestDaemonConfig, test_daemon_config_default, TestResult}
 use app.test_daemon.light_protocol.{aggregate_spec_file_verdict_line}
 val TRESP_COMPLETED: i64 = 2
@@ -190,6 +190,31 @@ pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestO
 # single scalar path; the remaining targets were dropped with no diagnostic.
 # Discovery now unions all of them, and the per-target counts are reported so a
 # target that contributes nothing is visible in the log rather than silent.
+fn test_file_effective_options(file_path: text, options: TestOptions) -> TestOptions:
+    # Override timeout for advanced testing modes
+    var effective_options = options
+    if options.fuzz_mode:
+        val fuzz_timeout = options.fuzz_time_secs + 30
+        if fuzz_timeout > effective_options.timeout:
+            effective_options.timeout = fuzz_timeout
+    if options.chaos_mode:
+        var chaos_timeout = options.chaos_trials * 2
+        if chaos_timeout < 300:
+            chaos_timeout = 300
+        if chaos_timeout > effective_options.timeout:
+            effective_options.timeout = chaos_timeout
+    if file_has_slow_test(file_path) and effective_options.timeout < 600:
+        effective_options.timeout = 600
+    # `# @timeout_secs <N>` header directive — mirrors
+    # test_runner_single.spl/test_runner_client.spl. Raise-only: a spec whose
+    # honest run exceeds even the slow_it 600s floor declares what it needs,
+    # instead of being killed mid-run and reporting no verdict line at all.
+    val declared_timeout = spec_timeout_secs_directive(file_path)
+    if declared_timeout > effective_options.timeout:
+        effective_options.timeout = declared_timeout
+
+    effective_options
+
 fn spec_timeout_secs_directive(file_path: text) -> i64:
     """Parse `# @timeout_secs <N>` from a spec header (0 when absent/invalid).
 
@@ -450,7 +475,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     if session_enabled:
         val daemon_config = _make_daemon_config(updated_options, config)
         val daemon_ok = test_daemon_ensure_responsive(daemon_config)
-        if daemon_ok:
+        if daemon_ok or updated_options.native_backend != "":
             if show_session_debug:
                 print "  [session] Routing {admitted_paths.len()} test(s) through daemon"
             val daemon_results = run_tests_via_daemon(admitted_paths, updated_options, daemon_config)
@@ -888,27 +913,7 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
     else:
         env_set("SIMPLE_DI_TEST", "0")
 
-    # Override timeout for advanced testing modes
-    var effective_options = options
-    if options.fuzz_mode:
-        val fuzz_timeout = options.fuzz_time_secs + 30
-        if fuzz_timeout > effective_options.timeout:
-            effective_options.timeout = fuzz_timeout
-    if options.chaos_mode:
-        var chaos_timeout = options.chaos_trials * 2
-        if chaos_timeout < 300:
-            chaos_timeout = 300
-        if chaos_timeout > effective_options.timeout:
-            effective_options.timeout = chaos_timeout
-    if file_has_slow_test(file_path) and effective_options.timeout < 600:
-        effective_options.timeout = 600
-    # `# @timeout_secs <N>` header directive — mirrors
-    # test_runner_single.spl/test_runner_client.spl. Raise-only: a spec whose
-    # honest run exceeds even the slow_it 600s floor declares what it needs,
-    # instead of being killed mid-run and reporting no verdict line at all.
-    val declared_timeout = spec_timeout_secs_directive(file_path)
-    if declared_timeout > effective_options.timeout:
-        effective_options.timeout = declared_timeout
+    val effective_options = test_file_effective_options(file_path, options)
 
     val monitor_timeout = env_get("SIMPLE_TIMEOUT_SECONDS") ?? ""
     # to_int("") throws, and the interpreter evaluates both sides of `and`,
@@ -1192,8 +1197,13 @@ fn run_tests_via_daemon(
     for file_path in files:
         val start_time = time_now_unix_micros()
 
+        # Expand the same per-file budget before the daemon owns the child.
+        val daemon_options = if options.native_backend != "": test_file_effective_options(file_path, options) else: options
         # Submit to daemon and wait for result
-        val daemon_result = test_submit_and_wait(file_path, daemon_config, clean, options.timeout * 1000)
+        val daemon_result = if options.native_backend != "":
+                test_submit_native_and_wait(file_path, daemon_config, daemon_options)
+            else:
+                test_submit_and_wait(file_path, daemon_config, clean, options.timeout * 1000)
         val duration_ms = (time_now_unix_micros() - start_time) / 1000
 
         if daemon_result.status == TRESP_COMPLETED or daemon_result.status == TRESP_FAILED or daemon_result.status == TRESP_CACHED:
@@ -1229,7 +1239,7 @@ fn run_tests_via_daemon(
                 pending: 0,
                 duration_ms: duration_ms,
                 setup_ms: 0,
-                error: "daemon returned unexpected status",
+                error: if daemon_result.output != "": daemon_result.output else: "daemon returned unexpected status",
                 timed_out: false,
                 cached: false
             )
@@ -1403,6 +1413,14 @@ fn run_test_cli() -> i64:
             if selected != "":
                 options.compiler_binary = selected
                 env_set("SIMPLE_BINARY", selected)
+    # Directory lane: publish the same nested-probe authority the single-file
+    # lane does (test_runner_single.spl), so contract specs that shell out to
+    # SIMPLE_TEST_BINARY run the admitted binary instead of guessing a
+    # cwd-relative `bin/simple` that does not exist in a worktree.
+    if (env_get("SIMPLE_TEST_BINARY") ?? "") == "":
+        val child_binary = find_simple_binary()
+        if child_binary != "":
+            env_set("SIMPLE_TEST_BINARY", shell_safe_child_binary_path(child_binary))
     report_free_mem("AFTER_PARSE_ARGS")
 
     # Load test configuration to determine what to run
@@ -1411,7 +1429,12 @@ fn run_test_cli() -> i64:
     var run_sdoc = config.run_sdoctests
     var run_spl_doc = config.run_spl_doctests
 
-    # Still needed when --spl-doctest is also set (e.g. --whole).
+    # A named source selects that file; configured repository-wide doctest
+    # sweeps apply only to broader runs. Explicit flags can opt lanes back in.
+    if options.path_explicit and not options.whole and options.path.ends_with(".spl"):
+        run_sdoc = false
+        run_spl_doc = false
+
     if options.sdoctest:
         run_sdoc = true
 
@@ -1442,6 +1465,9 @@ fn run_test_cli() -> i64:
             val source = file_read(options.path) ?? ""
             if not source_has_bdd_structure(source):
                 run_spec = false
+
+    if options.verbose:
+        eprint "test lanes: target={options.path} spec={run_spec} markdown={run_sdoc} source={run_spl_doc}"
 
     val library_lanes_error = native_test_library_lanes_error(options.library_mode, run_sdoc, run_spl_doc)
     if library_lanes_error != "":
@@ -1535,7 +1561,7 @@ fn run_test_cli() -> i64:
             elif mcdc_gate.failed:
                 for mcdc_line in mcdc_gate.lines:
                     if mcdc_line.starts_with("error: "):
-                        eprint mcdc_line
+                        eprint(mcdc_line)
             if mcdc_gate.failed and exit_code == 0:
                 exit_code = 1
         if coverage_session_should_finalize(options.coverage, inspection_only,
