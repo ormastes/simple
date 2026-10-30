@@ -36,7 +36,7 @@ on this lane produces output again, so it is not merged.
 ## Next steps
 
 1. Find where seed `native-build` stalls on this 3-module fixture (attach lldb to the hung
-   process). It never reaches `SIMPLE_FRONTEND_CACHE_DIR`. Check whether it routes to the pure-Simple driver or the
+   process). It never stores to the frontend cache dir (`frontend_parse_cache_dir()`, from `SIMPLE_FRONTEND_CACHE_DIR`). Check whether it routes to the pure-Simple driver or the
    `native_project` pipeline, and why that path returns success with no artifact.
 2. Make the spec report a memory-guard refusal (or set a test-scoped reserve) instead of failing on
    missing files.
