@@ -14,9 +14,17 @@ use std.common.crypto.sha256.{sha256_text}
 use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
-    driver_admitted_epoch_read_v1, driver_admitted_epoch_root_v1,
+    driver_admitted_epoch_read_v1, driver_admitted_epoch_root_v1, driver_admitted_epoch_retain_failure_v1,
     driver_admitted_epoch_normalize_v1, driver_admitted_epoch_declares_path_v1}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1}
+
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+@unsafe(reason: "bound epoch owner-check scratch to this worker", capabilities: [ffi])
+extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "pause epoch owner-check scratch before retaining failure", capabilities: [ffi])
+extern fn rt_transient_array_scope_pause() -> bool
+@unsafe(reason: "release epoch owner-check scratch", capabilities: [ffi])
+extern fn rt_transient_array_scope_end() -> bool
 
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -1568,22 +1576,44 @@ fn _driver_file_natively_owns_v1(path: text, module_name: text) -> bool:
     # only depends on the physical path and aliases, so it does not need the
     # import/sibling scan or its global content cache after that validation.
     if driver_admitted_epoch_active_v1():
-        if not path.ends_with(".spl"): return false
-        val key = _driver_physical_source_key_strict_v1(path)
-        val loaded = driver_admitted_epoch_read_v1(path, key)
-        if loaded.is_err():
-            eprint("[epoch-read-fail] path={path} key={key} reason={loaded.unwrap_err()}")
-            return false
-        var content = loaded.unwrap()
-        if _g_spec_prelude_entry_key != "" and key == _g_spec_prelude_entry_key:
-            content = driver_spec_prelude_source(content)
-        if content == "": return false
-        for source in _driver_module_aliases_with_closure(path, content, _driver_module_name_from_path(path), true):
-            if source.module_name == module_name: return true
-        return false
+        # This platform cache survives the scope, so initialise it before any
+        # scratch allocations. Never take ownership of a caller's scope.
+        val _platform = host_is_windows_host()
+        if transient_array_scope_state_v1() != 0:
+            return _driver_epoch_file_natively_owns_v1(path, module_name)
+        var started = false
+        unsafe(capabilities: [ffi]):
+            started = rt_transient_array_scope_begin()
+        if not started: panic("epoch owner scratch begin failed")
+        val owns = _driver_epoch_file_natively_owns_v1(path, module_name)
+        var paused = false
+        unsafe(capabilities: [ffi]):
+            paused = rt_transient_array_scope_pause()
+        if not paused: panic("epoch owner scratch pause failed")
+        driver_admitted_epoch_retain_failure_v1()
+        var ended = false
+        unsafe(capabilities: [ffi]):
+            ended = rt_transient_array_scope_end()
+        if not ended: panic("epoch owner scratch end failed")
+        return owns
     for source in _driver_collect_explicit_compiler_source(path):
         if source.module_name == module_name: return true
     false
+
+fn _driver_epoch_file_natively_owns_v1(path: text, module_name: text) -> bool:
+    if not path.ends_with(".spl"): return false
+    val key = _driver_physical_source_key_strict_v1(path)
+    val loaded = driver_admitted_epoch_read_v1(path, key)
+    if loaded.is_err():
+        eprint("[epoch-read-fail] path={path} key={key} reason={loaded.unwrap_err()}")
+        return false
+    var content = loaded.unwrap()
+    if _g_spec_prelude_entry_key != "" and key == _g_spec_prelude_entry_key:
+        content = driver_spec_prelude_source(content)
+    if content == "": return false
+    for source in _driver_module_aliases_with_closure(path, content, _driver_module_name_from_path(path), true):
+        if source.module_name == module_name: return true
+    return false
 
 pub fn driver_closure_native_owner_v1(file: text, module_name: text, importer_dir: text) -> text:
     # A source-root hit whose native names omit the import spelling (a src/lib

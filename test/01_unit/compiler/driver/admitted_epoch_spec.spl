@@ -7,6 +7,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
 use compiler.driver.driver_build.native_full_inventory_sources.{NativeFullInventorySourcesV1}
 use compiler.driver.driver_admitted_epoch.*
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use compiler.driver.driver_admitted_compile.{driver_admitted_epoch_compile_v1}
 use compiler.driver.driver_source_loading.{_driver_cached_entry_source_scan,
     driver_entry_scan_cache_reset, driver_entry_scan_cache_release,
@@ -132,13 +133,16 @@ describe "persistent admitted source epoch":
         val path = driver_admitted_epoch_task_begin_v1(owner, identity).unwrap()
         val name = _driver_module_name_from_path(path)
         driver_entry_scan_cache_reset()
-        expect(driver_closure_native_owner_v1(path, name, epoch_test_root() + "/" + dir)).to_equal(path)
+        for _attempt in 0..3:
+            expect(driver_closure_native_owner_v1(path, name, epoch_test_root() + "/" + dir)).to_equal(path)
+            expect(transient_array_scope_state_v1()).to_equal(0)
         expect(driver_entry_scan_cache_scan_count()).to_equal(0)
         val (_, reads) = driver_admitted_epoch_counters_v1()
-        expect(reads).to_equal(1)
+        expect(reads).to_equal(3)
         expect(file_write(path, "fn main() -> i64: 2\n")).to_be(true)
         val _owner = driver_closure_native_owner_v1(path, name, epoch_test_root() + "/" + dir)
         expect(driver_admitted_epoch_error_v1()).to_equal("admitted-epoch-source-content-mismatch")
+        expect(transient_array_scope_state_v1()).to_equal(0)
         expect(driver_admitted_epoch_task_finish_v1(owner).is_err()).to_be(true)
         expect(driver_admitted_epoch_end_v1(owner).is_err()).to_be(true)
         epoch_test_restore(saved)
