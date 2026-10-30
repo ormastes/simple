@@ -49,7 +49,18 @@ execution (peak 4.94 GiB). The 900-second attempt parsed and HIR-lowered all
 542 modules and completed mono for all of them (`generic_fns=102`,
 `call_sites=1367`, `specializations=678`, `unresolved=0`), but reached the
 8-GiB RSS cap during MIR lowering (peak 8,399,280 KiB). The driver algorithm
-did not execute. The no-MIR parser/HIR/mono driver is now split from the MIR
-ABI driver to allow a smaller bounded execution attempt. The repair source,
-compiler-import drivers, SSpec, and updated native fixture remain unverified
-end to end; this note does not claim a regression pass.
+did not execute. A reduced 442-module no-MIR driver then HIR-lowered all 442
+modules and completed mono with 412 specializations and zero unresolved calls,
+but also reached the 8-GiB RSS cap before executing the driver. The repair
+source and assertions remain unverified. Native fixtures now include a
+distinct-binder runtime case (`distinct.spl`) and a conflicting-result
+compile-negative case (`conflicting_result.spl`); neither has been run.
+
+The next verification attempt must use the freshly qualified pure-Simple
+stage-2 compiler for the focused source-import drivers and native fixture
+matrix: no-MIR parser/HIR/mono assertions, MIR ABI assertions, both positive
+native fixtures, the reachable conflicting-result compile-negative fixture,
+and the original native reproduction. Run the SSpec when a qualified runner
+with a test command is available; the admitted compiler CLI does not provide
+one. Until the available driver and native checks run, this note does not
+claim a regression pass.
