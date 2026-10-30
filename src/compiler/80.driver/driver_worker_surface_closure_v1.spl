@@ -48,8 +48,10 @@ use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_guards_active_v1, tldr_closure_walk_check_v1}
 use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1, driver_library_mode_native_owner_v1}
-use compiler.driver.driver_source_loading.{_driver_entry_import_dirname, _driver_physical_source_key, driver_closure_import_specs_from_source_v1}
+use compiler.driver.driver_source_loading.{_driver_entry_import_dirname, _driver_physical_source_key, driver_closure_import_specs_from_source_v1, driver_owner_scope_counters_v1}
 extern fn rt_process_start_identity(pid: i64) -> i64
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_aux_live_bytes() -> i64
 
 val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v2"
 
@@ -175,6 +177,7 @@ pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names:
         val physical = _driver_physical_source_key(paths[i])
         if not by_physical.contains_key(physical): by_physical[physical] = i
         i = i + 1
+    val (epoch_base, scopes_base, nested_base, legacy_base) = driver_owner_scope_counters_v1()
     var graph: [[i64]] = []
     var errors: [text] = []
     var queued: [bool] = []
@@ -228,7 +231,14 @@ pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names:
         graph[i] = deps
         errors[i] = error
         if driver_phase_trace_enabled() and head % 128 == 0:
-            log_phase("phase2:surface:admitted-graph:progress scanned={head} queued={queue.len()} inventory={paths.len()}")
+            val (epoch_checks, scopes, nested, legacy) = driver_owner_scope_counters_v1()
+            val live = rt_heap_live_bytes()
+            val aux = rt_heap_aux_live_bytes()
+            val epoch_delta = epoch_checks - epoch_base
+            val scopes_delta = scopes - scopes_base
+            val nested_delta = nested - nested_base
+            val legacy_delta = legacy - legacy_base
+            log_phase("phase2:surface:admitted-graph:progress scanned={head} queued={queue.len()} inventory={paths.len()} owner_epoch={epoch_delta} owner_scopes={scopes_delta} owner_nested={nested_delta} owner_legacy={legacy_delta} heap_live={live} heap_aux={aux}")
     if driver_phase_trace_enabled():
         log_phase("phase2:surface:admitted-graph:done scanned={head} inventory={paths.len()}")
     Ok(WorkerAdmittedGraphV1(edges: graph, errors: errors))

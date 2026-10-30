@@ -71,6 +71,14 @@ var _g_entry_scan_read_count: i64 = 0
 var _g_entry_scan_scan_count: i64 = 0
 var _g_entry_scan_hit_count: i64 = 0
 var _g_source_classification_count: i64 = 0
+# Scalar diagnostics only; no source or scratch object escapes the worker.
+var _g_worker_owner_epoch_checks: i64 = 0
+var _g_worker_owner_scopes: i64 = 0
+var _g_worker_owner_nested: i64 = 0
+var _g_worker_owner_legacy: i64 = 0
+
+pub fn driver_owner_scope_counters_v1() -> (i64, i64, i64, i64):
+    (_g_worker_owner_epoch_checks, _g_worker_owner_scopes, _g_worker_owner_nested, _g_worker_owner_legacy)
 # Physical key of the in-process `run` entry that gets the SSpec prelude.
 var _g_spec_prelude_entry_key: text = ""
 
@@ -1576,15 +1584,18 @@ fn _driver_file_natively_owns_v1(path: text, module_name: text) -> bool:
     # only depends on the physical path and aliases, so it does not need the
     # import/sibling scan or its global content cache after that validation.
     if driver_admitted_epoch_active_v1():
+        _g_worker_owner_epoch_checks = _g_worker_owner_epoch_checks + 1
         # This platform cache survives the scope, so initialise it before any
         # scratch allocations. Never take ownership of a caller's scope.
         val _platform = host_is_windows_host()
         if transient_array_scope_state_v1() != 0:
+            _g_worker_owner_nested = _g_worker_owner_nested + 1
             return _driver_epoch_file_natively_owns_v1(path, module_name)
         var started = false
         unsafe(capabilities: [ffi]):
             started = rt_transient_array_scope_begin()
         if not started: panic("epoch owner scratch begin failed")
+        _g_worker_owner_scopes = _g_worker_owner_scopes + 1
         val owns = _driver_epoch_file_natively_owns_v1(path, module_name)
         var paused = false
         unsafe(capabilities: [ffi]):
@@ -1596,6 +1607,7 @@ fn _driver_file_natively_owns_v1(path: text, module_name: text) -> bool:
             ended = rt_transient_array_scope_end()
         if not ended: panic("epoch owner scratch end failed")
         return owns
+    _g_worker_owner_legacy = _g_worker_owner_legacy + 1
     for source in _driver_collect_explicit_compiler_source(path):
         if source.module_name == module_name: return true
     false
