@@ -90,11 +90,6 @@ fn _macro_definition_fingerprint_v1(entry: MacroDefinitionEntryV1) -> text:
     sha256_text(macro_definition_digest_v1(entry) + "\n" + entry.contract_digest + "\n" +
         entry.hygiene_schema + "\n{entry.generation}")
 
-fn _add_changed_definition_v1(entry: MacroDefinitionEntryV1,
-        changed_ids: Dict<text, bool>, changed_names: Dict<text, bool>):
-    changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
-    changed_names[entry.macro_name] = true
-
 # Advisory inversion over captured forward candidates. It only identifies
 # additional consumer modules. Unknown, conservative, stale, or corrupt rows
 # request a full-scope recheck; this result never admits a cached object.
@@ -156,7 +151,7 @@ pub fn macro_forward_candidate_invalidation_v1(previous: [MacroForwardModuleCand
             full_recheck = true
             reason = "unknown-current-candidate"
         else:
-            current_tables[path] = decoded
+            current_tables[row.path] = decoded
     var changed_ids: Dict<text, bool> = {}
     var changed_names: Dict<text, bool> = {}
     var all_definitions: [MacroDefinitionEntryV1] = []
@@ -165,7 +160,8 @@ pub fn macro_forward_candidate_invalidation_v1(previous: [MacroForwardModuleCand
             for entry in previous_tables[row.path].definitions.entries:
                 all_definitions.push(entry)
                 if not current_tables.contains_key(row.path):
-                    _add_changed_definition_v1(entry, changed_ids, changed_names)
+                    changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                    changed_names[entry.macro_name] = true
                 else:
                     val current_entries = current_tables[row.path].definitions.entries
                     var found = false
@@ -175,26 +171,35 @@ pub fn macro_forward_candidate_invalidation_v1(previous: [MacroForwardModuleCand
                             found = true
                             if _macro_definition_fingerprint_v1(current_entry) !=
                                     _macro_definition_fingerprint_v1(entry):
-                                _add_changed_definition_v1(entry, changed_ids, changed_names)
-                                _add_changed_definition_v1(current_entry, changed_ids, changed_names)
-                    if not found: _add_changed_definition_v1(entry, changed_ids, changed_names)
+                                changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                                changed_names[entry.macro_name] = true
+                                changed_ids[macro_def_id_canonical_v1(current_entry.def_id)] = true
+                                changed_names[current_entry.macro_name] = true
+                    if not found:
+                        changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                        changed_names[entry.macro_name] = true
     for row in current_rows:
         if current_tables.contains_key(row.path):
             for entry in current_tables[row.path].definitions.entries:
                 all_definitions.push(entry)
                 if not previous_tables.contains_key(row.path):
-                    _add_changed_definition_v1(entry, changed_ids, changed_names)
+                    changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                    changed_names[entry.macro_name] = true
                 else:
                     var found = false
                     for old_entry in previous_tables[row.path].definitions.entries:
                         if macro_def_id_canonical_v1(old_entry.def_id) ==
                                 macro_def_id_canonical_v1(entry.def_id):
                             found = true
-                    if not found: _add_changed_definition_v1(entry, changed_ids, changed_names)
+                    if not found:
+                        changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                        changed_names[entry.macro_name] = true
     # A changed nested macro is an additive candidate for macros which declare
-    # it as a dependency. Iterate to closure over the recorded dependency names.
+    # its canonical definition identity as a dependency. Iterate to closure.
     var expanded = true
-    while expanded:
+    var closure_passes = 0
+    while expanded and closure_passes <= all_definitions.len():
+        closure_passes = closure_passes + 1
         expanded = false
         for entry in all_definitions:
             var depends_changed = false
@@ -202,8 +207,12 @@ pub fn macro_forward_candidate_invalidation_v1(previous: [MacroForwardModuleCand
                 if changed_ids.contains_key(dependency): depends_changed = true
             val identity = macro_def_id_canonical_v1(entry.def_id)
             if depends_changed and not changed_ids.contains_key(identity):
-                _add_changed_definition_v1(entry, changed_ids, changed_names)
+                changed_ids[identity] = true
+                changed_names[entry.macro_name] = true
                 expanded = true
+    if expanded:
+        full_recheck = true
+        reason = "nested-closure-bound"
     var users: [text] = []
     for row in previous:
         if previous_tables.contains_key(row.path):

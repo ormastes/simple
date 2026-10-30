@@ -75,3 +75,20 @@ remain UNRUN absent a newly qualified compiler. Native publication, concurrency,
 durability and exact committed-root completeness are not inferred from model
 tests or source availability. Review the final actual production call chain
 before root integration; retain incomplete acceptance items explicitly.
+
+## Qualification limits of this slice
+
+The file-worker manifest still uses physical source paths. A new immutable
+snapshot root therefore conservatively invalidates an older physical-path
+record even when logical identities and source bytes are unchanged. This slice
+does not establish cross-snapshot reuse or durable expected-root publication.
+
+A companion fresh for an importer's source bytes can contain an older resolved
+macro dependency context: the existing producer skips regeneration when that
+source is unchanged. Such records remain advisory candidates. Disabling worker
+object reuse is not proof that the SRC/HIR expansion cache reevaluated every
+macro. The missing compiled-source/read witness and dependency-context admission
+must be implemented and executed before claiming complete macro reexpansion.
+Existing fresh-companion skips remain; incoming users/counts are not stored in
+provider TLDR. Cold/changed-scope candidate scans and selected-scope validation
+costs remain unmeasured; no latency/RSS improvement is claimed.

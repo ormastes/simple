@@ -175,6 +175,43 @@ describe "macro forward candidate transport":
         expect(invalidation.needs_full_recheck).to_equal(true)
         expect(invalidation.reason).to_equal("object-generation-witness-unavailable")
 
+    it "keeps current parsed definitions and users distinct across modules":
+        val root = fresh_macro_root()
+        val first = root + "/pkg/first.spl"
+        val second = root + "/pkg/second.spl"
+        val tldr_root = root + "/tldr"
+        val first_source = macro_source().replace("twice", "alpha")
+        val second_source = macro_source().replace("twice", "beta")
+        expect(file_write(first, first_source)).to_equal(true)
+        expect(file_write(second, second_source)).to_equal(true)
+        expect(module_artifacts_emit_v1(first, tldr_root)).to_equal("")
+        expect(module_artifacts_emit_v1(second, tldr_root)).to_equal("")
+        val first_previous_digest = sha256_text("previous:" + first)
+        val second_previous_digest = sha256_text("previous:" + second)
+        val first_empty_defs = MacroDefinitionTableV1(schema: 1,
+            module_id: module_artifact_module_id_v1(first), entries: [])
+        val second_empty_defs = MacroDefinitionTableV1(schema: 1,
+            module_id: module_artifact_module_id_v1(second), entries: [])
+        val first_empty_uses = MacroUseTableV1(schema: 1,
+            module_id: module_artifact_module_id_v1(first), uses: [])
+        val second_empty_uses = MacroUseTableV1(schema: 1,
+            module_id: module_artifact_module_id_v1(second), uses: [])
+        val previous = [
+            MacroForwardModuleCandidateV1(path: first, source_digest: first_previous_digest,
+                candidate: candidate_from_tables(first, first_previous_digest, first_empty_defs,
+                    first_empty_uses)),
+            MacroForwardModuleCandidateV1(path: second, source_digest: second_previous_digest,
+                candidate: candidate_from_tables(second, second_previous_digest, second_empty_defs,
+                    second_empty_uses))]
+        var current_sources: Dict<text, text> = {}
+        current_sources[first] = sha256_text(first_source)
+        current_sources[second] = sha256_text(second_source)
+        val invalidation = macro_forward_candidate_invalidation_v1(previous,
+            [first, second], current_sources, tldr_root)
+        expect(invalidation.users.contains(first)).to_equal(true)
+        expect(invalidation.users.contains(second)).to_equal(true)
+        expect(invalidation.needs_full_recheck).to_equal(true)
+
     it "propagates a changed nested macro to shared parsed users by canonical definition ID":
         val root = fresh_macro_root()
         val provider = root + "/pkg/provider.spl"
