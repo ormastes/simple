@@ -1,0 +1,168 @@
+# Actual diagnostic-only driver call: frozen source -> real frontend -> HIR
+# -> enforcing HM diagnostics. No cache, semantic grant, codegen or publication.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.semantic_prerequisite_types_v1.*
+use compiler.driver.semantic_prerequisite_profile_v1.*
+use compiler.driver.semantic_prerequisite_hir_observation_v1.{frozen_semantic_observe_hir_function_v1}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1, frontend_cfg_target_from_triple_v1}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.core.parser.{parser_initialization_generation_v1, par_had_error_get,
+    par_had_error_mirror_get, par_had_error_mirror_clear, parser_first_error_get}
+use compiler.core.ast.{ast_prepare_persistent_owner_v1}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules, module_surfaces_retained_alignment}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.driver.driver_source_parse_support.{driver_parse_transient_scope_begin_v1,
+    driver_parse_transient_scope_pause_v1, driver_promote_retained_frontend_owners_v1,
+    driver_end_transient_parse_scope}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_promote}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+fn _frozen_semantic_request_reason_v1(request: FrozenSemanticPrerequisiteRequestV1) -> text:
+    val limits = request.limits
+    if (limits.max_source_bytes <= 0 or limits.max_source_bytes > 65536 or
+            limits.max_functions <= 0 or limits.max_functions > 64 or
+            limits.max_ast_nodes <= 0 or limits.max_ast_nodes > 4096 or
+            limits.max_depth < 5 or limits.max_depth > 32): return "request-limits-unsupported"
+    if request.source_bytes.len() == 0 or request.source_bytes.len() > limits.max_source_bytes: return "source-byte-budget"
+    for field in [request.source_path, request.module_name, request.target_triple]:
+        if field.len() == 0 or field.len() > 256 or field.contains("\n") or field.contains("\r") or field.contains("\0"): return "source-identity-invalid"
+    if (request.source_path.starts_with("/") or request.source_path.contains("..") or
+            request.source_path.contains("\\") or not request.source_path.ends_with(".spl")): return "source-path-unsupported"
+    if request.expected_source_sha256.len() != 64 or sha256_u8_hex(request.source_bytes) != request.expected_source_sha256: return "source-digest-mismatch"
+    if frontend_cfg_target_from_triple_v1(request.target_triple).is_err(): return "target-unsupported"
+    ""
+
+fn _diagnose_frozen_semantic_borrowed_v1(request: FrozenSemanticPrerequisiteRequestV1,
+        identity: i64) -> FrozenSemanticPrerequisiteDiagnosticV1:
+    var result = frozen_semantic_diagnostic_v1(request, identity, "unsupported", "source-utf8-invalid")
+    val decoded = validated_utf8_bytes_to_text_linear(request.source_bytes)
+    if decoded.is_err(): return result
+    val source = decoded.unwrap()
+    val lexical_reason = frozen_semantic_lexical_profile_v1(source, request.limits)
+    if lexical_reason != "":
+        result.reason = lexical_reason
+        return result
+    par_had_error_mirror_clear()
+    val parsed = parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1(source,
+        request.source_path, request.module_name, Logger(level: 0), request.source_path,
+        request.expected_source_sha256, request.target_triple)
+    if parsed.is_err():
+        result.status = "rejected"
+        result.reason = "frontend-rejected"
+        result.errors = [parsed.unwrap_err()]
+        return result
+    val (module, target_receipt) = parsed.unwrap()
+    result.preprocessed_sha256 = target_receipt.preprocessed_digest
+    result.target_decision_digest = target_receipt.decision_digest
+    if par_had_error_get() or par_had_error_mirror_get():
+        result.status = "rejected"
+        result.reason = "parser-rejected"
+        result.errors = [parser_first_error_get()]
+        return result
+    if not frontend_cfg_receipt_valid_v1(target_receipt, request.source_path,
+            request.expected_source_sha256, request.target_triple):
+        result.reason = "target-receipt-mismatch"
+        return result
+    if target_receipt.decisions.len() != 0:
+        result.reason = "initial-profile-conditional-source-unsupported"
+        return result
+    result.parsed_functions = module.functions.len()
+    val profile = frozen_semantic_ast_profile_v1(module, request.limits)
+    result.visited_ast_nodes = profile.visited_nodes
+    if not profile.supported:
+        result.reason = profile.reason
+        return result
+    if module.name != request.module_name:
+        result.reason = "parsed-module-identity-mismatch"
+        return result
+    var modules: Dict<text, ParserModule> = {}
+    modules[request.module_name] = module
+    val sources = [SourceFile(path: request.source_path, authored_path: request.source_path,
+        content: source, module_name: request.module_name)]
+    val extracted = module_surfaces_from_modules(modules, sources)
+    if extracted.is_err():
+        result.status = "rejected"
+        result.reason = "declaration-extraction-rejected"
+        result.errors = [extracted.unwrap_err()]
+        return result
+    val surfaces = extracted.unwrap()
+    if not module_surfaces_retained_alignment(surfaces):
+        result.reason = "declaration-owner-invalid"
+        return result
+    var lowering = hirlowering_for_module(request.source_path, surfaces)
+    lowering.use_explicit_semantic_policy()
+    val hir = lowering.lower_module(module)
+    result.lowered_functions = hir.functions.len()
+    if lowering.errors.len() > 0:
+        result.status = "rejected"
+        result.reason = "hir-lowering-rejected"
+        for finding in lowering.errors: result.errors.push(finding.message)
+        return result
+    if hir.name != request.module_name or hir.path != request.source_path or hir.functions.len() != profile.function_count:
+        result.reason = "lowered-module-identity-or-count-mismatch"
+        return result
+    # This actual consumer runs infer_module; type_check_impl is not used.
+    val checked = collect_module_typecheck_receipt_v1(request.module_name, hir, TypecheckPassSeverity.Deny)
+    result.hm_checked_functions = hir.functions.len()
+    result.errors = checked.errors
+    result.warnings = checked.warnings
+    if checked.errors.len() > 0:
+        result.status = "rejected"
+        result.reason = "hm-typecheck-rejected"
+        return result
+    # Retain actual parser declaration order rather than dictionary iteration.
+    # At most 64 functions; every source name must match exactly one HIR owner.
+    for name in module.function_order:
+        var found = 0
+        for key in hir.functions.keys():
+            val function_ = hir.functions[key]
+            if function_.name != name: continue
+            found = found + 1
+            val observed = frozen_semantic_observe_hir_function_v1(function_)
+            if observed.is_err():
+                result.reason = observed.unwrap_err()
+                return result
+            result.observations.push(observed.unwrap())
+        if found != 1:
+            result.reason = "lowered-function-identity-missing-or-duplicate"
+            return result
+    result.status = "diagnosed"
+    result.reason = "actual-parse-hir-hm-diagnostics-only"
+    result
+
+# Compiler driver API entry. Input bytes are already frozen; no path is opened.
+# Only idle drivers may enter the global frontend scratch boundary.
+pub fn compiler_driver_diagnose_frozen_semantic_prerequisites_v1(driver: CompilerDriver,
+        request: FrozenSemanticPrerequisiteRequestV1) -> FrozenSemanticPrerequisiteDiagnosticV1:
+    val invalid = _frozen_semantic_request_reason_v1(request)
+    if invalid != "": return frozen_semantic_diagnostic_v1(request, driver.identity_id, "unsupported", invalid)
+    if (driver.identity_id <= 0 or driver.ctx.has_errors() or driver.ctx.sources.len() != 0 or
+            driver.ctx.modules.len() != 0 or driver.ctx.hir_modules.len() != 0 or driver.ctx.mir_modules.len() != 0 or
+            driver.streaming_surface_owner_ready or driver.ctx.module_surfaces != nil):
+        return frozen_semantic_diagnostic_v1(request, driver.identity_id, "unsupported", "idle-driver-required")
+    if transient_array_scope_state_v1() != 0:
+        return frozen_semantic_diagnostic_v1(request, driver.identity_id, "unsupported", "foreign-scratch-scope-active")
+    ast_prepare_persistent_owner_v1()
+    val generation = parser_initialization_generation_v1()
+    if not driver_parse_transient_scope_begin_v1():
+        return frozen_semantic_diagnostic_v1(request, driver.identity_id, "unsupported", "scratch-scope-unavailable")
+    var result = _diagnose_frozen_semantic_borrowed_v1(request, driver.identity_id)
+    val paused = driver_parse_transient_scope_pause_v1()
+    var owned = false
+    var globals_owned = false
+    if paused:
+        globals_owned = driver_promote_retained_frontend_owners_v1(parser_initialization_generation_v1() != generation)
+        owned = transient_promote(result)
+    val ended = driver_end_transient_parse_scope()
+    if not paused or not globals_owned or not owned or not ended:
+        # A dangling diagnostics graph cannot be returned as a bounded failure.
+        panic("frozen semantic prerequisite scratch ownership failed")
+    result

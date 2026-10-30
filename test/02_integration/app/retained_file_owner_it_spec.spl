@@ -9,6 +9,33 @@ use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 
 describe "Retained file sequential value ownership":
+    it "opens ASCII and multibyte paths while rejecting embedded NUL and over-limit paths":
+        val target = secure_temp_dir(".", "item4-retained-path-").unwrap()
+        step("Open, write, and read a file through an ASCII path")
+        val ascii_path = "{target}/ascii"
+        var ascii_output = retained_file_open(ascii_path, 1u64, true).unwrap()
+        expect(ascii_output.write([11u8]).unwrap()).to_equal(true)
+        expect(ascii_output.close()).to_equal(true)
+        var ascii_input = retained_file_open(ascii_path, 1u64).unwrap()
+        expect(ascii_input.read_exact(1).unwrap()).to_equal([11u8])
+        expect(ascii_input.close()).to_equal(true)
+        step("Open, write, and read a supplementary Unicode path")
+        val path = "{target}/café-🙂"
+        var output = retained_file_open(path, 2u64, true).unwrap()
+        expect(output.write([17u8, 29u8]).unwrap()).to_equal(true)
+        expect(output.close()).to_equal(true)
+        var input = retained_file_open(path, 2u64).unwrap()
+        expect(input.read_exact(2).unwrap()).to_equal([17u8, 29u8])
+        expect(input.close()).to_equal(true)
+        step("Reject empty and embedded-NUL paths before native open")
+        expect(retained_file_open("", 1u64, true).unwrap_err()).to_equal("SCVDB_FILE_PATH")
+        expect(retained_file_open("{target}/bad\0suffix", 1u64, true).unwrap_err()).to_equal("SCVDB_FILE_PATH")
+        step("Reject a path beyond the existing byte-length cap")
+        expect(retained_file_open("x".repeat(32761), 1u64, true).unwrap_err()).to_equal("SCVDB_FILE_PATH")
+        expect(file_remove(ascii_path)).to_equal(true)
+        expect(file_remove(path)).to_equal(true)
+        expect(dir_remove(target, false)).to_equal(true)
+
     it "preserves cumulative write quotas and invalidates the exact owner on close":
         step("Create an exclusive native file and perform separate writes")
         val target = secure_temp_dir(".", "item4-retained-owner-").unwrap()
