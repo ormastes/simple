@@ -1,0 +1,155 @@
+# @manual_section: primary
+"""BuildRunner builds hello world and the developer runs it.
+
+## Purpose and audience
+
+A developer who submits `build/hw/hello.spl` to BuildRunner gets one compiled
+`hello` executable, a verifiable receipt that the executable came from that
+exact source, and a run that prints `hello` and exits 0. This manual is for
+the developer who runs the build and for the QA engineer who checks the
+refusals: a source outside the frozen inventory, a dangling alias, a forged
+receipt, and a build that overruns its timeout are each refused with a
+stated reason, and none of them ships an executable.
+
+Feature IDs: REQ-HBR-001 through REQ-HBR-006. Category: Tooling.
+
+## Operator workflow
+
+    SIMPLE_LIB=src bin/simple test test/03_system/app/buildrunner/feature/hello_buildrunner_acceptance_spec.spl
+
+Scenarios that need a real stage2 compiler report pending until the darwin
+stage2 binary marker exists. Point `HELLO_BR_STAGE2_MARKER` at that marker to
+run them. The alias and receipt refusals run on every host with no compiler.
+
+## Compatibility and limitations
+
+The happy path and the timeout scenario spawn a real worker and compiler, so
+they cannot run on a host without a stage2 compiler. On SimpleOS the manager
+is not ported; those scenarios stay pending there. The source-inventory
+refusal needs a real frozen inventory and stays pending until a compiler exists.
+
+## Verification guidance and troubleshooting
+
+Read the `SPEC FILE VERDICT` line for `executed=` and compare it with the
+number of `it` blocks. A RED alias or receipt scenario means the product
+returned a different refusal string than the one the manual states. A pending
+scenario is not a pass: it means the compiler evidence is absent on this host.
+"""
+
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_sync_mut.spec.{skip}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use app.io.env_ops.{env_get}
+use std.common.build_manager.contracts.{BuildInputV1, BuildLinkV1, BuildTaskV1, BuildResultV1,
+    builder_validate_task_v1, builder_validate_result_v1, builder_task_identity_v1}
+use std.common.build_manager.codec.{builder_encode_result_v1, builder_decode_result_v1}
+
+val HELLO_DIGEST = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+val STAGE2_REASON = "needs a darwin stage2 compiler: scratchpad/darwin-binary.txt absent"
+
+fn on_simpleos() -> bool:
+    (env_get("SIMPLE_OS_KERNEL") ?? "") == "simpleos"
+
+# Why a compiler-backed scenario cannot run here, or "" when it can. Gating is
+# done with skip() OUTSIDE it(): under the Rust seed a pending() inside an it()
+# is still counted as passed (bdd.rs it-handler ignores Simple test_pending).
+fn stage2_unavailable_reason() -> text:
+    if on_simpleos(): return "BuildRunner manager not ported to SimpleOS"
+    if not stage2_binary_ready(): return STAGE2_REASON
+    ""
+
+fn stage2_binary_ready() -> bool:
+    val marker = env_get("HELLO_BR_STAGE2_MARKER") ?? ""
+    marker != "" and file_exists(marker)
+
+# The hello task as the manager submits it: one compile, one linked source
+# alias, one declared output. Mirrors the shape used by the wire contract.
+fn hello_task(inputs: [BuildInputV1], links: [BuildLinkV1]) -> BuildTaskV1:
+    BuildTaskV1(id: "hello", attempt: 1, phase: "compile",
+        producer_digest: HELLO_DIGEST, source_digest: HELLO_DIGEST, toolchain_digest: HELLO_DIGEST,
+        dependencies: [], program: "native-build", args: ["build/hw/hello.spl"],
+        inputs: inputs, outputs: ["hello"], cache_key: HELLO_DIGEST, timeout_ms: 60000,
+        memory_limit_bytes: 1073741824, links: links)
+
+fn pinned_hello_input() -> BuildInputV1:
+    BuildInputV1(path: "src/hello.spl", digest: HELLO_DIGEST)
+
+fn decode_then_validate_v1(task: BuildTaskV1, payload: text) -> text:
+    match builder_decode_result_v1(payload):
+        case Ok(result): builder_validate_result_v1(task, result)
+        case Err(reason): reason
+
+fn sibling_alias() -> BuildLinkV1:
+    BuildLinkV1(kind: "file", path: "src/alias.spl", target: "hello.spl",
+        resolved_path: "src/hello.spl", target_digest: HELLO_DIGEST)
+
+describe "BuildRunner builds hello world and runs it":
+    if stage2_unavailable_reason() != "":
+        skip("builds hello world and runs it", stage2_unavailable_reason())
+    else:
+        it "builds hello world and runs it":
+            # @req REQ-HBR-001
+            step("Submit build/hw/hello.spl to BuildRunner")
+            # @capture(exec): the submission receipt
+            step("SCV admits the entry from the frozen inventory")
+            step("The manager dispatches one compile task to a worker")
+            step("The worker compiles and links")
+            step("The manager verifies the result receipt and memory receipt")
+            step("The artifact is published")
+            # @capture(exec): the hello program stdout and exit status
+            # oracle: scripts/bootstrap/sanity-oracles/buildrunner.stdout
+            step("Running it prints hello and exits 0")
+            fail("not yet wired to the real BuildRunner entry; a stage2 compiler is present but this scenario is unimplemented")
+
+    if stage2_unavailable_reason() != "":
+        skip("refuses an entry outside the source inventory", stage2_unavailable_reason())
+    else:
+        it "refuses an entry outside the source inventory":
+            # @req REQ-HBR-003
+            step("Submit an entry that is not in the frozen source inventory")
+            # @capture(exec): the SCV refusal message
+            step("SCV refuses the entry and no task is dispatched")
+            fail("not yet wired to the real BuildRunner entry; a stage2 compiler is present but this scenario is unimplemented")
+
+    it "refuses a dangling alias":
+        # @req REQ-HBR-004
+        step("Declare a sibling alias whose target has no pinned input")
+        val dangling = hello_task([], [sibling_alias()])
+        # positive control: the same alias with its pinned target is accepted
+        step("Declare the same alias with its pinned target present")
+        val pinned = hello_task([pinned_hello_input()], [sibling_alias()])
+        expect(builder_validate_task_v1(pinned)).to_equal("")
+        step("Refuse the dangling alias with its stated reason")
+        expect(builder_validate_task_v1(dangling)).to_equal("link target has no pinned regular input")
+
+    it "refuses a malformed or forged receipt":
+        # @req REQ-HBR-005
+        val task = hello_task([pinned_hello_input()], [])
+        val result = BuildResultV1(task_id: "hello", attempt: 1,
+            identity_digest: builder_task_identity_v1(task), host_id: "local-1", status: "OK",
+            exit_code: 0, outputs: [BuildInputV1(path: "hello", digest: HELLO_DIGEST)],
+            cache_hits: 0, cache_misses: 1, cache_stores: 1)
+        val payload = builder_encode_result_v1(result)
+        # positive control: the honest receipt decodes and binds to its task
+        step("Accept the honest result receipt for hello")
+        expect(decode_then_validate_v1(task, payload)).to_equal("")
+        step("Refuse a receipt with a forged wire header")
+        val forged = payload.replace("SIMPLE-BUILD-RESULT-1", "SIMPLE-BUILD-RESULT-0")
+        # @capture(exec): the forged header refusal
+        expect(decode_then_validate_v1(task, forged)).to_equal("invalid result wire header")
+        step("Refuse a receipt that names a different task identity")
+        val stale = BuildResultV1(task_id: "hello", attempt: 1, identity_digest: "a".repeat(64),
+            host_id: "local-1", status: "OK", exit_code: 0,
+            outputs: [BuildInputV1(path: "hello", digest: HELLO_DIGEST)],
+            cache_hits: 0, cache_misses: 1, cache_stores: 1)
+        expect(decode_then_validate_v1(task, builder_encode_result_v1(stale))).to_equal("stale or mismatched result identity")
+
+    if stage2_unavailable_reason() != "":
+        skip("stops a build that exceeds its timeout and leaves no process behind", stage2_unavailable_reason())
+    else:
+        it "stops a build that exceeds its timeout and leaves no process behind":
+            # @req REQ-HBR-006
+            step("Submit a build whose timeout is shorter than the compile")
+            # @capture(exec): the timeout status and the process table check
+            step("The manager stops the worker at the timeout and no worker process survives")
+            fail("not yet wired to the real BuildRunner entry; a stage2 compiler is present but this scenario is unimplemented")
