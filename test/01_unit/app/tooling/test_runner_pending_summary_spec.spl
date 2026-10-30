@@ -1,0 +1,47 @@
+use std.spec.*
+use std.test_runner.test_executor_parsing.{make_result_from_output}
+
+# Bug: doc/08_tracking/bug/test_db_and_runner_specs_red_2026-09-16.md
+# std.spec's print_summary column-aligns its counts ("Passed:  0"), and the
+# zero-result detector compared lines against exactly "Passed: 0", so a
+# pending-only file was refused as "no parseable pass/fail summary".
+
+fn summary(passed: i64, failed: i64, pending: i64) -> text:
+    val total = passed + failed + pending
+    "Test Summary:\n  Total:   {total}\n  Passed:  {passed}\n  Failed:  {failed}\n  Pending: {pending}\n"
+
+describe "test runner Test Summary pending block":
+    it "reports a pending-only file as pending, with no pass and no error":
+        val r = make_result_from_output("p_spec.spl", "    it host ... pending\n" + summary(0, 0, 1), "", 0i32, 1, 30)
+        expect(r.passed).to_equal(0)
+        expect(r.failed).to_equal(0)
+        expect(r.pending).to_equal(1)
+        expect(r.error).to_equal("")
+
+    it "counts several pending examples without inflating passes":
+        val r = make_result_from_output("p3_spec.spl", summary(0, 0, 3), "", 0i32, 1, 30)
+        expect(r.passed).to_equal(0)
+        expect(r.pending).to_equal(3)
+        expect(r.error).to_equal("")
+
+    it "keeps a mixed pass and pending run at its real pass count":
+        val r = make_result_from_output("m_spec.spl", summary(2, 0, 1), "", 0i32, 1, 30)
+        expect(r.passed).to_equal(2)
+        expect(r.failed).to_equal(0)
+        expect(r.pending).to_equal(1)
+
+    it "keeps a pending run with a failure red":
+        val r = make_result_from_output("f_spec.spl", summary(0, 1, 1), "", 1i32, 1, 30)
+        expect(r.failed).to_equal(1)
+        expect(r.pending).to_equal(1)
+        expect(r.passed).to_equal(0)
+
+    it "still accepts the single-space zero summary":
+        val r = make_result_from_output("z_spec.spl", "Passed: 0\nFailed: 0\n", "", 0i32, 1, 30)
+        expect(r.failed).to_equal(0)
+        expect(r.error).to_equal("")
+
+    it "still refuses output with no summary at all":
+        val r = make_result_from_output("n_spec.spl", "hello\n", "", 0i32, 1, 30)
+        expect(r.failed).to_equal(1)
+        expect(r.error).to_contain("refusing synthetic pass")
