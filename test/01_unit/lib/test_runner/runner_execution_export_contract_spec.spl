@@ -1,0 +1,52 @@
+"""
+## Purpose and audience
+Purpose: Keep runner execution and doctest classification APIs available through their intended facades.
+Audience: test runner and stdlib maintainers.
+"""
+# @req: REQ-SSPEC-LIB
+
+use std.spec.*
+use std.nogc_async_mut.test_runner.test_runner_execute.{run_test_file_safe_mode}
+use std.nogc_async_mut.test_runner.test_runner_args.{parse_test_args}
+use std.nogc_async_mut.test_runner.sdoctest.types.{should_fail_infra_reason}
+use std.nogc_sync_mut.test_runner.doctest_child_execution.{doctest_native_body_result_v1}
+
+describe "runner execution export contract":
+    it "routes safe-mode execution through the async facade and refuses an invalid selector before spawning":
+        var options = parse_test_args([])
+        options.compiler = "unsupported-runner-selector"
+        options.compiler_binary = ""
+        val path = "sentinel-do-not-execute.runner.spec.spl"
+
+        val result = run_test_file_safe_mode(path, options)
+
+        expect(result.path).to_equal(path)
+        expect(result.failed).to_equal(1)
+        expect(result.passed).to_equal(0)
+        expect(result.duration_ms).to_equal(0)
+        expect(result.error).to_equal(
+            "test-runner: unknown --compiler value 'unsupported-runner-selector' (expected: phase2)")
+
+describe "should-fail infrastructure classification through the async types facade":
+    it "classifies missing child executables and unresolved externs as infrastructure":
+        expect(should_fail_infra_reason(127, "")).to_equal(
+            "infrastructure: child binary could not be executed (exit 127)")
+        expect(should_fail_infra_reason(1, "unknown extern function rt_missing_probe")).to_equal(
+            "infrastructure: unknown extern (not the example's own failure): unknown extern function rt_missing_probe")
+
+    it "leaves genuine assertions and panics as example failures and accepts zero exit":
+        expect(should_fail_infra_reason(1, "assertion failed: expected one")).to_equal("")
+        expect(should_fail_infra_reason(-1, "PANIC: example panicked")).to_equal("")
+        expect(should_fail_infra_reason(0, "")).to_equal("")
+
+describe "native doctest result caller classifies transport without spawning":
+    it "marks a spawn failure as infrastructure while retaining a genuine panic failure":
+        val spawn_failure = doctest_native_body_result_v1("", "", -1, "", "")
+        expect(spawn_failure.infrastructure_error).to_equal(
+            "infrastructure: child failed to start or died without a diagnostic")
+        expect(spawn_failure.exit_code).to_equal(-1)
+
+        val panic = doctest_native_body_result_v1("", "PANIC: example panicked", -1, "", "")
+        expect(panic.infrastructure_error).to_equal("")
+        expect(panic.exit_code).to_equal(-1)
+        expect(panic.stderr).to_equal("PANIC: example panicked")
