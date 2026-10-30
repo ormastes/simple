@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $RootDir
 
 $failures = 0
@@ -19,7 +19,7 @@ function Get-GitIndexLines($Path) {
 }
 
 function Test-Gitlink($Path) {
-    $lines = @(Get-GitIndexLines $Path)
+    $lines = Get-GitIndexLines $Path
     $mode = ""
     if ($lines.Count -gt 0) {
         $mode = ($lines[0] -split "\s+")[0]
@@ -62,7 +62,7 @@ if ($Mode -eq "--repair") {
 
 Test-Gitlink ".spipe/spipe"
 function Test-TrackedTree($Path) {
-    $lines = @(Get-GitIndexLines $Path)
+    $lines = Get-GitIndexLines $Path
     $mode = ""
     if ($lines.Count -gt 0) {
         $mode = ($lines[0] -split "\s+")[0]

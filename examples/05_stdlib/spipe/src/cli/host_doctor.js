@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,21 +46,12 @@ function commandDoctor(hostRoot) {
     ["tool_expert_spipe_link", join(root, ".spipe/tool_expert/spipe_submodule"), relative(join(root, ".spipe/tool_expert"), join(root, example, "doc/00_llm_process/tool_expert/spipe_submodule"))]
   ];
   for (const [name, path, expected] of hostChecks) {
-    let stat;
-    try {
-      // lstat also sees dangling symlinks, which need to be diagnosed as bad
-      // links instead of being mistaken for absent paths by existsSync.
-      stat = lstatSync(path);
-    } catch {
+    if (!existsSync(path)) {
       failures += 1;
       console.log(`host_missing ${name} ${path}`);
       continue;
     }
-    if (expected === "exists" && !existsSync(path)) {
-      failures += 1;
-      console.log(`host_missing ${name} ${path}`);
-      continue;
-    }
+    const stat = lstatSync(path);
     if (expected !== "exists") {
       if (!stat.isSymbolicLink()) {
         failures += 1;
@@ -68,21 +59,7 @@ function commandDoctor(hostRoot) {
         continue;
       }
       const current = readlinkSync(path);
-      // Windows junctions store an absolute target, while the setup plan is
-      // expressed relative to the link. Compare resolved destinations so a
-      // correct junction and a correct relative symlink are equivalent.
-      let actualTarget;
-      let expectedTarget;
-      try {
-        actualTarget = realpathSync(resolve(dirname(path), current));
-        expectedTarget = realpathSync(resolve(dirname(path), expected));
-      } catch {
-        failures += 1;
-        console.log(`host_bad_link ${name} expected=${expected} actual=${current}`);
-        continue;
-      }
-      const normalizeForComparison = (value) => process.platform === "win32" ? value.toLowerCase() : value;
-      if (normalizeForComparison(actualTarget) !== normalizeForComparison(expectedTarget)) {
+      if (current !== expected) {
         failures += 1;
         console.log(`host_bad_link ${name} expected=${expected} actual=${current}`);
         continue;

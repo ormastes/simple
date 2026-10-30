@@ -3,7 +3,8 @@
 This directory is the host-local SPipe mount for the Simple repository.
 
 - `.spipe/spipe` is the compatibility submodule mount for reusable SPipe assets.
-- `.spipe/spipe_project` links to `examples/05_stdlib/spipe`, the tracked SPipe example project.
+- `.spipe/spipe_project` links to `examples/spipe`, the standalone SPipe example
+  project submodule.
 - `.spipe/doc` links to this host project's configured LLM process docs:
   `doc/00_llm_process`.
 - `.spipe/domain_expert`, `.spipe/template`, `.spipe/spipe_docs`,
@@ -17,16 +18,16 @@ overrides it in `.spipe/config.sdn` with `host_process_doc: doc/00_llm_process`.
 Run `node .spipe/spipe_project/cli/spipe.js doc-link .` to recreate the
 `.spipe/doc` link from that configuration.
 
-Run `sh scripts/setup/setup-spipe-submodule.shs` to initialize the compatibility submodule,
+Run `sh scripts/setup/setup-spipe-submodule.shs` to initialize both SPipe submodules,
 refresh `.spipe/spipe_project`, `.spipe/doc`, and the top-level common process
 links, then recreate the configured doc-root process links.
 
 Run `sh scripts/check/check-spipe-submodule-gitlinks.shs --check` to verify that
-`.spipe/spipe` is a parent gitlink and `examples/05_stdlib/spipe` is tracked as
-a regular directory tree. The setup command checks this state and leaves index
-repairs to an explicit maintainer action.
+`.spipe/spipe` and `examples/spipe` are parent gitlinks. Use `--repair` if a
+recursive `git add examples/spipe` accidentally cached submodule files.
 On Windows, use
-`powershell -ExecutionPolicy Bypass -File scripts\check\check-spipe-submodule-gitlinks.ps1 --check`.
+`powershell -ExecutionPolicy Bypass -File scripts\check-spipe-submodule-gitlinks.ps1 --check`
+or `--repair`.
 
 Run `node .spipe/spipe_project/cli/spipe.js doctor .` to verify the host mount
 links and reusable process surfaces.
