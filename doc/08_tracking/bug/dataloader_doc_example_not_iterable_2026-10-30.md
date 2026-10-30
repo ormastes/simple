@@ -9,3 +9,6 @@
   `DataLoaderIterator` object as not iterable.
 - Unblock: make `DataLoaderIterator` iterable (or correct the documented
   example). Not a comment-doctest runner defect.
+- 2026-10-30: the spec example is now a `skip(...)` linking here (body in
+  `check_dataloader_example_passes()`), so a suite sweep is not silently red. To unblock,
+  restore it as an `it`.
