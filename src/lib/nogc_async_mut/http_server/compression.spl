@@ -74,12 +74,24 @@ fn compress_response_for(resp: HttpResponseData, accept_header: text) -> HttpRes
     val body_bytes = _resp_body_as_bytes(resp)
     if body_bytes.len() < COMPRESSION_MIN_BODY_BYTES:
         return resp
-    val chosen = negotiate_encoding(accept_header, supported_encodings())
-    val compressed_res = compress_response_body(body_bytes, chosen)
-    if compressed_res.is_err():
-        return resp
-    val compressed = compressed_res.unwrap()
-    if compressed.len() == 0:
+    # Walk the server preference order and take the FIRST mutually-acceptable
+    # codec that actually produces a smaller body. Several encoders here are
+    # container writers that may emit a stored/raw frame and never shrink
+    # (doc/08_tracking/bug/compression_stored_only_encoders_lz4_2026-09-16.md);
+    # trying only the top codec would ship the body uncompressed even when a
+    # lower-preference codec on offer does shrink it.
+    var chosen: text = ""
+    var compressed: [u8] = []
+    for candidate in supported_encodings():
+        if chosen.len() == 0 and negotiate_encoding(accept_header, [candidate]).len() > 0:
+            val res = compress_response_body(body_bytes, candidate)
+            if res.is_ok():
+                val value = res.unwrap()
+                # Never emit a Content-Encoding header without a smaller body.
+                if value.len() > 0 and value.len() < body_bytes.len():
+                    chosen = candidate
+                    compressed = value
+    if chosen.len() == 0:
         return resp
     val new_headers = _set_content_encoding(_strip_content_length(resp.headers), chosen)
     HttpResponseData(
@@ -258,4 +270,4 @@ fn compress_response_body(body: [u8], encoding: text) -> Result<[u8], text>:
 # in server-preference order (strongest/most desirable first).
 # Used as input to `negotiate_encoding`.
 pub fn supported_encodings() -> [text]:
-    ["zstd", "lz4", "gzip", "deflate", "br"]
+    ["br", "gzip", "deflate", "zstd", "lz4"]
