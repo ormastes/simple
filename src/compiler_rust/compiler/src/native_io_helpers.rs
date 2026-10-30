@@ -132,7 +132,7 @@ pub fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> 
 
 pub fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError> {
     match args.get(idx) {
-        Some(Value::Array(arr)) => {
+        Some(Value::Array(arr)) | Some(Value::FrozenArray(arr)) => {
             let mut bytes = Vec::with_capacity(arr.len());
             for v in arr.iter() {
                 match v {
@@ -155,6 +155,13 @@ pub fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError
             }
             Ok(bytes)
         }
+        // Packed `[u8]` storage (the representation `[u8]` bindings use) and
+        // raw non-UTF-8 text fragments carry their bytes directly. The native
+        // runtime takes both as plain byte buffers; rejecting them here made
+        // every socket/file write of a packed `[u8]` fail with "argument 1
+        // must be bytes or string" on the seed.
+        Some(Value::ByteArray(bytes)) | Some(Value::FrozenByteArray(bytes)) => Ok(bytes.as_ref().clone()),
+        Some(Value::StrBytes(bytes)) => Ok(bytes.as_ref().clone()),
         Some(Value::Str(s)) => Ok(s.as_bytes().to_vec()),
         _ => Err(crate::error::factory::argument_must_be(idx, "bytes or string")),
     }
@@ -179,6 +186,42 @@ mod tests {
     fn extract_bytes_preserves_untyped_integer_compatibility() {
         let args = [Value::array(vec![Value::Int(1), Value::Int(258)])];
         assert_eq!(extract_bytes(&args, 0).unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn extract_bytes_accepts_packed_byte_arrays() {
+        let packed = [Value::byte_array(vec![0, 0x7f, 0xc3, 0xff])];
+        assert_eq!(extract_bytes(&packed, 0).unwrap(), vec![0, 0x7f, 0xc3, 0xff]);
+        let frozen = [Value::frozen_byte_array(vec![1, 255])];
+        assert_eq!(extract_bytes(&frozen, 0).unwrap(), vec![1, 255]);
+        let empty = [Value::byte_array(Vec::new())];
+        assert_eq!(extract_bytes(&empty, 0).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn extract_bytes_accepts_frozen_boxed_arrays_like_mutable_ones() {
+        let args = [Value::frozen_array(vec![Value::Int(1), Value::UInt { value: 255, width: 8 }])];
+        assert_eq!(extract_bytes(&args, 0).unwrap(), vec![1, 255]);
+        let bad = [Value::frozen_array(vec![Value::UInt { value: 1, width: 16 }])];
+        assert!(extract_bytes(&bad, 0).is_err());
+    }
+
+    #[test]
+    fn extract_bytes_keeps_raw_non_utf8_text_bytes_exact() {
+        // A split codepoint (0xC3 without its continuation byte) must not be
+        // rendered lossily as U+FFFD (EF BF BD).
+        let args = [Value::text_from_bytes(vec![b'h', 0xc3])];
+        assert!(matches!(args[0], Value::StrBytes(_)));
+        assert_eq!(extract_bytes(&args, 0).unwrap(), vec![b'h', 0xc3]);
+        let utf8 = [Value::text("h\u{e9}")];
+        assert_eq!(extract_bytes(&utf8, 0).unwrap(), vec![b'h', 0xc3, 0xa9]);
+    }
+
+    #[test]
+    fn extract_bytes_still_rejects_non_byte_values() {
+        let err = extract_bytes(&[Value::Int(7)], 0).unwrap_err().to_string();
+        assert!(err.contains("bytes or string"), "{err}");
+        assert!(extract_bytes(&[], 0).is_err());
     }
 
     #[test]
