@@ -10,6 +10,7 @@ use compiler.mir.hir_expression_artifact_v1.*
 use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.hir.hir_codec_key_order.{hc_order_symbol_id_keys_v1}
 use compiler.hir.hir_function_record_identity_v1.{mono_complete_function_digest_v1}
 use compiler.hir.hir_symbol_table_methods.*
 use compiler.hir.generated.hir_codec.*
@@ -110,15 +111,18 @@ fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1, 
     val complete = hir_module_encode(module)
     if complete == "" or sha256_text(complete) != digest:
         return Err("MIR declaration projection final body mismatch")
+    # Complete HIR encoding sorts identity-keyed dictionaries. Project in the
+    # same canonical order so independent decodes produce identical seals.
+    # Keep original key objects: copying a SymbolId loses dictionary identity.
     var functions: [MirHirFunctionDeclarationV1] = []
-    for raw_function in module.functions.values():
-        val function: HirFunction = raw_function
+    for key_function in hc_order_symbol_id_keys_v1(module.functions.keys()):
+        val function: HirFunction = module.functions[key_function]
         val projected = mir_hir_project_function_in_owned_scope_v1(context, module, authority, key, digest, function)
         if projected.is_err(): return Err(projected.unwrap_err())
         functions.push(projected.unwrap())
     var structs: [MirHirNominalDeclarationV1] = []
-    for raw_struct in module.structs.values():
-        val declaration: HirStruct = raw_struct
+    for key_struct in hc_order_symbol_id_keys_v1(module.structs.keys()):
+        val declaration: HirStruct = module.structs[key_struct]
         val projected = mir_hir_project_fields_in_owned_scope_v1(context, module, authority, key, digest,
             declaration.symbol.id, declaration.fields)
         if projected.is_err(): return Err(projected.unwrap_err())
@@ -131,8 +135,8 @@ fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1, 
             is_public: declaration.is_public, is_generic_template: declaration.is_generic_template,
             span: declaration.span))
     var classes: [MirHirNominalDeclarationV1] = []
-    for raw_class in module.classes.values():
-        val declaration: HirClass = raw_class
+    for key_class in hc_order_symbol_id_keys_v1(module.classes.keys()):
+        val declaration: HirClass = module.classes[key_class]
         val projected = mir_hir_project_fields_in_owned_scope_v1(context, module, authority, key, digest,
             declaration.symbol.id, declaration.fields)
         if projected.is_err(): return Err(projected.unwrap_err())
@@ -147,8 +151,8 @@ fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1, 
             export_attr: exported, visibility: declaration.visibility, is_public: declaration.is_public,
             is_generic_template: declaration.is_generic_template, span: declaration.span))
     var enums: [MirHirEnumDeclarationV1] = []
-    for raw_enum in module.enums.values():
-        val declaration: HirEnum = raw_enum
+    for key_enum in hc_order_symbol_id_keys_v1(module.enums.keys()):
+        val declaration: HirEnum = module.enums[key_enum]
         var variants: [MirHirVariantDeclarationV1] = []
         var variant_index = 0
         while variant_index < declaration.variants.len():
@@ -187,8 +191,8 @@ fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1, 
             visibility: declaration.visibility, is_public: declaration.is_public,
             is_generic_template: declaration.is_generic_template, span: declaration.span))
     var traits: [MirHirTraitDeclarationV1] = []
-    for raw_trait in module.traits.values():
-        val declaration: HirTrait = raw_trait
+    for key_trait in hc_order_symbol_id_keys_v1(module.traits.keys()):
+        val declaration: HirTrait = module.traits[key_trait]
         var methods: [MirHirFunctionDeclarationV1] = []
         var defaults: [MirHirFunctionDeclarationV1] = []
         for raw_method in declaration.methods:
@@ -208,7 +212,12 @@ fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1, 
             is_public: declaration.is_public, is_generic_template: declaration.is_generic_template,
             span: declaration.span))
     var globals: [MirHirGlobalDeclarationV1] = []
-    val constants: [HirConst] = module.constants.values()
+    var constants: [HirConst] = []
+    for key_constant in hc_order_symbol_id_keys_v1(module.constants.keys()):
+        constants.push(module.constants[key_constant])
+    var bitfields: [HirBitfield] = []
+    for key_bitfield in hc_order_symbol_id_keys_v1(module.bitfields.keys()):
+        bitfields.push(module.bitfields[key_bitfield])
     var needs_initialization = runtime_module_initializers_in_declaration_order(constants).len() > 0
     for raw_constant in constants:
         val constant: HirConst = raw_constant
@@ -230,7 +239,7 @@ fn mir_hir_project_module_in_owned_scope_v1(context: HirOwnedArtifactContextV1, 
     var result = MirHirModuleDeclarationsV1(name: module.name, path: module.path,
         final_repository_authority: authority, final_archive_key: key, final_body_digest: digest,
         symbols: module.symbols, functions: functions, structs: structs, classes: classes,
-        enums: enums, bitfields: module.bitfields.values(), traits: traits, impls: module.impls,
+        enums: enums, bitfields: bitfields, traits: traits, impls: module.impls,
         globals: globals, needs_initialization: needs_initialization, declaration_digest: "",
         stage: "mir-hir-module-declarations-v1", source_binding: source_binding)
     if not mir_hir_declaration_source_valid_v1(result):

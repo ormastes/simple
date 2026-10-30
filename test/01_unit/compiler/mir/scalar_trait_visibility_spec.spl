@@ -1,0 +1,30 @@
+# @req REQ-SSPEC-COMPILER
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirTypeKind, SymbolTable, SymbolKind, ScopeKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir._MirLowering.provider_metadata.{mir_scalar_trait_owner_key_v1, mir_visible_scalar_traits_v1, mir_trait_dispatch_identity}
+
+describe "native scalar trait declaration identity":
+    it "preserves primitive widths signedness and kind":
+        val signed64 = mir_scalar_trait_owner_key_v1(HirTypeKind.Int(64, true))
+        expect(signed64 == mir_scalar_trait_owner_key_v1(HirTypeKind.Int(32, true))).to_equal(false)
+        expect(signed64 == mir_scalar_trait_owner_key_v1(HirTypeKind.Int(64, false))).to_equal(false)
+        expect(signed64 == mir_scalar_trait_owner_key_v1(HirTypeKind.Bool)).to_equal(false)
+        expect(mir_scalar_trait_owner_key_v1(HirTypeKind.Infer(0, 0))).to_equal("")
+
+    it "admits a visible alias using the original declaration owner":
+        val symbols = SymbolTable.new()
+        val alias = symbols.define("Alias", SymbolKind.Trait, nil,
+            Span.empty(), Visibility.Public, false, Some("provider.spl"))
+        symbols.rename_symbol(alias, "Original")
+        val canonical = mir_trait_dispatch_identity(symbols.get_symbol_raw(alias.id).unwrap(), "consumer.spl")
+        val visible = mir_visible_scalar_traits_v1(symbols, "consumer.spl")
+        expect(visible.has(canonical)).to_equal(true)
+        expect(visible[canonical].id).to_equal(alias.id)
+        symbols.push_scope(ScopeKind.Block)
+        val shadow = symbols.define("Alias", SymbolKind.Variable, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        expect(shadow.id == alias.id).to_equal(false)
+        expect(mir_visible_scalar_traits_v1(symbols, "consumer.spl").has(canonical)).to_equal(false)
