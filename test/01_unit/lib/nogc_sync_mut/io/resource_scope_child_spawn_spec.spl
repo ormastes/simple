@@ -2,6 +2,8 @@ use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, ExecutionResour
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.common.perf.execution_metrics.{ResourceEvidenceQuality, ResourceBudget, TerminationCause}
 use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io_runtime.{host_os}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_is_simpleos}
 
 # The test runner's child path: _run_scoped_child (test_runner_execute.spl)
 # builds a Unit-class scope from standard_resource_budget and calls
@@ -55,6 +57,17 @@ describe "execution resource scope memory cap":
         val mechanism = resource_scope_memory_enforcement()
         val known = mechanism == "cgroup" or mechanism == "systemd-scope" or mechanism == "rlimit-as" or mechanism == "none"
         expect(known).to_be(true)
+
+    it "reports the mechanism the host can actually enforce, never a silent cap":
+        # SimpleOS: no hosted cgroup/ulimit, so the only honest answer is "none".
+        # macOS: RLIMIT_AS is unimplemented by Darwin -> "none" (runner also warns).
+        # Windows: no scope memory cap -> "none". Linux/FreeBSD: a real mechanism.
+        val mechanism = resource_scope_memory_enforcement()
+        val os = host_os()
+        if sosix_test_is_simpleos() or os == "macos" or os == "darwin" or os == "windows":
+            expect(mechanism).to_equal("none")
+        else:
+            expect(mechanism == "cgroup" or mechanism == "systemd-scope" or mechanism == "rlimit-as").to_be(true)
 
     it "does not fail a child that only reserves address space beyond the cap":
         # dd mallocs (mmaps) its whole 1 GiB input buffer and, reading from
