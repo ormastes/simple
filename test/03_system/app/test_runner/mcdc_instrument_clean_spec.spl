@@ -1,0 +1,70 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+"""
+# Specs that used to break the instrumented wrapper now instrument cleanly
+
+Three shapes made the MC/DC wrapper fail to compile and fall back to the
+interpreter: a stdlib namespace helper (`_namespace_finish` undefined), a
+struct-field access that the wrapper rewrote to `i64.recorder`, and a
+`.to_equal(false)` assertion rejected by a lint. Each must pass with no
+`degraded=` marker.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val NAMESPACE_SRC = "test/01_unit/fs_driver/instance_test.spl"
+val RECORDER = "use std.spec\nstruct Rec:\n    recorder: i64\n    count: i64\ndescribe \"recorder field\":\n    it \"reads a field named recorder\":\n        val r = Rec(recorder: 4, count: 2)\n        if r.recorder > 1 and r.count < 5:\n            expect(r.recorder).to_equal(4)\n"
+val FALSE_EQ = "use std.spec\ndescribe \"to_equal false\":\n    it \"asserts a false boolean\":\n        val a = 3\n        expect(a > 5).to_equal(false)\n        expect(a < 2 or a > 9).to_equal(false)\n"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn make_case(case: text, name: text, body: text) -> text:
+    val dir = "build/mcdc_kind/" + case
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    file_write(dir + "/" + name + "_spec.spl", body)
+    dir
+
+fn run_dir(dir: text) -> (text, i64):
+    val argv = [real_binary(), "test", dir, "--no-db", "--no-cache", "--assert-ran"]
+    val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
+    (out + err, code)
+
+fn verdict_line(output: text) -> text:
+    for line in output.split("\n"):
+        if line.starts_with("SPEC FILE VERDICT:"):
+            return line
+    ""
+
+describe "instrumented wrapper compiles":
+    it "handles a spec importing the namespace module (no _namespace_finish undefined)":
+        step("Run the fs_driver instance spec, which pulls in the namespace module")
+        val dir = make_case("clean_namespace", "ns", "")
+        process_run_bounded("cp", [NAMESPACE_SRC, dir + "/ns_spec.spl"], 10000, 65536)
+        val (output, _code) = run_dir(dir)
+        expect(output.contains("_namespace_finish")).to_equal(false)
+        expect(verdict_line(output).contains("degraded=")).to_equal(false)
+
+    it "handles a struct field named recorder (no i64 has no field recorder)":
+        step("Run the recorder-field fixture")
+        val dir = make_case("clean_recorder", "rec", RECORDER)
+        val (output, _code) = run_dir(dir)
+        expect(output.contains("has_no_field_named_`recorder`")).to_equal(false)
+        expect(output.contains("has no field named `recorder`")).to_equal(false)
+        expect(verdict_line(output)).to_contain("passed=1")
+        expect(verdict_line(output).contains("degraded=")).to_equal(false)
+
+    it "handles .to_equal(false) assertions in the wrapper":
+        step("Run the to_equal(false) fixture")
+        val dir = make_case("clean_false", "fe", FALSE_EQ)
+        val (output, _code) = run_dir(dir)
+        expect(output.contains("spipe_false_boolean_wrapper_assertions")).to_equal(false)
+        expect(verdict_line(output)).to_contain("passed=1")
+        expect(verdict_line(output).contains("degraded=")).to_equal(false)

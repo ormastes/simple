@@ -1,0 +1,113 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+"""
+# Instrumentation failure is an explicit degrade; a red spec stays FAIL
+
+When the instrumented MC/DC compile cannot handle a spec, the runner may fall
+back to the interpreter only if it says so on the verdict line and in the
+output. It must never present that run as MC/DC-covered. A genuinely failing
+spec must stay FAIL on every path, instrumented or degraded.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val GREEN = "use std.spec\ndescribe \"g\":\n    it \"green\":\n        val a = 3\n        if a > 1 and a < 5:\n            expect(a).to_equal(3)\n"
+val RED = "use std.spec\ndescribe \"r\":\n    it \"red\":\n        val a = 3\n        if a > 1 and a < 5:\n            expect(a).to_equal(4)\n"
+val UNDEFINED = "use std.spec\ndescribe \"u\":\n    it \"calls an undefined function\":\n        val a = 3\n        if a > 1 and a < 5:\n            expect(mcdc_kind_undefined_fn_zz(a)).to_equal(3)\n"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn make_case(case: text, name: text, body: text) -> text:
+    val dir = "build/mcdc_kind/" + case
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    file_write(dir + "/" + name + "_spec.spl", body)
+    dir
+
+fn run_dir(dir: text, envs: [text], extra: [text]) -> (text, i64):
+    val argv = envs + [real_binary(), "test", dir, "--no-db", "--no-cache", "--assert-ran"] + extra
+    val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
+    (out + err, code)
+
+fn verdict_line(output: text) -> text:
+    for line in output.split("\n"):
+        if line.starts_with("SPEC FILE VERDICT:"):
+            return line
+    ""
+
+describe "instrumentation failure is explicit":
+    it "marks a spec that cannot compile standalone with degraded= on the verdict line":
+        step("Run a spec the standalone SMF compile cannot handle")
+        val dir = make_case("degrade_undefined", "u", UNDEFINED)
+        val (output, code) = run_dir(dir, [], [])
+        val verdict = verdict_line(output)
+        expect(verdict).to_contain("degraded=")
+        expect(code == 0).to_equal(false)
+
+    it "prints the [mcdc-fallback] line whenever it degrades":
+        step("Look for the human-readable degrade line")
+        val dir = make_case("degrade_line", "u", UNDEFINED)
+        val (output, _code) = run_dir(dir, [], [])
+        if verdict_line(output).contains("degraded="):
+            expect(output).to_contain("[mcdc-fallback]")
+
+    it "never claims MC/DC evidence for a degraded run":
+        step("A degraded run must not also print an MC/DC pass claim")
+        val dir = make_case("degrade_no_claim", "u", UNDEFINED)
+        val (output, _code) = run_dir(dir, [], [])
+        if verdict_line(output).contains("degraded="):
+            expect(output.contains("MC/DC: all decisions covered")).to_equal(false)
+            expect(output.contains("mcdc=covered")).to_equal(false)
+
+    it "does not degrade a clean green spec":
+        step("A green spec instruments without a degrade")
+        val dir = make_case("degrade_clean_green", "g", GREEN)
+        val (output, _code) = run_dir(dir, [], [])
+        expect(verdict_line(output)).to_contain("passed=1")
+        expect(verdict_line(output).contains("degraded=")).to_equal(false)
+
+describe "a red spec stays FAIL under MC/DC":
+    it "reports failed=1 and a non-zero exit":
+        step("Run a failing spec through the directory lane")
+        val dir = make_case("red_basic", "r", RED)
+        val (output, code) = run_dir(dir, [], [])
+        val verdict = verdict_line(output)
+        expect(verdict).to_contain("failed=1")
+        expect(verdict.contains("outcome=OK")).to_equal(false)
+        expect(code == 0).to_equal(false)
+
+    it "stays FAIL when the mode is explicitly on":
+        step("Red under SIMPLE_MCDC_MODE=on")
+        val dir = make_case("red_on", "r", RED)
+        val (output, code) = run_dir(dir, ["SIMPLE_MCDC_MODE=on"], [])
+        expect(verdict_line(output)).to_contain("failed=1")
+        expect(code == 0).to_equal(false)
+
+    it "stays FAIL when the mode is dynamic":
+        step("Red under SIMPLE_MCDC_MODE=dynamic")
+        val dir = make_case("red_dynamic", "r", RED)
+        val (output, code) = run_dir(dir, ["SIMPLE_MCDC_MODE=dynamic"], [])
+        expect(verdict_line(output)).to_contain("failed=1")
+        expect(code == 0).to_equal(false)
+
+    it "stays FAIL when the instrumented compile degrades":
+        step("Red and uncompilable at once")
+        val dir = make_case("red_degraded", "u", UNDEFINED.replace("to_equal(3)", "to_equal(4)"))
+        val (output, code) = run_dir(dir, [], [])
+        expect(verdict_line(output).contains("outcome=OK")).to_equal(false)
+        expect(code == 0).to_equal(false)
+
+    it "does not let a green sibling mask a red spec":
+        step("Two specs in one directory, one red")
+        val dir = make_case("red_sibling", "r", RED)
+        file_write(dir + "/g_spec.spl", GREEN)
+        val (output, code) = run_dir(dir, [], [])
+        expect(output).to_contain("failed=1")
+        expect(code == 0).to_equal(false)
