@@ -28,6 +28,7 @@ use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64, MapError}
 use std.nogc_async_mut.async_ring.async_ref.{AsyncRefI64, AsyncRefError, AsyncRefStateI64}
 
 const _TLDR_ASYNC_RECIPE_ID: i64 = 84517001
+const _TLDR_ASYNC_SOURCE_FAILURE_CODE: i64 = -84517001
 
 pub enum TldrAsyncErrorV1:
     Disabled
@@ -36,6 +37,7 @@ pub enum TldrAsyncErrorV1:
     Conflict
     Directory(MapError)
     Outcome(AsyncRefError)
+    Source(text)
     ForeignReference
     ArtifactMismatch
 
@@ -52,19 +54,21 @@ class TldrTableV1:
     ids: IdScopeV1
     async_map: LocklessMapI64?
     async_ids: Dict<text, i64>
+    async_failures: Dict<text, text>
     async_next_id: i64
     async_capacity: i64
 
     static fn create() -> TldrTableV1:
         TldrTableV1(entries: {}, requested: {}, fill_queue: [], ids: id_scope_global_v1(),
-            async_map: nil, async_ids: {}, async_next_id: 1, async_capacity: 0)
+            async_map: nil, async_ids: {}, async_failures: {}, async_next_id: 1, async_capacity: 0)
 
     pub static fn create_async(capacity: i64, waiter_capacity: i64) -> Result<TldrTableV1, MapError>:
         match LocklessMapI64.create(capacity, capacity, capacity, waiter_capacity):
             case Err(error): Err(error)
             case Ok(map):
                 Ok(TldrTableV1(entries: {}, requested: {}, fill_queue: [], ids: id_scope_global_v1(),
-                    async_map: Some(map), async_ids: {}, async_next_id: 1, async_capacity: capacity))
+                    async_map: Some(map), async_ids: {}, async_failures: {},
+                    async_next_id: 1, async_capacity: capacity))
 
     # Uninitialised pointer to `decl` in the module with `module_key`.
     me handle(module_key: text, decl: text) -> TldrHandleV1:
@@ -155,21 +159,82 @@ class TldrTableV1:
         val id = self.async_ids[module_key]
         if self.entries.contains_key(module_key) and self.entries[module_key] != tldr:
             return Err(TldrAsyncErrorV1.Conflict)
-        if not self.entries.contains_key(module_key):
-            self.entries[module_key] = tldr
-
         match reference.try_ready():
             case AsyncRefStateI64.Ready(value):
                 if value != id:
                     return Err(TldrAsyncErrorV1.ArtifactMismatch)
-            case AsyncRefStateI64.Failed(code):
-                return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.Failed(code)))
+                if not self.entries.contains_key(module_key):
+                    return Err(TldrAsyncErrorV1.ArtifactMismatch)
+                if self.requested.contains_key(module_key):
+                    self.requested.remove(module_key)
+                return Ok(true)
+            case AsyncRefStateI64.Failed(_):
+                return Err(TldrAsyncErrorV1.Conflict)
             case AsyncRefStateI64.InvalidReference:
                 return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.InvalidReference))
             case AsyncRefStateI64.Pending:
+                if not self.entries.contains_key(module_key):
+                    self.entries[module_key] = tldr
                 match reference.complete(id):
                     case Err(error): return Err(TldrAsyncErrorV1.Outcome(error))
-                    case Ok(_): ()
+                    case Ok(true): ()
+                    case Ok(false):
+                        match reference.try_ready():
+                            case AsyncRefStateI64.Ready(value):
+                                if value != id:
+                                    return Err(TldrAsyncErrorV1.ArtifactMismatch)
+                            case AsyncRefStateI64.Failed(_):
+                                return Err(TldrAsyncErrorV1.Conflict)
+                            case AsyncRefStateI64.InvalidReference:
+                                return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.InvalidReference))
+                            case AsyncRefStateI64.Pending:
+                                return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.NotStarted))
+        if self.requested.contains_key(module_key):
+            self.requested.remove(module_key)
+        Ok(true)
+
+    # Source failures are terminal for this key in this table scope. A retry
+    # requires a new table scope; the old reference never changes meaning.
+    @unsafe(reason: "the table is sole terminal publisher for its live AsyncRef map", capabilities: [ffi])
+    pub me fail_async(module_key: text, source_error: text) -> Result<bool, TldrAsyncErrorV1>:
+        if self.async_map == nil:
+            return Err(TldrAsyncErrorV1.Disabled)
+        if module_key == "" or source_error == "":
+            return Err(TldrAsyncErrorV1.InvalidHandle)
+        val reference = match self.async_fill_reference(module_key):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        match reference.try_ready():
+            case AsyncRefStateI64.Ready(_):
+                return Err(TldrAsyncErrorV1.Conflict)
+            case AsyncRefStateI64.Failed(code):
+                if (code == _TLDR_ASYNC_SOURCE_FAILURE_CODE and
+                    self.async_failures.contains_key(module_key) and
+                    self.async_failures[module_key] == source_error):
+                    return Ok(true)
+                return Err(TldrAsyncErrorV1.Conflict)
+            case AsyncRefStateI64.InvalidReference:
+                return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.InvalidReference))
+            case AsyncRefStateI64.Pending: ()
+
+        self.async_failures[module_key] = source_error
+        match reference.fail(_TLDR_ASYNC_SOURCE_FAILURE_CODE):
+            case Err(error): return Err(TldrAsyncErrorV1.Outcome(error))
+            case Ok(true): ()
+            case Ok(false):
+                match reference.try_ready():
+                    case AsyncRefStateI64.Failed(code):
+                        if (code == _TLDR_ASYNC_SOURCE_FAILURE_CODE and
+                            self.async_failures[module_key] == source_error):
+                            ()
+                        else:
+                            return Err(TldrAsyncErrorV1.Conflict)
+                    case AsyncRefStateI64.Ready(_):
+                        return Err(TldrAsyncErrorV1.Conflict)
+                    case AsyncRefStateI64.InvalidReference:
+                        return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.InvalidReference))
+                    case AsyncRefStateI64.Pending:
+                        return Err(TldrAsyncErrorV1.Outcome(AsyncRefError.NotStarted))
         if self.requested.contains_key(module_key):
             self.requested.remove(module_key)
         Ok(true)
@@ -191,7 +256,12 @@ class TldrTableV1:
                 Err(TldrAsyncErrorV1.Outcome(AsyncRefError.InvalidReference))
             case AsyncRefStateI64.Pending: Ok(nil)
             case AsyncRefStateI64.Failed(code):
-                Err(TldrAsyncErrorV1.Outcome(AsyncRefError.Failed(code)))
+                if code == _TLDR_ASYNC_SOURCE_FAILURE_CODE:
+                    if not self.async_failures.contains_key(h.module_key) or self.async_failures[h.module_key] == "":
+                        return Err(TldrAsyncErrorV1.ArtifactMismatch)
+                    Err(TldrAsyncErrorV1.Source(self.async_failures[h.module_key]))
+                else:
+                    Err(TldrAsyncErrorV1.Outcome(AsyncRefError.Failed(code)))
             case AsyncRefStateI64.Ready(value):
                 if value != expected_id or not self.entries.contains_key(h.module_key):
                     return Err(TldrAsyncErrorV1.ArtifactMismatch)
@@ -204,6 +274,7 @@ class TldrTableV1:
             case nil: ()
         self.async_map = nil
         self.async_ids = {}
+        self.async_failures = {}
         self.async_next_id = 1
         self.async_capacity = 0
 

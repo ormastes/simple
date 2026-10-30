@@ -1,6 +1,6 @@
 # Reader-backed table publication. Keep source loading outside the storage owner
 # so worker surface cache users do not import the full frontend.
-use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrAsyncErrorV1}
 use compiler.driver.cache.source_reader_v1.{SourceReader}
 use std.nogc_async_mut.async_ring.async_ref.{AsyncRefStateI64}
 
@@ -41,13 +41,22 @@ pub fn tldr_table_fill_async_v1<R: SourceReader>(table: TldrTableV1, reader: R,
                 case Ok(nil): return "ready async tldr has no table artifact: {module_key}"
                 case Err(error): return "async tldr ready validation failed for {module_key}: {error}"
         case AsyncRefStateI64.Failed(code):
-            return "async tldr claim already failed for {module_key}: {code}"
+            match table.resolve_async(table.handle(module_key, ""), reference):
+                case Err(TldrAsyncErrorV1.Source(source_error)): return source_error
+                case Err(error): return "async tldr claim already failed for {module_key} ({code}): {error}"
+                case _: return "async tldr claim already failed for {module_key}: {code}"
         case AsyncRefStateI64.InvalidReference:
             return "async tldr claim is invalid for {module_key}"
         case AsyncRefStateI64.Pending: ()
 
     match _tldr_read_or_update(reader, source_path):
-        case Err(error): error
+        case Err(source_error):
+            match table.fail_async(module_key, source_error):
+                case Ok(true): source_error
+                case Ok(false):
+                    "source read failed for {module_key}: {source_error}; async failure was not published"
+                case Err(error):
+                    "source read failed for {module_key}: {source_error}; async failure publication failed: {error}"
         case Ok(tldr):
             match table.publish_async(module_key, tldr):
                 case Ok(true): ""

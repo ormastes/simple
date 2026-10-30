@@ -2,6 +2,33 @@ use std.spec.{describe, it, expect}
 use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrAsyncErrorV1}
 
 describe "bounded TLDR async owner admission":
+    it "terminalizes one source failure immutably with exact diagnostic identity":
+        unsafe(capabilities: [ffi]):
+            val table = TldrTableV1.create_async(2, 2).unwrap()
+            val handle = table.handle("module-failed", "Broken")
+            match table.fail_async("unclaimed-module", "source not found"):
+                case Err(TldrAsyncErrorV1.MissingClaim): ()
+                case other: fail("source failure created an implicit async claim: {other}")
+            val reference = table.request_async(handle).unwrap()
+            expect(table.take_fill_requests()).to_equal(["module-failed"])
+            val diagnostic = "source not found: missing.spl"
+            expect(table.fail_async("module-failed", diagnostic).unwrap()).to_equal(true)
+            expect(table.fail_async("module-failed", diagnostic).unwrap()).to_equal(true)
+            match table.fail_async("module-failed", "different source error"):
+                case Err(TldrAsyncErrorV1.Conflict): ()
+                case other: fail("terminal source diagnostic changed: {other}")
+            match table.publish_async("module-failed", "late TLDR"):
+                case Err(TldrAsyncErrorV1.Conflict): ()
+                case other: fail("failed claim accepted late artifact text: {other}")
+            expect(table.is_loaded("module-failed")).to_equal(false)
+            match table.resolve_async(handle, reference):
+                case Err(TldrAsyncErrorV1.Source(observed)): expect(observed).to_equal(diagnostic)
+                case other: fail("source failure identity was not preserved: {other}")
+            val repeated = table.request_async(handle).unwrap()
+            expect(repeated.same_reference(reference)).to_equal(true)
+            expect(table.take_fill_requests().len()).to_equal(0)
+            table.close_async_quiescent()
+
     it "keeps one canonical reference and one fill claim for repeated module handles":
         unsafe(capabilities: [ffi]):
             val table = TldrTableV1.create_async(2, 2).unwrap()
