@@ -5,14 +5,65 @@ source_ref: "explicit git fetch origin release/1.0.0 FETCH_HEAD"
 status: "AUTHORED_UNRUN"
 runner_path: "UNBOUND"
 runner_sha256: "UNBOUND"
-runner_required: "qualified pure-Simple Linux full CLI; buildrunner-only CLI and Rust seed are inadmissible"
+runner_required: "provisional pure-Simple Linux full CLI after real Hello and the readiness controls below; buildrunner-only CLI and Rust seed are inadmissible"
 backend: "llvm"
 execution_order: "sequential in an isolated checkout at source_revision; fixed fixture paths must not race"
 result_policy: "exit 0 AND exact expected cases executed AND zero failures/skips/todos; zero cases is failure"
 repeat_policy: "run each case once; no successful-case reruns; repairs require changed implementation or new evidence"
-command_binding: "Set ACCEPTANCE_RUNTIME to the admitted full CLI absolute path; record its SHA-256 and native provider before substituting commands"
-common_dependencies: ["full_cli_hello_admission", "native_llvm_backend", "sspec_native_runner", "qualified_linux_native_hal", "isolated_writable_build_directory"]
+command_binding: "Set ACCEPTANCE_RUNTIME to the provisional full CLI absolute path; record SHA-256, producer source revision, test source revision and native provider; verify native invocation receipt uses that exact binary/digest"
+common_dependencies: ["real_hello_provisional_readiness", "native_llvm_green_red_controls", "sspec_native_runner", "provider_capabilities_for_selected_suite", "isolated_writable_build_directory"]
 commands_are_executed: false
+readiness:
+  state: "UNRUN"
+  qualification: "Passing controls permits provisional feature-test execution only; all results remain bound to producer/source and provisional until the full required gates pass"
+  hello_prerequisite: "Root records actual Hello compile and native execution with exact output, exit 0 and producer identity; no count credit toward SSpec"
+  provider_rule: "LLVM must compile and directly run both controls on the actual native provider. Cranelift-only capability leaves this LLVM inventory BLOCKED; interpreter/SMF/Hello does not qualify LLVM"
+  backend_alternative: "If root chooses Cranelift, use existing --native-backend=cranelift on both controls and every selected suite, preserve separate backend receipts/artifacts, and record a new backend-bound execution inventory. No automatic fallback"
+  stop_rule: "Stop before feature suites if either control has wrong exit/count, zero execution, skipped cases, missing native receipt or wrong producer"
+  controls_excluded_from_feature_case_count: true
+  controls:
+    - path: "test/fixtures/test_runner/native_completion/real_green_spec.spl"
+      expected_executed: 2
+      expected_passed: 2
+      expected_failed: 0
+      expected_skipped: 0
+      expected_exit: 0
+      independent_oracle: "2+3 equals 5 and 7-2 equals 5; exact structured completion count 2 and direct native executable receipt"
+      command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/fixtures/test_runner/native_completion/real_green_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    - path: "test/fixtures/test_runner/native_completion/real_red_spec.spl"
+      expected_executed: 1
+      expected_passed: 0
+      expected_failed: 1
+      expected_skipped: 0
+      expected_exit: 1
+      independent_oracle: "2+3 deliberately compared with 6 must produce an actual assertion failure; compile/provider error is not the expected red result"
+      command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/fixtures/test_runner/native_completion/real_red_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+compiler_binding:
+  required_env: "SIMPLE_BINARY and SIMPLE_TEST_BINARY both name ACCEPTANCE_RUNTIME; SIMPLE_NO_BOOTSTRAP_DELEGATE=1; no stale external compiler selection"
+  owner_selection: "src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:240 _test_child_binary -> find_simple_binary; test_executor_parsing.spl:209 explicitly prioritizes SIMPLE_BINARY/SIMPLE_RUNTIME"
+  owner_admission: "test_runner_execute.spl:1110 explicit AOT requires SIMPLE_BINARY; :1120 hashes producer bytes; :1237 _run_scoped_child invokes binary with native compile args"
+  evidence_required: "Verbose native_test_invocation_receipt must match absolute compiler path, producer SHA-256, explicit backend, source, artifact and argv; record runtime-library identity if SIMPLE_RUNTIME_PATH is needed"
+  optional_existing_selector: "--compiler=phase2 exists with SIMPLE_PHASE2_FULL_CLI and SIMPLE_PHASE2_FULL_CLI_SHA256 validation (compiler_select.spl); this inventory instead binds the invoking provisional full CLI directly via SIMPLE_BINARY"
+cache_policy:
+  no_cache_meaning: "--no-cache disables file-discovery/result reuse; daemon path maps it to clean result admission. It does not request deleting compiler artifact caches"
+  owner_options: "src/lib/nogc_sync_mut/test_runner/test_runner_args.spl:609 no_cache; :615 clean is a separate flag; :443 force_rebuild is separate"
+  owner_result_cache: "src/app/test_runner_new/test_runner_main.spl:378 discovery use_cache; :1183-1192 no_cache bypasses daemon incremental results"
+  no_destructive_clean_requested: true
+  actual_native_cost: "Independent of --no-cache, current explicit AOT owner stages each spec and builds a timestamped per-spec executable; native_compile_contract.spl:95-104 passes --cache-dir artifact_path.cache and --refresh-source-authority. Forty suite commands mean forty native-build admissions plus two controls, not guaranteed warm shared compiler builds"
+  cost_gate: "Root schedules a bounded subset only after control compile time/resources are measured; retain --keep-artifacts and all existing caches. Do not launch forty cold admissions merely because this inventory lists them"
+  missing_policy: "No existing shared AOT artifact-cache override was established in the inspected option/compile owners; do not invent a flag, remove --no-cache to replay results, or claim reuse without evidence"
+resource_budget:
+  compiler_threads: 1
+  compiler_threads_owner: "native_compile_contract.spl native_test_compile_threads reads SIMPLE_NATIVE_BUILD_THREADS; positive decimal only"
+  concurrent_spec_processes: 1
+  controls_native_compile_admissions: 2
+  feature_native_compile_admissions_upper_bound: 40
+  planned_feature_cases: 211
+  controls_excluded_cases: 3
+  deadline_utc: "2026-10-31 01:53:43 UTC"
+  measurement_required: "Preserve native invocation receipt, artifact/cache paths, elapsed compile/run wall time, resource-limit outcome and available peak-RSS/process evidence for each control; absence of RSS measurement is unknown, never zero"
+  scheduling: "After controls, root chooses a finite dependency-ready subset fitting remaining time/resources; report unstarted files UNRUN. Keep current source/producer/backend binding and original expected counts"
+  stop: "Any readiness mismatch stops native evidence; timeout/resource failure is failure, not an empty or skipped pass. Do not retry unchanged commands or erase retained caches to retry"
 expected_suite_count: 40
 expected_total_case_count: 211
 suites:
@@ -24,7 +75,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Enumerate 49 sealed forward generations and compare inverse relation with independent forward-set oracle; unsealed input cannot yield Exact."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/00_formal_verification/compiler/reverse_reference_inverse_bounded_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/00_formal_verification/compiler/reverse_reference_inverse_bounded_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "matches the forward relation exactly for all 49 sealed generations"
       - "rejects an unsealed consumer despite a prior receipt"
@@ -39,7 +90,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact canonical key set, distinct consumer counts, type/demand metadata and retirement; 3000 logical users is sequential model evidence, not concurrent requests."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/cache/generic_instance_build_plan_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/cache/generic_instance_build_plan_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "counts distinct module users and preserves exact instance keys"
       - "models 3000 logical users without calling it concurrent execution"
@@ -54,7 +105,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Real companion/parse manifest projection with exact definition/use table and freshness state; stale/missing imports remain incomplete, not known empty."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/cache/module_tldr_macro_sections_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/cache/module_tldr_macro_sections_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "render and parse back to the sealed def/use tables"
       - "records a fresh empty macro-use table explicitly"
@@ -66,7 +117,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact dependent sets, family/generation separation and explicit Unknown on incomplete/failed producer; compare independent authored forward manifests; do not infer full compiler re-expansion."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/cache/reverse_reference_projection_v2_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/cache/reverse_reference_projection_v2_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "admits the new query kinds"
       - "distinguishes positive, absence and membership reads on the wire"
@@ -90,7 +141,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Compare selector digest/canonical values and real matcher behavior; exact parse/hit/eviction counters; membership/guard changes force shard miss without selector reparse; negative becomes matching."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/aop_selector_plan_cache_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/aop_selector_plan_cache_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "parses once for an exact source hit and returns the same plan"
       - "canonicalizes equivalent spellings to one retained semantic plan"
@@ -108,7 +159,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Real companion/parse manifest projection with exact definition/use table and freshness state; stale/missing imports remain incomplete, not known empty."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/module_tldr_macro_imports_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/module_tldr_macro_imports_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "resolves a macro defined in an imported module's fresh companion"
       - "a stale import companion keeps negative lookups conservative"
@@ -122,7 +173,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact producer call count, demanded key inventory and linked object set; failed/incomplete inventories preserve committed state; not standalone full generic compiler qualification."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/native_file_worker_instances_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/native_file_worker_instances_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "two consumers of one key build it once"
       - "unchanged lists build zero instances and place the cached objects"
@@ -140,7 +191,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact shared reference/fill queue and immutable source diagnostic; invalid and foreign handles rejected."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/tldr_table_async_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/tldr_table_async_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "terminalizes one source failure immutably with exact diagnostic identity"
       - "keeps one canonical reference and one fill claim for repeated module handles"
@@ -153,7 +204,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Inspect real parser AST tags, callee names, scoped capabilities, argument values and following statements; malformed forms must set parser errors; 8 cases, not source-string matching."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/frontend/unsafe_call_argument_parser_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/frontend/unsafe_call_argument_parser_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "parses exact positional Ok unsafe argument and preserves body calls and constants"
       - "parses nested positional and method arguments with unsafe and danger capabilities"
@@ -171,7 +222,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Actual HIR indices/body/signature and exact retained/emitted template identity; untouched ordinary/unresolved functions remain; not all generic semantics."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/hir/hir_function_selection_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/hir/hir_function_selection_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "orders real HIR function value indices by ascending symbol id stably"
       - "classifies generic declarations by a non-empty type parameter list"
@@ -185,7 +236,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Actual HIR indices/body/signature and exact retained/emitted template identity; untouched ordinary/unresolved functions remain; not all generic semantics."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/mono/retained_template_demand_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/mono/retained_template_demand_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "projects canonical signature parity without changing body or default"
       - "normalizes nested parameter references without erasing nominal owner"
@@ -198,7 +249,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact Missing/Unsupported/error variants for absent, malformed or unadmitted receipts; rejection is not native child execution proof."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/common/process_observation_untrusted_receipts_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/common/process_observation_untrusted_receipts_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "should mark an absent receipt as missing"
       - "should reject legacy success-shaped and malformed receipt words"
@@ -210,7 +261,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact host reservation counts and pending statuses; overflowing one host cannot borrow another capacity; system case preserves journal bytes and forbids process calls."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/common/task_runner/recovery_capacity_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/common/task_runner/recovery_capacity_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "rejects two active leases on a one-slot host"
       - "counts reaped and unresolved leases before recovering them as running"
@@ -224,7 +275,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact host reservation counts and pending statuses; overflowing one host cannot borrow another capacity; system case preserves journal bytes and forbids process calls."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/common/task_runner/recovery_host_boundaries_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/common/task_runner/recovery_host_boundaries_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "should accept exactly the configured slots for one host"
       - "should reject one host overflowing while another has spare capacity"
@@ -237,7 +288,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact terminal status and retry/reservation state; parent-observed output digest mismatch/missing output rejects; every expected output required for success."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/common/task_runner/result_admission_failure_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/common/task_runner/result_admission_failure_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "should preserve a valid error receipt as failed work"
       - "should reject a partial output receipt without releasing its reaped reservation"
@@ -252,7 +303,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact canonical reference, signed terminal payload/error, ring slot and generation, completion count and reservation lifecycle; no fabricated wake receipts."
     dependencies: ["common_dependencies", "AsyncRef_native_atomics", "SimpleRing_software_provider"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/async_ref_interest_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/async_ref_interest_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "should reject a zero ring id without consuming a live reservation"
       - "should reject a zero generation without consuming a live reservation"
@@ -264,7 +315,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact canonical reference, signed terminal payload/error, ring slot and generation, completion count and reservation lifecycle; no fabricated wake receipts."
     dependencies: ["common_dependencies", "AsyncRef_native_atomics", "SimpleRing_software_provider"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/async_ref_invalid_reference_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/async_ref_invalid_reference_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "rejects invalid entries without confusing them with valid pending work"
   - path: "test/01_unit/lib/nogc_async_mut/async_ref_terminal_contract_spec.spl"
@@ -275,7 +326,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact canonical reference, signed terminal payload/error, ring slot and generation, completion count and reservation lifecycle; no fabricated wake receipts."
     dependencies: ["common_dependencies", "AsyncRef_native_atomics", "SimpleRing_software_provider"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/async_ref_terminal_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/async_ref_terminal_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "rejects publication before start and leaves the reference pending"
       - "keeps the first successful publication against later attempts"
@@ -289,7 +340,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact resource uniqueness, generation/owner lease rejection and release/close states; awaiting acquire receives released resource."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/async_resource_pool_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/async_resource_pool_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "hands out each resource once"
       - "AsyncResourcePool requires at least one resource"
@@ -308,7 +359,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact inserted/replaced/deleted signed key values, length and capacity; invalid/reserved keys fail with specified error."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/atomic_map_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/atomic_map_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "creates an empty map of the requested power-of-two capacity"
       - "refuses a zero, negative or non-power-of-two capacity with the exact message"
@@ -334,7 +385,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact canonical reference, signed terminal payload/error, ring slot and generation, completion count and reservation lifecycle; no fabricated wake receipts."
     dependencies: ["common_dependencies", "AsyncRef_native_atomics", "SimpleRing_software_provider"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/lockless_map_boundary_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/lockless_map_boundary_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "keeps a same-key request stable after the key directory is full"
       - "does not recycle a descriptor after completion and distinguishes exhaustion"
@@ -349,7 +400,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Assertions in named production-owner scenario; inspect retained per-case result, do not infer broader runtime coverage."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_sync_mut/sosix/cache_namespace_publication_v3_source_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_sync_mut/sosix/cache_namespace_publication_v3_source_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "re-exports only the existing namespace authority owner surface"
       - "preserves the existing negative commit and recovery status mapping"
@@ -361,7 +412,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Independently computed task identity changes for one-byte argv mutation; codec retains exact fields; forged identity and old wire header reject; does not execute Hello."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/bootstrap_builder/hello_task_wire_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/bootstrap_builder/hello_task_wire_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "carries the hello task to the worker with the same identity"
       - "changes the task identity when one argument byte is flipped"
@@ -376,7 +427,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact worker result OK/0 and TIMEOUT/124; output SHA-256; decoded process evidence timed-out; kill -0 fails for reaped pid; all 3 cases executed with no conditional skips."
     dependencies: ["common_dependencies", "admitted_process_observation_v4", "host_/bin/cp_/bin/sleep_/bin/kill", "real_child_process_custody"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/bootstrap_builder/worker_timeout_cleanup_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/bootstrap_builder/worker_timeout_cleanup_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "refuses a task whose timeout exceeds the seven-day bound"
       - "reports OK for a producer that finishes inside its timeout"
@@ -389,7 +440,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact host reservation counts and pending statuses; overflowing one host cannot borrow another capacity; system case preserves journal bytes and forbids process calls."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/buildrunner/recovery_capacity_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/buildrunner/recovery_capacity_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "rejects overbooking through the production build adapter"
       - "preserves valid occupied slots and leaves pending work undispatched"
@@ -401,7 +452,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact host reservation counts and pending statuses; overflowing one host cannot borrow another capacity; system case preserves journal bytes and forbids process calls."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/buildrunner/recovery_host_boundaries_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/buildrunner/recovery_host_boundaries_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "should keep another host available when one restored host reaches its limit"
   - path: "test/02_integration/app/buildrunner/result_admission_failure_contract_spec.spl"
@@ -412,7 +463,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact terminal status and retry/reservation state; parent-observed output digest mismatch/missing output rejects; every expected output required for success."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/buildrunner/result_admission_failure_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/app/buildrunner/result_admission_failure_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "should preserve failed build status through the adapter"
       - "should reject incomplete output evidence before reporting success"
@@ -424,7 +475,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact dependent sets, family/generation separation and explicit Unknown on incomplete/failed producer; compare independent authored forward manifests; do not infer full compiler re-expansion."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/compiler/cache/reverse_reference_macro_generic_lifecycle_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/compiler/cache/reverse_reference_macro_generic_lifecycle_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "inverts parser-produced macro users from a fresh module companion"
       - "reports Unknown when any forward producer is unsealed"
@@ -436,7 +487,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact dependent sets, family/generation separation and explicit Unknown on incomplete/failed producer; compare independent authored forward manifests; do not infer full compiler re-expansion."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/compiler/cache/reverse_reference_projection_receipt_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/compiler/cache/reverse_reference_projection_receipt_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "records exact facts through every typed registration API"
       - "persists every owner-published family through the BuildCache writer"
@@ -472,7 +523,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Real source reader/table owner: one fill claim, exact shared reference and artifact text, two distinct ring slot/generation completions, terminal source diagnostic, unrelated progress; not FileFiber carrier integration."
     dependencies: ["common_dependencies", "retained_file_io", "parser_and_tldr_producer", "SimpleRing_software_provider", "AsyncRef_native_atomics"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/compiler/driver/cache/tldr_waiter_publication_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/compiler/driver/cache/tldr_waiter_publication_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "terminalizes one missing-source failure for both waiters and retries only in a new table"
       - "rejects an unclaimed fill and skips source work for a ready table hit"
@@ -485,7 +536,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact canonical reference, signed terminal payload/error, ring slot and generation, completion count and reservation lifecycle; no fabricated wake receipts."
     dependencies: ["common_dependencies", "AsyncRef_native_atomics", "SimpleRing_software_provider"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/async/async_ref_interest_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/async/async_ref_interest_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "should reject an old ring generation and deliver the reused slot only to its current reference"
       - "should preserve a shared failure when one of two consumer interests is cancelled"
@@ -498,7 +549,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact canonical reference, signed terminal payload/error, ring slot and generation, completion count and reservation lifecycle; no fabricated wake receipts."
     dependencies: ["common_dependencies", "AsyncRef_native_atomics", "SimpleRing_software_provider"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/async/async_ref_wake_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/async/async_ref_wake_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "makes duplicate delivery idempotent and publishes one exact completion"
       - "delivers the exact signed failure code through the real ring completion"
@@ -511,7 +562,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact canonical reference, signed terminal payload/error, ring slot and generation, completion count and reservation lifecycle; no fabricated wake receipts."
     dependencies: ["common_dependencies", "AsyncRef_native_atomics", "SimpleRing_software_provider"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/async/lockless_map_async_ref_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/async/lockless_map_async_ref_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "returns the caller token while pending and delivers a real terminal ring completion"
       - "keeps a wake retryable when owner delivery fails before ring admission"
@@ -525,7 +576,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact canonical reference, signed terminal payload/error, ring slot and generation, completion count and reservation lifecycle; no fabricated wake receipts."
     dependencies: ["common_dependencies", "AsyncRef_native_atomics", "SimpleRing_software_provider"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/async/lockless_map_boundary_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/async/lockless_map_boundary_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "joins repeated map requests to one exact slot before and after publication"
   - path: "test/02_integration/lib/sosix/atomic_copy_v1_spec.spl"
@@ -536,7 +587,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Independently reread binary bytes and SHA-256; compare retained file identity, mtime and directory entries on unchanged output; old open handle retains old bytes after replacement; wrong digest preserves destination."
     dependencies: ["common_dependencies", "retained_file_io", "native_atomic_replace_and_directory_sync"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/sosix/atomic_copy_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/sosix/atomic_copy_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "leaves identical binary output and metadata untouched"
       - "replaces changed bytes with the verified binary payload"
@@ -553,7 +604,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact Missing/Unsupported/error variants for absent, malformed or unadmitted receipts; rejection is not native child execution proof."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/sosix/process_observation_rejection_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/02_integration/lib/sosix/process_observation_rejection_contract_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "should preserve unsupported status through both facades for a valid request"
       - "should reject boundary-invalid requests before any unsupported provider can claim a start"
@@ -566,7 +617,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact host reservation counts and pending statuses; overflowing one host cannot borrow another capacity; system case preserves journal bytes and forbids process calls."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/03_system/app/buildrunner/feature/recovery_capacity_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/03_system/app/buildrunner/feature/recovery_capacity_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "returns infrastructure failure without changing the journal or opening recovery output"
   - path: "test/03_system/compiler/incremental/directory_tldr_semantic_binding_spec.spl"
@@ -577,7 +628,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Real package-init codec roundtrip and nonempty independent byte comparisons; malformed parent fails validation/encoding; not before-SRC publication."
     dependencies: ["common_dependencies"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/03_system/compiler/incremental/directory_tldr_semantic_binding_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/03_system/compiler/incremental/directory_tldr_semantic_binding_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "should preserve distinct parent, membership, aspect, and ordered-member values"
       - "should encode a changed parent context as different bytes"
@@ -591,7 +642,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Exact fixed capacities, signed keys and full ring-token bits; 3000 distinct keys from 8 native requesters x 375 keys, independently sum joined admission totals and lookup every key; 3000 same-key interests drained exactly; one producer wins synchronized start."
     dependencies: ["common_dependencies", "native_threads_and_atomics", "FileFiber_reader_parser_owner"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/lockless_map_i64_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/lib/nogc_async_mut/lockless_map_i64_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "rejects invalid capacities before allocating the epoch"
       - "retains zero and both signed i64 boundaries as ordinary exact keys"
@@ -613,7 +664,7 @@ suites:
     expected_skipped_count: 0
     positive_oracle: "Actual FileFiber scheduler states and source/read/error arrays: import cycles terminate, failed parse propagates, outside reader fills, bounded scheduler overflow terminates, unrelated pending work progresses; existing scalar park/wake path only, not canonical AsyncRef carrier."
     dependencies: ["common_dependencies", "native_threads_and_atomics", "FileFiber_reader_parser_owner"]
-    command: "SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/file_fiber_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
+    command: "SIMPLE_LIB=src SIMPLE_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_TEST_BINARY=\"$ACCEPTANCE_RUNTIME\" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=1 \"$ACCEPTANCE_RUNTIME\" test test/01_unit/compiler/driver/file_fiber_v1_spec.spl --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text"
     cases:
       - "terminates invalid scheduler configuration before starting file work"
       - "surfaces scheduler reservation overflow and terminates the host loop"
