@@ -34,7 +34,7 @@ use compiler.driver.cache.aop_guard_eval_v1.{aop_guard_profile_v1, aop_source_gu
     aop_module_guard_evals_v1}
 use compiler.frontend.join_point_attr_registry.{join_point_attr_names_of}
 use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
-    DirectoryJoinPointFactsV1, PointcutMatchCacheV1, PointcutMatchShardV1,
+    DirectoryJoinPointFactsV1, PointcutSelectorV1, PointcutMatchCacheV1, PointcutMatchShardV1,
     pointcut_selector_parse_v1, pointcut_match_key_v1,
     pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1}
 use std.common.string_core.{text_to_bytes}
@@ -48,10 +48,75 @@ class AopMatchDriverStateV1:
     shard_misses: i64
     fallbacks: i64
     sources: Dict<text, text>
+    selector_plans: Dict<text, PointcutSelectorV1>
+    selector_plan_keys: [text]
+    selector_plan_capacity: i64
+    selector_parse_count: i64
+    selector_plan_hits: i64
+    selector_plan_evictions: i64
 
     static fn create() -> AopMatchDriverStateV1:
-        AopMatchDriverStateV1(cache: pointcut_match_cache_new_v1(),
-            flights: CacheSingleFlightV1.create(), shard_hits: 0, shard_misses: 0, fallbacks: 0, sources: {})
+        AopMatchDriverStateV1.create_with_selector_capacity(256).unwrap()
+
+    static fn create_with_selector_capacity(capacity: i64) -> Result<AopMatchDriverStateV1, text>:
+        if capacity <= 0:
+            return Err("selector-plan-capacity-invalid")
+        Ok(AopMatchDriverStateV1(
+            cache: pointcut_match_cache_new_v1(), flights: CacheSingleFlightV1.create(),
+            shard_hits: 0, shard_misses: 0, fallbacks: 0, sources: {},
+            selector_plans: {}, selector_plan_keys: [], selector_plan_capacity: capacity,
+            selector_parse_count: 0, selector_plan_hits: 0, selector_plan_evictions: 0))
+
+fn _selector_plan_key(source: text) -> text:
+    "aop-selector-runtime/v1\u0000" + source
+
+fn _same_selector_plan(left: PointcutSelectorV1, right: PointcutSelectorV1) -> bool:
+    (left.selector_digest == right.selector_digest and
+    left.supported == right.supported and
+    left.form == right.form and
+    left.operand == right.operand and
+    left.needs_universe == right.needs_universe)
+
+fn _selector_plan_canonical(state: AopMatchDriverStateV1,
+        parsed: PointcutSelectorV1) -> PointcutSelectorV1:
+    for key in state.selector_plan_keys:
+        val existing = state.selector_plans[key]
+        if _same_selector_plan(existing, parsed):
+            return existing
+    parsed
+
+fn _selector_plan_insert(state: AopMatchDriverStateV1, key: text,
+        plan: PointcutSelectorV1):
+    var keys = state.selector_plan_keys
+    var plans = state.selector_plans
+    if keys.len() >= state.selector_plan_capacity:
+        var retained_keys: [text] = []
+        var retained_plans: Dict<text, PointcutSelectorV1> = {}
+        for index in 1..keys.len():
+            val old_key = keys[index]
+            retained_keys.push(old_key)
+            retained_plans[old_key] = plans[old_key]
+        keys = retained_keys
+        plans = retained_plans
+        state.selector_plan_evictions = state.selector_plan_evictions + 1
+    keys.push(key)
+    plans[key] = plan
+    state.selector_plan_keys = keys
+    state.selector_plans = plans
+
+pub fn aop_selector_plan_acquire_v1(state: AopMatchDriverStateV1,
+        source: text) -> PointcutSelectorV1:
+    # The owner serializes acquisitions. Exact hits skip parsing; semantic
+    # aliases keep the first spelling. This bounds aliases, not external plans.
+    val key = _selector_plan_key(source)
+    if state.selector_plans.contains_key(key):
+        state.selector_plan_hits = state.selector_plan_hits + 1
+        return state.selector_plans[key]
+    val parsed = pointcut_selector_parse_v1(source)
+    state.selector_parse_count = state.selector_parse_count + 1
+    val canonical = _selector_plan_canonical(state, parsed)
+    _selector_plan_insert(state, key, canonical)
+    canonical
 
 fn _dir_of(path: text) -> text:
     val i = path.rfind("/")
@@ -120,7 +185,7 @@ fn _encode_ids(ids: [text]) -> [u8]:
 # polls; a waiter that still sees no result re-acquires from the cache.
 pub fn aop_match_shard_acquire_v1(state: AopMatchDriverStateV1, selector: text,
         facts: DirectoryJoinPointFactsV1, request_id: text) -> PointcutMatchShardV1:
-    val sel = pointcut_selector_parse_v1(selector)
+    val sel = aop_selector_plan_acquire_v1(state, selector)
     val key = cache_single_flight_key_v1("aop.match", pointcut_match_key_v1(sel, facts))
     val (role, _flight) = state.flights.join(key, request_id)
     val r = pointcut_match_cache_acquire_v1(state.cache, sel, facts)
@@ -163,7 +228,7 @@ pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
     woven
 
 export AopMatchDriverStateV1, aop_directory_facts_from_hir_v1
-export aop_match_shard_acquire_v1, aop_weave_with_match_cache_v1
+export aop_selector_plan_acquire_v1, aop_match_shard_acquire_v1, aop_weave_with_match_cache_v1
 
 # Driver-loop-owned state: shards survive across compiles in one process
 # (daemon / LSP / watch), so a later advice-body or pointcut edit reuses every
