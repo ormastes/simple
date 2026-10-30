@@ -1,0 +1,123 @@
+"""
+## Purpose and audience
+
+Purpose: pin the BuildRunner link (alias) admission rules for the hello-world
+build task. A declared link must resolve portably inside the task root, point
+at a pinned regular input (or a pinned directory for dir links), and must not
+overlap any declared input or itself.
+
+Audience: engineers changing build_manager contracts who need to know which
+alias shapes the manager refuses and with which exact reason.
+
+## Operator workflow
+
+1. Run `SIMPLE_LIB=$PWD/src bin/simple test test/01_unit/app/buildrunner/hello_contracts_link_alias_spec.spl`.
+2. Every scenario must pass. A refusal string change is a contract change and
+   must be reviewed against the BuildRunner result-receipt documentation.
+
+## Compatibility and limitations
+
+Pure functions only. Runs identically on macOS, Linux, Windows, FreeBSD and
+SimpleOS; no process is spawned and no host path is consulted.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{
+    BuildTaskV1, BuildInputV1, BuildLinkV1,
+    builder_validate_task_v1, builder_link_resolved_path_v1, builder_relative_path_valid_v1
+}
+
+val HELLO_LINK_DIGEST = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+val HELLO_OTHER_DIGEST = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+fn hello_link_task_v1(inputs: [BuildInputV1], links: [BuildLinkV1]) -> BuildTaskV1:
+    BuildTaskV1(id: "hello", attempt: 1, phase: "compile",
+        producer_digest: HELLO_LINK_DIGEST, source_digest: HELLO_LINK_DIGEST,
+        toolchain_digest: HELLO_LINK_DIGEST, dependencies: [], program: "bin/simple",
+        args: ["native-build"], inputs: inputs, outputs: ["out/hello"],
+        cache_key: HELLO_LINK_DIGEST, timeout_ms: 1000, memory_limit_bytes: 1048576,
+        links: links)
+
+fn hello_pinned_input_v1() -> BuildInputV1:
+    BuildInputV1(path: "src/hello.spl", digest: HELLO_LINK_DIGEST)
+
+fn hello_file_alias_v1() -> BuildLinkV1:
+    BuildLinkV1(kind: "file", path: "src/alias.spl", target: "hello.spl",
+        resolved_path: "src/hello.spl", target_digest: HELLO_LINK_DIGEST)
+
+describe "BuildRunner hello link alias admission":
+    it "resolves a sibling link to its pinned regular input":
+        # @req REQ-HBR-004
+        step("Resolve the sibling alias src/alias.spl -> hello.spl")
+        expect(builder_link_resolved_path_v1("src/alias.spl", "hello.spl")).to_equal("src/hello.spl")
+        step("Validate a task whose alias targets the pinned hello input")
+        val task = hello_link_task_v1([hello_pinned_input_v1()], [hello_file_alias_v1()])
+        expect(builder_validate_task_v1(task)).to_equal("")
+
+    it "refuses a dangling alias whose target is not a pinned input":
+        # @req REQ-HBR-004
+        step("Validate the alias with no pinned src/hello.spl input")
+        val missing = hello_link_task_v1([], [hello_file_alias_v1()])
+        expect(builder_validate_task_v1(missing)).to_equal("link target has no pinned regular input")
+        step("Validate the alias whose target digest differs from the pinned input")
+        val mismatched = BuildLinkV1(kind: "file", path: "src/alias.spl", target: "hello.spl",
+            resolved_path: "src/hello.spl", target_digest: HELLO_OTHER_DIGEST)
+        val wrong_digest = hello_link_task_v1([hello_pinned_input_v1()], [mismatched])
+        expect(builder_validate_task_v1(wrong_digest)).to_equal("link target has no pinned regular input")
+
+    it "refuses an alias that escapes the task root":
+        # @req REQ-HBR-004
+        step("Resolve a parent-escaping target from src/a.spl")
+        expect(builder_link_resolved_path_v1("src/a.spl", "../../etc/passwd")).to_equal("")
+        step("Validate a link carrying the escaped empty resolution")
+        val escape = BuildLinkV1(kind: "file", path: "src/a.spl", target: "../../etc/passwd",
+            resolved_path: "", target_digest: HELLO_LINK_DIGEST)
+        expect(builder_validate_task_v1(hello_link_task_v1([hello_pinned_input_v1()], [escape])))
+            .to_equal("invalid declared link")
+
+    it "refuses an alias that points at its own subtree":
+        # @req REQ-HBR-004
+        step("Resolve a self-referencing target '.' from src/a")
+        expect(builder_link_resolved_path_v1("src/a", ".")).to_equal("src")
+        step("Validate a link whose resolved path contains its own path")
+        val self_alias = BuildLinkV1(kind: "dir", path: "src/a", target: ".",
+            resolved_path: "src", target_digest: "")
+        expect(builder_validate_task_v1(hello_link_task_v1([hello_pinned_input_v1()], [self_alias])))
+            .to_equal("invalid declared link")
+
+    it "refuses a directory alias that invents a target digest and accepts the pinned directory":
+        # @req REQ-HBR-004
+        step("Validate a dir alias that carries a target digest")
+        val invented = BuildLinkV1(kind: "dir", path: "alias", target: "src",
+            resolved_path: "src", target_digest: HELLO_LINK_DIGEST)
+        expect(builder_validate_task_v1(hello_link_task_v1([hello_pinned_input_v1()], [invented])))
+            .to_equal("directory link must not invent a target digest")
+        step("Validate the same dir alias with an empty target digest over the pinned directory")
+        val pinned_dir = BuildLinkV1(kind: "dir", path: "alias", target: "src",
+            resolved_path: "src", target_digest: "")
+        expect(builder_validate_task_v1(hello_link_task_v1([hello_pinned_input_v1()], [pinned_dir]))).to_equal("")
+
+    it "refuses a Windows device-name alias on every host":
+        # @req REQ-HBR-004
+        step("Resolve a device-name target con.spl")
+        expect(builder_link_resolved_path_v1("src/alias.spl", "con.spl")).to_equal("")
+        expect(builder_relative_path_valid_v1("src/con.spl")).to_equal(false)
+        step("Validate a link that resolves to the device name")
+        val device = BuildLinkV1(kind: "file", path: "src/alias.spl", target: "con.spl",
+            resolved_path: "", target_digest: HELLO_LINK_DIGEST)
+        expect(builder_validate_task_v1(hello_link_task_v1([hello_pinned_input_v1()], [device])))
+            .to_equal("invalid declared link")
+
+    it "refuses a link whose path overlaps a declared input":
+        # @req REQ-HBR-004
+        step("Declare src/hello.spl as an input and lib/other.spl as a second pinned input")
+        val other = BuildInputV1(path: "lib/other.spl", digest: HELLO_LINK_DIGEST)
+        step("Validate a link at the declared input path src/hello.spl targeting lib/other.spl")
+        val overlap = BuildLinkV1(kind: "file", path: "src/hello.spl", target: "../lib/other.spl",
+            resolved_path: "lib/other.spl", target_digest: HELLO_LINK_DIGEST)
+        expect(builder_validate_task_v1(hello_link_task_v1([hello_pinned_input_v1(), other], [overlap])))
+            .to_equal("link overlaps declared input")
+        step("Positive control: the non-overlapping alias to lib/other.spl is accepted")
+        val clean = BuildLinkV1(kind: "file", path: "alias/other.spl", target: "../lib/other.spl",
+            resolved_path: "lib/other.spl", target_digest: HELLO_LINK_DIGEST)
+        expect(builder_validate_task_v1(hello_link_task_v1([hello_pinned_input_v1(), other], [clean]))).to_equal("")
