@@ -20,7 +20,8 @@ use app.test_daemon.{
     TREQ_SESSION_RESET, TREQ_SESSION_EXECUTE, TREQ_SESSION_STOP,
     TRESP_QUEUED, TRESP_RUNNING, TRESP_COMPLETED, TRESP_FAILED,
     TRESP_SKIPPED, TRESP_CACHED, TRESP_ERROR,
-    test_request_mcdc_mode, test_daemon_mcdc_child_env_prefix
+    test_request_mcdc_mode, test_daemon_mcdc_child_env_prefix,
+    test_daemon_mcdc_child_profile_arg
 }
 use app.test_daemon.agent_pool.{AgentPool, agent_pool_new}
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_load}
@@ -182,7 +183,8 @@ impl TestDaemon:
                 return resp
 
         # Execute test
-        val result = self.execute_test(test_path, req.fields)
+        var result = self.execute_test(test_path, req.fields)
+        result.request_id = req.id
 
         # Remove from active
         self.active_requests["{dedup_key}"] = ""
@@ -206,10 +208,9 @@ impl TestDaemon:
         while i < test_files.len():
             val test_path = test_files[i]
             # Path-keyed cache serves MC/DC-on runs only (see handle_run_single).
-            val cached_path = if mcdc_mode == "on": self.incremental_state.check_freshness(test_path).test_path else: ""
+            val cached = self.incremental_state.check_freshness(if mcdc_mode == "on": test_path else: "")
 
-            if cached_path != "":
-                val cached = self.incremental_state.check_freshness(test_path)
+            if mcdc_mode == "on" and cached.test_path != "":
                 total_passed = total_passed + cached.passed
                 total_failed = total_failed + cached.failed
                 total_skipped = total_skipped + cached.skipped
@@ -218,6 +219,7 @@ impl TestDaemon:
                 val run = self.execute_test(test_path, req.fields)
                 total_passed = total_passed + ((run.fields["passed"] ?? "0").to_i64() ?? 0)
                 total_failed = total_failed + ((run.fields["failed"] ?? "0").to_i64() ?? 0)
+                total_skipped = total_skipped + ((run.fields["skipped"] ?? "0").to_i64() ?? 0)
             i = i + 1
 
         val elapsed = (time_now_unix_micros() - start_time) / 1000
@@ -241,7 +243,9 @@ impl TestDaemon:
             resp.fields["error"] = "missing test_path"
             return resp
 
-        self.execute_test(test_path, req.fields)
+        var result = self.execute_test(test_path, req.fields)
+        result.request_id = req.id
+        result
 
     # --- Status query ---
 
@@ -309,8 +313,10 @@ impl TestDaemon:
         val output = req.fields["output"] ?? ""
         self.agent_pool.report_result(agent_id, test_path, status, passed, failed, duration_ms, output)
 
-        # Also record in cache
-        self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
+        # Also record in cache -- MC/DC-on results only. Agents do not report
+        # their mode, so an unmarked report is never cached.
+        if (req.fields["mcdc_mode"] ?? "") == "on":
+            self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
 
         var resp = daemon_response_new(req.id, TRESP_COMPLETED)
         resp.fields["test_path"] = test_path
@@ -432,7 +438,7 @@ impl TestDaemon:
         # The child's MC/DC mode comes from the REQUEST (the client's resolved
         # mode), never from the daemon's inherited environment.
         val mcdc_mode = test_request_mcdc_mode(req_fields)
-        val cmd = "{test_daemon_mcdc_child_env_prefix(req_fields)} bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
+        val cmd = "{test_daemon_mcdc_child_env_prefix(req_fields)} bin/simple test {test_path} --no-session-daemon --sequential{test_daemon_mcdc_child_profile_arg(req_fields)} 2>&1"
         val setup_ms = (time_now_unix_micros() - setup_start) / 1000
 
         val test_start = time_now_unix_micros()

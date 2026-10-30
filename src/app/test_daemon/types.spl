@@ -65,7 +65,9 @@ fn test_daemon_config_default() -> TestDaemonConfig:
     )
     TestDaemonConfig(
         daemon: dc,
-        cache_path: ".build/test_daemon/test_cache.sdn",
+        # Renamed when the cache became MC/DC-on only: entries recorded by an
+        # older daemon may come from an MC/DC-off environment.
+        cache_path: ".build/test_daemon/test_cache_mcdc_on.sdn",
         dep_graph_path: ".build/test_daemon/dep_graph.sdn",
         qemu_session_timeout_ms: 300000,
         max_qemu_sessions: 4,
@@ -143,9 +145,10 @@ val TEST_DAEMON_MCDC_WAIVER_VARS: [text] = [
     "SIMPLE_MCDC_OFF_WAIVER_REASON", "SIMPLE_MCDC_OFF_WAIVER_REVIEWER",
     "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", "SIMPLE_MCDC_OFF_WAIVER_VERSION"]
 
-fn test_request_set_mcdc(req: DaemonRequest, mode: text, waivers: [text]) -> DaemonRequest:
+fn test_request_set_mcdc(req: DaemonRequest, mode: text, waivers: [text], profile: text = "") -> DaemonRequest:
     var out = req
     out.fields["mcdc_mode"] = mode
+    out.fields["mcdc_profile"] = profile
     var i = 0
     while i < TEST_DAEMON_MCDC_WAIVER_VARS.len():
         out.fields["mcdc_waiver_{i}"] = if mode == "off" and i < waivers.len(): waivers[i] else: ""
@@ -171,3 +174,9 @@ fn test_daemon_mcdc_child_env_prefix(fields: {text: text}) -> text:
         parts.push(TEST_DAEMON_MCDC_WAIVER_VARS[i] + "=" + _test_daemon_shell_quote(value))
         i = i + 1
     parts.join(" ")
+
+# The client's resolved safety profile decides whether "off" needs a waiver;
+# the child must re-resolve against the same profile, not the daemon's.
+fn test_daemon_mcdc_child_profile_arg(fields: {text: text}) -> text:
+    val profile = fields["mcdc_profile"] ?? ""
+    if profile == "": "" else: " " + _test_daemon_shell_quote("--profile=" + profile)

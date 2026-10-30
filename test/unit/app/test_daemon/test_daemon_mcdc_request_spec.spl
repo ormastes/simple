@@ -29,7 +29,9 @@ use std.spec
 use std.io_runtime.{env_get}
 use app.io.process_ops.{process_run}
 use std.daemon_sdk.types.{daemon_request_new}
-use app.test_daemon.types.{test_request_set_mcdc, test_request_mcdc_mode, test_daemon_mcdc_child_env_prefix}
+use std.daemon_sdk.types.{daemon_response_new}
+use app.test_daemon.types.{test_request_set_mcdc, test_request_mcdc_mode, test_daemon_mcdc_child_env_prefix, test_daemon_mcdc_child_profile_arg, TRESP_COMPLETED, TRESP_QUEUED}
+use app.test_daemon.client.{test_result_checked_mcdc}
 
 val WAIVER = ["reviewed reason", "rev", "R-1", "1"]
 val DAEMON_ENV = "export SIMPLE_MCDC_MODE=off SIMPLE_MCDC_OFF_WAIVER_REASON=daemon SIMPLE_MCDC_OFF_WAIVER_REVIEWER=daemon SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID=D-1 SIMPLE_MCDC_OFF_WAIVER_VERSION=1;"
@@ -70,6 +72,24 @@ describe "session daemon request carries the client's MC/DC mode":
         step("Verify waiver text is shell-quoted")
         val quoted = test_daemon_mcdc_child_env_prefix(client_fields("off", ["it's", "a", "b", "c"]))
         expect(quoted).to_contain("SIMPLE_MCDC_OFF_WAIVER_REASON='it'\\''s'")
+
+    it "forwards the client's profile to the child":
+        step("Verify the profile becomes a quoted --profile argument")
+        val fields = test_request_set_mcdc(daemon_request_new(1), "off", [], "dev").fields
+        expect(test_daemon_mcdc_child_profile_arg(fields)).to_equal(" '--profile=dev'")
+        expect(test_daemon_mcdc_child_profile_arg({})).to_equal("")
+
+    it "rejects a completed response that does not echo the mode (old daemon)":
+        step("Verify a non-echoing completed response is refused")
+        var resp = daemon_response_new("r1", TRESP_COMPLETED)
+        resp.fields["passed"] = "1"
+        val refused = test_result_checked_mcdc("on", resp)
+        expect(refused.failed).to_equal(1)
+        expect(refused.output).to_contain("did not apply the client's MC/DC mode")
+        step("Verify an echoing response and a queued response pass through")
+        resp.fields["mcdc_mode"] = "on"
+        expect(test_result_checked_mcdc("on", resp).passed).to_equal(1)
+        expect(test_result_checked_mcdc("on", daemon_response_new("r2", TRESP_QUEUED)).output).to_equal("")
 
 describe "daemon child under an off-waiver daemon environment":
     it "runs MC/DC on for a client that supplied no waiver":
