@@ -284,6 +284,26 @@ pub fn rt_tuple_get_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(items[idx as usize].clone())
 }
 
+/// Length of a tuple, or -1 when the argument is not a tuple.
+///
+/// Mirrors the runtime ABI `rt_tuple_len(RuntimeValue) -> i64` (Rust
+/// runtime collections.rs, C runtime runtime_native.c). Callers:
+/// `system_env_core.spl` (validates `rt_env_vars` pairs) and `enum_wire.spl`
+/// (distinguishes tuple payloads from arrays, relying on -1 for non-tuples).
+/// It was missing from the interpreter table, so every interpreted
+/// `env_vars_nilable()` died with "unknown extern function: rt_tuple_len".
+pub fn rt_tuple_len_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let len = match args.first() {
+        Some(Value::Tuple(arr)) => arr.len() as i64,
+        Some(Value::LabeledTuple { values, .. }) => values.len() as i64,
+        Some(Value::Int(raw)) => {
+            simple_runtime::value::rt_tuple_len(simple_runtime::value::RuntimeValue::from_raw(*raw as u64))
+        }
+        _ => -1,
+    };
+    Ok(Value::Int(len))
+}
+
 /// Assemble a [u8] array into a u32 (big-endian).
 ///
 /// Callable from Simple as: `bytes_to_u32_be(bytes)`
