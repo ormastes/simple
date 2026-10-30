@@ -24,15 +24,14 @@ structure Manifest where
   sealed   : Bool
   reads    : List (Subj × Bool)
 
-/-- Sealed: one edge per read. Unsealed (failed/cancelled rebuild): keep the
-    consumer's edges from the previous generation; no previous ⇒ fail. -/
+/-- A sealed manifest contributes one edge per read. An unsealed
+    (failed/cancelled) manifest rejects the candidate, regardless of the
+    previous generation; callers preserve that historical receipt separately. -/
 def projectOne (prev : Option (List Edge)) (m : Manifest) : Option (List Edge) :=
   if m.sealed then
     if m.reads.all (·.2) then some (m.reads.map (fun r => (r.1, m.consumer))) else none
   else
-    match prev with
-    | none   => none
-    | some p => some (p.filter (fun e => e.2 = m.consumer))
+    none
 
 def project (prev : Option (List Edge)) : List Manifest → Option (List Edge)
   | []      => some []
@@ -41,42 +40,23 @@ def project (prev : Option (List Edge)) : List Manifest → Option (List Edge)
     | some a, some b => some (a ++ b)
     | _, _           => none
 
-/-- Forward relation: consumer `c` reads subject `s` in this generation, or,
-    for a consumer whose rebuild did not seal, read it in the previous one. -/
-def Forward (prev : Option (List Edge)) (ms : List Manifest) (s : Subj) (c : Cons) : Prop :=
-  ∃ m ∈ ms, m.consumer = c ∧
-    ((m.sealed = true ∧ s ∈ m.reads.map Prod.fst) ∨
-     (m.sealed = false ∧ ∃ p, prev = some p ∧ (s, c) ∈ p))
+/-- Current forward relation. `prev` remains in the signature for model
+    compatibility but never supplies edges to the current projection. -/
+def Forward (_prev : Option (List Edge)) (ms : List Manifest) (s : Subj) (c : Cons) : Prop :=
+  ∃ m ∈ ms, m.consumer = c ∧ m.sealed = true ∧ s ∈ m.reads.map Prod.fst
 
 theorem projectOne_mem (prev : Option (List Edge)) (m : Manifest) (a : List Edge)
     (h : projectOne prev m = some a) (s : Subj) (c : Cons) :
-    (s, c) ∈ a ↔ m.consumer = c ∧
-      ((m.sealed = true ∧ s ∈ m.reads.map Prod.fst) ∨
-       (m.sealed = false ∧ ∃ p, prev = some p ∧ (s, c) ∈ p)) := by
+    (s, c) ∈ a ↔ m.consumer = c ∧ m.sealed = true ∧ s ∈ m.reads.map Prod.fst := by
   unfold projectOne at h
   cases hs : m.sealed
   · simp [hs] at h
-    cases hp : prev with
-    | none => simp [hp] at h
-    | some p =>
-      simp [hp] at h
-      subst h
-      constructor
-      · intro hm
-        simp [List.mem_filter] at hm
-        exact ⟨hm.2.symm, by simp; exact hm.1⟩
-      · rintro ⟨hc, hr⟩
-        simp at hr
-        simp [List.mem_filter, hr, hc]
   · simp [hs] at h
-    obtain ⟨_, rfl⟩ := h
-    simp only [List.mem_map, Prod.mk.injEq]
-    constructor
-    · rintro ⟨r, hr, h1, h2⟩
-      exact ⟨h2, Or.inl ⟨trivial, r, hr, h1⟩⟩
-    · rintro ⟨hc, ⟨_, r, hr, h1⟩ | ⟨hf, _⟩⟩
-      · exact ⟨r, hr, h1, hc⟩
-      · cases hf
+    by_cases hall : m.reads.all (·.2)
+    · simp [hall] at h
+      subst a
+      simp [List.mem_map, Prod.mk.injEq, hs, and_assoc, and_left_comm, and_comm]
+    · simp [hall] at h
 
 /-- T-RR1: a successful projection contains exactly the inverse of the
     forward relation — no consumer is omitted (no under-invalidation) and no
@@ -111,12 +91,44 @@ theorem rr_exact_when_all_sealed (prev : Option (List Edge)) (ms : List Manifest
   rw [rr_is_inverse_of_forward prev ms rr h s c]
   unfold Forward
   constructor
+  · rintro ⟨m, hm, hc, _, hr⟩
+    exact ⟨m, hm, hc, hr⟩
   · rintro ⟨m, hm, hc, hr⟩
-    rcases hr with ⟨_, hr⟩ | ⟨hns, _⟩
-    · exact ⟨m, hm, hc, hr⟩
-    · rw [hall m hm] at hns; cases hns
-  · rintro ⟨m, hm, hc, hr⟩
-    exact ⟨m, hm, hc, Or.inl ⟨hall m hm, hr⟩⟩
+    exact ⟨m, hm, hc, hall m hm, hr⟩
+
+/-- Successful projection candidates contain only sealed current manifests. -/
+theorem project_success_implies_all_sealed (prev : Option (List Edge)) (ms : List Manifest)
+    (rr : List Edge) (h : project prev ms = some rr) :
+    ∀ m ∈ ms, m.sealed = true := by
+  induction ms generalizing rr with
+  | nil => simp
+  | cons m ms ih =>
+    unfold project at h
+    cases hp : projectOne prev m with
+    | none => simp [hp] at h
+    | some a =>
+      have hsealed : m.sealed = true := by
+        cases hs : m.sealed
+        · have hn : projectOne prev m = none := by simp [projectOne, hs]
+          rw [hp] at hn
+          cases hn
+        · exact hs
+      cases hr : project prev ms with
+      | none => simp [hp, hr] at h
+      | some b =>
+        simp [hp, hr] at h
+        subst rr
+        intro x hx
+        rcases List.mem_cons.mp hx with rfl | hx
+        · exact hsealed
+        · exact ih b hr x hx
+
+/-- Previous-generation contents cannot affect the newly built projection. -/
+theorem project_previous_independent (prev₁ prev₂ : Option (List Edge)) (ms : List Manifest) :
+    project prev₁ ms = project prev₂ ms := by
+  induction ms with
+  | nil => rfl
+  | cons m ms ih => simp [project, projectOne, ih]
 
 /-- An unmapped read fails the whole generation (never a silent omission). -/
 theorem unmapped_read_fails (prev : Option (List Edge)) (m : Manifest) (ms : List Manifest)
@@ -135,10 +147,24 @@ theorem unmapped_read_fails (prev : Option (List Edge)) (m : Manifest) (ms : Lis
     simp [hs, this]
   simp [project, h1]
 
-/-- A failed consumer with no previous generation fails the build instead of
-    publishing "zero dependents". -/
-theorem unsealed_without_previous_fails (m : Manifest) (ms : List Manifest)
-    (hs : m.sealed = false) : project none (m :: ms) = none := by
+/-- A failed consumer rejects the candidate even when a prior receipt exists. -/
+theorem unsealed_with_previous_fails (prev : Option (List Edge)) (m : Manifest) (ms : List Manifest)
+    (hs : m.sealed = false) : project prev (m :: ms) = none := by
   simp [project, projectOne, hs]
+
+/-- An unsealed manifest at any position rejects the entire candidate. -/
+theorem unsealed_anywhere_fails (prev : Option (List Edge)) (ms : List Manifest)
+    (m : Manifest) (hm : m ∈ ms) (hs : m.sealed = false) : project prev ms = none := by
+  cases hp : project prev ms with
+  | none => exact hp
+  | some rr =>
+    have hsealed := project_success_implies_all_sealed prev ms rr hp m hm
+    rw [hs] at hsealed
+    cases hsealed
+
+/-- Compatibility specialization of the general unsealed rejection theorem. -/
+theorem unsealed_without_previous_fails (m : Manifest) (ms : List Manifest)
+    (hs : m.sealed = false) : project none (m :: ms) = none :=
+  unsealed_with_previous_fails none m ms hs
 
 end ReverseReferenceV2
