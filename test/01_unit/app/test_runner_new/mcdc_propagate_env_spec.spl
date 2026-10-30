@@ -1,0 +1,91 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+"""
+# propagate_env_vars enforces the resolved MC/DC mode
+
+An invalid-off request (off on a normal-or-stricter profile with no waiver) must
+never leave SIMPLE_MCDC_MODE=off in the environment the spec children inherit.
+The refusal flag SIMPLE_MCDC_MODE_ERROR must be set, and the mode must not stay
+off. A valid waiver is honoured; dev may switch MC/DC off.
+"""
+
+use std.spec.*
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_config.{propagate_env_vars}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+
+fn clear_env():
+    for k in ["SIMPLE_MCDC_MODE", "SIMPLE_MCDC_MODE_ERROR", "SIMPLE_MCDC_OFF_WAIVER_REASON", "SIMPLE_MCDC_OFF_WAIVER_REVIEWER", "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", "SIMPLE_MCDC_OFF_WAIVER_VERSION", "SIMPLE_SAFETY_PROFILE"]:
+        rt_env_set(k, "")
+
+fn set_waiver():
+    rt_env_set("SIMPLE_MCDC_OFF_WAIVER_REASON", "hardware scenario cannot be produced")
+    rt_env_set("SIMPLE_MCDC_OFF_WAIVER_REVIEWER", "safety-reviewer")
+    rt_env_set("SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", "review-42")
+    rt_env_set("SIMPLE_MCDC_OFF_WAIVER_VERSION", "source-offset-v1")
+
+describe "propagate_env_vars MC/DC mode":
+    it "defaults an unset mode to on on a normal profile":
+        clear_env()
+        propagate_env_vars(parse_test_args(["--profile=strict"]))
+        expect(rt_env_get("SIMPLE_MCDC_MODE")).to_equal("on")
+        expect(rt_env_get("SIMPLE_MCDC_MODE_ERROR")).to_equal("")
+        clear_env()
+
+    it "maps static-on to on and dynamic-aspect to dynamic":
+        clear_env()
+        rt_env_set("SIMPLE_MCDC_MODE", "static-on")
+        propagate_env_vars(parse_test_args(["--profile=strict"]))
+        expect(rt_env_get("SIMPLE_MCDC_MODE")).to_equal("on")
+        rt_env_set("SIMPLE_MCDC_MODE", "dynamic-aspect")
+        propagate_env_vars(parse_test_args(["--profile=strict"]))
+        expect(rt_env_get("SIMPLE_MCDC_MODE")).to_equal("dynamic")
+        clear_env()
+
+    it "flags invalid-off with SIMPLE_MCDC_MODE_ERROR":
+        clear_env()
+        rt_env_set("SIMPLE_MCDC_MODE", "off")
+        propagate_env_vars(parse_test_args(["--profile=strict"]))
+        expect(rt_env_get("SIMPLE_MCDC_MODE_ERROR")).to_equal("invalid-off")
+        clear_env()
+
+    it "does not leave SIMPLE_MCDC_MODE=off after an invalid-off request":
+        clear_env()
+        rt_env_set("SIMPLE_MCDC_MODE", "off")
+        propagate_env_vars(parse_test_args(["--profile=strict"]))
+        expect(rt_env_get("SIMPLE_MCDC_MODE") == "off").to_equal(false)
+        clear_env()
+
+    it "does not leave a bogus mode in place after an invalid-mode request":
+        clear_env()
+        rt_env_set("SIMPLE_MCDC_MODE", "bogus")
+        propagate_env_vars(parse_test_args(["--profile=strict"]))
+        expect(rt_env_get("SIMPLE_MCDC_MODE_ERROR")).to_equal("invalid-mode")
+        expect(rt_env_get("SIMPLE_MCDC_MODE") == "bogus").to_equal(false)
+        clear_env()
+
+    it "honours a complete waiver and clears the error flag":
+        clear_env()
+        rt_env_set("SIMPLE_MCDC_MODE", "off")
+        set_waiver()
+        propagate_env_vars(parse_test_args(["--profile=strict"]))
+        expect(rt_env_get("SIMPLE_MCDC_MODE")).to_equal("off")
+        expect(rt_env_get("SIMPLE_MCDC_MODE_ERROR")).to_equal("")
+        clear_env()
+
+    it "does not let the unreachable dev/advisory spellings be used from the CLI to turn MC/DC off":
+        clear_env()
+        for p in ["dev", "advisory"]:
+            rt_env_set("SIMPLE_MCDC_MODE", "off")
+            propagate_env_vars(parse_test_args(["--profile=" + p]))
+            expect(rt_env_get("SIMPLE_MCDC_MODE_ERROR")).to_equal("invalid-off")
+        clear_env()
+
+    it "clears a stale error flag once the request becomes valid":
+        clear_env()
+        rt_env_set("SIMPLE_MCDC_MODE_ERROR", "invalid-off")
+        rt_env_set("SIMPLE_MCDC_MODE", "on")
+        propagate_env_vars(parse_test_args(["--profile=strict"]))
+        expect(rt_env_get("SIMPLE_MCDC_MODE_ERROR")).to_equal("")
+        clear_env()
