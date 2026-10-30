@@ -1224,6 +1224,97 @@ impl MonomorphizationPass:
                 else:
                     self.inherent_method_owners[key] = identity
 
+    me collect_generic_instance_method_v1(module_name: text,
+            by_id: Dict<i64, HirFunction>, owner_identity: text, owner_name: text,
+            owner_tps: [HirTypeParam], method_name: text, method_symbol: SymbolId,
+            has_trait: bool, target_reason: text = ""):
+        if not by_id.has(method_symbol.id): return
+        val template: HirFunction = by_id[method_symbol.id]
+        if template.is_static or not template.is_method or template.params.len() == 0: return
+        val method_key = "{owner_identity}::{method_name}"
+        val gname = "{owner_name}__{method_name}"
+        var reason = target_reason
+        if has_trait: reason = "it is declared by a trait impl"
+        var all_tps: [HirTypeParam] = []
+        var bound_tps: [HirTypeParam] = []
+        var bound_names: [text] = []
+        for itp in owner_tps:
+            val owner_tp: HirTypeParam = itp
+            all_tps = all_tps.push(owner_tp)
+            if bound_names.contains(owner_tp.name):
+                reason = "owner has duplicate type parameter name `{owner_tp.name}`"
+            else:
+                bound_names = bound_names.push(owner_tp.name)
+                bound_tps = bound_tps.push(owner_tp)
+        val owner_bound_count = bound_tps.len()
+        for otp in template.type_params:
+            val own_tp: HirTypeParam = otp
+            all_tps = all_tps.push(own_tp)
+            if bound_names.contains(own_tp.name):
+                if reason == "": reason = "method type parameter `{own_tp.name}` shadows an owner binder"
+            else:
+                bound_names = bound_names.push(own_tp.name)
+                bound_tps = bound_tps.push(own_tp)
+        if reason == "" and owner_bound_count != owner_tps.len():
+            reason = "owner type parameter binders are not unique"
+        if reason == "" and bound_tps.len() != owner_bound_count + template.type_params.len():
+            reason = "method type parameter binders are not unique"
+
+        # Class-body methods and the flat-AST bridge can expose one declaration
+        # through both HirClass.methods and a synthetic HirImpl. Deduplicate only
+        # the same declaration under the same exact owner key; distinct symbols
+        # keep the existing collision refusal.
+        if reason == "" and self.generic_methods.has(method_key) and not self.generic_method_rejected.has(method_key):
+            val prior_name: text = self.generic_methods[method_key]
+            if prior_name == gname and self.template_recipes.has(prior_name):
+                val prior_recipe: MonoTemplateRecipeV1 = self.template_recipes[prior_name]
+                if prior_recipe.module_name == module_name and prior_recipe.original_symbol.id == method_symbol.id:
+                    var compatible_binders = prior_recipe.bound_type_params.len() == bound_tps.len()
+                    var binder_index = 0
+                    while compatible_binders and binder_index < bound_tps.len():
+                        if prior_recipe.bound_type_params[binder_index].name != bound_tps[binder_index].name:
+                            compatible_binders = false
+                        binder_index = binder_index + 1
+                    if compatible_binders:
+                        var merged_canonical = prior_recipe.canonical_type_params
+                        var merged_ids: Dict<i64, bool> = {}
+                        for canonical_param in merged_canonical:
+                            val existing_param: HirTypeParam = canonical_param
+                            merged_ids[existing_param.symbol.id] = true
+                        for alias_param in all_tps:
+                            val alias: HirTypeParam = alias_param
+                            if not merged_ids.has(alias.symbol.id):
+                                merged_canonical = merged_canonical.push(alias)
+                                merged_ids[alias.symbol.id] = true
+                        val merged_recipe = MonoTemplateRecipeV1(module_name: module_name,
+                            original_symbol: template.symbol, template_name: gname,
+                            canonical_type_params: merged_canonical,
+                            bound_type_params: prior_recipe.bound_type_params,
+                            inherent_method: true)
+                        self.template_recipes[prior_name] = merged_recipe
+                        self.archive_template_signatures[prior_name] = mono_template_recipe_signature_v1(template, merged_recipe)
+                        return
+                    reason = "duplicate class/impl registration has incompatible canonical binders"
+        if reason == "" and (self.has_template_v1(gname) or self.generic_methods.has(method_key)):
+            reason = "another declaration uses the template key `{gname}`"
+            for prior_key in self.generic_methods.keys():
+                val pk: text = prior_key
+                if self.generic_methods[pk] == gname:
+                    self.generic_method_rejected[pk] = reason
+        if reason != "":
+            self.generic_method_rejected[method_key] = reason
+            return
+        val recipe = MonoTemplateRecipeV1(module_name: module_name,
+            original_symbol: template.symbol, template_name: gname,
+            canonical_type_params: all_tps, bound_type_params: bound_tps,
+            inherent_method: true)
+        self.archive_template_signatures[gname] = mono_template_recipe_signature_v1(template, recipe)
+        if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+            self.generic_functions[gname] = template
+        self.template_recipes[gname] = recipe
+        self.template_module[gname] = module_name
+        self.generic_methods[method_key] = gname
+
     me collect_generic_impl_methods(module: HirModule, module_name: text):
         """Register each instance method of a generic inherent impl
         (`impl Box<T>:`, possibly in an extension module) as a function
@@ -1237,6 +1328,26 @@ impl MonomorphizationPass:
         names that do not shadow owner binders. Other shapes are rejected."""
         var by_id: Dict<i64, HirFunction> = {}
         var body_index_ready = false
+        # Direct class lowering keeps class-body methods on HirClass rather
+        # than materializing them as HirImpl rows. Register through the same
+        # exact-symbol path as synthetic impl methods.
+        val class_values: [HirClass] = module.classes.values()
+        for raw_class in class_values:
+            val class_: HirClass = raw_class
+            if class_.type_params.len() == 0 or class_.methods.len() == 0: continue
+            if not body_index_ready:
+                val body_values: [HirFunction] = module.functions.values()
+                for raw_body in body_values:
+                    val body_function: HirFunction = raw_body
+                    by_id[body_function.symbol.id] = body_function
+                body_index_ready = true
+            val owner_identity = mono_type_identity(module.symbols, class_.symbol, module_name)
+            if owner_identity == "": continue
+            for method_name in class_.methods.keys():
+                val method_symbol: SymbolId = class_.methods[method_name]
+                self.collect_generic_instance_method_v1(module_name, by_id,
+                    owner_identity, class_.name, class_.type_params, method_name,
+                    method_symbol, false)
         for raw_impl in module.impls:
             val gi: HirImpl = raw_impl
             val impl_tps: [HirTypeParam] = gi.type_params
@@ -1245,11 +1356,9 @@ impl MonomorphizationPass:
             # Build the body index once, only when a generic impl needs it.
             # Keep one impl traversal even when the first generic impl is last.
             if not body_index_ready:
-                val body_index_keys: [SymbolId] = module.functions.keys()
-                for dk_29 in body_index_keys:
-                    if module.functions[dk_29] == nil:
-                        continue
-                    val f: HirFunction = module.functions[dk_29]
+                val body_values: [HirFunction] = module.functions.values()
+                for raw_body in body_values:
+                    val f: HirFunction = raw_body
                     val fs: SymbolId = f.symbol
                     by_id[fs.id] = f
                 body_index_ready = true
@@ -1266,66 +1375,11 @@ impl MonomorphizationPass:
                 case _: ()
             if owner_identity == "" or owner_name == "":
                 continue
-            if gi.has_trait_:
-                target_reason = "it is declared by a trait impl"
             for method_name in gi.methods.keys():
                 val msym: SymbolId = gi.methods[method_name]
-                if not by_id.has(msym.id):
-                    continue
-                val template: HirFunction = by_id[msym.id]
-                if template.is_static or not template.is_method or template.params.len() == 0:
-                    continue
-                val method_key = "{owner_identity}::{method_name}"
-                val gname = "{owner_name}__{method_name}"
-                var reason = target_reason
-                # Every symbol spelling of a parameter is canonicalized, but a
-                # NAME binds once: the receiver's type arguments bind the
-                # impl's parameters, in order.
-                var all_tps: [HirTypeParam] = []
-                var bound_tps: [HirTypeParam] = []
-                var bound_names: [text] = []
-                for itp in impl_tps:
-                    val impl_tp: HirTypeParam = itp
-                    all_tps = all_tps.push(impl_tp)
-                    if bound_names.contains(impl_tp.name):
-                        reason = "impl has duplicate type parameter name `{impl_tp.name}`"
-                    else:
-                        bound_names = bound_names.push(impl_tp.name)
-                        bound_tps = bound_tps.push(impl_tp)
-                val impl_bound_count = bound_tps.len()
-                for otp in template.type_params:
-                    val own_tp: HirTypeParam = otp
-                    all_tps = all_tps.push(own_tp)
-                    if bound_names.contains(own_tp.name):
-                        if reason == "":
-                            reason = "method type parameter `{own_tp.name}` shadows an owner binder"
-                    else:
-                        bound_names = bound_names.push(own_tp.name)
-                        bound_tps = bound_tps.push(own_tp)
-                if reason == "" and impl_bound_count != impl_tps.len():
-                    reason = "impl type parameter binders are not unique"
-                if reason == "" and bound_tps.len() != impl_bound_count + template.type_params.len():
-                    reason = "method type parameter binders are not unique"
-                if reason == "" and (self.has_template_v1(gname) or self.generic_methods.has(method_key)):
-                    reason = "another module declares a method under the same template key `{gname}`"
-                    # The earlier registration is equally unusable.
-                    for prior_key in self.generic_methods.keys():
-                        val pk: text = prior_key
-                        if self.generic_methods[pk] == gname:
-                            self.generic_method_rejected[pk] = reason
-                if reason != "":
-                    self.generic_method_rejected[method_key] = reason
-                    continue
-                val recipe = MonoTemplateRecipeV1(module_name: module_name,
-                    original_symbol: template.symbol, template_name: gname,
-                    canonical_type_params: all_tps, bound_type_params: bound_tps,
-                    inherent_method: true)
-                self.archive_template_signatures[gname] = mono_template_recipe_signature_v1(template, recipe)
-                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
-                    self.generic_functions[gname] = template
-                self.template_recipes[gname] = recipe
-                self.template_module[gname] = module_name
-                self.generic_methods[method_key] = gname
+                self.collect_generic_instance_method_v1(module_name, by_id,
+                    owner_identity, owner_name, impl_tps, method_name, msym,
+                    gi.has_trait_, target_reason)
 
     # ========================================================================
     # Step 2: Worklist fixed point

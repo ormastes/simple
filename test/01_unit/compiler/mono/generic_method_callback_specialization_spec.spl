@@ -25,8 +25,8 @@ fn callback_future_module(source: text, module_name: text = "generic_callback") 
     module
 
 fn callback_specialized_function(module: HirModule, name: text) -> HirFunction:
-    for key in module.functions.keys():
-        val function: HirFunction = module.functions[key]
+    val functions: [HirFunction] = module.functions.values()
+    for function in functions:
         if function.name == name: return function
     fail("missing specialized method `{name}`")
 
@@ -48,6 +48,47 @@ fn callback_future_imported_modules() -> Dict<text, HirModule>:
     modules
 
 describe "generic method callback specialization":
+    it "preserves direct class owner binders on implicit self and specializes class methods":
+        val hir = callback_future_module(CALLBACK_FUTURE_SOURCE)
+        var saw_owner_bound_self = false
+        var saw_direct_class_method = false
+        val classes: [HirClass] = hir.classes.values()
+        for owner in classes:
+            if not owner.methods.has("then"): continue
+            saw_direct_class_method = true
+            val method_symbol = owner.methods["then"]
+            val functions: [HirFunction] = hir.functions.values()
+            for function in functions:
+                if function.symbol.id != method_symbol.id: continue
+                expect(function.params.len()).to_be_greater_than(0)
+                match function.params[0].type_.kind:
+                    case HirTypeKind.Named(receiver_owner, owner_args):
+                        expect(receiver_owner.id).to_equal(owner.symbol.id)
+                        expect(owner_args.len()).to_equal(1)
+                        match owner_args[0].kind:
+                            case HirTypeKind.TypeParam(name, _): expect(name).to_equal("T")
+                            case _: fail("direct class implicit self lost owner binder T")
+                    case _: fail("direct class implicit self lost its generic owner type")
+                saw_owner_bound_self = true
+        expect(saw_direct_class_method).to_equal(true)
+        expect(saw_owner_bound_self).to_equal(true)
+        var modules: Dict<text, HirModule> = {}
+        modules["generic_callback"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(callback_specialized_function(output["generic_callback"], "HostFuture__then$i64$text").type_params.len()).to_equal(0)
+
+    it "retains generic explicit impl method registration":
+        val source = "class HostFuture<T>:\n    value: T\nimpl HostFuture<T>:\n    fn then<U>(f: fn(T) -> HostFuture<U>) -> HostFuture<U>:\n        f(self.value)\nfn invoke(input: HostFuture<i64>, output: HostFuture<text>) -> HostFuture<text>:\n    input.then(\\value: output)\n"
+        val hir = callback_future_module(source)
+        var modules: Dict<text, HirModule> = {}
+        modules["generic_callback"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(callback_specialized_function(output["generic_callback"], "HostFuture__then$i64$text").type_params.len()).to_equal(0)
+
     it "binds owner T and method U, then stamps the captured callback ABI from the specialized signature":
         val hir = callback_future_module(CALLBACK_FUTURE_SOURCE)
         var modules: Dict<text, HirModule> = {}

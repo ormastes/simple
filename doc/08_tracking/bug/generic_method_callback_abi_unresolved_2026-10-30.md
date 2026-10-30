@@ -17,22 +17,27 @@ The native baseline reproduced the failure with
 
 ## Cause
 
-HIR retained instance calls as `MethodCall` nodes. The generic method registry
-accepted only methods whose complete type-parameter list matched receiver
-arguments, which excluded method-owned binders such as `U`. Its fallback also
-looked up the uninstantiated declaration signature. Result context and
-callback-body evidence were never combined before MIR lowered the function
-slot.
+The first repair covered generic `HirImpl.methods`, but the failing source uses
+class-body methods represented directly in `HirClass.methods`. The mono
+collector enumerated only `module.impls`, so it never registered
+`HostFuture::then`; the attempt's `call_sites=0` confirms no method rewrite
+was reached. Direct class lowering also typed implicit `self` as
+`Named(HostFuture, [])`, dropping the class-owned `T`, so the existing
+owner-prefix proof could not match the receiver declaration to its leading
+template binder even if the method had been registered.
 
 ## Repair
 
-The mono pass specializes inherent methods with receiver-owned binders first
-and unique, non-shadowing method binders afterward. It infers callback inputs
-and result from concrete arguments, expected results, and a checked callback
-body in an isolated environment. Imported nominal types cross the declaration
-and caller scopes through the existing relocation path. The rewritten method
-call is an ordinary direct call carrying its transported specialization
-signature; unresolved or conflicting evidence remains a hard mono refusal.
+Direct class methods now receive a `self` type containing their exact owner
+type-parameter names, and class-owned and explicit/synthetic impl methods share
+the same exact-symbol registration path. The mono pass specializes inherent
+methods with receiver-owned binders first and unique, non-shadowing method
+binders afterward. It infers callback inputs and result from concrete
+arguments, expected results, and a checked callback body in an isolated
+environment. Imported nominal types cross the declaration and caller scopes
+through the existing relocation path. The rewritten method call is an
+ordinary direct call carrying its transported specialization signature;
+unresolved or conflicting evidence remains a hard mono refusal.
 
 The MIR lambda ABI guard remains fail-closed. Regression coverage is in
 `test/01_unit/compiler/mono/generic_method_callback_specialization_spec.spl`.
@@ -55,6 +60,15 @@ but also reached the 8-GiB RSS cap before executing the driver. The repair
 source and assertions remain unverified. Native fixtures now include a
 distinct-binder runtime case (`distinct.spl`) and a conflicting-result
 compile-negative case (`conflicting_result.spl`); neither has been run.
+
+The freshly built compiler `908d23f9` reproduced the original failure against
+the frozen first-repair source blob `f5d86dc566671538f2d6423951b6d9508e8f6fb9`.
+Its native build log is
+`/tmp/simple-phase3-campaign-20261030-plan/probe-execution/attempt2/result-build.log`:
+`generic_fns=1`, `call_sites=0`, `specializations=0`, `unresolved=0`, followed
+by the unresolved lambda ABI diagnostic. This is the direct-class registration
+gap described above. The current direct-class registration and receiver-type
+fix are new construction input and have not been built or executed.
 
 The next verification attempt must use the freshly qualified pure-Simple
 stage-2 compiler for the focused source-import drivers and native fixture
