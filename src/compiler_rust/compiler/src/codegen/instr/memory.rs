@@ -16,7 +16,6 @@ use cranelift_module::Module;
 use crate::hir::TypeId;
 use crate::mir::VReg;
 
-use crate::codegen::shared::implicit_local_param_slots;
 use super::super::types_util::type_id_size;
 use super::helpers::call_runtime_1;
 use super::{InstrContext, InstrResult};
@@ -93,7 +92,7 @@ pub fn compile_store<M: Module>(
         };
 
         // Get the expected Cranelift type for this local
-        let implicit_param_slots = implicit_local_param_slots(ctx.func);
+        let implicit_param_slots = ctx.implicit_param_slots;
         let expected_cl_ty = if local_index < implicit_param_slots {
             types::I64
         } else if local_index - implicit_param_slots < ctx.func.params.len() {

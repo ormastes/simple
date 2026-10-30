@@ -1,0 +1,211 @@
+"""Bounded binary replacement for callers that already serialize publication.
+
+This primitive has no generation/CAS authority. Parents must be trusted against
+rename and the caller must serialize writes to `destination`. Changed files use
+the secure stage's private permissions; this is intended for private cache
+data, not permission-preserving general-purpose copies or executable installs.
+"""
+
+use std.nogc_sync_mut.io.retained_file.{
+    RetainedFile, retained_file_open, retained_file_read_at,
+    retained_file_identity_unchanged, retained_file_sync
+}
+use std.nogc_sync_mut.io.path_identity.{path_entry_present}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, directory_fsync, file_rename}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+val SOSIX_ATOMIC_COPY_MAX_BYTES_V1: i64 = 16777216
+val SOSIX_ATOMIC_COPY_CHUNK_BYTES_V1: i64 = 1048576
+
+enum SosixAtomicCopyStateV1:
+    Unchanged
+    ReplacedDurable
+    ReplacedDurabilityUnknown
+
+enum SosixAtomicCopyErrorKindV1:
+    InvalidRequest
+    SourceRead
+    SourceChanged
+    SourceDigestMismatch
+    DestinationInspect
+    DestinationRead
+    DestinationClose
+    DestinationDifferentSize
+    StageCreate
+    StageWrite
+    StageSync
+    StageClose
+    StageVerify
+    Replace
+
+struct SosixAtomicCopyReceiptV1:
+    state: SosixAtomicCopyStateV1
+    digest: text
+    byte_count: i64
+    cleanup_pending: bool
+    cleanup_path: text
+
+struct SosixAtomicCopyErrorV1:
+    kind: SosixAtomicCopyErrorKindV1
+    cleanup_pending: bool
+    cleanup_path: text
+
+fn _sosix_atomic_copy_error_v1(kind: SosixAtomicCopyErrorKindV1, cleanup_pending: bool, cleanup_path: text = "") -> SosixAtomicCopyErrorV1:
+    SosixAtomicCopyErrorV1(kind: kind, cleanup_pending: cleanup_pending, cleanup_path: cleanup_path)
+
+fn _sosix_atomic_copy_receipt_v1(state: SosixAtomicCopyStateV1, digest: text, byte_count: i64, cleanup_pending: bool, cleanup_path: text = "") -> SosixAtomicCopyReceiptV1:
+    SosixAtomicCopyReceiptV1(state: state, digest: digest, byte_count: byte_count, cleanup_pending: cleanup_pending, cleanup_path: cleanup_path)
+
+fn _sosix_atomic_copy_bytes_equal_v1(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+fn _sosix_atomic_copy_read_v1(file: RetainedFile, byte_count: i64) -> Result<[u8], SosixAtomicCopyErrorV1>:
+    var output: [u8] = []
+    var offset = 0
+    while offset < byte_count:
+        val remaining = byte_count - offset
+        val amount = if remaining > SOSIX_ATOMIC_COPY_CHUNK_BYTES_V1: SOSIX_ATOMIC_COPY_CHUNK_BYTES_V1 else: remaining
+        val chunk = match retained_file_read_at(file, offset as u64, amount):
+            case Ok(bytes): bytes
+            case Err(_): return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.SourceRead, false))
+        if chunk.len() != amount:
+            return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.SourceRead, false))
+        output = output + chunk
+        offset = offset + amount
+    Ok(output)
+
+fn _sosix_atomic_copy_read_destination_v1(path: text, byte_count: i64) -> Result<[u8], SosixAtomicCopyErrorV1>:
+    val destination = match retained_file_open(path, SOSIX_ATOMIC_COPY_MAX_BYTES_V1 as u64):
+        case Ok(file): file
+        case Err(_): return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationRead, false))
+    if destination.size != byte_count as u64:
+        val closed = destination.close()
+        if not closed:
+            return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationClose, false))
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationDifferentSize, false))
+    var output: [u8] = []
+    var offset = 0
+    var failed = false
+    while offset < byte_count and not failed:
+        val remaining = byte_count - offset
+        val amount = if remaining > SOSIX_ATOMIC_COPY_CHUNK_BYTES_V1: SOSIX_ATOMIC_COPY_CHUNK_BYTES_V1 else: remaining
+        match retained_file_read_at(destination, offset as u64, amount):
+            case Ok(bytes):
+                if bytes.len() != amount: failed = true
+                else: output = output + bytes
+            case Err(_): failed = true
+        offset = offset + amount
+    val stable = retained_file_identity_unchanged(destination)
+    val closed = destination.close()
+    if not closed:
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationClose, false))
+    if failed or stable.is_err():
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationRead, false))
+    Ok(output)
+
+fn _sosix_atomic_copy_parent_v1(destination: text) -> Result<text, SosixAtomicCopyErrorV1>:
+    val separator = destination.rfind("/")
+    if separator < 0: return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.InvalidRequest, false))
+    var parent = destination[0:separator]
+    if separator == 0: parent = "/"
+    elif host_is_windows_host() and separator == 2: parent = destination[0:3]
+    Ok(parent)
+
+fn _sosix_atomic_copy_cleanup_v1(stage_dir: text) -> bool:
+    dir_remove(stage_dir, true)
+
+fn sosix_atomic_copy_verified_v1(
+    source: RetainedFile,
+    destination: text,
+    expected_digest: text,
+    expected_bytes: i64,
+    maximum_bytes: i64
+) -> Result<SosixAtomicCopyReceiptV1, SosixAtomicCopyErrorV1>:
+    if (source.closed or source.writable or expected_bytes < 0 or maximum_bytes < 0 or
+        maximum_bytes > SOSIX_ATOMIC_COPY_MAX_BYTES_V1 or expected_bytes > maximum_bytes or
+        source.size != expected_bytes as u64 or expected_digest.len() != 64 or
+        destination == "" or destination.contains("\\")):
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.InvalidRequest, false))
+
+    val original_position = source.position
+    if retained_file_identity_unchanged(source).is_err():
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.SourceChanged, false))
+    val frozen = _sosix_atomic_copy_read_v1(source, expected_bytes)?
+    if source.position != original_position or retained_file_identity_unchanged(source).is_err():
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.SourceChanged, false))
+    if sha256_u8_hex(frozen) != expected_digest:
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.SourceDigestMismatch, false))
+
+    val parent = _sosix_atomic_copy_parent_v1(destination)?
+    val present = match path_entry_present(destination):
+        case Ok(value): value
+        case Err(_): return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.DestinationInspect, false))
+    if present:
+        val existing = _sosix_atomic_copy_read_destination_v1(destination, expected_bytes)
+        match existing:
+            case Ok(bytes):
+                if _sosix_atomic_copy_bytes_equal_v1(bytes, frozen):
+                    return Ok(_sosix_atomic_copy_receipt_v1(SosixAtomicCopyStateV1.Unchanged, expected_digest, expected_bytes, false))
+            case Err(error):
+                if error.kind != SosixAtomicCopyErrorKindV1.DestinationDifferentSize:
+                    return Err(error)
+
+    val stage_dir = match secure_temp_dir(parent, "sosix-copy-v1"):
+        case Ok(path): path
+        case Err(_): return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.StageCreate, false))
+    val stage_path = stage_dir + "/payload"
+    val stage = match retained_file_open(stage_path, maximum_bytes as u64, true):
+        case Ok(file): file
+        case Err(_):
+            val cleaned = _sosix_atomic_copy_cleanup_v1(stage_dir)
+            return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.StageCreate, not cleaned, if cleaned: "" else: stage_dir))
+    var offset = 0
+    var write_failed = false
+    while offset < frozen.len() and not write_failed:
+        val amount = if frozen.len() - offset > SOSIX_ATOMIC_COPY_CHUNK_BYTES_V1: SOSIX_ATOMIC_COPY_CHUNK_BYTES_V1 else: frozen.len() - offset
+        val chunk = frozen[offset:offset + amount]
+        match stage.write(chunk):
+            case Ok(_): ()
+            case Err(_): write_failed = true
+        offset = offset + amount
+    if write_failed:
+        val closed = stage.close()
+        val cleaned = _sosix_atomic_copy_cleanup_v1(stage_dir)
+        return Err(_sosix_atomic_copy_error_v1(if closed: SosixAtomicCopyErrorKindV1.StageWrite else: SosixAtomicCopyErrorKindV1.StageClose, not cleaned, if cleaned: "" else: stage_dir))
+    if not retained_file_sync(stage):
+        val closed = stage.close()
+        val cleaned = _sosix_atomic_copy_cleanup_v1(stage_dir)
+        return Err(_sosix_atomic_copy_error_v1(if closed: SosixAtomicCopyErrorKindV1.StageSync else: SosixAtomicCopyErrorKindV1.StageClose, not cleaned, if cleaned: "" else: stage_dir))
+    val stage_closed = stage.close()
+    if not stage_closed:
+        val cleaned = _sosix_atomic_copy_cleanup_v1(stage_dir)
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.StageClose, not cleaned, if cleaned: "" else: stage_dir))
+    val verified = _sosix_atomic_copy_read_destination_v1(stage_path, expected_bytes)
+    match verified:
+        case Ok(bytes):
+            if not _sosix_atomic_copy_bytes_equal_v1(bytes, frozen) or sha256_u8_hex(bytes) != expected_digest:
+                val cleaned = _sosix_atomic_copy_cleanup_v1(stage_dir)
+                return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.StageVerify, not cleaned, if cleaned: "" else: stage_dir))
+        case Err(error):
+            val cleaned = _sosix_atomic_copy_cleanup_v1(stage_dir)
+            val kind = if error.kind == SosixAtomicCopyErrorKindV1.DestinationClose: SosixAtomicCopyErrorKindV1.StageClose else: SosixAtomicCopyErrorKindV1.StageVerify
+            return Err(_sosix_atomic_copy_error_v1(kind, not cleaned, if cleaned: "" else: stage_dir))
+
+    if not file_rename(stage_path, destination):
+        val cleaned = _sosix_atomic_copy_cleanup_v1(stage_dir)
+        return Err(_sosix_atomic_copy_error_v1(SosixAtomicCopyErrorKindV1.Replace, not cleaned, if cleaned: "" else: stage_dir))
+    val cleaned = _sosix_atomic_copy_cleanup_v1(stage_dir)
+    if not directory_fsync(parent):
+        return Ok(_sosix_atomic_copy_receipt_v1(SosixAtomicCopyStateV1.ReplacedDurabilityUnknown, expected_digest, expected_bytes, not cleaned, if cleaned: "" else: stage_dir))
+    Ok(_sosix_atomic_copy_receipt_v1(SosixAtomicCopyStateV1.ReplacedDurable, expected_digest, expected_bytes, not cleaned, if cleaned: "" else: stage_dir))
+
+export SosixAtomicCopyStateV1, SosixAtomicCopyErrorKindV1
+export SosixAtomicCopyReceiptV1, SosixAtomicCopyErrorV1
+export sosix_atomic_copy_verified_v1

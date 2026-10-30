@@ -7,8 +7,8 @@ The file-worker coordinator consumes the P-G5 instance build plan: the union
 of every module's `generic-spec` list is the needed ConcreteTldrKey set, each
 key is one single-flight, receipted job compiled once into a producer-keyed,
 header-verified instance object. Two consumers -> one build; unchanged lists
--> zero builds; an added key -> one build; a removed key -> dropped + relink.
-An incomplete plan runs no job and links no instance object (fail closed).
+-> zero builds; an added key -> one build; a removed key -> demand retirement
+and relink while old bytes remain retained. An incomplete plan runs no job.
 """
 
 # @tag:unit
@@ -84,7 +84,7 @@ describe "file-worker generic instance jobs":
         expect(next.reused).to_equal(["k:a"])
         expect(next.relink).to_equal(true)
 
-    it "a removed key drops its object and forces a relink":
+    it "a removed key retires demand and forces a relink while retaining bytes":
         val root = fresh_root("drop")
         val _first = run(root, "0", [list_of(["k:a", "k:b"])])
         val gone = generic_instance_object_path_v1(root + "/cache", "producer-1", "k:b")
@@ -92,8 +92,20 @@ describe "file-worker generic instance jobs":
         val next = run(root, "1", [list_of(["k:a"])])
         expect(next.built.len()).to_equal(0)
         expect(next.dropped).to_equal(["k:b"])
-        expect(file_exists(gone)).to_equal(false)
+        expect(file_exists(gone)).to_equal(true)
         expect(next.relink).to_equal(true)
+
+    it "a failed producer keeps the previous complete needed inventory":
+        val root = fresh_root("retain-needed")
+        val _first = run(root, "0", [list_of(["k:a"])])
+        val plan = file_worker_instances_plan_v1(
+            [list_of(["k:a", "k:b"])], root + "/cache", "producer-1")
+        val failed = file_worker_instances_run_v1(plan, root + "/cache", "producer-1",
+            root + "/ledger-fail", "owner-fail", true, broken)
+        expect(failed.complete).to_equal(false)
+        expect(failed.failed).to_equal(["k:b"])
+        expect(file_worker_instances_previous_v1(root + "/cache", "producer-1"))
+            .to_equal(["k:a"])
 
     it "a key already claimed in the ledger is joined, not built twice":
         val root = fresh_root("flight")
