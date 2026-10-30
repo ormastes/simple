@@ -1,0 +1,44 @@
+# Process-local worker surface cache. Publication can occur inside the parser
+# lease; its escaped class graph must be retained before that lease closes.
+# This small owner boundary permits a native lifetime probe without importing
+# the full driver. No process/thread sharing or layout change is introduced.
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
+
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+
+var _worker_table_ready_v1: bool = false
+var _worker_table_dirty_v1: bool = false
+var _worker_table_v1: TldrTableV1 = TldrTableV1.create()
+
+fn worker_table_ensure_v1():
+    if not _worker_table_ready_v1:
+        _worker_table_v1 = TldrTableV1.create()
+        _worker_table_ready_v1 = true
+        _worker_table_dirty_v1 = true
+
+pub fn worker_surface_table_lookup_v1(digest: text) -> text?:
+    worker_table_ensure_v1()
+    if _worker_table_v1.is_loaded(digest):
+        Some(_worker_table_v1.entries[digest])
+    else:
+        nil
+
+pub fn worker_surface_table_publish_v1(digest: text, surface: text) -> bool:
+    worker_table_ensure_v1()
+    if digest == "" or surface == "": return false
+    if _worker_table_v1.is_loaded(digest):
+        return _worker_table_v1.entries[digest] == surface
+    # Mark before mutation: a failed retention cannot silently mark the graph
+    # clean. Rewalk the permanent table on later scopes to retain new children.
+    _worker_table_dirty_v1 = true
+    _worker_table_v1.publish(digest, surface)
+
+# Call only from the paused parser-scope owner, including cache-restored parses.
+pub fn worker_surface_table_promote_transient_owner_v1() -> bool:
+    if not _worker_table_dirty_v1: return true
+    if not rt_transient_heap_promote<TldrTableV1>(_worker_table_v1): return false
+    _worker_table_dirty_v1 = false
+    true
+
+export worker_surface_table_lookup_v1, worker_surface_table_publish_v1
+export worker_surface_table_promote_transient_owner_v1
