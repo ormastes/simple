@@ -1,6 +1,6 @@
 use std.spec.{describe, it, expect}
 use std.common.build_manager.grouped_native_contract.{NativeGroupMemberV1, NativeModuleResultV1,
-    NativeGroupManifestV1, native_group_scc_set_id_v1, native_module_result_encode_v1}
+    NativeGroupManifestV1, NativeGroupRunV1, NativeGroupResourceV1, native_group_scc_set_id_v1, native_module_result_encode_v1}
 use std.common.crypto.sha256.{sha256_text}
 use app.io.env_ops.{cwd}
 use app.io.dir_ops.{dir_create_all}
@@ -9,7 +9,8 @@ use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use app.bootstrap_builder.grouped_native_run.{native_group_normalize_crashed_sccs_v1,
     native_group_demote_unqualified_smf_v1, native_group_blocked_payload_v1,
     native_group_blocked_marker_matches_v1, native_group_has_compile_failure_v1,
-    native_group_failure_class_v1, native_group_recover_progress_v1}
+    native_group_failure_class_v1, native_group_recover_progress_v1,
+    native_group_attempt_root_v1, native_group_cache_root_v1, native_group_environment_v1}
 
 describe "grouped native terminal failure classification":
     it "retains a deterministic compiler rejection without retrying the same group":
@@ -149,3 +150,89 @@ describe "grouped native crash SCC normalization":
         expect(normalized[0].status).to_equal("CRASHED")
         expect(normalized[1].status).to_equal("BLOCKED")
         expect(normalized[2].status).to_equal("OK")
+
+fn stable_manifest_v1(group_id: text, generation: i64, attempt: i64) -> NativeGroupManifestV1:
+    val members = [NativeGroupMemberV1("m1", "scc-a", "src/a.spl", "a".repeat(64), "OBJECT", "objects/a.o")]
+    NativeGroupManifestV1("1".repeat(64), "2".repeat(64), "9".repeat(64), "c".repeat(64),
+        "C:/state/routes/group_a-1.route", "f".repeat(64),
+        "3".repeat(64), "4".repeat(64),
+        "phase4", "llvm", "x86_64", group_id, native_group_scc_set_id_v1(members),
+        generation, attempt, "5".repeat(64), 1, 1073741824, 2, members)
+
+fn stable_run_v1() -> NativeGroupRunV1:
+    NativeGroupRunV1("run_a", "1".repeat(64), "2".repeat(64), "9".repeat(64), "a".repeat(64),
+        "c".repeat(64), "3".repeat(64), "4".repeat(64),
+        "phase4", "llvm", "x86_64", "5".repeat(64), 2, 1073741824, 2,
+        268435456, 536870912, 1073741824,
+        "C:/source/build/scv/snapshots/rev1", "rev1", "commit1", "tree1",
+        "C:/state/source-inputs-before.txt", "C:/bin/tool.exe", "C:/bin/runtime.exe",
+        "C:/state/variant.receipt", "d".repeat(64),
+        "C:/source/build/warm-index/runtime-std.authority", "6".repeat(64),
+        "C:/source/build/warm-index", "0".repeat(64),
+        "C:/state/scv.receipt", "e".repeat(64),
+        "C:/source", "C:/state", "C:/output", "C:/bin/simple.exe",
+        "C:/bin/manager.exe", "b".repeat(64),
+        "C:/bin/worker.exe", "6".repeat(64), "C:/bin/broker.exe", "7".repeat(64),
+        ["MODE=release"], 3, 100, 60000, [], [], [])
+
+fn env_assignment_v1(environment: [text], name: text) -> text:
+    for item in environment:
+        if item.starts_with(name + "="): return item[name.len() + 1:]
+    "<missing>"
+
+describe "grouped native stable compiler cache root":
+    it "reuses one cache root across attempts and generations of a group":
+        val run = stable_run_v1()
+        val first = stable_manifest_v1("group-1", 1, 1)
+        val retry = stable_manifest_v1("group-1", 1, 2)
+        val next_generation = stable_manifest_v1("group-1", 2, 1)
+        val root = native_group_cache_root_v1(run, first)
+        expect(native_group_cache_root_v1(run, retry)).to_equal(root)
+        expect(native_group_cache_root_v1(run, next_generation)).to_equal(root)
+        expect(native_group_attempt_root_v1(run, first) != native_group_attempt_root_v1(run, retry)).to_equal(true)
+
+    it "keys the cache root by admitted identity":
+        val run = stable_run_v1()
+        val manifest = stable_manifest_v1("group-1", 1, 1)
+        val base = native_group_cache_root_v1(run, manifest)
+        var producer = stable_run_v1()
+        producer.producer_digest = "b".repeat(64)
+        expect(native_group_cache_root_v1(producer, manifest) != base).to_equal(true)
+        var inventory = stable_run_v1()
+        inventory.inventory_digest = "b".repeat(64)
+        expect(native_group_cache_root_v1(inventory, manifest) != base).to_equal(true)
+        var variant = stable_run_v1()
+        variant.variant_digest = "b".repeat(64)
+        expect(native_group_cache_root_v1(variant, manifest) != base).to_equal(true)
+        var index = stable_run_v1()
+        index.index_digest = "b".repeat(64)
+        expect(native_group_cache_root_v1(index, manifest) != base).to_equal(true)
+        var output = stable_run_v1()
+        output.output_root = "C:/output-2"
+        expect(native_group_cache_root_v1(output, manifest) != base).to_equal(true)
+        expect(native_group_cache_root_v1(run, stable_manifest_v1("group-2", 1, 1)) != base).to_equal(true)
+
+    it "keeps the cache root short and under state_root":
+        val run = stable_run_v1()
+        val root = native_group_cache_root_v1(run, stable_manifest_v1("group-1", 1, 1))
+        expect(root.starts_with(run.state_root + "/groups/")).to_equal(true)
+        expect(root.len() - run.state_root.len()).to_equal(95)
+        val segments = root.split("/")
+        val leaf = segments[segments.len() - 1]
+        expect(leaf.len()).to_equal(22)
+        expect(leaf.starts_with("cache-")).to_equal(true)
+        val hex = leaf[6:]
+        for i in 0..16:
+            expect("0123456789abcdef".contains(hex[i:i + 1])).to_equal(true)
+
+    it "points compiler caches at the stable root and temp at the attempt root":
+        val run = stable_run_v1()
+        val manifest = stable_manifest_v1("group-1", 1, 1)
+        val cache_root = native_group_cache_root_v1(run, manifest)
+        val attempt_root = native_group_attempt_root_v1(run, manifest)
+        val resource = NativeGroupResourceV1("group-1", 1, 1073741824, 1073741824, 1073741824, true, 268435456, 536870912)
+        val environment = native_group_environment_v1(run, attempt_root, cache_root, resource)
+        expect(env_assignment_v1(environment, "SIMPLE_NATIVE_BUILD_CACHE_DIR")).to_equal(cache_root + "/SIMPLE_NATIVE_BUILD_CACHE_DIR")
+        expect(env_assignment_v1(environment, "SIMPLE_HIR_CACHE_DIR")).to_equal(cache_root + "/SIMPLE_HIR_CACHE_DIR")
+        expect(env_assignment_v1(environment, "SIMPLE_CACHE")).to_equal(cache_root + "/cache")
+        expect(env_assignment_v1(environment, "TMPDIR")).to_equal(attempt_root + "/private/TMPDIR")
