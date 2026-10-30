@@ -876,6 +876,7 @@ pub(super) fn exec_block_closure_into(
                         if let Some(guard) = &arm.guard {
                             let mut guard_env = local_env.clone();
                             for (name, value) in &bindings {
+                                guard_env.enter_block_local(name.clone());
                                 guard_env.insert(name.clone(), value.clone());
                             }
                             let guard_val = eval_decision_cond(
@@ -900,6 +901,10 @@ pub(super) fn exec_block_closure_into(
                         let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
                             let prev = local_env.insert(name.clone(), value);
+                            // Block-local, as in `exec_match_core`: otherwise the
+                            // read prefers a same-named module global (e.g. the
+                            // `sdn.value` namespace for `case Failure(value):`).
+                            local_env.enter_block_local(name.clone());
                             shadowed.push((name, prev));
                         }
                         let arm_result = exec_block_closure_mut(
@@ -911,6 +916,7 @@ pub(super) fn exec_block_closure_into(
                             impl_methods,
                         );
                         for (name, prev) in shadowed.into_iter().rev() {
+                            local_env.exit_block_local(&name);
                             match prev {
                                 Some(v) => {
                                     local_env.insert(name, v);
@@ -1815,6 +1821,7 @@ fn exec_block_closure_mut_inner(
                         if let Some(guard) = &arm.guard {
                             let mut guard_env = local_env.clone();
                             for (name, value) in &bindings {
+                                guard_env.enter_block_local(name.clone());
                                 guard_env.insert(name.clone(), value.clone());
                             }
                             let guard_val = eval_decision_cond(
@@ -1839,6 +1846,10 @@ fn exec_block_closure_mut_inner(
                         let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
                             let prev = local_env.insert(name.clone(), value);
+                            // Block-local, as in `exec_match_core`: otherwise the
+                            // read prefers a same-named module global (e.g. the
+                            // `sdn.value` namespace for `case Failure(value):`).
+                            local_env.enter_block_local(name.clone());
                             shadowed.push((name, prev));
                         }
                         let arm_result = exec_block_closure_mut(
@@ -1850,6 +1861,7 @@ fn exec_block_closure_mut_inner(
                             impl_methods,
                         );
                         for (name, prev) in shadowed.into_iter().rev() {
+                            local_env.exit_block_local(&name);
                             match prev {
                                 Some(v) => {
                                     local_env.insert(name, v);

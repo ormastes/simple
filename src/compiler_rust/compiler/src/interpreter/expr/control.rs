@@ -253,6 +253,7 @@ pub(super) fn eval_control_expr(
                     if let Some(guard) = &arm.guard {
                         let mut guard_env = env.clone();
                         for (name, value) in &arm_bindings {
+                            guard_env.enter_block_local(name.clone());
                             guard_env.insert(name.clone(), value.clone());
                         }
                         let guard_val = crate::interpreter::eval_decision_cond(
@@ -288,6 +289,14 @@ pub(super) fn eval_control_expr(
                     // expression cost O(module globals). See bug
                     // seed_match_expression_return_arm_statement_cost_cliff_2026-08-22.
                     for (name, value) in arm_bindings {
+                        // Mark the arm binding block-local, exactly as the
+                        // statement form (`exec_match_core`) does. Without it
+                        // `is_local(name)` is false and the identifier read
+                        // (literals.rs) prefers a same-named MODULE_GLOBALS
+                        // entry, so `val s = match v: case String(value): value`
+                        // returned the imported `sdn.value` module namespace.
+                        // doc/08_tracking/bug/match_binding_shadowed_by_module_namespace_2026-08-18.md
+                        arm_env.enter_block_local(name.clone());
                         arm_env.insert(name, value);
                     }
                     // Pattern bindings are arm-local setup, not writes by the
