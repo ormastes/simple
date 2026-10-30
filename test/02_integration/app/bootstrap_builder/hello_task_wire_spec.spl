@@ -1,0 +1,106 @@
+# @req REQ-HBR-001 REQ-HBR-002 REQ-HBR-005
+# @manual_section: primary
+"""
+## Purpose and audience
+Pins the manager/worker wire seam for the hello BuildRunner task: the task the
+manager encodes must decode to the same identity on the worker side, a tampered
+task must change identity, and a result must bind to exactly one task identity.
+Audience: QA reviewers of the BuildRunner hello path. Pure codec, no processes.
+## Compatibility and limitations
+Runs on every host (macOS, Linux, FreeBSD, Windows, SimpleOS): no filesystem,
+no process spawn. The task program is a fixture literal, not the compiler path.
+## Verification guidance and troubleshooting
+A RED here means the codec or the identity digest drifted between manager and
+worker. Compare the encoded payload of both sides before changing the contract.
+"""
+use std.spec
+use std.common.build_manager.contracts.{
+    BuildInputV1, BuildTaskV1, BuildResultV1,
+    builder_validate_result_v1, builder_task_identity_v1
+}
+use std.common.build_manager.codec.{
+    builder_encode_task_v1, builder_decode_task_v1,
+    builder_encode_result_v1, builder_decode_result_v1
+}
+
+val HELLO_DIGEST = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+fn hello_wire_task_v1() -> BuildTaskV1:
+    hello_wire_task_attempt_v1(1)
+
+fn hello_wire_task_attempt_v1(attempt: i64) -> BuildTaskV1:
+    BuildTaskV1(id: "hello", attempt: attempt, phase: "module",
+        producer_digest: HELLO_DIGEST, source_digest: HELLO_DIGEST,
+        toolchain_digest: HELLO_DIGEST, dependencies: [],
+        program: "bin/simple", args: ["native-build", "--backend", "cranelift"],
+        inputs: [BuildInputV1(path: "hello.spl", digest: HELLO_DIGEST)],
+        outputs: ["hello"], cache_key: HELLO_DIGEST, timeout_ms: 60000,
+        memory_limit_bytes: 1073741824, links: [])
+
+fn hello_wire_result_v1(task: BuildTaskV1, status: text) -> BuildResultV1:
+    BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: "local",
+        status: status, exit_code: 0,
+        outputs: [BuildInputV1(path: "hello", digest: HELLO_DIGEST)],
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+
+describe "Hello BuildRunner manager and worker wire contract":
+    it "carries the hello task to the worker with the same identity":
+        # @req REQ-HBR-001
+        step("The manager encodes the hello build task")
+        val task = hello_wire_task_v1()
+        val payload = builder_encode_task_v1(task)
+        expect(payload.len() > 0).to_equal(true)
+        step("The worker decodes the same task and recomputes its identity")
+        match builder_decode_task_v1(payload):
+            case Ok(decoded): expect(builder_task_identity_v1(decoded)).to_equal(builder_task_identity_v1(task))
+            case Err(reason): fail(reason)
+
+    it "changes the task identity when one argument byte is flipped":
+        # @req REQ-HBR-002
+        step("The manager encodes the hello build task")
+        val task = hello_wire_task_v1()
+        val payload = builder_encode_task_v1(task)
+        step("A single argument byte in the wire payload is flipped")
+        val tampered = payload.replace("cranelift", "craneliff")
+        expect(tampered != payload).to_equal(true)
+        match builder_decode_task_v1(tampered):
+            case Ok(decoded): expect(builder_task_identity_v1(decoded) != builder_task_identity_v1(task)).to_equal(true)
+            case Err(reason): fail(reason)
+
+    it "refuses a task framed with the untyped-links header":
+        # @req REQ-HBR-005
+        step("The manager encodes the hello build task")
+        val payload = builder_encode_task_v1(hello_wire_task_v1())
+        step("The header is replaced with the retired version-2 header")
+        val legacy = payload.replace("SIMPLE-BUILD-TASK-3", "SIMPLE-BUILD-TASK-2")
+        match builder_decode_task_v1(legacy):
+            case Ok(decoded): fail("legacy task header must be refused")
+            case Err(reason): expect(reason).to_equal("invalid task wire header (typed links required)")
+
+    it "accepts the worker result for the hello task and refuses a forged identity":
+        # @req REQ-HBR-005
+        step("The worker reports an OK result for the hello task")
+        val task = hello_wire_task_v1()
+        val result = hello_wire_result_v1(task, "OK")
+        step("The manager verifies the result against the task it dispatched")
+        expect(builder_validate_result_v1(task, result)).to_equal("")
+        step("A result bound to a different task identity is forged")
+        val forged = BuildResultV1(task_id: task.id, attempt: task.attempt,
+            identity_digest: builder_task_identity_v1(hello_wire_task_attempt_v1(2)),
+            host_id: result.host_id, status: result.status, exit_code: result.exit_code,
+            outputs: result.outputs, cache_hits: -1, cache_misses: -1, cache_stores: -1)
+        expect(builder_validate_result_v1(task, forged)).to_equal("stale or mismatched result identity")
+
+    it "round-trips the result wire record for the hello task":
+        # @req REQ-HBR-001
+        step("The worker encodes its result for the hello task")
+        val task = hello_wire_task_v1()
+        val result = hello_wire_result_v1(task, "OK")
+        val payload = builder_encode_result_v1(result)
+        step("The manager decodes the result and checks its identity")
+        match builder_decode_result_v1(payload):
+            case Ok(decoded):
+                expect(decoded.identity_digest).to_equal(builder_task_identity_v1(task))
+                expect(builder_validate_result_v1(task, decoded)).to_equal("")
+            case Err(reason): fail(reason)
