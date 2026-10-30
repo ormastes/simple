@@ -1,0 +1,104 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+"""
+# Turning MC/DC off needs a reviewed waiver
+
+`SIMPLE_MCDC_MODE=off` on a normal-or-stricter profile with no complete waiver
+must be refused with a non-zero exit and an explicit message; the spec must not
+silently run with MC/DC disabled. A complete waiver is honoured. Unknown modes
+are refused too.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val GREEN = "use std.spec\ndescribe \"g\":\n    it \"green\":\n        val a = 3\n        if a > 1 and a < 5:\n            expect(a).to_equal(3)\n"
+
+val WAIVER = [
+    "SIMPLE_MCDC_OFF_WAIVER_REASON=hardware scenario cannot be produced",
+    "SIMPLE_MCDC_OFF_WAIVER_REVIEWER=safety-reviewer",
+    "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID=review-42",
+    "SIMPLE_MCDC_OFF_WAIVER_VERSION=source-offset-v1",
+]
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn make_case(case: text) -> text:
+    val dir = "build/mcdc_kind/" + case
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    file_write(dir + "/g_spec.spl", GREEN)
+    dir
+
+fn run_dir(dir: text, envs: [text], extra: [text]) -> (text, i64):
+    val argv = envs + [real_binary(), "test", dir, "--no-db", "--no-cache", "--assert-ran"] + extra
+    val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
+    (out + err, code)
+
+fn verdict_line(output: text) -> text:
+    for line in output.split("\n"):
+        if line.starts_with("SPEC FILE VERDICT:"):
+            return line
+    ""
+
+describe "off without a waiver":
+    it "gets an exit-code refusal on the default profile":
+        step("Request off with no waiver")
+        val dir = make_case("off_default")
+        val (output, code) = run_dir(dir, ["SIMPLE_MCDC_MODE=off"], [])
+        expect(code == 0).to_equal(false)
+
+    it "names the refusal in the output":
+        step("Look for an explicit invalid-off message")
+        val dir = make_case("off_message")
+        val (output, _code) = run_dir(dir, ["SIMPLE_MCDC_MODE=off"], [])
+        expect(output.contains("invalid-off") or output.contains("waiver")).to_equal(true)
+
+    it "is refused for the static-off spelling too":
+        step("Request static-off with no waiver")
+        val dir = make_case("off_static")
+        val (_output, code) = run_dir(dir, ["SIMPLE_MCDC_MODE=static-off"], [])
+        expect(code == 0).to_equal(false)
+
+    it "is refused on --profile=strict and --profile=critical":
+        step("Request off under stricter profiles")
+        for p in ["strict", "critical"]:
+            val dir = make_case("off_profile_" + p)
+            val (_output, code) = run_dir(dir, ["SIMPLE_MCDC_MODE=off"], ["--profile=" + p])
+            expect(code == 0).to_equal(false)
+
+    it "is refused when one waiver field is missing":
+        step("Three of four waiver fields")
+        val dir = make_case("off_partial_waiver")
+        val partial = [WAIVER[0], WAIVER[1], WAIVER[2]]
+        val (_output, code) = run_dir(dir, ["SIMPLE_MCDC_MODE=off"] + partial, [])
+        expect(code == 0).to_equal(false)
+
+    it "is refused when a waiver field contains a pipe":
+        step("Pipe in the reviewer field")
+        val dir = make_case("off_pipe_waiver")
+        val bad = [WAIVER[0], "SIMPLE_MCDC_OFF_WAIVER_REVIEWER=a|b", WAIVER[2], WAIVER[3]]
+        val (_output, code) = run_dir(dir, ["SIMPLE_MCDC_MODE=off"] + bad, [])
+        expect(code == 0).to_equal(false)
+
+describe "a valid waiver":
+    it "is honoured: the spec runs and passes with MC/DC off":
+        step("Request off with all four waiver fields")
+        val dir = make_case("waiver_ok")
+        val (output, _code) = run_dir(dir, ["SIMPLE_MCDC_MODE=off"] + WAIVER, [])
+        expect(verdict_line(output)).to_contain("passed=1")
+        expect(verdict_line(output).contains("degraded=")).to_equal(false)
+        expect(output.contains("invalid-off")).to_equal(false)
+
+describe "unknown modes":
+    it "are refused with a non-zero exit":
+        step("Request a bogus mode")
+        val dir = make_case("mode_bogus")
+        val (_output, code) = run_dir(dir, ["SIMPLE_MCDC_MODE=bogus"], [])
+        expect(code == 0).to_equal(false)

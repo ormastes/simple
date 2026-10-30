@@ -1,0 +1,83 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+"""
+# The full test runner applies MC/DC to a spec with if/and/or conditions
+
+An operator runs `simple test <dir>` (the directory lane, which is the one that
+instruments specs) over a spec containing `if a and b` and `if a or b`. The
+runner must run the spec, report PASS, and never be silent about MC/DC: it
+either collects evidence for the decisions or states an explicit degrade.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val FIXTURE = "use std.spec\ndescribe \"conditions\":\n    it \"if and or\":\n        val a = 3\n        val b = 7\n        var hits = 0\n        if a > 1 and b < 10:\n            hits = hits + 1\n        if a > 5 or b > 5:\n            hits = hits + 1\n        expect(hits).to_equal(2)\n"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn make_case(case: text, name: text, body: text) -> text:
+    val dir = "build/mcdc_kind/" + case
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    file_write(dir + "/" + name + "_spec.spl", body)
+    dir
+
+fn run_dir(dir: text, envs: [text], extra: [text]) -> (text, i64):
+    val argv = envs + [real_binary(), "test", dir, "--no-db", "--no-cache", "--assert-ran"] + extra
+    val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
+    (out + err, code)
+
+fn verdict_line(output: text) -> text:
+    for line in output.split("\n"):
+        if line.starts_with("SPEC FILE VERDICT:"):
+            return line
+    ""
+
+describe "simple test <dir> over an if/and/or fixture":
+    it "runs the spec and reports it passed with a verdict line":
+        step("Run the and/or fixture through the directory lane")
+        val dir = make_case("applies_basic", "cond", FIXTURE)
+        val (output, _code) = run_dir(dir, [], [])
+        val verdict = verdict_line(output)
+        expect(verdict).to_contain("passed=1")
+        expect(verdict).to_contain("failed=0")
+        expect(verdict).to_contain("outcome=OK")
+
+    it "is never silent about MC/DC: evidence or an explicit degrade is on record":
+        step("Look for MC/DC evidence or a degrade marker")
+        val dir = make_case("applies_not_silent", "cond", FIXTURE)
+        val (output, _code) = run_dir(dir, [], [])
+        val verdict = verdict_line(output)
+        val degraded = verdict.contains("degraded=") or output.contains("[mcdc-fallback]")
+        val evidenced = output.contains("MC/DC") and output.contains("decision")
+        expect(degraded or evidenced).to_equal(true)
+
+    it "reports MC/DC decisions for the fixture (instrumentation succeeded, no degrade)":
+        step("Require the instrumented path to succeed and name decisions")
+        val dir = make_case("applies_decisions", "cond", FIXTURE)
+        val (output, _code) = run_dir(dir, [], [])
+        expect(verdict_line(output).contains("degraded=")).to_equal(false)
+        expect(output.contains("[mcdc-fallback]")).to_equal(false)
+        expect(output).to_contain("MC/DC")
+        expect(output).to_contain("decision")
+
+    it "keeps an explicit SIMPLE_MCDC_MODE=on in force":
+        step("Run with the mode set explicitly")
+        val dir = make_case("applies_explicit_on", "cond", FIXTURE)
+        val (output, _code) = run_dir(dir, ["SIMPLE_MCDC_MODE=on"], [])
+        val verdict = verdict_line(output)
+        expect(verdict).to_contain("passed=1")
+        expect(verdict.contains("degraded=") or output.contains("decision")).to_equal(true)
+
+    it "treats dynamic-aspect like dynamic and still runs the spec":
+        step("Run with the dynamic-aspect spelling")
+        val dir = make_case("applies_dynamic_aspect", "cond", FIXTURE)
+        val (output, _code) = run_dir(dir, ["SIMPLE_MCDC_MODE=dynamic-aspect"], [])
+        expect(verdict_line(output)).to_contain("passed=1")

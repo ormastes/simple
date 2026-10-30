@@ -1,0 +1,84 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+"""
+# MC/DC under --no-session-daemon is applied or explicitly reported, never skipped silently
+
+`simple test <spec> --no-session-daemon` routes to the single-file lane. That
+lane must not quietly drop MC/DC: the run either instruments the spec and
+reports decisions, or states an explicit degrade/skip. A directory target is
+refused rather than passing silently.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val FIXTURE = "use std.spec\ndescribe \"conditions\":\n    it \"if and or\":\n        val a = 3\n        val b = 7\n        var hits = 0\n        if a > 1 and b < 10:\n            hits = hits + 1\n        if a > 5 or b > 5:\n            hits = hits + 1\n        expect(hits).to_equal(2)\n"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn make_case(case: text, name: text, body: text) -> text:
+    val dir = "build/mcdc_kind/" + case
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    file_write(dir + "/" + name + "_spec.spl", body)
+    dir
+
+fn run_target(target: text, envs: [text], extra: [text]) -> (text, i64):
+    val argv = envs + [real_binary(), "test", target, "--no-session-daemon", "--no-db", "--no-cache"] + extra
+    val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
+    (out + err, code)
+
+fn verdict_line(output: text) -> text:
+    for line in output.split("\n"):
+        if line.starts_with("SPEC FILE VERDICT:"):
+            return line
+    ""
+
+fn mentions_mcdc(output: text) -> bool:
+    var kept: [text] = []
+    for line in output.split("\n"):
+        if not line.contains("co-compiled") and not line.contains("[gc-warning]"):
+            kept.push(line)
+    val stripped = kept.join("\n").replace("mcdc_kind", "")
+    stripped.contains("MC/DC") or stripped.contains("mcdc") or stripped.contains("MCDC")
+
+describe "simple test <file> --no-session-daemon":
+    it "runs the fixture and reports it passed":
+        step("Run the and/or fixture through the single-file lane")
+        val dir = make_case("nodaemon_basic", "cond", FIXTURE)
+        val (output, code) = run_target(dir + "/cond_spec.spl", [], [])
+        expect(verdict_line(output)).to_contain("passed=1")
+        expect(code).to_equal(0)
+
+    it "does not skip MC/DC silently: the output mentions MC/DC or a degrade":
+        step("Look for any MC/DC statement in the single-file lane output")
+        val dir = make_case("nodaemon_not_silent", "cond", FIXTURE)
+        val (output, _code) = run_target(dir + "/cond_spec.spl", [], [])
+        expect(mentions_mcdc(output) or verdict_line(output).contains("degraded=")).to_equal(true)
+
+    it "reports decisions for the instrumented single-file run":
+        step("Require decisions in the single-file lane output")
+        val dir = make_case("nodaemon_decisions", "cond", FIXTURE)
+        val (output, _code) = run_target(dir + "/cond_spec.spl", [], [])
+        expect(output).to_contain("MC/DC")
+        expect(output).to_contain("decision")
+
+    it "still fails a red spec":
+        step("Run a failing spec through the single-file lane")
+        val dir = make_case("nodaemon_red", "red", "use std.spec\ndescribe \"r\":\n    it \"red\":\n        expect(1 + 1).to_equal(3)\n")
+        val (output, code) = run_target(dir + "/red_spec.spl", [], [])
+        expect(code == 0).to_equal(false)
+        expect(verdict_line(output)).to_contain("failed=1")
+
+    it "refuses to treat a directory as a single-file lane target, loudly":
+        step("Pass a directory with --no-session-daemon")
+        val dir = make_case("nodaemon_dir", "cond", FIXTURE)
+        val (output, code) = run_target(dir, [], [])
+        expect(code == 0).to_equal(false)
+        expect(output).to_contain("expected .spl test file")
