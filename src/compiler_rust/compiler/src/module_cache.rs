@@ -529,7 +529,7 @@ pub const MAX_MODULE_DEPTH: usize = 50;
 // Key: normalized module path, Value: module exports dict
 thread_local! {
     pub static MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
-    static MODULE_EXPORT_OWNERS: RefCell<HashMap<usize, Arc<str>>> = RefCell::new(HashMap::new());
+    pub(crate) static MODULE_EXPORT_OWNERS: RefCell<HashMap<usize, Arc<str>>> = RefCell::new(HashMap::new());
     // Cache for ClassDef objects (Arc-wrapped for cheap sharing)
     pub static MODULE_CLASSES_CACHE: RefCell<HashMap<PathBuf, HashMap<String, Arc<ClassDef>>>> = RefCell::new(HashMap::new());
     // Cache for FunctionDef objects (Arc-wrapped for cheap sharing with Value::Function)
