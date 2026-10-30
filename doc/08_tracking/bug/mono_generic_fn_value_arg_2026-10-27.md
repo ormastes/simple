@@ -17,3 +17,7 @@ concrete local type`, then `E-MONO-033` (6 unspecialized sites).
 When a generic function is used as a value whose expected type is `fn(T) -> R` and `T` is bound
 in the enclosing generic context, instantiate it with that `T` (and infer the callee's `T` from
 the enclosing substitution). Remove the workaround after.
+
+## Source-admission annotation repair (2026-10-30)
+
+A bounded static admission inventory for the current-release generic hardening lane found the existing build_session.spl marker carried a trailing colon in its bug ID and unkeyed explanatory prose. The canonical marker parser rejects that identifier. Keep the already registered ID unchanged, remove the colon, and label the same explanation with reason=. The marker still immediately precedes the same if block; executable behavior is unchanged. This repair is source-admission evidence, not a new generic-inference runtime PASS.
