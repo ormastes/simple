@@ -99,6 +99,9 @@ fn configure_timeout_child_process_group(command: &mut std::process::Command) {
     command.process_group(0);
 }
 
+#[cfg(not(unix))]
+fn configure_timeout_child_process_group(_command: &mut std::process::Command) {}
+
 /// A capturing child together with the host handle that lets a timeout take
 /// down its whole process tree, not only the leader.
 struct CaptureChild {
