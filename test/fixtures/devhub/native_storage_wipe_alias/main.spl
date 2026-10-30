@@ -1,0 +1,35 @@
+# Native only: close_view must wipe a caller-held plaintext owner. The seed
+# interpreter copies a var-held array on write, so this is not testable there.
+# `val alias = image` is not wiped natively (measured 2026-10-31), so a caller
+# that makes its own copy of plaintext owns wiping that copy.
+use std.io_runtime.{exit}
+use std.database.server.storage_port.{
+    database_storage_port_v1, StorageReadView, STORAGE_FORMAT_SQLCIPHER4
+}
+
+fn require_wiped(value: u8, label: text):
+    if value != 0u8:
+        print "FAIL storage wipe: {label}"
+        exit(1)
+
+fn main() -> i64:
+    var image: [u8] = []
+    image.push(0u8)
+    image.push(128u8)
+    image.push(255u8)
+    val view = StorageReadView(
+        format: STORAGE_FORMAT_SQLCIPHER4,
+        source_path: "owned-memory",
+        image: image,
+        page_size: 4096,
+        page_count: 1,
+        reserved_bytes: 80,
+        text_encoding: 1)
+    val port = database_storage_port_v1()
+    if not port.close_view(view):
+        print "FAIL storage wipe: close"
+        return 1
+    require_wiped(image[1], "original middle byte")
+    require_wiped(image[2], "original last byte")
+    print "PASS native storage wipe reaches the owner"
+    0
