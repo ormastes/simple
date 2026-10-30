@@ -19,6 +19,8 @@ use std.io_runtime.{thread_sleep}
 use std.io_runtime.{time_now_unix_micros}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
 use std.io_runtime.{env_get}
+use std.io_runtime.{env_set}
+use std.io_runtime.{env_remove_process}
 
 # Atomic write: tmp + rename (see test_runner_client.spl for the race this
 # closes — #98: a plain rt_file_write_text response could be observed
@@ -68,6 +70,33 @@ fn invoking_binary() -> text:
             return current_path
     ""
 
+fn argv_binary_candidate(raw: [text]) -> text:
+    """argv[0] when it names an existing compiler binary, else "".
+
+    A `.spl` argv[0] is this daemon's own source path (source-mode launch); it
+    exists but is not executable, so it must never be chosen as the binary."""
+    if raw.len() > 0 and not raw[0].ends_with(".spl") and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
+        return raw[0]
+    ""
+
+fn enter_daemon_child_env() -> text:
+    """Mark the environment the served worker inherits as daemon-owned.
+
+    Returns the previous marker value so the caller can restore it. A spec the
+    daemon is serving that itself runs `simple test <spec>` reaches
+    test_runner_client with SIMPLE_TEST_DAEMON_CHILD=1 and runs directly
+    instead of queueing behind the single worker that is busy serving it."""
+    val previous_child_marker = env_get("SIMPLE_TEST_DAEMON_CHILD") ?? ""
+    env_set("SIMPLE_TEST_DAEMON_CHILD", "1")
+    previous_child_marker
+
+fn restore_daemon_child_env(previous_child_marker: text):
+    """Undo enter_daemon_child_env() so the daemon's own environment is unchanged."""
+    if previous_child_marker == "":
+        env_remove_process("SIMPLE_TEST_DAEMON_CHILD")
+    else:
+        env_set("SIMPLE_TEST_DAEMON_CHILD", previous_child_marker)
+
 fn simple_binary() -> text:
     val configured = (env_get("SIMPLE_BINARY") ?? "")
     if configured != "" and file_exists(configured):
@@ -85,8 +114,9 @@ fn simple_binary() -> text:
     # exists, but it is not executable; passing it to process_run_timeout
     # produces a misleading permission-denied failure instead of running the
     # test. Same fix as test_runner_single.spl's simple_binary().
-    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
-        return raw[0]
+    val argv_binary = argv_binary_candidate(raw)
+    if argv_binary != "":
+        return argv_binary
     # bin/simple (the deployed pure-Simple self-hosted binary — see
     # .claude/rules/bootstrap.md "Default tooling runs on pure-Simple") MUST be
     # tried before any Rust-seed candidate. This daemon is long-lived (it
@@ -181,12 +211,14 @@ fn handle_request(binary: text, name: text, environment_digest: text,
             "{LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE}\n{LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER}")
         file_delete(inflight_path)
         return
+    val previous_child_marker = enter_daemon_child_env()
     val (stdout, stderr, code) = process_run_bounded(
         binary,
         ["run", "src/app/test_runner_new/test_runner_single.spl", test_path, "--no-session-daemon", "--sequential", "--timeout", timeout_secs.to_string()],
         timeout_ms,
         TEST_OUTPUT_CAPTURE_BYTES
     )
+    restore_daemon_child_env(previous_child_marker)
     var body = stdout
     if stderr != "":
         body = body + stderr
