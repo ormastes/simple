@@ -150,7 +150,7 @@ pub mod security_runtime;
 /// stage 1 of the mid-codepoint-slice rollout and is DEFAULT OFF.
 pub mod text_slice_audit;
 pub mod value;
-mod file_view;
+pub mod file_view;
 mod fd_stat_v1;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime
