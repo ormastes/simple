@@ -1,6 +1,6 @@
 # Process/cpuid raw-block facades leak per call
 
-Status: OPEN (P3)
+Status: PARTIALLY FIXED (C facade owner array freed 2026-10-30); remainder OPEN (P3)
 
 ## Summary
 
@@ -42,3 +42,26 @@ against the Rust runtime instead of the C bundle cannot resolve it. Closing
 this needs the owned-observed owner ported to the Rust runtime first, then a
 `process_result_block`-style twin. Its multi-line C signature also hides it
 from the rt dual-implementation census (line-based regex).
+
+## Status update 2026-10-30
+
+- **Fixed (C facade, macOS-measured):** `rt_process_result_to_tuple` in
+  `src/runtime/runtime_native.c` now frees the owner array after copying slots
+  0-2 (commit 55f705bb0ee). Callers pass fresh arrays (`posix_process_run_capture`
+  / `process_timeout_result` retain nothing); the free is shallow and a no-op for
+  tuple handles (the bytes path returns a tuple, which the registered-array lookup
+  rejects). Same contract as `rt_process_run_owned_observed_bounded_text`.
+- **Evidence:** `test/runtime/process_result_tuple_owner_free_test.c` (run by
+  `scripts/check/check-process-tuple-owner-free.shs`). Live malloc blocks per
+  spawn via `malloc_zone_statistics`: HEAD 3.02/call (603 over 200) -> 1.01/call
+  (203 over 200). Test FAILS at HEAD, PASSES with the fix.
+- **Still open:**
+  - The remaining 1 block/call is the `rt_alloc`'d 3-word tuple block the
+    pure-Simple destructure reads. It lives in the transient raw registry, so it
+    needs a lowering-side owner or scope-free (the original fix direction).
+  - `rt_cpuid_tuple_block` (`runtime_native.c`): the 4-word block has no owner.
+  - Rust twins in `src/compiler_rust/.../env_process.rs` (`raw_result_block`,
+    intermediate `rt_tuple_new` owner) leak as before; not touched in this lane.
+  - Bytes path (`rt_process_run_bounded_bytes_tuple`): the result is a tuple, not
+    an array, so the new free is a no-op there; its tuple and two byte arrays still
+    leak.
