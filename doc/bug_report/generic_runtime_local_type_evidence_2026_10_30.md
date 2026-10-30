@@ -91,3 +91,12 @@ The generated codec field update is mechanical and still requires comparison
 with the canonical `compiler_schema ... codec` regeneration under admitted
 pure tooling before completion. HIR codec v14 deliberately rejects older
 serialized layouts; old HIR receipts are not transplanted into this schema.
+
+## Focused compiler-owner harness: return-only generic projection blocker
+
+The first native harness attempt using producer `76c04806d8321705424b7ebbf11ddfbe5726771ad4033696d4b308c24e8d33fd` and candidate `63007bc614eac1d251d59f1cae9ca7c76f63921c` failed at monomorphization, before any object or fixture execution. All 12 unresolved call sites were specializations of the same call at `70.backend/backend/_MirToLlvm/core_codegen.spl:173`: `_sffi_tuple_get<T>` called return-only generic `rt_tuple_get` without explicit type arguments. The MIR shard and fallback worker each reported those 12 sites; they are not 24 distinct source defects.
+
+The backend now matches the existing MIR-expression owner: declare the nil-capable runtime projection as `rt_tuple_get<T>(...) -> T?` and forward `<T>` explicitly. The C implementation returns nil for missing or out-of-range slots. No monomorphization check is disabled. The added native fixture checks a retained record payload and negative/upper-out-of-range slots; execution is pending. The provenance spec title now accurately describes admission checks rather than claiming runtime identity coverage.
+
+Evidence: `C:/dev/runtime-value-abi-focused-20261030/attempt1/{stdout.log,stderr.log,result.sdn}`. Original artifacts are preserved. This blocker does not qualify or disprove the new runtime-value ABI lowering; the compiler harness itself did not finish building.
+Review caught an invalid initial test assumption: newly allocated tuple slots contain raw zero, whereas the runtime nil tag is distinct. The regression therefore tests the documented invalid-index nil branch, not unspecified unset-slot contents. No runtime initialization behavior was changed.
