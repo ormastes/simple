@@ -263,3 +263,124 @@ describe "Contextual generic callbacks preserve inference and validation":
         expect(report.unresolved_type_param).to_equal(0)
         expect(report.any_erasure).to_equal(0)
         expect(report.generic_call).to_equal(0)
+
+    it "persists contextual receiver and nested member types through the source pipeline":
+        val source = "struct Inner:\n    tag: text\n    value: i64\nstruct Outer:\n    tag: text\n    inner: Inner\nfn project<T>(value: T, callback: fn(T) -> i64) -> i64:\n    callback(value)\nfn invoke(value: Outer) -> i64:\n    project(value, \\item: item.inner.value)\n"
+        val parsed = parse_full_frontend(source, "callback_fields.spl", "callback_fields", Logger(level: 0))
+        var lowering = HirLowering.with_filename("callback_fields.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["callback_fields"] = hir
+        val (out, stats, diagnostics) = run_monomorphization_with_diagnostics(modules)
+        expect(diagnostics.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        var checked = 0
+        val module = out["callback_fields"]
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if function.name != "invoke": continue
+            match function.body.value.kind:
+                case HirExprKind.Call(_, arguments, _):
+                    match arguments[1].value.kind:
+                        case HirExprKind.Lambda(parameters, body, _):
+                            expect(body.has_type_).to_equal(true)
+                            expect(body.type_.kind == HirTypeKind.Int(64, true)).to_equal(true)
+                            match body.kind:
+                                case HirExprKind.Field(inner, name, _):
+                                    expect(name).to_equal("value")
+                                    expect(inner.has_type_).to_equal(true)
+                                    match inner.type_.kind:
+                                        case HirTypeKind.Named(inner_symbol, _):
+                                            expect(module.symbols.get_symbol_raw(inner_symbol.id).unwrap().name).to_equal("Inner")
+                                        case _: assert(false)
+                                    match inner.kind:
+                                        case HirExprKind.Field(receiver, inner_name, _):
+                                            expect(inner_name).to_equal("inner")
+                                            expect(receiver.has_type_).to_equal(true)
+                                            expect(receiver.type_.kind == parameters[0].type_.kind).to_equal(true)
+                                            checked = checked + 1
+                                        case _: assert(false)
+                                case _: assert(false)
+                        case _: assert(false)
+                case _: assert(false)
+        expect(checked).to_equal(1)
+
+    it "relocates a nested field result instead of reusing a colliding provider id":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "consumer"
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val inner = provider.define("Inner", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "provider")
+        val unrelated = consumer.define("Unrelated", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "consumer")
+        val imported = consumer.define("Inner", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "provider")
+        val outer = consumer.define("Outer", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "consumer")
+        pass_.module_symbols["provider"] = provider
+        pass_.module_symbols["consumer"] = consumer
+        pass_.named_symbol_names["consumer#{outer.id}"] = "Outer"
+        pass_.named_symbol_names["provider#{inner.id}"] = "Inner"
+        pass_.named_symbol_names["consumer#{imported.id}"] = "Inner"
+        pass_.field_types["Outer::inner"] = callback_type(HirTypeKind.Named(inner, []))
+        pass_.field_owner_modules["Outer::inner"] = "provider"
+        pass_.field_types["Inner::value"] = callback_type(HirTypeKind.Int(64, true))
+        pass_.field_owner_modules["Inner::value"] = "provider"
+        pass_.env[901] = callback_type(HirTypeKind.Named(outer, []))
+        val receiver = callback_expr(HirExprKind.NamedVar(SymbolId(id: 901), "item"))
+        val member = callback_expr(HirExprKind.Field(receiver, "inner", nil))
+        # Inferred aliases must cross the same owner boundary before entering
+        # env, or stamping a later Var would turn provider ids into caller ids.
+        val alias = SymbolId(id: 902)
+        pass_.collect_lets_stmt(HirStmt(kind: HirStmtKind.Let(alias, callback_type(HirTypeKind.Infer(0, 0)), member), span: Span.empty()))
+        expect(pass_.env[902].kind == HirTypeKind.Named(imported, [])).to_equal(true)
+        val alias_read = callback_expr(HirExprKind.Var(alias))
+        val alias_field = pass_.rewrite_expr(callback_expr(HirExprKind.Field(alias_read, "value", nil)))
+        expect(alias_field.has_type_).to_equal(true)
+        expect(alias_field.type_.kind == HirTypeKind.Int(64, true)).to_equal(true)
+        match alias_field.kind:
+            case HirExprKind.Field(alias_base, _, _):
+                expect(alias_base.has_type_).to_equal(true)
+                expect(alias_base.type_.kind == HirTypeKind.Named(imported, [])).to_equal(true)
+            case _: assert(false)
+        val rewritten = pass_.rewrite_expr(callback_expr(HirExprKind.Field(member, "value", nil)))
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(rewritten.has_type_).to_equal(true)
+        expect(rewritten.type_.kind == HirTypeKind.Int(64, true)).to_equal(true)
+        match rewritten.kind:
+            case HirExprKind.Field(nested, _, _):
+                expect(nested.has_type_).to_equal(true)
+                expect(nested.type_.kind == HirTypeKind.Named(imported, [])).to_equal(true)
+                expect(nested.type_.kind == HirTypeKind.Named(unrelated, [])).to_equal(false)
+                match nested.kind:
+                    case HirExprKind.Field(base, _, _):
+                        expect(base.has_type_).to_equal(true)
+                        expect(base.type_.kind == HirTypeKind.Named(outer, [])).to_equal(true)
+                    case _: assert(false)
+            case _: assert(false)
+
+    it "preserves concrete annotations and leaves unknown reads unresolved":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "callback"
+        pass_.env[901] = callback_type(HirTypeKind.Int(64, true))
+        var annotated = callback_expr(HirExprKind.Var(SymbolId(id: 901)))
+        annotated.has_type_ = true
+        annotated.type_ = callback_type(HirTypeKind.Bool)
+        val preserved = pass_.rewrite_expr(annotated)
+        expect(preserved.type_.kind == HirTypeKind.Bool).to_equal(true)
+        val unknown = pass_.rewrite_expr(callback_expr(HirExprKind.Var(SymbolId(id: 902))))
+        expect(unknown.has_type_).to_equal(false)
+
+    it "does not admit an inferred field alias when nominal transport fails":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "consumer"
+        val outer = SymbolId(id: 7)
+        pass_.env[901] = callback_type(HirTypeKind.Named(outer, []))
+        pass_.named_symbol_names["consumer#7"] = "Outer"
+        pass_.field_types["Outer::inner"] = callback_type(HirTypeKind.Named(SymbolId(id: 8), []))
+        pass_.field_owner_modules["Outer::inner"] = "missing_provider"
+        val member = callback_expr(HirExprKind.Field(callback_expr(HirExprKind.Var(SymbolId(id: 901))), "inner", nil))
+        val alias = SymbolId(id: 902)
+        pass_.collect_lets_stmt(HirStmt(kind: HirStmtKind.Let(alias, callback_type(HirTypeKind.Infer(0, 0)), member), span: Span.empty()))
+        expect(pass_.env.has(902)).to_equal(false)
+        expect(pass_.diagnostics.len()).to_be_greater_than(0)
+        val rewritten = pass_.rewrite_expr(callback_expr(HirExprKind.Var(alias)))
+        expect(rewritten.has_type_).to_equal(false)

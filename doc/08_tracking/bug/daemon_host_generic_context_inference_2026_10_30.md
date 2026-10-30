@@ -45,3 +45,13 @@ The tuple-projection regression is `test/01_unit/compiler/mono/tuple_index_infer
 Callback source-owner coverage is in `test/01_unit/compiler/monomorphize/contextual_callback_inference_spec.spl`. Standalone fixtures `contextual_callback_native.spl` and `contextual_callback_invalid_return.spl` in its `fixtures/` directory exercise real native callback/tuple behavior and rejection of a Bool-returning callback where i64 is required. These fixtures are authored; execution remains pending.
 
 Before sealing the candidate, working and staged direct-env runtime guards passed, and the executable-spec count under `doc/06_spec` was zero. These static checks do not imply runtime qualification.
+
+## Native validation exposed missing receiver metadata
+
+Compiler18 built from candidate `5a11bcaf1f17cecdd0a032d80d823ab3fdf9ff36` successfully compiled and linked `contextual_callback_native.spl`, but its executable failed the second assertion, the direct `.value` comparator expecting 57. The typed-local name comparator before it passed. The negative callback fixture rejected the incompatible return as intended; the separate typed-key and optional-tuple fixtures passed.
+
+LLDB stopped at `rt_panic` with caller `__simple_main + 648` in binary SHA256 `f838e4da2c7bad1f7bef04643aaa8cd326d4a2027920713627bd1458a86e51e9`. Disassembly of `__lambda_lift_1` at file address `0x1536c` showed both `.value` reads loading offset zero, although `CallbackRecord.value` is at offset eight. It subtracted the name pointers. Retained evidence is `/tmp/simple-callback18-lldb-diagnostic-20261030/`; the partition assertions were not reached.
+
+Contextual parameter declarations and the mono environment were concrete, but ordinary variable-reference HIR retained unresolved types. MIR field selection depends on the receiver type/provenance, so annotating only the lambda parameter was insufficient. The follow-up persists concrete environment types on unresolved Var/NamedVar reads in the existing expression rewrite, and transports inferred ordinary field types from their declaring module before annotating nested reads. Existing concrete annotations remain authoritative. No second expression traversal or field-offset fallback is added.
+
+The source regressions now inspect rewritten receiver and field metadata, including nested cross-module nominal identities. The standalone fixture retains the original failing assertion and adds nested member reads at two nonzero offsets. The follow-up requires a new source-matched producer and actual native execution; static review alone does not resolve this runtime failure. Existing compiler18 artifacts and its failed original fixture remain unchanged.

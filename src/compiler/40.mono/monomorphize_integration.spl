@@ -2695,8 +2695,14 @@ impl MonomorphizationPass:
                 if declared != nil: return declared
                 self.fn_sig_of(sym_id)
             case HirExprKind.Field(_, _, _):
-                val (ft, _fmod) = self.infer_field_chain(expr)
-                ft
+                # Plain inferred types enter caller-owned environments and
+                # generic bindings. Keep provider ids only inside the tagged
+                # field-chain helper, never across this boundary.
+                val (ft, fmod) = self.infer_field_chain(expr)
+                if val field_type = ft:
+                    if val moved = self.relocate_mono_types([field_type], fmod, self.current_module, "inferred field"):
+                        return moved[0]
+                nil
             case HirExprKind.ExistsCheck(exists_base):
                 # `opt.?` (also what `if val b = opt:` binds): still the
                 # optional itself, present-or-nil.
@@ -4107,6 +4113,15 @@ impl MonomorphizationPass:
             eprint("[mono-diag] expr line={expr.span.line}")
         var out = expr
         match expr.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                # Contextual lambda parameters enter env after HIR lowering.
+                # Persist their concrete type on reads so MIR can resolve the
+                # receiver layout; a declaration annotation remains authoritative.
+                if not expr.has_type_ or not hir_type_is_concrete(expr.type_):
+                    if val local_type = self.env_type(symbol):
+                        if hir_type_is_concrete(local_type):
+                            out.has_type_ = true
+                            out.type_ = local_type
             case HirExprKind.Call(callee, args, type_args):
                 val callee_t: HirExpr = callee
                 val args_t: [HirCallArg] = args
@@ -4150,6 +4165,15 @@ impl MonomorphizationPass:
                     out.type_ = instance_field
                 else:
                     self.note_unknown_instance_field_read(b1, field)
+                    if not expr.has_type_ or not hir_type_is_concrete(expr.type_):
+                        # Nested nominal fields carry the declaring module's
+                        # ids. Transport them before stamping caller-owned HIR.
+                        val (field_type, field_module) = self.infer_field_chain(expr)
+                        if val concrete_field = field_type:
+                            if hir_type_is_concrete(concrete_field):
+                                if val moved = self.relocate_mono_types([concrete_field], field_module, self.current_module, "contextual field {field}"):
+                                    out.has_type_ = true
+                                    out.type_ = moved[0]
                 out.kind = HirExprKind.Field(self.rewrite_expr(b1), field, resolved)
             case HirExprKind.Index(base, index):
                 val b2: HirExpr = base
