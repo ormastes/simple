@@ -1279,3 +1279,67 @@ pub(crate) fn steal_owned_global(owner: &str, name: &str, promoted: &Value) -> b
     }
     taken
 }
+
+// ---------------------------------------------------------------------------
+// Cross-thread interpreter state hand-off
+// ---------------------------------------------------------------------------
+
+macro_rules! interpreter_thread_state {
+    ($( $field:ident : $ty:ty = $path:path ),* $(,)?) => {
+        /// Thread-local interpreter state a closure needs to keep resolving
+        /// module globals, imported impl methods, traits and loaded modules
+        /// when it runs on another OS thread (`rt_thread_spawn_isolated*`).
+        /// Captured on the spawning thread and installed on the worker before
+        /// it evaluates anything. Values are cloned; runtime handles inside
+        /// them (atomics, mutexes, raw addresses) are process-global, so the
+        /// worker and the spawner share them.
+        pub(crate) struct InterpreterThreadState {
+            $( $field: $ty, )*
+        }
+
+        impl InterpreterThreadState {
+            pub(crate) fn capture() -> Self {
+                Self { $( $field: $path.with(|cell| cell.borrow().clone()), )* }
+            }
+
+            pub(crate) fn install(self) {
+                $( $path.with(|cell| *cell.borrow_mut() = self.$field); )*
+            }
+        }
+    };
+}
+
+interpreter_thread_state! {
+    concurrent_registry: Arc<ConcurrentProviderRegistry> = CONCURRENT_REGISTRY,
+    interpreter_args: Vec<String> = INTERPRETER_ARGS,
+    current_file: Option<PathBuf> = CURRENT_FILE,
+    interface_bindings: HashMap<String, String> = INTERFACE_BINDINGS,
+    const_names: std::collections::HashSet<String> = CONST_NAMES,
+    immutable_vars: std::collections::HashSet<String> = IMMUTABLE_VARS,
+    extern_functions: std::collections::HashSet<String> = EXTERN_FUNCTIONS,
+    block_scoped_enums: HashMap<String, Arc<EnumDef>> = BLOCK_SCOPED_ENUMS,
+    bitfields: HashMap<String, Arc<BitfieldDef>> = BITFIELDS,
+    newtypes: HashMap<String, Arc<NewtypeDef>> = NEWTYPES,
+    module_globals: HashMap<String, Value> = MODULE_GLOBALS,
+    module_globals_by_owner: OwnedGlobals = MODULE_GLOBALS_BY_OWNER,
+    module_env_by_owner: HashMap<Arc<str>, Arc<crate::value::LayeredEnv>> = MODULE_ENV_BY_OWNER,
+    module_global_bindings_by_owner: HashMap<Arc<str>, Arc<ModuleBindings>> = MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    literal_functions: HashMap<String, LiteralFunctionInfo> = LITERAL_FUNCTIONS,
+    blanket_impl_methods: HashMap<String, Vec<Arc<FunctionDef>>> = BLANKET_IMPL_METHODS,
+    trait_impls: HashMap<(String, String), Vec<Arc<FunctionDef>>> = TRAIT_IMPLS,
+    traits: HashMap<String, simple_parser::ast::TraitDef> = TRAITS,
+    mixins: HashMap<String, simple_parser::ast::MixinDef> = MIXINS,
+    global_enums: HashMap<String, Arc<EnumDef>> = GLOBAL_ENUMS,
+    global_impl_methods: HashMap<String, Vec<Arc<FunctionDef>>> = GLOBAL_IMPL_METHODS,
+    function_overloads: HashMap<String, Vec<Arc<FunctionDef>>> = FUNCTION_OVERLOADS,
+    function_module_owner: HashMap<usize, Arc<str>> = FUNCTION_MODULE_OWNER,
+    current_exec_module: Option<Arc<str>> = CURRENT_EXEC_MODULE,
+    class_overloads: HashMap<String, Vec<Arc<simple_parser::ast::ClassDef>>> = CLASS_OVERLOADS,
+    module_exports_cache: HashMap<PathBuf, Value> = crate::interpreter::module_cache::MODULE_EXPORTS_CACHE,
+    module_classes_cache: HashMap<PathBuf, HashMap<String, Arc<simple_parser::ast::ClassDef>>> =
+        crate::interpreter::module_cache::MODULE_CLASSES_CACHE,
+    module_functions_cache: HashMap<PathBuf, HashMap<String, Arc<FunctionDef>>> =
+        crate::interpreter::module_cache::MODULE_FUNCTIONS_CACHE,
+    module_enums_cache: HashMap<PathBuf, HashMap<String, Arc<EnumDef>>> =
+        crate::interpreter::module_cache::MODULE_ENUMS_CACHE,
+}
