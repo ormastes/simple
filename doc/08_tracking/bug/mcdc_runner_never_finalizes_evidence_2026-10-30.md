@@ -17,7 +17,9 @@
     `nodaemon_report/`, and the check now ignores the case path.
   - mcdc_degrade_and_red_spec.spl "does not degrade a clean green spec" -- skip() linking here;
     body in check_clean_green_not_degraded().
-  - mcdc_instrument_clean_spec.spl (3 examples) -- file tagged `@tag:in-development`.
+  - mcdc_instrument_clean_spec.spl (3 examples): no longer tagged. The no-degrade checks run only
+    under SIMPLE_MCDC_COMPILER (a probe-capable compiler) and are skipped otherwise. On the seed
+    the spec asserts the explicit mcdc-unavailable degrade plus "MC/DC: NOT compliant" (#5343).
   To unblock: restore each skip() as `it "<name>": <body fn>()` (or drop the tag) and rerun.
 - No longer red: mcdc_off_and_waiver_spec.spl "names the refusal in the output" is green since
   #5336 (refusal, exit 2).
