@@ -38,3 +38,56 @@ valid unrelated artifacts, but do not copy a terminal status to a new source
 fingerprint. No C runtime or full bootstrap rebuild is required by this patch.
 The underlying inference deficiency remains open after the annotation
 workaround; canonical BugDB registration awaits an admitted full CLI.
+
+## Native probe exposed a second, blocking transport defect
+
+The original typed-local fixture reached MIR and emitted COFF object
+`aot-aba7a9d34c45a5db3264ca916a65dd2ba8ef603b04f9858a290dbb483149543a.o`
+(SHA256 `38fa4907d1139029186925296e0a45d075472682323210726cce321c7a42a10c`).
+After manual linking against the pinned archive, it returned 2: present-key
+lookup failed. This is **not** a passing annotation fix.
+
+Object disassembly shows `check_keys` calling `rt_interp_cstr` before the
+text-key lookup and passing the integer key directly without
+`rt_value_int_wide`. Insertion instead creates a tagged string and boxes the
+integer. The generic extern declaration therefore selects ordinary FFI
+transport rather than the dictionary owner's tagged-value key transport.
+The unchanged C lookup baseline passes; changing its hash/equality algorithm
+would not repair these incompatible arguments.
+
+The revised probe uses `.contains_key` on explicitly typed `Dict` parameters.
+The shared MIR dictionary method path calls `lower_dict_key`, which invokes
+`box_runtime_value`, matching insertion. This route is being validated before
+production callers are changed. A bare class-field method replacement is
+insufficient: missing receiver type metadata can route it incorrectly, so any
+workaround must retain a concrete dictionary receiver type too. Native and
+cross-platform qualification remain pending.
+
+## Shared compiler repair under review
+
+`HirFunction.extern_runtime_value_abi` records declaration provenance: zero is
+the unchanged raw C ABI, one admits a semantic dictionary key, and two admits
+an identity-sensitive runtime root. Only specialization of an original generic
+extern with the exact runtime signature creates a nonzero value. Both parsed
+`Named` binder symbols and canonical `TypeParam` binders are checked against
+the declaration. A concrete fixed-i64 prototype is never inferred to be a
+semantic facade merely because its C name matches.
+
+The field survives the versioned HIR codec, semantic reconstruction, archive
+signatures, and ABI interface fingerprints. Common MIR validates the admitted
+declaration, uses physical i64 argument words, and normalizes C int8_t results
+to Bool. Dictionary keys use the existing RuntimeValue boxing owner. Root
+operations suppress text-to-C-string conversion and retain heap owner words;
+semantic primitive values are boxed so an integer such as 17 cannot be mistaken
+for a pointer. Raw fixed-i64 prototypes remain untouched.
+
+The authored provenance spec covers parsed declaration admission, integer
+specialization, archive metadata, codec roundtrip, raw overload exclusion,
+unknown-mode rejection, and physical return width. The original raw generic
+native regression is retained as `runtime_generic_extern_abi_native.spl`;
+the dictionary-method fixture is a separate current-producer diagnostic.
+No runtime or cross-platform PASS is claimed for the new compiler repair.
+The generated codec field update is mechanical and still requires comparison
+with the canonical `compiler_schema ... codec` regeneration under admitted
+pure tooling before completion. HIR codec v14 deliberately rejects older
+serialized layouts; old HIR receipts are not transplanted into this schema.
