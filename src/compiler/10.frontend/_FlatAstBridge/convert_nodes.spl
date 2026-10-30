@@ -822,7 +822,6 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
     var copied_until = 0
     var region_start = 0
     var depth = 0
-    var inner_parts: [text] = []
     # Source position of each region's first inner character, so the
     # sub-parsed fragment's spans can be rebased onto the real source line
     # (fragment-relative spans made every receiver at a region start `:1:1`).
@@ -855,18 +854,18 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
         elif depth == 0 and ch == "{":
             depth = 1
             region_start = i
-            inner_parts = []
             region_offset = span.start + 1 + i + 1
             if span.line > 0:
                 region_line = span.line
                 region_col = span.col + 1 + i + 1
         elif depth > 0 and ch == "{":
             depth = depth + 1
-            inner_parts.push(ch)
         elif depth > 0 and ch == "}":
             depth = depth - 1
             if depth == 0:
-                val part_idx = parse_interpolation_fragment_at(inner_parts.join(""), region_offset, region_line, region_col)
+                # Slice the region from its source bounds instead of retaining
+                # one text and array slot per character; nested braces stay in.
+                val part_idx = parse_interpolation_fragment_at(value.substring(region_start + 1, i), region_offset, region_line, region_col)
                 if part_idx < 0:
                     chunks.push(value.substring(copied_until, region_start))
                     chunks.push(interpolation_literalize_region(
@@ -879,10 +878,6 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
                         format: "",
                         span: span
                     ))
-            else:
-                inner_parts.push(ch)
-        elif depth > 0:
-            inner_parts.push(ch)
         i = i + 1
     if depth != 0:
         return (value, [])
