@@ -1,6 +1,6 @@
 # Lint modules still use facade wildcard imports and Bool/Int annotations (2026-10-30)
 
-Status: open
+Status: fixed (work/lint-main-primitive-boundary: concrete owner imports, bool/i64; specs updated to the current LintDiag/LintRunResult names)
 Area: compiler/lint (_LintMain/*)
 
 ## Symptom
