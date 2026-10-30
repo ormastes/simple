@@ -87,7 +87,7 @@ pub unsafe extern "C" fn rt_path_ext(path_ptr: *const u8, path_len: u64) -> Runt
 /// separator. Built from the separator's code point because backslash
 /// literals do not survive this repository's tooling reliably.
 #[cfg(windows)]
-fn strip_verbatim_prefix(path: String) -> String {
+pub(crate) fn strip_verbatim_prefix(path: String) -> String {
     let sep = char::from(92u8);
     let verbatim: String = [sep, sep, '?', sep].iter().collect();
     let unc: String = format!("{}UNC{}", verbatim, sep);
@@ -105,7 +105,7 @@ fn strip_verbatim_prefix(path: String) -> String {
 }
 
 #[cfg(not(windows))]
-fn strip_verbatim_prefix(path: String) -> String {
+pub(crate) fn strip_verbatim_prefix(path: String) -> String {
     path
 }
 

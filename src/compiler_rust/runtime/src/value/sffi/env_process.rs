@@ -1794,19 +1794,35 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
 // ============================================================================
 
 /// Get platform name
-/// Returns "windows", "macos", "linux", etc.
+/// Returns "windows", "macos", "linux", "freebsd", "illumos", "solaris", or
+/// "unknown".
+///
+/// This table MUST stay identical to the C runtime's `rt_platform_name`
+/// (src/runtime/runtime_native.c) and the pure-Simple owner
+/// (src/runtime/simple_core/core_process.spl): the same program built with
+/// the seed/JIT and with the native runtime must agree on its host. "unix"
+/// was removed as a catch-all because the C owner never emits it; an
+/// unsupported host now reports the explicit sentinel "unknown" on every
+/// owner, so std.io_runtime.host_os() can apply its uname fallback uniformly.
 #[no_mangle]
 pub extern "C" fn rt_platform_name() -> RuntimeValue {
-    let name = if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else {
-        "unix"
-    };
+    let name = platform_name_for_target_os(std::env::consts::OS);
     rt_string_new(name.as_ptr(), name.len() as u64)
+}
+
+/// Pure mapping from a Rust `target_os` spelling to the runtime's platform
+/// name. Kept separate from the `#[no_mangle]` entry point so the test can
+/// pin every row of the table regardless of the host it runs on.
+fn platform_name_for_target_os(target_os: &str) -> &'static str {
+    match target_os {
+        "windows" => "windows",
+        "macos" => "macos",
+        "linux" => "linux",
+        "freebsd" => "freebsd",
+        "illumos" => "illumos",
+        "solaris" => "solaris",
+        _ => "unknown",
+    }
 }
 
 /// Host target architecture code: 0=x86_64, 1=aarch64, 2=riscv64, -1=other.
@@ -2849,8 +2865,15 @@ mod tests {
             let platform = extract_string_test(result);
             assert!(!platform.is_empty());
 
-            // Check that it's one of the known platforms
-            assert!(platform == "windows" || platform == "macos" || platform == "linux" || platform == "unix");
+            // Exactly the names the C runtime's rt_platform_name can emit
+            // (src/runtime/runtime_native.c). "unix" is deliberately absent.
+            assert!(
+                matches!(
+                    platform.as_str(),
+                    "windows" | "macos" | "linux" | "freebsd" | "illumos" | "solaris" | "unknown"
+                ),
+                "unexpected platform name {platform:?}"
+            );
 
             // Verify it matches the current platform
             #[cfg(target_os = "windows")]
@@ -2859,6 +2882,44 @@ mod tests {
             assert_eq!(platform, "macos");
             #[cfg(target_os = "linux")]
             assert_eq!(platform, "linux");
+            #[cfg(target_os = "freebsd")]
+            assert_eq!(platform, "freebsd");
+            #[cfg(target_os = "illumos")]
+            assert_eq!(platform, "illumos");
+            #[cfg(target_os = "solaris")]
+            assert_eq!(platform, "solaris");
+            #[cfg(not(any(
+                target_os = "windows",
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "illumos",
+                target_os = "solaris"
+            )))]
+            assert_eq!(platform, "unknown");
+        }
+    }
+
+    /// Pins every row of the seed table against the C runtime's
+    /// `#if` chain, independent of the host this test happens to run on.
+    #[test]
+    fn test_platform_name_table_matches_c_runtime() {
+        for (target_os, expected) in [
+            ("windows", "windows"),
+            ("macos", "macos"),
+            ("linux", "linux"),
+            ("freebsd", "freebsd"),
+            ("illumos", "illumos"),
+            ("solaris", "solaris"),
+            // C has no arm for these: it falls through to "unknown".
+            // (Android/iOS are deliberately not pinned: C sees them through
+            // __linux__/__APPLE__ and Rust through their own target_os; the
+            // runtime has no supported lane for either.)
+            ("openbsd", "unknown"),
+            ("netbsd", "unknown"),
+            ("", "unknown"),
+        ] {
+            assert_eq!(platform_name_for_target_os(target_os), expected, "target_os {target_os:?}");
         }
     }
 
