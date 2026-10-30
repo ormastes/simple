@@ -146,7 +146,12 @@ Spec `test/01_unit/compiler/jit_facade_reexport_numbered_layer_spec.spl`
 
 Rust unit test
 `pipeline::module_loader::tests::numbered_layer_plain_package_init_resolves_and_flattens_facade_reexport`
-(temp dir, same layout) fails before / passes after.
+(temp dir, same layout) passes on the fixed tree (cargo `-- module_loader
+module_resolver`, bootstrap profile: 138 -> 140 passed, 0 failed). The test
+was compiled only post-fix; its fail-before is established on the baseline
+BINARY through the identical `resolve_use_to_path` ->
+`load_module_with_imports` path (fixture `lowered functions=1`), not by
+running the test against reverted code.
 
 After: see the commit message on `work/jit-reexport-resolve-fable-20261030`
 for the probe and cargo-test counts.
