@@ -1,0 +1,43 @@
+# Windows diagnostic: a real open handle permits writes but prevents replacement.
+use std.nogc_sync_mut.daemon_sdk.protocol.{write_daemon_response}
+use std.nogc_sync_mut.daemon_sdk.types.{DaemonResponse}
+use std.nogc_sync_mut.io.file.{FileHandle}
+use std.io.types.{FileMode}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.io_runtime.{file_write, file_rename, file_delete, read_file_text, file_exists, mkdir_p}
+
+fn main() -> i64:
+    val root = env_get("SIMPLE_SDK_ATOMIC_FIXTURE_ROOT")
+    if root == "" or file_exists(root): return 10
+    mkdir_p(root)
+    val old = DaemonResponse(request_id: "owned", status: 0, timestamp: 1, fields: {"body": "OLD_COMPLETE"})
+    val replacement = DaemonResponse(request_id: "owned", status: 1, timestamp: 2, fields: {"body": "NEW_COMPLETE"})
+    if not write_daemon_response(old, root): return 11
+    val final_path = root + "/owned.resp"
+    val old_bytes = read_file_text(final_path)
+    var held = match FileHandle.open(final_path, FileMode.ReadOnly):
+        case Ok(handle): handle
+        case Err(error): return 12
+    val candidate = root + "/rename-control.tmp"
+    if not file_write(candidate, "RENAME_CONTROL"):
+        held.close()
+        return 13
+    val renamed = file_rename(candidate, final_path)
+    val direct_write_allowed = file_write(final_path, old_bytes)
+    val published = write_daemon_response(replacement, root)
+    val preserved = read_file_text(final_path) == old_bytes
+    val temp_removed = not file_exists(final_path + ".tmp")
+    held.close()
+    file_delete(candidate)
+    print "rename_succeeded={renamed} expected=false"
+    print "direct_write_allowed={direct_write_allowed} expected=true"
+    print "response_published={published} expected=false"
+    print "old_final_preserved={preserved} expected=true"
+    print "temporary_removed={temp_removed} expected=true"
+    if renamed or not direct_write_allowed: return 14
+    if published or not preserved or not temp_removed: return 1
+    # A later successful retry must still use normal atomic publication.
+    if not write_daemon_response(replacement, root): return 15
+    if read_file_text(final_path) == old_bytes: return 16
+    print "DAEMON_ATOMIC_RESPONSE_PASS"
+    0
