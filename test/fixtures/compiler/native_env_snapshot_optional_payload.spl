@@ -1,0 +1,54 @@
+# Real configured environment APIs must return rows, not a nested Some handle.
+use std.nogc_sync_mut.env.variables.{env_set, env_unset, env_list_checked as sync_snapshot}
+use std.nogc_async_mut.env.variables.{env_list_checked as async_snapshot}
+
+fn sentinel_matches(rows: [(text, text)]) -> bool:
+    for (key, value) in rows:
+        if key == "SIMPLE_ENV_SNAPSHOT_REGRESSION_20261030":
+            return value == "snapshot-owned-value"
+    false
+
+fn through_try() -> Result<bool, text>:
+    val rows = sync_snapshot()?
+    Ok(sentinel_matches(rows))
+
+# Intentional Result<Option<Array>,text> must retain its Option carrier.
+fn preserved(value: [(text, text)]?) -> Result<[(text, text)]?, text>:
+    Ok(value)
+
+fn main() -> i64:
+    if not env_set("SIMPLE_ENV_SNAPSHOT_REGRESSION_20261030", "snapshot-owned-value"): return 1
+    match sync_snapshot():
+        case Ok(rows):
+            if not sentinel_matches(rows): return 2
+        case Err(_): return 3
+    match async_snapshot():
+        case Ok(rows):
+            if not sentinel_matches(rows): return 4
+        case Err(_): return 5
+    match through_try():
+        case Ok(found):
+            if not found: return 6
+        case Err(_): return 7
+    match preserved(None):
+        case Ok(value):
+            if value != nil: return 8
+        case Err(_): return 9
+    match preserved(Some([])):
+        case Ok(value):
+            if value == nil: return 10
+            if value.unwrap().len() != 0: return 11
+        case Err(_): return 12
+    match preserved(Some([("empty", ""), ("present", "snapshot-owned-value")])):
+        case Ok(value):
+            if value == nil: return 13
+            val rows = value.unwrap()
+            if rows.len() != 2: return 14
+            val empty_pair = rows[0]
+            if empty_pair[0] != "empty" or empty_pair[1] != "": return 15
+            val present_pair = rows[1]
+            if present_pair[0] != "present" or present_pair[1] != "snapshot-owned-value": return 16
+        case Err(_): return 17
+    if not env_unset("SIMPLE_ENV_SNAPSHOT_REGRESSION_20261030"): return 18
+    print "ENV_SNAPSHOT_OPTIONAL_PAYLOAD_PASS"
+    0
