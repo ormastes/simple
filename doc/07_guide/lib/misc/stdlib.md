@@ -610,3 +610,4 @@ val sdn_text = note.to_sdn()
 - DB & SQP: `doc/07_guide/apps/database.md`
 - Atomic DB: `src/lib/nogc_sync_mut/db_atomic.spl`
 - Note SDN: `src/compiler/40.mono/note_sdn.spl`
+- Resource helpers, host detection, process runs, thread pool, concurrent containers: `doc/07_guide/lib/stdlib_resource_helpers.md`
