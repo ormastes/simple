@@ -403,8 +403,9 @@ class HttpRequestParser:
 # ============================================================================
 
 # Lower-cased authority of an absolute-form target ("http://Host:1/a" ->
-# "host:1"), or "" when the target is origin-form.
-fn _async_absolute_form_authority(target: text) -> text:
+# "host:1"), or nil when the target is origin-form. `target` is the path
+# component (the query was already split off by parse_request_line).
+fn _async_absolute_form_authority(target: text) -> text?:
     val lower = target.lower()
     var rest = ""
     if lower.starts_with("http://"):
@@ -412,46 +413,101 @@ fn _async_absolute_form_authority(target: text) -> text:
     elif lower.starts_with("https://"):
         rest = lower.slice(8, lower.len())
     else:
-        return ""
+        return nil
     var end = rest.len()
-    for sep in ["/", "?", "#"]:
+    for sep in ["/", "#"]:
         val i = rest.index_of(sep)
         if i >= 0 and i < end:
             end = i
     rest.slice(0, end)
 
-# A Host value must be a bare uri-host[:port]. Userinfo ("@"), whitespace,
-# path/query delimiters and controls are rejected so a downstream component
-# can never pick a different authority than the one validated here.
-fn _async_host_authority_valid(host: text) -> bool:
-    for code in string_bytes(host):
-        val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
-        val digit = code >= 48 and code <= 57
-        # - . _ ~ ! $ & ' ( ) * + , ; = % : [ ]
-        val allowed = (
-            code == 45 or code == 46 or code == 95 or code == 126 or
-            code == 33 or code == 36 or code == 38 or code == 39 or
-            code == 40 or code == 41 or code == 42 or code == 43 or
-            code == 44 or code == 59 or code == 61 or code == 37 or
-            code == 58 or code == 91 or code == 93
-        )
-        if not alpha and not digit and not allowed:
+fn _async_is_port(s: text) -> bool:
+    if s.len() == 0 or s.len() > 5:
+        return false
+    for code in string_bytes(s):
+        if code < 48 or code > 57:
             return false
     true
 
+# reg-name / IPv4 bytes: unreserved, sub-delims and pct-encoding (RFC 3986).
+fn _async_is_reg_name(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    val bytes = string_bytes(s)
+    var i = 0
+    while i < bytes.len():
+        val code = bytes[i]
+        val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        # - . _ ~ ! $ & ' ( ) * + , ; =
+        val other = (
+            code == 45 or code == 46 or code == 95 or code == 126 or
+            code == 33 or code == 36 or code == 38 or code == 39 or
+            code == 40 or code == 41 or code == 42 or code == 43 or
+            code == 44 or code == 59 or code == 61
+        )
+        if code == 37:
+            if i + 2 >= bytes.len():
+                return false
+            if not _async_is_hex(bytes[i + 1]) or not _async_is_hex(bytes[i + 2]):
+                return false
+            i = i + 3
+        elif alpha or digit or other:
+            i = i + 1
+        else:
+            return false
+    true
+
+fn _async_is_hex(code: i64) -> bool:
+    (code >= 48 and code <= 57) or (code >= 65 and code <= 70) or (code >= 97 and code <= 102)
+
+# IP-literal body between brackets: hex digits, ':' and '.' (IPv6, with an
+# optional trailing dotted IPv4).
+fn _async_is_ip_literal_body(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    for code in string_bytes(s):
+        if not _async_is_hex(code) and code != 58 and code != 46:
+            return false
+    true
+
+# A Host value must be exactly uri-host [ ":" port ]. Userinfo ("@"),
+# whitespace, path delimiters, a malformed port and unbalanced IP-literal
+# brackets are all rejected, so the authority cannot be split differently by
+# a downstream component than it is here.
+fn _async_host_authority_valid(host: text) -> bool:
+    if host.starts_with("["):
+        val close = host.index_of("]")
+        if close < 0:
+            return false
+        if not _async_is_ip_literal_body(host.slice(1, close)):
+            return false
+        val after = host.slice(close + 1, host.len())
+        if after.len() == 0:
+            return true
+        if not after.starts_with(":"):
+            return false
+        return _async_is_port(after.slice(1, after.len()))
+    val colon = host.index_of(":")
+    if colon < 0:
+        return _async_is_reg_name(host)
+    _async_is_reg_name(host.slice(0, colon)) and _async_is_port(host.slice(colon + 1, host.len()))
+
 # Returns "" when the Host policy admits the request, else a 400 message.
-# HTTP/1.1 requires exactly one non-empty Host field; duplicates are invalid
-# even when equal. HTTP/1.0 keeps its optional-Host behavior, but any Host
-# that is present must still be valid and agree with an absolute-form target.
+# Every version other than HTTP/1.0 requires exactly one non-empty Host;
+# duplicates are invalid even when equal. HTTP/1.0 keeps its optional-Host
+# behavior, but a Host that is present must still be valid. An absolute-form
+# target must carry a non-empty authority identical (case-insensitively) to
+# Host — RFC 9112 §3.2 requires identity, so no default-port normalization.
 fn _async_request_host_error(headers: [(text, text)], version: text, target: text) -> text:
     var host_count: i32 = 0
     var host_value = ""
     for header in headers:
         if header.0.lower() == "host":
             host_count = host_count + 1
-            host_value = header.1.trim()
+            host_value = header.1
     if host_count == 0:
-        if version == "HTTP/1.1":
+        if version != "HTTP/1.0":
             return "400 Missing Host header"
         return ""
     if host_count > 1:
@@ -461,6 +517,8 @@ fn _async_request_host_error(headers: [(text, text)], version: text, target: tex
     if not _async_host_authority_valid(host_value):
         return "400 Invalid Host header"
     val target_authority = _async_absolute_form_authority(target)
-    if target_authority != "" and target_authority != host_value.lower():
-        return "400 Host does not match request-target authority"
+    if target_authority != nil:
+        val authority = target_authority ?? ""
+        if authority == "" or authority != host_value.lower():
+            return "400 Host does not match request-target authority"
     ""
