@@ -1310,8 +1310,12 @@ impl<'a> Parser<'a> {
         if let TokenKind::Identifier { name, .. } = &self.current.kind {
             let mut name = name.clone();
             self.advance();
-            // Allow trailing `?` as part of the name (e.g., fn iter_empty?())
-            if self.check(&TokenKind::Question) {
+            // Allow trailing `?` as part of the name only when a call `(`
+            // follows (e.g., fn iter_empty?(), xs.is_empty?()). Otherwise the
+            // `?` is the postfix operator: `x.value?` is field `value` + `?`.
+            if self.check(&TokenKind::Question)
+                && self.peek_next().kind == TokenKind::LParen
+            {
                 name.push('?');
                 self.advance();
             }

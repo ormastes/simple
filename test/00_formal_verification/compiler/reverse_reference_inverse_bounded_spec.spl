@@ -1,13 +1,14 @@
 # T-RR1 bounded-exhaustive twin of src/verification/build_cache/src/ReverseReferenceV2.lean
 # (rr_is_inverse_of_forward / rr_exact_when_all_sealed): over 3 producers x 2
 # consumers, every non-empty read set per consumer (7 x 7 = 49 generations),
-# the projected `.rr` edges are EXACTLY the inverse of the forward reads; then a
-# failed (unsealed) consumer keeps exactly its previous-generation edges.
+# the projected `.rr` edges are EXACTLY the inverse of the forward reads.
+# Unsealed producers reject a new candidate even when historical edges exist.
 use std.spec.*
 use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceReceiptReadV1}
 use compiler.driver.cache.reverse_reference_projection_v2.{
     SealedForwardManifestV2, reverse_reference_project_generation_v2,
     reverse_reference_subject_for_key_v2}
+use compiler.driver.cache.reverse_reference_receipt.{reverse_reference_consumers_v1}
 use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
     SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1, SemanticQueryReadManifestV1}
 use std.common.crypto.sha256.{sha256_text}
@@ -66,23 +67,48 @@ describe "T-RR1 bounded twin: .rr is the inverse of the forward manifests":
             m0 = m0 + 1
         expect(checked).to_equal(147)
 
-    it "keeps exactly a failed consumer's previous edges":
+    it "rejects an unsealed consumer despite a prior receipt":
         val first = reverse_reference_project_generation_v2("o", "r",
             [manifest_of(0, 5), manifest_of(1, 2)], no_previous())
         val prev = ReverseReferenceReceiptReadV1(valid: true, reason: "ok", receipt: first.receipt)
         val failed = SealedForwardManifestV2(consumer_identity: reverse_reference_subject_for_key_v2(consumer(0)),
             sealed: false, manifest: nil)
         val second = reverse_reference_project_generation_v2("o", "r2", [failed, manifest_of(1, 4)], prev)
-        expect(second.ok).to_equal(true)
-        var edges: [text] = []
-        for pr in second.receipt!.projections:
+        expect(second.ok).to_equal(false)
+        expect(second.receipt == nil).to_equal(true)
+        expect(second.reason).to_contain("unsealed-forward-manifest")
+        var historical_edges: [text] = []
+        for pr in prev.receipt!.projections:
             if not pr.key.subject_identity.starts_with("@"):
-                edges.push(pr.key.subject_identity + "|" + pr.consumer_identity)
-        expect(has_edge(edges, 0, 0)).to_equal(true)
-        expect(has_edge(edges, 1, 0)).to_equal(false)
-        expect(has_edge(edges, 2, 0)).to_equal(true)
-        expect(has_edge(edges, 1, 1)).to_equal(false)
-        expect(has_edge(edges, 2, 1)).to_equal(true)
+                historical_edges.push(pr.key.subject_identity + "|" + pr.consumer_identity)
+        expect(has_edge(historical_edges, 0, 0)).to_equal(true)
+        expect(has_edge(historical_edges, 2, 0)).to_equal(true)
+        val historical_users = reverse_reference_consumers_v1(prev,
+            reverse_reference_subject_for_key_v2(producer(0)), "macro-definition-consumer")
+        expect(historical_users.exact).to_equal(true)
+        expect(historical_users.consumers).to_equal([reverse_reference_subject_for_key_v2(consumer(0))])
+
+    it "rejects an unsealed later entry after earlier entries project":
+        val prev_build = reverse_reference_project_generation_v2("o", "r",
+            [manifest_of(0, 5), manifest_of(1, 2)], no_previous())
+        val prev = ReverseReferenceReceiptReadV1(valid: true, reason: "ok", receipt: prev_build.receipt)
+        val failed = SealedForwardManifestV2(consumer_identity: reverse_reference_subject_for_key_v2(consumer(1)),
+            sealed: false, manifest: nil)
+        val next = reverse_reference_project_generation_v2("o", "r2",
+            [manifest_of(0, 4), failed], prev)
+        expect(next.ok).to_equal(false)
+        expect(next.receipt == nil).to_equal(true)
+        expect(next.reason).to_contain("unsealed-forward-manifest")
+
+    it "admits an explicitly sealed empty forward manifest":
+        val empty = reverse_reference_project_generation_v2("o", "r",
+            [manifest_of(0, 0)], no_previous())
+        expect(empty.ok).to_equal(true)
+        val receipt = ReverseReferenceReceiptReadV1(valid: true, reason: "ok", receipt: empty.receipt)
+        val users = reverse_reference_consumers_v1(receipt,
+            reverse_reference_subject_for_key_v2(producer(0)), "macro-definition-consumer")
+        expect(users.exact).to_equal(true)
+        expect(users.consumers.len()).to_equal(0)
 
     it "fails a failed consumer with no previous generation":
         val failed = SealedForwardManifestV2(consumer_identity: reverse_reference_subject_for_key_v2(consumer(0)),
