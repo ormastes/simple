@@ -2285,29 +2285,6 @@ impl MirLowering:
             val native_owner = self.native_trait_owner_for_type(native_receiver_type)
             if native_owner != "":
                 return self.lower_native_trait_method(receiver, native_owner, method, args)
-        # RTI supplies declared call returns independently of whether every
-        # parameter is annotated. A scalar receiver selects an exact visible
-        # trait implementation, never a same-name free function or record.
-        match resolution:
-            case Unresolved:
-                if val scalar_type = self.enum_match_expr_type(receiver):
-                    val scalar_owner = mir_scalar_trait_owner_key_v1(scalar_type.kind)
-                    val scalar_key = "{scalar_owner}::{method}"
-                    val generic_key = "scalar:generic::{method}"
-                    if scalar_owner != "" and self.trait_impl_methods.has(generic_key):
-                        self.error_fatal("unsupported generic scalar trait method: {method}", Some(receiver.span))
-                    elif scalar_owner != "" and self.trait_impl_methods.has(scalar_key):
-                        val target = self.trait_impl_methods[scalar_key]
-                        if not self.trait_impl_closure_complete:
-                            self.error_fatal("scalar trait method {method}: implementation closure is incomplete", Some(receiver.span))
-                        elif target.id < 0:
-                            self.error_fatal("ambiguous scalar trait method: {method}", Some(receiver.span))
-                        else:
-                            val trait_id = self.trait_impl_methods["trait:{scalar_key}"]
-                            return self.lower_method_call(receiver, method, args,
-                                MethodResolution.TraitMethod(trait_id, target),
-                                static_receiver_name_hint, static_receiver_symbol_hint)
-            case _: ()
         var resolution_admits_trait_dispatch = false
         match resolution:
             case Unresolved: resolution_admits_trait_dispatch = true
@@ -2447,6 +2424,9 @@ impl MirLowering:
         var has_prelowered_method_receiver = false
         var option_method_receiver = false
         val trait_receiver_type = self.enum_match_expr_type(receiver)
+        var proven_scalar_receiver = false
+        if val scalar_receiver_type = trait_receiver_type:
+            proven_scalar_receiver = mir_scalar_trait_owner_key_v1(scalar_receiver_type.kind) != ""
         val declared_option_receiver = self.option_inner_hir_type(receiver) != nil
         val option_method_shape =
             (method == "is_some" and args.len() == 0) or
@@ -4355,29 +4335,8 @@ impl MirLowering:
                     self.build_args_from_receiver(prelowered_method_receiver, args, method_param_types)
                 else:
                     self.lower_receiver_and_args(receiver, args, method_param_types)
-                val method_operand = self.symbol_to_operand(method_id)
-                val return_type = self.resolved_call_return_type(method_id)
-                # Same receiver/self index-0 alignment as the InstanceMethod
-                # arm above -- pad the FULL array, receiver included.
-                val final_trait_args = self.pad_trailing_default_args(method_operand, arg_operands)
-                var b = self.builder
-                val result = b.emit_call(method_operand, final_trait_args, return_type)
-                self.builder = b
-                # The callee mutates its receiver in place. Its return value
-                # is an independent result (bool/int/Self/unit), never an
-                # implicit replacement for the receiver's owning field/slot.
-                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
-                if val result_local = result:
-                    self.remember_call_hir_return(result_local, method_id)
-                    result_local
-                else:
-                    var b2 = self.builder
-                    val temp = b2.new_temp(MirType.i64())
-                    # void call: define the placeholder so a consumer never
-                    # reads an undefined local (use-before-def -> llvm-lib NULL)
-                    b2.emit_const(temp, MirConstValue.Int(0), MirType.i64())
-                    self.builder = b2
-                    temp
+                self.emit_scalar_or_resolved_trait_call_v1(method_id, arg_operands,
+                    wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
 
             case FreeFunction(func_id):
                 if mir_mc_trace_state == 1:
@@ -4540,7 +4499,9 @@ impl MirLowering:
                                             case _: ()
                                     case _: ()
                             case _: ()
-                if static_method_id == nil and static_receiver_name == "" and known_record_owner < 0:
+                # A proven scalar is a runtime value, never a lost class
+                # name. A globally unique static leaf cannot own this call.
+                if static_method_id == nil and static_receiver_name == "" and known_record_owner < 0 and not proven_scalar_receiver:
                     val unique_static_method = self.symbols.lookup_unique_static_method(method)
                     if unique_static_method != nil:
                         # A call result is a runtime receiver, not a lost type
@@ -5427,7 +5388,54 @@ impl MirLowering:
                         self.struct_value_syms[unresolved_receiver_local.id] = recovered_field_owner
                 if val field_call = self.try_lower_function_field_call(receiver, unresolved_receiver_local, method, args):
                     return field_call
+                # Existing builtin and field-call dispatch keeps precedence.
+                # RTI supplies return-only metadata for untyped-parameter calls;
+                # the receiver above has already been evaluated exactly once.
+                if val scalar_type = trait_receiver_type:
+                    val scalar_owner = mir_scalar_trait_owner_key_v1(scalar_type.kind)
+                    val scalar_key = "{scalar_owner}::{method}"
+                    val generic_key = "scalar:generic::{method}"
+                    if scalar_owner != "" and self.trait_impl_methods.has(generic_key):
+                        self.error_fatal("unsupported generic scalar trait method: {method}", Some(receiver.span))
+                    elif scalar_owner != "" and self.trait_impl_methods.has(scalar_key):
+                        val target = self.trait_impl_methods[scalar_key]
+                        if not self.trait_impl_closure_complete:
+                            self.error_fatal("scalar trait method {method}: implementation closure is incomplete", Some(receiver.span))
+                        elif target.id < 0:
+                            self.error_fatal("ambiguous scalar trait method: {method}", Some(receiver.span))
+                        else:
+                            val scalar_args = self.build_args_from_receiver(unresolved_receiver_local,
+                                args, self.resolved_call_hir_param_types(target))
+                            return self.emit_scalar_or_resolved_trait_call_v1(target, scalar_args,
+                                wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
                 self.reject_unresolved_method_call_v1(receiver, method, "runtime-fallback")
+
+    me emit_scalar_or_resolved_trait_call_v1(method_id: SymbolId, arg_operands: [MirOperand],
+            wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64, wb_receiver: LocalId) -> LocalId:
+        val method_operand = self.symbol_to_operand(method_id)
+        val return_type = self.resolved_call_return_type(method_id)
+        # Same receiver/self index-0 alignment as the InstanceMethod
+        # arm above -- pad the FULL array, receiver included.
+        val final_trait_args = self.pad_trailing_default_args(method_operand, arg_operands)
+        var b = self.builder
+        val result = b.emit_call(method_operand, final_trait_args, return_type)
+        self.builder = b
+        # The callee mutates its receiver in place. Its return value
+        # is an independent result (bool/int/Self/unit), never an
+        # implicit replacement for the receiver's owning field/slot.
+        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+        if val result_local = result:
+            self.remember_call_hir_return(result_local, method_id)
+            result_local
+        else:
+            var b2 = self.builder
+            val temp = b2.new_temp(MirType.i64())
+            # void call: define the placeholder so a consumer never
+            # reads an undefined local (use-before-def -> llvm-lib NULL)
+            b2.emit_const(temp, MirConstValue.Int(0), MirType.i64())
+            self.builder = b2
+            temp
+
 
     me bootstrap_coerce_to_raw_str(local: LocalId) -> LocalId:
         """Bootstrap-only: coerce a lowered value to a raw char* (Opaque
