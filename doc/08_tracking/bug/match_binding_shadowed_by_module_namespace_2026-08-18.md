@@ -120,16 +120,24 @@ Related closure-scope defects worth checking together, since the shape matches:
 Root cause: the identifier read (`interpreter/expr/literals.rs`) prefers a
 same-named `MODULE_GLOBALS` entry over an env value unless the name is marked
 local (`Env::is_local`). The statement form `exec_match_core` marked arm
-bindings block-local; three other match evaluators did not:
+bindings block-local, but three other match evaluators did not:
 
-- `interpreter/expr/control.rs` — match used as an EXPRESSION
+- `interpreter/expr/control.rs`: a match used as an EXPRESSION
   (`val s = match v: case String(value): value`);
-- `interpreter_call/block_execution.rs` — both statement-match executors used
-  for BDD `it`/`describe` closure bodies;
-- every match evaluator's guard env (`case Ok(color) if color == 7`).
+- `interpreter_call/block_execution.rs`: the two statement-match executors
+  used for BDD `it`/`describe` closure bodies.
 
-All now call `enter_block_local` for each binding (and `exit_block_local` on
-restore in the closure executors).
+The guard env (`case Ok(color) if color == 7`) was missing the mark in all
+four evaluators, `exec_match_core` included.
+
+Every arm and guard binding now calls `enter_block_local`. The closure
+executors also call `exit_block_local` when they restore.
+
+The fix also closes a second hazard. Before it, an unmarked arm binding was
+added to the frame's `nonlocal_overlay`. On each call made out of the frame,
+`publish_live_bound_globals` (via `nonlocal_overlay_entries`) publishes any non-local
+name that has a module binding. So a call inside `case String(value):` could
+also publish the payload over the owned `value` global, not just misread it.
 
 Found through `test/01_unit/app/test_runner_new/sdn_worker_protocol_spec.spl`
 and `sdn_wrapper_spec.spl`: `app.test_runner_new.sdn_worker_protocol` reads
