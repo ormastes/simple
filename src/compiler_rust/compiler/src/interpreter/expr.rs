@@ -188,7 +188,7 @@ fn get_field_value(val: &Value, field: &str) -> Result<Value, CompileError> {
 }
 
 mod calls;
-pub(crate) use calls::refresh_stale_module_global_receiver;
+pub(crate) use calls::{receiver_root_identifier, refresh_stale_module_global_receiver};
 mod collections;
 mod control;
 mod literals;

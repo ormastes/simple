@@ -824,8 +824,9 @@ pub(crate) fn handle_method_call_with_self_update(
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
     if let Expr::MethodCall { receiver, .. } = value_expr {
-        if let Expr::Identifier(name) = receiver.as_ref() {
-            crate::interpreter::expr::refresh_stale_module_global_receiver(env, name);
+        if let Some(name) = crate::interpreter::expr::receiver_root_identifier(receiver) {
+            let name = name.to_owned();
+            crate::interpreter::expr::refresh_stale_module_global_receiver(env, &name);
         }
     }
     let out = handle_method_call_with_self_update_inner(value_expr, env, functions, classes, enums, impl_methods)?;

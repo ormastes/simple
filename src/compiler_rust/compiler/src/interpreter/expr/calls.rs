@@ -26,13 +26,24 @@ use super::super::{
 /// helper reassigned `g`, `g.f` saw the new value while `g.m()` ran on the old
 /// object and then wrote that stale object back over the live one
 /// (doc/08_tracking/bug/spec_it_method_receiver_stale_module_var_2026-10-30.md).
-/// Only bindings without owner provenance are refreshed; imported globals keep
-/// their existing owner-store refresh.
+/// Only bindings without owner provenance are refreshed; globals with owner
+/// provenance are left to the frame/block-boundary refresh. The refresh is an
+/// `env.insert`, so it is recorded as a frame write of the live value.
+/// The variable at the root of a receiver chain: `g` for `g`, `g.a`, `g[i]`,
+/// `g.a[i].b`. Method calls on any of those shapes read and write back `g`.
+pub(crate) fn receiver_root_identifier(receiver: &Expr) -> Option<&str> {
+    match receiver {
+        Expr::Identifier(name) => Some(name.as_str()),
+        Expr::FieldAccess { receiver, .. } | Expr::Index { receiver, .. } => receiver_root_identifier(receiver),
+        _ => None,
+    }
+}
+
 pub(crate) fn refresh_stale_module_global_receiver(env: &mut Env, name: &str) {
-    if env.is_local(name) || env.is_refreshed_global(name) {
+    if env.is_local(name) || env.live_owned_global(name).is_some() {
         return;
     }
-    if env.live_owned_global(name).is_some() || env.get(name).is_none() {
+    if env.get(name).is_none() {
         return;
     }
     if let Some(live) = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned()) {
@@ -199,8 +210,11 @@ pub(super) fn eval_call_expr(
             }
             // Check if receiver is an identifier - if so, we may need to update it
             // after calling a mutating (me) method
+            if let Some(root_name) = receiver_root_identifier(receiver) {
+                let root_name = root_name.to_owned();
+                refresh_stale_module_global_receiver(env, &root_name);
+            }
             if let Expr::Identifier(var_name) = receiver.as_ref() {
-                refresh_stale_module_global_receiver(env, var_name);
                 // MECALL-OWNED (2026-08-22): expression-context twin of the
                 // statement fast path in interpreter_helpers::patterns. When the
                 // variable holds an Object whose class has the method, evaluate
