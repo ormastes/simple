@@ -96,7 +96,10 @@ entry=''
 runtime=''
 cache=''
 source_roots=''
+backend=''
+backend_count=0
 for a in "$@"; do
+    case "$a" in --backend=*) backend=${a#*=}; backend_count=$((backend_count + 1)) ;; esac
     if [ "$prev" = "-o" ]; then out=$a; fi
     if [ "$prev" = "--entry" ]; then entry=$a; fi
     if [ "$prev" = "--runtime-path" ]; then runtime=$a; fi
@@ -105,6 +108,9 @@ for a in "$@"; do
     prev=$a
 done
 [ -n "$out" ] || { echo "fixture-cc: no -o" >&2; exit 1; }
+case "$backend:$backend_count" in llvm:1|llvm-lib:1|cranelift:1) ;; *)
+    echo "fixture-cc: planner build backend was not explicitly selected" >&2; exit 1 ;; esac
+printf '%s\n' "$backend" >"$out.backend-observed"
 [ "$source_roots" = '|src/app/cli|src/lib' ] || {
     echo "fixture-cc: entry-closure source roots must be checkout-relative" >&2; exit 1;
 }
@@ -294,12 +300,20 @@ FIXTURE_CC
 }
 
 run_producer() {
-    rp_root=$1 rp_suffix=${2:-}
-    sh "$producer" --root="$rp_root" \
-        --parent-compiler="$rp_root/build/bootstrap/stage2/fixture-triple/simple$rp_suffix" \
-        --runtime-dir="$rp_root/src/runtime" \
-        --target=//bootstrap:stage4 --reason=self-host-convergence-check \
-        --out="$rp_root/receipt.env"
+    rp_root=$1 rp_suffix=${2:-} rp_backend=${3:-}
+    if [ -n "$rp_backend" ]; then
+        sh "$producer" --root="$rp_root" \
+            --parent-compiler="$rp_root/build/bootstrap/stage2/fixture-triple/simple$rp_suffix" \
+            --runtime-dir="$rp_root/src/runtime" \
+            --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+            --planner-backend="$rp_backend" --out="$rp_root/receipt.env"
+    else
+        sh "$producer" --root="$rp_root" \
+            --parent-compiler="$rp_root/build/bootstrap/stage2/fixture-triple/simple$rp_suffix" \
+            --runtime-dir="$rp_root/src/runtime" \
+            --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+            --out="$rp_root/receipt.env"
+    fi
 }
 
 run_custom_output_producer() {
@@ -384,6 +398,63 @@ grep -q '^bootstrap-admission: produced ' "$scratch/ok.log" ||
     fail "producer emitted no verdict line"
 bootstrap_planner_v2_verify "$ok_root/receipt.env" "$ok_root" >/dev/null 2>&1 ||
     fail "verifier rejected the canonical producer's own receipt (gate unsatisfiable)"
+[ "$(bootstrap_planner_v2_field planner_build_backend "$ok_root/receipt.env")" = llvm ] ||
+    fail "planner receipt did not retain the default LLVM backend"
+ok_planner=$(bootstrap_planner_v2_field planner_path "$ok_root/receipt.env")
+[ "$(cat -- "$ok_planner.backend-observed")" = llvm ] ||
+    fail "planner parent did not receive --backend=llvm in its actual argv"
+checked=$((checked + 1))
+
+# Existing v2 receipts remain valid under the extended verifier. Remove only
+# the v3 build-backend fields and restore the historical schema/29-line shape.
+sed -e '/^planner_build_backend=/d' \
+    -e '/^planner_build_argv_sha256=/d' \
+    -e 's/^schema=simple-bootstrap-planner-admission-v3$/schema=simple-bootstrap-planner-admission-v2/' \
+    "$ok_root/receipt.env" >"$scratch/legacy-v2.env"
+bootstrap_planner_v2_verify "$scratch/legacy-v2.env" "$ok_root" >/dev/null 2>&1 ||
+    fail "historical v2 planner admission stopped verifying"
+checked=$((checked + 1))
+
+# Explicit selection must reach the parent compiler argv and survive receipt
+# verification as the backend actually selected for this planner build.
+cranelift_root="$scratch/cranelift-backend"
+make_fixture "$cranelift_root" 'stage2-provenance: pure-simple' strict
+cranelift_root=$(CDPATH= cd -- "$cranelift_root" && pwd -P)
+run_producer "$cranelift_root" '' cranelift >"$scratch/cranelift.log" 2>&1 ||
+    fail "producer refused explicit Cranelift planner backend: $(tail -3 "$scratch/cranelift.log" | tr '\n' ' ')"
+bootstrap_planner_v2_verify "$cranelift_root/receipt.env" "$cranelift_root" >/dev/null 2>&1 ||
+    fail "verifier rejected explicit Cranelift planner receipt"
+cranelift_planner=$(bootstrap_planner_v2_field planner_path "$cranelift_root/receipt.env")
+[ "$(cat -- "$cranelift_planner.backend-observed")" = cranelift ] &&
+    [ "$(bootstrap_planner_v2_field planner_build_backend "$cranelift_root/receipt.env")" = cranelift ] ||
+    fail "Cranelift planner selection was not received and recorded"
+sed 's/^planner_build_backend=cranelift$/planner_build_backend=llvm/' \
+    "$cranelift_root/receipt.env" >"$scratch/cranelift-backend-forged.env"
+if bootstrap_planner_v2_verify "$scratch/cranelift-backend-forged.env" \
+    "$cranelift_root" >/dev/null 2>&1; then
+    fail "planner receipt admitted a backend different from the compiler build argv"
+fi
+sed 's/^planner_build_argv_sha256=.*/planner_build_argv_sha256=0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$cranelift_root/receipt.env" >"$scratch/cranelift-argv-forged.env"
+bootstrap_planner_v2_verify_structure "$scratch/cranelift-argv-forged.env" \
+    "$cranelift_root" >/dev/null 2>&1 ||
+    fail "planner build argv digest negative no longer isolates the binding"
+if bootstrap_planner_v2_verify "$scratch/cranelift-argv-forged.env" \
+    "$cranelift_root" >/dev/null 2>&1; then
+    fail "planner receipt admitted a forged compiler build argv digest"
+fi
+
+# Unsupported backends fail before the admitted parent compiler is invoked.
+unsupported_root="$scratch/unsupported-backend"
+make_fixture "$unsupported_root" 'stage2-provenance: pure-simple' strict
+unsupported_root=$(CDPATH= cd -- "$unsupported_root" && pwd -P)
+if run_producer "$unsupported_root" '' wasm >"$scratch/unsupported-backend.log" 2>&1; then
+    fail "producer accepted an unsupported planner backend"
+fi
+grep -q 'planner-backend-unsupported' "$scratch/unsupported-backend.log" ||
+    fail "unsupported backend lacked its typed refusal"
+[ ! -d "$unsupported_root/build/bootstrap/admission" ] ||
+    fail "unsupported backend reached planner compilation"
 checked=$((checked + 1))
 fi
 
