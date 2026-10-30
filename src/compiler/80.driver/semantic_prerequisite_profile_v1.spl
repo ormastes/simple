@@ -1,0 +1,146 @@
+# Initial vertical probe eligibility. Orchestration is separate and reusable.
+# Lexer eligibility prevents source constructs erased/desugared before AST from
+# masquerading as a complete supported module. It constructs no substitute AST.
+use compiler.frontend.core.lexer.{Lexer, lexer_next_token}
+use compiler.frontend.core.lexer_types.{Token, TokenKind}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, Type, TypeKind, StmtKind}
+use compiler.driver.semantic_prerequisite_types_v1.{FrozenSemanticPrerequisiteLimitsV1}
+
+pub struct FrozenSemanticProfileVisitV1:
+    supported: bool
+    reason: text
+    visited_nodes: i64
+    function_count: i64
+
+fn _literal_token_v1(token: Token) -> bool:
+    token.kind == TokenKind.Integer or token.kind == TokenKind.KwTrue or
+        token.kind == TokenKind.KwFalse or token.kind == TokenKind.BoolLit
+
+# Exact token grammar: fn name() -> i64|bool : [newline indent] [return]
+# scalar-literal [newline dedent]. All other tokens refuse, including attributes,
+# macros, preprocessing, imports, defaults and additional nested statements.
+pub fn frozen_semantic_lexical_profile_v1(source: text,
+        limits: FrozenSemanticPrerequisiteLimitsV1) -> text:
+    val lexer = Lexer.new(source)
+    var tokens: [Token] = []
+    var done = false
+    while not done:
+        if tokens.len() >= limits.max_ast_nodes: return "profile-token-budget"
+        val token = lexer_next_token(lexer)
+        if token.kind == TokenKind.Error: return "profile-lexer-error"
+        tokens.push(token)
+        done = token.kind == TokenKind.Eof
+    var index = 0
+    var functions = 0
+    while index < tokens.len():
+        if tokens[index].kind == TokenKind.Newline:
+            index = index + 1
+            continue
+        if tokens[index].kind == TokenKind.Eof:
+            if functions == 0: return "profile-no-functions"
+            return ""
+        if functions >= limits.max_functions: return "profile-function-budget"
+        if index + 6 >= tokens.len(): return "profile-incomplete-header"
+        if (tokens[index].kind != TokenKind.KwFn or tokens[index + 1].kind != TokenKind.Ident or
+                tokens[index + 2].kind != TokenKind.LParen or tokens[index + 3].kind != TokenKind.RParen or
+                tokens[index + 4].kind != TokenKind.Arrow or tokens[index + 5].kind != TokenKind.Ident or
+                tokens[index + 6].kind != TokenKind.Colon): return "profile-function-header-unsupported"
+        if tokens[index + 5].text != "i64" and tokens[index + 5].text != "bool": return "profile-type-unsupported"
+        index = index + 7
+        if index >= tokens.len(): return "profile-body-missing"
+        var indented = false
+        if tokens[index].kind == TokenKind.Newline:
+            index = index + 1
+            while index < tokens.len() and tokens[index].kind == TokenKind.Newline: index = index + 1
+            if index >= tokens.len() or tokens[index].kind != TokenKind.Indent: return "profile-body-indent-required"
+            indented = true
+            index = index + 1
+        if index < tokens.len() and tokens[index].kind == TokenKind.KwReturn: index = index + 1
+        if index >= tokens.len() or not _literal_token_v1(tokens[index]): return "profile-expression-unsupported"
+        index = index + 1
+        if index >= tokens.len(): return "profile-body-end-missing"
+        if tokens[index].kind == TokenKind.Newline:
+            while index < tokens.len() and tokens[index].kind == TokenKind.Newline: index = index + 1
+        elif tokens[index].kind != TokenKind.Eof and tokens[index].kind != TokenKind.Dedent:
+            return "profile-extra-expression-unsupported"
+        if indented:
+            if index >= tokens.len() or tokens[index].kind != TokenKind.Dedent: return "profile-extra-statement-unsupported"
+            index = index + 1
+        functions = functions + 1
+    "profile-eof-required"
+
+fn _literal_type_v1(value: Type) -> bool:
+    match value.kind:
+        case TypeKind.Named(name, arguments): (name == "i64" or name == "bool") and arguments.len() == 0
+        case _: false
+
+fn _literal_expr_v1(value: Expr) -> bool:
+    if value.explicit_call_types.len() != 0: return false
+    match value.kind:
+        case ExprKind.IntLit(_) | ExprKind.BoolLit(_): true
+        case _: false
+
+pub fn frozen_semantic_ast_profile_v1(module: ParserModule,
+        limits: FrozenSemanticPrerequisiteLimitsV1) -> FrozenSemanticProfileVisitV1:
+    var result = FrozenSemanticProfileVisitV1(supported: false,
+        reason: "profile-module-metadata-unsupported", visited_nodes: 1, function_count: 0)
+    if (module.imports.len() != 0 or module.exports.len() != 0 or module.domain_blocks.len() != 0 or
+            module.classes.len() != 0 or module.actors.len() != 0 or module.actor_order.len() != 0 or
+            module.structs.len() != 0 or module.enums.len() != 0 or module.bitfields.len() != 0 or
+            module.traits.len() != 0 or module.impls.len() != 0 or module.type_aliases.len() != 0 or
+            module.constants.len() != 0 or module.static_asserts.len() != 0 or module.aop_advices.len() != 0 or
+            module.di_bindings.len() != 0 or module.arch_rules.len() != 0 or module.mock_decls.len() != 0 or
+            module.tagged_layer != "" or module.layer_dag_edges != "" or module.friends.len() != 0 or
+            module.internal_exports.len() != 0 or module.nogc_strict or module.extend_enums.len() != 0 or
+            module.representation_declarations.len() != 0): return result
+    if (module.functions.len() == 0 or module.functions.len() > limits.max_functions or
+            module.function_order.len() != module.functions.len()):
+        result.reason = "profile-function-set-invalid"
+        return result
+    var seen: [text] = []
+    for name in module.function_order:
+        if name == "" or seen.contains(name) or not module.functions.has(name):
+            result.reason = "profile-function-identity-invalid"
+            return result
+        seen.push(name)
+        val function_ = module.functions[name]
+        result.visited_nodes = result.visited_nodes + 1
+        val contract = function_.contract
+        if (function_.name != name or function_.type_params.len() != 0 or function_.params.len() != 0 or
+                not function_.has_return_type or function_.is_async or function_.is_static or function_.is_public or
+                function_.is_method or function_.is_mutable or function_.is_const or function_.is_kernel or
+                function_.is_extern or function_.attributes.len() != 0 or function_.has_doc_comment or
+                contract.preconditions.len() != 0 or contract.invariants.len() != 0 or
+                contract.postconditions.len() != 0 or contract.error_postconditions.len() != 0 or
+                contract.decrease_measure != nil or contract.postcondition_binding != "" or
+                contract.error_binding != "" or contract.proof_uses != ""):
+            result.reason = "profile-function-metadata-unsupported"
+            return result
+        result.visited_nodes = result.visited_nodes + 1
+        if not _literal_type_v1(function_.return_type):
+            result.reason = "profile-type-unsupported"
+            return result
+        result.visited_nodes = result.visited_nodes + 1
+        if function_.body.stmts.len() != 1:
+            result.reason = "profile-body-shape-unsupported"
+            return result
+        val statement = function_.body.stmts[0]
+        result.visited_nodes = result.visited_nodes + 1
+        var expression_supported = false
+        match statement.kind:
+            case StmtKind.Expr(expression): expression_supported = _literal_expr_v1(expression)
+            case StmtKind.Return(value):
+                if val expression = value: expression_supported = _literal_expr_v1(expression)
+            case _: ()
+        result.visited_nodes = result.visited_nodes + 1
+        if not expression_supported:
+            result.reason = "profile-expression-unsupported"
+            return result
+        if result.visited_nodes > limits.max_ast_nodes or limits.max_depth < 5:
+            result.reason = "profile-ast-budget"
+            return result
+        result.function_count = result.function_count + 1
+    result.supported = true
+    result.reason = ""
+    result

@@ -1,0 +1,34 @@
+# Native qualification pending an authorized self-hosted build; no seed fallback.
+use std.spec.*
+use std.spec.step
+use std.daemon_sdk.types.{daemon_request_new}
+use app.test_daemon.types.{test_daemon_mcdc_waiver_names, test_request_set_mcdc, test_daemon_mcdc_child_env_prefix}
+
+describe "Test daemon exposes waiver names through the owning module":
+    it "preserves the protocol ordering used to read client waiver atoms":
+        step("Read all waiver names through the public owner function")
+        val names = test_daemon_mcdc_waiver_names()
+        expect(names.len()).to_equal(4)
+        expect(names[0]).to_equal("SIMPLE_MCDC_OFF_WAIVER_REASON")
+        expect(names[1]).to_equal("SIMPLE_MCDC_OFF_WAIVER_REVIEWER")
+        expect(names[2]).to_equal("SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID")
+        expect(names[3]).to_equal("SIMPLE_MCDC_OFF_WAIVER_VERSION")
+
+    it "maps each ordered client waiver atom to the matching child variable":
+        step("Round trip distinct waiver atoms through request serialization and child environment")
+        val names = test_daemon_mcdc_waiver_names()
+        val atoms: [text] = ["reason-A", "reviewer-B", "review-C", "version-D"]
+        val request = test_request_set_mcdc(daemon_request_new(1), "off", atoms)
+        val prefix = test_daemon_mcdc_child_env_prefix(request.fields)
+        var index = 0
+        for name in names:
+            expect(request.fields["mcdc_waiver_{index}"] ?? "").to_equal(atoms[index])
+            expect(prefix).to_contain(name + "='" + atoms[index] + "'")
+            index = index + 1
+        expect(index).to_equal(4)
+
+    it "clears every owner-provided waiver name when MC/DC is on":
+        val request = test_request_set_mcdc(daemon_request_new(1), "on", ["a", "b", "c", "d"])
+        val prefix = test_daemon_mcdc_child_env_prefix(request.fields)
+        for name in test_daemon_mcdc_waiver_names():
+            expect(prefix).to_contain(name + "=''")

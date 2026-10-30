@@ -1,0 +1,72 @@
+# Contract-only rejection through sync and SOSIX aliases. No native provider completion is claimed here.
+# @req REQ-POV4-C02
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.process.observation_v1.{ObservedProcessRequestV1}
+use std.nogc_sync_mut.io.process_observation_v1.{
+    ProcessObservationProviderV1 as SyncProvider,
+    ObservedProcessStartStatusV1 as SyncStartStatus,
+    ObservedProcessStartV1,
+    ObservedProcessResultStatusV1 as SyncResultStatus,
+    process_observation_start_with_provider_v1 as sync_start_with_provider_v1,
+    process_observation_decode_result_v1 as sync_decode_result_v1
+}
+use std.nogc_async_mut.sosix.process_observation_v1.{
+    ProcessObservationProviderV1 as SosixProvider,
+    ObservedProcessStartStatusV1 as SosixStartStatus,
+    ObservedProcessResultStatusV1 as SosixResultStatus,
+    process_observation_start_with_provider_v1 as sosix_start_with_provider_v1,
+    process_observation_decode_result_v1 as sosix_decode_result_v1
+}
+
+fn rejected_observation_request() -> ObservedProcessRequestV1:
+    ObservedProcessRequestV1(command: "/bin/sh", args: ["-c", "exit 0"],
+        deadline_ms: 250, term_grace_ms: 50, stdout_limit: 1024,
+        stderr_limit: 1024, pin_executable: false)
+
+fn expect_rejected_observation_start(start: ObservedProcessStartV1):
+    expect(start.status).to_equal(SyncStartStatus.Unsupported)
+    expect(start.spawned).to_equal(false)
+    expect(start.pid).to_equal(0)
+
+fn untrusted_receipt_vectors() -> [[i64]]:
+    [
+        [1],
+        [1, 0, 4321, 0, 0, 0, 0],
+        [-1, -1, -1, -1, -1, -1, -1]
+    ]
+
+describe "SOSIX process observation V1 rejection contract":
+    it "should preserve unsupported status through both facades for a valid request":
+        step("Preserve unsupported status across the SOSIX facade")
+        val request = rejected_observation_request()
+        val sync_start = sync_start_with_provider_v1(SyncProvider.Unsupported, request)
+        val sosix_start = sosix_start_with_provider_v1(SosixProvider.Unsupported, request)
+        expect_rejected_observation_start(sync_start)
+        expect_rejected_observation_start(sosix_start)
+        expect(sosix_start.status).to_equal(SosixStartStatus.Unsupported)
+        expect(sync_start.failure_reason).to_equal(sosix_start.failure_reason)
+
+    it "should reject boundary-invalid requests before any unsupported provider can claim a start":
+        step("Preserve unsupported status across the SOSIX facade")
+        val invalid = ObservedProcessRequestV1(command: "", args: [],
+            deadline_ms: 0, term_grace_ms: -1, stdout_limit: -1,
+            stderr_limit: 0, pin_executable: false)
+        val sync_start = sync_start_with_provider_v1(SyncProvider.Unsupported, invalid)
+        val sosix_start = sosix_start_with_provider_v1(SosixProvider.Unsupported, invalid)
+        expect_rejected_observation_start(sync_start)
+        expect_rejected_observation_start(sosix_start)
+
+    it "should never decode unadmitted receipt words as completed through either facade":
+        step("Preserve unsupported status across the SOSIX facade")
+        expect(sync_decode_result_v1([]).status).to_equal(SyncResultStatus.Missing)
+        expect(sosix_decode_result_v1([]).status).to_equal(SosixResultStatus.Missing)
+        for words in untrusted_receipt_vectors():
+            val sync_result = sync_decode_result_v1(words)
+            val sosix_result = sosix_decode_result_v1(words)
+            expect(sync_result.status).to_equal(SyncResultStatus.Malformed)
+            expect(sosix_result.status).to_equal(SosixResultStatus.Malformed)
+            expect(sync_result.pid).to_equal(0)
+            expect(sosix_result.pid).to_equal(0)
+            expect(sync_result.reaped).to_equal(false)
+            expect(sosix_result.reaped).to_equal(false)

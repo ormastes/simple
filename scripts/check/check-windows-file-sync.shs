@@ -1,0 +1,23 @@
+#!/bin/sh
+# Standalone real-owner regression; no runtime stubs or simulated flush result.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cc=${CC:-clang}
+case $("$cc" -dumpmachine) in
+    *mingw*|*windows*) ;;
+    *) echo 'ERROR: Windows GNU compiler required; no checks executed' >&2; exit 2 ;;
+esac
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-file-sync.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+"$cc" -O0 -ffunction-sections -fdata-sections -std=gnu11 \
+    -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 \
+    -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+    "$root/src/runtime/test/runtime_file_sync_windows_selfcheck.c" \
+    "$root/src/runtime/runtime_native.c" "$root/src/runtime/runtime_legacy_core.c" \
+    "$root/src/runtime/runtime_process.c" "$root/src/runtime/runtime_memory.c" \
+    "$root/src/runtime/runtime_simd_dispatch.c" "$root/src/runtime/runtime_simd_utf8.c" \
+    "$root/src/runtime/runtime_process_owned.c" "$root/src/runtime/runtime_memtrack.c" \
+    -Wl,--gc-sections,--exclude-all-symbols \
+    -lkernel32 -lws2_32 -lmswsock -lbcrypt -luserenv -lntdll -lole32 -lsynchronization \
+    -o "$work/probe.exe"
+"$work/probe.exe" "$work/files"

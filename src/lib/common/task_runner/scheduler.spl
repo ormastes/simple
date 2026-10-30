@@ -349,6 +349,12 @@ fn task_runner_decode_v1(run: BuildRunV1, content: text) -> Result<TaskRunnerV1,
     # completed ancestors through that walk before scheduling their rehash.
     val execution = task_execution_schedule_v1(state.statuses, state.host_ids, state.error)
     if execution.error != "": return Err(execution.error)
+    # Persisted rows bypass dispatch's reservation check. Validate the rebuilt
+    # counts, including REAPED/UNRESOLVED leases restored above, before callers
+    # recover any process ownership from this journal.
+    for host in run.hosts:
+        if task_execution_host_active_v1(execution, host.id) > host.slots:
+            return Err("manager journal reservations exceed host slots: " + host.id)
     state = _task_runner_apply_execution_v1(state, execution)
     state = task_runner_block_dependents(state)
     if state.error != "": return Err(state.error)

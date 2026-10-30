@@ -532,7 +532,13 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
     if (!path_ptr || path_len == 0 || path_len >= sizeof(path)) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
     path[(size_t)path_len] = '\0';
+#if defined(_WIN32)
+    /* _commit uses FlushFileBuffers, which requires a writable handle.
+     * r+b opens the existing file without truncating or rewriting its bytes. */
+    FILE* f = fopen(path, "r+b");
+#else
     FILE* f = fopen(path, "rb");
+#endif
     if (!f) return 0;
 #if defined(_WIN32)
     int ok = _commit(_fileno(f)) == 0;

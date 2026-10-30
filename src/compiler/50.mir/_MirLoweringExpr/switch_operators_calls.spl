@@ -1,3 +1,4 @@
+use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.mir._MirLoweringExpr.enum_semantic_capture_v1.*
 use compiler.mir._MirLoweringExpr.enum_pattern_expansion_v1.*
 use compiler.mir._MirLowering.verification_calls_v1.*
@@ -7730,6 +7731,7 @@ impl MirLowering:
                 lw.current_function_names = self.current_function_names
                 lw.current_function_symbols = self.current_function_symbols
                 lw.exact_extern_signatures = self.exact_extern_signatures
+                lw.runtime_value_extern_abis = self.runtime_value_extern_abis
                 lw.adapted_file_write_bytes_externs = self.adapted_file_write_bytes_externs
                 # Lifted bodies resolve the same imported declarations as the
                 # enclosing body; local/capture lookup precedence is unchanged.
@@ -8423,6 +8425,9 @@ impl MirLowering:
                         self.error_fatal("dynamic callable requires proven arity before indirect emission", Some(callee.span))
                         return self.builder.emit_const_int(0)
                     case _: ()
+        var direct_runtime_value_abi: i64 = 0
+        if is_direct and self.runtime_value_extern_abis.has(direct_symbol.id):
+            direct_runtime_value_abi = self.runtime_value_extern_abis[direct_symbol.id]
         var direct_text_pointer_bridge = false
         var direct_pair_text_indices: [i64] = []
         var direct_boxed_text_indices: [i64] = []
@@ -8506,7 +8511,7 @@ impl MirLowering:
                 # value. Unwrapping a tagged handle here discards its length.
                 # Keep the existing pointer bridge at extern/unknown owners;
                 # dedicated extern pair/boxed argument expansion stays intact.
-                if direct_text_pointer_bridge and not int_list_contains(direct_pair_text_indices, current_arg_index) and not int_list_contains(direct_boxed_text_indices, current_arg_index):
+                if direct_runtime_value_abi == 0 and direct_text_pointer_bridge and not int_list_contains(direct_pair_text_indices, current_arg_index) and not int_list_contains(direct_boxed_text_indices, current_arg_index):
                     arg_local = self.bridge_tagged_text_direct_arg(arg_local, declared_param_type)
                 match declared_param_type.kind:
                     case HirTypeKind.Float(_):
@@ -8590,6 +8595,19 @@ impl MirLowering:
                             arg_local = moved_local
                     case _:
                         ()
+                if direct_runtime_value_abi == 1 and current_arg_index == 1:
+                    arg_local = self.box_runtime_dictionary_key_v1(arg_local)
+                if direct_runtime_value_abi == 2:
+                    match declared_param_type.kind:
+                        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                            arg_local = self.box_runtime_value(arg_local)
+                        case HirTypeKind.Named(primitive_owner, _):
+                            if custom_primitive_underlying_type_tag_by_symbol(primitive_owner.id) >= 0:
+                                arg_local = self.box_runtime_value(arg_local)
+                        case _: ()
+                # Mode 2 preserves heap owner words. Semantic primitive values
+                # still need tags: raw integer 17 otherwise masquerades as a
+                # heap pointer. Fixed-i64 raw declarations never enter this path.
                 # SF1 (c), 2026-07-28 — flag-gated, DEFAULT OFF: under
                 # SIMPLE_BORROW_REF_CALL_ARGS=1 record the by-reference
                 # nature of a class-typed argument as a Mutable MIR Ref so
@@ -8735,7 +8753,13 @@ impl MirLowering:
             else:
                 self.symbol_to_operand(direct_symbol)
             val adapted_receipt = self.adapted_file_write_bytes_receipt_for_call_v1(direct_symbol, resolved_name)
-            val result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type, direct_symbol, adapted_receipt)
+            var result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type, direct_symbol, adapted_receipt)
+            if direct_runtime_value_abi != 0 and return_type.kind == MirTypeKind.I8:
+                var abi_builder = self.builder
+                val wide_result = abi_builder.emit_cast(mir_operand_copy(result), MirType.i64())
+                val zero_result = abi_builder.emit_const_int(0)
+                result = abi_builder.emit_binop(MirBinOp.Ne, mir_operand_copy(wide_result), mir_operand_copy(zero_result), MirType.bool())
+                self.builder = abi_builder
             if direct_symbol.id < MONO_SYMBOL_BASE or stamped_return == nil:
                 self.remember_call_hir_return(result, direct_symbol)
             if stamped_struct_name != "" and not self.struct_value_syms.contains(result.id):

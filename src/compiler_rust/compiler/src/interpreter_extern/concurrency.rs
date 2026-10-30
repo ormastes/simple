@@ -342,7 +342,9 @@ pub fn spl_thread_pool_spawn_worker(_args: &[Value]) -> Result<Value, CompileErr
 /// the local `THREAD_RESULTS`. Under a `Native` backend that made join a lookup in
 /// a table nothing ever wrote, and `NativeThreadProvider::thread_join` ends in
 /// `.unwrap_or(Value::Nil)` — so every join silently returned nil. Spawn must be
-/// backend-aware exactly where join is.
+/// backend-aware exactly where join is. Spawned workers now live in
+/// `THREAD_HANDLES` (see `spawn_isolated_worker`); the id still comes from
+/// the backend-aware allocator so it never collides with registry ids.
 fn alloc_thread_handle_id() -> i64 {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
@@ -355,6 +357,9 @@ fn alloc_thread_handle_id() -> i64 {
 }
 
 /// Store a completed spawn result in the store `rt_thread_join` will read.
+/// Spawns now run on real OS threads (`spawn_isolated_worker`); this keeps
+/// pinning the backend-aware allocate/store/join round trip in tests.
+#[cfg(test)]
 fn store_thread_result(handle_id: i64, result: Value) -> Result<(), CompileError> {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
@@ -409,24 +414,18 @@ pub fn rt_thread_spawn_isolated_with_context(
         }
     }
 
-    // Evaluate the body expression — propagate timeout errors instead of swallowing them.
-    let body_value = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
-
-    // If it's a BlockClosure, execute it; otherwise use the value directly
-    let result = match &body_value {
-        Value::BlockClosure { .. } => exec_block_value(
-            body_value.clone(),
-            &mut local_env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?,
-        _ => body_value,
-    };
-
-    // Store the result where `rt_thread_join` will look for it.
-    store_thread_result(handle_id, result)?;
+    // Run on a real OS thread so a closure that rendezvous with its spawner
+    // (Barrier.wait(), channel recv) cannot deadlock it; see the args variant.
+    spawn_isolated_worker(
+        handle_id,
+        body,
+        local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        "rt_thread_spawn_isolated",
+    )?;
     Ok(Value::Int(handle_id))
 }
 
@@ -480,11 +479,37 @@ pub fn rt_thread_spawn_isolated_with_args_context(
         local_env.insert(params[1].clone(), data2);
     }
 
-    // Run the closure on a real OS thread. It used to be evaluated inline on
-    // the spawner, so a closure that waits on the spawner (Barrier.wait(),
-    // channel recv, spin on an atomic) deadlocked: the spawner could not reach
-    // its side of the rendezvous until the "thread" returned.
-    // doc/08_tracking/bug/interpreter_isolated_thread_barrier_hang_2026-10-30.md
+    spawn_isolated_worker(
+        handle_id,
+        body,
+        local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        "rt_thread_spawn_isolated_with_args",
+    )?;
+    Ok(Value::Int(handle_id))
+}
+
+/// Run an isolated closure body on a real OS thread and register its handle
+/// for `rt_thread_join`. It used to be evaluated inline on the spawner, so a
+/// closure that waits on the spawner (Barrier.wait(), channel recv, spin on an
+/// atomic) deadlocked: the spawner could not reach its side of the rendezvous
+/// until the "thread" returned. The worker gets a copy of the spawner's
+/// interpreter thread state.
+/// doc/08_tracking/bug/interpreter_isolated_thread_barrier_hang_2026-10-30.md
+#[allow(clippy::too_many_arguments)]
+fn spawn_isolated_worker(
+    handle_id: i64,
+    body: Box<Expr>,
+    mut local_env: Env,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+    classes: &HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    what: &str,
+) -> Result<(), CompileError> {
     let state = InterpreterThreadState::capture();
     let mut functions = functions.clone();
     let mut classes = classes.clone();
@@ -508,10 +533,10 @@ pub fn rt_thread_spawn_isolated_with_args_context(
                 _ => Ok(body_value),
             }
         })
-        .map_err(|e| CompileError::Runtime(format!("rt_thread_spawn_isolated_with_args: spawn failed: {e}")))?;
+        .map_err(|e| CompileError::Runtime(format!("{what}: spawn failed: {e}")))?;
 
     THREAD_HANDLES.lock().unwrap().insert(handle_id, worker);
-    Ok(Value::Int(handle_id))
+    Ok(())
 }
 
 /// Same stack the driver gives the main interpreter thread.

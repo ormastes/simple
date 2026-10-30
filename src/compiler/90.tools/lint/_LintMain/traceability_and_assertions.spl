@@ -1,6 +1,8 @@
 # Tracking-DB traceability checks and assertion-style lint helpers.
-use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
-use compiler.tools.lint.main.*
+use std.tooling.easy_fix.types.{
+    FixConfidence, Replacement, EasyFix, LintLevel, LintCategory
+}
+use compiler.tools.lint._LintMain.config_and_model.{LintDiag, LintEvidenceTier, LintRunResult, Linter}
 # Simple Language Linter
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
@@ -19,7 +21,7 @@ use compiler.semantics.lint.riscv_rtl_debuggability_lint (lint_riscv_rtl_debugga
 
 # File I/O wrapper
 
-fn lint_is_feature_tracking_db(path: String) -> Bool:
+fn lint_is_feature_tracking_db(path: String) -> bool:
     val normalized = path.replace("\\", "/")
     return normalized.ends_with("doc/08_tracking/feature/feature_db.sdn") or normalized.ends_with("feature_db.sdn")
 
@@ -63,7 +65,7 @@ fn lint_header_fields(line: String) -> [String]:
         return []
     lint_parse_csv_fields(parts[1])
 
-fn lint_field_index(header: [String], name: String) -> Int:
+fn lint_field_index(header: [String], name: String) -> i64:
     var i = 0
     while i < header.len():
         if header[i].trim() == name:
@@ -77,7 +79,7 @@ fn lint_row_field(header: [String], row: [String], name: String) -> String:
         return ""
     row[idx].trim()
 
-fn lint_is_blank_tracking_value(value: String) -> Bool:
+fn lint_is_blank_tracking_value(value: String) -> bool:
     val normalized = value.trim().lower()
     if normalized == "" or normalized == "\"\"":
         return true
@@ -106,7 +108,7 @@ fn lint_missing_done_traceability_fields(header: [String], row: [String]) -> [St
     missing
 
 impl Linter:
-    me check_unfold_declaration(path: String, line_num: Int, line: String):
+    me check_unfold_declaration(path: String, line_num: i64, line: String):
         # Validate unfold declaration: unfold {subpkg1, subpkg2, ...}
         # Check that:
         # 1. File is __init__.spl (directory module)
@@ -143,7 +145,7 @@ impl Linter:
                     .with_fix("Create file: touch {init_file}")
                 self.results.push(LintRunResult.new(path, line_num, 0, lint))
 
-    me check_sdn_write(path: String, line_num: Int, line: String):
+    me check_sdn_write(path: String, line_num: i64, line: String):
         # Detect direct database file writes
         # Specifically checks for writes to:
         # - doc/08_tracking/bug/bug_db.sdn
@@ -592,7 +594,7 @@ fn extract_unfold_subpackages(line: String) -> [String]:
 # SPIPE005 must keep firing): `pass`, `pass_do_nothing`, `pending(...)`.
 # -----------------------------------------------------------------------
 
-fn is_trace_ident_char(ch: String) -> Bool:
+fn is_trace_ident_char(ch: String) -> bool:
     val alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
     alnum.contains(ch)
 
@@ -601,7 +603,7 @@ fn is_trace_ident_char(ch: String) -> Bool:
 # `fail(` assertion, and `parser.check(x)` must not read as a `check(` one.
 fn bare_call_names(normalized: String) -> [String]:
     var names: [String] = []
-    var seen: Dict<String, Bool> = {}
+    var seen: Dict<String, bool> = {}
     var token_start = -1
     var i = 0
     while i < normalized.len():
@@ -632,7 +634,7 @@ fn strip_leading_underscores(raw: String) -> String:
     raw.slice(start)
 
 # Repo-wide assertion/matcher naming families.
-fn is_assertion_family_name(raw: String) -> Bool:
+fn is_assertion_family_name(raw: String) -> bool:
     val name = strip_leading_underscores(raw)
     if name.starts_with("assert") or name.starts_with("expect"):
         return true
@@ -642,7 +644,7 @@ fn is_assertion_family_name(raw: String) -> Bool:
         return true
     name == "check" or name == "verify" or name == "fail"
 
-fn has_assertion_family_call(normalized: String) -> Bool:
+fn has_assertion_family_call(normalized: String) -> bool:
     for name in bare_call_names(normalized):
         if is_assertion_family_name(name):
             return true
@@ -650,7 +652,7 @@ fn has_assertion_family_call(normalized: String) -> Bool:
 
 # `assert <expr>` / `expect <expr>` statement form, including inside a
 # `case Some(x): expect x == 1` match arm.
-fn has_assertion_keyword_statement(trimmed_stmt: String) -> Bool:
+fn has_assertion_keyword_statement(trimmed_stmt: String) -> bool:
     if trimmed_stmt.starts_with("assert ") and trimmed_stmt.len() > 7:
         return true
     if trimmed_stmt.starts_with("expect ") and trimmed_stmt.len() > 7:
@@ -662,7 +664,7 @@ fn has_assertion_keyword_statement(trimmed_stmt: String) -> Bool:
 # `subject.should_*(...)` / `subject.must_*(...)` matcher chains.
 # `.is_*`/`.has_*` are deliberately excluded — those are queries, not
 # assertions, and recognizing them would silence genuine findings.
-fn has_method_matcher(normalized: String) -> Bool:
+fn has_method_matcher(normalized: String) -> bool:
     normalized.contains(".should_") or normalized.contains(".must_")
 
 # Assertion-family call written WITHOUT parentheses — Simple supports
@@ -673,7 +675,7 @@ fn has_method_matcher(normalized: String) -> Bool:
 # Assignment forms are excluded on purpose: `expected = build_expected(lines)`
 # has an assertion-family HEAD but binds a variable, it does not assert.
 # `==` is not an assignment, so `check x == 1` still counts.
-fn has_paren_less_assertion_call(trimmed_stmt: String) -> Bool:
+fn has_paren_less_assertion_call(trimmed_stmt: String) -> bool:
     var idx = 0
     while idx < trimmed_stmt.len():
         val byte = trimmed_stmt.byte_at(idx)
@@ -698,7 +700,7 @@ fn has_paren_less_assertion_call(trimmed_stmt: String) -> Bool:
         return false
     true
 
-fn statement_has_direct_assertion(normalized: String, trimmed_stmt: String) -> Bool:
+fn statement_has_direct_assertion(normalized: String, trimmed_stmt: String) -> bool:
     val builtin = normalized.contains("expect(") or normalized.contains("expect_not(") or normalized.contains("to_equal(") or normalized.contains("to_be(") or normalized.contains("is_equal(") or normalized.contains("to_contain(") or normalized.contains("to_start_with(") or normalized.contains("to_end_with(") or normalized.contains("to_be_greater_than(") or normalized.contains("to_be_less_than(") or normalized.contains("assert_true(") or normalized.contains("assert_false(") or normalized.contains("assert_equal(") or normalized.contains("assert_not_equal(") or normalized.contains("assert_contains(") or normalized.contains("assert_nil(")
     if builtin:
         return true
@@ -713,11 +715,11 @@ fn statement_has_direct_assertion(normalized: String, trimmed_stmt: String) -> B
 # Names of fn/me definitions in THIS file whose body reaches an assertion,
 # transitively. Spec files routinely wrap `expect(...)` in a file-local
 # `check`/`verify` helper; calling such a helper IS an assertion.
-fn collect_asserting_helpers(lines: [String]) -> Dict<String, Bool>:
+fn collect_asserting_helpers(lines: [String]) -> Dict<String, bool>:
     var names: [String] = []
-    var direct: [Bool] = []
+    var direct: [bool] = []
     var calls: [[String]] = []
-    var local_names: Dict<String, Bool> = {}
+    var local_names: Dict<String, bool> = {}
 
     var i = 0
     while i < lines.len():
@@ -739,7 +741,7 @@ fn collect_asserting_helpers(lines: [String]) -> Dict<String, Bool>:
         var j = i + 1
         var body_direct = false
         var body_calls: [String] = []
-        var body_call_set: Dict<String, Bool> = {}
+        var body_call_set: Dict<String, bool> = {}
         while j < lines.len():
             val body_line = lines[j]
             val body_trimmed = body_line.trim()
@@ -761,7 +763,7 @@ fn collect_asserting_helpers(lines: [String]) -> Dict<String, Bool>:
         calls.push(body_calls)
         i = j
 
-    var good: Dict<String, Bool> = {}
+    var good: Dict<String, bool> = {}
     var queue: [String] = []
     var k = 0
     while k < names.len():
@@ -800,14 +802,14 @@ fn collect_asserting_helpers(lines: [String]) -> Dict<String, Bool>:
     good
 
 fn calls_asserting_helper(
-    normalized: String, helper_names: Dict<String, Bool>
-) -> Bool:
+    normalized: String, helper_names: Dict<String, bool>
+) -> bool:
     for name in bare_call_names(normalized):
         if helper_names.contains_key(name):
             return true
     false
 
-fn is_test_like_file(path: String) -> Bool:
+fn is_test_like_file(path: String) -> bool:
     path.ends_with("_spec.spl") or path.contains("/test/") or path.starts_with("test/")
 
 fn normalize_lint_line(line: String) -> String:
@@ -848,7 +850,7 @@ fn extract_expect_subject_from_source(line: String) -> String:
         return tail.slice(0, end_is_equal)
     ""
 
-fn is_boolean_wrapper_assertion(normalized: String) -> Bool:
+fn is_boolean_wrapper_assertion(normalized: String) -> bool:
     var compares_to_bool = normalized.contains(").to_equal(true)")
     if normalized.contains(").to_equal(false)"):
         compares_to_bool = true
@@ -869,17 +871,17 @@ fn is_boolean_wrapper_assertion(normalized: String) -> Bool:
 
     true
 
-fn is_true_boolean_wrapper_assertion(normalized: String) -> Bool:
+fn is_true_boolean_wrapper_assertion(normalized: String) -> bool:
     if not is_boolean_wrapper_assertion(normalized):
         return false
     normalized.contains(").to_equal(true)") or normalized.contains(").to_be(true)") or normalized.contains(").is_equal(true)")
 
-fn is_false_boolean_wrapper_assertion(normalized: String) -> Bool:
+fn is_false_boolean_wrapper_assertion(normalized: String) -> bool:
     if not is_boolean_wrapper_assertion(normalized):
         return false
     normalized.contains(").to_equal(false)") or normalized.contains(").to_be(false)") or normalized.contains(").is_equal(false)")
 
-fn boolean_wrapper_easy_fix(path: String, line: String, normalized: String, byte_offset: Int, line_num: Int) -> EasyFix:
+fn boolean_wrapper_easy_fix(path: String, line: String, normalized: String, byte_offset: i64, line_num: i64) -> EasyFix:
     var subject = extract_expect_subject_from_source(line)
     if subject == "":
         subject = extract_expect_subject(normalized)
@@ -905,7 +907,7 @@ fn boolean_wrapper_easy_fix(path: String, line: String, normalized: String, byte
     ))
     fix
 
-fn indent_width(line: String) -> Int:
+fn indent_width(line: String) -> i64:
     var width = 0
     for ch in line:
         if ch == " ":

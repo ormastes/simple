@@ -9,8 +9,29 @@ import re
 import shutil
 
 
-def verified_memory_receipt(state, receipt, output, artifact, limit):
-    """Bind the worker's memory receipt to the manager's verified result."""
+MEMORY_POLICIES = ("enforce", "monitor")
+MONITOR_PEAK_METRICS = ("process-tree-peak", "child-rss-peak")
+MONITOR_VERDICT = "functional-only BuildRunner hello (monitor policy; memory qualification deferred)"
+
+
+def lane_status(policy):
+    """Only enforce evidence may carry the qualified PASS marker."""
+    if policy == "enforce":
+        return "PASS"
+    if policy == "monitor":
+        return "FUNCTIONAL"
+    raise ValueError("unknown memory policy")
+
+
+def verified_memory_receipt(state, receipt, output, artifact, limit, policy="enforce"):
+    """Bind the worker's memory receipt to the manager's verified result.
+
+    policy "enforce" requires kernel-enforced memory. policy "monitor" is the
+    opt-in functional-only mode for hosts without enforcement; it never proves
+    memory qualification.
+    """
+    if policy not in MEMORY_POLICIES:
+        raise ValueError("unknown memory policy")
     lines = receipt.read_text().splitlines()
     if len(lines) != 13 or lines[0:2] != ["SIMPLE-BUILD-RESULT-1", "hello"]:
         raise ValueError("invalid BuildRunner result receipt")
@@ -36,6 +57,16 @@ def verified_memory_receipt(state, receipt, output, artifact, limit):
                 "enforcement", "enforced_bytes", "observed_peak_bytes", "peak_metric"}
     if set(fields) != expected or fields["format"] != "simple-build-memory-v1" or fields["task_identity"] != identity:
         raise ValueError("memory receipt identity or format mismatch")
+    if policy == "monitor":
+        if fields["requested_policy"] == "enforce" or fields["enforcement"] != "none" or fields["enforced_bytes"] != "0":
+            raise ValueError("monitor receipt claims enforcement it did not request")
+        if fields["requested_policy"] != "monitor" or fields["reserved_bytes"] != str(limit):
+            raise ValueError("worker did not prove the requested memory monitoring")
+        if fields["peak_metric"] not in MONITOR_PEAK_METRICS:
+            raise ValueError("monitor receipt peak metric is not monitor-only")
+        if not re.fullmatch(r"0|[1-9][0-9]*", fields["observed_peak_bytes"]):
+            raise ValueError("invalid worker memory peak")
+        return memory
     metrics = {"job-memory": "job-commit-peak", "cgroup-memory-max": "cgroup-memory-peak"}
     if fields["requested_policy"] != "enforce" or fields["reserved_bytes"] != str(limit) or fields["enforced_bytes"] != str(limit) or metrics.get(fields["enforcement"]) != fields["peak_metric"]:
         raise ValueError("worker did not prove the requested memory enforcement")
@@ -104,6 +135,10 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
     import sys
     lane = matrix.out / ("buildrunner-" + backend + "-" + name)
     lane.mkdir()
+    policy = getattr(matrix.args, "memory_policy", "enforce")
+    # manifest_main.spl parses --memory-policy only before --manifest; under
+    # enforce the argv is emitted exactly as before.
+    policy_argv = ["--memory-policy", "monitor"] if policy == "monitor" else []
     values = {"phase": matrix.args.phase, "backend": backend, "lane": name,
               "compile_route": matrix.args.compile_route,
               "compiler_sha256": matrix.sha, "status": "FAIL", "admitted": False}
@@ -165,7 +200,7 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
                source, "hello", "sanity", output, "inputs.txt",
                "--memory-limit-bytes", str(matrix.args.max_rss_kib * 1024),
                "--links-inventory", "links.txt", "--work-timeout-ms",
-               str(task_seconds * 1000), "--manifest", manifest, "--",
+               str(task_seconds * 1000), *policy_argv, "--manifest", manifest, "--",
                "scripts/bootstrap/hello-sanity-buildrunner-worker.py",
                "--backend", backend, "--lane", name, "--phase", str(matrix.args.phase),
                "--target", target,
@@ -189,7 +224,7 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
         receipt, bundle = state / "receipts/hello.sdn", published / output
         if not receipt.is_file() or not bundle.is_file() or not bundle.stat().st_size:
             raise ValueError("verified receipt or published bundle missing")
-        memory = verified_memory_receipt(state, receipt, output, bundle, matrix.args.max_rss_kib * 1024)
+        memory = verified_memory_receipt(state, receipt, output, bundle, matrix.args.max_rss_kib * 1024, policy)
         artifact = unpack_verified_lane(bundle, lane / "verified", {
             "format": "hello-buildrunner-lane-v1", "lane": name, "backend": backend,
             "phase": matrix.args.phase, "compile_route": matrix.args.compile_route,
@@ -197,12 +232,16 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
         matrix.check_executable(lane, artifact)
         if any(matrix_digest(path) != sha for path, sha in pinned.items()):
             raise ValueError("BuildRunner provider identity changed during execution")
-        values.update(status="PASS", executable_sha256=matrix_digest(artifact),
+        values.update(status=lane_status(policy), executable_sha256=matrix_digest(artifact),
                       receipt_sha256=matrix_digest(receipt), memory_receipt_sha256=matrix_digest(memory),
                       bundle_sha256=matrix_digest(bundle), python_sha256=pinned[producer],
                       manager_sha256=pinned[Path(manager)],
                       manifest_writer_sha256=pinned[Path(manifest_writer)],
                       template_sha256=pinned[Path(template)])
+        if policy == "monitor":
+            values.update(memory_policy="monitor", evidence_scope="functional-only-memory-deferred",
+                          verdict=MONITOR_VERDICT)
+            print(MONITOR_VERDICT, flush=True)
     except Exception as error:
         values["reason"] = str(error)
     return values

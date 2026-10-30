@@ -1,0 +1,283 @@
+# AtomicMap - fixed-capacity lock-free i64 -> i64 map
+#
+# Open addressing with linear probing. Every shared slot is an AtomicI64, so
+# inserts, reads, removals and updates are lock-free: no mutex is taken and no
+# method mutates a plain field after construction.
+#
+# Layout:
+#   _keys[i]  0 = EMPTY, otherwise the key. A key slot goes EMPTY -> KEY once
+#             and is never cleared, so there is no key ABA.
+#   _vals[i]  TOMBSTONE = absent (the initial value, and the value after
+#             remove). A value is always stored after its key is published, so
+#             a half-published entry reads as absent, never as a wrong value.
+#   _len      live entries (eventually consistent under concurrent writers).
+#   _claimed  key slots ever claimed; enforces the 3/4 load factor.
+#
+# Non-owning: keys and values are opaque handles. They must outlive the map.
+# The map never dereferences them and never frees them.
+#
+# Reserved inputs: key 0 and the value TOMBSTONE (the i64 minimum). Passing
+# either to insert or update is a programmer error and panics with the exact
+# message from refusal_for().
+#
+# Lifecycle: the map holds 2*capacity + 2 i64 atomic handles plus one bool
+# handle. free() releases the i64 handles. The bool handle `_freed` is
+# intentionally retained as the idempotence guard and is NOT freed, so a second
+# free() is a no-op. The map must not be used after free().
+
+use std.nogc_sync_mut.atomic.{AtomicI64, AtomicBool, MemoryOrdering, atomic_i64_new, atomic_bool_new}
+use std.nogc_async_mut.async_core.{AsyncError}
+
+const ATOMIC_MAP_TOMBSTONE: i64 = -9223372036854775807 - 1
+
+class AtomicMap:
+    """Fixed-capacity, lock-free i64 -> i64 map (open addressing, linear probe).
+
+    Non-owning: stored keys/values are opaque handles that MUST outlive the map.
+    Methods are `fn`, not `me`: all mutation lives inside the atomic cells.
+    """
+    _capacity: i64
+    _mask: i64
+    _limit: i64
+    _keys: [AtomicI64]
+    _vals: [AtomicI64]
+    _len: AtomicI64
+    _claimed: AtomicI64
+    _freed: AtomicBool
+
+    # Returns Ok(map) for a power-of-two capacity of at least 2, or
+    # Err("AtomicMap capacity must be a positive power of two") otherwise.
+    # Validation runs before any handle is allocated, so a refusal leaks nothing.
+    static fn with_capacity(capacity: i64) -> Result<AtomicMap, text>:
+        if capacity < 2 or (capacity & (capacity - 1)) != 0:
+            return Err("AtomicMap capacity must be a positive power of two")
+        var keys: [AtomicI64] = []
+        var vals: [AtomicI64] = []
+        var i = 0
+        while i < capacity:
+            keys.push(atomic_i64_new(0))
+            vals.push(atomic_i64_new(ATOMIC_MAP_TOMBSTONE))
+            i = i + 1
+        Ok(AtomicMap(
+            _capacity: capacity,
+            _mask: capacity - 1,
+            _limit: (capacity * 3) / 4,
+            _keys: keys,
+            _vals: vals,
+            _len: atomic_i64_new(0),
+            _claimed: atomic_i64_new(0),
+            _freed: atomic_bool_new(false)
+        ))
+
+    # Returns "" when the pair may be stored, otherwise the exact refusal text.
+    static fn refusal_for(key: i64, value: i64) -> text:
+        if key == 0:
+            return "AtomicMap key 0 is reserved"
+        if value == ATOMIC_MAP_TOMBSTONE:
+            return "AtomicMap value sentinel is reserved"
+        ""
+
+    fn capacity() -> i64:
+        self._capacity
+
+    fn len() -> i64:
+        self._len.load(MemoryOrdering.SeqCst)
+
+    fn is_empty() -> bool:
+        self.len() == 0
+
+    # Diagnostic: the first slot probed for this key. Keys with equal home
+    # slots collide and exercise the probe path.
+    fn home_slot(key: i64) -> i64:
+        ((key * 2654435761) >> 16) & self._mask
+
+    fn get(key: i64) -> i64?:
+        if key == 0:
+            return nil
+        val idx = self._lookup(key)
+        if idx < 0:
+            return nil
+        val value = self._vals[idx].load(MemoryOrdering.SeqCst)
+        if value == ATOMIC_MAP_TOMBSTONE:
+            return nil
+        value
+
+    fn has(key: i64) -> bool:
+        self.get(key).is_some()
+
+    fn get_or_default(key: i64, default_value: i64) -> i64:
+        val found = self.get(key)
+        if found.is_some():
+            return found.unwrap()
+        default_value
+
+    # Ok(true) when the key was absent and is now live, Ok(false) when an
+    # existing value was replaced. Err(CapacityExceeded) past the load factor
+    # or when the probe ring has no free slot.
+    fn insert(key: i64, value: i64) -> Result<bool, AsyncError>:
+        val refusal = AtomicMap.refusal_for(key, value)
+        if refusal != "":
+            panic(refusal)
+        val idx = self._find_or_claim(key)
+        if idx < 0:
+            return Err(AsyncError.CapacityExceeded)
+        Ok(self._write(idx, value, true))
+
+    # Ok(true) when stored, Ok(false) when the key already had a live value
+    # (the existing value is kept).
+    fn insert_if_absent(key: i64, value: i64) -> Result<bool, AsyncError>:
+        val refusal = AtomicMap.refusal_for(key, value)
+        if refusal != "":
+            panic(refusal)
+        val idx = self._find_or_claim(key)
+        if idx < 0:
+            return Err(AsyncError.CapacityExceeded)
+        Ok(self._write(idx, value, false))
+
+    # Tombstones the value and returns the old one. The key slot stays claimed,
+    # so a later insert of the same key reuses it.
+    fn remove(key: i64) -> i64?:
+        if key == 0:
+            return nil
+        val idx = self._lookup(key)
+        if idx < 0:
+            return nil
+        var done = false
+        var result: i64? = nil
+        while not done:
+            val old = self._vals[idx].load(MemoryOrdering.SeqCst)
+            if old == ATOMIC_MAP_TOMBSTONE:
+                done = true
+            elif self._vals[idx].compare_exchange(old, ATOMIC_MAP_TOMBSTONE, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+                self._len.fetch_sub(1, MemoryOrdering.SeqCst)
+                result = old
+                done = true
+        result
+
+    # CAS loop: f is recomputed from the freshly loaded value on every retry.
+    # Returns the new value, or nil when the key is absent.
+    fn update(key: i64, f: fn(i64) -> i64) -> i64?:
+        if key == 0:
+            return nil
+        val idx = self._lookup(key)
+        if idx < 0:
+            return nil
+        var done = false
+        var result: i64? = nil
+        while not done:
+            val old = self._vals[idx].load(MemoryOrdering.SeqCst)
+            if old == ATOMIC_MAP_TOMBSTONE:
+                done = true
+            else:
+                val new_value = f(old)
+                val refusal = AtomicMap.refusal_for(key, new_value)
+                if refusal != "":
+                    panic(refusal)
+                if self._vals[idx].compare_exchange(old, new_value, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+                    result = new_value
+                    done = true
+        result
+
+    # Snapshots of live entries. Not atomic across slots.
+    fn keys() -> [i64]:
+        var out: [i64] = []
+        var i = 0
+        while i < self._capacity:
+            val k = self._keys[i].load(MemoryOrdering.SeqCst)
+            if k != 0 and self._vals[i].load(MemoryOrdering.SeqCst) != ATOMIC_MAP_TOMBSTONE:
+                out.push(k)
+            i = i + 1
+        out
+
+    fn values() -> [i64]:
+        var out: [i64] = []
+        var i = 0
+        while i < self._capacity:
+            val k = self._keys[i].load(MemoryOrdering.SeqCst)
+            val v = self._vals[i].load(MemoryOrdering.SeqCst)
+            if k != 0 and v != ATOMIC_MAP_TOMBSTONE:
+                out.push(v)
+            i = i + 1
+        out
+
+    fn entries() -> [(i64, i64)]:
+        var out: [(i64, i64)] = []
+        var i = 0
+        while i < self._capacity:
+            val k = self._keys[i].load(MemoryOrdering.SeqCst)
+            val v = self._vals[i].load(MemoryOrdering.SeqCst)
+            if k != 0 and v != ATOMIC_MAP_TOMBSTONE:
+                out.push((k, v))
+            i = i + 1
+        out
+
+    # Releases the i64 atomic handles (keys, values, _len, _claimed). _freed is
+    # intentionally NOT freed: it is the idempotence guard. The first call wins
+    # the CAS false->true; later calls do nothing. The map must not be used
+    # afterwards.
+    fn free():
+        if self._freed.compare_exchange(false, true, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+            var i = 0
+            while i < self._capacity:
+                self._keys[i].free()
+                self._vals[i].free()
+                i = i + 1
+            self._len.free()
+            self._claimed.free()
+
+    # Slot index holding key, or -1 when absent. Stops at the first empty key
+    # slot, since slots never return to EMPTY.
+    fn _lookup(key: i64) -> i64:
+        var idx = self.home_slot(key)
+        var probes = 0
+        while probes < self._capacity:
+            val k = self._keys[idx].load(MemoryOrdering.SeqCst)
+            if k == key:
+                return idx
+            if k == 0:
+                return -1
+            idx = (idx + 1) & self._mask
+            probes = probes + 1
+        -1
+
+    # Slot index for key, claiming a new key slot if needed. Returns -1 when the
+    # load factor is reached or the probe ring is full.
+    fn _find_or_claim(key: i64) -> i64:
+        var idx = self.home_slot(key)
+        var probes = 0
+        while probes < self._capacity:
+            val k = self._keys[idx].load(MemoryOrdering.SeqCst)
+            if k == key:
+                return idx
+            if k != 0:
+                idx = (idx + 1) & self._mask
+                probes = probes + 1
+            else:
+                # Spend a claim before publishing so the load factor holds.
+                val claimed = self._claimed.fetch_add(1, MemoryOrdering.SeqCst) + 1
+                if claimed > self._limit:
+                    self._claimed.fetch_sub(1, MemoryOrdering.SeqCst)
+                    return -1
+                if self._keys[idx].compare_exchange(0, key, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+                    return idx
+                # Another writer took this slot. Return the claim and re-read it.
+                self._claimed.fetch_sub(1, MemoryOrdering.SeqCst)
+        -1
+
+    # Stores value into slot idx. replace=false keeps a live value.
+    # Returns true when the slot was absent and is now live.
+    fn _write(idx: i64, value: i64, replace: bool) -> bool:
+        var done = false
+        var became_live = false
+        while not done:
+            val old = self._vals[idx].load(MemoryOrdering.SeqCst)
+            if old == ATOMIC_MAP_TOMBSTONE:
+                if self._vals[idx].compare_exchange(ATOMIC_MAP_TOMBSTONE, value, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+                    self._len.fetch_add(1, MemoryOrdering.SeqCst)
+                    became_live = true
+                    done = true
+            elif not replace:
+                done = true
+            elif self._vals[idx].compare_exchange(old, value, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+                done = true
+        became_live
