@@ -12,9 +12,12 @@ memory evidence come from `std.nogc_sync_mut.io.resource_scope`. Temp paths
 come from `sosix_test_temp_dir()` (path only) or `secure_temp_dir()` (creates
 a 0700 dir). Parallel work goes through `task_spawn(closure)` in
 `std.nogc_async_mut.thread_pool`. `ConcurrentMap` is **not** thread-safe;
-the lock-free map is `LocklessMapI64` (partial: fixed capacity, insert-once,
-`i64`). There is no `MemoryReceipt`, `ResourceScope`, `AsyncResource` or
-`ProcessLimits` type; the real names are given below.
+there are two fixed-capacity lock-free `i64` maps with different jobs:
+`AtomicMap` (mutable `i64 -> i64`: insert, replace, remove, CAS `update`) and
+`LocklessMapI64` (insert-once `(key, recipe) -> AsyncRefI64` single-flight
+slots). A bounded async resource is `AsyncResourcePool` with affine
+`AsyncResourceLease`s. There is no `MemoryReceipt`, `ResourceScope`,
+`AsyncResource` or `ProcessLimits` type; the real names are given below.
 
 Related: [misc/stdlib.md](misc/stdlib.md) (SDN, strings, green threads, DB),
 [sosix_runtime_library.md](sosix_runtime_library.md) (what the SOSIX facade
@@ -244,20 +247,42 @@ Locks and channels for the sync layer: `class Mutex`
 (`src/lib/nogc_sync_mut/concurrent/mutex.spl:25`), `class RwLock`
 (`rwlock.spl:38`), `class Channel` (`channel.spl:123`).
 
-**Lock-free map: partial.** `pub class LocklessMapI64`
-(`src/lib/nogc_async_mut/concurrent/lockless_map_i64.spl:27`), header `:1-3`:
-"Fixed-capacity, insert-once i64 map facade." API:
-`static fn create(key_capacity, descriptor_capacity, outcome_capacity, waiter_capacity) -> Result<LocklessMapI64, MapError>`
-(`:31`), `fn request(key: i64, recipe_id: i64) -> Result<AsyncRefI64, MapError>`
-(`:50`; a second recipe for the same key is `RecipeConflict`), `find`,
-`get`, `contains_key` (`:66-77`), `me close_quiescent()` (`:99`).
-`MapError` (`:19`): `InvalidCapacity`, `UnsupportedAtomics`,
-`AllocationFailed`, `Full`, `DescriptorFull`, `RecipeConflict`. Keys and
-values are `i64` only; there is no generic lock-free map.
+**Lock-free maps.** Two types, not duplicates; pick by what the value is.
 
-**Async resource.** There is no `AsyncResource` type. The async handle the
-lock-free map hands out is `pub struct AsyncRefI64`
-(`src/lib/nogc_async_mut/async_ring/async_ref.spl:51`).
+| | `AtomicMap` | `LocklessMapI64` |
+|---|---|---|
+| File | `src/lib/nogc_async_mut/concurrent/atomic_map.spl` | `src/lib/nogc_async_mut/concurrent/lockless_map_i64.spl` (arena in `lockless_i64_core.spl`) |
+| Import | `std.nogc_async_mut.concurrent.{AtomicMap}` (also `std.nogc_async_mut`) | `std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64, MapError}` |
+| Value | plain `i64` (opaque, non-owning) | `AsyncRefI64` result slot with outcome + waiters |
+| Mutation | `insert` (replace), `insert_if_absent`, `remove` (tombstone), `update(key, f)` CAS loop | insert-once `request(key, recipe_id)`; no remove, clear or replace by design |
+| Errors | `Result<_, AsyncError>`: `CapacityExceeded` past 3/4 load; reserved key `0` and value `i64` min panic with `refusal_for` text | `MapError`: `InvalidCapacity`, `UnsupportedAtomics`, `AllocationFailed`, `Full`, `DescriptorFull`, `RecipeConflict` |
+| Storage | `2*capacity + 2` `AtomicI64` handles + one `AtomicBool` guard; `free()` idempotent | one raw arena; `me close_quiescent()` after all users quiesce |
+| Use for | shared handle -> handle index, counters | single-flight "compute once, await the outcome" (e.g. `80.driver/cache/reader/tldr_table_v1.spl`) |
+
+`AtomicMap` API: `static fn with_capacity(capacity) -> Result<AtomicMap, text>`
+(power of two >= 2), `get`, `has`, `get_or_default`, `insert`,
+`insert_if_absent`, `remove`, `update`, `len`, `is_empty`, `capacity`,
+`keys`/`values`/`entries` (snapshots, not atomic across slots), `free`. Key
+slots are never cleared, so churn over distinct keys permanently consumes
+capacity. Neither map is generic; text keys and `<V>` are not provided.
+
+**Async resource.** `class AsyncResourcePool`
+(`src/lib/nogc_async_mut/async/resource_pool.spl`; import
+`std.nogc_async_mut.async.resource_pool.{AsyncResourcePool, AsyncResourceLease}`,
+also re-exported from `std.nogc_async_mut.async` beside `AsyncSemaphore`) hands out a fixed set of
+`i64` resources: `static fn with_resources([i64]) -> Result<AsyncResourcePool, text>`,
+`me try_acquire() -> AsyncResourceLease?`, `fn acquire() -> Future<AsyncResourceLease>`,
+`fn resource(lease) -> i64?`, `me release(lease) -> bool` (false on double or
+stale release), `fn lease_error(lease) -> text`
+(`"stale resource lease"` / `"foreign resource lease"`), `me close() -> bool`
+(refuses while leases are outstanding), `me free() -> bool`. Permits, claims,
+generations and the closed/freed flags are all atomics. The scalar async
+result handle is still `pub struct AsyncRefI64`
+(`src/lib/nogc_async_mut/async_ring/async_ref.spl`), handed out by
+`LocklessMapI64`.
+
+Both new types are verified under the interpreter on macOS; a native
+real-thread smoke is pending.
 
 ## 8. Per-host matrix
 
@@ -284,4 +309,5 @@ Run with `bin/simple test <relative path>`.
 - thread pool: `test/01_unit/lib/nogc_async_mut/thread_pool_spec.spl`,
   `task_spawn_runtime_pool_spec.spl`, `test/02_integration/lib/thread_pool_async_spec.spl`
 - containers: `test/01_unit/lib/nogc_async_mut/concurrent_spec.spl`,
-  `concurrent_ds_spec.spl`, `lockless_map_i64_spec.spl`
+  `concurrent_ds_spec.spl`, `lockless_map_i64_spec.spl`, `atomic_map_spec.spl`,
+  `async_resource_pool_spec.spl`

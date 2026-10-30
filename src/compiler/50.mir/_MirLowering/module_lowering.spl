@@ -2434,6 +2434,7 @@ impl MirLowering:
             self.global_constants_by_id = {}
             self.global_const_exprs = {}
             self.exact_extern_signatures = {}
+            self.runtime_value_extern_abis = {}
             self.adapted_file_write_bytes_externs = {}
             self.collection_literal_operands = {}
             self.collection_literal_ordinals = {}
@@ -2519,6 +2520,38 @@ impl MirLowering:
         Ok(lowered)
 
     me record_exact_extern_declaration_v1(declaration: HirFunction):
+        # This field is issued by mono from the ORIGINAL generic declaration,
+        # and survives HIR serialization. Concrete spelling/signature alone
+        # never certifies a semantic RuntimeValue facade.
+        val runtime_abi: i64 = declaration.extern_runtime_value_abi
+        if runtime_abi != 0:
+            var admitted = declaration.is_extern and not declaration.is_method and not declaration.is_static and not declaration.is_async and not declaration.has_export_attr and declaration.type_params.len() == 0 and not declaration.is_generic_template and declaration.symbol.id >= 0
+            if runtime_abi == 1:
+                admitted = admitted and declaration.name == "rt_dict_contains" and declaration.params.len() == 2 and declaration.return_type.kind == HirTypeKind.Bool
+                if admitted: admitted = declaration.params[0].type_.kind == HirTypeKind.Int(64, true)
+            elif runtime_abi == 2:
+                admitted = admitted and declaration.params.len() == 1
+                if declaration.name == "rt_enum_discriminant":
+                    admitted = admitted and declaration.return_type.kind == HirTypeKind.Int(64, true)
+                else:
+                    admitted = admitted and (declaration.name == "rt_transient_heap_promote" or declaration.name == "rt_heap_ref_wellformed") and declaration.return_type.kind == HirTypeKind.Bool
+            else:
+                admitted = false
+            for parameter in declaration.params:
+                if parameter.has_default: admitted = false
+            if not admitted:
+                self.error_fatal("invalid serialized generic RuntimeValue extern admission", Some(declaration.span))
+                return
+            var runtime_params: [MirType] = []
+            for parameter in declaration.params: runtime_params.push(MirType.i64())
+            self.runtime_value_extern_abis[declaration.symbol.id] = runtime_abi
+            val physical_return = if declaration.return_type.kind == HirTypeKind.Bool:
+                MirType(kind: MirTypeKind.I8)
+            else:
+                MirType.i64()
+            self.exact_extern_signatures[declaration.symbol.id] = MirSignature(params: runtime_params,
+                return_type: physical_return, is_variadic: false, params_known: true)
+            return
         # HIR exposes fixed parameters only. Generic/default/method and
         # adapted text signatures must retain their existing lowering.
         if not declaration.is_extern or declaration.is_method or declaration.is_async or declaration.type_params.len() != 0 or declaration.is_generic_template:
@@ -2625,6 +2658,7 @@ impl MirLowering:
             self.register_declaration_provider_traits_v1(module, true)
         mir_section_profile_mark("p1_native_traits", module.name)
         self.exact_extern_signatures = {}
+        self.runtime_value_extern_abis = {}
         self.adapted_file_write_bytes_externs = {}
         # E-MIR-TYPE-Error rate limit is per module (see lower_type).
         self.mir_type_error_reports = {}
