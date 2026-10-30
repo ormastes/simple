@@ -1,0 +1,79 @@
+# @req REQ-MCDC-ENFORCEMENT-005
+# @cover src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl 80%
+"""
+# A probe-capable compiler gives real MC/DC instrumentation, with no fallback
+
+## Purpose and audience
+For owners of the MC/DC test lane (`src/lib/nogc_sync_mut/test_runner/`).
+Under `SIMPLE_MCDC_MODE=on`, a spec gets real MC/DC instrumentation when the
+selected compiler can emit MC/DC probes. That holds even when the spec:
+- imports the dbfs namespace module (private generic `_namespace_finish`)
+- declares a struct field named `recorder`
+- asserts with `.to_equal(false)`
+
+The run must print no `[mcdc-fallback]` and no `[mcdc-unavailable]` line, and
+the spec's verdict line must carry no `degraded=` token.
+
+## Which compiler
+Only the pure-Simple compiler emits MC/DC probes (`src/compiler/50.mir`). The
+Rust bootstrap seed never does; the runner degrades it up front as
+`mcdc-unavailable`. Name a self-hosted compiler in `SIMPLE_MCDC_COMPILER`.
+Without one, this scenario is SKIPPED with that reason; it never passes
+without a probe-capable compiler.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_runner_execute.{mcdc_compiler_lacks_probes}
+
+val MCDC_COMPILER_GATE_REASON = "requires SIMPLE_MCDC_COMPILER naming a self-hosted (pure-Simple-built) compiler that emits MC/DC probes; the Rust seed cannot"
+
+val FIXTURE = "use std.spec.*\nuse std.fs_driver.instance.{{DriverInstance}}\n\nstruct Rec:\n    recorder: i64\n    count: i64\n\ndescribe \"namespaces, recorder field and to_equal(false)\":\n    it \"instruments all three shapes\":\n        val r = Rec(recorder: 4, count: 2)\n        if r.recorder > 1 and r.count < 5:\n            expect(r.recorder).to_equal(4)\n        expect(r.count > 5).to_equal(false)\n"
+
+fn mcdc_compiler() -> text:
+    env_get("SIMPLE_MCDC_COMPILER") ?? ""
+
+fn probe_capable_compiler_absent() -> bool:
+    val compiler = mcdc_compiler()
+    compiler == "" or mcdc_compiler_lacks_probes(compiler)
+
+fn run_fixture() -> text:
+    val dir = "build/mcdc_kind/real_instrumentation"
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    file_write(dir + "/shapes_spec.spl", FIXTURE)
+    val compiler = mcdc_compiler()
+    val (out, err, _code) = process_run_bounded("env",
+        ["SIMPLE_MCDC_MODE=on", "SIMPLE_BINARY=" + compiler, compiler, "test", dir + "/shapes_spec.spl", "--no-db", "--no-cache", "--assert-ran"],
+        600000, 8388608)
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    out + err
+
+fn verdict_line(output: text) -> text:
+    for line in output.split("\n"):
+        if line.starts_with("SPEC FILE VERDICT:"):
+            return line
+    ""
+
+describe "MC/DC instrumentation with a probe-capable compiler":
+    it "states the gate this file is skipped under, so it is never vacuous":
+        expect(MCDC_COMPILER_GATE_REASON).to_contain("SIMPLE_MCDC_COMPILER")
+
+    skip_if(fn(): probe_capable_compiler_absent(), MCDC_COMPILER_GATE_REASON)(
+        "instruments a spec using namespaces, a recorder field and to_equal(false) with no fallback",
+        fn():
+            step("Run the three-shape fixture under SIMPLE_MCDC_MODE=on")
+            val output = run_fixture()
+            step("No degrade of any kind was taken")
+            expect_not(output.contains("[mcdc-fallback]"))
+            expect_not(output.contains("[mcdc-unavailable]"))
+            step("Real MC/DC evidence was collected, not merely no degrade")
+            expect(output).to_contain("evidence=present")
+            expect_not(output.contains("evidence=absent"))
+            expect_not(verdict_line(output).contains("degraded="))
+            step("The fixture's own example passed")
+            expect(verdict_line(output)).to_contain("passed=1")
+    )
