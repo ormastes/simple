@@ -17,7 +17,7 @@
 // Built-in methods for String
 if let Value::Str(ref s) = recv_val {
     match method {
-        "to_string" | "to_text" => return Ok(Value::shared_text(s.clone())),
+        "to_string" | "to_text" | "clone" => return Ok(Value::shared_text(s.clone())),
         "len" | "length" => return Ok(Value::Int(s.len() as i64)),
         "char_count" => return Ok(Value::Int(s.chars().count() as i64)),
         "is_empty" => return Ok(Value::Bool(s.is_empty())),

@@ -1611,6 +1611,11 @@ pub(crate) fn evaluate_method_call(
             {
                 return Ok(result);
             }
+            // Built-in value clone for a struct with no user `clone`: `Object`
+            // fields are copy-on-write, so a Value clone is a value copy.
+            if method == "clone" && args.is_empty() {
+                return Ok(recv_val.clone());
+            }
             // Collect available methods for typo suggestion
             let mut available_methods: Vec<&str> = Vec::new();
             if let Some(methods) = impl_methods.get(class) {
@@ -2145,6 +2150,10 @@ pub(crate) fn evaluate_method_call_with_self_update(
             // Call the function with receiver as first argument
             let result = exec_function_with_values(&func, &arg_values, env, functions, classes, enums, impl_methods)?;
             return Ok((result, None)); // UFCS calls don't mutate self
+        }
+        // Built-in value clone (see the non-mutating path above).
+        if method == "clone" && args.is_empty() {
+            return Ok((recv_val.clone(), None));
         }
         // Collect available methods for typo suggestion
         let mut available_methods: Vec<&str> = Vec::new();
