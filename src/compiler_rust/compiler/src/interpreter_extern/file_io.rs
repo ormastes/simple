@@ -1912,6 +1912,26 @@ pub fn rt_file_truncate(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_mmap(path, size, offset, readonly) -> addr`: map an existing file
+/// via the linked runtime twin (`simple_runtime::value::rt_mmap`). 0 on any
+/// failure (missing file, short file, capability denied).
+pub fn rt_mmap(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let int_at = |idx: usize| match args.get(idx) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(Value::UInt { value, .. }) => Ok(*value as i64),
+        Some(Value::Bool(b)) => Ok(*b as i64),
+        other => Err(CompileError::semantic(format!(
+            "rt_mmap() expects (path: text, size: i64, offset: i64, readonly: i64), got {:?}",
+            other
+        ))),
+    };
+    let (size, offset, readonly) = (int_at(1)?, int_at(2)?, int_at(3)?);
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    let addr = simple_runtime::value::rt_mmap(path_rv.to_raw() as i64, size, offset, readonly);
+    Ok(Value::Int(addr))
+}
+
 /// `rt_mmap_create(path, size) -> addr`: create/truncate `path` to exactly
 /// `size` bytes and map it read-write, via the linked runtime twin
 /// (`simple_runtime::value::rt_mmap_create`). 0 on any failure.
