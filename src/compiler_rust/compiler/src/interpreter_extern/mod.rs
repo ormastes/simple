@@ -146,6 +146,8 @@ pub mod host_gpu_lane;
 pub mod win32_hosted;
 #[cfg(windows)]
 pub mod windows_abi;
+#[cfg(unix)]
+pub mod posix_abi;
 pub mod cache_host;
 pub mod enum_sffi;
 pub mod vulkan;
@@ -3595,6 +3597,17 @@ pub(crate) fn call_extern_function_with_values(
     #[cfg(windows)]
     if windows_abi::is_supported_name(name) {
         return windows_abi::dispatch(name, &evaluated);
+    }
+
+    // Bare POSIX libc externs declared by path_identity_abi.spl,
+    // _PathIdentityPosix/errno_abi.spl and retained_file_abi.spl (malloc,
+    // free, realpath, readlink, errno address, open/read/pread/write/close/
+    // fsync, Linux statx). Must precede try_call_dynamic: the errno-address
+    // extern returns a bridge-owned cell, which is only correct when this
+    // module also owns the calls that set errno. See posix_abi.rs.
+    #[cfg(unix)]
+    if posix_abi::is_supported_name(name) {
+        return posix_abi::dispatch(name, &evaluated);
     }
 
     // capability gap. None of these five families has a real native
