@@ -34,7 +34,7 @@ pub fn handle_int_methods(
         // and display treat bit 63 as magnitude, not sign (mirrors the MIR
         // lowering, which types the result as U64).
         "to_u64" => Value::UInt { value: n as u64, width: 64 },
-        "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+        "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" => {
             // Strip "to_" prefix -> numeric type name. Reuse the same cast
             // rules as `expr as <T>` so behavior is consistent.
             let tname = &method[3..];
