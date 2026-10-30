@@ -121,3 +121,15 @@ data fixes are stdlib content with no platform code, and the interpreter lane
 was re-verified after each (`bin/simple run src/app/devhub/main.spl --version`
 -> `devhub 0.1.0`).
 
+
+## See also (2026-10-30)
+
+The Rust seed's `simple run` lane had a facade-shaped defect of its own,
+in different code: `pipeline::module_loader::resolve_numbered_parts_from_root`
+never resolved a plain package `__init__.spl` as the LAST segment under a
+numbered layer dir, so `use compiler.semantics.any_escape.{any_escape_check}`
+flattened nothing and the JIT dropped the whole compiler worker to the
+interpreter. FIXED in
+`jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md`.
+The Simple-written driver's phase-1 closure walk described above is separate
+and still open.
