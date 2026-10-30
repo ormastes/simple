@@ -1210,13 +1210,23 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
     if addr <= 0 || length <= 0 || (prot & write_exec) == write_exec {
         return Ok(Value::Int(-1));
     }
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_os = "macos")))]
     if (prot & i64::from(libc::PROT_EXEC)) != 0 {
-        // No verified cross-platform cache-sync primitive exists in this lane.
+        // No verified cache-sync primitive is wired for this host in this lane.
         // Fail before granting execute permission on non-coherent targets.
         return Ok(Value::Int(-1));
     }
     let result = unsafe { libc::mprotect(addr as usize as *mut libc::c_void, length as usize, prot as i32) };
+    // Mirror runtime unix_common.h rt_mprotect: an execute grant must be
+    // followed by an instruction-cache sync on non-coherent targets (Apple
+    // Silicon). macOS exports `sys_icache_invalidate` from libSystem.
+    #[cfg(all(target_os = "macos", not(any(target_arch = "x86", target_arch = "x86_64"))))]
+    if result == 0 && (prot & i64::from(libc::PROT_EXEC)) != 0 {
+        extern "C" {
+            fn sys_icache_invalidate(start: *mut libc::c_void, len: libc::size_t);
+        }
+        unsafe { sys_icache_invalidate(addr as usize as *mut libc::c_void, length as usize) };
+    }
     Ok(Value::Int(i64::from(result)))
 }
 
@@ -1533,6 +1543,38 @@ mod ptr_read_u8_tests {
                 .unwrap(),
             0
         );
+    }
+
+    /// Regression: on Apple Silicon the interpreter refused every execute
+    /// grant (no cache-sync primitive was wired), so the loader's RW->RX
+    /// transition failed and no SMF/JIT symbol could be mapped on macOS arm64.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn macos_arm64_mprotect_grants_rx_and_executes() {
+        let rw = rt_mmap_raw(&[
+            Value::Int(0),
+            Value::Int(4096),
+            Value::Int((libc::PROT_READ | libc::PROT_WRITE) as i64),
+            Value::Int((libc::MAP_PRIVATE | libc::MAP_ANON) as i64),
+            Value::Int(-1),
+            Value::Int(0),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_ne!(rw, -1);
+        // movz w0, #42 ; ret
+        let code: [u8; 8] = [0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
+        unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), rw as usize as *mut u8, code.len()) };
+        let rx = (libc::PROT_READ | libc::PROT_EXEC) as i64;
+        let status = rt_mprotect(&[Value::Int(rw), Value::Int(4096), Value::Int(rx)]).unwrap();
+        assert_eq!(status, Value::Int(0));
+        let f: extern "C" fn() -> i32 = unsafe { std::mem::transmute(rw as usize) };
+        assert_eq!(f(), 42);
+        let write_exec = (libc::PROT_WRITE | libc::PROT_EXEC) as i64;
+        let refused = rt_mprotect(&[Value::Int(rw), Value::Int(4096), Value::Int(write_exec)]).unwrap();
+        assert_eq!(refused, Value::Int(-1), "W^X must still be refused");
+        assert_eq!(rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)]).unwrap(), Value::Int(0));
     }
 
     /// Regression: the Windows seed had no `rt_mprotect` ("unavailable on this
