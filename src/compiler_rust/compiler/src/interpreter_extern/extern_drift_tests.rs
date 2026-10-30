@@ -168,6 +168,7 @@ const ALLOWED_KNOWN_GAPS: &[(&str, &str)] = &[
 /// interpreter must serve itself.
 const PINNED_C_ONLY_SYMBOLS: &[(&str, &str)] = &[
     ("rt_list_dir_recursive", "runtime_core_io_exports.c only; caller 80.driver/project.spl"),
+    ("rt_fs_read_text", "runtime_native.c only; caller sffi/fs.spl fs_read_text"),
 ];
 
 /// Sentinels that must appear in the scanned universe, so a wrong repo-root
