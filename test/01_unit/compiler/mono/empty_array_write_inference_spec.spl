@@ -1,0 +1,296 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, run_monomorphization_with_diagnostics}
+
+fn empty_array_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn empty_array_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, span: Span.empty())
+
+fn empty_array_read(id: i64) -> HirExpr:
+    empty_array_expr(HirExprKind.Var(SymbolId(id: id)))
+
+fn empty_array_let(id: i64, initial: HirExpr) -> HirStmt:
+    HirStmt(kind: HirStmtKind.Let(SymbolId(id: id), empty_array_type(HirTypeKind.Infer(0, 0)), initial), span: Span.empty())
+
+fn empty_array_declaration(id: i64) -> HirStmt:
+    empty_array_let(id, empty_array_expr(HirExprKind.ArrayLit([], nil)))
+
+fn empty_array_push(id: i64, value: HirExpr, resolution: MethodResolution = MethodResolution.Unresolved) -> HirExpr:
+    val argument = HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+    empty_array_expr(HirExprKind.MethodCall(empty_array_read(id), "push", [argument], resolution))
+
+fn empty_array_integer(value: i64) -> HirExpr:
+    empty_array_expr(HirExprKind.IntLit(value, "i64"))
+
+describe "empty array locals collect concrete element constraints from writes":
+    it "shares element constraints through slices and aliases and stamps storage metadata":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "arrays"
+        val declaration = empty_array_declaration(901)
+        pass_.collect_lets_stmt(declaration)
+        val range = empty_array_expr(HirExprKind.Range(empty_array_integer(0), empty_array_integer(1), false, nil))
+        val slice = empty_array_expr(HirExprKind.Index(empty_array_read(901), range))
+        val before = empty_array_let(902, slice)
+        val combined = empty_array_let(903, empty_array_read(902))
+        pass_.collect_lets_stmt(before)
+        pass_.collect_lets_stmt(combined)
+        pass_.collect_lets_expr(empty_array_push(903, empty_array_integer(42)))
+        val integer = empty_array_type(HirTypeKind.Int(64, true))
+        for id in [901, 902, 903]:
+            val inferred = pass_.env_type(SymbolId(id: id))
+            expect(inferred != nil).to_equal(true)
+            expect(inferred.unwrap().kind == HirTypeKind.Array(integer, nil)).to_equal(true)
+        for statement in [declaration, before, combined]:
+            val rewritten = pass_.rewrite_stmt(statement)
+            match rewritten.kind:
+                case HirStmtKind.Let(_, type_, initial):
+                    expect(type_.kind == HirTypeKind.Array(integer, nil)).to_equal(true)
+                    expect(initial.has_type_).to_equal(true)
+                    expect(initial.type_.kind == type_.kind).to_equal(true)
+                case _: assert(false)
+
+    it "poisons mixed or unknown writes permanently and ignores stale alias caches":
+        for invalid in [empty_array_expr(HirExprKind.BoolLit(true)), empty_array_read(777)]:
+            var pass_ = MonomorphizationPass.create()
+            pass_.collect_lets_stmt(empty_array_declaration(901))
+            pass_.collect_lets_stmt(empty_array_let(902, empty_array_read(901)))
+            pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42)))
+            val previous = pass_.env_type(SymbolId(id: 902)).unwrap()
+            pass_.env[902] = previous
+            pass_.collect_lets_expr(empty_array_push(902, invalid))
+            pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(7)))
+            expect(pass_.env_type(SymbolId(id: 901)) == nil).to_equal(true)
+            expect(pass_.env_type(SymbolId(id: 902)) == nil).to_equal(true)
+            var cached = empty_array_read(902)
+            cached.has_type_ = true
+            cached.type_ = previous
+            expect(pass_.infer_expr_type(cached) == nil).to_equal(true)
+            expect(pass_.rewrite_expr(cached).has_type_).to_equal(false)
+
+    it "does not infer from arbitrary push methods or unknown receiver provenance":
+        var pass_ = MonomorphizationPass.create()
+        pass_.collect_lets_expr(empty_array_push(777, empty_array_integer(42)))
+        expect(pass_.env_type(SymbolId(id: 777)) == nil).to_equal(true)
+        expect(pass_.array_element_roots_v1.len()).to_equal(0)
+        pass_.collect_lets_stmt(empty_array_declaration(901))
+        val custom = MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 11))
+        pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42), custom))
+        pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42)))
+        expect(pass_.env_type(SymbolId(id: 901)) == nil).to_equal(true)
+
+    it "rejects unknown call escape and captured mutation evidence":
+        for capture in [false, true]:
+            var pass_ = MonomorphizationPass.create()
+            pass_.collect_lets_stmt(empty_array_declaration(901))
+            pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42)))
+            if capture:
+                pass_.collect_lets_expr(empty_array_expr(HirExprKind.Lambda([], empty_array_integer(0), [SymbolId(id: 901)])))
+            else:
+                val argument = HirCallArg(has_name: false, name: "", value: empty_array_read(901), span: Span.empty())
+                pass_.collect_lets_expr(empty_array_expr(HirExprKind.Call(empty_array_read(777), [argument], [])))
+            expect(pass_.env_type(SymbolId(id: 901)) == nil).to_equal(true)
+
+    it "keeps nested lambda parameter shadowing separate from outer constraints":
+        var pass_ = MonomorphizationPass.create()
+        pass_.collect_lets_stmt(empty_array_declaration(901))
+        pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42)))
+        val integer = empty_array_type(HirTypeKind.Int(64, true))
+        val parameter = HirParam(symbol: SymbolId(id: 901), name: "value", type_: empty_array_type(HirTypeKind.Infer(0, 0)),
+            has_default: false, span: Span.empty(), is_mutable: false)
+        val lambda = empty_array_expr(HirExprKind.Lambda([parameter], empty_array_read(901), []))
+        val expected = empty_array_type(HirTypeKind.Function([integer], integer, []))
+        val checked = pass_.contextual_lambda_v1(lambda, expected)
+        expect(checked.is_ok()).to_equal(true)
+        val rewritten = pass_.rewrite_expr(checked.unwrap())
+        match rewritten.kind:
+            case HirExprKind.Lambda(_, body, _):
+                expect(body.has_type_).to_equal(true)
+                expect(body.type_.kind == integer.kind).to_equal(true)
+            case _: assert(false)
+        expect(pass_.env_type(SymbolId(id: 901)).unwrap().kind == HirTypeKind.Array(integer, nil)).to_equal(true)
+
+    it "retains the caller identity of provider-owned field write evidence":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "consumer"
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val record = provider.define("Record", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "provider")
+        val collision = consumer.define("Other", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "consumer")
+        val imported = consumer.define("Record", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "provider")
+        val holder = consumer.define("Holder", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "consumer")
+        pass_.module_symbols["provider"] = provider
+        pass_.module_symbols["consumer"] = consumer
+        pass_.named_symbol_names["consumer#{holder.id}"] = "Holder"
+        pass_.field_types["Holder::value"] = empty_array_type(HirTypeKind.Named(record, []))
+        pass_.field_owner_modules["Holder::value"] = "provider"
+        pass_.env[902] = empty_array_type(HirTypeKind.Named(holder, []))
+        pass_.collect_lets_stmt(empty_array_declaration(901))
+        val field = empty_array_expr(HirExprKind.Field(empty_array_read(902), "value", nil))
+        pass_.collect_lets_expr(empty_array_push(901, field))
+        val inferred = pass_.env_type(SymbolId(id: 901)).unwrap()
+        match inferred.kind:
+            case HirTypeKind.Array(element, _):
+                expect(element.kind == HirTypeKind.Named(imported, [])).to_equal(true)
+                expect(element.kind == HirTypeKind.Named(collision, [])).to_equal(false)
+            case _: assert(false)
+
+    it "keeps explicit annotations authoritative and rejects scalar-index alias guesses":
+        var pass_ = MonomorphizationPass.create()
+        val integer = empty_array_type(HirTypeKind.Int(64, true))
+        val declared = empty_array_type(HirTypeKind.Array(integer, nil))
+        val explicit = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 900), declared, empty_array_expr(HirExprKind.ArrayLit([], nil))), span: Span.empty())
+        pass_.collect_lets_stmt(explicit)
+        expect(pass_.array_element_roots_v1.len()).to_equal(0)
+        expect(pass_.env_type(SymbolId(id: 900)).unwrap().kind == declared.kind).to_equal(true)
+        pass_.collect_lets_stmt(empty_array_declaration(901))
+        pass_.collect_lets_stmt(empty_array_let(902, empty_array_expr(HirExprKind.Index(empty_array_read(901), empty_array_integer(0)))))
+        pass_.collect_lets_expr(empty_array_push(902, empty_array_integer(42)))
+        expect(pass_.array_element_roots_v1.has(902)).to_equal(false)
+        expect(pass_.env_type(SymbolId(id: 901)) == nil).to_equal(true)
+
+    it "rewrites recursive generic calls after slice-local writes without weakening unknown arguments":
+        val source = "struct Record:\n    label: text\n    key: i64\nfn gather<T>(values: [T], compare: fn(T, T) -> i64) -> [T]:\n    var sorted = []\n    val before = sorted[0:1]\n    val after = sorted[1:]\n    var combined = before\n    for item in values:\n        combined.push(item)\n    sorted = combined\n    if values.len() > 100:\n        return gather(sorted, compare)\n    sorted\nfn invoke(values: [Record]) -> [Record]:\n    gather(values, \\left, right: left.key - right.key)\n"
+        val parsed = parse_full_frontend(source, "array_write.spl", "array_write", Logger(level: 0))
+        var lowering = HirLowering.with_filename("array_write.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["array_write"] = hir
+        val (out, stats, diagnostics) = run_monomorphization_with_diagnostics(modules)
+        expect(diagnostics.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        var declarations = 0
+        var closed_slices = 0
+        var open_slices = 0
+        val module = out["array_write"]
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if not function.name.starts_with("gather$"): continue
+            for statement in function.body.stmts:
+                match statement.kind:
+                    case HirStmtKind.Let(_, type_, initial):
+                        match type_.kind:
+                            case HirTypeKind.Array(element, _):
+                                expect(initial.has_type_).to_equal(true)
+                                expect(initial.type_.kind == type_.kind).to_equal(true)
+                                match initial.kind:
+                                    case HirExprKind.MethodCall(_, method, arguments, _):
+                                        expect(method).to_equal("slice")
+                                        if arguments.len() == 2: closed_slices = closed_slices + 1
+                                        elif arguments.len() == 1: open_slices = open_slices + 1
+                                        else: assert(false)
+                                    case _: ()
+                                match element.kind:
+                                    case HirTypeKind.Named(_, _): declarations = declarations + 1
+                                    case _: assert(false)
+                            case _: ()
+                    case _: ()
+        expect(declarations).to_equal(4)
+        expect(closed_slices).to_equal(1)
+        expect(open_slices).to_equal(1)
+
+    it "rejects element stores foreign assignment and aggregate escapes":
+        val read = empty_array_read(901)
+        val scalar_store = HirStmt(kind: HirStmtKind.Assign(empty_array_expr(HirExprKind.Index(read, empty_array_integer(0))), nil,
+            empty_array_expr(HirExprKind.BoolLit(true))), span: Span.empty())
+        val foreign_store = HirStmt(kind: HirStmtKind.Assign(empty_array_read(777), nil, read), span: Span.empty())
+        val dictionary = empty_array_expr(HirExprKind.DictLit([(empty_array_expr(HirExprKind.StringLit("key", nil)), read)], nil, nil))
+        val repeat = empty_array_expr(HirExprKind.ArrayRepeat(read, empty_array_integer(2), nil))
+        for escape in [scalar_store, foreign_store, HirStmt(kind: HirStmtKind.Expr(dictionary), span: Span.empty()),
+            HirStmt(kind: HirStmtKind.Expr(repeat), span: Span.empty())]:
+            var pass_ = MonomorphizationPass.create()
+            pass_.collect_lets_stmt(empty_array_declaration(901))
+            pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42)))
+            pass_.collect_lets_stmt(escape)
+            expect(pass_.env_type(SymbolId(id: 901)) == nil).to_equal(true)
+
+    it "invalidates cached nested projection metadata after root poisoning":
+        var pass_ = MonomorphizationPass.create()
+        pass_.collect_lets_stmt(empty_array_declaration(901))
+        pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42)))
+        val integer = empty_array_type(HirTypeKind.Int(64, true))
+        var projected = empty_array_expr(HirExprKind.Index(empty_array_read(901), empty_array_integer(0)))
+        projected.has_type_ = true
+        projected.type_ = integer
+        var member = empty_array_expr(HirExprKind.Field(projected, "value", nil))
+        member.has_type_ = true
+        member.type_ = integer
+        val range = empty_array_expr(HirExprKind.Range(empty_array_integer(0), empty_array_integer(1), false, nil))
+        var slice = empty_array_expr(HirExprKind.Index(empty_array_read(901), range))
+        slice.has_type_ = true
+        slice.type_ = empty_array_type(HirTypeKind.Array(integer, nil))
+        pass_.collect_lets_expr(empty_array_push(901, empty_array_expr(HirExprKind.BoolLit(true))))
+        for stale in [projected, member, slice]:
+            expect(pass_.infer_expr_type(stale) == nil).to_equal(true)
+            expect(pass_.rewrite_expr(stale).has_type_).to_equal(false)
+
+    it "preserves heterogeneous arrays outside concrete generic demand":
+        val source = "fn plain() -> i64:\n    var values = []\n    values.push(1)\n    values.push(\"text\")\n    0\n"
+        val parsed = parse_full_frontend(source, "mixed_plain.spl", "mixed_plain", Logger(level: 0))
+        var lowering = HirLowering.with_filename("mixed_plain.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["mixed_plain"] = hir
+        val (out, stats, diagnostics) = run_monomorphization_with_diagnostics(modules)
+        expect(diagnostics.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        var checked = 0
+        val module = out["mixed_plain"]
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if function.name != "plain": continue
+            for statement in function.body.stmts:
+                match statement.kind:
+                    case HirStmtKind.Let(_, type_, _):
+                        match type_.kind:
+                            case HirTypeKind.Array(_, _): assert(false)
+                            case _: checked = checked + 1
+                    case _: ()
+        expect(checked).to_equal(1)
+
+    it "rejects conflicting branch writes at generic demand in either branch order":
+        for reverse in [false, true]:
+            val first = if reverse: "\"text\"" else: "1"
+            val second = if reverse: "1" else: "\"text\""
+            val source = "fn need<T>(values: [T]) -> i64:\n    values.len()\nfn invoke(condition: bool) -> i64:\n    var values = []\n    if condition:\n        values.push({first})\n    else:\n        values.push({second})\n    need(values)\n"
+            val parsed = parse_full_frontend(source, "mixed_demand.spl", "mixed_demand", Logger(level: 0))
+            var lowering = HirLowering.with_filename("mixed_demand.spl")
+            val hir = lowering.lower_module(parsed)
+            expect(lowering.errors.len()).to_equal(0)
+            var modules: Dict<text, HirModule> = {}
+            modules["mixed_demand"] = hir
+            val (out, stats, diagnostics) = run_monomorphization_with_diagnostics(modules)
+            expect(diagnostics.len()).to_be_greater_than(0)
+            expect(stats.unresolved_generic_calls).to_be_greater_than(0)
+
+    it "recognizes only validated builtin colon-slice method shapes":
+        var pass_ = MonomorphizationPass.create()
+        pass_.collect_lets_stmt(empty_array_declaration(901))
+        val start = HirCallArg(has_name: false, name: "", value: empty_array_integer(0), span: Span.empty())
+        val end = HirCallArg(has_name: false, name: "", value: empty_array_integer(2), span: Span.empty())
+        val open_slice = empty_array_expr(HirExprKind.MethodCall(empty_array_read(901), "slice", [start], MethodResolution.Unresolved))
+        val closed_slice = empty_array_expr(HirExprKind.MethodCall(empty_array_read(901), "slice", [start, end], MethodResolution.Unresolved))
+        pass_.collect_lets_stmt(empty_array_let(902, open_slice))
+        pass_.collect_lets_stmt(empty_array_let(903, closed_slice))
+        pass_.collect_lets_expr(empty_array_push(903, empty_array_integer(42)))
+        for slice in [open_slice, closed_slice]:
+            expect(pass_.array_constraint_root_v1(slice)).to_equal(901)
+            expect(pass_.rewrite_expr(slice).has_type_).to_equal(true)
+        val custom = empty_array_expr(HirExprKind.MethodCall(empty_array_read(901), "slice", [start],
+            MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 11))))
+        expect(pass_.array_constraint_root_v1(custom)).to_equal(-1)
+        val wrong = HirCallArg(has_name: false, name: "", value: empty_array_expr(HirExprKind.BoolLit(true)), span: Span.empty())
+        val invalid = empty_array_expr(HirExprKind.MethodCall(empty_array_read(901), "slice", [wrong], MethodResolution.Unresolved))
+        expect(pass_.array_constraint_root_v1(invalid)).to_equal(-1)
+        pass_.collect_lets_expr(invalid)
+        expect(pass_.env_type(SymbolId(id: 901)) == nil).to_equal(true)
