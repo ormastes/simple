@@ -156,7 +156,7 @@ theorem unsealed_with_previous_fails (prev : Option (List Edge)) (m : Manifest) 
 theorem unsealed_anywhere_fails (prev : Option (List Edge)) (ms : List Manifest)
     (m : Manifest) (hm : m ∈ ms) (hs : m.sealed = false) : project prev ms = none := by
   cases hp : project prev ms with
-  | none => exact hp
+  | none => rfl
   | some rr =>
     have hsealed := project_success_implies_all_sealed prev ms rr hp m hm
     rw [hs] at hsealed
