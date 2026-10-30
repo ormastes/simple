@@ -26,12 +26,14 @@ to the caller. Measured on the deployed seed (`bin/simple`, 2026-10-30):
 `simple test` runs every spec on the interpreter, so each scenario that reads
 back a buffer a callee filled sees the original zeros.
 
+The `test/02_integration/app/*` rows below are marked by the follow-up PR that
+restores `app.hal_provider` and the `app.test.hal_environment_*` fixtures.
+
 ## Affected scenarios (marked `skip_it`)
 
 - `test/01_unit/lib/common/structural/environment_device_adapter_spec.spl` (3)
 - `test/01_unit/lib/common/structural/environment_instruction_executor_spec.spl` (2)
 - `test/01_unit/lib/common/structural/environment_instruction_wire_v1_spec.spl` (5) — `frame()` builds the wire frame through `put_i64`
-- `test/01_unit/lib/common/structural/rt_hal_device_capability_api_spec.spl` (4)
 - `test/01_unit/lib/common/structural/rt_hal_environment_binding_spec.spl` (1)
 - `test/02_integration/app/hal_environment_entropy_executor_spec.spl` (2)
 - `test/02_integration/app/hal_environment_physical_executor_spec.spl` (4; the clock scenario also calls `.execute` on `HostedPreparedClockReadExecutorV1`, which has no `EnvPhysicalExecutorPortV1` impl in any historical source)
@@ -40,6 +42,27 @@ back a buffer a callee filled sees the original zeros.
 - `test/02_integration/app/hal_tagged_environment_binding_spec.spl` (2 of 2) —
   every scenario is affected, so the file is tagged `@tag:in-development`
   instead (a spec with zero executed scenarios is reported as an error)
+
+## Second cause: device capability API input shape (also `skip_it`)
+
+`test/01_unit/lib/common/structural/rt_hal_device_capability_api_spec.spl`
+(4 scenarios) fails before any buffer is written:
+`device_capability_api.spl` seeds the request's `argument_capacity` from
+`region.capacity` (4) while the spec passes `argument_bytes = []`, so
+`device_adapter.spl` rejects the preferred execution with `Overflow` (or
+`env_execution_record_applied_v1(..., [], ...)` returns `InvalidInstruction`).
+Code and spec are token-identical to `43e1f7108fb`, so this was already broken at
+the source. Unblock: decide whether a device read request carries argument
+bytes, then make the request builder or the spec agree. These scenarios also
+read back caller buffers, so they need the fix above too. They are the only
+scenarios that call `HalDeviceCompareOwnerV1.submit`, so the `.status`
+adaptation made there in the restore has no green coverage yet.
+
+Note on `env_instruction_plan_digest_v1` (written new during the restore; no
+historical definition exists): it is the digest of a one-instruction trace.
+`rt_hal_executed_access_receipt_v3_well_formed` accepts `trace_cursor` values
+up to 4095, so for a cursor above 0 the "trace identity" is not a chained trace
+digest. No producer exists yet.
 
 ## Unblock condition
 
