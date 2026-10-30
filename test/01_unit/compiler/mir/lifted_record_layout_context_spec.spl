@@ -1,0 +1,96 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_source_file.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir.{MirModule}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+class LiftedRecordLayoutFixture:
+    lowering: MirLowering
+    mir: MirModule
+
+val lifted_layout_provider = "pub struct Row:\n    prefix: i64\n    value: text\npub fn rows() -> [Row]:\n    [Row(prefix: 13, value: \"provider\")]\n"
+val lifted_layout_consumer = "use app.lifted_layout.provider.\{rows, Row as ProviderRow}\nstruct Row:\n    value: i64\nfn invoke(callback: fn() -> i64) -> i64:\n    callback()\nfn nested() -> fn() -> i64:\n    \\:\n        invoke(\\: rows()[0].prefix)\nfn inspect() -> i64:\n    val ordinary = rows()[0].prefix\n    val first = invoke(\\: rows()[0].prefix)\n    val callback = nested()\n    val sibling = invoke(\\: rows()[0].value.len())\n    ordinary + first + callback() + sibling\n"
+
+fn lifted_record_layout_fixture(conflict: i64 = 0) -> LiftedRecordLayoutFixture:
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(lifted_layout_provider, "app/lifted_layout/provider.spl", "app.lifted_layout.provider", log)
+    # Negative cases contain provider calls only inside lifted bodies, so an
+    # ordinary-body rejection cannot satisfy the lifted rejection assertions.
+    val consumer_source = if conflict == 0: lifted_layout_consumer else: lifted_layout_consumer.replace("val ordinary = rows()[0].prefix", "val ordinary = 0")
+    val consumer_ast = parse_full_frontend(consumer_source, "app/lifted_layout/consumer.spl", "app.lifted_layout.consumer", log)
+    var modules: Dict<text, ParserModule> = {}
+    modules["app.lifted_layout.provider"] = provider_ast
+    val files = [SourceFile(path: "app/lifted_layout/provider.spl", content: lifted_layout_provider, module_name: "app.lifted_layout.provider")]
+    match module_surfaces_from_modules(modules, files):
+        case Ok(surfaces):
+            var provider_lowering = hirlowering_for_module("app/lifted_layout/provider.spl", surfaces)
+            var consumer_lowering = hirlowering_for_module("app/lifted_layout/consumer.spl", surfaces)
+            val provider = provider_lowering.lower_module(provider_ast)
+            val consumer = consumer_lowering.lower_module(consumer_ast)
+            expect(provider_lowering.errors.len()).to_equal(0)
+            expect(consumer_lowering.errors.len()).to_equal(0)
+            var lowering = MirLowering.new(consumer.symbols)
+            var hir_modules: Dict<text, HirModule> = {}
+            hir_modules["provider"] = provider
+            hir_modules["consumer"] = consumer
+            lowering.prescan_module_struct_names(hir_modules, "provider")
+            lowering.prescan_module_struct_names(hir_modules, "consumer")
+            val identity = "app.lifted_layout.provider::Row"
+            expect(lowering.composite_layout_owner_counts[identity]).to_equal(1)
+            expect(lowering.result_err_layout_types[identity] != "").to_be(true)
+            # Exercise the exact rejection markers that registration installs.
+            # Re-registration must not heal conflicting admitted snapshots.
+            if conflict == 1:
+                lowering.composite_layout_owner_counts[identity] = 2
+            if conflict == 2:
+                lowering.result_err_layout_types[identity] = ""
+            val mir = lowering.lower_module(consumer, [provider, consumer])
+            return LiftedRecordLayoutFixture(lowering: lowering, mir: mir)
+        case Err(reason): fail("record layout provider surface failed: " + reason)
+
+fn lifted_record_provider_calls(mir: MirModule) -> i64:
+    var count = 0
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                if name == "app.lifted_layout.provider.rows": count = count + 1
+                            case _: ()
+                    case _: ()
+    count
+
+describe "lifted record provider layout context":
+    it "preserves imported array owners through ordinary nested and sibling calls":
+        val fixture = lifted_record_layout_fixture()
+        expect(fixture.lowering.errors.len()).to_equal(0)
+        expect(lifted_record_provider_calls(fixture.mir)).to_equal(4)
+
+    it "rejects conflicting physical layout identity in lifted calls":
+        val fixture = lifted_record_layout_fixture(1)
+        var rejected = false
+        for error in fixture.lowering.errors:
+            if error.fatal and error.message.contains("array return record element has no unique provider layout"):
+                rejected = true
+        expect(rejected).to_be(true)
+
+    it "rejects unknown or conflicting semantic field snapshots in lifted calls":
+        val fixture = lifted_record_layout_fixture(2)
+        var rejected = false
+        for error in fixture.lowering.errors:
+            if error.fatal and error.message.contains("array return record element has conflicting or unknown provider field types"):
+                rejected = true
+        expect(rejected).to_be(true)

@@ -427,8 +427,22 @@ fn detect_stdlib_root(project_root: &Path, file_parent: &Path) -> Option<PathBuf
         }
     }
 
+    // Climb to the repository/workspace boundary below, not a fixed depth.
+    // A five-level cap stopped short of the repo root for any file six or more
+    // directories deep (e.g. test/01_unit/lib/nogc_async_mut/gpu/x_spec.spl)
+    // whenever `project_root` was a spec-mirror dir holding its own `src/`
+    // (test/01_unit/lib/nogc_async_mut/src/), so `common.*` / `std.*` imports
+    // failed on the run/HIR lane while the interpreter lane resolved them.
+    // On the climb, the project stdlib `src/lib` (where `std.*` and the
+    // `common`/`nogc_*` families live) wins over the Rust seed's own
+    // `src/compiler_rust/lib/std/src`, which sits first in the list above and
+    // would otherwise be picked at the repository root.
     let mut current = file_parent.to_path_buf();
-    for _ in 0..5 {
+    loop {
+        let project_stdlib = current.join("src/lib");
+        if p_is_dir(&project_stdlib) {
+            return Some(project_stdlib);
+        }
         for candidate_path in &stdlib_candidates {
             let candidate = current.join(candidate_path);
             if p_exists(&candidate) {
