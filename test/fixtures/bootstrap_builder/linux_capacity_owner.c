@@ -197,6 +197,37 @@ static int setup_owned_service_parent(int parent, const char *path,
     return 1;
 }
 
+/* A failure before a child launch still owns the admitted V2 parent until this
+ * exact release and both filesystem/controller readbacks are proven. */
+static int release_v2_parent_without_process(int service_parent, int64_t token,
+        const char *controls_before) {
+    if (!rt_lg_delegation.active || token != rt_lg_delegation.token) return 79;
+    char parent_name[sizeof(rt_lg_delegation.name)];
+    memcpy(parent_name, rt_lg_delegation.name, sizeof(parent_name));
+    parent_name[sizeof(parent_name) - 1] = 0;
+    if (rt_linux_group_parent_release_v1(token) != 0) return 79;
+    struct stat missing;
+    if (fstatat(service_parent, parent_name, &missing, AT_SYMLINK_NOFOLLOW) != -1 || errno != ENOENT)
+        return 79;
+    char controls_after[4096];
+    if (!rt_lg_read_at(service_parent, "cgroup.subtree_control", controls_after,
+            sizeof(controls_after)) || strcmp(controls_before, controls_after) != 0) return 79;
+    return 0;
+}
+
+static int valid_fresh_evidence_dir(const char *path) {
+    if (!rt_lg_canonical_path(path) || strcmp(path, "/") == 0) return 0;
+    int fd = rt_lg_open_absolute_dir(path);
+    if (fd < 0) return 0;
+    struct stat status, out_status, err_status;
+    int valid = fstat(fd, &status) == 0 && S_ISDIR(status.st_mode) &&
+        status.st_uid == geteuid() && (status.st_mode & 0700) == 0700 &&
+        (status.st_mode & 0077) == 0 &&
+        fstatat(fd, "true.stdout", &out_status, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT &&
+        fstatat(fd, "true.stderr", &err_status, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT;
+    close(fd); return valid;
+}
+
 static int v2_service_probe(const char *expected_service) {
     char mount_path[4096], current_path[4096], delegated_path[4096];
     char parsed_root[4096], parsed_mount[4096], parsed_member[4096];
@@ -313,10 +344,220 @@ static int v2_service_probe(const char *expected_service) {
     return 0;
 }
 
+static int v2_process_probe(const char *expected_service, const char *evidence_dir) {
+    if (!valid_fresh_evidence_dir(evidence_dir)) {
+        printf("PROCESS_SETUP_FAIL: evidence directory is not canonical, private, or fresh\n");
+        return 1;
+    }
+    char mount_path[4096], current_path[4096], delegated_path[4096];
+    if (!rt_lg_current_mapping(mount_path, sizeof(mount_path),
+            current_path, sizeof(current_path))) {
+        printf("PROCESS_SETUP_FAIL: current cgroup mapping unavailable errno=%d\n", errno);
+        return 1;
+    }
+    size_t current_len = strlen(current_path);
+    if (current_len <= 11 || strcmp(current_path + current_len - 11, "/supervisor") != 0) {
+        printf("PROCESS_SETUP_FAIL: service process is not in supervisor: %s\n", current_path);
+        return 1;
+    }
+    memcpy(delegated_path, current_path, current_len - 11);
+    delegated_path[current_len - 11] = 0;
+    printf("V2_DELEGATED_PATH=%s\n", delegated_path); fflush(stdout);
+    int service_parent = rt_lg_open_absolute_dir(delegated_path);
+    if (service_parent < 0) {
+        printf("PROCESS_SETUP_FAIL: cannot open service parent errno=%d\n", errno);
+        return 1;
+    }
+    if (!setup_owned_service_parent(service_parent, delegated_path, expected_service)) {
+        printf("PROCESS_SETUP_FAIL: owned service parent setup/readback failed errno=%d\n", errno);
+        close(service_parent); return 1;
+    }
+    char controls_before[4096];
+    if (!rt_lg_read_at(service_parent, "cgroup.subtree_control", controls_before,
+            sizeof(controls_before))) {
+        printf("PROCESS_SETUP_FAIL: enabled controllers unreadable errno=%d\n", errno);
+        close(service_parent); return 1;
+    }
+
+    char identity[65]; uint8_t identity_bytes[32];
+    SHA256((const uint8_t*)expected_service, strlen(expected_service), identity_bytes);
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        identity[i * 2] = hex[identity_bytes[i] >> 4];
+        identity[i * 2 + 1] = hex[identity_bytes[i] & 15];
+    }
+    identity[64] = 0;
+    const char *attempt = evidence_dir;
+    SplArray *admission = rt_linux_group_parent_acquire_at_v2(delegated_path,
+        strlen(delegated_path), attempt, strlen(attempt), identity, 64);
+    if (!admission || admission->len != 4) {
+        printf("PARENT_ADMISSION_UNKNOWN: receipt layout invalid\n");
+        close(service_parent); return 1;
+    }
+    int64_t parent_status = field(admission, 0), parent_token = field(admission, 1);
+    if (parent_status != 0 || parent_token <= 0 || field(admission, 2) < 0 || field(admission, 3) <= 0) {
+        if (parent_token > 0) {
+            int cleanup = release_v2_parent_without_process(service_parent,
+                parent_token, controls_before);
+            if (cleanup == 0)
+                printf("PARENT_ADMISSION_FAIL_CLEANED: status=%lld token=%lld\n",
+                    (long long)parent_status, (long long)parent_token);
+            else
+                printf("PARENT_ADMISSION_CLEANUP_PENDING: status=%lld token=%lld cleanup=%d\n",
+                    (long long)parent_status, (long long)parent_token, cleanup);
+        } else if (parent_token < 0 || (parent_status == 0 && parent_token == 0)) {
+            printf("PARENT_ADMISSION_UNKNOWN: status=%lld token=%lld\n",
+                (long long)parent_status, (long long)parent_token);
+        } else {
+            printf("PARENT_ADMISSION_REJECTED: status=%lld token=%lld\n",
+                (long long)parent_status, (long long)parent_token);
+        }
+        close(service_parent); return 1;
+    }
+    printf("PARENT_ADMISSION_PASS: token=%lld device=%lld inode=%lld\n",
+        (long long)parent_token, (long long)field(admission, 2), (long long)field(admission, 3));
+    fflush(stdout);
+
+    char executable[4096], digest[65], stdout_path[4096], stderr_path[4096];
+    if (!realpath("/usr/bin/true", executable)) {
+        printf("PROCESS_FAIL: /usr/bin/true resolution failed errno=%d\n", errno);
+        int cleanup = release_v2_parent_without_process(service_parent, parent_token, controls_before);
+        if (cleanup != 0) { close(service_parent); return 79; }
+        close(service_parent); return 1;
+    }
+    digest_path(executable, digest);
+    int sealed_probe = rt_lg_pin_image(executable, digest);
+    if (sealed_probe < 0) {
+        printf("PROCESS_FAIL: sealed-image preflight failed errno=%d\n", errno);
+        int cleanup = release_v2_parent_without_process(service_parent, parent_token, controls_before);
+        if (cleanup != 0) { close(service_parent); return 79; }
+        close(service_parent); return 1;
+    }
+    close(sealed_probe);
+    if (snprintf(stdout_path, sizeof(stdout_path), "%s/true.stdout", evidence_dir) >= (int)sizeof(stdout_path) ||
+        snprintf(stderr_path, sizeof(stderr_path), "%s/true.stderr", evidence_dir) >= (int)sizeof(stderr_path)) {
+        printf("PROCESS_FAIL: evidence output path too long\n");
+        int cleanup = release_v2_parent_without_process(service_parent, parent_token, controls_before);
+        if (cleanup != 0) { close(service_parent); return 79; }
+        close(service_parent); return 1;
+    }
+    printf("PROCESS_IMAGE=/usr/bin/true sha256=%s extra_args=empty env=empty cwd=%s\n",
+        digest, evidence_dir);
+    SplArray empty_args = {0}, empty_environment = {0};
+    SplArray *started = rt_linux_group_start_v1(executable, strlen(executable), digest, 64,
+        &empty_args, &empty_environment, evidence_dir, strlen(evidence_dir), attempt,
+        strlen(attempt), identity, 64, 33554432, 5000, stdout_path, strlen(stdout_path),
+        stderr_path, strlen(stderr_path));
+    char group_name[80]; snprintf(group_name, sizeof(group_name), "simple-native-%s", identity);
+    if (!started || started->len != 2) {
+        printf("PROCESS_CLEANUP_PENDING: start receipt layout unknown\n");
+        close(service_parent); return 79;
+    }
+    int64_t start_token = field(started, 0), start_status = field(started, 1);
+    if (start_token != 1 || start_status != 0) {
+        if (start_token != 0 || start_status == 0) {
+            printf("PROCESS_CLEANUP_PENDING: start receipt token=%lld status=%lld is ambiguous\n",
+                (long long)start_token, (long long)start_status);
+            close(service_parent); return 79;
+        }
+        struct stat child_status;
+        int child_absent = fstatat(rt_lg_delegation.parent_fd, group_name, &child_status,
+            AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT;
+        int release = child_absent ? release_v2_parent_without_process(service_parent,
+            parent_token, controls_before) : 79;
+        if (!child_absent || release != 0) {
+            printf("PROCESS_CLEANUP_PENDING: start_status=%lld child_absent=%d release=%lld\n",
+                (long long)start_status, child_absent, (long long)release);
+            close(service_parent); return 79;
+        }
+        if (start_status == ENOSYS) printf("PROCESS_UNSUPPORTED: status=ENOSYS; parent_admission=PASS\n");
+        else if (start_status == EPERM) printf("PROCESS_POLICY_BLOCKED: status=EPERM; parent_admission=PASS\n");
+        else printf("PROCESS_FAIL: start_status=%lld; parent_admission=PASS\n", (long long)start_status);
+        close(service_parent);
+        return start_status == ENOSYS ? 77 : (start_status == EPERM ? 78 : 1);
+    }
+
+    int terminal = 0, poll_error = 0, completion_deadline = 0, clock_failure = 0;
+    SplArray *observed = NULL;
+    int64_t poll_started = rt_lg_now_ms();
+    if (poll_started < 0) { poll_error = EIO; clock_failure = 1; }
+    for (int i = 0; i < 1000 && !terminal && !poll_error; i++) {
+        int64_t now = rt_lg_now_ms();
+        if (now < 0) { poll_error = EIO; clock_failure = 1; break; }
+        if (now - poll_started >= 10000) { completion_deadline = 1; break; }
+        observed = rt_linux_group_poll_v1(1);
+        if (!observed || observed->len != 10) { poll_error = EPROTO; break; }
+        if (field(observed, 0) != 0) { poll_error = (int)field(observed, 0); break; }
+        if (field(observed, 1) == 1) { terminal = 1; break; }
+        usleep(10000);
+    }
+    if (!terminal && !poll_error && !clock_failure) {
+        int64_t now = rt_lg_now_ms();
+        if (now < 0) clock_failure = 1;
+        else if (now - poll_started >= 10000) completion_deadline = 1;
+        else completion_deadline = 1; /* bounded poll-turn budget elapsed */
+    }
+    if (!terminal) {
+        int64_t cancel = rt_linux_group_cancel_v1(1);
+        int64_t drain_started = rt_lg_now_ms();
+        if (drain_started < 0) clock_failure = 1;
+        printf("PROCESS_DRAIN: initial_poll_error=%d deadline=%d clock_failure=%d cancel=%lld\n",
+            poll_error, completion_deadline, clock_failure, (long long)cancel); fflush(stdout);
+        for (int i = 0; i < 1000; i++) {
+            if (drain_started >= 0 && !clock_failure) {
+                int64_t now = rt_lg_now_ms();
+                if (now < 0) clock_failure = 1;
+                else if (now - drain_started >= 10000) break;
+            }
+            observed = rt_linux_group_poll_v1(1);
+            if (observed && observed->len == 10 && field(observed, 0) == 0 &&
+                field(observed, 1) == 1) { terminal = 1; break; }
+            usleep(10000);
+        }
+    }
+    if (!terminal) {
+        printf("PROCESS_CLEANUP_PENDING: terminal state unproven after bounded cancel/drain\n");
+        close(service_parent); return 79;
+    }
+    int process_ok = poll_error == 0 && !completion_deadline && !clock_failure &&
+        field(observed, 2) == 1 && field(observed, 3) == 1 && field(observed, 4) == 0 &&
+        field(observed, 5) == 0 && field(observed, 6) == 0 && field(observed, 7) == 0;
+    SplArray *collected = rt_linux_group_collect_v1(1);
+    if (!collected || collected->len != 10 || field(collected, 0) != 0 ||
+        field(collected, 1) != 1 || field(collected, 2) != 1 || field(collected, 3) != 1 ||
+        field(collected, 4) != 0) {
+        printf("PROCESS_CLEANUP_PENDING: collect/reap receipt unproven\n");
+        close(service_parent); return 79;
+    }
+    struct stat child_missing;
+    if (fstatat(rt_lg_delegation.parent_fd, group_name, &child_missing,
+            AT_SYMLINK_NOFOLLOW) != -1 || errno != ENOENT) {
+        printf("PROCESS_CLEANUP_PENDING: child cgroup remains after collect\n");
+        close(service_parent); return 79;
+    }
+    int cleanup = release_v2_parent_without_process(service_parent, parent_token, controls_before);
+    close(service_parent);
+    if (cleanup != 0) {
+        printf("PROCESS_CLEANUP_PENDING: parent release/removal/controller receipt unproven\n");
+        return 79;
+    }
+    if (!process_ok) {
+        printf("PROCESS_FAIL: poll_error=%d deadline=%d clock_failure=%d exit=%lld timeout=%lld cancelled=%lld\n",
+            poll_error, completion_deadline, clock_failure,
+            (long long)field(observed, 5), (long long)field(observed, 6), (long long)field(observed, 7));
+        return 1;
+    }
+    printf("PROCESS_PASS: clone3 sealed_exec=true exit=0 leader_reaped=true tree_empty=true peak=%lld parent_released=true\n",
+        (long long)field(observed, 8));
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[2], "lifecycle") == 0) return lifecycle_probe(argv[1]);
     if (argc == 3 && strcmp(argv[1], "v2-service") == 0)
         return v2_service_probe(argv[2]);
+    if (argc == 4 && strcmp(argv[1], "v2-process") == 0)
+        return v2_process_probe(argv[2], argv[3]);
     int monitor = argc == 3 && strcmp(argv[2], "monitor") == 0;
     assert((argc == 2 || monitor) && argv[1][0] == '/');
     const char *identity = "cafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00d";
