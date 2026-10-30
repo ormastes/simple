@@ -813,7 +813,7 @@ fn _process_observation_result_error_v1(
             pinned: lease.pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
         failure_reason: reason)
-use std.io_runtime.{env_get, env_get_nullable, read_file_text_result, file_size_signed}
+use std.io_runtime.{env_get, env_get_nullable, read_file_text_result, file_size_signed, host_os}
 use std.common.string_core.{str_len}
 use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
 use std.nogc_sync_mut.io.file_text_session.{file_default_text_codec, file_session_decode}
@@ -826,6 +826,19 @@ extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 @unsafe(reason: "raw owned-child termination status; false sentinel means absent or termination failure", capabilities: [ffi])
 extern fn rt_process_kill(pid: i64) -> bool
+# Session-owned process trees: ONE C implementation (src/runtime/runtime_process_tree.c)
+# behind every engine. Codes: >= 0 success, -errno failure, RT_PTREE_UNSUPPORTED
+# (-100000) when the host has no owner arm. Never a silent success.
+@unsafe(reason: "host capability probe; 0 means session ownership works, -100000 means no arm on this host", capabilities: [ffi])
+extern fn rt_process_tree_support() -> i64
+@unsafe(reason: "session-leader spawn; positive PID (== session id) is published ownership, negative is -errno or unsupported", capabilities: [ffi])
+extern fn rt_process_spawn_session_value(cmd: text, args: [text]) -> i64
+@unsafe(reason: "session-leader wait; -2 is timeout, -1 is not-our-child, -(128+signo) is signal death", capabilities: [ffi])
+extern fn rt_process_session_wait(pid: i64, timeout_ms: i64) -> i64
+@unsafe(reason: "session-leader liveness without reaping; 1 running, 0 exited or absent, -100000 unsupported", capabilities: [ffi])
+extern fn rt_process_session_is_running(pid: i64) -> i64
+@unsafe(reason: "SIGKILL every process in the leader's session and reap the leader; 0 success, else -errno / -100000 / -100001 / -100002 (leader reaped, second sweep failed)", capabilities: [ffi])
+extern fn rt_process_kill_tree(pid: i64) -> i64
 @unsafe(reason: "raw piped-child spawn; positive PID is owned and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
 extern fn rt_browser_renderer_spawn_sandboxed(cmd: text, args: [text]) -> i64
@@ -982,6 +995,59 @@ fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
 fn _process_kill_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_kill(pid)
+
+# --- session-owned tree: raw bridges -----------------------------------------
+# Same codes as runtime_process_tree.h.
+val RT_PTREE_UNSUPPORTED: i64 = -100000
+val RT_PTREE_NOT_SESSION_LEADER: i64 = -100001
+val RT_PTREE_SWEEP_FAILED_AFTER_REAP: i64 = -100002
+
+fn _process_tree_support_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_tree_support()
+
+fn _process_spawn_session_raw(cmd: text, args: [text]) -> i64:
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_session_value(host_path_native(rcmd), rargs)
+
+fn _process_session_wait_raw(pid: i64, timeout_ms: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_session_wait(pid, timeout_ms)
+
+fn _process_session_is_running_raw(pid: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_session_is_running(pid)
+
+fn _process_kill_tree_raw(pid: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_kill_tree(pid)
+
+fn _ptree_error_text(code: i64) -> text:
+    if code == RT_PTREE_UNSUPPORTED:
+        return "no process-tree ownership on host '{host_os()}': runtime_process_tree.c has no arm for it"
+    if code == RT_PTREE_NOT_SESSION_LEADER:
+        return "pid is alive but is not a session leader spawned by process_spawn_session"
+    if code == RT_PTREE_SWEEP_FAILED_AFTER_REAP:
+        return "leader reaped, but the second sweep of its session failed; late forks may survive"
+    if code < 0:
+        return "errno {0 - code}"
+    "unexpected code {code}"
+
+# Pids this module spawned as session leaders. Their wait / is_running / kill
+# route to the session owner, whose waitpid does not depend on any engine's
+# spawn table. Every other pid keeps the raw path.
+var _session_pids: [i64] = []
+
+fn _session_owned(pid: i64) -> bool:
+    _session_pids.contains(pid)
+
+fn _session_forget(pid: i64):
+    var kept: [i64] = []
+    for p in _session_pids:
+        if p != pid:
+            kept.push(p)
+    _session_pids = kept
 
 fn _process_spawn_piped_raw(cmd: text, args: [text]) -> i64:
     val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
@@ -2207,6 +2273,43 @@ fn process_spawn_async(cmd: text, args: [text]) -> i64:
     """
     _process_spawn_async_raw(cmd, args)
 
+# Session ownership works on this host when Ok. Err carries the reason
+# (Windows: the Job object owns capture children instead; SimpleOS and any
+# host without an arm in runtime_process_tree.c: unsupported). The answer comes
+# from the C owner, never from a host-name allowlist: a host that misreports
+# its name (SimpleOS says "linux" today) still gets the truthful code.
+pub fn process_kill_tree_support() -> Result<(), text>:
+    if _is_windows_platform():
+        return Err("Windows capture children are owned by the Job object (process_spawn_redirected), not by a session")
+    val code = _process_tree_support_raw()
+    if code == 0:
+        return Ok(())
+    Err(_ptree_error_text(code))
+
+pub fn process_spawn_session(cmd: text, args: [text]) -> Result<i64, text>:
+    """
+    Spawn cmd as a SESSION LEADER (fork + setsid + exec), so that
+    process_kill(pid) and process_kill_tree(pid) reach every descendant, including
+    a `sh -c 'sleep 300 &'` grandchild that was reparented to init and sits in
+    its own process group. Only a descendant that calls setsid() itself escapes.
+
+    The pid is also the session id. process_wait / process_is_running /
+    process_kill route it to the session owner (runtime_process_tree.c), which
+    works on every engine because it does not depend on a spawn table.
+
+    Returns Ok(pid), or Err(reason) when the host has no session owner or the
+    spawn failed (-errno from the child's exec: the child never ran user code).
+    """
+    if _is_windows_platform():
+        return Err("process_spawn_session is POSIX-only; Windows uses process_spawn_redirected (Job object)")
+    val pid = _process_spawn_session_raw(cmd, args)
+    if pid > 1:
+        _session_pids.push(pid)
+        return Ok(pid)
+    if pid < 0:
+        return Err("process_spawn_session('{cmd}'): {_ptree_error_text(pid)}")
+    Err("process_spawn_session('{cmd}'): invalid pid {pid}")
+
 fn process_spawn_redirected(cmd: text, args: [text], stdout_path: text,
         stderr_path: text, timeout_ms: i64, capture_limit: i64) -> i64:
     """Windows exact argv/file capture with owned JobObject lifecycle.
@@ -2234,6 +2337,13 @@ fn process_wait(pid: i64, timeout_ms: i64) -> i64:
         return -1
     if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
         return windows_redirected_wait(pid, timeout_ms)
+    if _session_owned(pid):
+        val code = _process_session_wait_raw(pid, timeout_ms)
+        # -2 keeps ownership (still running); anything else means the leader is
+        # reaped or was never ours to wait for.
+        if code != -2:
+            _session_forget(pid)
+        return code
     _process_wait_raw(pid, timeout_ms)
 
 fn process_is_running(pid: i64) -> bool:
@@ -2244,21 +2354,32 @@ fn process_is_running(pid: i64) -> bool:
     """
     if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
         return windows_redirected_is_running(pid)
+    if _session_owned(pid):
+        return _process_session_is_running_raw(pid) == 1
     _process_is_running_raw(pid)
 
 fn process_kill(pid: i64) -> bool:
     """
-    Terminate a running process.
+    Terminate a process.
 
-    Sends SIGTERM (Unix) or TerminateProcess (Windows).
-    On Unix, escalates to SIGKILL if process doesn't exit.
+    Plain pid: rt_process_kill, which signals ONLY that process (SIGTERM on the
+    C owner, kill-and-reap on the Rust/interp twins; see the contract in
+    runtime_symbols.rs). Its descendants are not reached.
 
-    Returns: true on success, false on failure
+    Owned tokens kill what they own: a Windows capture token terminates its Job
+    (every process in it), and a process_spawn_session pid kills its whole
+    session via process_kill_tree, because killing the leader alone would
+    orphan the tree the owner promised to contain.
+
+    Returns: true on success, false on failure (the reason is printed for a
+    session pid; see process_kill_tree).
     """
     if pid <= 1:
         return false
     if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
         return windows_redirected_kill(pid)
+    if _session_owned(pid):
+        return process_kill_tree(pid)
     _process_kill_raw(pid)
 
 # ============================================================================
@@ -2275,12 +2396,65 @@ fn process_kill(pid: i64) -> bool:
 fn eprint(msg: text):
     rt_stderr_write("{msg}\n")
 
+# Kill `pid` and EVERYTHING it started, and say whether that could be
+# guaranteed. The only pids with that guarantee are the ones this module owns:
+#
+#   process_spawn_session pid   the pid is a session id; every descendant
+#                               inherited it (a pgid change cannot leave a
+#                               session). The C owner SIGKILLs every process in
+#                               the session and reaps the leader. An escaped
+#                               `sh -c 'sleep &'` grandchild in its own group,
+#                               reparented to init, is still in the session.
+#   Windows capture token       the Job object: process_kill terminates it.
+#   anything else               Err. The leader is still signalled (the old
+#                               behaviour), and the Err says descendants may
+#                               survive. Never reported as Ok.
+#
+# Known limit, same on every POSIX host: a descendant that itself calls setsid()
+# (a daemon) left the session and is not reached. Ok(()) means "the session was
+# enumerated and every member signalled", not "no descendant survives".
+#
+# Host status: macOS verified (C selfcheck + the specs under test/01_unit/lib).
+# Linux verified by the C selfcheck in a container (alpine/musl). FreeBSD arm
+# compile-checked by eye only. Windows: Job path unchanged. SimpleOS and other
+# hosts: Err (RT_PTREE_UNSUPPORTED from the C owner).
+pub fn process_kill_tree_result(pid: i64) -> Result<(), text>:
+    if pid <= 1:
+        return Err("invalid pid {pid}")
+    if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
+        if windows_redirected_kill(pid):
+            return Ok(())
+        return Err("Windows Job owner did not terminate capture token {pid}")
+    if _is_windows_platform():
+        _process_kill_raw(pid)
+        return Err("pid {pid} is not a Job-owned capture token: only the leader was signalled; descendants may survive")
+    if not _session_owned(pid):
+        _process_kill_raw(pid)
+        return Err("pid {pid} was not spawned by process_spawn_session: only the leader was signalled, through process_kill (which on the Rust/interp engines reaches only pids they spawned); descendants may survive")
+    val code = _process_kill_tree_raw(pid)
+    if code == 0:
+        _session_forget(pid)
+        return Ok(())
+    if code == RT_PTREE_SWEEP_FAILED_AFTER_REAP:
+        # The leader is gone and its pid may be recycled: stop owning it.
+        _session_forget(pid)
+        return Err("process_kill_tree({pid}): {_ptree_error_text(code)}")
+    # Otherwise ownership is kept so is_running/wait still route to the owner.
+    Err("process_kill_tree({pid}): {_ptree_error_text(code)}")
+
+# Bool view. The reason is printed, so false is never silent.
+pub fn process_kill_tree(pid: i64) -> bool:
+    match process_kill_tree_result(pid):
+        case Ok(_):
+            true
+        case Err(reason):
+            eprint("[process_kill_tree] {reason}")
+            false
+
 fn _process_kill_group(pgid_file: text):
     # Best effort: the session leader recorded its pid (= the SESSION id of the
-    # whole spawned tree) in pgid_file. Kill by session (`pkill -s`), not by
-    # process group: GNU timeout 9.4 puts its command into a fresh group of
-    # its own, so a group kill on the leader pid misses the real worker.
-    # TERM first, then KILL.
+    # whole spawned tree) in pgid_file. Kill by that group id (the leader is
+    # also the group leader). TERM first, then KILL.
     if not file_exists(pgid_file):
         return
     val pgid = file_read_text(pgid_file).trim()
@@ -2292,8 +2466,12 @@ fn _process_kill_group(pgid_file: text):
         val cleanup = "case \"$1\" in ''|*[!0-9]*|0|1) exit 125 ;; esac; kill -TERM \"-$1\" 2>/dev/null; sleep 0.5; kill -KILL \"-$1\" 2>/dev/null; true"
         _process_run_bounded_raw("sh", ["-c", cleanup, "sh", pgid], 5000, 4096)
         return
-    _process_run_bounded_raw("pkill", ["-TERM", "-s", "{pgid}"], 2000, 4096)
-    _process_run_bounded_raw("sh", ["-c", "sleep 0.5; pkill -KILL -s {pgid} 2>/dev/null; true"], 5000, 4096)
+    # `pkill -s` is not portable: macOS pkill rejects -s, and the `set -m`
+    # fallback records a PGID, not a session id (audit item 6). The recorded id
+    # is a group leader's pid in every branch, so `kill -- -id` is the one form
+    # that reaches it everywhere.
+    val cleanup = "case \"$1\" in ''|*[!0-9]*|0|1) exit 125 ;; esac; kill -TERM -- \"-$1\" 2>/dev/null; sleep 0.5; kill -KILL -- \"-$1\" 2>/dev/null; true"
+    _process_run_bounded_raw("sh", ["-c", cleanup, "sh", pgid], 5000, 4096)
 
 # ============================================================================
 # App-twin surface parity (ported from src/app/io/process_ops.spl, 2026-09-19)

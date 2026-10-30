@@ -87,54 +87,11 @@ bool rt_process_is_running(int64_t pid) {
 #endif
 }
 
+/* One owner for the pid-reuse guard's birth identity: the per-OS arms
+ * (Linux, macOS, FreeBSD, Windows) live in runtime_process_tree.c and are
+ * shared with runtime_process_owned.c. */
 int64_t rt_process_start_identity(int64_t pid) {
-    if (pid <= 0) return 0;
-#ifdef _WIN32
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
-    if (!process) return 0;
-    FILETIME created, exited, kernel, user;
-    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
-        CloseHandle(process);
-        return 0;
-    }
-    CloseHandle(process);
-    ULARGE_INTEGER value;
-    value.LowPart = created.dwLowDateTime;
-    value.HighPart = created.dwHighDateTime;
-    return value.QuadPart > INT64_MAX ? 0 : (int64_t)value.QuadPart;
-#elif defined(__linux__)
-    char path[64], line[2048];
-    snprintf(path, sizeof(path), "/proc/%lld/stat", (long long)pid);
-    FILE* file = fopen(path, "r");
-    if (!file) return 0;
-    if (!fgets(line, sizeof(line), file)) {
-        fclose(file);
-        return 0;
-    }
-    fclose(file);
-    char* cursor = strrchr(line, ')');
-    if (!cursor || cursor[1] != ' ') return 0;
-    cursor += 2;
-    for (int field = 3; field < 22; field++) {
-        cursor = strchr(cursor, ' ');
-        if (!cursor) return 0;
-        cursor++;
-    }
-    errno = 0;
-    char* end = NULL;
-    unsigned long long value = strtoull(cursor, &end, 10);
-    return errno == 0 && end != cursor && value <= INT64_MAX ? (int64_t)value : 0;
-#elif defined(__APPLE__)
-    struct proc_bsdinfo info;
-    int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
-    if (bytes != sizeof(info)) return 0;
-    uint64_t seconds = (uint64_t)info.pbi_start_tvsec;
-    uint64_t micros = (uint64_t)info.pbi_start_tvusec;
-    if (seconds > (uint64_t)INT64_MAX / 1000000ULL) return 0;
-    return (int64_t)(seconds * 1000000ULL + micros);
-#else
-    return 0;
-#endif
+    return rt_proc_start_time(pid);
 }
 
 bool rt_process_kill(int64_t pid) {
@@ -2003,9 +1960,7 @@ static int64_t rt_process_spawn_piped_argv(
     pid_t pid = proc_spawn_piped_apple(
         cmd, argv, stdin_pipe, stdout_pipe);
 #else
-#ifdef __linux__
     pid_t expected_parent = getpid();
-#endif
     pid_t pid = fork();
     if (pid < 0) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
@@ -2017,12 +1972,17 @@ static int64_t rt_process_spawn_piped_argv(
     if (pid == 0) {
         /* === CHILD === */
         if (setpgid(0, 0) != 0) _exit(127);
-#ifdef __linux__
-        if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 ||
-            getppid() != expected_parent) {
-            _exit(127);
+        /* Die with the parent where the host can promise it (Linux prctl,
+         * FreeBSD procctl). A host without the arm keeps the old behaviour:
+         * the child simply continues. A supported arm that fails is fatal, and
+         * the getppid re-check closes the race where the parent died first. */
+        {
+            int64_t pdeath = rt_child_set_pdeathsig(SIGKILL);
+            if (pdeath != RT_PTREE_UNSUPPORTED &&
+                (pdeath != 0 || getppid() != expected_parent)) {
+                _exit(127);
+            }
         }
-#endif
         int null_fd = -1;
         if (sandboxed_renderer) {
             null_fd = open("/dev/null", O_WRONLY);

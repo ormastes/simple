@@ -372,30 +372,12 @@ static int64_t owned_direct_child_rss_bytes(const struct rusage* usage) {
 #endif
 }
 
+/* Birth identity for the pid-reuse guard. The per-OS arms are owned by
+ * rt_proc_start_time (runtime_process_tree.c), shared with
+ * rt_process_start_identity in runtime_process.c. 0 means "cannot verify". */
 static uint64_t owned_start_identity(pid_t pid) {
-#ifdef __linux__
-    char path[64], line[2048];
-    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
-    FILE* file = fopen(path, "r");
-    if (!file) return 0;
-    if (!fgets(line, sizeof(line), file)) { fclose(file); return 0; }
-    fclose(file);
-    char* cursor = strrchr(line, ')');
-    if (!cursor || cursor[1] != ' ') return 0;
-    cursor += 2;
-    for (int field = 3; field < 22; field++) {
-        cursor = strchr(cursor, ' ');
-        if (!cursor) return 0;
-        cursor++;
-    }
-    errno = 0;
-    char* end = NULL;
-    unsigned long long value = strtoull(cursor, &end, 10);
-    return errno == 0 && end != cursor ? (uint64_t)value : 0;
-#else
-    (void)pid;
-    return 0;
-#endif
+    int64_t identity = rt_proc_start_time((int64_t)pid);
+    return identity > 0 ? (uint64_t)identity : 0;
 }
 
 static int owned_pidfd_open(pid_t pid) {

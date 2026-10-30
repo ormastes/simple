@@ -1931,6 +1931,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_exists", file_io::rt_process_exists);
     insert_simple!("rt_process_is_running", system::rt_process_is_running);
     insert_simple!("rt_process_start_identity", bootstrap_runtime::rt_process_start_identity);
+    // Session-owned process trees: one C owner (runtime_process_tree.c) for
+    // every engine; these bridges only unpack Values.
+    insert_simple!("rt_process_tree_support", bootstrap_runtime::rt_process_tree_support);
+    insert_simple!("rt_process_spawn_session_value", bootstrap_runtime::rt_process_spawn_session_value);
+    insert_simple!("rt_process_session_wait", bootstrap_runtime::rt_process_session_wait);
+    insert_simple!("rt_process_session_is_running", bootstrap_runtime::rt_process_session_is_running);
+    insert_simple!("rt_process_kill_session", bootstrap_runtime::rt_process_kill_session);
+    insert_simple!("rt_process_kill_tree", bootstrap_runtime::rt_process_kill_tree);
     insert_simple!("rt_simple_abi_version", bootstrap_runtime::rt_simple_abi_version);
     insert_simple!("rt_simple_abi_version_deferred", bootstrap_runtime::rt_simple_abi_version_deferred);
     insert_simple!("rt_process_kill", system::rt_process_kill);
