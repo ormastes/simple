@@ -1286,28 +1286,38 @@ fn _single_run_md(args: [text]) -> i64:
 # MC/DC attempt for the single lane. ADDITIVE: the normal lane body has
 # already run the spec with every lane feature (directives, env, identity,
 # infix rewrite, APK coverage) and owns the verdict. This only adds the MC/DC
-# outcome, printed on its own line either way -- never a silent skip:
+# outcome, printed on its own line whenever the lane reaches its verdict
+# (a lane error exit before that is already a red result) -- never a silent
+# skip:
 #   MC/DC: mode=<m> evidence=present|absent <path>
 #   MC/DC: mode=<m> evidence=absent DEGRADED <path>: <reason>
 # A compiler without probe emission (the Rust seed) is detected once from its
 # identity and degraded without the slow, doomed instrumented compile.
 # Returns false only when the instrumented run itself FAILED examples, so a
 # native-only failure cannot hide behind the interpreter lane's pass.
-fn _single_mcdc_attempt(args: [text], path: text, mcdc_mode: text, binary: text) -> bool:
+fn _single_mcdc_attempt(args: [text], path: text, mcdc_mode: text, binary: text, timeout_secs: i64) -> bool:
     if mcdc_compiler_lacks_probes(binary):
         print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {MCDC_UNAVAILABLE_REASON}"
         return true
     var options = parse_test_args(args)
     options.path = path
+    # Same budget the lane granted (slow_it floor, @timeout_secs), not the
+    # 120s parse default.
+    options.timeout = timeout_secs
     val r = run_test_file_interpreter(path, options)
     if r.mcdc_skip_reason != "":
         print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {r.mcdc_skip_reason}"
+    elif r.timed_out:
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: instrumented run timed out after {timeout_secs}s"
+        return true
     elif r.mcdc_evidence_v1 != "":
         print "MC/DC: mode={mcdc_mode} evidence=present {path}"
+    elif r.error != "":
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {r.error}"
     else:
         print "MC/DC: mode={mcdc_mode} evidence=absent {path}"
     if r.failed > 0:
-        print "error: test-runner: MC/DC instrumented run failed {r.failed} example(s): {r.error}"
+        print "error: test-runner: MC/DC instrumented run failed ({r.failed}): {r.error}"
         return false
     true
 
@@ -1798,7 +1808,7 @@ fn main() -> i64:
     if source_is_in_development(rt_file_read_text(run.path)):
         print in_development_explicit_line(run.path)
     if mcdc_mode == "on" or mcdc_mode == "dynamic":
-        if not _single_mcdc_attempt(args, run.path, mcdc_mode, binary) and failed == 0:
+        if not _single_mcdc_attempt(args, run.path, mcdc_mode, binary, run.timeout_secs) and failed == 0 and unverified_error == "":
             failed = 1
     print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms,
         if failed == 0: unverified_error else: "", process_error)
