@@ -35,6 +35,7 @@ const _REF_WAITER_CANCELLED: i64 = 2
 const _REF_WAITER_ACKED: i64 = 4
 
 pub enum AsyncRefError:
+    InvalidReference
     Failed(i64)
     WaiterFull
     InvalidToken
@@ -44,6 +45,7 @@ pub enum AsyncRefError:
     InvalidSubscription
 
 pub enum AsyncRefStateI64:
+    InvalidReference
     Pending
     Ready(i64)
     Failed(i64)
@@ -92,7 +94,7 @@ impl AsyncRefI64:
     @unsafe(reason: "AsyncRef fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
     pub fn try_ready() -> AsyncRefStateI64:
         if not core_valid_ref_i64(self._scope, self._entry):
-            return AsyncRefStateI64.Pending
+            return AsyncRefStateI64.InvalidReference
         val outcome = core_outcome_i64(self._scope, self._entry)
         if outcome == 0:
             return AsyncRefStateI64.Pending
@@ -118,6 +120,8 @@ impl AsyncRefI64:
             return Ok(true)
         if result == 0:
             return Ok(false)
+        if result == _REF_PUBLISH_INVALID_REF:
+            return Err(AsyncRefError.InvalidReference)
         if result == _REF_PUBLISH_OUTCOME_FULL:
             return Err(AsyncRefError.OutcomeFull)
         if result == _REF_PUBLISH_NOT_STARTED:
@@ -130,12 +134,14 @@ impl AsyncRefI64:
     pub fn subscribe(token: RingToken) -> Result<AsyncSubscriptionI64, AsyncRefError>:
         # Precondition: token is reserved for this reference only and remains
         # owned by its ring until terminal completion or owner cancellation.
+        if not core_valid_ref_i64(self._scope, self._entry):
+            return Err(AsyncRefError.InvalidReference)
         if not ring_token_validate(token).ok:
             return Err(AsyncRefError.InvalidToken)
         val subscriber = core_subscribe_i64(
             self._scope, self._entry, token.ring_id, token.slot, token.generation.value)
         if subscriber == _REF_SUBSCRIBE_INVALID:
-            return Err(AsyncRefError.NotStarted)
+            return Err(AsyncRefError.InvalidReference)
         if subscriber == _REF_SUBSCRIBE_WAITER_FULL:
             return Err(AsyncRefError.WaiterFull)
         Ok(AsyncSubscriptionI64(reference: self, _subscriber: subscriber))
@@ -153,6 +159,8 @@ impl AsyncRefI64:
 impl AsyncSubscriptionI64:
     @unsafe(reason: "subscription and embedded AsyncRef fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
     pub fn poll() -> TaskPollResult<Result<i64, AsyncRefError>>:
+        if not core_valid_ref_i64(self.reference._scope, self.reference._entry):
+            return TaskPollResult.Ready(Err(AsyncRefError.InvalidReference))
         if self._subscriber < 0:
             return TaskPollResult.Ready(Err(AsyncRefError.InvalidSubscription))
         if self._subscriber > 0 and
@@ -163,6 +171,7 @@ impl AsyncSubscriptionI64:
             return TaskPollResult.Ready(Err(AsyncRefError.CancelledInterest))
         val state = self.reference.try_ready()
         match state:
+            case AsyncRefStateI64.InvalidReference: TaskPollResult.Ready(Err(AsyncRefError.InvalidReference))
             case AsyncRefStateI64.Ready(value): TaskPollResult.Ready(Ok(value))
             case AsyncRefStateI64.Failed(code): TaskPollResult.Ready(Err(AsyncRefError.Failed(code)))
             case AsyncRefStateI64.Pending:
@@ -253,6 +262,8 @@ pub fn async_ref_deliver_wake_i64<Op>(
     if delivery_state != 1:
         return Err(SimpleRingError.InvalidTransition)
     match reference.try_ready():
+        case AsyncRefStateI64.InvalidReference:
+            Err(SimpleRingError.InvalidTransition)
         case AsyncRefStateI64.Pending:
             Err(SimpleRingError.InvalidTransition)
         case AsyncRefStateI64.Ready(value):

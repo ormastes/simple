@@ -172,6 +172,23 @@ S3 follows the useful S1/S2 path; it does not block async library integration. P
 
 HIR carries optional OS/CPU/ABI/layout/runtime constraints and actual target-read witnesses. None means no constraint under a proved capability, not unfinished initialization. Preserve interim target-sensitive keys while preprocessing removes target arms. A portable base receives a new constrained overlay, never in-place target mutation. Portable AST/HIR does not imply portable native ABI/OBJ.
 
+### 7.1 Container-qualified indices and lazy attributes (2026-10-30 clarification)
+
+These are required storage/design changes, not claims about implemented codecs. Packed AST/HIR store container identity/version (or a qualified pack ordinal) plus object/entry index; they do not store pointers. A hash-entry reference also identifies its owning container and canonical entry, with exact key/hash validation as appropriate; a hash value, bucket or local index alone is insufficient. Repacking remaps every changed index/ordinal. Loading begins uncached. Runtime views may cache an owning container reference after verifying identity and retaining lifetime, but serialization omits that cache, raw scope addresses, AsyncRef slots and all process pointers. A cached reference or generation check does not itself prevent unmapping.
+
+Choose existing attribute containers by frequency: common optional values use set-once scalar fields; dense indexed values use arrays with presence bitmaps; rare/keyed values use sparse hash sidecars. Keep unresolved, absent and present-empty distinct. Published core bytes remain immutable; lazy memoization belongs in runtime sidecars. Use AsyncRef for expensive shared production with waiting consumers, not for every node attribute.
+
+HIR must preserve all host/target conditional alternatives; select explicit host/target configuration at MIR lowering. Current preprocessing can discard alternatives, so this remains a required migration: retain target-sensitive cache keys until preservation and MIR selection have executable evidence. Do not call current HIR portable merely because target constraints are recorded.
+
+### 7.2 Deepest valid stage and backward provenance (2026-10-30 clarification)
+
+The requested cache-return contract is: admitted OBJ -> writer; admitted HIR -> remaining HIR-to-OBJ work; admitted AST -> AST-to-HIR-to-OBJ; no admitted stage -> parse. Select the deepest valid stage under exact source/dependency/configuration evidence, and do not repeat earlier parsing, replay or save/reload. Mandatory remaining semantic checks still belong to their existing owners. For a verified immutable content-addressed destination, an existing matching filename is no-overwrite; arbitrary output names require exact admitted identity/content checks before skipping. Verified no-change preserves destination identity and timestamp. Atomic replacement for changed mutable destinations is a separate SOSIX publication profile.
+
+OBJ -> HIR -> AST are backward logical container identities/indices with lazy retained resolution, not raw pointers embedded in packed bytes. Existing FrozenNativeModuleCapsuleV1 retains MIR/storage/OBJ, not a HIR/AST owning chain; FileAstV1 and MirHirExpressionArtifactV1 provide reusable identity records, but no universal retained stage-reference ABI is qualified. Reuse existing compiler/cache owners and verify their admission/resume seams before adding an adapter; the CompileNode name below remains proposed.
+
+The current bounded TLDR patch extends the existing table with canonical map/AsyncRef and SourceReader fill/wake capability only. Its scope+entry reference is a runtime live-owner identity, never a persisted container ID. Default file-fiber/worker-surface consumers remain on legacy APIs pending adoption; runtime tests are UNRUN. See [TLDR async owner design](tldr_async_owner_integration_2026-10-30.md), including the mandatory terminal source-failure followup. It does not implement the storage/stage/MIR requirements in this section.
+
+
 ## 8. Compiler, runner and retention integration
 
 The proposed `compile(request, options, provider)` returns `AsyncRef<ImmutableArtifact<CompileNode>>`, default OBJ. `request_stage` may return an admitted AST/TLDR earlier. `CompileNode` describes one completed stage and exact capabilities; external stage slots hold optional derived work. Confirm the public owner/name before adding it; never create a second compiler graph.
