@@ -1611,8 +1611,9 @@ pub(crate) fn evaluate_method_call(
             {
                 return Ok(result);
             }
-            // Built-in value clone for a struct with no user `clone`: `Object`
-            // fields are copy-on-write, so a Value clone is a value copy.
+            // Built-in value clone for a struct with no user `clone` (user
+            // methods and method_missing ran above; this arm has no UFCS step).
+            // `Object` fields are copy-on-write, so a Value clone is a value copy.
             if method == "clone" && args.is_empty() {
                 return Ok(recv_val.clone());
             }
@@ -2151,7 +2152,8 @@ pub(crate) fn evaluate_method_call_with_self_update(
             let result = exec_function_with_values(&func, &arg_values, env, functions, classes, enums, impl_methods)?;
             return Ok((result, None)); // UFCS calls don't mutate self
         }
-        // Built-in value clone (see the non-mutating path above).
+        // Built-in value clone (see the non-mutating path above); here it runs
+        // after the UFCS fallback, so a free `fn clone` would still win.
         if method == "clone" && args.is_empty() {
             return Ok((recv_val.clone(), None));
         }

@@ -17,6 +17,8 @@
 // Built-in methods for String
 if let Value::Str(ref s) = recv_val {
     match method {
+        // `clone` on a StrBytes receiver arrives here already converted to a
+        // lossy Str, the same display-boundary rule as to_string.
         "to_string" | "to_text" | "clone" => return Ok(Value::shared_text(s.clone())),
         "len" | "length" => return Ok(Value::Int(s.len() as i64)),
         "char_count" => return Ok(Value::Int(s.chars().count() as i64)),
