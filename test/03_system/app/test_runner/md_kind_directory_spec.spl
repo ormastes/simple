@@ -1,0 +1,138 @@
+# @req REQ-TESTRUNNER-MD-KIND
+# @cover src/lib/nogc_sync_mut/test_runner/sdoctest/discovery.spl 10%
+"""
+# Test runner md kind: a directory of markdown files
+
+**Feature IDs:** #test-runner-md-kind
+**Category:** Tooling
+
+## Overview
+
+Pointing the runner at a directory with `--sdoctest <dir>` runs every Markdown
+file under it, including subdirectories, and ignores other file types. Each file
+gets its own PASS or FAIL line and the exit code is 1 if any file is red.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn fresh(name: text) -> text:
+    val dir = "build/md_kind/dir_" + name
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    dir
+
+fn put(path: text, lines: [text]):
+    file_write(path, lines.join("\n") + "\n")
+
+fn run_dir(dir: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), ["test", "--no-session-daemon", "--sdoctest", dir], 300000, 4194304)
+    (out + err, code)
+
+val GREEN = ["```simple", "val a = 1", "```"]
+val RED = ["```simple", "assert 1 == 2", "```"]
+
+describe "md kind over a directory":
+    # @capture(exec)
+    it "runs every markdown file in a directory":
+        step("Write two green markdown files")
+        val dir = fresh("two_green")
+        put(dir + "/a.md", GREEN)
+        put(dir + "/b.md", GREEN)
+        val (report, code) = run_dir(dir)
+        expect(code).to_equal(0)
+        expect(report).to_contain("Running code blocks from 2 file(s)")
+        expect(report).to_contain("SDoctest Results: 2 total, 2 passed, 0 failed")
+
+    # @capture(exec)
+    it "reports a PASS line per green file":
+        val dir = fresh("pass_lines")
+        put(dir + "/a.md", GREEN)
+        put(dir + "/b.md", GREEN)
+        val (report, code) = run_dir(dir)
+        expect(report).to_contain("PASS  " + dir + "/a.md")
+        expect(report).to_contain("PASS  " + dir + "/b.md")
+
+    # @capture(exec)
+    it "fails the run when one file is red":
+        step("Write one green and one red markdown file")
+        val dir = fresh("one_red")
+        put(dir + "/good.md", GREEN)
+        put(dir + "/bad.md", RED)
+        val (report, code) = run_dir(dir)
+        expect(code).to_equal(1)
+        expect(report).to_contain("PASS  " + dir + "/good.md")
+        expect(report).to_contain("FAIL  " + dir + "/bad.md")
+        expect(report).to_contain("2 total, 1 passed, 1 failed")
+
+    # @capture(exec)
+    it "recurses into subdirectories":
+        val dir = fresh("nested")
+        process_run_bounded("mkdir", ["-p", dir + "/sub/deeper"], 10000, 65536)
+        put(dir + "/top.md", GREEN)
+        put(dir + "/sub/mid.md", GREEN)
+        put(dir + "/sub/deeper/low.md", GREEN)
+        val (report, code) = run_dir(dir)
+        expect(code).to_equal(0)
+        expect(report).to_contain("Running code blocks from 3 file(s)")
+
+    # @capture(exec)
+    it "ignores non-markdown files":
+        val dir = fresh("non_md")
+        put(dir + "/a.md", GREEN)
+        put(dir + "/notes.txt", RED)
+        put(dir + "/code.spl", RED)
+        val (report, code) = run_dir(dir)
+        expect(code).to_equal(0)
+        expect(report).to_contain("Running code blocks from 1 file(s)")
+
+    # @capture(exec)
+    it "does not print a line for a markdown file with no simple fences":
+        val dir = fresh("silent_prose")
+        put(dir + "/a.md", GREEN)
+        put(dir + "/prose.md", ["# Only prose"])
+        val (report, code) = run_dir(dir)
+        expect(code).to_equal(0)
+        expect(report.contains("prose.md")).to_equal(false)
+
+    # @capture(exec)
+    it "fails closed on a directory with no markdown files":
+        val dir = fresh("empty")
+        put(dir + "/notes.txt", ["nothing"])
+        val (report, code) = run_dir(dir)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails closed on a directory whose markdown has no simple fences":
+        val dir = fresh("all_prose")
+        put(dir + "/a.md", ["# One"])
+        put(dir + "/b.md", ["# Two"])
+        val (report, code) = run_dir(dir)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "sums blocks across files":
+        val dir = fresh("sum")
+        put(dir + "/a.md", GREEN + GREEN)
+        put(dir + "/b.md", GREEN + RED + GREEN)
+        val (report, code) = run_dir(dir)
+        expect(code).to_equal(1)
+        expect(report).to_contain("5 total, 4 passed, 1 failed")
+
+    # @capture(exec)
+    it "names the failing line within the failing file":
+        val dir = fresh("fail_line")
+        put(dir + "/bad.md", ["# T", "", "text"] + RED)
+        val (report, code) = run_dir(dir)
+        expect(report).to_contain("Line 4:")
