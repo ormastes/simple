@@ -7,12 +7,9 @@ tiers resolves by directory-listing order; the resolver now warns
 candidate tiers. Resolution itself must be unchanged. See
 doc/08_tracking/bug/tierless_std_import_ambiguity_resolves_by_registration_order_2026-07-29.md
 
-Lane note: `ModuleResolver.resolve` cannot execute in the unit-spec
-interpreter lane (its `rt_path_parent` extern is not registered there —
-same wall documented in allowed_families_spec.spl). The warning mechanism
-is exercised directly through `maybe_warn_tier_ambiguity` on a filesystem
-fixture; the hook's placement inside the resolve() tier-subdirectory loop
-(after Ok, non-fatal, before caching/return) is locked by source scans.
+The warning mechanism is exercised directly through
+`maybe_warn_tier_ambiguity` and end to end through `ModuleResolver.resolve`
+on a filesystem fixture.
 """
 
 use std.spec.*
@@ -24,17 +21,11 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_set(key: text, value_str: text) -> bool
 
 val FIXTURE = "/tmp/simple_tier_ambiguity_fixture"
-val RESOLUTION_SRC = "src/compiler/99.loader/module_resolver/resolution.spl"
 
 fn setup_fixture():
     # Two same-named modules in two tier dirs (ambiguous), one unambiguous.
     val sh = "rm -rf {FIXTURE} && mkdir -p {FIXTURE}/src/lib/common/foo {FIXTURE}/src/lib/nogc_sync_mut/foo {FIXTURE}/src/lib/common/solo && printf 'fn amb_common() -> i64:\\n    1\\n' > {FIXTURE}/src/lib/common/foo/bar.spl && printf 'fn amb_sync() -> i64:\\n    2\\n' > {FIXTURE}/src/lib/nogc_sync_mut/foo/bar.spl && printf 'fn solo_fn() -> i64:\\n    3\\n' > {FIXTURE}/src/lib/common/solo/only.spl"
     rt_process_run("/bin/sh", ["-c", sh])
-
-fn _scan(pattern: text) -> text:
-    val cmd = "rg -n '" + pattern + "' " + RESOLUTION_SRC + " || true"
-    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
-    stdout.trim()
 
 describe "tier-less std import ambiguity warning":
     it "warns once per distinct ambiguous path, across importing files":
@@ -75,13 +66,28 @@ describe "tier-less std import ambiguity warning":
         expect(resolver.tier_warn_count).to_equal(2)
         rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "1")
 
-    it "hook is wired inside the resolve tier-subdirectory loop, non-fatally":
-        # Placement: called on the Ok path of the lib/*/ subdir search,
-        # before the resolution cache write and return — so resolution
-        # behavior is unchanged and the diagnostic cannot become an error.
-        expect(_scan("self\\.maybe_warn_tier_ambiguity\\(lib_dir, inner_segments, from_file\\)").len() > 0).to_equal(true)
-        # Non-fatal: the warn method returns unit and only prints.
-        expect(_scan("fn maybe_warn_tier_ambiguity\\(lib_dir: text, inner_segments: \\[text\\], from_file: text\\):").len() > 0).to_equal(true)
-        expect(_scan("print \"warning: ambiguous import: std\\.").len() > 0).to_equal(true)
-        # Still returns the resolved module right after the hook.
-        expect(_scan("self\\.resolution_cache\\[cache_key\\] = Some\\(resolved\\)").len() > 0).to_equal(true)
+    it "resolve warns on an ambiguous tier-less import and still resolves it":
+        # Behaviour through resolve(): the hook fires on the Ok path of the
+        # lib/*/ tier search, is non-fatal, and the fixed tier order picks
+        # common/ first. A cache hit does not warn again.
+        setup_fixture()
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "1")
+        var resolver = moduleresolver_new(FIXTURE, "{FIXTURE}/src")
+        val path = ModulePath(segments: ["std", "foo", "bar"])
+        match resolver.resolve(path, "{FIXTURE}/src/main_a.spl"):
+            Ok(resolved):
+                expect(resolved.path).to_end_with("lib/common/foo/bar.spl")
+            Err(_): fail("ambiguous tier-less import did not resolve")
+        expect(resolver.tier_warn_count).to_equal(1)
+        match resolver.resolve(path, "{FIXTURE}/src/main_a.spl"):
+            Ok(_): expect(resolver.tier_warn_count).to_equal(1)
+            Err(_): fail("cached tier-less import did not resolve")
+
+    it "resolve stays silent for an unambiguous tier-less import":
+        setup_fixture()
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "1")
+        var resolver = moduleresolver_new(FIXTURE, "{FIXTURE}/src")
+        match resolver.resolve(ModulePath(segments: ["std", "solo", "only"]), "{FIXTURE}/src/main_a.spl"):
+            Ok(resolved): expect(resolved.path).to_end_with("lib/common/solo/only.spl")
+            Err(_): fail("unambiguous tier-less import did not resolve")
+        expect(resolver.tier_warn_count).to_equal(0)
