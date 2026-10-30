@@ -205,11 +205,22 @@ pub(crate) fn assert_stmt_failure(
     assert_stmt: &simple_parser::ast::AssertStmt,
     condition_value: &Value,
 ) -> CompileError {
+    assert_failure(assert_stmt.message.as_deref(), condition_value)
+}
+
+/// Build the error raised by a failing assertion, whichever spelling raised
+/// it: the `assert COND[, "msg"]` keyword statement (`Node::Assert`, above) or
+/// the callable spelling `assert(COND[, MSG])` that the lexer deliberately
+/// leaves as an identifier call (`interpreter_call/builtins.rs`, the `assert`
+/// arm). The pure-Simple front end desugars both to one `__assert` builtin
+/// (src/compiler/10.frontend/core/parser_stmts.spl), so both must fail with
+/// one identical, greppable message and the same `ASSERTION_FAILED` code.
+pub(crate) fn assert_failure(message: Option<&str>, condition_value: &Value) -> CompileError {
     let base = format!(
         "assertion failed: condition evaluated to {}",
         condition_value.to_display_string()
     );
-    let msg = match &assert_stmt.message {
+    let msg = match message {
         Some(custom) => format!("{} ({})", base, custom),
         None => base,
     };
