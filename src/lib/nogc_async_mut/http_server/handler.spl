@@ -53,12 +53,14 @@ class HandlerRegistry:
     """
     static_handler: StaticFileHandler?
     custom_handlers: Dict<text, fn(HttpRequestData, LocationConfig) -> HttpResponseData>
+    async_handlers: Dict<text, fn(i64, i64, HttpRequestData, LocationConfig) -> bool>
 
     static fn new() -> HandlerRegistry:
         """Create an empty registry."""
         HandlerRegistry(
             static_handler: nil,
-            custom_handlers: {}
+            custom_handlers: {},
+            async_handlers: {}
         )
 
     me set_static_handler(handler: StaticFileHandler):
@@ -74,6 +76,32 @@ class HandlerRegistry:
             handler: Function to handle requests
         """
         self.custom_handlers[name] = handler
+
+    me register_async(name: text,
+                      submit: fn(i64, i64, HttpRequestData, LocationConfig) -> bool):
+        """Register an async handler that accepts a typed job submission.
+
+        The callback receives (job_id, completion_channel_id, request,
+        location) and returns true when it accepted the job; the response
+        is delivered later on the completion channel, not returned here.
+        """
+        self.async_handlers[name] = submit
+
+    fn has_async(name: text) -> bool:
+        """True when `name` is registered as an async handler."""
+        self.async_handlers.contains_key(name)
+
+    fn submit_async(name: text, job_id: i64, completion_channel_id: i64,
+                    request: HttpRequestData, location: LocationConfig) -> bool:
+        """Submit a job to the async handler `name`.
+
+        Returns false without invoking any callback when no async handler
+        is registered under `name`.
+        """
+        if not self.async_handlers.contains_key(name):
+            return false
+        val submit = self.async_handlers[name]
+        submit(job_id, completion_channel_id, request, location)
 
     fn dispatch(handler_type: text, request: HttpRequestData,
                 location: LocationConfig) -> HttpResponseData:
