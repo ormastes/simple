@@ -176,6 +176,42 @@ pub(super) fn eval_builtin(
             let value = std::env::var(key.as_str()).unwrap_or_default().to_ascii_lowercase();
             Ok(Some(Value::Bool(matches!(value.as_str(), "1" | "true" | "yes" | "on"))))
         }
+        // Callable spelling of the assertion statement: `assert(COND[, MSG])`.
+        //
+        // The lexer keeps `assert(` an ordinary identifier call (so a user
+        // `fn assert` stays callable; see test/fixtures/compiler/
+        // native_callable_assert_shadow.spl), and `evaluate_call`'s Priority-2
+        // gate only reaches this arm when no user `fn assert` exists. A local
+        // *value* named `assert` (a lambda in scope) is left to the ordinary
+        // callable-value path below, mirroring the HIR gate in
+        // hir/lower/stmt_lowering.rs (`ctx.lookup("assert")`). The pure-Simple
+        // front end desugars both `assert COND[, MSG]` and `assert(COND[, MSG])`
+        // to the single `__assert` builtin (parser_stmts.spl), where MSG is any
+        // expression evaluated only on failure; this arm is the interpreter
+        // half of that parity (the keyword form is `Node::Assert`).
+        "assert" => {
+            if env.get("assert").is_some() {
+                return Ok(None);
+            }
+            let Some(condition) = args.first() else {
+                return Err(assert_call_shape_error());
+            };
+            if args.len() > 2 || args.iter().any(|arg| arg.name.is_some()) {
+                return Err(assert_call_shape_error());
+            }
+            let value = evaluate_expr(&condition.value, env, functions, classes, enums, impl_methods)?;
+            if super::super::interpreter_control::is_condition_present(&condition.value, &value) {
+                return Ok(Some(Value::Nil));
+            }
+            // Evaluate the message only on failure, as `__assert` does.
+            let message = match args.get(1) {
+                Some(msg) => {
+                    Some(evaluate_expr(&msg.value, env, functions, classes, enums, impl_methods)?.to_display_string())
+                }
+                None => None,
+            };
+            Err(super::super::interpreter_control::assert_failure(message.as_deref(), &value))
+        }
         "len" => {
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match val {
@@ -725,6 +761,18 @@ pub(super) fn eval_builtin(
 /// used by both compiled backends, so this seed interpreter agrees with
 /// compiled mode and with the pure-Simple flat-AST interpreter
 /// (eval_builtins.spl's `eval_int_parse_lenient`).
+/// Arity/shape error for the callable `assert(...)` spelling. Same wording as
+/// the pure-Simple parser's rejection (parser_stmts.spl, `assert` desugar).
+fn assert_call_shape_error() -> CompileError {
+    let ctx = ErrorContext::new()
+        .with_code(codes::INVALID_OPERATION)
+        .with_help("use `assert(condition)` or `assert(condition, message)`");
+    CompileError::semantic_with_context(
+        "assert requires a condition and at most one message".to_string(),
+        ctx,
+    )
+}
+
 fn parse_int_lenient(s: &str) -> i64 {
     let t = s.trim();
     let mut chars = t.chars().peekable();

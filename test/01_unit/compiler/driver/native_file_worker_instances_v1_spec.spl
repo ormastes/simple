@@ -7,8 +7,8 @@ The file-worker coordinator consumes the P-G5 instance build plan: the union
 of every module's `generic-spec` list is the needed ConcreteTldrKey set, each
 key is one single-flight, receipted job compiled once into a producer-keyed,
 header-verified instance object. Two consumers -> one build; unchanged lists
--> zero builds; an added key -> one build; a removed key -> dropped + relink.
-An incomplete plan runs no job and links no instance object (fail closed).
+-> zero builds; an added key -> one build; a removed key -> demand retirement
+and relink while old bytes remain retained. An incomplete plan runs no job.
 """
 
 # @tag:unit
@@ -52,15 +52,26 @@ fn broken(s: RequiredSpecializationV1) -> text:
     ""
 
 fn run(root: text, round: text, lists: [GenericSpecializationListV1?]) -> FileWorkerInstanceRunV1:
-    val plan = file_worker_instances_plan_v1(lists, root + "/cache", "producer-1")
+    var module_paths: [text] = []
+    var i = 0
+    while i < lists.len():
+        module_paths.push("module-{i}.spl")
+        i = i + 1
+    val plan = file_worker_instances_plan_v1(lists, root + "/cache", "producer-1", module_paths)
     file_worker_instances_run_v1(plan, root + "/cache", "producer-1", root + "/ledger-" + round,
         "owner-" + round, true, obj)
 
 describe "file-worker generic instance jobs":
     it "two consumers of one key build it once":
         val root = fresh_root("two")
-        val r = run(root, "0", [list_of(["k:i64_f64"]), list_of(["k:i64_f64"])])
+        val lists = [list_of(["k:i64_f64"]), list_of(["k:i64_f64"])]
+        val plan = file_worker_instances_plan_v1(lists, root + "/cache", "producer-1",
+            ["consumer-a.spl", "consumer-b.spl"])
+        val r = file_worker_instances_run_v1(plan, root + "/cache", "producer-1", root + "/ledger-0",
+            "owner-0", true, obj)
         expect(r.complete).to_equal(true)
+        expect(plan.demands[0].consumers).to_equal(["consumer-a.spl", "consumer-b.spl"])
+        expect(plan.demands[0].distinct_consumer_count).to_equal(2)
         expect(r.built).to_equal(["k:i64_f64"])
         expect(r.retire_comdat).to_equal(true)
         expect(r.link_objects.len()).to_equal(1)
@@ -84,7 +95,7 @@ describe "file-worker generic instance jobs":
         expect(next.reused).to_equal(["k:a"])
         expect(next.relink).to_equal(true)
 
-    it "a removed key drops its object and forces a relink":
+    it "a removed key retires demand and forces a relink while retaining bytes":
         val root = fresh_root("drop")
         val _first = run(root, "0", [list_of(["k:a", "k:b"])])
         val gone = generic_instance_object_path_v1(root + "/cache", "producer-1", "k:b")
@@ -92,12 +103,39 @@ describe "file-worker generic instance jobs":
         val next = run(root, "1", [list_of(["k:a"])])
         expect(next.built.len()).to_equal(0)
         expect(next.dropped).to_equal(["k:b"])
-        expect(file_exists(gone)).to_equal(false)
+        expect(file_exists(gone)).to_equal(true)
         expect(next.relink).to_equal(true)
+
+    it "a failed producer keeps the previous complete needed inventory":
+        val root = fresh_root("retain-needed")
+        val _first = run(root, "0", [list_of(["k:a"])])
+        val plan = file_worker_instances_plan_v1(
+            [list_of(["k:a", "k:b"])], root + "/cache", "producer-1", ["module-a.spl"])
+        val failed = file_worker_instances_run_v1(plan, root + "/cache", "producer-1",
+            root + "/ledger-fail", "owner-fail", true, broken)
+        expect(failed.complete).to_equal(false)
+        expect(failed.failed).to_equal(["k:b"])
+        expect(file_worker_instances_previous_v1(root + "/cache", "producer-1"))
+            .to_equal(["k:a"])
+
+    it "conflicting duplicate consumer rows make demand incomplete":
+        val root = fresh_root("conflict-consumer")
+        val plan = file_worker_instances_plan_v1(
+            [list_of(["k:a"]), list_of(["k:b"])], root + "/cache", "producer-1",
+            ["same-module.spl", "same-module.spl"])
+        expect(plan.complete).to_equal(false)
+        expect(plan.drop).to_equal([])
+
+    it "missing module identities make demand incomplete":
+        val root = fresh_root("missing-consumer")
+        val plan = file_worker_instances_plan_v1(
+            [list_of(["k:a"])], root + "/cache", "producer-1", [])
+        expect(plan.complete).to_equal(false)
+        expect(plan.demands.len()).to_equal(0)
 
     it "a key already claimed in the ledger is joined, not built twice":
         val root = fresh_root("flight")
-        val plan = file_worker_instances_plan_v1([list_of(["k:a"])], root + "/cache", "producer-1")
+        val plan = file_worker_instances_plan_v1([list_of(["k:a"])], root + "/cache", "producer-1", ["module-a.spl"])
         val ledger = root + "/ledger"
         val first = file_worker_instances_run_v1(plan, root + "/cache", "producer-1", ledger, "w0", true, obj)
         val second = file_worker_instances_run_v1(plan, root + "/cache", "producer-1", ledger, "w1", true, obj)
@@ -119,13 +157,13 @@ describe "file-worker generic instance jobs":
 
     it "never links instance objects that could duplicate a strong definition":
         val root = fresh_root("strong")
-        val plan = file_worker_instances_plan_v1([list_of(["k:a"])], root + "/cache", "producer-1")
+        val plan = file_worker_instances_plan_v1([list_of(["k:a"])], root + "/cache", "producer-1", ["module-a.spl"])
         val not_comdat = file_worker_instances_run_v1(plan, root + "/cache", "producer-1", root + "/l0",
             "w0", false, obj)
         expect(not_comdat.retire_comdat).to_equal(false)
         expect(not_comdat.link_objects.len()).to_equal(0)
         val root2 = fresh_root("fail")
-        val plan2 = file_worker_instances_plan_v1([list_of(["k:a"])], root2 + "/cache", "producer-1")
+        val plan2 = file_worker_instances_plan_v1([list_of(["k:a"])], root2 + "/cache", "producer-1", ["module-a.spl"])
         val failed = file_worker_instances_run_v1(plan2, root2 + "/cache", "producer-1", root2 + "/l0",
             "w0", true, broken)
         expect(failed.failed).to_equal(["k:a"])

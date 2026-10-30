@@ -1,0 +1,129 @@
+"""process_spawn_session / process_kill_tree: the session-owner contract in
+process_ops, shared by every POSIX host through one C owner
+(src/runtime/runtime_process_tree.c).
+
+Windows: the Job object owns capture children; the POSIX examples are pending
+and the Windows example checks that the family refuses with an explicit error.
+A POSIX host without an owner arm (SimpleOS) gets pending examples that carry
+the owner's reason: never a silent pass.
+"""
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{
+    process_spawn_session, process_spawn_async, process_kill_tree_support,
+    process_kill_tree_result, process_kill_tree, process_wait, process_is_running,
+    process_kill, shell_bool, shell_int
+}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_delete}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{host_os}
+
+fn alive(pid: i64) -> bool:
+    shell_bool("kill -0 {pid} 2>/dev/null")
+
+fn wait_until_dead(pid: i64, polls: i64) -> bool:
+    var attempts = 0
+    while attempts < polls and alive(pid):
+        shell_bool("sleep 0.1")
+        attempts = attempts + 1
+    not alive(pid)
+
+fn support_reason() -> text:
+    match process_kill_tree_support():
+        case Ok(_): ""
+        case Err(reason): reason
+
+describe "process_spawn_session":
+    it "refuses explicitly on Windows, where the Job object is the owner":
+        if host_os() != "windows":
+            pending("Windows-only refusal")
+            return
+        match process_spawn_session("cmd", ["/c", "exit 0"]):
+            case Ok(pid): expect("Ok({pid})").to_equal("Err")
+            case Err(reason): expect(reason).to_contain("Job object")
+        match process_kill_tree_support():
+            case Ok(_): expect("Ok").to_equal("Err")
+            case Err(reason): expect(reason).to_contain("Job object")
+
+    it "routes wait and is_running to the session owner and returns the exit code":
+        if host_os() == "windows":
+            pending("POSIX-only")
+            return
+        val reason = support_reason()
+        if reason != "":
+            pending("no session owner on this host: {reason}")
+            return
+        match process_spawn_session("/bin/sh", ["-c", "sleep 0.2; exit 7"]):
+            case Err(why): expect(why).to_equal("")
+            case Ok(pid):
+                expect(pid > 1).to_equal(true)
+                expect(process_is_running(pid)).to_equal(true)
+                expect(process_wait(pid, 20)).to_equal(-2)
+                expect(process_wait(pid, 5000)).to_equal(7)
+                expect(process_is_running(pid)).to_equal(false)
+
+    it "reports an exec failure as Err, never as a pid":
+        if host_os() == "windows":
+            pending("POSIX-only")
+            return
+        val reason = support_reason()
+        if reason != "":
+            pending("no session owner on this host: {reason}")
+            return
+        match process_spawn_session("/nonexistent/never-here", []):
+            case Ok(pid): expect("Ok({pid})").to_equal("Err")
+            case Err(why): expect(why).to_contain("errno")
+
+    it "process_kill on a session pid kills the escaped grandchild too":
+        if host_os() == "windows":
+            pending("POSIX-only")
+            return
+        val reason = support_reason()
+        if reason != "":
+            pending("no session owner on this host: {reason}")
+            return
+        dir_create_all("build/test_fixtures")
+        val pidfile = "build/test_fixtures/session_{time_now_unix_micros()}.pid"
+        val script = "(set -m; sleep 300 & echo $! > \"$1\"); exec sleep 300"
+        match process_spawn_session("/bin/sh", ["-c", script, "session", pidfile]):
+            case Err(why): expect(why).to_equal("")
+            case Ok(pid):
+                var grandchild = 0
+                var attempts = 0
+                while attempts < 50 and grandchild <= 1:
+                    shell_bool("sleep 0.1")
+                    grandchild = shell_int("cat '{pidfile}' 2>/dev/null", 0)
+                    attempts = attempts + 1
+                expect(grandchild > 1).to_equal(true)
+                val killed = process_kill(pid)
+                val grandchild_dead = wait_until_dead(grandchild, 30)
+                val leader_dead = wait_until_dead(pid, 30)
+                if not grandchild_dead: shell_bool("kill -KILL {grandchild} 2>/dev/null")
+                if not leader_dead: shell_bool("kill -KILL {pid} 2>/dev/null")
+                if file_exists(pidfile): file_delete(pidfile)
+                val verdict = "killed={killed} leader_dead={leader_dead} grandchild_dead={grandchild_dead}"
+                expect(verdict).to_equal("killed=true leader_dead=true grandchild_dead=true")
+                # The leader was reaped by the kill; a later wait is -1, not a hang.
+                expect(process_wait(pid, 1000)).to_equal(-1)
+
+describe "process_kill_tree_result":
+    it "is Err, never Ok, for a pid that was not spawned as a session, and still signals the leader":
+        if host_os() == "windows":
+            pending("POSIX-only")
+            return
+        val pid = process_spawn_async("/bin/sh", ["-c", "sleep 300"])
+        expect(pid > 1).to_equal(true)
+        val outcome = process_kill_tree_result(pid)
+        val leader_dead = wait_until_dead(pid, 30)
+        if not leader_dead: shell_bool("kill -KILL {pid} 2>/dev/null")
+        process_wait(pid, 2000)
+        match outcome:
+            case Ok(_): expect("Ok").to_equal("Err")
+            case Err(reason): expect(reason).to_contain("descendants may survive")
+        expect(leader_dead).to_equal(true)
+
+    it "is Err for an invalid pid":
+        match process_kill_tree_result(1):
+            case Ok(_): expect("Ok").to_equal("Err")
+            case Err(reason): expect(reason).to_contain("invalid pid")
+        expect(process_kill_tree(0)).to_equal(false)

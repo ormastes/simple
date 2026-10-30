@@ -36,11 +36,17 @@ use compiler.driver.cache.module_artifacts_v1.{module_artifact_publish_atomic_v1
 
 val _INSTANCE_OBJECT_MAGIC_V1 = "generic-instance-object/v1"
 
+pub struct GenericInstanceDemandV1:
+    concrete_key: text
+    consumers: [text]                 # sorted users in supplied source snapshot, replay-deduplicated
+    distinct_consumer_count: i64      # not an invocation/use-site count
+
 pub struct GenericInstanceBuildPlanV1:
     needed: [RequiredSpecializationV1]   # sorted by concrete_key, unique
+    demands: [GenericInstanceDemandV1]   # snapshot-derived users; not committed root authority
     build: [text]    # needed keys with no verified cached instance object
     reuse: [text]    # needed keys whose cached instance object verified
-    drop: [text]     # previously needed keys no list needs any more
+    drop: [text]     # prior demand no longer needed (artifact remains retained)
     complete: bool   # every module's list was known and complete
 
 fn _insert_sorted_v1(out: [text], key: text) -> [text]:
@@ -128,11 +134,86 @@ pub fn generic_instance_build_plan_v1(previous_needed: [text], lists: [GenericSp
         else:
             build.push(s.concrete_key)
     var drop: [text] = []
-    for k in previous_needed:
-        if not now.contains(k):
-            drop = _insert_sorted_v1(drop, k)
+    if complete:
+        for k in previous_needed:
+            if not now.contains(k):
+                drop = _insert_sorted_v1(drop, k)
     GenericInstanceBuildPlanV1(needed: needed, build: build, reuse: reuse, drop: drop,
-        complete: complete)
+        demands: [], complete: complete)
+
+# Aggregate the actual per-module forward lists. This reports distinct module
+# demand only: generic-spec currently does not retain each semantic invocation
+# site or need flags, so those counts and variants are not inferred here.
+pub fn generic_instance_demands_v1(module_paths: [text],
+        lists: [GenericSpecializationListV1?]) -> ([GenericInstanceDemandV1], bool):
+    var complete = module_paths.len() == lists.len()
+    var demands: [GenericInstanceDemandV1] = []
+    var demand_index: Dict<text, i64> = {}
+    var seen_consumer: Dict<text, bool> = {}
+    var consumer_inventory: Dict<text, text> = {}
+    var spec_identity: Dict<text, text> = {}
+    var i = 0
+    while i < module_paths.len() and i < lists.len():
+        val consumer = module_paths[i]
+        if consumer == "": complete = false
+        match lists[i]:
+            case Some(list):
+                if not list.complete: complete = false
+                var signature_rows: [text] = []
+                for spec in list.specs:
+                    var args_signature_rows: [text] = []
+                    for arg in spec.arg_keys:
+                        args_signature_rows.push("{arg.len()}:{arg}")
+                    val args_signature = args_signature_rows.join("")
+                    val spec_sig = "{spec.template_symbol.len()}:{spec.template_symbol}{spec.template_id.len()}:{spec.template_id}{spec.args_id.len()}:{spec.args_id}{spec.arg_keys.len()}:{args_signature.len()}:{args_signature}"
+                    signature_rows.push("{spec.concrete_key.len()}:{spec.concrete_key}{spec_sig}")
+                    if spec_identity.contains_key(spec.concrete_key) and
+                            spec_identity[spec.concrete_key] != spec_sig:
+                        complete = false
+                    else:
+                        spec_identity[spec.concrete_key] = spec_sig
+                    val found = if demand_index.contains_key(spec.concrete_key):
+                        demand_index[spec.concrete_key]
+                    else: -1
+                    if found < 0:
+                        demand_index[spec.concrete_key] = demands.len()
+                        demands.push(GenericInstanceDemandV1(concrete_key: spec.concrete_key,
+                            consumers: if consumer == "": [] else: [consumer],
+                            distinct_consumer_count: if consumer == "": 0 else: 1))
+                        if consumer != "":
+                            seen_consumer["{spec.concrete_key.len()}:{spec.concrete_key}{consumer.len()}:{consumer}"] = true
+                    elif consumer != "" and not seen_consumer.contains_key(
+                            "{spec.concrete_key.len()}:{spec.concrete_key}{consumer.len()}:{consumer}"):
+                        seen_consumer["{spec.concrete_key.len()}:{spec.concrete_key}{consumer.len()}:{consumer}"] = true
+                        var row = demands[found]
+                        row.consumers.push(consumer)
+                        demands[found] = row
+                if consumer != "":
+                    signature_rows.sort()
+                    val signature = "complete={list.complete}|" + signature_rows.join("")
+                    if consumer_inventory.contains_key(consumer) and
+                            consumer_inventory[consumer] != signature:
+                        complete = false
+                    else:
+                        consumer_inventory[consumer] = signature
+            case nil:
+                complete = false
+        i = i + 1
+    if module_paths.len() != lists.len(): complete = false
+    var sorted_keys: [text] = []
+    for row in demands:
+        sorted_keys.push(row.concrete_key)
+    sorted_keys.sort()
+    var sorted: [GenericInstanceDemandV1] = []
+    for key in sorted_keys:
+        for row in demands:
+            if row.concrete_key == key:
+                var sorted_row = row
+                sorted_row.consumers.sort()
+                sorted_row.distinct_consumer_count = sorted_row.consumers.len()
+                sorted.push(sorted_row)
+                break
+    (sorted, complete)
 
 # Scheduler entry: read every module's fresh TLDR list, verify the instance cache.
 pub fn generic_instance_build_plan_of_tldr_v1(module_paths: [text], tldr_root: text,
@@ -141,11 +222,16 @@ pub fn generic_instance_build_plan_of_tldr_v1(module_paths: [text], tldr_root: t
     for path in module_paths:
         lists.push(generic_spec_list_of_module_v1(path, tldr_root))
     val (needed, _complete) = generic_instance_needed_v1(lists)
+    val (demands, demand_complete) = generic_instance_demands_v1(module_paths, lists)
     var cached: [text] = []
     for s in needed:
         if generic_instance_cached_v1(cache_root, producer, s.concrete_key):
             cached.push(s.concrete_key)
-    generic_instance_build_plan_v1(previous_needed, lists, cached)
+    var plan = generic_instance_build_plan_v1(previous_needed, lists, cached)
+    plan.demands = demands
+    plan.complete = plan.complete and demand_complete
+    if not plan.complete: plan.drop = []
+    plan
 
 # Publish one built instance object from the object FILE at `object_path`:
 # byte copy (temp + atomic rename), then the sidecar header over the copied
@@ -173,4 +259,5 @@ export generic_instance_needed_v1, generic_instance_object_path_v1
 export generic_instance_object_encode_v1, generic_instance_object_verify_v1, generic_instance_cached_v1
 export generic_instance_header_path_v1, generic_instance_object_file_verified_v1
 export generic_instance_build_plan_v1, generic_instance_build_plan_of_tldr_v1
+export GenericInstanceDemandV1, generic_instance_demands_v1
 export generic_instance_cache_publish_v1

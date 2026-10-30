@@ -98,6 +98,13 @@ thread_local! {
     pub(crate) static BDD_EXPECT_FAILED: RefCell<bool> = const { RefCell::new(false) };
     // Whether we're currently inside an "it" block (expect should be silent)
     pub(crate) static BDD_INSIDE_IT: RefCell<bool> = const { RefCell::new(false) };
+    // Whether the current "it" block called the spec library's `pending(...)`.
+    // The pure-Simple runner (spec.spl `_execute_it`) reports such an example
+    // as "pending" when no assertion failed; the `it` handler mirrors that
+    // instead of printing a green check and counting a pass. The Simple
+    // library's own `test_pending` counter is a module global the interpreter
+    // cannot observe from here, so the `pending` arm raises this flag.
+    pub(crate) static BDD_PENDING_IN_IT: RefCell<bool> = const { RefCell::new(false) };
     // Failure message from expect (for display in it block)
     pub(crate) static BDD_FAILURE_MSG: RefCell<Option<String>> = const { RefCell::new(None) };
     // Provisional "hollow call" failure: a bare `expect(<call>)` whose result is
@@ -213,6 +220,16 @@ fn write_test_result_evidence(path: &Path) {
             })
     });
     let _ = std::fs::write(path, format!("simple-bdd-v1\n{passed}\n{failed}\n"));
+}
+
+/// Record a skipped / pending / planned example that never ran: it joins the
+/// result list as `skipped` (so the file verdict's `executed` and `skipped`
+/// carry it) and the ignored-test list, and it never touches `BDD_COUNTS`, so
+/// it can neither pass nor fail.
+fn record_describe_level_skip(name: String) {
+    BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name.clone()));
+    let desc_path = get_current_describe_path();
+    record_test_result(desc_path, name, true, true);
 }
 
 fn record_test_result(describe_path: String, test_name: String, passed: bool, skipped: bool) {
@@ -971,6 +988,7 @@ pub(super) fn eval_bdd_builtin(
             BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);
             BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
             BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = None);
+            BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
             BDD_LAZY_VALUES.with(|cell| {
@@ -1068,18 +1086,29 @@ pub(super) fn eval_bdd_builtin(
                         ));
                     }
 
+                    let pending = BDD_PENDING_IN_IT.with(|cell| *cell.borrow());
+                    let desc_path = get_current_describe_path();
                     if failed {
                         println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
                         if let Some(msg) = failure_msg {
                             println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
                         }
                         BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+                        record_test_result(desc_path, name_str.clone(), false, false);
+                    } else if pending {
+                        // Same rule as spec.spl `_execute_it`: the pending counter
+                        // moved and nothing failed, so this example is pending --
+                        // neither a pass nor a failure. It is recorded as skipped so
+                        // the SPEC FILE VERDICT carries it, and it never reaches the
+                        // passed tally or the green check.
+                        println!("{}\x1b[33m○ {} (pending)\x1b[0m", indent_str, name_str);
+                        BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
+                        record_test_result(desc_path, name_str.clone(), true, true);
                     } else {
                         println!("{}\x1b[32m✓ {}\x1b[0m", indent_str, name_str);
                         BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+                        record_test_result(desc_path, name_str.clone(), true, false);
                     }
-                    let desc_path = get_current_describe_path();
-                    record_test_result(desc_path, name_str.clone(), !failed, false);
 
                     // Reset lazy value caches after each test so they are
                     // re-evaluated for the next test (fresh values per test).
@@ -1136,12 +1165,8 @@ pub(super) fn eval_bdd_builtin(
 
             println!("{}\x1b[33m○ {} (planned)\x1b[0m", indent_str, name_str);
 
-            BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
-
-            let desc_path = get_current_describe_path();
-            record_test_result(desc_path, name_str.clone(), true, true);
-
-            BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+            // Planned work is neither a pass nor a failure; see `pending`.
+            record_describe_level_skip(name_str);
 
             Ok(Some(Value::Nil))
         }
@@ -1152,6 +1177,19 @@ pub(super) fn eval_bdd_builtin(
             // would be silently bypassed and the enclosing example could pass
             // without running its body.
             if functions.contains_key(name) {
+                // The Simple definition runs (validation, its own "... pending"
+                // line, its counter). What it cannot do is reach this table's
+                // bookkeeping, so mirror the outcome here before deferring:
+                //  * inside an `it`, flag the example so the `it` arm reports it
+                //    as pending instead of a pass (spec.spl `_execute_it` rule);
+                //  * at describe level, record one skipped example so the SPEC
+                //    FILE VERDICT agrees with the runner's `Results:` line, which
+                //    counts the "... pending" marker the Simple body prints.
+                if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+                    BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = true);
+                } else if BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
+                    record_describe_level_skip(extract_desc_str(args, "unnamed"));
+                }
                 return Ok(None);
             }
 
@@ -1162,15 +1200,30 @@ pub(super) fn eval_bdd_builtin(
 
             println!("{}\x1b[33m○ {} (skipped)\x1b[0m", indent_str, name_str);
 
-            // Track skipped test for qualified ignore prompting
-            BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
-
-            let desc_path = get_current_describe_path();
-            record_test_result(desc_path, name_str.clone(), true, true);
-
-            BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+            // A pending example is neither a pass nor a failure: it is recorded
+            // as skipped (carried by the verdict) and never enters the passed
+            // tally behind the per-describe "N examples, M failures" line.
+            record_describe_level_skip(name_str);
 
             Ok(Some(Value::Nil))
+        }
+        "skip" | "skip_it" | "skip_context" => {
+            // Owned by the Simple spec library (src/lib/nogc_sync_mut/spec.spl):
+            // it validates the skip, prints "... skipped (<reason>)" /
+            // "context skipped: <reason>" and bumps its own counter, which the
+            // test runner's `Results:` line counts from the output. Nothing
+            // reached this table, so the SPEC FILE VERDICT said `skipped=0` for
+            // the same run. Record the skipped example here, then defer to the
+            // Simple body unchanged (a rejected skip under a critical assurance
+            // profile still prints its FAILED line from there). Only a call at
+            // describe level is a skipped example: a same-named helper called
+            // inside an `it` body, or outside any describe, is left alone.
+            let describe_level =
+                BDD_INDENT.with(|cell| *cell.borrow()) > 0 && !BDD_INSIDE_IT.with(|cell| *cell.borrow());
+            if describe_level && functions.contains_key(name) {
+                record_describe_level_skip(extract_desc_str(args, "unnamed"));
+            }
+            Ok(None)
         }
         "expect" => {
             BDD_EXPECT_SEQ.with(|cell| *cell.borrow_mut() += 1);
@@ -2187,6 +2240,7 @@ pub fn clear_bdd_state() {
     // Clear local BDD state
     BDD_INDENT.with(|cell| *cell.borrow_mut() = 0);
     BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
+    BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
     BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);

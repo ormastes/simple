@@ -884,7 +884,39 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_spawn_inherit",
     "rt_process_is_running",
     "rt_process_wait",
+    // rt_process_kill(pid) -> bool. THE contract (one symbol, four engines):
+    //   * Signals the one process `pid`, never its descendants. A caller that
+    //     needs the tree uses rt_process_kill_tree on a session-owned pid.
+    //   * pid <= 0 is false. A pid that is already gone is NOT an error on the
+    //     C/core owners (ESRCH -> true: the goal state holds).
+    //   * Ownership: the C and core owners signal any pid the caller may
+    //     signal (SIGTERM on POSIX, TerminateProcess on Windows) and do not
+    //     reap. The Rust (env_process.rs) and interpreter (system.rs) twins
+    //     kill-and-reap only pids in their own spawn table and answer false
+    //     for every other pid. That divergence is recorded, not endorsed: the
+    //     conformance surface every engine meets is "an owned pid, killed, is
+    //     not running afterwards and its wait returns"; see
+    //     src/runtime/test/process_tree_selfcheck.c and
+    //     test/01_unit/lib/test_runner/runner_timeout_kills_tree_spec.spl.
+    //     Making the twins delegate to one table is owned by the env_process.rs
+    //     lane.
     "rt_process_kill",
+    // Session-owned process trees (src/runtime/runtime_process_tree.c), the
+    // one mechanism by which a timed-out test kills everything it started.
+    // rt_process_spawn_session forks + setsid + exec, so pid == session id and
+    // every descendant inherits it; rt_process_kill_tree(pid) SIGKILLs every
+    // process whose session id is pid and reaps the leader. Hosts without an
+    // arm (Windows: the Job object owns capture children; SimpleOS) answer
+    // RT_PTREE_UNSUPPORTED (-100000), never success.
+    "rt_process_tree_support",
+    "rt_process_spawn_session",
+    "rt_process_spawn_session_value",
+    "rt_process_session_wait",
+    "rt_process_session_is_running",
+    "rt_process_kill_session",
+    "rt_process_kill_tree",
+    "rt_child_set_pdeathsig",
+    "rt_proc_start_time",
     "rt_process_owned_cancel",
     "rt_process_owned_cancel_value",
     "rt_process_owned_terminate",

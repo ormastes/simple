@@ -1129,6 +1129,11 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value,
             }
         }
     };
+    // Dynamically dispatched libc calls (link, unlink, fopen, ...) set the
+    // real errno; publish it to the interpreter's errno cell before any Rust
+    // work can clobber it, so `__error`/`__errno_location` readers see it.
+    #[cfg(unix)]
+    super::posix_abi::capture_errno();
 
     Ok(i64_to_value(result))
 }

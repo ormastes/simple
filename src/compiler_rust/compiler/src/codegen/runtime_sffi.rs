@@ -2209,6 +2209,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // pairs back to the Simple extern's argument count.
     RuntimeFuncSpec::new("rt_linux_group_available_capacity_v1", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_parent_acquire_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_group_parent_acquire_at_v2", &[I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_parent_release_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_launch_broker_v1", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_start_v1",
@@ -2606,6 +2607,7 @@ mod tests {
         for (name, machine_arity) in [
             ("rt_linux_group_available_capacity_v1", 2),
             ("rt_linux_group_parent_acquire_v1", 4),
+            ("rt_linux_group_parent_acquire_at_v2", 6),
             ("rt_linux_group_parent_release_v1", 1),
             ("rt_linux_group_launch_broker_v1", 5),
             ("rt_linux_group_start_v1", 18),

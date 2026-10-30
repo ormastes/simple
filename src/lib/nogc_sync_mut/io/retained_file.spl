@@ -11,6 +11,16 @@ use std.nogc_sync_mut.io.retained_file_abi.*
 use std.nogc_sync_mut.io.retained_file_abi.{read as retained_native_read, write as retained_native_write, close as retained_native_close}
 @end
 
+pub struct RetainedFileSecurityMetadataV1:
+    owner_uid: u32
+    effective_uid: u32
+    mode: u32
+
+struct RetainedDirectorySecurityMetadataV1:
+    owner_uid: u32
+    effective_uid: u32
+    mode: u32
+
 class RetainedFile:
     var handle: i64
     var size: u64
@@ -19,6 +29,21 @@ class RetainedFile:
     var closed: bool
     var position: u64
     maximum: u64
+
+    # Policy readers opt into owner/mode inspection on this exact retained
+    # regular-file descriptor. Ordinary file reads do not pay this extra statx.
+    pub fn security_metadata_v1() -> Result<RetainedFileSecurityMetadataV1, text>:
+        if self.closed or self.handle < 0 or self.writable:
+            return Err("SCVDB_FILE_SECURITY_OWNER_CLOSED")
+        _retained_security_metadata_v1(self.handle)
+
+    pub me read_all_bounded_v1(maximum: i64) -> Result<[u8], text>:
+        if self.closed or self.writable or maximum < 1 or maximum > 1048576 or self.size > maximum as u64:
+            return Err("SCVDB_FILE_READ_QUOTA")
+        val bytes = self.read_exact(self.size as i64)?
+        if not retained_file_identity_unchanged(self)?:
+            return Err("SCVDB_FILE_CHANGED")
+        Ok(bytes)
 
     @unsafe(reason: "reads at most one MiB through retained native handle", capabilities: [ffi, raw_ptr])
     me read(maximum: i64) -> Result<[u8], text>:
@@ -90,6 +115,27 @@ class RetainedFile:
         retained_native_close(handle as i32) == 0
         @end
 
+pub class RetainedDirectoryOwnerV1:
+    var handle: i64
+    var closed: bool
+
+    @unsafe(reason: "opens a fixed nofollow regular file beneath the retained directory", capabilities: [ffi, raw_ptr])
+    pub fn open_file(name: text, maximum: u64) -> Result<RetainedFile, text>:
+        if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        _retained_file_open_at_v1(self.handle, name, maximum)
+
+    @unsafe(reason: "invalidates retained directory owner before closing its descriptor", capabilities: [ffi])
+    pub me close() -> bool:
+        if self.closed or self.handle < 0: return false
+        self.closed = true
+        val handle = self.handle
+        self.handle = -1
+        @when(os="linux"):
+        retained_native_close(handle as i32) == 0
+        @else:
+        false
+        @end
+
 
 @unsafe(reason: "allocates zeroed temporary native IO storage", capabilities: [ffi, raw_ptr])
 fn _retained_alloc(size: u64) -> i64:
@@ -114,7 +160,13 @@ fn _retained_free(ptr: i64):
 @unsafe(reason: "encodes bounded native path without embedded NUL", capabilities: [ffi, raw_ptr])
 fn _retained_path(path: text) -> i64:
     if path.len() == 0 or path.len() > 32760: return 0
-    val ptr = _retained_alloc(65536u64)
+    @when(os="windows"):
+    # UTF-16 units never exceed the UTF-8 byte count; reserve a terminator too.
+    val ptr = _retained_alloc(((path.len() + 1) * 2) as u64)
+    @else:
+    val bytes = base_encoding_text_to_bytes(path)
+    val ptr = _retained_alloc((bytes.len() + 1) as u64)
+    @end
     if ptr == 0: return 0
     @when(os="windows"):
     var consumed = 0
@@ -139,7 +191,6 @@ fn _retained_path(path: text) -> i64:
         elif scalar < 65536: consumed = consumed + 3
         else: consumed = consumed + 4
     @else:
-    val bytes = base_encoding_text_to_bytes(path)
     for index in 0..bytes.len():
         if bytes[index] == 0u8:
             _retained_free(ptr)
@@ -191,6 +242,199 @@ fn _retained_metadata(handle: i64) -> Result<RetainedMeta, text>:
     if not valid: return Err("SCVDB_FILE_METADATA_UNSUPPORTED")
     Ok(RetainedMeta(size: size, identity: identity))
 
+@unsafe(reason: "reads Linux owner and mode from the exact retained descriptor", capabilities: [ffi, raw_ptr])
+fn _retained_security_metadata_v1(handle: i64) -> Result<RetainedFileSecurityMetadataV1, text>:
+    @when(os="linux"):
+    if handle < 0: return Err("SCVDB_FILE_SECURITY_OWNER_CLOSED")
+    val ptr = _retained_alloc(256u64)
+    if ptr == 0: return Err("SCVDB_FILE_MEMORY")
+    val empty = _retained_alloc(1u64)
+    if empty == 0:
+        _retained_free(ptr)
+        return Err("SCVDB_FILE_MEMORY")
+    val status = statx(handle as i32, empty, 4096, 11u32, ptr)
+    val mask = if status == 0: volatile_read_u32(ptr) as u32 else: 0u32
+    if status != 0 or (mask & 11u32) != 11u32:
+        _retained_free(empty)
+        _retained_free(ptr)
+        return Err("SCVDB_FILE_SECURITY_METADATA_UNAVAILABLE")
+    val raw_mode = volatile_read_u16(ptr + 28) as u32
+    val owner_uid = volatile_read_u32(ptr + 20) as u32
+    val effective_uid = geteuid()
+    _retained_free(empty)
+    _retained_free(ptr)
+    if (raw_mode & 61440u32) != 32768u32:
+        return Err("SCVDB_FILE_SECURITY_METADATA_UNAVAILABLE")
+    Ok(RetainedFileSecurityMetadataV1(owner_uid: owner_uid,
+        effective_uid: effective_uid, mode: raw_mode))
+    @else:
+    Err("SCVDB_FILE_SECURITY_METADATA_UNSUPPORTED")
+    @end
+
+@unsafe(reason: "reads directory owner and mode from the exact retained descriptor", capabilities: [ffi, raw_ptr])
+fn _retained_directory_security_metadata_v1(handle: i64) -> Result<RetainedDirectorySecurityMetadataV1, text>:
+    @when(os="linux"):
+    if handle < 0: return Err("SCVDB_DIR_CLOSED")
+    val ptr = _retained_alloc(256u64)
+    if ptr == 0: return Err("SCVDB_DIR_MEMORY")
+    val empty = _retained_alloc(1u64)
+    if empty == 0:
+        _retained_free(ptr)
+        return Err("SCVDB_DIR_MEMORY")
+    val status = statx(handle as i32, empty, 4096, 11u32, ptr)
+    val mask = if status == 0: volatile_read_u32(ptr) as u32 else: 0u32
+    if status != 0 or (mask & 11u32) != 11u32:
+        _retained_free(empty)
+        _retained_free(ptr)
+        return Err("SCVDB_DIR_METADATA_UNAVAILABLE")
+    val raw_mode = volatile_read_u16(ptr + 28) as u32
+    val owner_uid = volatile_read_u32(ptr + 20) as u32
+    val effective_uid = geteuid()
+    _retained_free(empty)
+    _retained_free(ptr)
+    if (raw_mode & 61440u32) != 16384u32:
+        return Err("SCVDB_DIR_NOT_DIRECTORY")
+    Ok(RetainedDirectorySecurityMetadataV1(owner_uid: owner_uid,
+        effective_uid: effective_uid, mode: raw_mode))
+    @else:
+    Err("SCVDB_DIR_HOST_UNSUPPORTED")
+    @end
+
+fn _retained_directory_owner_allowed_v1(metadata: RetainedDirectorySecurityMetadataV1,
+    allow_root_sticky: bool) -> bool:
+    if metadata.owner_uid != metadata.effective_uid and metadata.owner_uid != 0u32:
+        return false
+    if (metadata.mode & 18u32) == 0u32: return true
+    allow_root_sticky and metadata.owner_uid == 0u32 and (metadata.mode & 512u32) != 0u32
+
+# Linux file and directory flags are part of the target syscall ABI. Keep these
+# words in one place so legacy path APIs and retained-owner APIs cannot drift.
+fn _retained_linux_directory_flags_v1() -> i32:
+    var flags: i32 = 0
+    @when(os="linux"):
+    @when(arch="aarch64"):
+    flags = 573440 # O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY
+    @elif(arch="x86_64"):
+    flags = 720896 # O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY
+    @else:
+    flags = 0
+    @end
+    @end
+    flags
+
+fn _retained_linux_file_flags_v1() -> i32:
+    var flags: i32 = 0
+    @when(os="linux"):
+    @when(arch="aarch64"):
+    flags = 559104 # O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC
+    @elif(arch="x86_64"):
+    flags = 657408 # O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC
+    @else:
+    flags = 0
+    @end
+    @end
+    flags
+
+@unsafe(reason: "walks trusted directory components through nofollow native descriptors", capabilities: [ffi, raw_ptr])
+pub fn retained_directory_open_trusted_v1(path: text) -> Result<RetainedDirectoryOwnerV1, text>:
+    @when(os="linux"):
+    if path == "" or path == "/" or path.len() > 32760 or not path.starts_with("/") or
+            path.contains("\u0000") or path.contains("//") or path.ends_with("/") or
+            path.contains("/./") or path.ends_with("/.") or path.contains("/../") or path.ends_with("/.."):
+        return Err("SCVDB_DIR_PATH")
+    val directory_flags = _retained_linux_directory_flags_v1()
+    if directory_flags == 0: return Err("SCVDB_DIR_ARCH_UNSUPPORTED")
+    val components = path.substring(1, path.len()).split("/")
+    if components.len() == 0: return Err("SCVDB_DIR_PATH")
+    for component in components:
+        if component == "" or component == "." or component == ".." or component.contains("\u0000"):
+            return Err("SCVDB_DIR_PATH")
+    val root_path = _retained_path("/")
+    if root_path == 0: return Err("SCVDB_DIR_MEMORY")
+    var current = openat(-100, root_path, directory_flags, 0u32) as i64
+    _retained_free(root_path)
+    if current < 0: return Err("SCVDB_DIR_OPEN")
+    var index = 0
+    while index < components.len():
+        val current_metadata = _retained_directory_security_metadata_v1(current)
+        match current_metadata:
+            case Err(_):
+                val closed = retained_native_close(current as i32)
+                return Err("SCVDB_DIR_METADATA_UNAVAILABLE")
+            case Ok(metadata):
+                if not _retained_directory_owner_allowed_v1(metadata, true):
+                    val closed = retained_native_close(current as i32)
+                    return Err("SCVDB_DIR_PARENT_UNTRUSTED")
+        val component = components[index]
+        if component.len() > 255:
+            val closed = retained_native_close(current as i32)
+            return Err("SCVDB_DIR_COMPONENT")
+        val name = _retained_path(component)
+        if name == 0:
+            val closed = retained_native_close(current as i32)
+            return Err("SCVDB_DIR_MEMORY")
+        val next = openat(current as i32, name, directory_flags, 0u32) as i64
+        _retained_free(name)
+        if next < 0:
+            val closed = retained_native_close(current as i32)
+            return Err("SCVDB_DIR_COMPONENT_OPEN")
+        val next_metadata = _retained_directory_security_metadata_v1(next)
+        match next_metadata:
+            case Err(_):
+                val child_closed = retained_native_close(next as i32)
+                val parent_closed = retained_native_close(current as i32)
+                return Err("SCVDB_DIR_METADATA_UNAVAILABLE")
+            case Ok(metadata):
+                if metadata.owner_uid != metadata.effective_uid and metadata.owner_uid != 0u32:
+                    val child_closed = retained_native_close(next as i32)
+                    val parent_closed = retained_native_close(current as i32)
+                    return Err("SCVDB_DIR_OWNER")
+                if index + 1 == components.len() and not _retained_directory_owner_allowed_v1(metadata, false):
+                    val child_closed = retained_native_close(next as i32)
+                    val parent_closed = retained_native_close(current as i32)
+                    return Err("SCVDB_DIR_FINAL_UNTRUSTED")
+        if retained_native_close(current as i32) != 0:
+            val child_closed = retained_native_close(next as i32)
+            return Err("SCVDB_DIR_PARENT_CLOSE")
+        current = next
+        index = index + 1
+    Ok(RetainedDirectoryOwnerV1(handle: current, closed: false))
+    @else:
+    Err("SCVDB_DIR_HOST_UNSUPPORTED")
+    @end
+
+@unsafe(reason: "opens a nofollow regular file relative to a retained directory descriptor", capabilities: [ffi, raw_ptr])
+fn _retained_file_open_at_v1(directory_handle: i64, name: text, maximum: u64) -> Result<RetainedFile, text>:
+    if maximum > 1099511627776u64: return Err("SCVDB_FILE_QUOTA")
+    if name == "" or name == "." or name == ".." or name.len() > 255 or
+            name.contains("/") or name.contains("\u0000"):
+        return Err("SCVDB_FILE_PATH")
+    @when(os="linux"):
+    if directory_handle < 0: return Err("SCVDB_DIR_CLOSED")
+    val file_flags = _retained_linux_file_flags_v1()
+    if file_flags == 0: return Err("SCVDB_DIR_ARCH_UNSUPPORTED")
+    val path = _retained_path(name)
+    if path == 0: return Err("SCVDB_FILE_PATH")
+    # O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK rejects FIFOs before metadata.
+    val handle = openat(directory_handle as i32, path, file_flags, 0u32) as i64
+    _retained_free(path)
+    if handle < 0: return Err("SCVDB_FILE_OPEN")
+    var file = RetainedFile(handle: handle, size: 0, identity: [], writable: false, closed: false, position: 0, maximum: maximum)
+    match _retained_metadata(handle):
+        case Err(error):
+            val closed = file.close()
+            Err(error)
+        case Ok(meta):
+            if meta.size > maximum:
+                val closed = file.close()
+                return Err("SCVDB_FILE_QUOTA")
+            file.size = meta.size
+            file.identity = meta.identity
+            Ok(file)
+    @else:
+    Err("SCVDB_DIR_HOST_UNSUPPORTED")
+    @end
+
 @unsafe(reason: "opens nofollow regular file or exclusively creates private output", capabilities: [ffi, raw_ptr])
 fn retained_file_open(path: text, maximum: u64, create: bool = false) -> Result<RetainedFile, text>:
     if maximum > 1099511627776u64: return Err("SCVDB_FILE_QUOTA")
@@ -216,8 +460,14 @@ fn retained_file_open(path: text, maximum: u64, create: bool = false) -> Result<
     @else:
     @when(os="linux"):
     # O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK prevents FIFO open from blocking before stat.
-    val flags = if create: 657601 else: 657408
-    handle = open(ptr, flags, 384u32) as i64
+    val file_flags = _retained_linux_file_flags_v1()
+    if file_flags == 0:
+        _retained_free(ptr)
+        return Err("SCVDB_FILE_ARCH_UNSUPPORTED")
+    # Add O_WRONLY|O_CREAT|O_EXCL to the read-only base word; the base
+    # already carries NONBLOCK|NOFOLLOW|CLOEXEC on every supported ABI.
+    val flags = if create: file_flags + 193 else: file_flags
+    handle = openat(-100, ptr, flags, 384u32) as i64
     @end
     @end
     _retained_free(ptr)
@@ -275,8 +525,11 @@ fn retained_directory_is_real_no_follow(path: text) -> bool:
     @when(os="linux"):
     val ptr = _retained_path(directory)
     if ptr == 0: return false
-    # O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC.
-    val handle = open(ptr, 720896, 0u32)
+    val directory_flags = _retained_linux_directory_flags_v1()
+    if directory_flags == 0:
+        _retained_free(ptr)
+        return false
+    val handle = openat(-100, ptr, directory_flags, 0u32)
     _retained_free(ptr)
     if handle < 0: return false
     close(handle) == 0
@@ -353,7 +606,8 @@ fn retained_file_sync(file: RetainedFile) -> bool:
     fsync(file.handle as i32) == 0
     @end
 
-export RetainedFile, retained_file_open
+export RetainedFile, RetainedFileSecurityMetadataV1, retained_file_open
+export RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1
 export retained_file_unchanged, retained_file_sync
 export retained_file_read_at, retained_file_identity_unchanged
 export retained_directory_is_real_no_follow

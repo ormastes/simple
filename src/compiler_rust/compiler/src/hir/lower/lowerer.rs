@@ -160,6 +160,11 @@ pub struct Lowerer {
     /// source name), decoded from every `__simple_flatten_import_binding__`
     /// marker. Keyed by importer, unlike `import_alias_bindings`.
     pub(super) flatten_owner_import_bindings: HashMap<String, HashMap<String, (String, String)>>,
+    /// Flattened unit only: importer owner -> every source owner it glob-imports
+    /// (`use m.*` / `export use m.*`), in marker order. The `*` markers are
+    /// not name bindings, so `flatten_owner_import_bindings` cannot hold them;
+    /// `flatten_reexport_definer` follows these edges through glob facades.
+    pub(super) flatten_owner_glob_sources: HashMap<String, Vec<String>>,
     /// Flatten owner of the function whose body is being lowered.
     pub(super) current_function_owner: Option<String>,
     /// Flattened unit only: module-global name declared by two or more
@@ -299,6 +304,7 @@ impl Lowerer {
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
+            flatten_owner_glob_sources: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
             flatten_struct_owners: HashMap::new(),
@@ -371,6 +377,7 @@ impl Lowerer {
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
+            flatten_owner_glob_sources: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
             flatten_struct_owners: HashMap::new(),
@@ -466,6 +473,7 @@ impl Lowerer {
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
+            flatten_owner_glob_sources: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
             flatten_struct_owners: HashMap::new(),
@@ -868,6 +876,7 @@ impl Lowerer {
         // `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
         self.flatten_fn_owners.clear();
         self.flatten_owner_import_bindings.clear();
+        self.flatten_owner_glob_sources.clear();
         let mut definition_counts: HashMap<&str, usize> = HashMap::new();
         // Every name the flattened unit really DECLARES, function or value. The
         // alias branch in `lower_identifier` now runs ahead of the
@@ -910,6 +919,12 @@ impl Lowerer {
             else {
                 continue;
             };
+            if local_name == "*" && source_name == "*" {
+                let sources = self.flatten_owner_glob_sources.entry(importer.to_string()).or_default();
+                if !sources.iter().any(|known| known == source_owner) {
+                    sources.push(source_owner.to_string());
+                }
+            }
             if local_name != "*" && source_name != "*" {
                 self.flatten_owner_import_bindings
                     .entry(importer.to_string())
@@ -975,6 +990,64 @@ impl Lowerer {
             .is_some_and(|owners| owners.iter().any(|owner| owner != &owners[0]))
     }
 
+    /// The `(owner, name)` that DECLARES the function an import binding names,
+    /// following re-export facades (`export use m.{f}` / `export use m.*`).
+    ///
+    /// A binding records the module the `use` names. When that module is a
+    /// facade it declares nothing, and stopping there made the owner-exact
+    /// lookup fall back to the bare name -- under a cross-module collision the
+    /// "last definition" of an unrelated module, i.e. a silent miscompile
+    /// (`app.io.file_ops` re-exports `file_exists`; ~15 modules of the
+    /// native-build closure declare one). Mirrors the interpreter's walk in
+    /// `interpreter_call::import_bound_candidate`: at each hop a declaration in
+    /// the current owner wins, else the owner's own binding for the name, else
+    /// its glob edges. Fail-closed (`None`, keeping the historical lookup) on a
+    /// hop back into the importer (recursion trap), on two distinct declaring
+    /// owners reachable through globs (ambiguous), or past the hop budget.
+    pub(super) fn flatten_reexport_definer(
+        &self,
+        importer: &str,
+        source_owner: &str,
+        source_name: &str,
+    ) -> Option<(String, String)> {
+        const HOP_BUDGET: usize = 64;
+        let mut found: Option<(String, String)> = None;
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        let mut pending = vec![(source_owner.to_string(), source_name.to_string())];
+        let mut hops = 0usize;
+        while let Some((owner, name)) = pending.pop() {
+            hops += 1;
+            if hops > HOP_BUDGET {
+                return None;
+            }
+            if owner == importer || !seen.insert((owner.clone(), name.clone())) {
+                continue;
+            }
+            if self.flatten_owner_defines(Some(&owner), &name) {
+                match &found {
+                    None => found = Some((owner, name)),
+                    Some(previous) if previous.0 == owner && previous.1 == name => {}
+                    Some(_) => return None,
+                }
+                continue;
+            }
+            if let Some(next) = self
+                .flatten_owner_import_bindings
+                .get(&owner)
+                .and_then(|bindings| bindings.get(&name))
+            {
+                pending.push(next.clone());
+                continue;
+            }
+            if let Some(globs) = self.flatten_owner_glob_sources.get(&owner) {
+                for glob_owner in globs.iter().rev() {
+                    pending.push((glob_owner.clone(), name.clone()));
+                }
+            }
+        }
+        found
+    }
+
     fn flatten_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
         self.flatten_fn_owners
             .get(name)
@@ -1024,9 +1097,11 @@ impl Lowerer {
         } else if let Some((source_owner, source_name)) = current
             .and_then(|importer| self.flatten_owner_import_bindings.get(importer))
             .and_then(|bindings| bindings.get(name))
-            .filter(|(source_owner, source_name)| self.flatten_owner_defines(Some(source_owner), source_name))
+            .and_then(|(source_owner, source_name)| {
+                self.flatten_reexport_definer(current.unwrap_or_default(), source_owner, source_name)
+            })
         {
-            Some(self.flatten_emitted_symbol(Some(source_owner), source_name))
+            Some(self.flatten_emitted_symbol(Some(&source_owner), &source_name))
         } else if !self.flatten_fn_owners.contains_key(name) {
             self.resolve_function_alias(name)
                 .filter(|original| *original != name && self.flatten_is_collision(original))

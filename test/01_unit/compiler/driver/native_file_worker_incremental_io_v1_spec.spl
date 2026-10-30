@@ -1,0 +1,77 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_file_worker_incremental_io_v1.spl 0%
+"""
+# Native incremental file-worker prepare binds reuse to exact selected roots
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+
+use std.spec
+use std.io_runtime.{dir_create_all, file_write, file_read}
+use app.io.time_ops.{time_now_unix_micros}
+use compiler.driver.cache.macro_forward_candidate_contract_v1.{macro_forward_candidate_unknown_v1}
+use compiler.driver.driver_build.native_file_worker_incremental_v1.{FileWorkerIncRowV1,
+    file_worker_inc_manifest_encode_v2}
+use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{
+    file_worker_inc_prepare_v1, file_worker_inc_iface_digest_v1,
+    file_worker_inc_source_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn io_cache_fixture_root() -> text:
+    val root = "build/test_tmp/file_worker_prepare_{time_now_unix_micros()}"
+    val _made = dir_create_all(root + "/cache/obj")
+    root
+
+fn write_previous_manifest(root: text, source_path: text, producer: text,
+        scope_digest: text, inventory_digest: text) -> bool:
+    val source = "pub fn stable() -> i64: 1\n"
+    val object_path = root + "/cache/obj/module.o"
+    if not dir_create_all(source_path.substring(0, source_path.rfind("/"))) or
+            not file_write(source_path, source) or not file_write(object_path, "object-bytes"):
+        return false
+    val row = FileWorkerIncRowV1(path: source_path,
+        source_digest: file_worker_inc_source_digest_v1(source_path),
+        iface_digest: file_worker_inc_iface_digest_v1(source_path), imports_known: true,
+        imports: [], object_digest: sha256_text("object-bytes"), cached_object: object_path,
+        functions: 1, statics: 0, capsule: "",
+        macro_candidate: macro_forward_candidate_unknown_v1())
+    val encoded = file_worker_inc_manifest_encode_v2([row], "output", producer,
+        scope_digest, inventory_digest)
+    file_write(root + "/cache/manifest", encoded)
+
+describe "native file-worker incremental prepare" :
+    it "reuses compiled rows when the exact selected scope is a stable superset":
+        val root = io_cache_fixture_root()
+        val compiled = root + "/snapshot/pkg/compiled.spl"
+        val extra = root + "/snapshot/pkg/selected-but-not-compiled.spl"
+        val source = "pub fn stable() -> i64: 1\n"
+        expect(write_previous_manifest(root, compiled, "producer", "selected-root", "inventory-root"))
+            .to_equal(true)
+        expect(file_write(extra, source)).to_equal(true)
+        var selected_digests: Dict<text, text> = {}
+        selected_digests[compiled] = file_worker_inc_source_digest_v1(compiled)
+        selected_digests[extra] = file_worker_inc_source_digest_v1(extra)
+        val (reuse_path, reused) = file_worker_inc_prepare_v1(root + "/cache", "producer",
+            [compiled, extra], selected_digests, "selected-root", "inventory-root", "")
+        expect(reuse_path != "").to_equal(true)
+        expect(reused).to_equal(1)
+        expect(file_read(reuse_path).contains(compiled)).to_equal(true)
+        expect(file_read(reuse_path).contains(extra)).to_equal(false)
+
+    it "does not reuse a previous physical path in a new same-byte snapshot root":
+        val root = io_cache_fixture_root()
+        val previous_path = root + "/snapshot-old/pkg/module.spl"
+        val current_path = root + "/snapshot-new/pkg/module.spl"
+        val source = "pub fn stable() -> i64: 1\n"
+        expect(write_previous_manifest(root, previous_path, "producer", "same-selected-root",
+            "same-inventory-root")).to_equal(true)
+        expect(dir_create_all(root + "/snapshot-new/pkg")).to_equal(true)
+        expect(file_write(current_path, source)).to_equal(true)
+        var current_digests: Dict<text, text> = {}
+        current_digests[current_path] = file_worker_inc_source_digest_v1(current_path)
+        val (reuse_path, reused) = file_worker_inc_prepare_v1(root + "/cache", "producer",
+            [current_path], current_digests, "same-selected-root", "same-inventory-root", "")
+        expect(reuse_path).to_equal("")
+        expect(reused).to_equal(0)

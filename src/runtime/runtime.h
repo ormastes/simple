@@ -45,6 +45,9 @@ extern "C" {
 /* Include fork-without-exec support */
 #include "runtime_fork.h"
 
+/* Session-owned process trees (spawn/kill_tree, pdeathsig, birth identity) */
+#include "runtime_process_tree.h"
+
 /* ===== Runtime Configuration ===== */
 
 void rt_set_macro_trace(bool enabled);
@@ -635,6 +638,12 @@ SplArray* rt_array_new_uninit(int64_t cap);
 /* 1 when the array is packed bytes ([u8]), 0 when tagged int64 slots. */
 int rt_array_is_byte_packed(SplArray* value);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
+/* Capacity-reserving constructors (len 0), C twins of the Rust runtime family. */
+SplArray* rt_array_new_with_cap(int64_t cap);
+SplArray* rt_array_new_with_cap_text(int64_t cap);
+SplArray* rt_array_new_with_cap_bool(int64_t cap);
+SplArray* rt_array_new_with_cap_i64(int64_t cap);
+SplArray* rt_array_new_with_cap_js_value(int64_t cap);
 void      rt_array_free(SplArray* array);  /* shallow: preserves element handles */
 /* Deep array free. Returns 1 only if the ENTIRE structure was reclaimed, 0 if
  * refused -- and a refusal frees nothing at all (all-or-nothing, so the result
@@ -1261,6 +1270,8 @@ int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* ar
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_guarded_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_async_value(int64_t cmd, SplArray* args);
+/* Session-leader spawn for tree cleanup; see runtime_process_tree.h. */
+int64_t   rt_process_spawn_session_value(int64_t cmd, SplArray* args);
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1423. NOT a bare SplArray*. */
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,

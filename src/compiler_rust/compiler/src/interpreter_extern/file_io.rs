@@ -466,23 +466,23 @@ pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
 // File Operations
 // ============================================================================
 
-/// Canonicalize path
+/// Canonicalize path: realpath semantics (absolute, symlinks resolved, the
+/// path must exist), `Value::Nil` on failure. This is the ONE cross-engine
+/// contract shared with the native Rust runtime
+/// (runtime/src/value/sffi/file_io/file_ops.rs) and the C runtime
+/// (src/runtime/runtime_native.c). The former cwd-join fallback made this
+/// lane the only one that never failed, so a missing path canonicalized to
+/// a guess here and to nil natively.
 pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
+    if path.is_empty() {
+        return Ok(Value::Nil);
+    }
     match fs::canonicalize(&path) {
         Ok(canonical) => Ok(Value::text(strip_verbatim_prefix(
             canonical.to_string_lossy().to_string(),
         ))),
-        Err(_) => {
-            // Fallback: make absolute
-            match std::env::current_dir() {
-                Ok(cwd) => {
-                    let abs = cwd.join(&path);
-                    Ok(Value::text(abs.to_string_lossy().to_string()))
-                }
-                Err(_) => Ok(Value::text(path)),
-            }
-        }
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -519,6 +519,22 @@ fn strip_verbatim_prefix(path: String) -> String {
 mod canonicalize_tests {
     use super::*;
 
+    /// rt_path_absolute never fails: a missing path is made absolute against
+    /// the cwd (matching runtime/src/value/sffi/file_io/path.rs), unlike
+    /// rt_file_canonicalize which returns nil. std.sffi.io.path_absolute is
+    /// `-> text`, so nil here trips the non-optional return contract.
+    #[test]
+    fn path_absolute_of_missing_path_is_text_not_nil() {
+        let got = rt_path_absolute(&[Value::text("no_such_dir_xyz/child.spl".to_string())])
+            .expect("path_absolute call");
+        let text = match got {
+            Value::Str(s) => s.to_string(),
+            other => panic!("rt_path_absolute returned {other:?} for a missing path"),
+        };
+        assert!(std::path::Path::new(&text).is_absolute(), "not absolute: {text}");
+        assert!(text.ends_with("child.spl"), "lost leaf: {text}");
+    }
+
     /// Canonicalizing an existing file must not leak the Windows `\\?\`
     /// verbatim prefix (the runtime lane strips it; the lanes must agree).
     #[test]
@@ -536,6 +552,39 @@ mod canonicalize_tests {
         assert!(!text.starts_with(&verbatim), "verbatim prefix leaked: {}", text);
         assert!(std::path::Path::new(&text).is_absolute(), "not absolute: {}", text);
         assert!(text.ends_with("probe.spl"), "wrong target: {}", text);
+    }
+
+    /// Cross-engine contract (see runtime file_ops.rs
+    /// `canonicalize_resolves_symlinks_and_fails_closed`): a symlink resolves
+    /// to its target and a missing path is `Nil`, never a cwd-joined guess.
+    #[test]
+    fn canonicalize_resolves_symlinks_and_returns_nil_when_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, "x").expect("write");
+        let expected = strip_verbatim_prefix(
+            std::fs::canonicalize(&real).expect("std canonicalize").to_string_lossy().to_string(),
+        );
+
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.txt");
+            std::os::unix::fs::symlink(&real, &link).expect("symlink");
+            let got = rt_file_canonicalize(&[Value::text(link.to_string_lossy().to_string())])
+                .expect("canonicalize call");
+            match got {
+                Value::Str(s) => assert_eq!(s.to_string(), expected),
+                other => panic!("expected text, got {}", other.type_name()),
+            }
+        }
+
+        let missing = dir.path().join("missing.txt");
+        let got = rt_file_canonicalize(&[Value::text(missing.to_string_lossy().to_string())])
+            .expect("canonicalize call");
+        assert!(matches!(got, Value::Nil), "missing path must be Nil, got {}", got.type_name());
+
+        let got = rt_file_canonicalize(&[Value::text(String::new())]).expect("canonicalize call");
+        assert!(matches!(got, Value::Nil), "empty path must be Nil");
     }
 }
 
@@ -556,6 +605,23 @@ pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
             };
             Ok(Value::text(content))
         }
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+/// `extern fn rt_fs_read_text(path: text) -> text?` (sffi/fs.spl).
+///
+/// Mirrors the C runtime (`runtime_native.c` `rt_fs_read_text`, which delegates
+/// to `rt_file_read_text`): the whole file's BYTES become the text, unchanged,
+/// and only a failed open/read yields nil. Unlike this module's
+/// `rt_file_read_text` it does NOT strip `\r` and does NOT turn non-UTF-8
+/// content into nil; invalid UTF-8 stays byte-exact as raw text
+/// (`Value::text_from_bytes`), exactly what the C lane's
+/// `rt_string_new(content, len)` returns. An empty file is "" (not nil).
+pub fn rt_fs_read_text(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Value::text_from_bytes(bytes)),
         Err(_) => Ok(Value::Nil),
     }
 }
@@ -2178,6 +2244,28 @@ pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn fs_read_text_returns_exact_file_bytes_like_the_c_runtime() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let arg = |name: &str| Value::text(dir.path().join(name).to_string_lossy().to_string());
+
+        fs::write(dir.path().join("crlf.txt"), b"a\r\nb\r\n").expect("write");
+        assert_eq!(rt_fs_read_text(&[arg("crlf.txt")]).unwrap(), Value::text("a\r\nb\r\n"));
+
+        fs::write(dir.path().join("utf8.txt"), "h\u{e9}\n").expect("write");
+        assert_eq!(rt_fs_read_text(&[arg("utf8.txt")]).unwrap(), Value::text("h\u{e9}\n"));
+
+        // Invalid UTF-8 (a lone 0xFF) stays byte-exact: 5 bytes, no U+FFFD.
+        fs::write(dir.path().join("raw.bin"), b"a\r\nb\xff").expect("write");
+        let raw = rt_fs_read_text(&[arg("raw.bin")]).unwrap();
+        assert_eq!(raw.text_bytes_view(), Some(&b"a\r\nb\xff"[..]));
+
+        fs::write(dir.path().join("empty.txt"), b"").expect("write");
+        assert_eq!(rt_fs_read_text(&[arg("empty.txt")]).unwrap(), Value::text(""));
+
+        assert_eq!(rt_fs_read_text(&[arg("missing.txt")]).unwrap(), Value::Nil);
+    }
+
     /// A 1 GiB size cap (what SCV inventory passes per source file) must not
     /// allocate or zero-fill 1 GiB per call: the read is bounded by the bytes the
     /// file holds and returns the whole file even when one read() is short.
@@ -3006,6 +3094,49 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(results))
 }
 
+/// Recursive file listing filtered by extension: `rt_list_dir_recursive(path, ext) -> [text]`.
+///
+/// Mirrors the only native definition, `src/runtime/runtime_core_io_exports.c`
+/// (the symbol is in neither the JIT `RuntimeFuncSpec` table nor the Rust
+/// runtime): `ext` may be `"spl"` or `".spl"`, an empty `ext` lists every file,
+/// the suffix is matched on the entry name, directories are entered without
+/// following symlinks (C uses `lstat`; symlinks are emitted as files when they
+/// match), nesting is capped at 64 levels, and a missing or unreadable
+/// directory yields an empty array. Live caller: `80.driver/project.spl`
+/// (`list_dir_recursive(source_root, ".spl")`), which died in the interpreter
+/// with "unknown extern function: rt_list_dir_recursive".
+pub fn rt_list_dir_recursive(args: &[Value]) -> Result<Value, CompileError> {
+    const MAX_DEPTH: usize = 64;
+
+    let path = extract_path(args, 0)?;
+    let ext = extract_content(args, 1)?;
+    let suffix = if ext.is_empty() || ext.starts_with('.') { ext } else { format!(".{ext}") };
+
+    fn walk(dir: &Path, suffix: &str, depth: usize, results: &mut Vec<Value>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let full = entry.path();
+            if file_type.is_dir() {
+                walk(&full, suffix, depth + 1, results);
+            } else if entry.file_name().to_string_lossy().ends_with(suffix) {
+                results.push(Value::text(full.to_string_lossy().to_string()));
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    walk(Path::new(&path), &suffix, 0, &mut results);
+    Ok(Value::array(results))
+}
+
 /// Get current directory.
 ///
 /// Returns a bare `Value::Str` on success and an empty string on failure --
@@ -3253,9 +3384,26 @@ pub fn rt_path_ext(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(ext.to_string()))
 }
 
-/// Get absolute path
+/// Get absolute path. Unlike `rt_file_canonicalize` (nil on failure), this
+/// never fails: it resolves symlinks when the path exists and otherwise joins
+/// it onto the cwd, matching the runtime's `rt_path_absolute`
+/// (runtime/src/value/sffi/file_io/path.rs). `std.sffi.io.path_absolute` is
+/// `-> text`, so nil here would break its non-optional return contract.
 pub fn rt_path_absolute(args: &[Value]) -> Result<Value, CompileError> {
-    rt_file_canonicalize(args)
+    let path = extract_path(args, 0)?;
+    let p = Path::new(&path);
+    if let Ok(canonical) = p.canonicalize() {
+        return Ok(Value::text(strip_verbatim_prefix(canonical.to_string_lossy().to_string())));
+    }
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => return Ok(Value::text(path)),
+        }
+    };
+    Ok(Value::text(abs.to_string_lossy().to_string()))
 }
 
 /// Get path separator

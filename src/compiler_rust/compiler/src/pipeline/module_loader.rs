@@ -188,6 +188,23 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
             if p_is_file(&file) {
                 return Some(prefer_package_init_for_member_import(file, use_stmt));
             }
+            // A plain package directory as the LAST segment under a numbered
+            // layer: `compiler.semantics.any_escape` is
+            // `src/compiler/35.semantics/any_escape/__init__.spl`. The
+            // non-last branch below already takes the plain `direct` dir
+            // first, and both sibling resolvers probe this marker for the last
+            // segment (`path_resolution::try_resolve_last_segment`,
+            // `module_resolver::resolve_module_in_dir`); this walk did not,
+            // so such a facade `use` resolved to nothing in the flattening
+            // loader, its `export use` owners were never flattened, and the
+            // JIT declared the re-exported fn as an unresolved import
+            // (`[jit-fallback] unresolved external symbol 'any_escape_check'`,
+            // whole compiler worker dropped to the interpreter). See
+            // doc/08_tracking/bug/jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md.
+            let direct_init = current.join(part).join("__init__.spl");
+            if p_is_file(&direct_init) {
+                return Some(direct_init);
+            }
             if let Some(alias) = layered_alias_child_dir(&current, part) {
                 let init = alias.join("__init__.spl");
                 if p_is_file(&init) {
@@ -2900,6 +2917,95 @@ mod tests {
             second.items.len(),
             first.items.len(),
             "second load must be byte-identical to the first: it came from the source-text cache, not the rewritten file"
+        );
+    }
+
+    /// Regression for
+    /// doc/08_tracking/bug/jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md:
+    /// a facade `__init__.spl` whose LAST path segment is a plain package dir
+    /// under a numbered layer dir (`src/35.sem/pkg_a/__init__.spl`, the shape
+    /// of `src/compiler/35.semantics/any_escape/__init__.spl`) must resolve in
+    /// the flattening loader so the fn it re-exports from its owner submodule
+    /// is a `Node::Function` of the flattened unit. Before the fix
+    /// `resolve_use_to_path` returned `None` for `use sem.pkg_a.{facade_f}`
+    /// (only `<dir>/pkg_a.spl`, layered aliases and `NN.pkg_a/` were probed),
+    /// nothing was flattened, and the JIT reported
+    /// `unresolved external symbol 'facade_f'`.
+    #[test]
+    fn numbered_layer_plain_package_init_resolves_and_flattens_facade_reexport() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let pkg = src.join("35.sem").join("pkg_a");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("__init__.spl"), "export use sem.pkg_a.inner.{facade_f}\n").unwrap();
+        fs::write(
+            pkg.join("inner.spl"),
+            "pub fn facade_f(x: i64) -> i64:\n    x * 2 + 1\n\nexport facade_f\n",
+        )
+        .unwrap();
+        let entry = src.join("main.spl");
+        fs::write(&entry, "use sem.pkg_a.{facade_f}\n\nfn main():\n    print(\"{facade_f(20)}\")\n").unwrap();
+        clear_module_source_text_cache();
+
+        let use_stmt = UseStmt {
+            span: Span::new(0, 0, 1, 1),
+            path: ModulePath::new(vec!["sem".to_string(), "pkg_a".to_string()]),
+            target: ImportTarget::Group(vec![ImportTarget::Single("facade_f".to_string())]),
+            is_type_only: false,
+            is_lazy: false,
+        };
+        let resolved = resolve_use_to_path(&use_stmt, &src).expect("facade import must resolve to a path");
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            pkg.join("__init__.spl").canonicalize().unwrap(),
+            "the plain package marker under the numbered layer is the facade"
+        );
+
+        let module = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_fn = module
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(f) if f.name == "facade_f"));
+        assert!(
+            has_fn,
+            "the re-exported owner fn must be flattened into the entry unit; items: {:?}",
+            module
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Node::Function(f) => Some(f.name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Ordering pin for the fix above: a same-named `<pkg>.spl` file next to a
+    /// `<pkg>/__init__.spl` directory still wins for a `Single` import (the
+    /// file check runs first; only lookups that returned `None` before may
+    /// now return the package marker).
+    #[test]
+    fn numbered_layer_same_named_file_still_outranks_plain_package_init() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let layer = src.join("35.sem");
+        fs::create_dir_all(layer.join("pkg_b")).unwrap();
+        fs::write(layer.join("pkg_b.spl"), "pub fn from_file() -> i64:\n    1\n").unwrap();
+        fs::write(layer.join("pkg_b").join("__init__.spl"), "pub fn from_init() -> i64:\n    2\n").unwrap();
+        clear_module_source_text_cache();
+
+        let use_stmt = UseStmt {
+            span: Span::new(0, 0, 1, 1),
+            path: ModulePath::new(vec!["sem".to_string(), "pkg_b".to_string()]),
+            target: ImportTarget::Single("pkg_b".to_string()),
+            is_type_only: false,
+            is_lazy: false,
+        };
+        let resolved = resolve_use_to_path(&use_stmt, &src).expect("import must resolve");
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            layer.join("pkg_b.spl").canonicalize().unwrap(),
+            "same-named file keeps winning over the package marker"
         );
     }
 

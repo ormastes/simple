@@ -75,6 +75,15 @@ fn native_group_cache_identity_v1(run: NativeGroupRunV1) -> text:
         run.variant_digest + "\n" + run.index_digest + "\n" + run.inventory_digest +
         "\n" + run.state_root + "\n" + run.output_root)
 
+fn native_group_cache_root_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1) -> text:
+    # Stable across attempts AND generations of one group under one admitted identity:
+    # retries reuse content-keyed per-file objects; any change to producer, variant,
+    # index, inventory, state_root or output_root yields a different directory, so a
+    # stale object can never be served across identities. 16 hex chars keep the path
+    # short for Windows MAX_PATH.
+    run.state_root + "/groups/" + sha256_text(manifest.group_id) + "/cache-" +
+        sha256_text(native_group_cache_identity_v1(run))[0:16]
+
 fn native_group_lease_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1) -> GroupedActionLeaseV1:
     val digest = native_group_manifest_identity_v1(manifest)
     GroupedActionLeaseV1(manifest.group_id, native_group_action_id_v1(manifest),
@@ -154,7 +163,7 @@ fn native_group_restore_v1(input: NativeGroupRunV1) -> Result<NativeGroupRunV1, 
     if not native_group_base_match_v1(input, ledger): return Err("native group ledger differs from supplied manifest")
     Ok(ledger)
 
-fn native_group_environment_v1(run: NativeGroupRunV1, root: text,
+fn native_group_environment_v1(run: NativeGroupRunV1, root: text, cache_root: text,
         resource: NativeGroupResourceV1) -> [text]:
     val private_keys = ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR",
         "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK",
@@ -172,9 +181,12 @@ fn native_group_environment_v1(run: NativeGroupRunV1, root: text,
             environment = environment.push(assignment)
     for key in private_keys:
         var value = root + "/private/" + key
+        if key == "SIMPLE_NATIVE_BUILD_CACHE_DIR" or key == "SIMPLE_RT_OBJ_CACHE_DIR" or
+                key == "SIMPLE_HIR_CACHE_DIR" or key == "SIMPLE_FRONTEND_CACHE_DIR":
+            value = cache_root + "/" + key
         if key == "SIMPLE_NO_STUB_FALLBACK" or key == "SIMPLE_COMPILER_PHASE_PROFILE":
             value = "1"
-        if key == "SIMPLE_CACHE": value = root + "/cache"
+        if key == "SIMPLE_CACHE": value = cache_root + "/cache"
         if key == "SIMPLE_PACKAGE_INDEX_READ_ROOT": value = run.index_read_root
         if key == "SIMPLE_COMPILER_PHASE_PROFILE_FILE": value = root + "/compiler.phase.log"
         if key == "SIMPLE_NATIVE_GROUP_MEASURED_THREAD_BYTES":
@@ -270,6 +282,7 @@ fn native_group_warm_environment_v1(run: NativeGroupRunV1) -> text:
 fn native_group_request_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1) -> Result<GroupProcessRequestV1, text>:
     val resource = native_group_resource_for_v1(run, manifest)?
     val root = native_group_attempt_root_v1(run, manifest)
+    val cache_root = native_group_cache_root_v1(run, manifest)
     if not file_is_regular_no_follow(manifest.group_route_path) or
             file_hash_sha256(manifest.group_route_path) != manifest.group_route_digest:
         return Err("group warm route differs from pinned digest")
@@ -280,7 +293,7 @@ fn native_group_request_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV
         root + "/group.manifest.sdn", sha256_text(group_payload), root + "/result.sdn",
         run.source_root, run.source_root + "/" + manifest.members[0].source_path,
         run.index_read_root, run.run_id, run.output_root,
-        run.backend, run.max_threads, run.target, run.lifetime_ms)
+        run.backend, run.max_threads, run.target, run.lifetime_ms, cache_root)
     val worker_payload = native_group_worker_request_encode_v1(worker_request)
     if worker_payload == "" or not native_group_install_v1(root, root + "/worker.request.sdn", worker_payload):
         return Err("cannot install group worker request")
@@ -299,11 +312,13 @@ fn native_group_request_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV
     for member in manifest.members:
         inputs = inputs.push(GroupProcessInputV1(run.source_root + "/" + member.source_path, member.source_digest))
     for key in ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR",
-            "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "TEMP", "TMP", "TMPDIR"]:
+            "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR"]:
+        if not dir_create(cache_root + "/" + key, true): return Err("cannot create private compiler cache")
+    for key in ["TEMP", "TMP", "TMPDIR"]:
         if not dir_create(root + "/private/" + key, true): return Err("cannot create private compiler cache")
-    if not dir_create(root + "/cache/native", true): return Err("cannot create private grouped compiler cache")
+    if not dir_create(cache_root + "/cache/native", true): return Err("cannot create private grouped compiler cache")
     Ok(GroupProcessRequestV1(run.worker_program, run.worker_digest,
-        ["--group-root", root], native_group_environment_v1(run, root, resource), root, inputs,
+        ["--group-root", root], native_group_environment_v1(run, root, cache_root, resource), root, inputs,
         root + "/worker.stdout.log", root + "/worker.stderr.log", run.lifetime_ms,
         run.broker_program, run.broker_digest))
 
@@ -1309,3 +1324,4 @@ export native_group_run_v1, native_group_verify_v1, native_group_completion_json
 export native_group_normalize_crashed_sccs_v1
 export native_group_demote_unqualified_smf_v1
 export native_group_blocked_payload_v1, native_group_blocked_marker_matches_v1
+export native_group_attempt_root_v1, native_group_cache_root_v1, native_group_environment_v1

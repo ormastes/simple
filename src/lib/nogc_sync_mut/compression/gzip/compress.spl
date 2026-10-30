@@ -15,12 +15,13 @@ use std.nogc_sync_mut.compression.gzip.crc.{
     crc32_calculate, crc32_verify, crc32_update, crc32_finalize, crc32_chunked
 }
 use std.nogc_sync_mut.compression.gzip.header.{
-    gzip_header_create, gzip_header_parse, gzip_header_parse_at, gzip_header_size,
-    gzip_footer_create, gzip_footer_parse, gzip_footer_validate
+    gzip_header_create, gzip_header_parse, gzip_header_size,
+    gzip_footer_create, gzip_footer_parse
 }
 use std.nogc_sync_mut.compression.gzip.lz77.{lz77_compress}
 use std.nogc_sync_mut.compression.gzip.deflate.{deflate_block_stored, deflate_block_fixed}
 use std.nogc_sync_mut.compression.gzip.inflate.{inflate_member, InflateOut}
+use std.nogc_sync_mut.compression.gzip.decompress.{gzip_decompress as gzip_decode_members}
 
 # =============================================================================
 # GZIP COMPRESSION
@@ -91,35 +92,8 @@ fn gzip_compress(data: [u8], level: i64) -> [u8]:
 
     return result
 
-# Decompress a GZIP file: a series of one or more members (RFC 1952 2.2), each
-# with its own header, DEFLATE stream and CRC-32 + ISIZE trailer. The output is the
-# concatenation of the members' data. Any malformed member, and any bytes after the
-# last member that do not form another member, fail the whole file (nil).
 fn gzip_decompress(data: [u8]) -> [u8]?:
-    if data.len() < 18:
-        return nil
-    var result: [u8] = []
-    var pos = 0
-    while pos < data.len():
-        # Extract declared payloads explicitly on older native producers.
-        # @workaround bug=gzip_optional_collection_payload_provenance_2026_10_21
-        val header_info: [i64] = match gzip_header_parse_at(data, pos):
-            case Some(info): info
-            case nil: return nil
-        val body: InflateOut = match inflate_member(data, gzip_header_size(header_info)):
-            case Some(info): info
-            case nil: return nil
-        val member: [u8] = body.output
-        # A missing (truncated) trailer follows the same nil failure path.
-        val footer_info: [i64] = match gzip_footer_parse(data, body.end):
-            case Some(info): info
-            case nil: return nil
-        if not gzip_footer_validate(footer_info, member, member.len()):
-            return nil
-        for b in member:
-            result.push(b)
-        pos = body.end + 8
-    return result
+    gzip_decode_members(data)
 
 # Compress with default level
 fn gzip_compress_default(data):

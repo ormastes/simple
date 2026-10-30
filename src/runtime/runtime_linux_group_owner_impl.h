@@ -6,7 +6,9 @@
 #include <linux/memfd.h>
 #include <linux/sched.h>
 #include <errno.h>
+#include <ctype.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,6 +127,211 @@ static int rt_lg_parent(void) {
         close(fd); errno = ENOTSUP; return -1;
     }
     return fd;
+}
+
+/* V2 accepts only a canonical, fd-walkable absolute directory. Every
+ * component is opened without following symlinks; textual prefixes are never
+ * used as an ancestry proof. */
+static int rt_lg_canonical_path(const char *path) {
+    if (!path || path[0] != '/') return 0;
+    if (path[1] == 0) return 1;
+    if (path[strlen(path) - 1] == '/') return 0;
+    const char *at = path + 1;
+    while (*at) {
+        const char *end = strchr(at, '/');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        if (!n || (n == 1 && at[0] == '.') ||
+            (n == 2 && at[0] == '.' && at[1] == '.') ||
+            memchr(at, '\\', n)) return 0;
+        at += n;
+        if (*at == '/') { at++; if (!*at) return 0; }
+    }
+    return 1;
+}
+
+static int rt_lg_open_absolute_dir(const char *path) {
+    if (!rt_lg_canonical_path(path)) { errno = EINVAL; return -1; }
+    int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (current < 0) return -1;
+    const char *at = path + 1;
+    while (*at) {
+        const char *end = strchr(at, '/');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        char component[NAME_MAX + 1];
+        if (!n || n > NAME_MAX) { close(current); errno = ENAMETOOLONG; return -1; }
+        memcpy(component, at, n); component[n] = 0;
+        int next = openat(current, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int saved = errno; close(current); current = next; errno = saved;
+        if (current < 0) return -1;
+        at += n; if (*at == '/') at++;
+    }
+    return current;
+}
+
+static int rt_lg_read_proc_file(const char *file_name, char **contents, size_t *length) {
+    const size_t cap = 1024 * 1024;
+    int fd = open(file_name, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    char *data = malloc(cap + 1);
+    if (!data) { close(fd); errno = ENOMEM; return 0; }
+    size_t used = 0;
+    while (used < cap) {
+        ssize_t n = read(fd, data + used, cap - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) { free(data); close(fd); return 0; }
+        if (n == 0) break;
+        used += (size_t)n;
+    }
+    close(fd);
+    if (used == cap) { free(data); errno = EOVERFLOW; return 0; }
+    data[used] = 0; *contents = data; *length = used; return 1;
+}
+
+static int rt_lg_parse_mountinfo(const char *data, size_t length,
+        char *mount_root, size_t root_cap, char *mount_point, size_t point_cap) {
+    size_t offset = 0; int mounts = 0, lines = 0;
+    char root[4096] = "", point[4096] = "";
+    while (offset < length) {
+        const char *newline = memchr(data + offset, '\n', length - offset);
+        if (!newline || ++lines > 4096) { errno = EPROTO; return 0; }
+        size_t line_len = (size_t)(newline - (data + offset));
+        if (!line_len || line_len >= 16384 || memchr(data + offset, '\\', line_len) ||
+            memchr(data + offset, 0, line_len) || memchr(data + offset, '\r', line_len)) {
+            errno = ENOTSUP; return 0;
+        }
+        char line[16384]; memcpy(line, data + offset, line_len); line[line_len] = 0;
+        offset += line_len + 1;
+        char *save = NULL, *token = strtok_r(line, " \t", &save);
+        char *fields[6] = {0};
+        for (int i = 0; token && i < 6; i++, token = strtok_r(NULL, " \t", &save)) fields[i] = token;
+        if (!fields[0] || !fields[1] || !fields[2] || !fields[3] || !fields[4] || !fields[5]) {
+            errno = EPROTO; return 0;
+        }
+        for (int field = 0; field < 2; field++) {
+            if (!*fields[field]) { errno = EPROTO; return 0; }
+            for (const char *digit = fields[field]; *digit; digit++)
+                if (!isdigit((unsigned char)*digit)) { errno = EPROTO; return 0; }
+        }
+        const char *device_colon = strchr(fields[2], ':');
+        if (!device_colon || device_colon == fields[2] || !device_colon[1] ||
+            strchr(device_colon + 1, ':')) { errno = EPROTO; return 0; }
+        for (const char *digit = fields[2]; *digit; digit++)
+            if (digit != device_colon && !isdigit((unsigned char)*digit)) {
+                errno = EPROTO; return 0;
+            }
+        int separator = 0, cgroup2 = 0;
+        while (token) {
+            if (strcmp(token, "-") == 0) {
+                char *fstype = strtok_r(NULL, " \t", &save);
+                char *source = strtok_r(NULL, " \t", &save);
+                char *super_options = strtok_r(NULL, " \t", &save);
+                if (!fstype || !source || !super_options) { errno = EPROTO; return 0; }
+                separator = 1; cgroup2 = strcmp(fstype, "cgroup2") == 0; break;
+            }
+            token = strtok_r(NULL, " \t", &save);
+        }
+        if (!separator) { errno = EPROTO; return 0; }
+        if (cgroup2) {
+            if (++mounts > 1 || strlen(fields[3]) >= sizeof(root) ||
+                strlen(fields[4]) >= sizeof(point) || !rt_lg_canonical_path(fields[3]) ||
+                !rt_lg_canonical_path(fields[4])) { errno = ENOTSUP; return 0; }
+            strcpy(root, fields[3]); strcpy(point, fields[4]);
+        }
+    }
+    if (mounts != 1 || strlen(root) >= root_cap || strlen(point) >= point_cap) {
+        errno = ENOTSUP; return 0;
+    }
+    strcpy(mount_root, root); strcpy(mount_point, point); return 1;
+}
+
+static int rt_lg_parse_membership(const char *data, size_t length,
+        char *membership, size_t cap) {
+    size_t offset = 0; int found = 0, lines = 0;
+    while (offset < length) {
+        const char *newline = memchr(data + offset, '\n', length - offset);
+        if (!newline || ++lines > 4096) { errno = EPROTO; return 0; }
+        size_t line_len = (size_t)(newline - (data + offset));
+        const char *line = data + offset; offset += line_len + 1;
+        const char *first = memchr(line, ':', line_len);
+        const char *second = first ? memchr(first + 1, ':', line_len - (size_t)(first + 1 - line)) : NULL;
+        if (!line_len || memchr(line, '\\', line_len) || memchr(line, 0, line_len) ||
+            memchr(line, '\r', line_len) || !first || !second || first == line ||
+            second + 1 >= line + line_len) {
+            errno = EPROTO; return 0;
+        }
+        for (const char *digit = line; digit < first; digit++)
+            if (!isdigit((unsigned char)*digit)) { errno = EPROTO; return 0; }
+        size_t path_len = (size_t)(line + line_len - (second + 1));
+        if (path_len >= 4096) { errno = EOVERFLOW; return 0; }
+        char record_path[4096]; memcpy(record_path, second + 1, path_len); record_path[path_len] = 0;
+        if (!rt_lg_canonical_path(record_path)) { errno = EPROTO; return 0; }
+        if (line[0] == '0') {
+            if ((size_t)(first - line) != 1 || second != first + 1 || found) {
+                errno = ENOTSUP; return 0;
+            }
+            size_t n = path_len;
+            if (!n || n >= cap) { errno = EOVERFLOW; return 0; }
+            memcpy(membership, second + 1, n); membership[n] = 0; found = 1;
+        }
+    }
+    if (!found) { errno = ENOENT; return 0; }
+    return 1;
+}
+
+/* Resolve the one unambiguous cgroup2 mount visible to this process and map
+ * its unified membership back into that mount. Escaped/ambiguous mountinfo is
+ * rejected rather than guessed. */
+static int rt_lg_current_mapping(char *mount_path, size_t mount_cap,
+        char *membership_path, size_t membership_cap) {
+    char *mountinfo = NULL, *cgroups = NULL; size_t mountinfo_len = 0, cgroups_len = 0;
+    char mount_root[4096], mount_point[4096], membership[4096];
+    int ok = rt_lg_read_proc_file("/proc/self/mountinfo", &mountinfo, &mountinfo_len) &&
+        rt_lg_read_proc_file("/proc/self/cgroup", &cgroups, &cgroups_len) &&
+        rt_lg_parse_mountinfo(mountinfo, mountinfo_len, mount_root, sizeof(mount_root),
+            mount_point, sizeof(mount_point)) &&
+        rt_lg_parse_membership(cgroups, cgroups_len, membership, sizeof(membership));
+    free(mountinfo); free(cgroups);
+    if (!ok ||
+        !rt_lg_canonical_path(mount_root) || !rt_lg_canonical_path(mount_point) ||
+        !rt_lg_canonical_path(membership)) return 0;
+    size_t root_len = strlen(mount_root);
+    if (strncmp(membership, mount_root, root_len) != 0 ||
+        (root_len > 1 && membership[root_len] != 0 && membership[root_len] != '/')) {
+        errno = ENOTSUP; return 0;
+    }
+    const char *suffix = membership + root_len;
+    if (root_len == 1 && mount_root[0] == '/') suffix = membership + 1;
+    if (*suffix == '/') suffix++;
+    int n;
+    if (strcmp(mount_point, "/") == 0)
+        n = snprintf(membership_path, membership_cap, "/%s", suffix);
+    else if (*suffix)
+        n = snprintf(membership_path, membership_cap, "%s/%s", mount_point, suffix);
+    else n = snprintf(membership_path, membership_cap, "%s", mount_point);
+    if (n < 0 || (size_t)n >= membership_cap || strlen(mount_point) >= mount_cap) {
+        errno = EOVERFLOW; return 0;
+    }
+    strcpy(mount_path, mount_point);
+    return 1;
+}
+
+static int rt_lg_is_current_or_parent(int candidate, const char *candidate_path,
+        int current, const char *current_path) {
+    struct stat a, b, named;
+    if (fstat(candidate, &a) || fstat(current, &b)) return 0;
+    if (a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
+        strcmp(candidate_path, current_path) == 0) return 1;
+    size_t n = strlen(candidate_path);
+    if (strncmp(current_path, candidate_path, n) != 0 ||
+        (n > 1 && current_path[n] != '/') || !current_path[n]) return 0;
+    const char *child_name = current_path + n + (n == 1 ? 0 : 1);
+    if (!*child_name || strchr(child_name, '/')) return 0;
+    int child = openat(candidate, child_name,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (child < 0) return 0;
+    int ok = fstat(child, &named) == 0 && named.st_dev == b.st_dev && named.st_ino == b.st_ino;
+    close(child);
+    return ok;
 }
 
 static int rt_lg_hex_digest(const char *data, uint64_t len, char out[65]) {
@@ -294,31 +501,22 @@ static int rt_lg_delegation_fd(void) {
     return fcntl(rt_lg_delegation.parent_fd, F_DUPFD_CLOEXEC, 3);
 }
 
-/* Receipt: status, token, device, inode. Acquisition never adopts an existing
- * directory and never enables a controller in the host root or current group. */
-SplArray *rt_linux_group_parent_acquire_v1(const char *attempt_data, uint64_t attempt_len,
-        const char *identity_data, uint64_t identity_len) {
+/* Shared fresh-child transaction. root_fd is either the legacy literal
+ * cgroup2 mount root or the verified explicit delegated directory. */
+static SplArray *rt_lg_parent_acquire_root(int root, const char *attempt,
+        const char identity[65]) {
     int64_t answer[4] = {EINVAL, 0, 0, 0};
-    char attempt[4096], identity[65], name[80];
-    int root = -1, parent = -1, created = 0;
+    char name[80];
+    int parent = -1, created = 0;
     struct statfs fs;
-    struct stat status;
-    if (rt_lg_delegation.active || rt_linux_group.active ||
-        rt_lg_next_parent_token == INT64_MAX ||
-        !rt_lg_copy_text(attempt_data, attempt_len, attempt, sizeof(attempt)) ||
-        attempt[0] != '/' || !rt_lg_hex_digest(identity_data, identity_len, identity))
-        goto done;
-    root = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    const char *components[] = {"sys", "fs", "cgroup"};
-    for (size_t i = 0; root >= 0 && i < 3; i++) {
-        int next = openat(root, components[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        int saved = errno; close(root); root = next; errno = saved;
-    }
-    if (root < 0 || fstatfs(root, &fs) ||
+    struct stat status = {0};
+    if (root < 0 || rt_lg_delegation.active || rt_linux_group.active ||
+        rt_lg_next_parent_token == INT64_MAX) goto done;
+    if (fstatfs(root, &fs) ||
         (unsigned long)fs.f_type != CGROUP2_SUPER_MAGIC) {
         answer[0] = ENOTSUP; goto done;
     }
-    if (!rt_lg_memory_delegated(root)) { answer[0] = errno; goto done; }
+    if (!rt_lg_memory_delegated(root)) { answer[0] = errno ? errno : ENOTSUP; goto done; }
     snprintf(name, sizeof(name), "simple-parent-%s", identity);
     if (mkdirat(root, name, 0700)) { answer[0] = errno; goto done; }
     created = 1;
@@ -327,6 +525,11 @@ SplArray *rt_linux_group_parent_acquire_v1(const char *attempt_data, uint64_t at
     memset(&status, 0, sizeof(status));
     if (parent < 0 || fstat(parent, &status)) {
         answer[0] = errno ? errno : EIO; goto done;
+    }
+    struct stat named;
+    if (fstatat(root, name, &named, AT_SYMLINK_NOFOLLOW) || !S_ISDIR(named.st_mode) ||
+        named.st_dev != status.st_dev || named.st_ino != status.st_ino) {
+        answer[0] = ESTALE; goto done;
     }
     if (!rt_lg_populated(parent, &populated) || populated ||
         !rt_lg_write_at(parent, "cgroup.subtree_control", "+memory") ||
@@ -345,8 +548,21 @@ SplArray *rt_linux_group_parent_acquire_v1(const char *attempt_data, uint64_t at
 done:
     /* A positive token with a nonzero status is retained ownership, NOT proof
      * of no allocation. Never discard an unremoved parent after rollback. */
-    if (created && unlinkat(root, name, AT_REMOVEDIR)) {
-        answer[0] = errno ? errno : EIO;
+    if (created) {
+        struct stat named;
+        int same = parent >= 0 && fstat(parent, &status) == 0 &&
+            fstatat(root, name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+            S_ISDIR(named.st_mode) && named.st_dev == status.st_dev && named.st_ino == status.st_ino;
+        if (!same) {
+            /* mkdir succeeded but no pinned inode can be proven. Do not
+             * unlink a possibly substituted sibling or mint a fake token. */
+            answer[0] = EOWNERDEAD; answer[1] = -1;
+            if (parent >= 0) close(parent);
+            if (root >= 0) close(root);
+            return owned_adapter_values(answer, 4);
+        }
+        if (unlinkat(root, name, AT_REMOVEDIR)) {
+            answer[0] = errno ? errno : EIO;
         rt_lg_delegation.active = 1;
         rt_lg_delegation.token = ++rt_lg_next_parent_token;
         rt_lg_delegation.root_fd = root; rt_lg_delegation.parent_fd = parent;
@@ -356,10 +572,107 @@ done:
         answer[1] = rt_lg_delegation.token;
         answer[2] = (int64_t)status.st_dev; answer[3] = (int64_t)status.st_ino;
         return owned_adapter_values(answer, 4);
+        }
     }
     if (parent >= 0) close(parent);
     if (root >= 0) close(root);
     return owned_adapter_values(answer, 4);
+}
+
+/* Receipt: status, token, device, inode. V1 deliberately retains its original
+ * literal mount-root policy; V2 supplies an already verified delegated fd. */
+SplArray *rt_linux_group_parent_acquire_v1(const char *attempt_data, uint64_t attempt_len,
+        const char *identity_data, uint64_t identity_len) {
+    char attempt[4096], identity[65];
+    if (rt_lg_delegation.active || rt_linux_group.active ||
+        !rt_lg_copy_text(attempt_data, attempt_len, attempt, sizeof(attempt)) ||
+        attempt[0] != '/' || !rt_lg_hex_digest(identity_data, identity_len, identity)) {
+        const int64_t error[4] = {EINVAL, 0, 0, 0}; return owned_adapter_values(error, 4);
+    }
+    int root = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    const char *components[] = {"sys", "fs", "cgroup"};
+    for (size_t i = 0; root >= 0 && i < 3; i++) {
+        int next = openat(root, components[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int saved = errno; close(root); root = next; errno = saved;
+    }
+    return rt_lg_parent_acquire_root(root, attempt, identity);
+}
+
+/* V2 proves an explicit current/immediate-parent mapping before any child
+ * mkdir. The parent's existing controller set is observed only, never changed. */
+SplArray *rt_linux_group_parent_acquire_at_v2(const char *path_data, uint64_t path_len,
+        const char *attempt_data, uint64_t attempt_len,
+        const char *identity_data, uint64_t identity_len) {
+    int64_t failure[4] = {EINVAL, 0, 0, 0};
+    char path[4096], attempt[4096], identity[65], mount_path[4096], current_path[4096];
+    int root = -1, current = -1;
+    struct statfs fs;
+    if (rt_lg_delegation.active || rt_linux_group.active ||
+        !rt_lg_copy_text(path_data, path_len, path, sizeof(path)) ||
+        !rt_lg_copy_text(attempt_data, attempt_len, attempt, sizeof(attempt)) ||
+        !rt_lg_hex_digest(identity_data, identity_len, identity) ||
+        !rt_lg_canonical_path(path) || !rt_lg_canonical_path(attempt)) goto reject;
+    if (!rt_lg_current_mapping(mount_path, sizeof(mount_path), current_path, sizeof(current_path))) {
+        failure[0] = errno ? errno : ENOTSUP; goto reject;
+    }
+    root = rt_lg_open_absolute_dir(path);
+    current = rt_lg_open_absolute_dir(current_path);
+    int mount = rt_lg_open_absolute_dir(mount_path);
+    if (root < 0 || current < 0 || mount < 0 || fstatfs(root, &fs) ||
+        (unsigned long)fs.f_type != CGROUP2_SUPER_MAGIC || fstatfs(current, &fs) ||
+        (unsigned long)fs.f_type != CGROUP2_SUPER_MAGIC ||
+        !rt_lg_is_current_or_parent(root, path, current, current_path)) {
+        failure[0] = errno ? errno : EACCES;
+        if (mount >= 0) close(mount);
+        goto reject;
+    }
+    struct stat root_stat, current_stat, mount_stat;
+    if (fstat(root, &root_stat) || fstat(current, &current_stat) || fstat(mount, &mount_stat)) {
+        failure[0] = errno ? errno : EIO; close(mount); goto reject;
+    }
+    close(mount);
+    if (root_stat.st_dev != mount_stat.st_dev || current_stat.st_dev != mount_stat.st_dev) {
+        failure[0] = EXDEV; goto reject;
+    }
+    if (root_stat.st_dev == mount_stat.st_dev && root_stat.st_ino == mount_stat.st_ino) {
+        failure[0] = EACCES; goto reject;
+    }
+    if (!rt_lg_memory_delegated(root)) { failure[0] = errno ? errno : ENOTSUP; goto reject; }
+    /* Re-read membership and prove the named delegated path still resolves to
+     * the pinned inode immediately before starting the fresh-child transaction. */
+    char mount_path_again[4096], current_path_again[4096];
+    int named_root = -1, named_current = -1, named_mount = -1;
+    if (!rt_lg_current_mapping(mount_path_again, sizeof(mount_path_again),
+            current_path_again, sizeof(current_path_again)) ||
+        strcmp(mount_path_again, mount_path) != 0 || strcmp(current_path_again, current_path) != 0 ||
+        (named_root = rt_lg_open_absolute_dir(path)) < 0 ||
+        (named_current = rt_lg_open_absolute_dir(current_path_again)) < 0 ||
+        (named_mount = rt_lg_open_absolute_dir(mount_path_again)) < 0) {
+        failure[0] = errno ? errno : ESTALE;
+        if (named_root >= 0) close(named_root);
+        if (named_current >= 0) close(named_current);
+        if (named_mount >= 0) close(named_mount);
+        goto reject;
+    }
+    struct stat pinned, named_status, named_current_status, named_mount_status;
+    struct statfs named_mount_fs;
+    int revalidated = fstat(root, &pinned) == 0 && fstat(named_root, &named_status) == 0 &&
+        pinned.st_dev == named_status.st_dev && pinned.st_ino == named_status.st_ino &&
+        fstat(named_current, &named_current_status) == 0 &&
+        named_current_status.st_dev == mount_stat.st_dev &&
+        fstat(named_mount, &named_mount_status) == 0 &&
+        named_mount_status.st_dev == mount_stat.st_dev && named_mount_status.st_ino == mount_stat.st_ino &&
+        fstatfs(named_mount, &named_mount_fs) == 0 &&
+        (unsigned long)named_mount_fs.f_type == CGROUP2_SUPER_MAGIC &&
+        rt_lg_is_current_or_parent(named_root, path, named_current, current_path_again);
+    close(named_root); close(named_current); close(named_mount);
+    if (!revalidated) { failure[0] = ESTALE; goto reject; }
+    if (current >= 0) close(current);
+    return rt_lg_parent_acquire_root(root, attempt, identity);
+reject:
+    if (current >= 0) close(current);
+    if (root >= 0) close(root);
+    return owned_adapter_values(failure, 4);
 }
 
 int64_t rt_linux_group_parent_release_v1(int64_t token) {

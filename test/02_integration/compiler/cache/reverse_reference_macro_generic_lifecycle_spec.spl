@@ -1,0 +1,101 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Macro forward producer to reverse projection integration.
+
+The macro oracle starts at real parser-produced module TLDR output. The
+generic 3,000-user case is covered separately as a logical demand model, not
+as compiler concurrency qualification.
+"""
+
+# @tag:integration
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec.*
+use std.io_runtime.{file_write}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use app.io.time_ops.{time_now_unix_micros}
+use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1}
+use compiler.driver.cache.generic_spec_rr_producer_v1.{
+    macro_reference_sealed_manifests_for_module_v1}
+use compiler.driver.cache.reverse_reference_projection_v2.{
+    SealedForwardManifestV2, ProposedSemanticEditV2,
+    reverse_reference_project_generation_v2, preview_semantic_change}
+use compiler.driver.cache.reverse_reference_receipt.{
+    ReverseReferenceReceiptReadV1, reverse_reference_consumers_v1,
+    reverse_reference_receipt_encode_v1, reverse_reference_receipt_decode_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    semantic_query_key_canonical_v1}
+
+struct MacroRrFixtureV3:
+    receipt: ReverseReferenceReceiptReadV1
+    definition_subject: text
+    expected_users: [text]
+
+fn setup_rr_forward_scope_v3() -> MacroRrFixtureV3:
+    val root = "build/test_tmp/rr_macro_lifecycle_{time_now_unix_micros()}"
+    val tldr = root + "/tldr"
+    val source = root + "/src/provider_and_users.spl"
+    val source_text = "macro twice(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\n\nfn first() -> i64:\n    twice!(1)\n\nfn second() -> i64:\n    twice!(2)\n"
+    if not dir_create_all(root + "/src") or not file_write(source, source_text):
+        return MacroRrFixtureV3(receipt: ReverseReferenceReceiptReadV1(false,
+            "fixture-write-failed", nil), definition_subject: "", expected_users: [])
+    if module_artifacts_emit_v1(source, tldr) != "":
+        return MacroRrFixtureV3(receipt: ReverseReferenceReceiptReadV1(false,
+            "macro-producer-failed", nil), definition_subject: "", expected_users: [])
+    val manifests = macro_reference_sealed_manifests_for_module_v1(source, tldr)
+    var definition_subject = ""
+    var expected_users: [text] = []
+    for entry in manifests:
+        if val manifest = entry.manifest:
+            for read in manifest.ordered_reads:
+                if read.producer.kind == "macro.def":
+                    definition_subject = semantic_query_key_canonical_v1(read.producer)
+                    val user = semantic_query_key_canonical_v1(read.consumer)
+                    if not expected_users.contains(user): expected_users.push(user)
+    val built = reverse_reference_project_generation_v2("fixture-owner", "fixture-root",
+        manifests, ReverseReferenceReceiptReadV1(false, "missing-generation", nil))
+    if not built.ok or built.receipt == nil:
+        return MacroRrFixtureV3(receipt: ReverseReferenceReceiptReadV1(false,
+            "projection:" + built.reason, nil), definition_subject: definition_subject,
+            expected_users: expected_users)
+    val readback = reverse_reference_receipt_decode_v1(
+        reverse_reference_receipt_encode_v1(built.receipt!))
+    MacroRrFixtureV3(receipt: readback, definition_subject: definition_subject,
+        expected_users: expected_users)
+
+fn check_rr_users_v3(fixture: MacroRrFixtureV3):
+    val users = reverse_reference_consumers_v1(fixture.receipt,
+        fixture.definition_subject, "macro-definition-consumer")
+    expect(users.exact).to_equal(true)
+    expect(users.consumers).to_equal(fixture.expected_users.sorted())
+
+fn check_rr_unknown_scope_v3():
+    val failed = SealedForwardManifestV2(consumer_identity: "consumer:failed",
+        sealed: false, manifest: nil)
+    val build = reverse_reference_project_generation_v2("next-owner", "next-root",
+        [failed], ReverseReferenceReceiptReadV1(false, "missing-generation", nil))
+    expect(build.ok).to_equal(false)
+    val unknown = ReverseReferenceReceiptReadV1(false,
+        "unsealed-forward-manifest", nil)
+    val users = reverse_reference_consumers_v1(unknown, "macro-definition", "macro-definition-consumer")
+    expect(users.exact).to_equal(false)
+    val preview = preview_semantic_change(unknown,
+        ProposedSemanticEditV2(base_snapshot: "previous-root",
+            changed_subjects: ["macro-definition"], changed_name_scopes: [],
+            unknown_effects: false), "complete-workspace")
+    expect(preview.complete).to_equal(false)
+    expect(preview.affected_consumers).to_equal(["@scope:complete-workspace"])
+
+describe "macro reverse-reference lifecycle":
+    it "inverts parser-produced macro users from a fresh module companion":
+        step("Generate forward macro reads and project users through RR")
+        val fixture = setup_rr_forward_scope_v3()
+        expect(fixture.receipt.valid).to_equal(true)
+        expect(fixture.expected_users.len()).to_equal(2)
+        check_rr_users_v3(fixture)
+
+    it "reports Unknown when any forward producer is unsealed":
+        step("Reject an unsealed forward scope without claiming exact empty")
+        check_rr_unknown_scope_v3()

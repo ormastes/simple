@@ -441,6 +441,10 @@ fn build_c_runtime_library(
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
+        // Session-owned process trees + shared pdeathsig / birth-identity arms.
+        // runtime_process.c, runtime_process_owned.c and runtime_fork.c call
+        // into it, so every list that carries those must carry this.
+        "runtime_process_tree.c",
         // Owned-process receipt ABI (rt_process_run_owned_observed_bounded_value
         // and siblings) and the coverage probe/dump ABI. Both were registered by
         // 97a39131fe3 "fix(runtime): close core tool host providers" and dropped

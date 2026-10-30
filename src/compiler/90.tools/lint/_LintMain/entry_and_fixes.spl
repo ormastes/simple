@@ -4,7 +4,21 @@
 # test-runner's phantom file-level-failure defect (a wildcard-resolved import
 # chain reaching a module that declares a top-level `fn main`). See
 # doc/08_tracking/bug/test_runner_wildcard_imported_main_phantom_failure_2026-08-01.md.
-use compiler.tools.lint.main.*
+use std.tooling.easy_fix.types.{easyfix_id, easyfix_description, easyfix_replacements}
+use compiler.tools.lint._LintMain.config_and_model.{
+    LintCliPolicy, LintConfig, LintDiag, LintEvidenceTier, LintFileResult,
+    LintProfile, LintReadFileResult, LintRunResult, Linter, all_lint_names,
+    any_rule_relay_level, lint_evidence_tier_name, lint_policy_decision,
+    lint_read_file, lint_run_result_apply_cli_policy, linter_find_project_sdn,
+    resolve_lint_config
+}
+# `impl Linter` (Linter.new, lint_source_for_parsed_append,
+# release_combined_lint_view) lives in lint_checks; import it directly so
+# this module does not depend on another module's facade wildcard to load it.
+use compiler.tools.lint._LintMain.lint_checks.{lint_rule_code_from_easyfix_id}
+use compiler.tools.lint._LintMain.semantic_markdown_lints.{
+    apply_semantic_markdown_lint_fix_v1, semantic_markdown_lint_sources_v1
+}
 # Simple Language Linter
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
@@ -531,7 +545,7 @@ fn lint_uncertainty_json(uncertainty: text?) -> text:
         case Some(reason): "\"" + escape_json(reason) + "\""
         case nil: "null"
 
-fn lint_main() -> Int:
+fn lint_main() -> i64:
     val args = get_args()
     val json_output = args.contains("--json")
 
@@ -584,7 +598,7 @@ fn lint_main() -> Int:
 # `simple_lint` entry above and the `simple lint` CLI wrapper
 # (app.io.cli_lint_commands.run_lint_command). Returns 0 when the file is
 # clean (or only warnings, unless --deny-all is set), 1 otherwise.
-fn run_lint_file(file_path: String, args: [text]) -> Int:
+fn run_lint_file(file_path: String, args: [text]) -> i64:
     # The target-scoped command path resolves its manifest below. Do not first
     # discover/read/parse an unrelated cwd manifest only to overwrite it.
     var linter = Linter.new(false)
@@ -594,7 +608,7 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
 # immutable rule descriptors and bounded parsed-project cache are reused.
 fn run_lint_file_with_linter(
     linter: Linter, file_path: String, args: [text]
-) -> Int:
+) -> i64:
     _run_lint_with_linter_source(
         linter, file_path, LintCliPolicy.from_args(args), nil)
 
@@ -602,7 +616,7 @@ fn run_lint_file_with_linter(
 # loaded the file use this to share the exact payload with sibling analyses.
 fn run_lint_source_with_linter(
     linter: Linter, file_path: String, args: [text], content: String
-) -> Int:
+) -> i64:
     _run_lint_with_linter_source(
         linter, file_path, LintCliPolicy.from_args(args), Some(content))
 
@@ -610,12 +624,12 @@ fn run_lint_source_with_linter(
 # reuses it for every source. Positional targets never enter the file hot path.
 fn run_lint_source_with_linter_policy(
     linter: Linter, file_path: String, policy: LintCliPolicy, content: String
-) -> Int:
+) -> i64:
     _run_lint_with_linter_source(linter, file_path, policy, Some(content))
 
 fn _run_lint_with_linter_source(
     linter: Linter, file_path: String, policy: LintCliPolicy, content: String?
-) -> Int:
+) -> i64:
     linter.last_diagnostic_count = 0
     linter.last_error_count = 0
     linter.last_warning_count = 0
@@ -769,7 +783,7 @@ fn _run_lint_with_linter_source(
                     if effective_item.has_easy_fix():
                         fix_count = fix_count + 1
 
-                # Render the flag as text rather than interpolating the Bool:
+                # Render the flag as text rather than interpolating the bool:
                 # to_text on an erased Any bool is corrupt (true -> "nil"), which
                 # would emit invalid JSON. See
                 # .claude/memory reference_to_to_text_on_erased_any_bool_corrupt.
@@ -837,7 +851,7 @@ fn _run_lint_with_linter_source(
 
     return 0
 
-fn collect_easy_fixes(results: [LintRunResult], include_all: Bool) -> [EasyFix]:
+fn collect_easy_fixes(results: [LintRunResult], include_all: bool) -> [EasyFix]:
     var fixes: [EasyFix] = []
     for result in results:
         if result.lint.level == LintLevel.Allow: continue
@@ -849,14 +863,14 @@ fn collect_easy_fixes(results: [LintRunResult], include_all: Bool) -> [EasyFix]:
                 val _ = 0
     fixes
 
-fn lint_fix_refused(file_path: String, message: String, json_output: Bool) -> Bool:
+fn lint_fix_refused(file_path: String, message: String, json_output: bool) -> bool:
     if json_output:
         print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(message)}\"}")
     else:
         error("lint", message)
     false
 
-fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, json_output: Bool, analyzed_source: String? = nil) -> Bool:
+fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: bool, json_output: bool, analyzed_source: String? = nil) -> bool:
     if analyzed_source == nil:
         return lint_fix_refused(file_path, "{file_path}:1:1: missing analyzed source revision; rerun lint before applying fixes", json_output)
     val source: String = analyzed_source.unwrap()

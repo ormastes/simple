@@ -1,0 +1,229 @@
+# Actual HM-owned finite-profile annotation. Returned HIR is compiler data,
+# never parser provenance, a live completion grant, or cache admission.
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable,
+    HirSymbol, Scope, SymbolKind, ScopeKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirFunction, HirStmt, HirStmtKind, HirBlock}
+use compiler.types.type_infer_types.{HmInferContext}
+use compiler.types.type_infer.*
+use compiler.common.attributes.{OptimizationReqLevel, OptimizationBackend}
+
+pub struct HmTypedModuleLimitsV1:
+    max_functions: i64
+    max_nodes: i64
+    max_depth: i64
+    max_work: i64
+
+pub struct HmTypedModuleResultV1:
+    module: HirModule
+    annotated_functions: i64
+    annotated_expressions: i64
+
+fn _hm_primitive_type_v1(value: HirType) -> bool:
+    if value.span.file.len() > 256: return false
+    match value.kind:
+        case HirTypeKind.Int(bits, signed): bits == 64 and signed
+        case HirTypeKind.Bool | HirTypeKind.Unit: true
+        case _: false
+
+fn _hm_symbol_type_v1(value: HirType) -> bool:
+    if value.span.file.len() > 256: return false
+    match value.kind:
+        case HirTypeKind.Function(parameters, result, effects):
+            parameters.len() == 0 and effects.len() == 0 and _hm_primitive_type_v1(result)
+        case _: _hm_primitive_type_v1(value)
+
+fn _hm_literal_shape_v1(value: HirExpr) -> bool:
+    if value.span.file.len() > 256: return false
+    if value.has_type_ and not _hm_primitive_type_v1(value.type_): return false
+    match value.kind:
+        case HirExprKind.IntLit(_, suffix): suffix == nil
+        case HirExprKind.BoolLit(_): true
+        case _: false
+
+fn _hm_terminal_shape_v1(value: HirExpr) -> bool:
+    match value.kind:
+        case HirExprKind.Return(payload):
+            if value.span.file.len() > 256: return false
+            if value.has_type_ and not _hm_primitive_type_v1(value.type_): return false
+            if val expression = payload: return _hm_literal_shape_v1(expression)
+            false
+        case _: _hm_literal_shape_v1(value)
+
+fn _hm_inactive_body_value_v1(value: HirExpr) -> bool:
+    if value.span.file.len() > 256 or value.has_type_ or value.type_ != nil: return false
+    match value.kind:
+        case HirExprKind.NilLit: true
+        case _: false
+
+# Bound all roots the actual whole-module inference may inspect BEFORE calling
+# it. Every other declaration/type/body kind is unsupported, never skipped.
+fn _hm_typed_preflight_v1(module: HirModule, limits: HmTypedModuleLimitsV1) -> text:
+    if (limits.max_functions <= 0 or limits.max_functions > 64 or limits.max_nodes <= 0 or
+            limits.max_nodes > 4096 or limits.max_depth < 4 or limits.max_depth > 32 or
+            limits.max_work <= 0 or limits.max_work > 1000000): return "hm-typed-limits"
+    if module.name.len() == 0 or module.name.len() > 256 or module.path.len() > 256: return "hm-typed-module-metadata"
+    if (module.functions.len() == 0 or module.functions.len() > limits.max_functions or
+            module.imports.len() != 0 or module.exports.len() != 0 or module.domain_blocks.len() != 0 or
+            module.classes.len() != 0 or module.structs.len() != 0 or module.enums.len() != 0 or
+            module.bitfields.len() != 0 or module.traits.len() != 0 or module.impls.len() != 0 or
+            module.constants.len() != 0 or module.static_asserts.len() != 0 or module.aop_advices.len() != 0 or
+            module.di_bindings.len() != 0 or module.arch_rules.len() != 0 or module.mock_decls.len() != 0 or
+            module.types.len() != 0 or module.extend_enums.len() != 0 or module.representation_declarations.len() != 0 or
+            module.nogc_strict or module.nogc_param_effects_checked or module.nogc_param_effect_symbol_ids.len() != 0 or
+            module.nogc_param_effects.len() != 0 or module.gpu_function_targets.len() != 0 or module.gpu_function_backend_orders.len() != 0): return "hm-typed-module-profile"
+    val table = module.symbols
+    if table.symbols.len() > limits.max_nodes or table.scopes.len() > limits.max_nodes: return "hm-typed-symbol-budget"
+    if table.symbols.len() != module.functions.len(): return "hm-typed-external-symbol-universe"
+    if (table.gpu_function_targets.len() != 0 or table.gpu_function_backend_orders.len() != 0 or
+            table.qualified_functions.len() != 0 or table.qualified_types.len() != 0 or
+            table.structural_union_symbols.len() != 0 or table.structural_union_owners.len() != 0): return "hm-typed-symbol-profile"
+    var work = 1
+    for key in table.symbols.keys():
+        val symbol = table.symbols[key]
+        if key != symbol.id.id: return "hm-typed-symbol-key-mismatch"
+        if (symbol.name.len() > 256 or symbol.span.file.len() > 256 or symbol.generic_param_count != 0): return "hm-typed-symbol-metadata"
+        if symbol.kind != SymbolKind.Function or not module.functions.has(symbol.id): return "hm-typed-symbol-universe"
+        if val owner = symbol.defining_module:
+            if owner.len() > 256: return "hm-typed-symbol-metadata"
+        if val type_ = symbol.type_:
+            if not _hm_symbol_type_v1(type_): return "hm-typed-symbol-type"
+        work = work + 1
+    for key in table.scopes.keys():
+        val scope = table.scopes[key]
+        if scope.kind != ScopeKind.Module and scope.kind != ScopeKind.Function and scope.kind != ScopeKind.Block:
+            return "hm-typed-scope-profile"
+        if scope.symbols.len() > limits.max_nodes - work: return "hm-typed-scope-budget"
+        for name in scope.symbols.keys():
+            if name.len() > 256: return "hm-typed-scope-metadata"
+            work = work + 1
+    for names in [table.exact_symbols, table.module_callables, table.root_scope_symbols]:
+        if names.len() > limits.max_nodes - work: return "hm-typed-index-budget"
+        for name in names.keys():
+            if name.len() > 256: return "hm-typed-index-metadata"
+            work = work + 1
+    for key in module.functions.keys():
+        val function_ = module.functions[key]
+        if not table.symbols.has(key.id) or table.symbols[key.id].kind != SymbolKind.Function:
+            return "hm-typed-function-symbol-missing"
+        val attr = function_.func_attr
+        if (attr.is_entry or attr.is_naked or attr.is_noreturn or attr.section != nil or
+                attr.is_interrupt or attr.is_boot or attr.is_alloc or attr.is_no_alloc or attr.is_gpu_kernel or
+                attr.gpu_target != "" or attr.gpu_backends != "" or attr.is_simd or attr.has_fast_math or
+                attr.simd_enable or attr.simd_disable or attr.simd_prefer_scalable or
+                attr.optimization_req.level != OptimizationReqLevel.None_ or
+                attr.optimization_req.backend != OptimizationBackend.Unknown or
+                attr.unroll_factor != 0 or attr.pipeline_ii != 0 or attr.memory_banks != 0 or
+                attr.is_rt_hal or attr.rt_hal_compare_c or attr.rt_hal_compare_rust or attr.rt_hal_error != "" or
+                attr.is_volatile or attr.is_no_reorder or attr.align != 0 or attr.is_global or attr.placement_error != ""):
+            return "hm-typed-attributes-unsupported"
+        if (key.id != function_.symbol.id or function_.name.len() == 0 or function_.name.len() > 256 or
+                function_.span.file.len() > 256 or function_.type_params.len() != 0 or function_.params.len() != 0 or
+                function_.effects.len() != 0 or function_.is_async or function_.is_static or function_.is_method or
+                function_.is_mutable or function_.is_const or function_.is_extern or function_.is_gpu_kernel or
+                function_.has_suspension or function_.has_export_attr or function_.export_attr != nil or
+                function_.has_driver_manifest_attr or function_.driver_manifest_attr != nil or
+                function_.has_vhdl_metadata or function_.vhdl_metadata != nil or function_.has_doc_comment or
+                function_.doc_comment != "" or function_.gpu_target != "" or function_.gpu_backend_order != "" or
+                function_.verification_contract != nil or function_.is_generic_template or
+                not _hm_primitive_type_v1(function_.return_type) or function_.body.unsafe_caps.len() != 0): return "hm-typed-function-profile"
+        if (function_.cfg.len() != 0 or function_.cfg_group != 0 or function_.cfg_arm != -1 or
+                function_.extern_runtime_value_abi != 0): return "hm-typed-conditional-or-runtime-abi-profile"
+        if function_.body.span.file.len() > 256: return "hm-typed-body-metadata"
+        if function_.body.has:
+            if function_.body.stmts.len() != 0 or not _hm_terminal_shape_v1(function_.body.value): return "hm-typed-body-profile"
+        else:
+            if not _hm_inactive_body_value_v1(function_.body.value): return "hm-typed-inactive-body-value"
+            if function_.body.stmts.len() != 1: return "hm-typed-body-profile"
+            match function_.body.stmts[0].kind:
+                case HirStmtKind.Expr(expression):
+                    if not _hm_terminal_shape_v1(expression): return "hm-typed-body-profile"
+                case _: return "hm-typed-statement-profile"
+        work = work + 8
+        if work > limits.max_nodes or work > limits.max_work / 16: return "hm-typed-work-budget"
+    ""
+
+# New container owners; the original module's functions/blocks/expressions and
+# mutable symbol dictionaries are never edited by inference or annotation.
+fn _hm_copy_symbols_v1(original: SymbolTable) -> SymbolTable:
+    val copy = original.module_snapshot()
+    copy.symbols = {}
+    for key in original.symbols.keys(): copy.symbols[key] = original.symbols[key]
+    copy.scopes = {}
+    for key in original.scopes.keys():
+        val original_scope = original.scopes[key]
+        var names: Dict<text, i64> = {}
+        for name in original_scope.symbols.keys(): names[name] = original_scope.symbols[name]
+        copy.scopes[key] = Scope(..original_scope, symbols: names)
+    copy.exact_symbols = {}
+    for name in original.exact_symbols.keys(): copy.exact_symbols[name] = original.exact_symbols[name]
+    copy.module_callables = {}
+    for name in original.module_callables.keys(): copy.module_callables[name] = original.module_callables[name]
+    copy.root_scope_symbols = {}
+    for name in original.root_scope_symbols.keys(): copy.root_scope_symbols[name] = original.root_scope_symbols[name]
+    copy.gpu_function_targets = {}
+    copy.gpu_function_backend_orders = {}
+    copy.qualified_functions = {}
+    copy.qualified_types = {}
+    copy.structural_union_symbols = {}
+    copy.structural_union_owners = {}
+    copy
+
+pub fn hm_infer_owned_typed_module_v1(module: HirModule,
+        limits: HmTypedModuleLimitsV1) -> Result<HmTypedModuleResultV1, text>:
+    val refusal = _hm_typed_preflight_v1(module, limits)
+    if refusal != "": return Err(refusal)
+    var context = HmInferContext.with_builtins()
+    context.infer_module(module)
+    if context.errors.len() != 0: return Err("hm-typed-inference-rejected")
+    var functions: Dict<SymbolId, HirFunction> = {}
+    var occurrences = 0
+    for key in module.functions.keys():
+        val original = module.functions[key]
+        # Exact existing function symbol plus structural body occurrence; no
+        # span IDs, caller occurrence map or caller-supplied inferred types.
+        context.current_function_symbol = Some(original.symbol)
+        context.current_return_type = Some(original.return_type)
+        context.current_fn_name = original.name
+        val expression = if original.body.has: original.body.value else:
+            match original.body.stmts[0].kind:
+                case HirStmtKind.Expr(value): value
+                case _: return Err("hm-typed-statement-changed")
+        var terminal = expression
+        var returning = false
+        match expression.kind:
+            case HirExprKind.Return(value):
+                if val payload = value:
+                    terminal = payload
+                    returning = true
+                else: return Err("hm-typed-return-missing")
+            case _: ()
+        val inferred = context.synthesize_expr(terminal)
+        if inferred.is_err(): return Err("hm-typed-expression-inference-rejected")
+        if context.check_expr(terminal, original.return_type).is_err(): return Err("hm-typed-expression-check-rejected")
+        val resolved = context.resolve(inferred.unwrap())
+        if not _hm_primitive_type_v1(resolved): return Err("hm-typed-unresolved-expression")
+        val typed_terminal = HirExpr(..terminal, has_type_: true, type_: resolved)
+        var typed_expression = typed_terminal
+        occurrences = occurrences + 1
+        if returning:
+            val inferred_return = context.synthesize_expr(expression)
+            if inferred_return.is_err(): return Err("hm-typed-return-inference-rejected")
+            val resolved_return = context.resolve(inferred_return.unwrap())
+            if not _hm_primitive_type_v1(resolved_return): return Err("hm-typed-unresolved-return")
+            typed_expression = HirExpr(..expression, kind: HirExprKind.Return(Some(typed_terminal)),
+                has_type_: true, type_: resolved_return)
+            occurrences = occurrences + 1
+        val statements: [HirStmt] = if original.body.has: [] else:
+            [HirStmt(..original.body.stmts[0], kind: HirStmtKind.Expr(typed_expression))]
+        val body = HirBlock(..original.body, stmts: statements, unsafe_caps: [],
+            value: if original.body.has: typed_expression else:
+                HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: original.body.span))
+        functions[key] = HirFunction(..original, body: body, type_params: [], params: [], effects: [],
+            cfg: [], cfg_group: 0, cfg_arm: -1, extern_runtime_value_abi: 0)
+    if context.errors.len() != 0: return Err("hm-typed-final-diagnostics")
+    val typed = HirModule(..module, functions: functions, symbols: _hm_copy_symbols_v1(module.symbols),
+        imports: [], exports: [], domain_blocks: [], gpu_function_targets: {}, gpu_function_backend_orders: {},
+        classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [], types: [],
+        extend_enums: [], representation_declarations: [], nogc_param_effect_symbol_ids: [], nogc_param_effects: [])
+    Ok(HmTypedModuleResultV1(module: typed, annotated_functions: functions.len(), annotated_expressions: occurrences))

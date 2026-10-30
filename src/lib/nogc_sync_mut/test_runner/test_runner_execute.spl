@@ -1573,6 +1573,24 @@ fn remove_native_completion_evidence_v1(path: text):
     if file_exists(path + ".complete"): file_delete(path + ".complete")
     if file_exists(path + ".trace-events.sdnstream"): file_delete(path + ".trace-events.sdnstream")
 
+fn native_failure_output_excerpt_v1(output: text) -> text:
+    # Keep complete UTF-8 characters and leave room for both streams and the
+    # authoritative reason inside the daemon's 4096-byte diagnostic envelope.
+    if output.len() <= 1536: return output
+    var excerpt = ""
+    for ch in output:
+        if excerpt.len() + ch.len() > 1536: break
+        excerpt = excerpt + ch
+    excerpt + " [truncated]"
+
+fn native_failure_diagnostic_v1(reason: text, stdout: text, stderr: text) -> text:
+    # Child output is opaque diagnostic text only. Never derive verdicts,
+    # completion, or counts from a child-controlled log line.
+    var diagnostic = reason
+    if stderr != "": diagnostic = diagnostic + "\nchild stderr (diagnostic only):\n" + native_failure_output_excerpt_v1(stderr)
+    if stdout != "": diagnostic = diagnostic + "\nchild stdout (diagnostic only):\n" + native_failure_output_excerpt_v1(stdout)
+    diagnostic
+
 pub fn make_native_completion_result_v1(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text, kind: text) -> TestFileResult:
     if kind != "spec" and kind != "plain":
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
@@ -1581,13 +1599,13 @@ pub fn make_native_completion_result_v1(file_path: text, stdout: text, stderr: t
     if complete != native_execution_completion_v1(evidence_path, kind, exit_code):
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: duration_ms, setup_ms: 0,
-            error: "native-test: normal completion evidence missing or invalid (exit " + exit_code.to_text() + ")", timed_out: false, cached: false)
+            error: native_failure_diagnostic_v1("native-test: normal completion evidence missing or invalid (exit " + exit_code.to_text() + ")", stdout, stderr), timed_out: false, cached: false)
     if kind == "spec":
         return make_result_from_structured_evidence(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs, evidence_path, true)
     # One completed plain program, not a fabricated BDD example/assertion.
     TestFileResult(path: file_path, passed: if exit_code == 0: 1 else: 0, failed: if exit_code == 0: 0 else: 1, skipped: 0, pending: 0,
         duration_ms: duration_ms, setup_ms: 0,
-        error: if exit_code == 0: "" else: "native-test: plain program returned failure", timed_out: false, cached: false)
+        error: if exit_code == 0: "" else: native_failure_diagnostic_v1("native-test: plain program returned failure", stdout, stderr), timed_out: false, cached: false)
 
 fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResult:
     """Compile mode: compile test file to .smf and run it.
@@ -1663,7 +1681,7 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 # std.test_runner.test_executor_lanes instead.
 
 # Exports from this file
-export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
+export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe_mode, preprocess_spipe_file
 export mcdc_manifest_transport_args
 export smf_compile_degrade_token, scoped_limit_exceeded_result, mcdc_manifest_absent_degrade_opted_in
 export mcdc_compiler_lacks_probes, mcdc_compiler_identity_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN, MCDC_UNAVAILABLE_REASON

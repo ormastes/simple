@@ -77,6 +77,10 @@ extern fn rt_array_new(cap: i64) -> i64
 extern fn rt_array_push(array: i64, value: i64) -> i8
 @unsafe(reason: "raw owned byte-array handle allocation ABI; nonpositive return is failure", capabilities: [ffi])
 extern fn rt_byte_array_new_len(len: i64) -> i64
+@unsafe(reason: "raw libc path resolution ABI; NULL resolved buffer requests a malloc'd result, NULL return is failure", capabilities: [ffi, raw_ptr])
+extern fn realpath(path: i64, resolved: i64) -> i64
+@unsafe(reason: "raw tagged nil value ABI", capabilities: [ffi])
+extern fn rt_value_nil() -> i64
 @unsafe(reason: "raw pointer/offset byte load ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 @unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi, raw_ptr])
@@ -150,6 +154,16 @@ fn _sffi_core_fs_lseek(fd: i64, offset: i64, whence: i64) -> i64:
 fn _sffi_core_fs_strlen(ptr: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]):
         strlen(ptr)
+
+@always_inline
+fn _sffi_core_fs_realpath(path: i64, resolved: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        realpath(path, resolved)
+
+@always_inline
+fn _sffi_core_fs_rt_value_nil() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_value_nil()
 
 @always_inline
 fn _sffi_core_fs_fread(ptr: i64, size: i64, count: i64, stream: i64) -> i64:
@@ -352,6 +366,37 @@ pub fn rt_file_exists(path_ptr_raw: i64, path_len: i64) -> i8:
         return 0
     _sffi_core_fs_fclose(f)
     return 1
+
+# --- Canonical Path ---
+
+# Cross-engine contract shared with runtime_native.c, the Rust runtime
+# (file_ops.rs) and the interpreter twin: the real absolute path with every
+# symlink resolved, like libc realpath; the path must exist; every failure is the
+# explicit nil. Before this owner existed the simple-core bundle had no
+# rt_file_canonicalize at all, so a caller dispatched through an unresolved
+# extern. On SimpleOS libsimpleos_c's realpath returns NULL/ENOSYS by design
+# (doc/08_tracking/bug/simpleos_realpath_false_canonicalization_2026-08-13.md),
+# so SimpleOS reports nil rather than a fabricated path; Linux/macOS/FreeBSD
+# simple-core bundles get the real answer from this same code.
+pub fn rt_file_canonicalize(path_ptr_raw: i64, path_len: i64) -> i64:
+    var raw_ptr = path_ptr_raw
+    var raw_len = path_len
+    if raw_len < 1 and (raw_ptr & 7) == 1:
+        raw_len = _sffi_core_fs_rt_string_len(raw_ptr)
+        raw_ptr = _sffi_core_fs_rt_string_data(raw_ptr)
+    if raw_len < 1:
+        return _sffi_core_fs_rt_value_nil()
+    val path_ptr = fs_copy_cstr(raw_ptr, raw_len)
+    if path_ptr < 1:
+        return _sffi_core_fs_rt_value_nil()
+    # resolved == 0 (NULL) asks libc to malloc the result, so no PATH_MAX guess.
+    val resolved = _sffi_core_fs_realpath(path_ptr, 0)
+    _sffi_core_fs_free(path_ptr)
+    if resolved < 1:
+        return _sffi_core_fs_rt_value_nil()
+    val result = _sffi_core_fs_rt_string_new(resolved, _sffi_core_fs_strlen(resolved))
+    _sffi_core_fs_free(resolved)
+    result
 
 # --- File Read ---
 

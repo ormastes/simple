@@ -146,6 +146,8 @@ pub mod host_gpu_lane;
 pub mod win32_hosted;
 #[cfg(windows)]
 pub mod windows_abi;
+#[cfg(unix)]
+pub mod posix_abi;
 pub mod cache_host;
 pub mod enum_sffi;
 pub mod vulkan;
@@ -833,6 +835,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_char_from_code", conversion::rt_char_from_code_fn);
     insert_simple!("rt_tuple_get", conversion::rt_tuple_get_fn);
     insert_simple!("rt_tuple_len", conversion::rt_tuple_len_fn);
+    insert_simple!("rt_tuple_new", conversion::rt_tuple_new_fn);
+    insert_simple!("rt_tuple_set", conversion::rt_tuple_set_fn);
     insert_simple!("rt_bytes_alloc", file_io::rt_bytes_alloc);
     insert_simple!("rt_bytes_from_raw", file_io::rt_bytes_from_raw);
     insert_simple!("rt_u32s_from_raw", file_io::rt_u32s_from_raw);
@@ -872,6 +876,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cpuid", simd::rt_cpuid);
     insert_simple!("rt_cpuid_tuple", simd::rt_cpuid);
     insert_simple!("rt_xgetbv", simd::rt_xgetbv);
+    // Host SIMD probes used by simd_capabilities.spl (missing until 2026-10-31:
+    // the seed native-build worker died with `unknown extern function:
+    // rt_is_darwin_arm64`).
+    insert_simple!("rt_getauxval", simd::rt_getauxval);
+    insert_simple!("rt_is_darwin_arm64", simd::rt_is_darwin_arm64);
+    insert_simple!("rt_sysctlbyname_i32", simd::rt_sysctlbyname_i32);
+    insert_simple!("rt_riscv_read_vlenb", simd::rt_riscv_read_vlenb);
+    insert_simple!("rt_riscv_has_v_ext", simd::rt_riscv_has_v_ext);
+    insert_simple!("rt_cuda_sm_version", simd::rt_cuda_sm_version);
     insert_simple!("rt_cargo_build", cargo::rt_cargo_build);
     insert_simple!("rt_cargo_check", cargo::rt_cargo_check);
     insert_simple!("rt_cargo_clean", cargo::rt_cargo_clean);
@@ -1394,6 +1407,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_dir_remove_all", file_io::rt_dir_remove_all);
     insert_simple!("rt_dir_remove", file_io::rt_dir_remove);
     insert_simple!("rt_dir_walk", file_io::rt_dir_walk);
+    insert_simple!("rt_list_dir_recursive", file_io::rt_list_dir_recursive);
     insert_simple!("rt_dns_lookup", interpreter_native_net::rt_dns_lookup_interp);
     insert_simple!(
         "rt_dyn_torch_tensor_from_bits_1d",
@@ -1597,6 +1611,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // (same class as the rt_enum_* gap in task #113). Alias to the Value-based
     // reader; the _rv boxing is transparent at the interpreter level.
     insert_simple!("rt_file_read_text_rv", file_io::rt_file_read_text);
+    // sffi/fs.spl `fs_read_text`: byte-exact, nil only on failure (C runtime
+    // parity) -- deliberately NOT aliased to the CR-stripping reader above.
+    insert_simple!("rt_fs_read_text", file_io::rt_fs_read_text);
     insert_simple!("rt_file_remove", file_io::rt_file_remove);
     insert_simple!("rt_file_rename", file_io::rt_file_rename);
     insert_simple!("rt_file_size", file_io::rt_file_size);
@@ -1926,6 +1943,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_exists", file_io::rt_process_exists);
     insert_simple!("rt_process_is_running", system::rt_process_is_running);
     insert_simple!("rt_process_start_identity", bootstrap_runtime::rt_process_start_identity);
+    // Session-owned process trees: one C owner (runtime_process_tree.c) for
+    // every engine; these bridges only unpack Values.
+    insert_simple!("rt_process_tree_support", bootstrap_runtime::rt_process_tree_support);
+    insert_simple!("rt_process_spawn_session_value", bootstrap_runtime::rt_process_spawn_session_value);
+    insert_simple!("rt_process_session_wait", bootstrap_runtime::rt_process_session_wait);
+    insert_simple!("rt_process_session_is_running", bootstrap_runtime::rt_process_session_is_running);
+    insert_simple!("rt_process_kill_session", bootstrap_runtime::rt_process_kill_session);
+    insert_simple!("rt_process_kill_tree", bootstrap_runtime::rt_process_kill_tree);
     insert_simple!("rt_simple_abi_version", bootstrap_runtime::rt_simple_abi_version);
     insert_simple!("rt_simple_abi_version_deferred", bootstrap_runtime::rt_simple_abi_version_deferred);
     insert_simple!("rt_process_kill", system::rt_process_kill);
@@ -3597,6 +3622,18 @@ pub(crate) fn call_extern_function_with_values(
         return windows_abi::dispatch(name, &evaluated);
     }
 
+    // Bare POSIX libc externs declared by path_identity_abi.spl,
+    // _PathIdentityPosix/errno_abi.spl and retained_file_abi.spl (malloc,
+    // free, realpath, readlink, errno address, open/read/pread/write/close/
+    // fsync, Linux statx). Must precede try_call_dynamic: the errno-address
+    // extern returns a bridge-owned cell, which is only correct when this
+    // module also owns the calls that set errno. posix_abi also keeps an
+    // ownership registry (free refuses foreign or double frees). See posix_abi.rs.
+    #[cfg(unix)]
+    if posix_abi::is_supported_name(name) {
+        return posix_abi::dispatch(name, &evaluated);
+    }
+
     // capability gap. None of these five families has a real native
     // implementation anywhere in this tree (no C translation unit, no linked
     // Rust runtime crate) for a dispatcher to resolve against. Registering
@@ -3626,6 +3663,10 @@ pub(crate) fn call_extern_function_with_values(
 
     Err(common::unknown_function(name))
 }
+
+#[cfg(test)]
+#[path = "extern_drift_tests.rs"]
+mod extern_drift_tests;
 
 #[cfg(test)]
 mod tests {

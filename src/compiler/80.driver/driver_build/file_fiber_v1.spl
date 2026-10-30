@@ -33,12 +33,17 @@
 use std.common.task_runner.fiber_scheduler.{FiberSchedV1, FiberStepV1, fiber_sched_new, fiber_sched_submit, fiber_sched_admit, fiber_sched_abort, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake, fiber_sched_all_done, fiber_sched_runnable_count, fiber_step_done, fiber_step_yield, fiber_step_park}
 use std.nogc_async_mut.fiber.io_reactor.{FiberIoReactorV1, fiber_io_new, fiber_io_close, fiber_io_submit_open, fiber_io_submit_read, fiber_io_submit_close, fiber_io_ready, fiber_io_result, fiber_io_data, fiber_io_forget, fiber_io_pump}
 use std.nogc_sync_mut.io_runtime.{file_size}
-use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrAsyncErrorV1}
 use compiler.driver.cache.reader.tldr_table_fill_v1.{tldr_table_fill_v1}
+use compiler.driver.cache.reader.tldr_table_fill_v1.{tldr_table_fill_async_v1}
+use compiler.driver.driver_build.file_fiber_tldr_bridge_v1.{
+    FileFiberTldrBridgeV1, FileFiberTldrBridgeErrorV1, FileFiberTldrWakeV1}
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefStateI64}
 use compiler.driver.cache.source_reader_v1.{SourceReader}
 use std.async.future.{Future}
 use std.async.poll.{Poll}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.nogc_async_mut.concurrent.lockless_map_i64.{MapError}
 
 val FILE_FIBER_OPEN: i64 = 0
 val FILE_FIBER_READ: i64 = 1
@@ -52,6 +57,7 @@ val FILE_FIBER_DONE: i64 = 5
 val FILE_FIBER_MODULE_TOKEN_BASE: i64 = 1000000000
 val FILE_FIBER_PARSE_TOKEN_BASE: i64 = 2000000000
 val FILE_FIBER_OUTSIDE_TOKEN_BASE: i64 = 3000000000
+val FILE_FIBER_TLDR_WAIT_TOKEN_BASE: i64 = 4000000000
 
 struct FileFiberEntryV1:
     module_key: text
@@ -87,6 +93,14 @@ class FileFiberRunV1:
     async_fut: [Future<text>]
     async_done: [FileFiberAsyncDoneV1]
     async_parks: i64
+    tldr_bridge: FileFiberTldrBridgeV1?
+    tldr_async_enabled: bool
+    closed: bool
+    close_error: text
+    parse_dispatched: [bool]
+    parse_acknowledged: [bool]
+    fill_dispatched: [text]
+    fill_acknowledged: [text]
 
     fn _index_of_key(key: text) -> i64:
         for i in 0..self.entries.len():
@@ -101,11 +115,20 @@ class FileFiberRunV1:
     me _fail(i: i64, why: text) -> FiberStepV1:
         self.error[i] = why
         self.stage[i] = FILE_FIBER_DONE
+        if self.tldr_async_enabled and not self.table.is_loaded(self.entries[i].module_key):
+            unsafe(capabilities: [ffi]):
+                val bridge = self.tldr_bridge.unwrap()
+                match bridge.fail(self.table, self.entries[i].module_key, why):
+                    case Err(error):
+                        self.error[i] = "{why}; async terminal publication failed: {error}"
+                        self.close_error = self.error[i]
+                    case Ok(_): ()
         # dependants parked on this module must not wait forever
         self.sched = fiber_sched_wake(self.sched, FILE_FIBER_MODULE_TOKEN_BASE + i)
         fiber_step_done()
 
     me step(i: i64, imports_of: fn(text) -> [text]) -> FiberStepV1:
+        if self.closed: return fiber_step_done()
         val e = self.entries[i]
         val st = self.stage[i]
         if st == FILE_FIBER_OPEN:
@@ -149,11 +172,39 @@ class FileFiberRunV1:
             for key in imports_of(self.source[i]):
                 if key == e.module_key or self.table.is_loaded(key): continue
                 val producer = self._index_of_key(key)
-                if producer >= 0:
+                if producer >= 0 and not self.tldr_async_enabled:
                     if self.error[producer] != "":
                         return self._fail(i, "import {key} failed: {self.error[producer]}")
                     self.dep_parks = self.dep_parks + 1
                     return fiber_step_park(FILE_FIBER_MODULE_TOKEN_BASE + producer)
+                if self.tldr_async_enabled:
+                    if producer < 0 and self._outside_index(key) < 0:
+                        self.outside_keys = self.outside_keys.push(key)
+                        self.outside_error = self.outside_error.push("")
+                    val bridge = self.tldr_bridge.unwrap()
+                    unsafe(capabilities: [ffi]):
+                        match bridge.prepare_wait(self.table, i, key):
+                            case Err(FileFiberTldrBridgeErrorV1.Table(TldrAsyncErrorV1.Source(message))):
+                                return self._fail(i, "import {key}: {message}")
+                            case Err(error):
+                                return self._fail(i, "TLDR wait failed for {key}: {error}")
+                            case Ok(false):
+                                val reference = match self.table.async_fill_reference(key):
+                                    case Ok(value): value
+                                    case Err(error): return self._fail(i, "TLDR claim missing for {key}: {error}")
+                                match self.table.resolve_async(self.table.handle(key, ""), reference):
+                                    case Err(TldrAsyncErrorV1.Source(message)):
+                                        return self._fail(i, "import {key}: {message}")
+                                    case Err(error): return self._fail(i, "TLDR resolve failed for {key}: {error}")
+                                    case Ok(Some(_)): return fiber_step_yield()
+                                    case Ok(nil): return fiber_step_yield()
+                            case Ok(true):
+                                match bridge.arm_wait(self.table, i):
+                                    case Err(error): return self._fail(i, "TLDR wait arm failed for {key}: {error}")
+                                    case Ok(true):
+                                        self.dep_parks = self.dep_parks + 1
+                                        return fiber_step_park(FILE_FIBER_TLDR_WAIT_TOKEN_BASE + i)
+                                    case Ok(false): return fiber_step_yield()
                 var o = self._outside_index(key)
                 if o >= 0 and self.outside_error[o] != "":
                     return self._fail(i, "import {key}: {self.outside_error[o]}")
@@ -171,21 +222,49 @@ class FileFiberRunV1:
         fiber_step_done()
 
     me take_parse_requests() -> [i64]:
+        if self.closed: return []
         val out = self.parse_requests
         self.parse_requests = []
+        for i in out:
+            if i >= 0 and i < self.parse_dispatched.len() and not self.parse_dispatched[i]:
+                self.parse_dispatched[i] = true
         out
 
     me parse_done(i: i64, tldr: text, error: text):
         """Host result of the one parse: the module's TLDR, or an error."""
+        if self.closed or i < 0 or i >= self.parse_dispatched.len(): return
+        if not self.parse_dispatched[i] or self.parse_acknowledged[i]: return
+        self.parse_acknowledged[i] = true
         if error != "" or tldr == "":
             self.error[i] = if error != "": error else: "tldr unavailable after parse: {self.entries[i].path}"
             self.stage[i] = FILE_FIBER_DONE
+            if self.tldr_async_enabled:
+                unsafe(capabilities: [ffi]):
+                    val bridge = self.tldr_bridge.unwrap()
+                    match bridge.fail(self.table, self.entries[i].module_key, self.error[i]):
+                        case Err(why):
+                            self.error[i] = "{self.error[i]}; async failure publication failed: {why}"
+                            self.close_error = self.error[i]
+                        case Ok(_): ()
             self.sched = fiber_sched_wake(self.sched, FILE_FIBER_MODULE_TOKEN_BASE + i)
             # the parked fiber resumes into DONE and finishes
             self.sched = fiber_sched_wake(self.sched, FILE_FIBER_PARSE_TOKEN_BASE + i)
             return
         self.tldr[i] = tldr
         self.stage[i] = FILE_FIBER_PUBLISH
+        if self.tldr_async_enabled:
+            unsafe(capabilities: [ffi]):
+                val bridge = self.tldr_bridge.unwrap()
+                match bridge.publish(self.table, self.entries[i].module_key, tldr):
+                    case Err(error):
+                        self.error[i] = "async TLDR publication failed: {error}"
+                        self.stage[i] = FILE_FIBER_DONE
+                        match bridge.fail(self.table, self.entries[i].module_key, self.error[i]):
+                            case Err(fail_error):
+                                self.error[i] = "{self.error[i]}; failure publication failed: {fail_error}"
+                                self.close_error = self.error[i]
+                            case Ok(_): ()
+                    case Ok(_): ()
         self.sched = fiber_sched_wake(self.sched, FILE_FIBER_PARSE_TOKEN_BASE + i)
 
     me park_async(i: i64, f: Future<text>):
@@ -220,45 +299,135 @@ class FileFiberRunV1:
         out
 
     fn external_work_count() -> i64:
-        self.reactor.in_flight + self.parse_requests.len() + self.async_idx.len() +
-            self.async_done.len() + self.table.fill_queue.len()
+        var outstanding_callbacks = 0
+        for i in 0..self.parse_dispatched.len():
+            if self.parse_dispatched[i] and not self.parse_acknowledged[i]:
+                outstanding_callbacks = outstanding_callbacks + 1
+        var outstanding_fills = 0
+        for key in self.fill_dispatched:
+            if not self.fill_acknowledged.contains(key): outstanding_fills = outstanding_fills + 1
+        val bridge_work = if self.tldr_async_enabled:
+            self.tldr_bridge.unwrap().pending_work()
+        else: 0
+        self.reactor.in_flight + self.parse_requests.len() + self.table.fill_queue.len() +
+            self.async_idx.len() + self.async_done.len() + outstanding_callbacks + outstanding_fills + bridge_work
+
+    fn host_work_inflight() -> bool:
+        if self.reactor.in_flight > 0 or self.async_idx.len() > 0 or self.async_done.len() > 0:
+            return true
+        for i in 0..self.parse_dispatched.len():
+            if self.parse_dispatched[i] and not self.parse_acknowledged[i]: return true
+        for key in self.fill_dispatched:
+            if not self.fill_acknowledged.contains(key): return true
+        false
+
+    fn scheduler_external_work_count() -> i64:
+        var outstanding_callbacks = 0
+        for i in 0..self.parse_dispatched.len():
+            if self.parse_dispatched[i] and not self.parse_acknowledged[i]:
+                outstanding_callbacks = outstanding_callbacks + 1
+        var outstanding_fills = 0
+        for key in self.fill_dispatched:
+            if not self.fill_acknowledged.contains(key): outstanding_fills = outstanding_fills + 1
+        val bridge_work = if self.tldr_async_enabled:
+            self.tldr_bridge.unwrap().deliverable_work()
+        else: 0
+        self.reactor.in_flight + self.parse_requests.len() + self.table.fill_queue.len() +
+            self.async_idx.len() + self.async_done.len() + outstanding_callbacks + outstanding_fills + bridge_work
 
     me take_fill_requests() -> [text]:
-        self.table.take_fill_requests()
+        if self.closed: return []
+        val out = self.table.take_fill_requests()
+        for key in out: self.fill_dispatched = self.fill_dispatched.push(key)
+        out
+
+    @unsafe(reason: "advances the live bridge and translates canonical completions to scheduler wakes", capabilities: [ffi])
+    pub me advance_tldr_bridge():
+        if not self.tldr_async_enabled or self.closed: return
+        self._advance_tldr_bridge()
+
+    @unsafe(reason: "fails one pending claim only inside its run-owned live table scope", capabilities: [ffi])
+    me _fail_pending_async_key(key: text, reason: text) -> Result<(), FileFiberTldrBridgeErrorV1>:
+        val reference = match self.table.async_fill_reference(key):
+            case Err(TldrAsyncErrorV1.MissingClaim): return Ok(())
+            case Err(error): return Err(FileFiberTldrBridgeErrorV1.Table(error))
+            case Ok(value): value
+        match reference.try_ready():
+            case AsyncRefStateI64.InvalidReference: return Err(FileFiberTldrBridgeErrorV1.Closed)
+            case AsyncRefStateI64.Pending: ()
+            case AsyncRefStateI64.Ready(_): return Ok(())
+            case AsyncRefStateI64.Failed(_): return Ok(())
+        match self.tldr_bridge.unwrap().fail(self.table, key, reason):
+            case Err(error): Err(error)
+            case Ok(_): Ok(())
 
     me module_filled(key: text, error: text):
         """Host result of an outside-run fill (TLDR already published into
         `table` on success)."""
+        if self.closed: return
         val o = self._outside_index(key)
         if o < 0: return
+        if self.fill_acknowledged.contains(key): return
+        var dispatched = false
+        for item in self.fill_dispatched:
+            if item == key: dispatched = true
+        if not dispatched: return
+        self.fill_acknowledged = self.fill_acknowledged.push(key)
         if error != "": self.outside_error[o] = error
+        if self.tldr_async_enabled and error != "":
+            unsafe(capabilities: [ffi]):
+                val bridge = self.tldr_bridge.unwrap()
+                match bridge.fail(self.table, key, error):
+                    case Err(failure):
+                        self.outside_error[o] = "{error}; async terminal publication failed: {failure}"
+                        self.close_error = self.outside_error[o]
+                    case Ok(_): ()
+        elif self.tldr_async_enabled:
+            unsafe(capabilities: [ffi]):
+                match self.tldr_bridge.unwrap().notice_terminal(key):
+                    case Err(failure):
+                        self.close_error = "async completion notification failed for {key}: {failure}"
+                    case Ok(_): ()
         self.fills = self.fills + 1
         self.sched = fiber_sched_wake(self.sched, FILE_FIBER_OUTSIDE_TOKEN_BASE + o)
 
     me advance(imports_of: fn(text) -> [text]):
         """One carrier round: admit, step one fiber per worker, pump IO."""
-        self.sched.external_inflight = self.external_work_count()
+        if self.closed: return
+        self.sched.external_inflight = self.scheduler_external_work_count()
         self.sched = fiber_sched_admit(self.sched)
         for w in 0..self.sched.queues.len():
             val pick = fiber_sched_pick(self.sched, w)
             self.sched = pick.sched
             if pick.fiber >= 0:
                 val result = self.step(pick.fiber, imports_of)
-                self.sched.external_inflight = self.external_work_count()
+                self.sched.external_inflight = self.scheduler_external_work_count()
                 self.sched = fiber_sched_complete(self.sched, w, pick.fiber, result)
         val wait_ms = if fiber_sched_runnable_count(self.sched) > 0 or self.parse_requests.len() > 0 or self.async_done.len() > 0: 0 else: 50
         val pump = fiber_io_pump(self.reactor, self.sched, wait_ms)
         self.reactor = pump.reactor
         self.sched = pump.sched
+        if self.tldr_async_enabled:
+            unsafe(capabilities: [ffi]): self._advance_tldr_bridge()
+
+    @unsafe(reason: "drains canonical completions into the existing scalar fiber scheduler", capabilities: [ffi])
+    me _advance_tldr_bridge():
+        val bridge = self.tldr_bridge.unwrap()
+        match bridge.advance(self.table):
+            case Err(error): self.close_error = "TLDR bridge advance failed: {error}"
+            case Ok(_): ()
+        for wake in bridge.take_wakes():
+            if wake.error != "":
+                self.error[wake.fiber] = wake.error
+                self.stage[wake.fiber] = FILE_FIBER_DONE
+            self.sched = fiber_sched_wake(self.sched,
+                FILE_FIBER_TLDR_WAIT_TOKEN_BASE + wake.fiber)
 
     fn stalled() -> bool:
         """Nothing runnable, no IO, no host work pending: by construction this
         cannot happen while fibers remain; hosts treat it as a hard error."""
-        not fiber_sched_all_done(self.sched) and fiber_sched_runnable_count(self.sched) == 0 and
-            self.sched.pending.len() == 0 and
-            self.reactor.in_flight == 0 and self.parse_requests.len() == 0 and
-            self.async_idx.len() == 0 and self.async_done.len() == 0 and
-            self.table.fill_queue.len() == 0
+        (not fiber_sched_all_done(self.sched) and fiber_sched_runnable_count(self.sched) == 0 and
+            self.sched.pending.len() == 0 and self.scheduler_external_work_count() == 0)
 
     me fail_stalled():
         for i in 0..self.stage.len():
@@ -285,6 +454,8 @@ fn file_fiber_begin_v1(entries: [FileFiberEntryV1], worker_sockets: [i64], budge
     var tldrs: [text] = []
     var errs: [text] = []
     var sources: [text] = []
+    var parse_dispatched: [bool] = []
+    var parse_acknowledged: [bool] = []
     for e in entries:
         sched = fiber_sched_submit(sched, e.est_bytes)
         stage = stage.push(if e.content != "": FILE_FIBER_PARSE else: FILE_FIBER_OPEN)
@@ -293,17 +464,103 @@ fn file_fiber_begin_v1(entries: [FileFiberEntryV1], worker_sockets: [i64], budge
         tldrs = tldrs.push("")
         errs = errs.push("")
         sources = sources.push(e.content)
+        parse_dispatched = parse_dispatched.push(false)
+        parse_acknowledged = parse_acknowledged.push(false)
     FileFiberRunV1(entries: entries, stage: stage, op: ops, fd: fds, source: sources,
         tldr: tldrs, error: errs, done_order: [], parse_requests: [], outside_keys: [],
         outside_error: [], table: TldrTableV1.create(), reactor: fiber_io_new(64), sched: sched,
-        dep_parks: 0, fills: 0, async_idx: [], async_fut: [], async_done: [], async_parks: 0)
+        dep_parks: 0, fills: 0, async_idx: [], async_fut: [], async_done: [], async_parks: 0,
+        tldr_bridge: nil, tldr_async_enabled: false, closed: false, close_error: "",
+        parse_dispatched: parse_dispatched, parse_acknowledged: parse_acknowledged,
+        fill_dispatched: [], fill_acknowledged: [])
+
+fn file_fiber_begin_tldr_async_v1(entries: [FileFiberEntryV1], worker_sockets: [i64],
+        budget: i64, key_capacity: i64, waiter_capacity: i64,
+        ring_id: u64, owner_id: u64) -> Result<FileFiberRunV1, FileFiberTldrBridgeErrorV1>:
+    if (key_capacity <= 0 or key_capacity >= 1000000000 or waiter_capacity <= 0 or
+        entries.len() >= 333333334 or worker_sockets.len() == 0 or budget <= 0):
+        return Err(FileFiberTldrBridgeErrorV1.Capacity)
+    var local_keys: [text] = []
+    for entry in entries:
+        if entry.module_key == "": return Err(FileFiberTldrBridgeErrorV1.InvalidKey)
+        var found = false
+        for key in local_keys:
+            if key == entry.module_key: found = true
+        if found: return Err(FileFiberTldrBridgeErrorV1.InvalidKey)
+        local_keys = local_keys.push(entry.module_key)
+    if local_keys.len() > key_capacity:
+        return Err(FileFiberTldrBridgeErrorV1.Capacity)
+    val table = match TldrTableV1.create_async(key_capacity, waiter_capacity):
+        case Err(error): return Err(FileFiberTldrBridgeErrorV1.Map(error))
+        case Ok(value): value
+    val bridge = match FileFiberTldrBridgeV1.create(ring_id, owner_id,
+            entries.len(), waiter_capacity):
+        case Err(error):
+            unsafe(capabilities: [ffi]): table.close_async_quiescent()
+            return Err(error)
+        case Ok(value): value
+    var run = file_fiber_begin_v1(entries, worker_sockets, budget)
+    run.table = table
+    run.tldr_bridge = Some(bridge)
+    run.tldr_async_enabled = true
+    unsafe(capabilities: [ffi]):
+        for key in local_keys:
+            match table.request_async(table.handle(key, "")):
+                case Ok(_): ()
+                case Err(error):
+                    val _closed_bridge = bridge.clear_quiescent()
+                    table.close_async_quiescent()
+                    fiber_io_close(run.reactor)
+                    return Err(FileFiberTldrBridgeErrorV1.Table(error))
+        val _local_fill_notifications = table.take_fill_requests()
+    Ok(run)
 
 fn file_fiber_finished_v1(run: FileFiberRunV1) -> bool:
+    if run.close_error != "":
+        if run.tldr_async_enabled and not run.closed:
+            val original = run.close_error
+            match file_fiber_abort_tldr_async_v1(run, "fatal bridge invariant: {original}"):
+                case Ok(_): run.close_error = original
+                case Err(FileFiberTldrBridgeErrorV1.Busy):
+                    if run.host_work_inflight(): return false
+                    run.close_error = "{original}; async scope retained because abort is Busy"
+                case Err(error): run.close_error = "{original}; async scope retained because abort failed: {error}"
+        return true
     if run.sched.error != "":
+        if run.tldr_async_enabled:
+            match file_fiber_abort_tldr_async_v1(run, "fiber scheduler failed: {run.sched.error}"):
+                case Ok(_): return true
+                case Err(FileFiberTldrBridgeErrorV1.Busy): return false
+                case Err(error):
+                    run.close_error = "FileFiber abort after scheduler failure refused: {error}"
+                    return true
         return fiber_sched_runnable_count(run.sched) == 0 and run.external_work_count() == 0
-    (fiber_sched_all_done(run.sched) and run.external_work_count() == 0) or run.stalled()
+    if fiber_sched_all_done(run.sched) and run.external_work_count() == 0: return true
+    if run.stalled():
+        if run.tldr_async_enabled:
+            match file_fiber_abort_tldr_async_v1(run, "stalled without producer or host work"):
+                case Ok(_): return true
+                case Err(error):
+                    run.close_error = "FileFiber stalled scope could not abort: {error}"
+                    return true
+        else:
+            run.fail_stalled()
+        return true
+    false
 
 fn file_fiber_end_v1(run: FileFiberRunV1):
+    if run.closed: return
+    if run.tldr_async_enabled:
+        val previous_error = run.close_error
+        match file_fiber_try_end_tldr_async_v1(run):
+            case Ok(_): ()
+            case Err(FileFiberTldrBridgeErrorV1.Busy):
+                val close_error = "Busy: FileFiber TLDR async scope still has live work"
+                run.close_error = if previous_error != "": "{previous_error}; {close_error}" else: close_error
+            case Err(error):
+                val close_error = "FileFiber TLDR async close failed: {error}"
+                run.close_error = if previous_error != "": "{previous_error}; {close_error}" else: close_error
+        return
     if fiber_sched_runnable_count(run.sched) > 0 or run.external_work_count() > 0: return
     if run.sched.error != "":
         # Callers should first drain host work and IO through advance(). Never
@@ -313,6 +570,81 @@ fn file_fiber_end_v1(run: FileFiberRunV1):
         return
     if run.stalled(): run.fail_stalled()
     fiber_io_close(run.reactor)
+
+fn file_fiber_try_end_tldr_async_v1(run: FileFiberRunV1) -> Result<bool, FileFiberTldrBridgeErrorV1>:
+    if run.closed: return Ok(true)
+    if not run.tldr_async_enabled:
+        return Err(FileFiberTldrBridgeErrorV1.Closed)
+    unsafe(capabilities: [ffi]):
+        val bridge = run.tldr_bridge.unwrap()
+        match bridge.advance(run.table):
+            case Err(error): return Err(error)
+            case Ok(_): ()
+        for wake in bridge.take_wakes():
+            if wake.error != "":
+                run.error[wake.fiber] = wake.error
+                run.stage[wake.fiber] = FILE_FIBER_DONE
+            run.sched = fiber_sched_wake(run.sched, FILE_FIBER_TLDR_WAIT_TOKEN_BASE + wake.fiber)
+    if (not fiber_sched_all_done(run.sched) or fiber_sched_runnable_count(run.sched) > 0 or
+        run.external_work_count() > 0):
+        return Err(FileFiberTldrBridgeErrorV1.Busy)
+    unsafe(capabilities: [ffi]):
+        val bridge = run.tldr_bridge.unwrap()
+        if not bridge.quiescent(): return Err(FileFiberTldrBridgeErrorV1.Busy)
+        match bridge.clear_quiescent():
+            case Err(error): return Err(error)
+            case Ok(_): ()
+        run.table.close_async_quiescent()
+        fiber_io_close(run.reactor)
+        run.tldr_bridge = nil
+        run.closed = true
+        run.tldr_async_enabled = false
+    Ok(true)
+
+fn file_fiber_abort_tldr_async_v1(run: FileFiberRunV1, reason: text) -> Result<bool, FileFiberTldrBridgeErrorV1>:
+    if run.closed: return Ok(true)
+    if not run.tldr_async_enabled:
+        return Err(FileFiberTldrBridgeErrorV1.Closed)
+    if run.host_work_inflight():
+        return Err(FileFiberTldrBridgeErrorV1.Busy)
+    # Only queued, undispatched callbacks may be discarded. Dispatched work
+    # above remains live until its real completion callback acknowledges it.
+    run.parse_requests = []
+    run.table.fill_queue = []
+    val failure = if reason != "": reason else: "FileFiber async abort"
+    unsafe(capabilities: [ffi]):
+        for entry in run.entries:
+            match run._fail_pending_async_key(entry.module_key, failure):
+                case Err(error): return Err(error)
+                case Ok(_): ()
+        for key in run.outside_keys:
+            match run._fail_pending_async_key(key, failure):
+                case Err(error): return Err(error)
+                case Ok(_): ()
+        val bridge = run.tldr_bridge.unwrap()
+        for key in bridge.keys:
+            match run._fail_pending_async_key(key, failure):
+                case Err(error): return Err(error)
+                case Ok(_): ()
+        match bridge.cancel_all(run.table, failure):
+            case Err(error): return Err(error)
+            case Ok(_): ()
+        run.sched = fiber_sched_abort(run.sched)
+        val _cancel_wakes = bridge.take_wakes()
+        for i in 0..run.stage.len():
+            if run.stage[i] != FILE_FIBER_DONE:
+                run.error[i] = failure
+                run.stage[i] = FILE_FIBER_DONE
+        if not bridge.quiescent(): return Err(FileFiberTldrBridgeErrorV1.Busy)
+        match bridge.clear_quiescent():
+            case Err(error): return Err(error)
+            case Ok(_): ()
+        run.table.close_async_quiescent()
+        fiber_io_close(run.reactor)
+        run.tldr_bridge = nil
+        run.closed = true
+        run.tldr_async_enabled = false
+    Ok(true)
 
 fn file_fiber_run_v1<R: SourceReader>(entries: [FileFiberEntryV1], reader: R,
         imports_of: fn(text) -> [text], path_of_key: fn(text) -> text,
@@ -353,6 +685,30 @@ fn file_fiber_run_async_v1<R: SourceReader>(entries: [FileFiberEntryV1], reader:
     file_fiber_end_v1(run)
     run
 
+fn file_fiber_run_tldr_async_v1<R: SourceReader>(entries: [FileFiberEntryV1], reader: R,
+        imports_of: fn(text) -> [text], path_of_key: fn(text) -> text,
+        worker_sockets: [i64], budget: i64, key_capacity: i64,
+        waiter_capacity: i64, ring_id: u64, owner_id: u64) -> Result<FileFiberRunV1, FileFiberTldrBridgeErrorV1>:
+    var run = match file_fiber_begin_tldr_async_v1(entries, worker_sockets, budget,
+            key_capacity, waiter_capacity, ring_id, owner_id):
+        case Err(error): return Err(error)
+        case Ok(value): value
+    while not file_fiber_finished_v1(run):
+        run.advance(imports_of)
+        for i in run.take_parse_requests():
+            val path = run.entries[i].path
+            val err = reader.update_tldr(path)
+            run.parse_done(i, if err == "": reader.read_tldr(path) else: "", err)
+        for key in run.take_fill_requests():
+            val error = tldr_table_fill_async_v1(run.table, reader, key, path_of_key(key))
+            run.module_filled(key, error)
+    file_fiber_end_v1(run)
+    if run.close_error != "": return Err(FileFiberTldrBridgeErrorV1.Busy)
+    Ok(run)
+
 export FileFiberEntryV1, FileFiberRunV1, FileFiberAsyncDoneV1
-export file_fiber_begin_v1, file_fiber_finished_v1, file_fiber_end_v1, file_fiber_run_v1, file_fiber_run_async_v1
+export file_fiber_begin_v1, file_fiber_begin_tldr_async_v1, file_fiber_finished_v1, file_fiber_end_v1
+export file_fiber_try_end_tldr_async_v1, file_fiber_abort_tldr_async_v1
+export file_fiber_run_v1, file_fiber_run_async_v1, file_fiber_run_tldr_async_v1
 export FILE_FIBER_OPEN, FILE_FIBER_READ, FILE_FIBER_PARSE, FILE_FIBER_PUBLISH, FILE_FIBER_DEPS, FILE_FIBER_DONE
+export FILE_FIBER_TLDR_WAIT_TOKEN_BASE

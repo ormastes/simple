@@ -406,31 +406,40 @@ fn compile_source_inventory_sort_v1(
         ordered = ordered + 1
     if ordered >= sorted.len():
         return sorted
-    # Build a max heap, then move its maximum to the sorted suffix. Cold Git
-    # listings may place untracked paths before cached paths, so insertion
-    # sort is quadratic even when each individual listing is ordered.
-    var start = sorted.len() / 2 - 1
-    var end = sorted.len() - 1
-    while end > 0:
-        var root = 0
-        if start >= 0:
-            root = start
-            start = start - 1
-        else:
-            val maximum = sorted[0]
-            sorted[0] = sorted[end]
-            sorted[end] = maximum
-            end = end - 1
-        while root * 2 + 1 <= end:
-            var child = root * 2 + 1
-            if child < end and compile_source_inventory_identity_cmp_v1(sorted[child].source_identity, sorted[child + 1].source_identity) < 0:
-                child = child + 1
-            if compile_source_inventory_identity_cmp_v1(sorted[root].source_identity, sorted[child].source_identity) >= 0:
-                break
-            val parent = sorted[root]
-            sorted[root] = sorted[child]
-            sorted[child] = parent
-            root = child
+    # Bottom-up merge sort. It must be STABLE: entries with equal identities
+    # keep their input order (heap sort did not, so the survivor of a
+    # duplicate pair depended on its position in the heap). Cold Git listings
+    # may place untracked paths before cached paths, so insertion sort is
+    # quadratic even when each individual listing is ordered; this stays
+    # O(n log n) with one n-sized buffer per pass.
+    val count = sorted.len()
+    var width = 1
+    while width < count:
+        var merged: [CompileSourceInventoryEntryV1] = []
+        var left = 0
+        while left < count:
+            val middle = if left + width < count: left + width else: count
+            val stop = if middle + width < count: middle + width else: count
+            var i = left
+            var j = middle
+            while i < middle and j < stop:
+                # Take the right run only when strictly smaller: ties keep
+                # the left (earlier) entry first.
+                if compile_source_inventory_identity_cmp_v1(sorted[j].source_identity, sorted[i].source_identity) < 0:
+                    merged = merged.push(sorted[j])
+                    j = j + 1
+                else:
+                    merged = merged.push(sorted[i])
+                    i = i + 1
+            while i < middle:
+                merged = merged.push(sorted[i])
+                i = i + 1
+            while j < stop:
+                merged = merged.push(sorted[j])
+                j = j + 1
+            left = stop
+        sorted = merged
+        width = width * 2
     sorted
 
 # Empty-inventory cold initialization is a set of unique creates. Validate

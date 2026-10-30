@@ -27,7 +27,9 @@ use compiler.frontend.frontend_advisory_preprocess_port_v1.{
     frontend_advisory_policy_from_environment_decision_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1}
 use compiler.driver.driver_build.file_fiber_v1.{FileFiberEntryV1, FileFiberRunV1,
-    file_fiber_begin_v1, file_fiber_finished_v1, file_fiber_end_v1}
+    file_fiber_begin_v1, file_fiber_begin_tldr_async_v1,
+    file_fiber_finished_v1, file_fiber_end_v1}
+use compiler.driver.driver_build.file_fiber_tldr_bridge_v1.{FileFiberTldrBridgeErrorV1}
 use compiler.driver.driver_build.parse_fiber_claim_window_v1.{parse_fiber_claim_window_v1}
 use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_owns_v1,
     driver_publish_frontend_cache_scope_v1}
@@ -156,6 +158,8 @@ pub fn driver_run_parse_shard_with_environment_variant_policy_v1(
 # Module keys produced by THIS child: imports outside it are skipped, never
 # filled (another child owns them; cross-child waits need the cache daemon).
 var _g_parse_fiber_keys: Dict<text, bool> = {}
+val _FILE_FIBER_TLDR_ASYNC_KEY_CAPACITY: i64 = 4096
+val _FILE_FIBER_TLDR_ASYNC_WAITER_CAPACITY: i64 = 65536
 
 fn _driver_parse_fiber_import_key(path: text) -> text:
     var p = path
@@ -185,6 +189,19 @@ fn driver_parse_fiber_imports_v1(source: text) -> [text]:
 fn _driver_parse_fiber_budget_bytes() -> i64:
     val mb = env_get("SIMPLE_PARSE_FIBER_BUDGET_MB").to_i64() ?? 0
     if mb > 0: mb * 1048576 else: 2048 * 1048576
+
+fn _driver_parse_fiber_begin_v1(entries: [FileFiberEntryV1], budget: i64,
+        driver_identity: i64, window_ordinal: i64) -> Result<FileFiberRunV1, FileFiberTldrBridgeErrorV1>:
+    if env_get("SIMPLE_FILE_TLDR_ASYNC") != "1":
+        return Ok(file_fiber_begin_v1(entries, [0], budget))
+    if (driver_identity <= 0 or driver_identity > 4294967295 or
+        window_ordinal <= 0 or window_ordinal > 4294967295):
+        return Err(FileFiberTldrBridgeErrorV1.Capacity)
+    val owner_id = driver_identity.to_u64()
+    val ring_id = (owner_id << 32) | window_ordinal.to_u64()
+    file_fiber_begin_tldr_async_v1(entries, [0], budget,
+        _FILE_FIBER_TLDR_ASYNC_KEY_CAPACITY,
+        _FILE_FIBER_TLDR_ASYNC_WAITER_CAPACITY, ring_id, owner_id)
 
 fn _driver_run_parse_fibers(
     input_files: [text], low_memory: bool,
@@ -240,6 +257,7 @@ fn _driver_run_parse_fibers(
     var done = 0
     var import_parks = 0
     var errors = 0
+    var window_ordinal = 0
     while source_index < sources.len():
         var entries: [FileFiberEntryV1] = []
         _g_parse_fiber_keys = {}
@@ -252,7 +270,13 @@ fn _driver_run_parse_fibers(
             _g_parse_fiber_keys[source.module_name] = true
         if entries.len() == 0: continue
         claimed = claimed + entries.len()
-        var run = file_fiber_begin_v1(entries, [0], _driver_parse_fiber_budget_bytes())
+        window_ordinal = window_ordinal + 1
+        var run = match _driver_parse_fiber_begin_v1(entries,
+                _driver_parse_fiber_budget_bytes(), driver.identity_id, window_ordinal):
+            case Ok(value): value
+            case Err(error):
+                eprint "error: FileFiber TLDR async mode refused: {error}"
+                return false
         while not file_fiber_finished_v1(run):
             run.advance(driver_parse_fiber_imports_v1)
             for i in run.take_parse_requests():
@@ -273,6 +297,9 @@ fn _driver_run_parse_fibers(
                             module_tldr_companion_path_v1(tldr_dir, e.path), tldr)
                     run.parse_done(i, tldr, "")
         file_fiber_end_v1(run)
+        if run.close_error != "":
+            eprint "error: parse child: FileFiber scope remains open: {run.close_error}"
+            errors = errors + 1
         done = done + run.done_order.len()
         import_parks = import_parks + run.dep_parks
         var ei = 0

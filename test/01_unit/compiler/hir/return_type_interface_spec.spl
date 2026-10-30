@@ -10,6 +10,7 @@ Design: doc/05_design/compiler/types/return_type_interface_design.md.
 # @cover src/compiler/50.mir/_MirLowering/module_lowering.spl
 
 use std.spec.*
+use compiler.common.diagnostics.span.{Span}
 use app.io.mod.{file_read}
 use compiler.common.config.{Logger}
 use compiler.common.driver_core_types.{SourceFile}
@@ -141,6 +142,32 @@ fn mir_subject_kind(hirs: Dict<text, HirModule>, fn_name: text) -> text:
     "none"
 
 describe "return-type interface v1":
+    it "reports the exact unbound return-only parameter diagnostic on the direct error path":
+        val unbound = rti_param_term("T", [])
+        expect(err_code(unbound)).to_equal("E-RTI-007")
+        expect(err_message(unbound)).to_equal(
+            "E-RTI-007: type parameter 'T' is not bound by the callable or its owner")
+
+    it "reports the exact unsupported-Any diagnostic for an actual HIR return term":
+        val term = HirType(kind: HirTypeKind.Any, span: Span.empty())
+        val result = rti_term_of_hir_type(term, SymbolTable.new(), [])
+        expect(err_code(result)).to_equal("E-RTI-007")
+        expect(err_message(result)).to_equal(
+            "E-RTI-007: declared return is Any; not representable in an interface row")
+
+    it "reports the exact missing nominal declaration diagnostic from an empty symbol table":
+        val result = rti_type_decl_ref(SymbolTable.new(), 9)
+        expect(err_code(result)).to_equal("E-RTI-004")
+        expect(err_message(result)).to_equal("E-RTI-004: no local symbol for id 9")
+
+    it "returns the bound parameter index and fails on every unexpected result shape":
+        match rti_param_term("T", ["T"]):
+            case Ok(term):
+                match term:
+                    case RtType.Param(index): expect(index).to_equal(0)
+                    case _: fail("bound parameter did not produce RtType.Param")
+            case Err(error): fail(error.message)
+
     it "publishes body-free imported Optional record returns with the provider owner":
         val hir = path_spelled_hir("struct Payload:\n    value: i64\nfn maybe() -> Payload?:\n    Some(Payload(value: 42))\n", "src/rti_body_free/provider.spl")
         val function = function_named(hir, "maybe")

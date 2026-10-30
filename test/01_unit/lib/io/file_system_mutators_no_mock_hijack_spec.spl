@@ -1,0 +1,78 @@
+# Regression (hello native-build "MIR shard ledger inventory refused for this
+# worker", 2026-10-31): std.{nogc_sync_mut,nogc_async_mut}.file_system defined
+# mock mutators (`dir_create_all`, `file_rename`, `file_delete`, `file_copy`,
+# `file_append_text`, `dir_walk`) with the SAME signatures as the real
+# io_runtime owners but no filesystem effect. The JIT function registry is
+# keyed on NAME ALONE, so inside the native-build closure the coordinator's
+# `shard_ledger_queue_dir` reached the mock `dir_create_all`, got true, and
+# never created the MIR ledger directory; the worker's `file_lock` on
+# "<queue>/.lock" then failed and the inventory was refused. The ledger publish
+# (`file_rename`) and withdraw (`file_delete`) paths had the same exposure.
+# The file_system modules now re-export the one real io_runtime implementation.
+# These cases check FILESYSTEM STATE, not return values: the mocks already
+# returned "success".
+use std.spec
+use std.nogc_sync_mut.file_system.dir_ops.{dir_create_all as sync_fs_dir_create_all, dir_walk as sync_fs_dir_walk}
+use std.nogc_async_mut.file_system.dir_ops.{dir_create_all as async_fs_dir_create_all, dir_walk as async_fs_dir_walk}
+use std.nogc_sync_mut.file_system.file_ops.{file_rename as sync_fs_file_rename, file_delete as sync_fs_file_delete, file_copy as sync_fs_file_copy, file_append_text as sync_fs_file_append_text}
+use std.nogc_async_mut.file_system.file_ops.{file_rename as async_fs_file_rename, file_delete as async_fs_file_delete, file_copy as async_fs_file_copy, file_append_text as async_fs_file_append_text}
+use std.nogc_sync_mut.io_runtime.{dir_exists, file_exists, file_read, file_write, dir_remove_all, getpid}
+
+fn fs_mock_spec_root(tag: text) -> text:
+    "/tmp/simple_fs_mock_hijack_spec_{getpid()}_{tag}"
+
+describe "file_system mutators reach the real filesystem":
+    it "dir_create_all creates every nested component":
+        val root = fs_mock_spec_root("mkdir")
+        val _clean = dir_remove_all(root)
+        expect(sync_fs_dir_create_all("{root}/sync/a/b")).to_equal(true)
+        expect(dir_exists("{root}/sync/a/b")).to_equal(true)
+        expect(async_fs_dir_create_all("{root}/async/a/b")).to_equal(true)
+        expect(dir_exists("{root}/async/a/b")).to_equal(true)
+        val _done = dir_remove_all(root)
+
+    it "file_rename moves the file and file_delete removes it":
+        val root = fs_mock_spec_root("rename")
+        val _clean = dir_remove_all(root)
+        expect(sync_fs_dir_create_all(root)).to_equal(true)
+        expect(file_write("{root}/s.tmp", "sync")).to_equal(true)
+        expect(sync_fs_file_rename("{root}/s.tmp", "{root}/s.done")).to_equal(true)
+        expect(file_exists("{root}/s.tmp")).to_equal(false)
+        expect(file_read("{root}/s.done")).to_equal("sync")
+        expect(sync_fs_file_delete("{root}/s.done")).to_equal(true)
+        expect(file_exists("{root}/s.done")).to_equal(false)
+        expect(file_write("{root}/a.tmp", "async")).to_equal(true)
+        expect(async_fs_file_rename("{root}/a.tmp", "{root}/a.done")).to_equal(true)
+        expect(file_exists("{root}/a.tmp")).to_equal(false)
+        expect(file_read("{root}/a.done")).to_equal("async")
+        expect(async_fs_file_delete("{root}/a.done")).to_equal(true)
+        expect(file_exists("{root}/a.done")).to_equal(false)
+        val _done = dir_remove_all(root)
+
+    it "file_copy and file_append_text write real bytes":
+        val root = fs_mock_spec_root("copy")
+        val _clean = dir_remove_all(root)
+        expect(sync_fs_dir_create_all(root)).to_equal(true)
+        expect(file_write("{root}/src", "x")).to_equal(true)
+        expect(sync_fs_file_copy("{root}/src", "{root}/s.copy")).to_equal(true)
+        expect(file_read("{root}/s.copy")).to_equal("x")
+        expect(async_fs_file_copy("{root}/src", "{root}/a.copy")).to_equal(true)
+        expect(file_read("{root}/a.copy")).to_equal("x")
+        expect(sync_fs_file_append_text("{root}/s.copy", "y")).to_equal(true)
+        expect(file_read("{root}/s.copy")).to_equal("xy")
+        expect(async_fs_file_append_text("{root}/a.copy", "z")).to_equal(true)
+        expect(file_read("{root}/a.copy")).to_equal("xz")
+        val _done = dir_remove_all(root)
+
+    it "dir_walk lists the real tree, not mock entries":
+        val root = fs_mock_spec_root("walk")
+        val _clean = dir_remove_all(root)
+        expect(sync_fs_dir_create_all("{root}/d")).to_equal(true)
+        expect(file_write("{root}/d/only.txt", "w")).to_equal(true)
+        val sync_walk = sync_fs_dir_walk(root)
+        val async_walk = async_fs_dir_walk(root)
+        expect(sync_walk.len()).to_equal(1)
+        expect(sync_walk[0].ends_with("/d/only.txt")).to_equal(true)
+        expect(async_walk.len()).to_equal(1)
+        expect(async_walk[0].ends_with("/d/only.txt")).to_equal(true)
+        val _done = dir_remove_all(root)

@@ -137,6 +137,7 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
         "rt_linux_group_available_capacity_v1" => Some(&[0]),
         "rt_linux_group_parent_acquire_v1" => Some(&[0, 1]),
+        "rt_linux_group_parent_acquire_at_v2" => Some(&[0, 1, 2]),
         "rt_linux_group_launch_broker_v1" => Some(&[0, 1]),
         "rt_linux_group_start_v1" => Some(&[0, 1, 4, 5, 6, 9, 10]),
         // Print/IO (text → ptr, len)

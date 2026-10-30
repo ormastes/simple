@@ -532,7 +532,13 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
     if (!path_ptr || path_len == 0 || path_len >= sizeof(path)) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
     path[(size_t)path_len] = '\0';
+#if defined(_WIN32)
+    /* _commit uses FlushFileBuffers, which requires a writable handle.
+     * r+b opens the existing file without truncating or rewriting its bytes. */
+    FILE* f = fopen(path, "r+b");
+#else
     FILE* f = fopen(path, "rb");
+#endif
     if (!f) return 0;
 #if defined(_WIN32)
     int ok = _commit(_fileno(f)) == 0;
@@ -904,16 +910,29 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
     free(argv);
     return error == 0 ? (int64_t)pid : -1;
 #else
+    if (arg_count > 32768) return -1;
+    for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
+    /* argv is built BEFORE fork: a multithreaded parent may hold the
+     * allocator lock, so the child must not calloc (it used to). */
+    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+    if (!argv) return -1;
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
     pid_t pid = fork();
-    if (pid < 0) return -1;
+    if (pid < 0) {
+        free(argv);
+        return -1;
+    }
     if (pid == 0) {
-        char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
-        if (!argv) _exit(1);
-        argv[0] = (char*)cmd;
-        for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
+        /* Deliberately NOT setpgid(0, 0) (audit P12 asked for parity with
+         * rt_fork_child_setup): the Rust twin keeps async children in the
+         * caller's group, and a child in a background group that reads the
+         * inherited tty would stop on SIGTTIN. Tree cleanup for test children
+         * is owned by rt_process_spawn_session instead. */
         execvp(cmd, argv);
         _exit(127);
     }
+    free(argv);
     return (int64_t)pid;
 #endif
 }
