@@ -16802,6 +16802,12 @@ static char* rt_core_shell_quote(const char* s) {
  * declared result type. Same worker/entry-point split the (ptr, len) parameter
  * fixes used for rt_dir_create_cpath et al. */
 static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArray* args) {
+#if defined(_WIN32)
+    /* The Windows capture owner handles argv quoting, both output streams and
+     * raw exit codes. Zero deadline and -1 capture cap preserve unbounded run
+     * semantics; the POSIX popen/status encoding below is not a Windows ABI. */
+    return rt_process_run_bounded(cmd, cmd_len, args, 0, -1);
+#else
     SplArray* result = rt_array_new(3);
     if (!cmd || cmd_len == 0) {
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
@@ -16877,6 +16883,7 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
     rt_array_push(result, rt_value_int(exit_code));
     if (stdout_buf) free(stdout_buf);
     return result;
+#endif
 }
 
 int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args) {
