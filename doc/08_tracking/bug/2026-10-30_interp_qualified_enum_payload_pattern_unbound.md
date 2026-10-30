@@ -37,3 +37,13 @@ the variant is Option/Result, or the variant name is declared.
 - Reproducer: `test/01_unit/compiler/interpreter/enum_instance_method_dispatch_spec.spl` (now 3/3)
 - Generalisation: `test/01_unit/compiler/interpreter/enum_qualified_payload_pattern_spec.spl`
   (binder names, `_`, `Type::Variant`, unit fall-through, mismatch fall-through; 5/5)
+
+## Known limits (review of PR #5349, not regressions)
+
+- Variant matching compares the tag text only, so `case A.X(v):` also matches
+  a `B.X(..)` value when two enums share a variant name. Unqualified and
+  EXPR_CALL/EXPR_FIELD_ACCESS forms have the same limit. Fix: require the
+  boxed struct name to start with `<Receiver>::`.
+- A capitalised static call used as a constant pattern (`case Maker.make(7):`)
+  against a boxed-enum scrutinee is treated as a variant pattern and does not
+  match; it did not match on the equality path before either.
