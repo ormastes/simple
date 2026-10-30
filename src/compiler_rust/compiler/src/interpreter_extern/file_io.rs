@@ -609,6 +609,23 @@ pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `extern fn rt_fs_read_text(path: text) -> text?` (sffi/fs.spl).
+///
+/// Mirrors the C runtime (`runtime_native.c` `rt_fs_read_text`, which delegates
+/// to `rt_file_read_text`): the whole file's BYTES become the text, unchanged,
+/// and only a failed open/read yields nil. Unlike this module's
+/// `rt_file_read_text` it does NOT strip `\r` and does NOT turn non-UTF-8
+/// content into nil; invalid UTF-8 stays byte-exact as raw text
+/// (`Value::text_from_bytes`), exactly what the C lane's
+/// `rt_string_new(content, len)` returns. An empty file is "" (not nil).
+pub fn rt_fs_read_text(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Value::text_from_bytes(bytes)),
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
 fn open_regular_no_follow(path: &Path) -> Option<std::fs::File> {
     #[cfg(unix)]
     {
@@ -2226,6 +2243,28 @@ pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fs_read_text_returns_exact_file_bytes_like_the_c_runtime() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let arg = |name: &str| Value::text(dir.path().join(name).to_string_lossy().to_string());
+
+        fs::write(dir.path().join("crlf.txt"), b"a\r\nb\r\n").expect("write");
+        assert_eq!(rt_fs_read_text(&[arg("crlf.txt")]).unwrap(), Value::text("a\r\nb\r\n"));
+
+        fs::write(dir.path().join("utf8.txt"), "h\u{e9}\n").expect("write");
+        assert_eq!(rt_fs_read_text(&[arg("utf8.txt")]).unwrap(), Value::text("h\u{e9}\n"));
+
+        // Invalid UTF-8 (a lone 0xFF) stays byte-exact: 5 bytes, no U+FFFD.
+        fs::write(dir.path().join("raw.bin"), b"a\r\nb\xff").expect("write");
+        let raw = rt_fs_read_text(&[arg("raw.bin")]).unwrap();
+        assert_eq!(raw.text_bytes_view(), Some(&b"a\r\nb\xff"[..]));
+
+        fs::write(dir.path().join("empty.txt"), b"").expect("write");
+        assert_eq!(rt_fs_read_text(&[arg("empty.txt")]).unwrap(), Value::text(""));
+
+        assert_eq!(rt_fs_read_text(&[arg("missing.txt")]).unwrap(), Value::Nil);
+    }
 
     /// A 1 GiB size cap (what SCV inventory passes per source file) must not
     /// allocate or zero-fill 1 GiB per call: the read is bounded by the bytes the
