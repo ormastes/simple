@@ -1608,7 +1608,39 @@ fn _driver_file_natively_owns_v1(path: text, module_name: text) -> bool:
         if not ended: panic("epoch owner scratch end failed")
         return owns
     _g_worker_owner_legacy = _g_worker_owner_legacy + 1
-    for source in _driver_collect_explicit_compiler_source(path):
+    if not path.ends_with(".spl"):
+        eprint("[explicit-source] rejected non-spl path={path}")
+        return false
+    # The scan publishes content/import/sibling caches. Complete it before
+    # owning scratch; these process-retained values must outlive this lookup.
+    val (content, _, _, _) = _driver_cached_entry_source_scan(path)
+    if content == "":
+        eprint("[explicit-source] empty content path={path}")
+        return false
+    val _platform = host_is_windows_host()
+    if transient_array_scope_state_v1() != 0:
+        _g_worker_owner_nested = _g_worker_owner_nested + 1
+        return _driver_alias_content_natively_owns_v1(path, content, module_name)
+    var started = false
+    unsafe(capabilities: [ffi]):
+        started = rt_transient_array_scope_begin()
+    if not started: panic("legacy owner scratch begin failed")
+    _g_worker_owner_scopes = _g_worker_owner_scopes + 1
+    val owns = _driver_alias_content_natively_owns_v1(path, content, module_name)
+    var ended = false
+    unsafe(capabilities: [ffi]):
+        ended = rt_transient_array_scope_end()
+    if not ended: panic("legacy owner scratch end failed")
+    owns
+
+fn _driver_alias_content_natively_owns_v1(path: text, content: text, module_name: text) -> bool:
+    # Only a scalar escapes. Physical identity and walked spelling still use
+    # exactly the explicit-source alias policy; no new memoized authority.
+    val aliases = _driver_module_aliases_with_closure(
+        path, content, _driver_module_name_from_path(path), true)
+    if aliases.len() == 0:
+        eprint("[explicit-source] zero aliases path={path} content_len={content.len()}")
+    for source in aliases:
         if source.module_name == module_name: return true
     false
 
