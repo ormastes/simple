@@ -95,4 +95,41 @@ pub fn process_run_script(cmd: text, args: [text]) -> (text, text, i64):
     spawn_args = spawn_args + [cmd]
     for arg in args:
         spawn_args = spawn_args + [arg]
+    if _shebang_is_posix_shell(prefix[0]):
+        return _shebang_process_run_raw(prefix[0], ["-c", _shebang_exec_script(prefix[0], spawn_args)])
     _shebang_process_run_raw(prefix[0], spawn_args)
+
+fn _shebang_is_posix_shell(interpreter: text) -> bool:
+    interpreter == "sh" or interpreter == "bash" or interpreter == "dash"
+
+# The host builds the Windows command line with MS-CRT quoting (`c"d` becomes
+# `c\"d`, quoted only when it holds a space), but a Windows sh is MSYS/Cygwin,
+# whose own argv parser ends the argument differently, drops backslashes inside
+# quotes and globs unquoted words. A `-c` script always holds a space, so it
+# crosses that boundary as one quoted word; POSIX single quotes then carry each
+# real argument literally.
+fn _shebang_exec_script(interpreter: text, argv: [text]) -> text:
+    var script = "exec " + interpreter
+    for arg in argv:
+        script = script + " '" + arg.replace("'", "'\\''") + "'"
+    _shebang_msys_quoted_word(script)
+
+# Inside a quoted word MSYS reads `\\` as one backslash and drops a lone one.
+# A backslash run directly before `"` is already doubled by MS-CRT quoting.
+fn _shebang_msys_quoted_word(word: text) -> text:
+    var out = ""
+    var index = 0
+    while index < word.len():
+        var run_end = index
+        while run_end < word.len() and word[run_end] == "\\":
+            run_end = run_end + 1
+        if run_end == index:
+            out = out + word[index]
+            index = index + 1
+        else:
+            var run = word.substring(index, run_end)
+            if run_end == word.len() or word[run_end] != "\"":
+                run = run + run
+            out = out + run
+            index = run_end
+    out

@@ -1,0 +1,53 @@
+# A bare URI value is one scalar: the `:` of its `://` marker and any later
+# `:port` are not key separators.
+use std.common.sdn.parser.{parse, parse_untrusted, parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+
+fn field_text(source: text, key: text) -> text:
+    match parse(source):
+        case Err(e): "parse-error: " + e
+        case Ok(value):
+            match value:
+                case SdnValue.Dict(fields):
+                    match fields[key]:
+                        case SdnValue.String(string): string
+                        case _: "not-a-string"
+                case _: "not-a-dict"
+
+describe "SDN bare URI scalars":
+    it "keeps a custom-scheme reference as a string":
+        expect(field_text("ref: secret://roles/signer\n", "ref")).to_equal("secret://roles/signer")
+
+    it "keeps an https URL with a port and path as a string":
+        expect(field_text("url: https://example.test:8443/a/b\n", "url")).to_equal("https://example.test:8443/a/b")
+
+    it "keeps a URI inside an inline dict":
+        expect(field_text("{url: file://tmp/x, n: 1}", "url")).to_equal("file://tmp/x")
+
+    it "parses a URI in the nested and sequence forms the untrusted parser accepts":
+        match parse_untrusted("hosts:\n  - id: a\n    role:\n      ref: secret://r/a\n"):
+            case Err(e): expect(e).to_equal("")
+            case Ok(value):
+                match value:
+                    case SdnValue.Dict(fields):
+                        match fields["hosts"]:
+                            case SdnValue.Array(items):
+                                match items[0]:
+                                    case SdnValue.Dict(host):
+                                        match host["role"]:
+                                            case SdnValue.Dict(role):
+                                                match role["ref"]:
+                                                    case SdnValue.String(string): expect(string).to_equal("secret://r/a")
+                                                    case _: expect("ref").to_equal("string")
+                                            case _: expect("role").to_equal("dict")
+                                    case _: expect("host").to_equal("dict")
+                            case _: expect("hosts").to_equal("array")
+                    case _: expect("root").to_equal("dict")
+
+    it "reports no duplicate issues for repeated URI values under different keys":
+        match parse_with_issues("a: secret://r/x\nb: secret://r/x\n"):
+            case Err(e): expect(e).to_equal("")
+            case Ok(checked): expect(checked.1.len()).to_equal(0)
+
+    it "still treats a plain colon as a key separator":
+        expect(field_text("host: example\nport: 8443\n", "host")).to_equal("example")
