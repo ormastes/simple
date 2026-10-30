@@ -1,0 +1,42 @@
+"""
+## Purpose and audience
+Purpose: Prove a closure started with plain `thread_spawn` (no arguments)
+runs on its own thread, so it can rendezvous with its spawner through a
+shared `Barrier`, and that its result still comes back through `join()`.
+Companion to isolated_thread_barrier_spec.spl, which covers
+`thread_spawn_with_args`; regression for
+doc/08_tracking/bug/interpreter_isolated_thread_barrier_hang_2026-10-30.md.
+Audience: interpreter and concurrency-library engineers.
+"""
+
+use std.spec
+use std.nogc_async_mut.concurrent.{Barrier, barrier_new}
+use std.concurrent.thread.{thread_spawn}
+
+describe "thread_spawn rendezvous":
+    it "lets a worker and its spawner both pass a two-party barrier":
+        val gate = barrier_new(2)
+        val handle = thread_spawn(\:
+            gate.wait()
+            7
+        )
+        gate.wait()
+        expect(handle.join().unwrap()).to_equal(7)
+        gate.free()
+
+    it "releases eight workers waiting on one barrier and joins every result":
+        val workers = 8
+        val gate = barrier_new(workers)
+        var handles = []
+        var worker = 0
+        while worker < workers:
+            handles.push(thread_spawn(\:
+                gate.wait()
+                10
+            ))
+            worker = worker + 1
+        var total = 0
+        for handle in handles:
+            total = total + handle.join().unwrap()
+        expect(total).to_equal(80)
+        gate.free()
