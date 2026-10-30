@@ -1,0 +1,56 @@
+"""
+# rt_list_dir_recursive is dispatchable from the interpreter
+
+`project.spl` (80.driver) enumerates a source root with
+`list_dir_recursive(root, ".spl")`. The extern was defined only by the C
+runtime (runtime_core_io_exports.c), so the interpreter died with
+`unknown extern function: rt_list_dir_recursive` as soon as a driver module
+walked a project. Generalization spec for the rt_tuple_new registration gap:
+same class (extern declared in .spl with live callers, absent from the
+interpreter table), adjacent family (filesystem instead of tuples).
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{list_dir_recursive, dir_create_all, dir_remove_all, file_write_text}
+
+val root = "build/tmp/rt_list_dir_recursive_spec"
+
+fn make_fixture_tree():
+    dir_remove_all(root)
+    dir_create_all("{root}/nested/deeper")
+    file_write_text("{root}/top.spl", "")
+    file_write_text("{root}/top.txt", "")
+    file_write_text("{root}/nested/mid.spl", "")
+    file_write_text("{root}/nested/deeper/leaf.spl", "")
+    file_write_text("{root}/nested/deeper/leaf.md", "")
+
+fn count_with_suffix(paths: [text], suffix: text) -> i64:
+    var n = 0
+    for p in paths:
+        if p.ends_with(suffix):
+            n = n + 1
+    n
+
+describe "rt_list_dir_recursive via std.nogc_sync_mut.sffi.io.list_dir_recursive":
+    it "lists every file with the dotted extension across all depths":
+        make_fixture_tree()
+        val found = list_dir_recursive(root, ".spl")
+        expect(found.len()).to_equal(3)
+        expect(count_with_suffix(found, ".spl")).to_equal(3)
+        dir_remove_all(root)
+
+    it "accepts the extension without a leading dot, like the C runtime":
+        make_fixture_tree()
+        val found = list_dir_recursive(root, "spl")
+        expect(found.len()).to_equal(3)
+        dir_remove_all(root)
+
+    it "lists every file when the extension is empty":
+        make_fixture_tree()
+        val found = list_dir_recursive(root, "")
+        expect(found.len()).to_equal(5)
+        dir_remove_all(root)
+
+    it "returns an empty array for a missing directory":
+        val found = list_dir_recursive("build/tmp/rt_list_dir_recursive_spec_missing", ".spl")
+        expect(found.len()).to_equal(0)

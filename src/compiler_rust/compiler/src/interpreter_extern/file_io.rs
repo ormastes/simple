@@ -3006,6 +3006,49 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(results))
 }
 
+/// Recursive file listing filtered by extension: `rt_list_dir_recursive(path, ext) -> [text]`.
+///
+/// Mirrors the only native definition, `src/runtime/runtime_core_io_exports.c`
+/// (the symbol is in neither the JIT `RuntimeFuncSpec` table nor the Rust
+/// runtime): `ext` may be `"spl"` or `".spl"`, an empty `ext` lists every file,
+/// the suffix is matched on the entry name, directories are entered without
+/// following symlinks (C uses `lstat`; symlinks are emitted as files when they
+/// match), nesting is capped at 64 levels, and a missing or unreadable
+/// directory yields an empty array. Live caller: `80.driver/project.spl`
+/// (`list_dir_recursive(source_root, ".spl")`), which died in the interpreter
+/// with "unknown extern function: rt_list_dir_recursive".
+pub fn rt_list_dir_recursive(args: &[Value]) -> Result<Value, CompileError> {
+    const MAX_DEPTH: usize = 64;
+
+    let path = extract_path(args, 0)?;
+    let ext = extract_content(args, 1)?;
+    let suffix = if ext.is_empty() || ext.starts_with('.') { ext } else { format!(".{ext}") };
+
+    fn walk(dir: &Path, suffix: &str, depth: usize, results: &mut Vec<Value>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let full = entry.path();
+            if file_type.is_dir() {
+                walk(&full, suffix, depth + 1, results);
+            } else if entry.file_name().to_string_lossy().ends_with(suffix) {
+                results.push(Value::text(full.to_string_lossy().to_string()));
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    walk(Path::new(&path), &suffix, 0, &mut results);
+    Ok(Value::array(results))
+}
+
 /// Get current directory.
 ///
 /// Returns a bare `Value::Str` on success and an empty string on failure --
