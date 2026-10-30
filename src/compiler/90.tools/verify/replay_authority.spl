@@ -1,7 +1,7 @@
 # Signed operator policy candidate resolver for FV2 replay.
 # A valid candidate is deliberately NOT execution authority: replay remains
 # blocked until every tool in the chain can be launched from pinned bytes.
-use app.io.mod.{file_hash_sha256}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
 use std.common.crypto.ed25519.{pure_ed25519_verify}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
@@ -10,7 +10,7 @@ use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
 use std.common.sdn.value.{SdnValue}
 use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
 use std.nogc_sync_mut.env.{get_config_dir}
-use std.nogc_sync_mut.io.retained_file.{retained_file_open}
+use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1}
 use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1}
 
 val REPLAY_POLICY_DOMAIN_V1: text = "FV2-REPLAY-POLICY-v1\n"
@@ -23,8 +23,8 @@ fn _policy_path_is_canonical_v1(path: text) -> bool:
         return false
     true
 
-fn _policy_read_v1(path: text, maximum: i64) -> Result<[u8], text>:
-    val opened = retained_file_open(path, maximum as u64)
+fn _policy_read_v1(directory: RetainedDirectoryOwnerV1, name: text, maximum: i64) -> Result<[u8], text>:
+    val opened = directory.open_file(name, maximum as u64)
     match opened:
         case Err(_): Err("FV2-E-REPLAY-AUTHORITY-READ")
         case Ok(file):
@@ -87,9 +87,8 @@ fn _policy_hash_matches_v1(path: text, expected: text) -> bool:
     val observed = file_hash_sha256(path)
     observed == expected
 
-fn _policy_root_v1(config_root: text) -> Result<[u8], text>:
-    val path = config_root + "/simple/verification/replay/root.pub"
-    match _policy_read_v1(path, 128):
+fn _policy_root_v1(directory: RetainedDirectoryOwnerV1) -> Result<[u8], text>:
+    match _policy_read_v1(directory, "root.pub", 128):
         case Err(reason): Err(reason)
         case Ok(raw):
             if raw.len() == 32: Ok(raw)
@@ -140,22 +139,15 @@ fn _policy_validate_schema_v1(value: SdnValue, class_: ReplayCheckerClassV1,
         _policy_hash_matches_v1(lake, lake_hash) and _policy_hash_matches_v1(exporter, export_hash) and
         _policy_hash_matches_v1(nanoda, nanoda_hash)
 
-# No caller supplies a policy/key path or an authority object. The only source
-# is the canonical platform config directory; success returns a candidate hash.
-pub fn replay_authority_candidate_v1(class_: ReplayCheckerClassV1,
-    launcher_path: text, tool_path: text, tool_name: text, tool_version: text) -> Result<text, text>:
-    @when(os="linux"):
-    val root = get_config_dir()
-    if not _policy_path_is_canonical_v1(root):
-        return Err("FV2-E-REPLAY-AUTHORITY-CONFIG")
-    val key = _policy_root_v1(root)?
+fn _replay_authority_candidate_from_owner_v1(directory: RetainedDirectoryOwnerV1,
+    class_: ReplayCheckerClassV1, launcher_path: text, tool_path: text,
+    tool_name: text, tool_version: text) -> Result<text, text>:
+    val key = _policy_root_v1(directory)?
     val lane = match class_:
         case ReplayCheckerClassV1.FreshLeanKernel: "fresh"
         case ReplayCheckerClassV1.IndependentKernel: "independent"
-    val policy_path = root + "/simple/verification/replay/" + lane + ".sdn"
-    val signature_path = root + "/simple/verification/replay/" + lane + ".sig"
-    val payload = _policy_read_v1(policy_path, REPLAY_POLICY_MAX_BYTES_V1)?
-    val signature = _policy_read_v1(signature_path, 64)?
+    val payload = _policy_read_v1(directory, lane + ".sdn", REPLAY_POLICY_MAX_BYTES_V1)?
+    val signature = _policy_read_v1(directory, lane + ".sig", 64)?
     if signature.len() != 64:
         return Err("FV2-E-REPLAY-AUTHORITY-SIGNATURE")
     val signed_message = base_encoding_text_to_bytes(REPLAY_POLICY_DOMAIN_V1) + payload
@@ -172,6 +164,26 @@ pub fn replay_authority_candidate_v1(class_: ReplayCheckerClassV1,
                     tool_path, tool_name, tool_version):
                 return Err("FV2-E-REPLAY-AUTHORITY-POLICY")
     Ok(sha256_u8_hex(payload))
+
+# No caller supplies a policy/key path or an authority object. The only source
+# is the canonical platform config directory; all policy files are opened
+# relative to one retained, component-validated directory descriptor.
+pub fn replay_authority_candidate_v1(class_: ReplayCheckerClassV1,
+    launcher_path: text, tool_path: text, tool_name: text, tool_version: text) -> Result<text, text>:
+    @when(os="linux"):
+    val root = get_config_dir()
+    if not _policy_path_is_canonical_v1(root):
+        return Err("FV2-E-REPLAY-AUTHORITY-CONFIG")
+    val opened = retained_directory_open_trusted_v1(root + "/simple/verification/replay")
+    match opened:
+        case Err(_): Err("FV2-E-REPLAY-AUTHORITY-ROOT-PROVENANCE")
+        case Ok(directory):
+            var owner = directory
+            val candidate = _replay_authority_candidate_from_owner_v1(owner, class_,
+                launcher_path, tool_path, tool_name, tool_version)
+            val closed = owner.close()
+            if not closed: Err("FV2-E-REPLAY-AUTHORITY-ROOT-CLOSE")
+            else: candidate
     @else:
     Err("FV2-E-REPLAY-AUTHORITY-UNSUPPORTED")
     @end

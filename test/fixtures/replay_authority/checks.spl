@@ -2,7 +2,8 @@ use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.nogc_sync_mut.env.{env_get, env_has, env_set, env_unset}
-use std.nogc_sync_mut.io.{dir_create_all, file_delete, file_write_bytes}
+use std.nogc_sync_mut.io.{dir_create_all, dir_remove_all, file_delete, file_write_bytes}
+use test.fixtures.replay_authority.owner_checks.{retained_directory_owner_fixture_checks_v1}
 use std.io_runtime.{getpid}
 use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1}
 use compiler.tools.verify.replay_authority.{REPLAY_POLICY_DOMAIN_V1,
@@ -76,6 +77,7 @@ fn _replay_authority_fixture_body_v1(root: text, policy_root: text) -> i64:
     val adapter_bytes = _fixture_bytes_v1("fixture adapter bytes")
     val exporter_bytes = _fixture_bytes_v1("fixture export bytes")
     val nanoda_bytes = _fixture_bytes_v1("fixture nanoda bytes")
+    var checks = 0
     if not _fixture_write_v1(policy_root + "/root.pub", pair.1) or
             not _fixture_write_v1(lake, lake_bytes) or
             not _fixture_write_v1(checker, checker_bytes) or
@@ -83,13 +85,15 @@ fn _replay_authority_fixture_body_v1(root: text, policy_root: text) -> i64:
             not _fixture_write_v1(exporter, exporter_bytes) or
             not _fixture_write_v1(nanoda, nanoda_bytes):
         return -1
+    val owner_check_result = retained_directory_owner_fixture_checks_v1()
+    if owner_check_result == 8: checks = checks + 8
+    else: checks = -1
     val lake_hash = sha256_u8_hex(lake_bytes)
     val checker_hash = sha256_u8_hex(checker_bytes)
     val valid = _fresh_policy_v1(lake, lake_hash, checker, checker_hash,
         "fixture-checker-v1")
     if not _fixture_publish_v1(root, "fresh", valid, seed, pair.1):
         return -1
-    var checks = 0
     if replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
             lake, checker, "leanchecker", "fixture-checker-v1").is_ok(): checks = checks + 1
     if replay_authority_candidate_v1(ReplayCheckerClassV1.FreshLeanKernel,
@@ -97,7 +101,7 @@ fn _replay_authority_fixture_body_v1(root: text, policy_root: text) -> i64:
     val guarded = run_fresh_leanchecker_v1(ReplayRunnerConfigV1("/project",
         "Fixture.Module", "Fixture", "/artifact", sha256_u8_hex(_fixture_bytes_v1("artifact")),
         lake, checker, "leanchecker", "fixture-checker-v1", 1000))
-    if not guarded.accepted() and guarded.diagnostic.contains("ROOT-PROVENANCE-AND-PINNED-CHAIN-UNAVAILABLE"):
+    if not guarded.accepted() and guarded.diagnostic.contains("PINNED-CHAIN-UNAVAILABLE"):
         checks = checks + 1
     val tampered = valid + "# tampered\n"
     if _fixture_write_v1(policy_root + "/fresh.sdn", _fixture_bytes_v1(tampered)) and
@@ -168,6 +172,7 @@ pub fn replay_authority_fixture_checks_v1() -> i64:
     file_delete(root + "/adapter")
     file_delete(root + "/lean4export")
     file_delete(root + "/nanoda")
+    dir_remove_all(root + "/renamed-replay")
     if had_xdg:
         env_set("XDG_CONFIG_HOME", old_xdg)
     else:
