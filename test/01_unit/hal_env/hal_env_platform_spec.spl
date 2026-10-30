@@ -1,0 +1,101 @@
+# HAL environment unit checks: platform identity, temp-dir canonicality,
+# explicit refusal on unsupported hosts.
+# Per host: macOS/Linux/FreeBSD run all. Windows: platform agreement runs; the
+# uname and temp-dir cases are pending (no uname; TEMP 8.3 long-name
+# canonicalization is not implemented). SimpleOS (SIMPLE_OS_KERNEL=simpleos):
+# hosted-shell cases are pending. Any other host fails.
+use std.spec.{describe, it, expect, fail, pending}
+use std.nogc_sync_mut.io_runtime.{host_os, platform_name, env_get, env_set, env_remove_process}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_host_os, sosix_test_temp_dir, sosix_test_is_simpleos}
+use std.nogc_sync_mut.test_runner.worker_memory.{worker_memory_supported}
+
+extern fn rt_platform_name() -> text
+
+fn hal_env_normal_os(value: text) -> text:
+    val low = value.trim().lower()
+    if low == "darwin": return "macos"
+    low
+
+fn hal_env_posix_host() -> bool:
+    val os = hal_env_normal_os(host_os())
+    os == "macos" or os == "linux" or os == "freebsd"
+
+# Independent oracle: the shell's physical working directory after cd.
+fn hal_env_pwd_p(path: text) -> text:
+    val (out, _err, code) = process_run_bounded("/bin/sh", ["-c", "cd -- \"$1\" && pwd -P", "sh", path], 10000, 4096)
+    if code != 0: return "<pwd -P failed for " + path + ">"
+    out.trim()
+
+describe "HAL platform detection":
+    it "reports a qualified host":
+        val os = hal_env_normal_os(host_os())
+        if sosix_test_is_simpleos():
+            pending("SimpleOS: hosted host_os() is not the SimpleOS detector")
+            return
+        if os != "macos" and os != "linux" and os != "freebsd" and os != "windows":
+            fail("unqualified host: rt_platform_name=" + rt_platform_name() + " host_os=" + host_os())
+            return
+        expect(hal_env_normal_os(rt_platform_name()) == "unix" or hal_env_normal_os(rt_platform_name()) == os).to_equal(true)
+
+    it "agrees across rt_platform_name, platform_name, host_os and sosix_test_host_os":
+        val runtime_os = hal_env_normal_os(rt_platform_name())
+        val io_os = hal_env_normal_os(host_os())
+        expect(hal_env_normal_os(platform_name())).to_equal(runtime_os)
+        expect(hal_env_normal_os(sosix_test_host_os())).to_equal(io_os)
+        if runtime_os == "unix":
+            # BSD runtimes report "unix"; host_os must then refine to a BSD.
+            expect(io_os).to_equal("freebsd")
+        else:
+            expect(io_os).to_equal(runtime_os)
+
+    it "agrees with an independent uname probe":
+        if not hal_env_posix_host() or sosix_test_is_simpleos():
+            pending("uname probe needs a POSIX host shell (Windows/SimpleOS have none)")
+            return
+        val (out, _err, code) = process_run_bounded("/bin/sh", ["-c", "uname -s"], 10000, 4096)
+        expect(code).to_equal(0)
+        expect(hal_env_normal_os(out)).to_equal(hal_env_normal_os(host_os()))
+
+describe "HAL temp directory":
+    it "returns the physical (pwd -P) path of the temp dir":
+        if not hal_env_posix_host() or sosix_test_is_simpleos():
+            pending("Windows TEMP long-name canonicalization unimplemented; SimpleOS has no hosted TMPDIR")
+            return
+        val temp = sosix_test_temp_dir()
+        expect(temp).to_equal(hal_env_pwd_p(temp))
+
+    it "resolves a symlinked TMPDIR to its target":
+        if not hal_env_posix_host() or sosix_test_is_simpleos():
+            pending("needs a POSIX host to create a symlink")
+            return
+        val tmpdir_now = env_get("TMPDIR")
+        val base = hal_env_pwd_p(if tmpdir_now == "": "/tmp" else: tmpdir_now)
+        val (nonce, _ne, _nc) = process_run_bounded("/bin/sh", ["-c", "echo $$-$(date +%s)"], 5000, 64)
+        val link = base + "/hal_env_link_" + nonce.trim()
+        val (_o, _e, made) = process_run_bounded("/bin/sh", ["-c", "mkdir -p \"$1.d\" && ln -s \"$1.d\" \"$1\"", "sh", link], 10000, 4096)
+        expect(made).to_equal(0)
+        val saved = env_get("TMPDIR")
+        env_set("TMPDIR", link)
+        val temp = sosix_test_temp_dir()
+        if saved == "": env_remove_process("TMPDIR") else: env_set("TMPDIR", saved)
+        val (_o2, _e2, _c2) = process_run_bounded("/bin/sh", ["-c", "rm -f \"$1\"; rmdir \"$1.d\"", "sh", link], 10000, 4096)
+        expect(temp).to_equal(link + ".d")
+        expect(temp == link).to_equal(false)
+
+    it "returns a bogus TMPDIR unresolved rather than inventing a path":
+        if not hal_env_posix_host() or sosix_test_is_simpleos():
+            pending("needs a POSIX host shell")
+            return
+        val saved = env_get("TMPDIR")
+        env_set("TMPDIR", "/nonexistent/hal-env-bogus")
+        val temp = sosix_test_temp_dir()
+        if saved == "": env_remove_process("TMPDIR") else: env_set("TMPDIR", saved)
+        expect(temp).to_equal("/nonexistent/hal-env-bogus")
+
+describe "HAL unsupported host refusal":
+    it "refuses worker memory sampling on an unknown host and accepts qualified ones":
+        expect(worker_memory_supported("haiku-os")).to_equal(false)
+        expect(worker_memory_supported("")).to_equal(false)
+        expect(worker_memory_supported("linux")).to_equal(true)
+        expect(worker_memory_supported("macos")).to_equal(true)

@@ -5,9 +5,10 @@ Windows capture uses its tagged JobObject owner. This boundary selects and
 executes the capture strategy without promising POSIX tree containment.
 """
 
-use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_spawn_redirected}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_spawn_redirected, process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 export use std.nogc_sync_mut.io.windows_redirected_process.{
     windows_redirected_completion as sosix_test_process_completion,
     windows_redirected_failure_reason as sosix_test_process_failure_reason
@@ -22,14 +23,41 @@ fn sosix_test_host_os() -> text:
 fn sosix_test_has_owned_completion(token: i64) -> bool:
     token >= WINDOWS_REDIRECTED_TOKEN_BASE
 
+fn sosix_test_is_simpleos() -> bool:
+    # host_os() never reports SimpleOS (the hosted runtimes emit only
+    # windows/macos/linux/unix); the kernel exports this marker instead.
+    (env_get("SIMPLE_OS_KERNEL") ?? "") == "simpleos"
+
+var _sosix_test_temp_dir_cache: text = ""
+
+fn sosix_test_temp_dir_realpath(path: text) -> text:
+    """Symlink-resolved directory via `pwd -P`, or "" on failure.
+
+    rt_file_canonicalize only normalizes lexically in the native runtimes, so
+    it cannot resolve macOS /tmp -> /private/tmp; the shell is the portable
+    POSIX realpath here. Called once per process (cached by the caller)."""
+    val (out, _err, code) = process_run_bounded("/bin/sh",
+        ["-c", "cd -- \"$1\" && pwd -P", "sh", path], 10000, 4096)
+    if code != 0: return ""
+    out.trim()
+
 fn sosix_test_temp_dir() -> text:
     if sosix_test_owned_capture():
+        # Windows TEMP is NOT long-name canonicalized (8.3 names such as
+        # RUNNER~1 survive); tracked for the runtime lane.
         val temp = (env_get("TEMP") ?? "").trim()
         if temp != "": return temp
         return "C:\\Temp"
-    val temp = (env_get("TMPDIR") ?? "").trim()
-    if temp != "": return temp
-    "/tmp"
+    val raw = (env_get("TMPDIR") ?? "").trim()
+    val temp = if raw != "": raw else: "/tmp"
+    if _sosix_test_temp_dir_cache != "" and _sosix_test_temp_dir_cache.starts_with(temp + "\n"):
+        return _sosix_test_temp_dir_cache[temp.len() + 1:]
+    val resolved = sosix_test_temp_dir_realpath(temp)
+    if resolved == "":
+        eprint("[sosix] temp dir '" + temp + "' could not be resolved to a canonical path; using it unresolved")
+        return temp
+    _sosix_test_temp_dir_cache = temp + "\n" + resolved
+    resolved
 
 fn sosix_test_path_separator() -> text:
     if sosix_test_owned_capture(): return "\\"
