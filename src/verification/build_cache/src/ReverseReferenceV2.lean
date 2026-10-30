@@ -52,11 +52,8 @@ theorem projectOne_mem (prev : Option (List Edge)) (m : Manifest) (a : List Edge
   cases hs : m.sealed
   · simp [hs] at h
   · simp [hs] at h
-    by_cases hall : m.reads.all (·.2)
-    · simp [hall] at h
-      subst a
-      simp [List.mem_map, Prod.mk.injEq, hs, and_assoc, and_left_comm, and_comm]
-    · simp [hall] at h
+    obtain ⟨_, rfl⟩ := h
+    simp [List.mem_map, Prod.mk.injEq, hs, and_assoc, and_left_comm, and_comm]
 
 /-- T-RR1: a successful projection contains exactly the inverse of the
     forward relation — no consumer is omitted (no under-invalidation) and no
@@ -112,7 +109,7 @@ theorem project_success_implies_all_sealed (prev : Option (List Edge)) (ms : Lis
         · have hn : projectOne prev m = none := by simp [projectOne, hs]
           rw [hp] at hn
           cases hn
-        · exact hs
+        · rfl
       cases hr : project prev ms with
       | none => simp [hp, hr] at h
       | some b =>
