@@ -1,0 +1,75 @@
+# Source-level contract for the intentionally thin SOSIX V3 namespace facade.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+fn cache_namespace_facade_source() -> text:
+    file_read("src/lib/nogc_sync_mut/sosix/cache_namespace_publication_v3.spl")
+
+fn cache_namespace_owner_source() -> text:
+    file_read("src/lib/common/cache_daemon_host_authority_v1.spl")
+
+describe "SOSIX cache namespace V3 source contract":
+    it "re-exports only the existing namespace authority owner surface":
+        val facade = cache_namespace_facade_source()
+        expect(facade).to_contain(
+            "export use std.common.cache_daemon_host_authority_v1.{")
+        expect(facade.split("export use").len() - 1).to_equal(1)
+        expect(facade.split("export ").len() - 1).to_equal(1)
+        for symbol in [
+            "CacheNamespaceAuthorityV3", "CacheNamespaceScopeV3",
+            "CacheNamespaceSyncedObjectV3", "CacheNamespaceRecoveryV3",
+            "CacheNamespaceExpectedHeadV3", "CacheNamespaceModeV3",
+            "CacheNamespaceCommitStatusV3", "CacheNamespaceResolutionV3",
+            "CacheNamespaceLimitsV3", "cache_host_namespace_available_v3",
+            "cache_host_namespace_open_v3", "cache_host_namespace_begin_v3",
+            "cache_host_namespace_sync_object_v3",
+            "cache_host_namespace_commit_selected_v3",
+            "cache_host_namespace_recovery_capture_v3",
+            "cache_host_namespace_recovery_read_v3",
+            "cache_host_namespace_resolve_operation_v3",
+            "cache_host_namespace_finish_v3", "cache_host_namespace_abort_v3",
+            "cache_host_namespace_close_v3"
+        ]:
+            expect(facade).to_contain(symbol)
+        expect(facade.contains("extern fn")).to_equal(false)
+        expect(facade.contains("rt_cache_host_namespace_")).to_equal(false)
+        expect(facade.contains("three_payload_generation_publisher")).to_equal(false)
+        expect(facade.contains("bool")).to_equal(false)
+        expect(facade.contains("pub struct")).to_equal(false)
+        expect(facade.contains("pub enum")).to_equal(false)
+        expect(facade.contains("pub fn")).to_equal(false)
+
+    it "preserves the existing negative commit and recovery status mapping":
+        val owner = cache_namespace_owner_source()
+        val commit_start = owner.find("fn cache_namespace_commit_status_v3(status: i64)")
+        val resolution_start = owner.find("fn cache_namespace_resolution_v3(status: i64)")
+        expect(commit_start).to_be_greater_than(-1)
+        expect(resolution_start).to_be_greater_than(commit_start)
+        val commit_mapping = owner.substring(commit_start, resolution_start)
+        expect(commit_mapping).to_contain("case -2: CacheNamespaceCommitStatusV3.Unknown")
+        expect(commit_mapping).to_contain("case -3: CacheNamespaceCommitStatusV3.Unsupported")
+        expect(commit_mapping).to_contain("case -4: CacheNamespaceCommitStatusV3.Bounds")
+        expect(commit_mapping).to_contain("case -5: CacheNamespaceCommitStatusV3.Cancelled")
+        expect(commit_mapping).to_contain("case -6: CacheNamespaceCommitStatusV3.Stale")
+        expect(commit_mapping).to_contain("case -7: CacheNamespaceCommitStatusV3.IoBeforeMutation")
+        expect(commit_mapping).to_contain("case _: CacheNamespaceCommitStatusV3.Invalid")
+
+        val resolution_end = owner.find("fn cache_host_namespace_available_v3()")
+        expect(resolution_end).to_be_greater_than(resolution_start)
+        val resolution_mapping = owner.substring(resolution_start, resolution_end)
+        expect(resolution_mapping).to_contain("case -2: CacheNamespaceResolutionV3.Unknown")
+        expect(resolution_mapping).to_contain("case -3: CacheNamespaceResolutionV3.Unsupported")
+        expect(resolution_mapping).to_contain("case -4: CacheNamespaceResolutionV3.Bounds")
+        expect(resolution_mapping).to_contain("case -6: CacheNamespaceResolutionV3.Stale")
+        expect(resolution_mapping).to_contain("case _: CacheNamespaceResolutionV3.Invalid")
+        expect(owner).to_contain(
+            "cache_namespace_commit_status_v3(rt_cache_host_namespace_available_v3())")
+        val native_provider = file_read("src/runtime/runtime_cache_host_authority_v1.c")
+        val rust_provider = file_read(
+            "src/compiler_rust/runtime/src/cache_host_authority_v1.rs")
+        expect(native_provider).to_contain(
+            "rt_cache_host_namespace_available_v3(void){return -3;}")
+        expect(rust_provider).to_contain(
+            "const NAMESPACE_V3_UNSUPPORTED: i64 = -3;")
+        expect(rust_provider).to_contain("rt_cache_host_namespace_available_v3() -> i64")
+        expect(rust_provider).to_contain("NAMESPACE_V3_UNSUPPORTED")
