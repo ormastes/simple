@@ -1,7 +1,7 @@
 # Seed interpreter: an `if` expression makes a frame re-read a stale module global
 
 - **Filed:** 2026-10-31
-- **Status:** OPEN
+- **Status:** FIXED on work/release-caret-cmux-20261031 (publish_before_block_clone in function_exec.rs); main_spec 64/64
 - **Lane:** Windows caret triage, Rust seed `simple test` / `simple run` (interpreter path)
 - **Keeps RED:** `test/01_unit/app/llm_caret/main_spec.spl`, "should resume a saved provider model transcript and provider session" (`expected dummy to equal claude_cli`)
 
