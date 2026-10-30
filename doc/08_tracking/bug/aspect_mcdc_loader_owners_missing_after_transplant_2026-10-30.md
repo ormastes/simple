@@ -33,6 +33,9 @@ but the next layer is also missing on release:
 - `McdcPolicy.StaticOff` / `StaticOn` (`compiler.common.config`). Release has the
   same variants as `McdcMode` in `src/lib/common/mcdc/model.spl`, imported by
   `config.spl:7`, so this item is an import rename, not a feature port.
+  `mcdc_aspect_pack_payload.spl:374,379` also uses `McdcPolicy.Dynamic`, which
+  maps to `McdcMode.DynamicAspect`. `McdcPolicy.Invalid` and its helper
+  methods have no `McdcMode` equivalent, and the owners do not use them.
 - `pack_index_cached_count` (`compiler.loader.aspect_pack_index_cache`)
 
 Measured with the owners restored: aspect_loader_integration 0/1,
