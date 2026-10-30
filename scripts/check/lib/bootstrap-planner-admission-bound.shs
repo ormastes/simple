@@ -215,11 +215,21 @@ bootstrap_planner_v2_authorization_text() {
 bootstrap_planner_v2_verify_structure() {
     bootstrap_planner_v2_receipt=$(bootstrap_planner_v2_canonical_file "$1") || return 1
     bootstrap_planner_v2_root=$(bootstrap_planner_v2_canonical_dir "$2") || return 1
-    bootstrap_planner_v2_keys='schema status platform target reason parent_compiler_path parent_compiler_sha256 parent_stage2_sanity_path parent_stage2_sanity_sha256 parent_stage2_provenance_path parent_stage2_provenance_sha256 runtime_dir runtime_snapshot_path runtime_snapshot_sha256 planner_source_path planner_source_sha256 planner_source_closure_snapshot_path planner_source_closure_snapshot_sha256 git_state_path git_state_sha256 build_argv_sha256 build_env_sha256 cache_scope_key planner_path planner_sha256 planner_smoke_path planner_smoke_sha256 authorization_receipt_path authorization_receipt_sha256'
-    [ "$(wc -l <"$bootstrap_planner_v2_receipt" | tr -d ' ')" -eq 29 ] || return 1
+    bootstrap_planner_v2_schema=$(bootstrap_planner_v2_field schema "$bootstrap_planner_v2_receipt") || return 1
+    case "$bootstrap_planner_v2_schema" in
+        simple-bootstrap-planner-admission-v2)
+            bootstrap_planner_v2_keys='schema status platform target reason parent_compiler_path parent_compiler_sha256 parent_stage2_sanity_path parent_stage2_sanity_sha256 parent_stage2_provenance_path parent_stage2_provenance_sha256 runtime_dir runtime_snapshot_path runtime_snapshot_sha256 planner_source_path planner_source_sha256 planner_source_closure_snapshot_path planner_source_closure_snapshot_sha256 git_state_path git_state_sha256 build_argv_sha256 build_env_sha256 cache_scope_key planner_path planner_sha256 planner_smoke_path planner_smoke_sha256 authorization_receipt_path authorization_receipt_sha256'
+            bootstrap_planner_v2_expected_lines=29
+            ;;
+        simple-bootstrap-planner-admission-v3)
+            bootstrap_planner_v2_keys='schema status platform target reason parent_compiler_path parent_compiler_sha256 parent_stage2_sanity_path parent_stage2_sanity_sha256 parent_stage2_provenance_path parent_stage2_provenance_sha256 runtime_dir runtime_snapshot_path runtime_snapshot_sha256 planner_source_path planner_source_sha256 planner_source_closure_snapshot_path planner_source_closure_snapshot_sha256 git_state_path git_state_sha256 build_argv_sha256 build_env_sha256 planner_build_backend planner_build_argv_sha256 cache_scope_key planner_path planner_sha256 planner_smoke_path planner_smoke_sha256 authorization_receipt_path authorization_receipt_sha256'
+            bootstrap_planner_v2_expected_lines=31
+            ;;
+        *) return 1 ;;
+    esac
+    [ "$(wc -l <"$bootstrap_planner_v2_receipt" | tr -d ' ')" -eq "$bootstrap_planner_v2_expected_lines" ] || return 1
     bootstrap_planner_v2_actual=$(cut -d= -f1 "$bootstrap_planner_v2_receipt" | tr '\n' ' ' | sed 's/ $//')
     [ "$bootstrap_planner_v2_actual" = "$bootstrap_planner_v2_keys" ] || return 1
-    [ "$(bootstrap_planner_v2_field schema "$bootstrap_planner_v2_receipt")" = simple-bootstrap-planner-admission-v2 ] || return 1
     [ "$(bootstrap_planner_v2_field status "$bootstrap_planner_v2_receipt")" = pass ] || return 1
     bootstrap_planner_v2_target=$(bootstrap_planner_v2_field target "$bootstrap_planner_v2_receipt") || return 1
     bootstrap_planner_v2_reason=$(bootstrap_planner_v2_field reason "$bootstrap_planner_v2_receipt") || return 1
@@ -238,7 +248,13 @@ bootstrap_planner_v2_verify_structure() {
     [ "$bootstrap_planner_v2_source" = "$bootstrap_planner_v2_root/src/app/cli/bootstrap_reason_planner.spl" ] || return 1
     bootstrap_planner_v2_runtime=$(bootstrap_planner_v2_field runtime_dir "$bootstrap_planner_v2_receipt") || return 1
     bootstrap_planner_v2_canonical_dir "$bootstrap_planner_v2_runtime" >/dev/null || return 1
-    for bootstrap_planner_v2_name in build_argv_sha256 build_env_sha256 cache_scope_key; do
+    bootstrap_planner_v2_names='build_argv_sha256 build_env_sha256 cache_scope_key'
+    if [ "$bootstrap_planner_v2_schema" = simple-bootstrap-planner-admission-v3 ]; then
+        bootstrap_planner_v2_build_backend=$(bootstrap_planner_v2_field planner_build_backend "$bootstrap_planner_v2_receipt") || return 1
+        case "$bootstrap_planner_v2_build_backend" in llvm|llvm-lib|cranelift) ;; *) return 1 ;; esac
+        bootstrap_planner_v2_names="$bootstrap_planner_v2_names planner_build_argv_sha256"
+    fi
+    for bootstrap_planner_v2_name in $bootstrap_planner_v2_names; do
         bootstrap_planner_v2_sha=$(bootstrap_planner_v2_field "$bootstrap_planner_v2_name" "$bootstrap_planner_v2_receipt") || return 1
         bootstrap_planner_v2_is_sha256 "$bootstrap_planner_v2_sha" || return 1
     done
@@ -278,6 +294,24 @@ bootstrap_planner_v2_canonical_argv_text() {
         "--planner-source-closure-sha256=$6" \
         "--planner-sha256=$7" \
         "--bootstrap-receipt=$8"
+}
+
+# Compiler argv used to build the planner. Bind it separately from the
+# planner's later execution argv: backend selection changes the compiler path
+# that produced the admitted executable.
+bootstrap_planner_v2_canonical_build_argv_text() {
+    printf '%s\n' \
+        "$1" \
+        'native-build' \
+        "--backend=$2" \
+        '--source' 'src/app/cli' \
+        '--source' 'src/lib' \
+        '--runtime-path' "$3" \
+        '--runtime-bundle' 'core-c-bootstrap' \
+        '--cache-dir' "$4" \
+        '--entry-closure' \
+        '--entry' "$5" \
+        '-o' "$6"
 }
 
 # The exact environment the producer must exec the planner under. Fixed and
@@ -413,6 +447,27 @@ bootstrap_planner_v2_verify_bound() {
         *) return 1 ;;
     esac
     case "$bootstrap_planner_v2_rt" in *..*) return 1 ;; esac
+
+    if [ "$(bootstrap_planner_v2_field schema "$bootstrap_planner_v2_receipt")" = simple-bootstrap-planner-admission-v3 ]; then
+        # Bind the exact native-build argv, including its selected codegen
+        # backend. The admitted runtime authority is named by parent sanity.
+        [ "$(grep -c '^admission_receipt_path=' "$bootstrap_planner_v2_sanity" 2>/dev/null || true)" -eq 1 ] || return 1
+        bootstrap_planner_v2_admission=$(sed -n 's/^admission_receipt_path=//p' \
+            "$bootstrap_planner_v2_sanity") || return 1
+        bootstrap_planner_v2_admission=$(bootstrap_planner_v2_canonical_file \
+            "$bootstrap_planner_v2_admission") || return 1
+        bootstrap_planner_v2_admission_root=$(dirname -- \
+            "$(dirname -- "$bootstrap_planner_v2_admission")") || return 1
+        bootstrap_planner_v2_build_backend=$(bootstrap_planner_v2_field \
+            planner_build_backend "$bootstrap_planner_v2_receipt") || return 1
+        bootstrap_planner_v2_build_argv=$(bootstrap_planner_v2_canonical_build_argv_text \
+            "$bootstrap_planner_v2_parent" "$bootstrap_planner_v2_build_backend" \
+            "$bootstrap_planner_v2_admission_root/stage2-runtime-authority" \
+            "$bootstrap_planner_v2_adm/planner-cache" \
+            src/app/cli/bootstrap_reason_planner.spl "$bootstrap_planner_v2_planner")
+        [ "$(bootstrap_planner_v2_hash_text "$bootstrap_planner_v2_build_argv")" = \
+          "$(bootstrap_planner_v2_field planner_build_argv_sha256 "$bootstrap_planner_v2_receipt")" ] || return 1
+    fi
 
     # Re-derive the argv/env digests instead of shape-checking them. Without
     # this a v2 receipt carries no more authority than a v1 one.

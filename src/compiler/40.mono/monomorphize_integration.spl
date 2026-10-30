@@ -1228,6 +1228,97 @@ impl MonomorphizationPass:
                 else:
                     self.inherent_method_owners[key] = identity
 
+    me collect_generic_instance_method_v1(module_name: text,
+            by_id: Dict<i64, HirFunction>, owner_identity: text, owner_name: text,
+            owner_tps: [HirTypeParam], method_name: text, method_symbol: SymbolId,
+            has_trait: bool, target_reason: text = ""):
+        if not by_id.has(method_symbol.id): return
+        val template: HirFunction = by_id[method_symbol.id]
+        if template.is_static or not template.is_method or template.params.len() == 0: return
+        val method_key = "{owner_identity}::{method_name}"
+        val gname = "{owner_name}__{method_name}"
+        var reason = target_reason
+        if has_trait: reason = "it is declared by a trait impl"
+        var all_tps: [HirTypeParam] = []
+        var bound_tps: [HirTypeParam] = []
+        var bound_names: [text] = []
+        for itp in owner_tps:
+            val owner_tp: HirTypeParam = itp
+            all_tps = all_tps.push(owner_tp)
+            if bound_names.contains(owner_tp.name):
+                reason = "owner has duplicate type parameter name `{owner_tp.name}`"
+            else:
+                bound_names = bound_names.push(owner_tp.name)
+                bound_tps = bound_tps.push(owner_tp)
+        val owner_bound_count = bound_tps.len()
+        for otp in template.type_params:
+            val own_tp: HirTypeParam = otp
+            all_tps = all_tps.push(own_tp)
+            if bound_names.contains(own_tp.name):
+                if reason == "": reason = "method type parameter `{own_tp.name}` shadows an owner binder"
+            else:
+                bound_names = bound_names.push(own_tp.name)
+                bound_tps = bound_tps.push(own_tp)
+        if reason == "" and owner_bound_count != owner_tps.len():
+            reason = "owner type parameter binders are not unique"
+        if reason == "" and bound_tps.len() != owner_bound_count + template.type_params.len():
+            reason = "method type parameter binders are not unique"
+
+        # Class-body methods and the flat-AST bridge can expose one declaration
+        # through both HirClass.methods and a synthetic HirImpl. Deduplicate only
+        # the same declaration under the same exact owner key; distinct symbols
+        # keep the existing collision refusal.
+        if reason == "" and self.generic_methods.has(method_key) and not self.generic_method_rejected.has(method_key):
+            val prior_name: text = self.generic_methods[method_key]
+            if prior_name == gname and self.template_recipes.has(prior_name):
+                val prior_recipe: MonoTemplateRecipeV1 = self.template_recipes[prior_name]
+                if prior_recipe.module_name == module_name and prior_recipe.original_symbol.id == method_symbol.id:
+                    var compatible_binders = prior_recipe.bound_type_params.len() == bound_tps.len()
+                    var binder_index = 0
+                    while compatible_binders and binder_index < bound_tps.len():
+                        if prior_recipe.bound_type_params[binder_index].name != bound_tps[binder_index].name:
+                            compatible_binders = false
+                        binder_index = binder_index + 1
+                    if compatible_binders:
+                        var merged_canonical = prior_recipe.canonical_type_params
+                        var merged_ids: Dict<i64, bool> = {}
+                        for canonical_param in merged_canonical:
+                            val existing_param: HirTypeParam = canonical_param
+                            merged_ids[existing_param.symbol.id] = true
+                        for alias_param in all_tps:
+                            val alias: HirTypeParam = alias_param
+                            if not merged_ids.has(alias.symbol.id):
+                                merged_canonical = merged_canonical.push(alias)
+                                merged_ids[alias.symbol.id] = true
+                        val merged_recipe = MonoTemplateRecipeV1(module_name: module_name,
+                            original_symbol: template.symbol, template_name: gname,
+                            canonical_type_params: merged_canonical,
+                            bound_type_params: prior_recipe.bound_type_params,
+                            inherent_method: true)
+                        self.template_recipes[prior_name] = merged_recipe
+                        self.archive_template_signatures[prior_name] = mono_template_recipe_signature_v1(template, merged_recipe)
+                        return
+                    reason = "duplicate class/impl registration has incompatible canonical binders"
+        if reason == "" and (self.has_template_v1(gname) or self.generic_methods.has(method_key)):
+            reason = "another declaration uses the template key `{gname}`"
+            for prior_key in self.generic_methods.keys():
+                val pk: text = prior_key
+                if self.generic_methods[pk] == gname:
+                    self.generic_method_rejected[pk] = reason
+        if reason != "":
+            self.generic_method_rejected[method_key] = reason
+            return
+        val recipe = MonoTemplateRecipeV1(module_name: module_name,
+            original_symbol: template.symbol, template_name: gname,
+            canonical_type_params: all_tps, bound_type_params: bound_tps,
+            inherent_method: true)
+        self.archive_template_signatures[gname] = mono_template_recipe_signature_v1(template, recipe)
+        if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+            self.generic_functions[gname] = template
+        self.template_recipes[gname] = recipe
+        self.template_module[gname] = module_name
+        self.generic_methods[method_key] = gname
+
     me collect_generic_impl_methods(module: HirModule, module_name: text):
         """Register each instance method of a generic inherent impl
         (`impl Box<T>:`, possibly in an extension module) as a function
@@ -1236,12 +1327,31 @@ impl MonomorphizationPass:
 
         HIR flags these methods `is_generic_template` and MIR never emits a
         template, so without a specialization a call on a `Box<i64>` receiver
-        has no callable target. Only the shape the receiver's arguments can
-        bind positionally is accepted -- an inherent impl whose target is
-        exactly its own parameters in order, and a method with no type
-        parameters of its own; every other method is recorded as rejected."""
+        has no callable target. The receiver's arguments bind the impl-owned
+        parameters first; method-owned parameters follow and must have unique
+        names that do not shadow owner binders. Other shapes are rejected."""
         var by_id: Dict<i64, HirFunction> = {}
         var body_index_ready = false
+        # Direct class lowering keeps class-body methods on HirClass rather
+        # than materializing them as HirImpl rows. Register through the same
+        # exact-symbol path as synthetic impl methods.
+        val class_values: [HirClass] = module.classes.values()
+        for raw_class in class_values:
+            val class_: HirClass = raw_class
+            if class_.type_params.len() == 0 or class_.methods.len() == 0: continue
+            if not body_index_ready:
+                val body_values: [HirFunction] = module.functions.values()
+                for raw_body in body_values:
+                    val body_function: HirFunction = raw_body
+                    by_id[body_function.symbol.id] = body_function
+                body_index_ready = true
+            val owner_identity = mono_type_identity(module.symbols, class_.symbol, module_name)
+            if owner_identity == "": continue
+            for method_name in class_.methods.keys():
+                val method_symbol: SymbolId = class_.methods[method_name]
+                self.collect_generic_instance_method_v1(module_name, by_id,
+                    owner_identity, class_.name, class_.type_params, method_name,
+                    method_symbol, false)
         for raw_impl in module.impls:
             val gi: HirImpl = raw_impl
             val impl_tps: [HirTypeParam] = gi.type_params
@@ -1250,11 +1360,9 @@ impl MonomorphizationPass:
             # Build the body index once, only when a generic impl needs it.
             # Keep one impl traversal even when the first generic impl is last.
             if not body_index_ready:
-                val body_index_keys: [SymbolId] = module.functions.keys()
-                for dk_29 in body_index_keys:
-                    if module.functions[dk_29] == nil:
-                        continue
-                    val f: HirFunction = module.functions[dk_29]
+                val body_values: [HirFunction] = module.functions.values()
+                for raw_body in body_values:
+                    val f: HirFunction = raw_body
                     val fs: SymbolId = f.symbol
                     by_id[fs.id] = f
                 body_index_ready = true
@@ -1271,59 +1379,11 @@ impl MonomorphizationPass:
                 case _: ()
             if owner_identity == "" or owner_name == "":
                 continue
-            if gi.has_trait_:
-                target_reason = "it is declared by a trait impl"
             for method_name in gi.methods.keys():
                 val msym: SymbolId = gi.methods[method_name]
-                if not by_id.has(msym.id):
-                    continue
-                val template: HirFunction = by_id[msym.id]
-                if template.is_static or not template.is_method or template.params.len() == 0:
-                    continue
-                val method_key = "{owner_identity}::{method_name}"
-                val gname = "{owner_name}__{method_name}"
-                var reason = target_reason
-                # Every symbol spelling of a parameter is canonicalized, but a
-                # NAME binds once: the receiver's type arguments bind the
-                # impl's parameters, in order.
-                var all_tps: [HirTypeParam] = []
-                var bound_tps: [HirTypeParam] = []
-                var bound_names: [text] = []
-                for itp in impl_tps:
-                    val impl_tp: HirTypeParam = itp
-                    all_tps = all_tps.push(impl_tp)
-                    if not bound_names.contains(impl_tp.name):
-                        bound_names = bound_names.push(impl_tp.name)
-                        bound_tps = bound_tps.push(impl_tp)
-                val impl_bound_count = bound_tps.len()
-                for otp in template.type_params:
-                    val own_tp: HirTypeParam = otp
-                    all_tps = all_tps.push(own_tp)
-                    if not bound_names.contains(own_tp.name):
-                        bound_names = bound_names.push(own_tp.name)
-                        bound_tps = bound_tps.push(own_tp)
-                if reason == "" and bound_tps.len() != impl_bound_count:
-                    reason = "it declares type parameters of its own"
-                if reason == "" and (self.has_template_v1(gname) or self.generic_methods.has(method_key)):
-                    reason = "another module declares a method under the same template key `{gname}`"
-                    # The earlier registration is equally unusable.
-                    for prior_key in self.generic_methods.keys():
-                        val pk: text = prior_key
-                        if self.generic_methods[pk] == gname:
-                            self.generic_method_rejected[pk] = reason
-                if reason != "":
-                    self.generic_method_rejected[method_key] = reason
-                    continue
-                val recipe = MonoTemplateRecipeV1(module_name: module_name,
-                    original_symbol: template.symbol, template_name: gname,
-                    canonical_type_params: all_tps, bound_type_params: bound_tps,
-                    inherent_method: true)
-                self.archive_template_signatures[gname] = mono_template_recipe_signature_v1(template, recipe)
-                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
-                    self.generic_functions[gname] = template
-                self.template_recipes[gname] = recipe
-                self.template_module[gname] = module_name
-                self.generic_methods[method_key] = gname
+                self.collect_generic_instance_method_v1(module_name, by_id,
+                    owner_identity, owner_name, impl_tps, method_name, msym,
+                    gi.has_trait_, target_reason)
 
     # ========================================================================
     # Step 2: Worklist fixed point
@@ -2393,7 +2453,8 @@ impl MonomorphizationPass:
                     return Err("argument inference conflicts with another argument or explicit prefix")
                 # Concrete annotations may supply bindings, but are not proof
                 # that this lambda's parameter/body types satisfy the callback.
-                if contextual_callback: contextual_callbacks = contextual_callbacks.push(i)
+                if contextual_callback:
+                    contextual_callbacks = contextual_callbacks.push(i)
             else:
                 if contextual_callback:
                     # A later argument or result context can bind this callback's
@@ -2410,6 +2471,17 @@ impl MonomorphizationPass:
                     return Err("result inference lacks declaration/caller nominal context")
                 if not bind_type_params(semantic_return, expected, bindings, nominal_context):
                     return Err("result inference conflicts with argument bindings")
+        var needs_lambda_inference = false
+        for parameter in tps:
+            if not bindings.has(parameter.name) or not hir_type_is_concrete(bindings[parameter.name]):
+                needs_lambda_inference = true
+        if needs_lambda_inference:
+            for lambda_index in contextual_callbacks:
+                if lambda_index >= params.len() or lambda_index >= args.len():
+                    return Err("lambda argument index is outside the declared signature")
+                if not self.infer_lambda_argument_bindings_v1(template, params[lambda_index],
+                        mono_arg_value(args[lambda_index]), bindings, nominal_context):
+                    return Err("lambda argument does not prove the declared callback signature")
         if contextual_callbacks.len() > 0:
             val completed = self.complete_template_type_args_v1(template, bindings)
             if completed.is_err(): return Err(completed.unwrap_err())
@@ -2480,24 +2552,201 @@ impl MonomorphizationPass:
                         for parameter in typed_parameters:
                             self.array_element_roots_v1.remove(parameter.symbol.id)
                             local_env[parameter.symbol.id] = parameter.type_
+                        val previous_return_type = self.current_return_type
+                        val previous_match_hint = self.match_enum_hint
                         self.env = local_env
+                        self.current_return_type = Some(result_type)
+                        self.match_enum_hint = ""
                         self.collect_lets_expr(body)
-                        val actual_result = self.infer_expr_type(body)
+                        val checked_body = self.rewrite_expr_with_context(body, Some(result_type))
+                        val actual_result = self.infer_expr_type(checked_body)
                         self.env = previous_env
                         self.array_element_roots_v1 = previous_array_roots
                         self.array_element_types_v1 = previous_array_elements
+                        self.current_return_type = previous_return_type
+                        self.match_enum_hint = previous_match_hint
                         if actual_result == nil:
                             return Err("contextual callback body has no concrete result type")
                         val actual: HirType = actual_result
                         if not hir_type_is_concrete(actual) or not self.same_type_key(actual, result_type):
                             return Err("contextual callback result type conflicts with inferred signature")
+                        if not self.call_evidence_is_valid_v1(checked_body, actual):
+                            return Err("contextual callback body has invalid or erased type evidence")
                         var typed = expr
-                        typed.kind = HirExprKind.Lambda(typed_parameters, body, captures)
+                        typed.kind = HirExprKind.Lambda(typed_parameters, checked_body, captures)
                         typed.has_type_ = true
                         typed.type_ = expected
                         Ok(typed)
                     case _: Err("contextual callback is not a lambda")
             case _: Err("contextual callback parameter is not a function")
+        # Lambda evidence is bidirectional and has already been unified above;
+        # the shared contextual pass below validates and stamps its caller ABI.
+    me infer_lambda_argument_bindings_v1(template: MonoTemplateSignatureV1, declared: HirType,
+            value: HirExpr, bindings: Dict<text, HirType>, context: NominalBindingContext?) -> bool:
+        var declared_params: [HirType] = []
+        var declared_result: HirType = nil
+        match declared.kind:
+            case HirTypeKind.Function(parameters, result, _):
+                declared_params = parameters
+                declared_result = result
+            case _: return false
+        var lambda_params: [HirParam] = []
+        var lambda_body: HirExpr = nil
+        match value.kind:
+            case HirExprKind.Lambda(parameters, body, _):
+                lambda_params = parameters
+                lambda_body = body
+            case _: return false
+        if declared_params.len() != lambda_params.len(): return false
+
+        val owner_module: text = self.template_module[template.name] ?? self.current_module
+        var active_context = context
+        var bound_names: [text] = []
+        var bound_values: [HirType] = []
+        for parameter in template.type_params:
+            if bindings.has(parameter.name):
+                bound_names = bound_names.push(parameter.name)
+                bound_values = bound_values.push(bindings[parameter.name])
+        var owner_names: Dict<text, HirType> = {}
+        if bound_values.len() > 0:
+            if val owner_values = self.relocate_mono_types(bound_values, self.current_module, owner_module, "callback bindings of `{template.name}`"):
+                var bi = 0
+                while bi < bound_names.len():
+                    owner_names[bound_names[bi]] = owner_values[bi]
+                    bi = bi + 1
+            else:
+                return false
+        if val refreshed_context = self.nominal_binding_context(owner_module): active_context = Some(refreshed_context)
+        val partial = TypeSubstitution(mapping: owner_names, by_symbol: {})
+        var concrete_inputs: [HirType] = []
+        var input_index = 0
+        while input_index < declared_params.len():
+            val expected_input_owner = substitute_type(declared_params[input_index], partial)
+            var expected_input = expected_input_owner
+            if owner_module != self.current_module:
+                if val caller_input = self.relocate_mono_types([expected_input_owner], owner_module, self.current_module, "callback input of `{template.name}`"):
+                    expected_input = caller_input[0]
+                    if val refreshed_context = self.nominal_binding_context(owner_module): active_context = Some(refreshed_context)
+                else:
+                    return false
+            val actual_input: HirType = lambda_params[input_index].type_
+            if hir_type_is_concrete(actual_input):
+                if hir_type_is_concrete(expected_input):
+                    if not self.same_type_key(expected_input, actual_input):
+                        return false
+                elif not bind_type_params(declared_params[input_index], actual_input, bindings, active_context):
+                    return false
+            var final_input = expected_input
+            if not hir_type_is_concrete(final_input):
+                var refreshed_names: Dict<text, HirType> = {}
+                var refreshed_values: [HirType] = []
+                for parameter in template.type_params:
+                    if bindings.has(parameter.name):
+                        refreshed_names[parameter.name] = bindings[parameter.name]
+                        refreshed_values = refreshed_values.push(bindings[parameter.name])
+                if refreshed_values.len() > 0:
+                    if val owner_values = self.relocate_mono_types(refreshed_values, self.current_module, owner_module, "callback bindings of `{template.name}`"):
+                        var ri = 0
+                        for parameter in template.type_params:
+                            if bindings.has(parameter.name):
+                                refreshed_names[parameter.name] = owner_values[ri]
+                                ri = ri + 1
+                    else:
+                        return false
+                val owner_input = substitute_type(declared_params[input_index], TypeSubstitution(mapping: refreshed_names, by_symbol: {}))
+                final_input = owner_input
+                if owner_module != self.current_module:
+                    if val caller_input = self.relocate_mono_types([owner_input], owner_module, self.current_module, "callback input of `{template.name}`"):
+                        final_input = caller_input[0]
+                        if val refreshed_context = self.nominal_binding_context(owner_module): active_context = Some(refreshed_context)
+                    else:
+                        return false
+            if not hir_type_is_concrete(final_input): return false
+            concrete_inputs = concrete_inputs.push(final_input)
+            input_index = input_index + 1
+
+        var output_names: Dict<text, HirType> = {}
+        var output_values: [HirType] = []
+        for parameter in template.type_params:
+            if bindings.has(parameter.name):
+                output_names[parameter.name] = bindings[parameter.name]
+                output_values = output_values.push(bindings[parameter.name])
+        if output_values.len() > 0:
+            if val owner_values = self.relocate_mono_types(output_values, self.current_module, owner_module, "callback output bindings of `{template.name}`"):
+                var oi = 0
+                for parameter in template.type_params:
+                    if bindings.has(parameter.name):
+                        output_names[parameter.name] = owner_values[oi]
+                        oi = oi + 1
+                if val refreshed_context = self.nominal_binding_context(owner_module): active_context = Some(refreshed_context)
+            else:
+                return false
+        var expected_output_owner = substitute_type(declared_result, TypeSubstitution(mapping: output_names, by_symbol: {}))
+        var expected_output = expected_output_owner
+        if hir_type_is_concrete(expected_output_owner) and owner_module != self.current_module:
+            if val caller_output = self.relocate_mono_types([expected_output_owner], owner_module, self.current_module, "callback output of `{template.name}`"):
+                expected_output = caller_output[0]
+                if val refreshed_context = self.nominal_binding_context(owner_module): active_context = Some(refreshed_context)
+            else:
+                return false
+
+        # Keep captured locals visible but give the callback parameters their
+        # declared input types in a private inference scope.
+        val previous_env = self.env
+        val previous_return_type = self.current_return_type
+        val previous_match_hint = self.match_enum_hint
+        var lambda_env: Dict<i64, HirType> = {}
+        for raw_id in previous_env.keys():
+            val id: i64 = i64("{raw_id}")
+            val binding: HirType = previous_env[id]
+            lambda_env[id] = binding
+        self.env = lambda_env
+        self.match_enum_hint = ""
+        self.current_return_type = if hir_type_is_concrete(expected_output): Some(expected_output) else: nil
+        var parameter_index = 0
+        while parameter_index < lambda_params.len():
+            val parameter: HirParam = lambda_params[parameter_index]
+            self.env[parameter.symbol.id] = concrete_inputs[parameter_index]
+            parameter_index = parameter_index + 1
+        self.collect_lets_expr(lambda_body)
+        val checked_body = self.rewrite_expr_with_context(lambda_body,
+            if hir_type_is_concrete(expected_output): Some(expected_output) else: nil)
+        val body_result = self.infer_expr_type(checked_body)
+        self.env = previous_env
+        self.current_return_type = previous_return_type
+        self.match_enum_hint = previous_match_hint
+        if self.invocation_failed_v1(): return false
+
+        if body_result == nil or not hir_type_is_concrete(body_result): return false
+        if not self.call_evidence_is_valid_v1(checked_body, body_result): return false
+        if context == nil and (hir_type_has_nominal(expected_output) or hir_type_has_nominal(body_result)):
+            return false
+        if not bind_type_params(declared_result, body_result, bindings, active_context): return false
+        var final_names: Dict<text, HirType> = {}
+        var final_values: [HirType] = []
+        for parameter in template.type_params:
+            if bindings.has(parameter.name):
+                final_names[parameter.name] = bindings[parameter.name]
+                final_values = final_values.push(bindings[parameter.name])
+        if final_values.len() > 0:
+            if val owner_values = self.relocate_mono_types(final_values, self.current_module, owner_module, "callback result bindings of `{template.name}`"):
+                var oi = 0
+                for parameter in template.type_params:
+                    if bindings.has(parameter.name):
+                        final_names[parameter.name] = owner_values[oi]
+                        oi = oi + 1
+                if val refreshed_context = self.nominal_binding_context(owner_module): active_context = Some(refreshed_context)
+            else:
+                return false
+        val final_output_owner = substitute_type(declared_result, TypeSubstitution(mapping: final_names, by_symbol: {}))
+        var final_output = final_output_owner
+        if owner_module != self.current_module:
+            if val caller_output = self.relocate_mono_types([final_output_owner], owner_module, self.current_module, "callback output of `{template.name}`"):
+                final_output = caller_output[0]
+            else:
+                return false
+        if not hir_type_is_concrete(final_output): return false
+        self.same_type_key(final_output, body_result)
 
     me complete_declared_type_args_v1(tps: [HirTypeParam], canonical_tps: [HirTypeParam], owner_module: text, bindings: Dict<text, HirType>) -> Result<[HirType], text>:
         # Binding values arrive in caller scope. Existing complete calls keep
@@ -2880,6 +3129,23 @@ impl MonomorphizationPass:
                                 return nil
                         cty
                     nil: nil
+            case HirExprKind.MatchCase(_, arms):
+                # A match result is evidence only when every arm yields the
+                # same concrete type. Expected context does not replace arm
+                # evidence when binding a callback result parameter.
+                if arms.len() == 0: return nil
+                var result_type: HirType? = nil
+                for arm in arms:
+                    val arm_result = self.block_value_type(arm.body)
+                    if arm_result == nil: return nil
+                    val concrete_arm: HirType = arm_result
+                    if not hir_type_is_concrete(concrete_arm): return nil
+                    if result_type == nil:
+                        result_type = concrete_arm
+                    else:
+                        val prior: HirType = result_type
+                        if not self.same_type_key(prior, concrete_arm): return nil
+                result_type
             case HirExprKind.Index(base, index):
                 # `xs[i]` loads an element, `d[k]` a value. A range index is a
                 # slice and a text index is not typed here.
@@ -3087,7 +3353,7 @@ impl MonomorphizationPass:
                     return ""
                 val known: text = self.generic_methods[key]
                 val template = self.template_signature_v1(known)
-                if template.type_params.len() == owner_args.len():
+                if self.generic_method_owner_prefix_len_v1(known, owner_sym, rmod, owner_args.len()) == owner_args.len() and template.type_params.len() >= owner_args.len():
                     return known
                 ""
             case _:
@@ -3510,8 +3776,10 @@ impl MonomorphizationPass:
                 val sc: HirExpr = scrutinee
                 self.collect_lets_expr(sc)
                 val sct = self.infer_expr_type(sc)
+                var result_scrutinee: HirType? = nil
                 if sct != nil:
                     val scc: HirType = sct
+                    result_scrutinee = scc
                     match scc.kind:
                         case HirTypeKind.Named(ssym, _):
                             scrut_enum = self.named_type_name(ssym, scc)
@@ -3528,7 +3796,9 @@ impl MonomorphizationPass:
                     if self.invocation_diag_enabled_v1():
                         eprint("[mono-diag] match arm pattern kind={mt.pattern.kind}")
                     self.match_enum_hint = scrut_enum
-                    self.collect_pattern_bindings(mt.pattern)
+                    if not self.foreign_owner_pattern_on_result_v1(mt.pattern, result_scrutinee):
+                        self.collect_pattern_bindings(mt.pattern)
+                    self.collect_result_pattern_bindings_v1(mt.pattern, result_scrutinee)
                     if mt.has_guard:
                         self.collect_lets_expr(mt.guard)
                     self.collect_lets_block(mt.body)
@@ -3729,6 +3999,64 @@ impl MonomorphizationPass:
                 self.collect_enum_payload_bindings(ename, variant, payload)
             case _:
                 pass_do_nothing("binds nothing")
+
+    me foreign_owner_pattern_on_result_v1(pat: HirPattern, scrutinee_type: HirType?) -> bool:
+        if pat == nil or scrutinee_type == nil: return false
+        val scrutinee: HirType = scrutinee_type
+        match scrutinee.kind:
+            case HirTypeKind.Result(_, _):
+                match pat.kind:
+                    case HirPatternKind.Enum(pattern_owner, _, _):
+                        if pattern_owner == nil: return false
+                        match pattern_owner.kind:
+                            case HirTypeKind.Error | HirTypeKind.Result(_, _): false
+                            case _: true
+                    case _: false
+            case _: false
+
+    me collect_result_pattern_bindings_v1(pat: HirPattern, scrutinee_type: HirType?) -> bool:
+        if pat == nil or scrutinee_type == nil: return false
+        val scrutinee: HirType = scrutinee_type
+        var payload_type: HirType? = nil
+        match scrutinee.kind:
+            case HirTypeKind.Result(ok_type, err_type):
+                match pat.kind:
+                    case HirPatternKind.Enum(pattern_owner, variant, _):
+                        if pattern_owner == nil: return false
+                        # Bare Ok/Err patterns carry Error in HIR; explicit
+                        # builtin Result patterns carry Result. A concrete
+                        # named enum called Foreign.Ok is never accepted by
+                        # spelling alone.
+                        match pattern_owner.kind:
+                            case HirTypeKind.Error | HirTypeKind.Result(_, _): ()
+                            case _: return false
+                        if variant == "Ok": payload_type = ok_type
+                        elif variant == "Err": payload_type = err_type
+                    case _: return false
+            case _: return false
+        if payload_type == nil or not hir_type_is_concrete(payload_type): return false
+        var payload: HirPatternPayload? = nil
+        match pat.kind:
+            case HirPatternKind.Enum(_, _, contents): payload = contents
+            case _: return false
+        val concrete_payload_type: HirType = payload_type
+        match payload:
+            Some(contents):
+                match contents:
+                    case HirPatternPayload.Tuple(patterns):
+                        if patterns.len() != 1: return false
+                        match patterns[0].kind:
+                            case HirPatternKind.Binding(symbol, _):
+                                val binding: SymbolId = symbol
+                                if patterns[0].has_type_ and patterns[0].type_ != nil and hir_type_is_concrete(patterns[0].type_):
+                                    if not self.same_type_key(patterns[0].type_, concrete_payload_type):
+                                        self.env.remove(binding.id)
+                                        return false
+                                self.env[binding.id] = concrete_payload_type
+                                true
+                            case _: false
+                    case HirPatternPayload.Struct(_): false
+            nil: false
 
     me collect_enum_payload_bindings(enum_name: text, variant: text, payload: HirPatternPayload?):
         """Bind an enum arm's payload variables by DECLARED payload type."""
@@ -4143,6 +4471,31 @@ impl MonomorphizationPass:
             case _:
                 (ft2, found_module)
 
+    me generic_method_owner_prefix_len_v1(template_name: text, receiver_owner: SymbolId,
+            receiver_module: text, receiver_arg_count: i64) -> i64:
+        """Number of leading template binders owned by the receiver, proven
+        from the exact declaration's receiver slot and owner identity."""
+        val template = self.template_signature_v1(template_name)
+        if template.param_types.len() == 0: return -1
+        val provider_module = self.template_module[template_name] ?? self.current_module
+        val receiver_identity = self.symbol_identity_v1(receiver_module, receiver_owner)
+        match template.param_types[0].kind:
+            case HirTypeKind.Named(declared_owner, declared_args):
+                if receiver_identity == "" or self.symbol_identity_v1(provider_module, declared_owner) != receiver_identity:
+                    return -1
+                if declared_args.len() != receiver_arg_count or declared_args.len() > template.type_params.len():
+                    return -1
+                var index = 0
+                while index < declared_args.len():
+                    val argument: HirType = declared_args[index]
+                    match argument.kind:
+                        case HirTypeKind.TypeParam(name, _):
+                            if name != template.type_params[index].name: return -1
+                        case _: return -1
+                    index = index + 1
+                declared_args.len()
+            case _: -1
+
     me generic_method_template(receiver: HirExpr, method: text) -> text:
         """Template key of `method` when the receiver's type is a concrete
         instantiation (`Box<i64>`) of a class whose generic impl declares it,
@@ -4170,9 +4523,11 @@ impl MonomorphizationPass:
                 else:
                     val known: text = self.generic_methods[key]
                     val template = self.template_signature_v1(known)
-                    if template.type_params.len() == owner_args.len():
+                    val owner_prefix_len = self.generic_method_owner_prefix_len_v1(
+                        known, owner_sym, rmod, owner_args.len())
+                    if owner_prefix_len == owner_args.len() and template.type_params.len() >= owner_prefix_len:
                         return known
-                    reason = "the receiver has {owner_args.len()} type arguments and the impl declares {template.type_params.len()} type parameters"
+                    reason = "the receiver declaration does not prove the leading {owner_args.len()} template binders"
                 # Leveled (default `warning`): before this pass typed generic
                 # receivers such a call was simply left as a method call, and
                 # modules containing one compile today. `error` refuses it.
@@ -4183,13 +4538,12 @@ impl MonomorphizationPass:
             case _:
                 ""
 
-    me rewrite_generic_method_call(gname: text, receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> HirExprKind:
+    me rewrite_generic_method_call(gname: text, receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, expected_result: HirType?) -> HirExprKind:
         """`recv.m(a)` on a `Box<i64>` receiver -> a direct call of the
         `Box<i64>` specialization with the receiver first (UFCS; the
         template's params[0] is `self`). Falls back to the unchanged method
         call when the specialization is refused."""
         val new_receiver = self.rewrite_expr(receiver)
-        val new_args = self.rewrite_call_args(args)
         var targs: [HirType] = []
         val (rt, rmod) = self.receiver_instance_type(receiver)
         if rt != nil:
@@ -4204,17 +4558,30 @@ impl MonomorphizationPass:
         else:
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
-            return HirExprKind.MethodCall(new_receiver, method, new_args, resolution)
+            return HirExprKind.MethodCall(new_receiver, method, self.rewrite_call_args(args), resolution)
+        var call_args: [HirCallArg] = [HirCallArg(has_name: false, name: "", value: receiver, span: receiver.span)]
+        for a in args:
+            call_args = call_args.push(a)
+        val template = self.template_signature_v1(gname)
+        if call_args.len() > template.param_types.len():
+            self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
+            self.unresolved_templates[gname] = true
+            self.diagnostics = self.diagnostics.push("E-MONO-032: method call to generic `{gname}` has more arguments than its declaration; call site not monomorphized")
+            return HirExprKind.MethodCall(new_receiver, method, self.rewrite_call_args(args), resolution)
+        val completed = self.resolve_call_type_args_signature_v1(template, call_args, targs, expected_result)
+        if completed.is_err():
+            self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
+            self.unresolved_templates[gname] = true
+            self.diagnostics = self.diagnostics.push("E-MONO-032: method call to generic `{gname}` could not infer its complete callback signature ({completed.unwrap_err()}); call site not monomorphized")
+            return HirExprKind.MethodCall(new_receiver, method, self.rewrite_call_args(args), resolution)
+        targs = completed.unwrap()
         val target = self.request_specialization(gname, targs)
         if target < 0:
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
-            return HirExprKind.MethodCall(new_receiver, method, new_args, resolution)
+            return HirExprKind.MethodCall(new_receiver, method, self.rewrite_call_args(args), resolution)
         val spec_name: text = self.mangled_name(gname, targs)
         val callee_name = self.specialization_callee_name_v1(gname, spec_name)
-        var call_args: [HirCallArg] = [HirCallArg(has_name: false, name: "", value: new_receiver, span: receiver.span)]
-        for a in new_args:
-            call_args = call_args.push(a)
         # Same stamp as `rewrite_call`: the specialization's own signature
         # types the call's result (a `text`-returning `get` is a pointer, not
         # the erased i64 -- BUG-IT-5 class), transported into the caller's
@@ -4225,10 +4592,34 @@ impl MonomorphizationPass:
         else:
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
-            return HirExprKind.MethodCall(new_receiver, method, new_args, resolution)
+            return HirExprKind.MethodCall(new_receiver, method, self.rewrite_call_args(args), resolution)
+        var final_args: [HirCallArg] = [HirCallArg(has_name: false, name: "", value: new_receiver, span: receiver.span)]
+        var specialized_params: [HirType] = []
+        match spec_sig.kind:
+            case HirTypeKind.Function(parameters, _, _): specialized_params = parameters
+            case _: return HirExprKind.MethodCall(new_receiver, method, self.rewrite_call_args(args), resolution)
+        var argument_index = 0
+        while argument_index < args.len():
+            val slot_index = argument_index + 1
+            if slot_index >= specialized_params.len(): break
+            val expected_slot: HirType = specialized_params[slot_index]
+            var argument = call_args[slot_index]
+            var value = argument.value
+            match value.kind:
+                case HirExprKind.Lambda(_, _, _):
+                    val checked = self.contextual_lambda_v1(value, expected_slot)
+                    if checked.is_err():
+                        self.diagnostics = self.diagnostics.push("E-MONO-032: " + checked.unwrap_err())
+                        self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
+                        return HirExprKind.MethodCall(new_receiver, method, self.rewrite_call_args(args), resolution)
+                    argument.value = self.rewrite_expr(checked.unwrap())
+                case _:
+                    argument.value = self.rewrite_expr(value)
+            final_args = final_args.push(argument)
+            argument_index = argument_index + 1
         val callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), callee_name),
                              has_type_: true, type_: spec_sig, span: receiver.span)
-        HirExprKind.Call(callee, call_args, [])
+        HirExprKind.Call(callee, final_args, [])
 
     me rewrite_expr_with_context(expr: HirExpr, expected: HirType?) -> HirExpr:
         if not self.invocation_enter_v1(): return expr
@@ -4248,6 +4639,32 @@ impl MonomorphizationPass:
                 val context: HirType? = if expected != nil: expected else: (if expr.has_type_: expr.type_ else: nil)
                 out.kind = self.rewrite_call(ct, at, type_args, context, expr.span)
                 out
+            case HirExprKind.MethodCall(receiver, method, args, resolution):
+                val context: HirType? = if expected != nil: expected else: (if expr.has_type_: expr.type_ else: nil)
+                match resolution:
+                    case MethodResolution.StaticMethod(owner_id, method_id):
+                        val callee = HirExpr(kind: HirExprKind.Var(method_id), has_type_: false, type_: nil, span: expr.span)
+                        val class_template = self.class_static_template_v1(owner_id, method)
+                        if class_template != "":
+                            val owner_args = self.class_static_owner_args_v1(if receiver.has_type_: receiver.type_ else: nil, owner_id)
+                            var out = expr
+                            out.kind = self.rewrite_template_call_v1(class_template, callee, args,
+                                owner_args, context, expr.span)
+                            out
+                        elif self.callee_generic_name(callee) != "":
+                            var out = expr
+                            out.kind = self.rewrite_call(callee, args, [], context, expr.span)
+                            out
+                        else:
+                            self.rewrite_expr(expr)
+                    case _:
+                        val template = self.generic_method_template(receiver, method)
+                        if template != "":
+                            var out = expr
+                            out.kind = self.rewrite_generic_method_call(template, receiver, method, args, resolution, context)
+                            out
+                        else:
+                            self.rewrite_expr(expr)
             case HirExprKind.If(cond, then_, else_):
                 self.rewrite_if_with_context(expr, cond, then_, else_, expected)
             case HirExprKind.IfChain(arms, else_):
@@ -4476,7 +4893,7 @@ impl MonomorphizationPass:
                     case _:
                         val generic_method = self.generic_method_template(rc, method)
                         if generic_method != "":
-                            out.kind = self.rewrite_generic_method_call(generic_method, rc, method, args, resolution)
+                            out.kind = self.rewrite_generic_method_call(generic_method, rc, method, args, resolution, if expr.has_type_: expr.type_ else: nil)
                         else:
                             out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
             case HirExprKind.StaticCall(ty, method, args, resolution):

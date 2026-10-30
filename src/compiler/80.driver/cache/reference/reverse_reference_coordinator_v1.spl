@@ -9,6 +9,7 @@ use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
     SemanticQueryReadManifestV1, semantic_query_key_valid_v1,
     semantic_query_key_equal_v1, semantic_query_key_canonical_v1,
     semantic_query_key_budget_v1, semantic_query_read_budget_v1,
+    semantic_query_read_manifest_budget_v1,
     semantic_query_read_manifest_valid_v1, semantic_query_read_manifest_encode_v1
 }
 use compiler.common.cache_contract.reverse_reference_shard_v1.{
@@ -862,6 +863,114 @@ fn _build_edges_v1(reads: [SemanticQueryReadV1], manifest_digest: text) -> Rever
         else if edges[index].consumed_fingerprint != edge.consumed_fingerprint:
             return ReverseEdgeBuildV1(valid: false, edges: [])
     ReverseEdgeBuildV1(valid: true, edges: _sort_edges_v1(edges))
+
+# Reconstruct the exact inverse of a declared set of canonical forward
+# manifests. This has no disk or publication effects and makes no claim that
+# the supplied set covers a committed semantic scope.
+pub fn rebuild_reverse_shards_from_forward_v1(
+        manifests: [SemanticQueryReadManifestV1]) -> ReverseReferenceShardStageV1:
+    if manifests.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1:
+        return _stage_reject_v1("rr_forward_bounds_exceeded", [])
+    val input_budget = ThreePayloadContractBudgetV1(
+        remaining_bytes: AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+        remaining_items: AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1,
+        used_bytes: 0, ok: true)
+    input_budget.add_items(manifests.len())
+    for manifest in manifests:
+        if manifest.ordered_reads.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1:
+            return _stage_reject_v1("rr_forward_bounds_exceeded", [])
+        semantic_query_read_manifest_budget_v1(input_budget, manifest)
+        if not input_budget.ok:
+            return _stage_reject_v1("rr_forward_bounds_exceeded", [])
+
+    var consumer_indices: Dict<text, i64> = {}
+    var unique_manifests: [SemanticQueryReadManifestV1] = []
+    var unique_bytes: [[u8]] = []
+    for manifest in manifests:
+        if not semantic_query_read_manifest_valid_v1(manifest):
+            return _stage_reject_v1("rr_forward_manifest_invalid", [])
+        for read in manifest.ordered_reads:
+            if read.completeness != SemanticCoverageV1.Complete:
+                return _stage_reject_v1("rr_forward_manifest_incomplete", [])
+        val encoded = semantic_query_read_manifest_encode_v1(manifest)
+        if encoded.len() == 0:
+            return _stage_reject_v1("rr_forward_manifest_invalid", [])
+        val consumer_id = semantic_query_key_canonical_v1(manifest.consumer)
+        if consumer_indices.contains_key(consumer_id):
+            val prior_index = consumer_indices[consumer_id]
+            if unique_bytes[prior_index] != encoded:
+                return _stage_reject_v1("rr_forward_consumer_conflict", [])
+        else:
+            consumer_indices[consumer_id] = unique_manifests.len()
+            unique_manifests.push(manifest)
+            unique_bytes.push(encoded)
+
+    var edges_by_identity: Dict<text, ReverseReferenceEdgeV1> = {}
+    var edge_identities: [text] = []
+    for manifest_index in 0..unique_manifests.len():
+        val manifest = unique_manifests[manifest_index]
+        val manifest_digest = sha256_u8_hex(unique_bytes[manifest_index])
+        for read in manifest.ordered_reads:
+            val edge = _read_edge_v1(read, manifest_digest)
+            val identity = _edge_identity_v1(edge)
+            if edges_by_identity.contains_key(identity):
+                val prior = edges_by_identity[identity]
+                if prior.consumed_fingerprint != edge.consumed_fingerprint or
+                        prior.forward_manifest_digest != edge.forward_manifest_digest:
+                    return _stage_reject_v1("rr_forward_edge_conflict", [])
+            else:
+                edges_by_identity[identity] = edge
+                edge_identities.push(identity)
+
+    if edge_identities.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1:
+        return _stage_reject_v1("rr_forward_bounds_exceeded", [])
+    val sorted_identities = array_sort_by(edge_identities, \left, right:
+        if left < right: -1
+        elif left > right: 1
+        else: 0
+    )
+    var output_budget = ThreePayloadContractBudgetV1(
+        remaining_bytes: AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+        remaining_items: AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1,
+        used_bytes: 0, ok: true)
+    output_budget.add_items(sorted_identities.len())
+    var shards: [ReverseReferenceShardV1] = []
+    var current_partition = ""
+    var current_edges: [ReverseReferenceEdgeV1] = []
+    # The identity starts with a length-framed partition, followed by the
+    # canonical edge key. A single global sort therefore keeps each partition
+    # contiguous and each shard's edge order canonical.
+    for identity in sorted_identities:
+        val edge = edges_by_identity[identity]
+        reverse_reference_edge_budget_v1(output_budget, edge)
+        if not output_budget.ok:
+            return _stage_reject_v1("rr_forward_bounds_exceeded", [])
+        if current_partition != "" and current_partition != edge.partition_id:
+            output_budget.add_items(1)
+            output_budget.add_text(current_partition, false)
+            if not output_budget.ok:
+                return _stage_reject_v1("rr_forward_bounds_exceeded", [])
+            val shard = ReverseReferenceShardV1(schema: 1, partition_id: current_partition,
+                coverage: SemanticCoverageV1.Complete, sorted_edges: current_edges)
+            if not reverse_reference_shard_valid_v1(shard):
+                return _stage_reject_v1("rr_forward_shard_invalid", [])
+            shards.push(shard)
+            current_edges = []
+        if current_partition != edge.partition_id:
+            current_partition = edge.partition_id
+        current_edges.push(edge)
+    if current_partition != "":
+        output_budget.add_items(1)
+        output_budget.add_text(current_partition, false)
+        if not output_budget.ok:
+            return _stage_reject_v1("rr_forward_bounds_exceeded", [])
+        val shard = ReverseReferenceShardV1(schema: 1, partition_id: current_partition,
+            coverage: SemanticCoverageV1.Complete, sorted_edges: current_edges)
+        if not reverse_reference_shard_valid_v1(shard):
+            return _stage_reject_v1("rr_forward_shard_invalid", [])
+        shards.push(shard)
+    shards = _sort_shards_v1(shards)
+    ReverseReferenceShardStageV1(accepted: true, rejection_reason: "", shards: shards)
 
 pub fn stage_reverse_delta_v1(
     old_reads: SemanticQueryReadManifestV1?,

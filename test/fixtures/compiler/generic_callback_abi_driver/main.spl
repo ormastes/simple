@@ -1,0 +1,48 @@
+"""MIR ABI assertions for the parser-to-mono callback fixture."""
+use compiler.hir.hir_types.*
+use compiler.mir.mir.{MirLowering, MirTypeKind, MirFunction}
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_identity}
+use .checks.{check, check_generic_callback_mono}
+
+fn main():
+    val module: HirModule = check_generic_callback_mono()
+    var mir_lowering = MirLowering.new(module.symbols)
+    val mir = mir_lowering.lower_module(module)
+    check(mir_lowering.errors.len() == 0, "concrete callback signature failed MIR lowering")
+    var saw_read_all = false
+    var saw_result_method = false
+    var saw_i64_method = false
+    var saw_result_lift = false
+    var saw_i64_lift = false
+    for raw_function in mir.functions.values():
+        val function: MirFunction = raw_function
+        if function.name == mir_provider_callable_identity("generic_callback", "read_all"): saw_read_all = true
+        if function.name.contains("HostFuture__then"):
+            check(function.is_generic_template == false, "MIR method still has generic parameters")
+            check(function.signature.params.len() == 2, "specialized method MIR signature has wrong arity")
+            match function.signature.params[1].kind:
+                case MirTypeKind.FuncPtr(callback_signature):
+                    check(callback_signature.params.len() == 1, "callback ABI input arity is wrong")
+                    match callback_signature.params[0].kind:
+                        case MirTypeKind.Result(_, _): saw_result_method = true
+                        case MirTypeKind.I64: saw_i64_method = true
+                        case _: panic("callback ABI input is not concrete Result or i64")
+                    match callback_signature.return_type.kind:
+                        case MirTypeKind.Struct(_): ()
+                        case _: panic("callback ABI return did not retain the HostFuture struct")
+                case _: panic("specialized method callback slot is not a MIR function pointer")
+        if function.name.starts_with(mir_provider_callable_identity("generic_callback", "__lambda_lift_")):
+            check(function.is_generic_template == false, "lifted callback is unexpectedly generic")
+            check(function.signature.params.len() == 2, "lifted callback lost its capture or explicit input")
+            match function.signature.params[1].kind:
+                case MirTypeKind.Result(_, _): saw_result_lift = true
+                case MirTypeKind.I64: saw_i64_lift = true
+                case _: panic("lifted callback explicit input is not Result or i64")
+            match function.signature.return_type.kind:
+                case MirTypeKind.Struct(_): ()
+                case _: panic("lifted callback return did not retain the HostFuture struct")
+    check(saw_read_all, "MIR output has no read_all function")
+    check(saw_result_method, "MIR output has no Result callback method ABI")
+    check(saw_i64_method, "MIR output has no distinct i64 callback method ABI")
+    check(saw_result_lift, "MIR output has no lifted Result callback")
+    check(saw_i64_lift, "MIR output has no lifted i64 callback")

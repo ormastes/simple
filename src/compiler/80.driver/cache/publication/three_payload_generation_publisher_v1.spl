@@ -3,6 +3,7 @@
 # boundary.  This file contains no legacy action lookup or SQL write path.
 
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.array.{array_sort_by}
 use compiler.common.cache_contract.generation_manifest_v1.{
     GenerationManifestV1, generation_manifest_valid_v1, generation_manifest_digest_v1,
     generation_manifest_encode_v1
@@ -11,15 +12,28 @@ use compiler.common.cache_contract.portable_object_ref_v1.{
     PortableObjectRefV1
 }
 use compiler.common.cache_contract.physical_tld_v1.{
-    three_payload_contract_digest_valid_v1, three_payload_contract_max_items_v1
+    ThreePayloadContractBudgetV1, three_payload_contract_digest_valid_v1,
+    three_payload_contract_max_items_v1
 }
 use compiler.common.cache_contract.three_payload_compile_v2.{ThreePayloadFallbackV1}
 use compiler.common.cache_contract.three_payload_worker_v1.{ThreePayloadWorkerResultV1}
 use compiler.common.cache_contract.three_payload_worker_v1.{
-    three_payload_worker_result_valid_v1, three_payload_worker_result_encode_v1
+    three_payload_worker_result_valid_v1, three_payload_worker_result_encode_v1,
+    three_payload_worker_result_decode_bounded_v1
 }
 use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
-    semantic_query_read_manifest_encode_v1
+    SemanticQueryReadManifestV1, semantic_query_read_manifest_encode_v1,
+    semantic_query_read_manifest_decode_bounded_v1
+}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceShardV1, reverse_reference_shard_encode_v1
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    semantic_query_read_manifest_valid_v1
+}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1, AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+    rebuild_reverse_shards_from_forward_v1
 }
 use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
     verified_cas_kind_available_v1, verified_cas_kind_digest_v1,
@@ -146,6 +160,166 @@ fn _objects_canonical_v1(objects: [ThreePayloadImmutableObjectV1]) -> bool:
                 return false
         else:
             seen[object.digest] = object
+    true
+
+fn _objects_identity_unique_v1(objects: [ThreePayloadImmutableObjectV1]) -> bool:
+    var seen: Dict<text, ThreePayloadImmutableObjectV1> = {}
+    for object in objects:
+        if seen.contains_key(object.digest):
+            val prior = seen[object.digest]
+            if prior.kind != object.kind or prior.bytes != object.bytes: return false
+        else:
+            seen[object.digest] = object
+    true
+
+struct _RebuiltReversePayloadV1:
+    valid: bool
+    refs: [text]
+    objects: [ThreePayloadImmutableObjectV1]
+
+# Caller has already checked the full immutable object array with
+# `_objects_canonical_v1`; the digest index here avoids rescanning it for every
+# declared forward ref.
+fn _rebuild_reverse_payload_v1(forward_refs: [text],
+        objects: [ThreePayloadImmutableObjectV1]) -> _RebuiltReversePayloadV1:
+    if forward_refs.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1:
+        return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+    var objects_by_digest: Dict<text, ThreePayloadImmutableObjectV1> = {}
+    for object in objects:
+        if not objects_by_digest.contains_key(object.digest):
+            objects_by_digest[object.digest] = object
+    var seen_forward_refs: Dict<text, bool> = {}
+    var named_forward_objects: [ThreePayloadImmutableObjectV1] = []
+    val forward_budget = ThreePayloadContractBudgetV1(
+        remaining_bytes: AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+        remaining_items: AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1,
+        used_bytes: 0, ok: true)
+    forward_budget.add_items(forward_refs.len())
+    var manifests: [SemanticQueryReadManifestV1] = []
+    for digest in forward_refs:
+        if not _digest_v1(digest) or seen_forward_refs.contains_key(digest):
+            return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+        seen_forward_refs[digest] = true
+        if not objects_by_digest.contains_key(digest):
+            return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+        val forward_object = objects_by_digest[digest]
+        if forward_object.kind != "forward_manifest":
+            return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+        forward_budget.add_bytes(forward_object.bytes.len())
+        if not forward_budget.ok:
+            return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+        named_forward_objects.push(forward_object)
+    # Preflight every named manifest's raw byte total before any decoder or
+    # canonical encoder allocates per-manifest structures.
+    for forward_object in named_forward_objects:
+        val decoded = semantic_query_read_manifest_decode_bounded_v1(
+            forward_object.bytes, three_payload_contract_max_items_v1())
+        if not decoded.ok:
+            return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+        val manifest = match decoded.value:
+            case Some(value): value
+            case nil: return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+        if not semantic_query_read_manifest_valid_v1(manifest) or
+                semantic_query_read_manifest_encode_v1(manifest) != forward_object.bytes:
+            return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+        manifests.push(manifest)
+    val rebuilt = rebuild_reverse_shards_from_forward_v1(manifests)
+    if not rebuilt.accepted:
+        return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+    var reverse_refs: [text] = []
+    var reverse_objects: [ThreePayloadImmutableObjectV1] = []
+    var seen_reverse_refs: Dict<text, bool> = {}
+    for shard in rebuilt.shards:
+        val bytes = reverse_reference_shard_encode_v1(shard)
+        if bytes.len() == 0:
+            return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+        val object = ThreePayloadImmutableObjectV1(digest: "", kind: "reverse_reference_shard",
+            bytes: bytes)
+        val object_digest = _immutable_object_digest_v1(object)
+        if not _digest_v1(object_digest) or seen_reverse_refs.contains_key(object_digest):
+            return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+        seen_reverse_refs[object_digest] = true
+        reverse_refs.push(object_digest)
+        reverse_objects.push(ThreePayloadImmutableObjectV1(digest: object_digest,
+            kind: object.kind, bytes: object.bytes))
+    reverse_refs = array_sort_by(reverse_refs, \left, right:
+        if left < right: -1
+        elif left > right: 1
+        else: 0
+    )
+    reverse_objects = array_sort_by(reverse_objects, \left, right:
+        if left.digest < right.digest: -1
+        elif left.digest > right.digest: 1
+        else: 0
+    )
+    var rebuilt_objects: [ThreePayloadImmutableObjectV1] = []
+    for object in objects:
+        if object.kind != "reverse_reference_shard": rebuilt_objects.push(object)
+    for object in reverse_objects: rebuilt_objects.push(object)
+    if not _immutable_objects_bounded_v1(rebuilt_objects) or
+            not _objects_identity_unique_v1(rebuilt_objects):
+        return _RebuiltReversePayloadV1(valid: false, refs: [], objects: [])
+    _RebuiltReversePayloadV1(valid: true, refs: reverse_refs, objects: rebuilt_objects)
+
+fn _prepared_reverse_payload_matches_v1(prepared: PreparedThreePayloadGenerationV1) -> bool:
+    val rebuilt = _rebuild_reverse_payload_v1(prepared.manifest.forward_manifest_refs,
+        prepared.immutable_objects)
+    if not rebuilt.valid or prepared.manifest.rr_shard_refs != rebuilt.refs:
+        return false
+    # The canonical object validator permits repeated identical immutable
+    # entries. Compare the RR payloads as a typed identity set: duplicates of
+    # one exact object are harmless, while any distinct extra/missing object
+    # is rejected.
+    var actual_rr: Dict<text, ThreePayloadImmutableObjectV1> = {}
+    for object in prepared.immutable_objects:
+        if object.kind == "reverse_reference_shard":
+            if actual_rr.contains_key(object.digest):
+                val prior = actual_rr[object.digest]
+                if prior.kind != object.kind or prior.bytes != object.bytes: return false
+            else:
+                actual_rr[object.digest] = object
+    var expected_rr: Dict<text, ThreePayloadImmutableObjectV1> = {}
+    for object in rebuilt.objects:
+        if object.kind == "reverse_reference_shard": expected_rr[object.digest] = object
+    for digest in actual_rr.keys():
+        if not expected_rr.contains_key(digest): return false
+    for digest in expected_rr.keys():
+        if not actual_rr.contains_key(digest): return false
+        val actual = actual_rr[digest]
+        val expected = expected_rr[digest]
+        if actual.kind != expected.kind or actual.bytes != expected.bytes: return false
+    true
+
+fn _prepared_worker_forward_membership_v1(
+        prepared: PreparedThreePayloadGenerationV1) -> bool:
+    var objects_by_digest: Dict<text, ThreePayloadImmutableObjectV1> = {}
+    var forward_refs: Dict<text, bool> = {}
+    for digest in prepared.manifest.forward_manifest_refs:
+        forward_refs[digest] = true
+    for object in prepared.immutable_objects:
+        if not objects_by_digest.contains_key(object.digest):
+            objects_by_digest[object.digest] = object
+    for digest in prepared.manifest.scope_refs:
+        if objects_by_digest.contains_key(digest):
+            val object = objects_by_digest[digest]
+            if object.kind == "worker_result":
+                val decoded = three_payload_worker_result_decode_bounded_v1(
+                    object.bytes, three_payload_contract_max_items_v1())
+                if not decoded.ok: return false
+                val worker = match decoded.value:
+                    case Some(value): value
+                    case nil: return false
+                if not three_payload_worker_result_valid_v1(worker) or
+                        three_payload_worker_result_encode_v1(worker) != object.bytes:
+                    return false
+                val query_bytes = semantic_query_read_manifest_encode_v1(worker.query_reads)
+                val query_digest = sha256_u8_hex(query_bytes)
+                if query_bytes.len() == 0 or not forward_refs.contains_key(query_digest) or
+                        not objects_by_digest.contains_key(query_digest):
+                    return false
+                val query_object = objects_by_digest[query_digest]
+                if query_object.kind != "forward_manifest" or query_object.bytes != query_bytes:
+                    return false
     true
 
 fn _typed_object_present_v1(objects: [VerifiedCasReadObjectV1],
@@ -276,7 +450,9 @@ pub fn publish_verified_three_payload_generation_v1(
 fn _prepared_valid_v1(prepared: PreparedThreePayloadGenerationV1) -> bool:
     if (not generation_manifest_valid_v1(prepared.manifest) or
             generation_manifest_digest_v1(prepared.manifest) != prepared.manifest_digest or
-            not _objects_canonical_v1(prepared.immutable_objects)):
+            not _objects_canonical_v1(prepared.immutable_objects) or
+            not _prepared_worker_forward_membership_v1(prepared) or
+            not _prepared_reverse_payload_matches_v1(prepared)):
         return false
     for digest in prepared.manifest.summary_refs:
         if not _object_present_v1(prepared.immutable_objects, digest): return false
@@ -311,45 +487,54 @@ pub fn prepare_three_payload_generation_v1(
         return Err(ThreePayloadFallbackV1.CorruptPayload)
     val query_manifest_digest = sha256_u8_hex(
         semantic_query_read_manifest_encode_v1(input.worker_result.query_reads))
-    val worker_result_digest = sha256_u8_hex(
-        three_payload_worker_result_encode_v1(input.worker_result))
+    val worker_result_bytes = three_payload_worker_result_encode_v1(input.worker_result)
+    val worker_result_digest = sha256_u8_hex(worker_result_bytes)
     if input.summary_refs.index_of(input.worker_result.new_summary_digest) < 0 or
             input.diagnostic_refs.index_of(input.worker_result.diagnostic_digest) < 0 or
             input.forward_manifest_refs.index_of(query_manifest_digest) < 0 or
             input.scope_refs.index_of(worker_result_digest) < 0:
         return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    var typed_worker_result_found = false
+    for object in input.immutable_objects:
+        if object.digest == worker_result_digest and object.kind == "worker_result" and
+                object.bytes == worker_result_bytes:
+            typed_worker_result_found = true
+    if not typed_worker_result_found:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val reverse_payload = _rebuild_reverse_payload_v1(input.forward_manifest_refs,
+        input.immutable_objects)
+    if not reverse_payload.valid:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
     for digest in input.summary_refs:
-        if not _object_present_v1(input.immutable_objects, digest):
+        if not _object_present_v1(reverse_payload.objects, digest):
             return Err(ThreePayloadFallbackV1.CorruptPayload)
     for digest in input.scope_refs:
-        if not _object_present_v1(input.immutable_objects, digest):
-            return Err(ThreePayloadFallbackV1.CorruptPayload)
-    for digest in input.rr_shard_refs:
-        if not _object_present_v1(input.immutable_objects, digest):
-            return Err(ThreePayloadFallbackV1.CorruptPayload)
-    for digest in input.forward_manifest_refs:
-        if not _object_present_v1(input.immutable_objects, digest):
+        if not _object_present_v1(reverse_payload.objects, digest):
             return Err(ThreePayloadFallbackV1.CorruptPayload)
     for reference in input.worker_result.portable_refs:
-        if not _object_present_v1(input.immutable_objects, reference.content_digest):
+        if not _object_present_v1(reverse_payload.objects, reference.content_digest):
             return Err(ThreePayloadFallbackV1.CorruptPayload)
     for digest in input.target_refs:
-        if not _object_present_v1(input.immutable_objects, digest):
+        if not _object_present_v1(reverse_payload.objects, digest):
             return Err(ThreePayloadFallbackV1.CorruptPayload)
     for digest in input.diagnostic_refs:
-        if not _object_present_v1(input.immutable_objects, digest):
+        if not _object_present_v1(reverse_payload.objects, digest):
             return Err(ThreePayloadFallbackV1.CorruptPayload)
     val manifest = GenerationManifestV1(schema: 1, snapshot_digest: input.snapshot_digest,
         catalog_digest: input.catalog_digest, summary_refs: input.summary_refs,
-        scope_refs: input.scope_refs, rr_shard_refs: input.rr_shard_refs,
+        scope_refs: input.scope_refs, rr_shard_refs: reverse_payload.refs,
         forward_manifest_refs: input.forward_manifest_refs,
         portable_refs: input.worker_result.portable_refs, target_refs: input.target_refs,
         diagnostic_refs: input.diagnostic_refs)
-    if not generation_manifest_valid_v1(manifest):
+    if not generation_manifest_valid_v1(manifest) or
+            not _immutable_objects_bounded_v1(reverse_payload.objects):
         return Err(ThreePayloadFallbackV1.CorruptPayload)
-    Ok(PreparedThreePayloadGenerationV1(manifest: manifest,
+    val prepared = PreparedThreePayloadGenerationV1(manifest: manifest,
         manifest_digest: generation_manifest_digest_v1(manifest),
-        immutable_objects: input.immutable_objects))
+        immutable_objects: reverse_payload.objects)
+    if not _prepared_worker_forward_membership_v1(prepared):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    Ok(prepared)
 
 # Canonical non-authorizing identity for a fully validated prepared candidate.
 # The live scope owner may retain this digest, but it never treats the digest as

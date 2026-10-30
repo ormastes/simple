@@ -1,0 +1,42 @@
+# Supply an absolute, absent SIMPLE_RUNTIME_ARCHIVE_FIXTURE_ROOT per attempt.
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_hash_sha256}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.io_runtime.{file_delete}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_capsule_archive_v1}
+
+fn rejected(root: text) -> bool:
+    match native_runtime_capsule_archive_v1(root):
+        case Ok(_): false
+        case Err(_): true
+
+fn selected_bytes(root: text, expected: text, bytes: text) -> bool:
+    match native_runtime_capsule_archive_v1(root):
+        case Ok(path): path == expected and file_hash_sha256(path) == sha256_text(bytes)
+        case Err(_): false
+
+fn main() -> i64:
+    val root = env_get("SIMPLE_RUNTIME_ARCHIVE_FIXTURE_ROOT")
+    if root == "" or file_exists(root): return 1
+    if not rejected("relative-capsule"): return 2
+    if not dir_create(root, false): return 3
+    if not rejected(root): return 4
+    val msvc = root + "/simple_native_all.lib"
+    val gnu = root + "/libsimple_native_all.a"
+    val msvc_bytes = "MSVC distinct archive fixture\n"
+    val gnu_bytes = "GNU POSIX distinct archive fixture\n"
+    if not file_write(msvc, msvc_bytes): return 5
+    if not selected_bytes(root, msvc, msvc_bytes): return 6
+    if not file_write(gnu, gnu_bytes): return 7
+    if file_hash_sha256(msvc) == file_hash_sha256(gnu): return 8
+    if not rejected(root): return 9
+    if not file_delete(msvc): return 10
+    if not selected_bytes(root, gnu, gnu_bytes): return 11
+    if not file_delete(gnu): return 12
+    if not rejected(root): return 13
+    # A directory named like an archive cannot satisfy the pin.
+    if not dir_create(msvc, false): return 14
+    if not rejected(root): return 15
+    print "NATIVE_RUNTIME_CAPSULE_ARCHIVE_PASS"
+    0

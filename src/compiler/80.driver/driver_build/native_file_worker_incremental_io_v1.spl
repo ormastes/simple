@@ -3,15 +3,23 @@
 # native_file_worker_incremental_v1.spl (kept free of driver_aot_native_output
 # so its spec loads in the interpreter).
 use std.common.crypto.sha256.{sha256_text}
-use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, dir_create_all, getpid}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete,
+    dir_create_all, getpid, file_size}
 use std.nogc_sync_mut.io_runtime.{file_copy, file_hash_sha256_or_empty}
 use compiler.driver.cache.incremental_rebuild_plan_v1.{incremental_link_decision_v1}
 use compiler.driver.driver_aot_native_output.{driver_native_source_interface_text}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_deps_read_v1}
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FileWorkerReuseRowV1, file_worker_reuse_encode_v1}
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{FileWorkerIncRowV1,
-    file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_parse_v1, file_worker_inc_select_v1,
+    file_worker_inc_manifest_encode_v2,
+    file_worker_inc_manifest_parse_v1, file_worker_inc_manifest_selected_scope_digest_v2,
+    file_worker_inc_manifest_inventory_digest_v2,
+    FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2,
+    file_worker_inc_select_v1,
     file_worker_inc_link_objects_v1}
+use compiler.driver.cache.macro_forward_transport_v1.{macro_forward_candidate_capture_v1}
+use compiler.driver.cache.macro_forward_transport_v1.{macro_forward_candidate_invalidation_v1}
+use compiler.driver.cache.macro_forward_candidate_contract_v1.{MacroForwardModuleCandidateV1}
 
 # ------------------------------------------------------------------ paths --
 
@@ -55,16 +63,67 @@ fn _reuse_rows_v1(rows: [FileWorkerIncRowV1]) -> [FileWorkerReuseRowV1]:
 
 # Before the pool. Returns the reuse-file path ("" = nothing reusable) and
 # the number of reused modules.
-pub fn file_worker_inc_prepare_v1(dir: text, producer: text) -> (text, i64):
-    if dir == "" or not file_exists(_manifest_path_v1(dir)):
+pub fn file_worker_inc_prepare_v1(dir: text, producer: text, selected_scope_paths: [text],
+        selected_source_digests: Dict<text, text>, selected_scope_digest: text,
+        selected_inventory_digest: text, tldr_root: text) -> (text, i64):
+    if dir == "" or selected_scope_digest == "" or selected_inventory_digest == "" or
+            not file_exists(_manifest_path_v1(dir)):
         return ("", 0)
-    val (prev, _out_digest) = file_worker_inc_manifest_parse_v1(file_read(_manifest_path_v1(dir)), producer)
+    if file_size(_manifest_path_v1(dir)) > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2:
+        return ("", 0)
+    val previous_text = file_read(_manifest_path_v1(dir))
+    val (prev, _out_digest) = file_worker_inc_manifest_parse_v1(previous_text, producer)
+    val previous_scope_digest = file_worker_inc_manifest_selected_scope_digest_v2(previous_text, producer)
+    val previous_inventory_digest = file_worker_inc_manifest_inventory_digest_v2(previous_text, producer)
+    if previous_scope_digest == "" or previous_inventory_digest == "" or prev.len() == 0:
+        return ("", 0)
+    var previous_by_path: Dict<text, FileWorkerIncRowV1> = {}
+    for r in prev:
+        if previous_by_path.contains_key(r.path): return ("", 0)
+        previous_by_path[r.path] = r
+    var selected_seen: Dict<text, bool> = {}
+    var source_changed = false
     var src: Dict<text, text> = {}
     var iface: Dict<text, text> = {}
+    for path in selected_scope_paths:
+        if selected_seen.contains_key(path): return ("", 0)
+        selected_seen[path] = true
+        if not selected_source_digests.contains_key(path): source_changed = true
     for r in prev:
-        src[r.path] = file_worker_inc_source_digest_v1(r.path)
-        iface[r.path] = file_worker_inc_iface_digest_v1(r.path)
+        if not selected_seen.contains_key(r.path) or
+                not selected_source_digests.contains_key(r.path):
+            source_changed = true
+        else:
+            val source_digest = file_worker_inc_source_digest_v1(r.path)
+            if source_digest == "" or source_digest != selected_source_digests[r.path] or
+                    source_digest != r.source_digest:
+                source_changed = true
+            else:
+                src[r.path] = source_digest
+                iface[r.path] = file_worker_inc_iface_digest_v1(r.path)
     val sel = file_worker_inc_select_v1(prev, src, iface, [])
+    # Macro candidates are not bound to the object generation. Any source or
+    # selected-scope change therefore invalidates the whole prior source scope.
+    # A candidate table can never authorize a reuse-file entry.
+    val scope_changed = previous_scope_digest != selected_scope_digest or
+        previous_inventory_digest != selected_inventory_digest
+    if scope_changed or source_changed or sel.rebuild.len() > 0:
+        var previous_candidates: [MacroForwardModuleCandidateV1] = []
+        for row in prev:
+            previous_candidates.push(MacroForwardModuleCandidateV1(path: row.path,
+                source_digest: row.source_digest, candidate: row.macro_candidate))
+        # Inversion runs before the conservative return so body changes can
+        # contribute parsed macro users. Its result remains advisory: an absent
+        # current source mapping is passed through and forces full recheck.
+        val invalidation = macro_forward_candidate_invalidation_v1(previous_candidates,
+            selected_scope_paths, selected_source_digests, tldr_root)
+        var rebuild = sel.rebuild
+        for user in invalidation.users:
+            if selected_seen.contains_key(user) and not rebuild.contains(user):
+                rebuild.push(user)
+        if scope_changed or source_changed or sel.rebuild.len() > 0 or rebuild.len() > 0 or
+                invalidation.needs_full_recheck:
+            return ("", 0)
     var verified: [FileWorkerIncRowV1] = []
     for r in sel.reuse:
         if r.cached_object == "":
@@ -91,19 +150,25 @@ fn _sidecar_v1(queue: text, name: text) -> [text]:
 
 # After a "link" outcome. Copies every ledger object into the cache, writes
 # the pending manifest, and places the cached output when no object changed
-# and no module was added or removed. A ledger this cannot read invalidates
-# the cache (manifest removed) so the next run rebuilds everything.
+# and no module was added or removed. An unreadable ledger preserves the
+# previous committed manifest; the next run will widen to a full
+# rebuild if its selected-scope binding no longer matches.
 pub fn file_worker_inc_finish_v1(dir: text, producer: text, mir_queue: text, hir_queue: text, output: text,
-        reused: i64) -> FileWorkerIncFinishV1:
+        reused: i64, tldr_root: text, selected_source_digests: Dict<text, text>,
+        selected_scope_digest: text, selected_inventory_digest: text) -> FileWorkerIncFinishV1:
     val fallback = FileWorkerIncFinishV1(rebuilt: 0, reused: reused, relink: true)
     if dir == "" or not dir_create_all("{dir}/obj"):
+        return fallback
+    val pending_path = "{dir}/pending"
+    if file_exists(pending_path) and not file_delete(pending_path):
         return fallback
     var prev: [FileWorkerIncRowV1] = []
     var prev_output = ""
     if file_exists(_manifest_path_v1(dir)):
-        val (prev_rows, out_digest) = file_worker_inc_manifest_parse_v1(file_read(_manifest_path_v1(dir)), producer)
-        prev = prev_rows
-        prev_output = out_digest
+        if file_size(_manifest_path_v1(dir)) <= FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2:
+            val (prev_rows, out_digest) = file_worker_inc_manifest_parse_v1(file_read(_manifest_path_v1(dir)), producer)
+            prev = prev_rows
+            prev_output = out_digest
     val inventory = file_read("{mir_queue}/inventory").split("\n")
     var rows: [FileWorkerIncRowV1] = []
     var i = 1
@@ -121,25 +186,41 @@ pub fn file_worker_inc_finish_v1(dir: text, producer: text, mir_queue: text, hir
             digest = file_hash_sha256_or_empty(sc[0])
             ok = digest != "" and (sc[0] == cached or file_copy(sc[0], cached))
         if not ok:
-            val _dropped = file_delete(_manifest_path_v1(dir))
+            # Failed production never erases the prior committed inventory.
+            # Only a staged candidate from this attempt may be discarded.
+            if file_exists(pending_path):
+                val _pending_dropped = file_delete(pending_path)
             return fallback
         val deps = native_file_worker_deps_read_v1(hir_queue, name)
         val known = deps.is_ok() and file_exists(name)
         val imports: [text] = if deps.is_ok(): deps.unwrap() else: []
+        val source_digest = file_worker_inc_source_digest_v1(name)
+        if not selected_source_digests.contains_key(name) or
+                source_digest == "" or source_digest != selected_source_digests[name]:
+            return fallback
+        val macro_candidate = macro_forward_candidate_capture_v1(name, tldr_root, source_digest)
         rows = rows.push(FileWorkerIncRowV1(path: name,
-            source_digest: file_worker_inc_source_digest_v1(name),
+            source_digest: source_digest,
             iface_digest: file_worker_inc_iface_digest_v1(name), imports_known: known,
             imports: imports, object_digest: digest, cached_object: cached,
-            functions: sc[1].to_i64() ?? 0, statics: sc[2].to_i64() ?? 0, capsule: sc[3]))
+            functions: sc[1].to_i64() ?? 0, statics: sc[2].to_i64() ?? 0, capsule: sc[3],
+            macro_candidate: macro_candidate))
     val cached_output = "{dir}/output"
     val output_present = prev_output != "" and file_exists(cached_output) and
         file_hash_sha256_or_empty(cached_output) == prev_output
     val decision = incremental_link_decision_v1(file_worker_inc_link_objects_v1(prev, rows), output_present)
     val rebuilt = rows.len() - reused
+    if rows.len() == 0: return fallback
+    val encoded_cached = file_worker_inc_manifest_encode_v2(rows, prev_output, producer,
+        selected_scope_digest, selected_inventory_digest)
+    val encoded_pending = file_worker_inc_manifest_encode_v2(rows, "", producer,
+        selected_scope_digest, selected_inventory_digest)
     if decision.place_cached and output != "" and file_copy(cached_output, output):
-        val _held = _publish_v1("{dir}/pending", file_worker_inc_manifest_encode_v1(rows, prev_output, producer))
+        if encoded_cached == "" or not _publish_v1(pending_path, encoded_cached):
+            return fallback
         return FileWorkerIncFinishV1(rebuilt: rebuilt, reused: reused, relink: false)
-    val _pending = _publish_v1("{dir}/pending", file_worker_inc_manifest_encode_v1(rows, "", producer))
+    if encoded_pending == "" or not _publish_v1(pending_path, encoded_pending):
+        return fallback
     FileWorkerIncFinishV1(rebuilt: rebuilt, reused: reused, relink: true)
 
 # After a successful link: cache the output and promote the pending manifest.
@@ -147,14 +228,22 @@ pub fn file_worker_inc_commit_v1(dir: text, producer: text, output: text, relink
     val pending = "{dir}/pending"
     if dir == "" or not file_exists(pending):
         return false
-    val (rows, digest) = file_worker_inc_manifest_parse_v1(file_read(pending), producer)
-    val _gone = file_delete(pending)
+    if file_size(pending) > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2: return false
+    val pending_text = file_read(pending)
+    val (rows, digest) = file_worker_inc_manifest_parse_v1(pending_text, producer)
+    val pending_scope_digest = file_worker_inc_manifest_selected_scope_digest_v2(pending_text, producer)
+    val pending_inventory_digest = file_worker_inc_manifest_inventory_digest_v2(pending_text, producer)
+    if pending_scope_digest == "" or pending_inventory_digest == "" or rows.len() == 0: return false
     var out_digest = digest
     if relinked:
         if output == "" or not file_exists(output) or not file_copy(output, "{dir}/output"):
             return false
         out_digest = file_hash_sha256_or_empty("{dir}/output")
-    _publish_v1(_manifest_path_v1(dir), file_worker_inc_manifest_encode_v1(rows, out_digest, producer))
+    val committed = file_worker_inc_manifest_encode_v2(rows, out_digest, producer,
+        pending_scope_digest, pending_inventory_digest)
+    if committed == "" or not _publish_v1(_manifest_path_v1(dir), committed):
+        return false
+    file_delete(pending)
 
 export FileWorkerIncFinishV1
 export file_worker_inc_producer_v1, file_worker_inc_dir_v1, file_worker_inc_iface_digest_v1, file_worker_inc_source_digest_v1

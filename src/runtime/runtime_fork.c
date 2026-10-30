@@ -64,6 +64,7 @@ int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
 
 #include "runtime_fork.h"
 #include "runtime_memtrack.h"
+#include "runtime_process_tree.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -695,7 +696,9 @@ int64_t rt_fork_shared_heap_v1(void) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != expected_parent) {
+        /* Shared parent-death arm (runtime_process_tree.c); Linux here, so an
+         * unsupported answer is impossible and any failure is fatal. */
+        if (rt_child_set_pdeathsig(SIGKILL) != 0 || getppid() != expected_parent) {
             _exit(127);
         }
         /* Keep the inherited heap registry read-only so the child neither

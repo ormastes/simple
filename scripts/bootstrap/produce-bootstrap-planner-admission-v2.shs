@@ -68,7 +68,7 @@ adm_fail() {
 }
 
 usage() {
-    echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--bootstrap-output=<path>] [--runtime-dir=<path>] [--out=<path>]" >&2
+    echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--planner-backend=<llvm|llvm-lib|cranelift>] [--bootstrap-output=<path>] [--runtime-dir=<path>] [--out=<path>]" >&2
     echo "       --validate-parent-only checks the complete existing Stage-2 authority and exits before planner compilation" >&2
     echo "       $0 --selftest" >&2
 }
@@ -80,6 +80,7 @@ adm_reason=''
 adm_parent=''
 adm_runtime=''
 adm_out=''
+adm_planner_backend=llvm
 adm_root=$root
 # Left EMPTY on purpose; resolved after argv parsing, because the correct
 # default depends on --root. Presetting it to the ambient centralized storage
@@ -98,6 +99,7 @@ while [ "$#" -gt 0 ]; do
         --parent-compiler=*) adm_parent=${1#*=} ;;
         --bootstrap-output=*) adm_bootstrap_output=${1#*=} ;;
         --runtime-dir=*) adm_runtime=${1#*=} ;;
+        --planner-backend=*) adm_planner_backend=${1#*=} ;;
         --out=*) adm_out=${1#*=} ;;
         --root=*) adm_root=${1#*=} ;;
         --help|-h) usage; exit 0 ;;
@@ -112,6 +114,7 @@ if [ "$selftest" -eq 1 ]; then
 fi
 
 [ -n "$adm_target" ] && [ -n "$adm_reason" ] && [ -n "$adm_parent" ] || { usage; exit 2; }
+case "$adm_planner_backend" in llvm|llvm-lib|cranelift) ;; *) adm_fail planner-backend-unsupported ;; esac
 
 adm_root=$(bootstrap_planner_v2_canonical_dir "$adm_root") || adm_fail root-not-canonical
 bootstrap_planner_v2_reason_allowed "$adm_target" "$adm_reason" || adm_fail typed-reason-not-allowed-for-target
@@ -295,8 +298,13 @@ git_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/git-state.txt")
 planner_entry_rel=src/app/cli/bootstrap_reason_planner.spl
 [ "$adm_root/$planner_entry_rel" = "$planner_source" ] || adm_fail planner-entry-not-checkout-relative
 build_planner_out=$(bootstrap_planner_v2_planner_path "$adm_dir" "$parent_file") || adm_fail planner-path-invalid
+planner_build_argv=$(bootstrap_planner_v2_canonical_build_argv_text \
+    "$parent_file" "$adm_planner_backend" \
+    "$admission_root/stage2-runtime-authority" \
+    "$adm_dir/planner-cache" "$planner_entry_rel" "$build_planner_out")
+planner_build_argv_sha=$(bootstrap_planner_v2_hash_text "$planner_build_argv") || adm_fail planner-build-argv-unavailable
 if ! ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" "$parent_file" \
-        native-build --source src/app/cli --source src/lib \
+        native-build "--backend=$adm_planner_backend" --source src/app/cli --source src/lib \
         --runtime-path "$admission_root/stage2-runtime-authority" --runtime-bundle core-c-bootstrap \
         --cache-dir "$adm_dir/planner-cache" \
         --entry-closure --entry "$planner_entry_rel" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1; then
@@ -382,7 +390,7 @@ case "$adm_out" in /*) ;; *) adm_out="$PWD/$adm_out" ;; esac
 platform=$(uname -m 2>/dev/null || echo unknown)
 
 {
-    printf 'schema=simple-bootstrap-planner-admission-v2\n'
+    printf 'schema=simple-bootstrap-planner-admission-v3\n'
     printf 'status=pass\n'
     printf 'platform=%s\n' "$platform"
     printf 'target=%s\n' "$adm_target"
@@ -404,6 +412,8 @@ platform=$(uname -m 2>/dev/null || echo unknown)
     printf 'git_state_sha256=%s\n' "$git_sha"
     printf 'build_argv_sha256=%s\n' "$argv_sha"
     printf 'build_env_sha256=%s\n' "$env_sha"
+    printf 'planner_build_backend=%s\n' "$adm_planner_backend"
+    printf 'planner_build_argv_sha256=%s\n' "$planner_build_argv_sha"
     printf 'cache_scope_key=%s\n' "$scope_key"
     printf 'planner_path=%s\n' "$build_planner_out"
     printf 'planner_sha256=%s\n' "$planner_sha"

@@ -8,8 +8,9 @@ Astra owns design and final source review; Luna owns implementation/specs.
 
 `80.driver/driver_hir_pipeline_passes.spl` invokes both whole-program report
 and per-module specialization. `80.driver/cache/hir_mono_archive_consumer_v1.spl`
-uses the pass for admission; `hir_mono_replay_selection_v1.spl` constructs it
-only to prune already-published templates. `70.backend/linker/lazy_instantiator.spl`
+uses the pass for admission. The landed replay slice removed its pass
+construction: `hir_mono_replay_selection_v1.spl` now filters already-published
+templates through the HIR owner. `70.backend/linker/lazy_instantiator.spl`
 uses `TemplateInstantiator`. Removing the driver call alone is incomplete.
 `50.mir/_MirLowering/function_lowering.spl` rejects unsubstituted TypeParam
 and Any; neither type erasure nor silent template omission preserves semantics.
@@ -140,3 +141,90 @@ Full standalone monomorphization removal remains unfinished until steps 2–4
 and qualified generic/native/archive/linker regressions pass. Core compiler,
 library, MCP/LSP checks, runtime and native MCP smoke remain UNRUN. No push,
 merge, release or completion claim is authorized by static review alone.
+
+## 2026-10-31 audit after PR 5518
+
+Audit baseline: `0423140a092`. PR 5518 (`e0a16c5c669`) strengthens prelink
+demand identity; it does not implement a replacement specialization producer.
+`file_worker_instances_plan_v1` / `generic_instance_demands_v1` aggregate
+per-module forward lists and validate cached objects. The latter explicitly
+does not retain invocation-site counts or Interface/Const/Inline/AddressableCode/
+Export needs. `generic_instance_object_producer_v1.spl` still consumes MIR
+created by the child AFTER module-scoped monomorphization; its build callback
+publishes already-staged objects. This is cache/reuse wiring, not independent
+cold instance generation: `native_build_main.spl` passes
+`generic_instance_object_from_stage_v1(stage, _1)` as the actual prelink build
+callback. Generic-type methods have no symbol-to-key mapping;
+non-extractable instances that reference module-local symbols are deliberately
+retained in their original objects. These exclusions must remain fail-closed.
+
+### Rejected zero-generics shortcut
+
+The global pass's zero-definition shortcut cannot simply be copied into
+`process_module_scoped_v1`. In scoped mode, `rewrite_call` invokes
+`module_scoped_visibility_check_v1` even when no generic definition was
+collected. An imported generic function whose provider is absent still needs
+E-MONO-040, which makes the driver widen its template set or fail without an
+object. Zero collected generic functions/structs/classes is not proof of zero
+generic demand. `MonoPreflightFactsV1` contains resource counts, not this proof.
+
+The existing real-HIR `mono_module_scoped_spec.spl` missing-provider case now
+also asserts all three generic counters are zero and unresolved calls is one.
+It retains its exact diagnostic and zero-instance checks. This is authored
+UNRUN evidence; no new production skip was added. An equivalent-cost whole
+body scan would merely replace the rewrite walk without establishing useful
+removal. An empty-module-only shortcut is not the requested migration.
+
+### Next concrete slice: independent cold instance producer
+
+The next implementation must make one existing per-instance job able to build
+a concrete function from admitted archived HIR without waiting for any using
+module's `process_module_scoped_v1` or pre-staged MIR. Initially constrain this
+to exact function templates already supported by the extractable-instance
+policy. Unsupported nominal-method/local-symbol cases stay on the existing
+route and must not receive a success/retirement receipt.
+
+Proposed boundary (design only, no callable API or stub is added here):
+
+1. The existing instance job supplies its `RequiredSpecializationV1`, exact
+   template body key, producer/artifact key and owned registration authority.
+   Admit canonical type arguments in declaration coordinates through existing
+   template signature/nominal relocation owners. A textual TLDR key alone is
+   not authority to invent types, substitute Any or load unrelated bodies.
+2. Add an owner-private external-demand admission operation beside existing
+   archive queue admission. It validates template identity, arity, concrete
+   argument identity and body availability, then creates the same deduplicated
+   specialization request that current root rewriting creates. Callers never
+   append queue rows or manufacture symbol ids directly.
+3. Reuse archive one-instance substitution, body rewrite and FIFO closure
+   (`mono_archive_drain_one_v1` and publication/apply owners), keeping nested
+   demand limits, diagnostics, exact-once state transitions and relocation.
+   This is a function-production transaction, not a completed module pipeline.
+   Do NOT forge `mono_archive_roots_complete_v1`, clear its root inventory or
+   bypass `mono_archive_execute_next_specialization_v1`'s root barrier.
+4. Give this function-only transaction a distinct admitted receipt identity.
+   Existing module-final/replay receipts retain their current meanings and
+   must reject function-only authority. Persist new records in SDN through
+   the existing cache owner; no second scheduler or cache-key family.
+5. Lower the admitted function/dependency closure using the existing configured
+   MIR/backend/storage owners; publish with `generic_instance_cache_publish_v1`
+   only after exact object verification. Wire the current instance job's cold
+   build callback to this producer; a cache hit retains current admission.
+
+Test-first acceptance for that slice: cold cache plus no using-module MIR
+must produce the same concrete signatures, rewritten calls, symbol/nominal
+identity and executable result as the current scoped producer. Cover nested
+generic demand and duplicate requests, changed body/configuration rejection,
+missing template and wrong nominal owner, recursive-limit failure, and the
+non-extractable case. Compare logical semantics separately from permitted
+COMDAT placement differences. Verify no staging prerequisite remains and that
+failed/incomplete publication never retires the per-module copy. Require the
+exact frozen producer/source/backend receipt; authored tests cannot qualify
+this transaction.
+
+Only after cold production qualifies can a later slice replace per-module
+instance body emission with verified instance references while retaining root
+call rewriting. Removing that root rewrite additionally requires an admitted
+call-site rewrite/relocation artifact, which PR 5518 does not supply. Global
+compilation, archive root replay and linker lazy instantiation remain separate
+consumers to migrate. The standalone monomorphization engine is NOT removed.
