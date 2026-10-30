@@ -8847,6 +8847,36 @@ SplArray* rt_array_new_with_cap_u64(int64_t cap) {
     return rt_core_array_new(cap, RT_CORE_ARRAY_FLAG_U64_PACKED);
 }
 
+/* C twins of the Rust runtime's rt_array_new_with_cap family
+ * (compiler_rust/runtime/src/value/collections.rs): `cap` slots RESERVED,
+ * `len == 0`, tagged-slot representation -- i.e. exactly rt_array_new(cap).
+ * Not the len == cap constructor rt_array_new_uninit above: every caller
+ * (io/tls_common_hooks.spl, src/array_builder.spl) fills with push().
+ * Declared in .spl and in RUNTIME_SYMBOL_NAMES, served by the JIT and the
+ * interpreter, but absent from every C translation unit, so a native link of
+ * any module pulling them in failed with an unresolved symbol (or got a
+ * zero-returning stub under SIMPLE_ALLOW_UNRESOLVED_RT=1, i.e. a null [u8]).
+ * The typed spellings carry no representation difference in either runtime. */
+SplArray* rt_array_new_with_cap(int64_t cap) {
+    return rt_array_new(cap);
+}
+
+SplArray* rt_array_new_with_cap_text(int64_t cap) {
+    return rt_array_new(cap);
+}
+
+SplArray* rt_array_new_with_cap_bool(int64_t cap) {
+    return rt_array_new(cap);
+}
+
+SplArray* rt_array_new_with_cap_i64(int64_t cap) {
+    return rt_array_new(cap);
+}
+
+SplArray* rt_array_new_with_cap_js_value(int64_t cap) {
+    return rt_array_new(cap);
+}
+
 /* Is this array stored as PACKED BYTES rather than tagged int64 slots?
  *
  * `[u8]` takes the packed representation (RT_CORE_ARRAY_FLAG_BYTES); every

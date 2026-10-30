@@ -635,6 +635,12 @@ SplArray* rt_array_new_uninit(int64_t cap);
 /* 1 when the array is packed bytes ([u8]), 0 when tagged int64 slots. */
 int rt_array_is_byte_packed(SplArray* value);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
+/* Capacity-reserving constructors (len 0), C twins of the Rust runtime family. */
+SplArray* rt_array_new_with_cap(int64_t cap);
+SplArray* rt_array_new_with_cap_text(int64_t cap);
+SplArray* rt_array_new_with_cap_bool(int64_t cap);
+SplArray* rt_array_new_with_cap_i64(int64_t cap);
+SplArray* rt_array_new_with_cap_js_value(int64_t cap);
 void      rt_array_free(SplArray* array);  /* shallow: preserves element handles */
 /* Deep array free. Returns 1 only if the ENTIRE structure was reclaimed, 0 if
  * refused -- and a refusal frees nothing at all (all-or-nothing, so the result
