@@ -46,7 +46,8 @@ fn retention_unchanged_history_v1(previous: BuildRetentionStateV1, candidate: Bu
     Ok(true)
 
 fn retention_store_commit_locked_v1(cache_root: text, expected_generation: i64, expected_root: text,
-        candidate: BuildRetentionStateV1, limits: BuildRetentionLimitsV1) -> Result<text, text>:
+        candidate: BuildRetentionStateV1, limits: BuildRetentionLimitsV1,
+        released_capture: text = "") -> Result<text, text>:
     # Validate without deriving an eviction plan: admission must succeed even
     # when protected history exceeds the requested storage budget.
     var validation = limits
@@ -61,6 +62,11 @@ fn retention_store_commit_locked_v1(cache_root: text, expected_generation: i64, 
         if build_retention_root_v1(current) == build_retention_root_v1(candidate): return Ok(expected_root)
         if expected_generation == 9223372036854775807 or candidate.generation != expected_generation + 1:
             return Err("retention_generation")
+        # V1-shaped callers must not erase V2 reservations via default fields.
+        # Only a private checked lifecycle transaction can release its owner.
+        for owner in current.capture_owners:
+            if owner != released_capture and not candidate.capture_owners.contains(owner):
+                return Err("retention_capture_drop")
         retention_unchanged_history_v1(current, candidate)?
     elif expected_generation != 0 or expected_root != "" or candidate.generation != 1:
         return Err("retention_initial_generation")
@@ -76,6 +82,32 @@ fn build_retention_store_commit_v1(cache_root: text, expected_generation: i64, e
     if not file_unlock(lock): return Err("retention_unlock")
     result
 
+# The durable reservation is committed before any caller reads a snapshot.
+# Capture may call the compiler without retaining this lock: nested legacy
+# collectors see managed authority and every managed deletion sees this owner.
+fn retention_capture_begin_locked_v2(cache_root: text, owner: text,
+        limits: BuildRetentionLimitsV1) -> Result<text, text>:
+    var current = BuildRetentionStateV1(generation: 0, nodes: [], pins: [], leases: [])
+    var expected_root = ""
+    if file_exists(retention_authority_path_v1(cache_root)):
+        current = build_retention_store_load_v1(cache_root)?
+        expected_root = build_retention_root_v1(current)
+        if current.capture_owners.contains(owner): return Ok(expected_root)
+    if current.generation == 9223372036854775807: return Err("retention_generation_exhausted")
+    var candidate = current
+    candidate.generation = current.generation + 1
+    candidate.capture_owners.push(owner)
+    retention_store_commit_locked_v1(cache_root, current.generation, expected_root, candidate, limits)
+
+fn build_retention_store_capture_begin_v2(cache_root: text, owner: text,
+        limits: BuildRetentionLimitsV1) -> Result<text, text>:
+    if cache_root == "" or not dir_exists(cache_root): return Err("retention_store_root")
+    val lock = file_lock(retention_lock_path_v1(cache_root), 1)
+    if lock < 0: return Err("retention_busy")
+    val result = retention_capture_begin_locked_v2(cache_root, owner, limits)
+    if not file_unlock(lock): return Err("retention_unlock")
+    result
+
 fn retention_snapshot_owned_v1(plan: BuildRetentionPlanV1) -> Result<bool, text>:
     # No arbitrary paths and no physical deletion of manifests/receipts by a
     # snapshot callback. A snapshot and its provenance receipt are one store
@@ -88,6 +120,7 @@ fn retention_snapshot_owned_v1(plan: BuildRetentionPlanV1) -> Result<bool, text>
 fn retention_store_execute_locked_v1(cache_root: text, requested: BuildRetentionPlanV1,
         limits: BuildRetentionLimitsV1, now: i64) -> Result<i64, text>:
     var state = build_retention_store_load_v1(cache_root)?
+    if state.capture_owners.len() != 0: return Err("retention_capture_active")
     if requested.generation != state.generation or requested.root != build_retention_root_v1(state):
         return Err("retention_stale_plan")
     val plan = build_retention_plan_v1(state, limits, now)?
@@ -101,6 +134,7 @@ fn retention_store_execute_locked_v1(cache_root: text, requested: BuildRetention
         # Recheck the exact durable root immediately before EACH checked store
         # callback, while pin/lease/root publication is excluded by the lock.
         val current = build_retention_store_load_v1(cache_root)?
+        if current.capture_owners.len() != 0: return Err("retention_capture_active")
         if current.generation != state.generation or build_retention_root_v1(current) != build_retention_root_v1(state):
             return Err("retention_stale_callback")
         val revision = key.split("/")[1]
@@ -135,3 +169,4 @@ fn build_retention_store_execute_v1(cache_root: text, plan: BuildRetentionPlanV1
 
 export build_retention_store_load_v1, build_retention_store_commit_v1
 export build_retention_store_execute_v1
+export build_retention_store_capture_begin_v2

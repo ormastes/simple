@@ -29,6 +29,7 @@ struct BuildRetentionStateV1:
     nodes: [BuildRetentionNodeV1]
     pins: [BuildRetentionPinV1]
     leases: [BuildRetentionLeaseV1]
+    capture_owners: [text] = []
 
 struct BuildRetentionLimitsV1:
     max_nodes: i64
@@ -80,14 +81,20 @@ fn build_retention_sdn_v1(state: BuildRetentionStateV1) -> text:
         for dependency in node.dependencies: dependencies.push("\"{dependency}\"")
         val dependency_body = dependencies.join(", ")
         rows.push("  {{namespace: \"{node.namespace}\", id: \"{node.id}\", authoritative: {node.authoritative}, rebuildable: {node.rebuildable}, bytes: {node.bytes}, last_used: {node.last_used}, dependencies: [{dependency_body}]}}")
-    var body = "version: 1\ngeneration: {state.generation}\nnodes: [\n" + rows.join(",\n") + "\n]\npins: [\n"
+    val version = if state.capture_owners.len() == 0: 1 else: 2
+    var body = "version: {version}\ngeneration: {state.generation}\nnodes: [\n" + rows.join(",\n") + "\n]\npins: [\n"
     rows = []
     for pin in state.pins: rows.push("  {{ref: \"{pin.ref}\", root: \"{pin.root}\"}}")
     body = body + rows.join(",\n") + "\n]\nleases: [\n"
     rows = []
     for lease in state.leases:
         rows.push("  {{owner: \"{lease.owner}\", root: \"{lease.root}\", expires_at: {lease.expires_at}}}")
-    body + rows.join(",\n") + "\n]\n"
+    body = body + rows.join(",\n") + "\n]\n"
+    if version == 2:
+        rows = []
+        for owner in state.capture_owners: rows.push("\"{owner}\"")
+        body = body + "capture_owners: [" + rows.join(", ") + "]\n"
+    body
 
 fn build_retention_root_v1(state: BuildRetentionStateV1) -> text:
     sha256_text("scv.build-retention.v1\n" + build_retention_sdn_v1(state))
@@ -172,11 +179,18 @@ fn build_retention_plan_v1(state: BuildRetentionStateV1, limits: BuildRetentionL
             limits.max_edges < 0 or limits.max_edges > 65536 or limits.max_work < 1 or
             limits.max_work > 16777216 or limits.max_bytes < 0 or limits.max_retained < 0 or
             limits.max_remove < 0 or state.nodes.len() > limits.max_nodes or
-            state.pins.len() > limits.max_nodes or state.leases.len() > limits.max_nodes):
+            state.pins.len() > limits.max_nodes or state.leases.len() > limits.max_nodes or
+            state.capture_owners.len() > limits.max_nodes):
         return Err("retention_limits")
     val by = build_retention_index_v1(state)?
     var total: i64 = 0
     var work: i64 = state.nodes.len()
+    var captures: Dict<text, bool> = {}
+    for owner in state.capture_owners:
+        work = work + 1
+        if work > limits.max_work: return Err("retention_work_budget")
+        if not build_retention_token_v1(owner) or captures.contains_key(owner): return Err("retention_capture_owner")
+        captures[owner] = true
     var edges: i64 = 0
     var roots: [text] = []
     var resolved: Dict<text, bool> = {}

@@ -9,11 +9,27 @@ use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
 use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_lock, file_unlock}
 use std.nogc_sync_mut.io_runtime.{dir_list, dir_remove, process_is_running}
 use std.scv.store.{scv_write_text}
+use std.scv.build_retention_codec_v1.{build_retention_parse_v1}
 
 export scv_compile_snapshot_recover_v1, scv_compile_snapshot_gc_v1
 export scv_compile_snapshot_gc_authorized_v1, scv_compile_snapshot_retain_newest_v1
 export scv_compile_snapshot_cleanup_v1, scv_compile_snapshot_touch_v1
 export scv_compile_snapshot_max_keep_v1, scv_compile_snapshot_min_age_v1
+export scv_compile_snapshot_invalid_destination_cleanup_v2
+
+# A failed validation never grants permission to erase managed source bytes.
+# Serialize even this legacy repair path with retention admission and eviction.
+fn scv_compile_snapshot_invalid_destination_cleanup_v2(cache_root: text, destination: text) -> bool:
+    if destination == "" or not destination.starts_with(cache_root + "/snapshots/"): return false
+    val name = destination.substring((cache_root + "/snapshots/").len())
+    if name == "" or name == "." or name == ".." or name.contains("/") or name.contains("\\"): return false
+    val lock = file_lock("{cache_root}/.build-retention-v1.lock", 1)
+    if lock < 0: return false
+    var removed = false
+    if not file_exists("{cache_root}/.build-retention-v1.sdn"):
+        removed = dir_remove(destination, true)
+    if not file_unlock(lock): return false
+    removed
 
 fn scv_compile_snapshot_recover_v1(cache_root: text) -> i64:
     val snapshots_root = "{cache_root}/snapshots"
@@ -80,6 +96,9 @@ fn scv_compile_snapshot_gc_authorized_v1(
             revision.contains("/") or revision.contains("\\") or
             not file_exists("{cache_root}/.build-retention-v1.lock")):
         return 0
+    val retained = build_retention_parse_v1(expected_authority.bytes())
+    if retained.is_err(): return 0
+    if retained.unwrap().capture_owners.len() != 0: return 0
     val authority_path = "{cache_root}/.build-retention-v1.sdn"
     val root_id = sha256_text("scv.build-retention.v1\n" + expected_authority)
     val permit = "revision: \"{revision}\"\nroot: \"{root_id}\"\n"

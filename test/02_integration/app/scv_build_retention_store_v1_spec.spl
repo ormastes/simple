@@ -4,6 +4,7 @@ use std.scv.build_retention_v1.*
 use std.scv.build_retention_store_v1.*
 use std.scv.compile_snapshot.{scv_compile_snapshot_provenance_v1,
     scv_compile_snapshot_receipt_v1, scv_compile_snapshot_gc_v1}
+use std.scv.compile_snapshot_retention_v1.{scv_compile_snapshot_invalid_destination_cleanup_v2}
 use app.io.mod.{dir_create, dir_exists, file_exists}
 use std.nogc_sync_mut.io_runtime.{file_write}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
@@ -29,6 +30,39 @@ fn retention_store_initial() -> BuildRetentionStateV1:
         rebuildable: true, bytes: 8, last_used: 1)], pins: [], leases: [])
 
 describe "Build retention checked store callback":
+    it "blocks deletion of a snapshot registered after an empty-store capture began":
+        step("Reserve capture before any snapshots are registered")
+        val root = retention_store_fixture("capture-new-registration")
+        build_retention_store_capture_begin_v2(root, "manager-A", retention_store_limits()).unwrap()
+        val reserved = build_retention_store_load_v1(root).unwrap()
+        expect(reserved.capture_owners).to_equal(["manager-A"])
+        var registered = reserved
+        registered.generation = reserved.generation + 1
+        registered.nodes = retention_store_initial().nodes
+        build_retention_store_commit_v1(root, reserved.generation, build_retention_root_v1(reserved), registered, retention_store_limits()).unwrap()
+        step("A newly eligible snapshot remains protected by the global acquisition barrier")
+        val plan = build_retention_plan_v1(registered, retention_store_limits(), 10).unwrap()
+        expect(plan.deletions).to_equal(["snapshot/old"])
+        expect(build_retention_store_execute_v1(root, plan, retention_store_limits(), 10).unwrap_err()).to_equal("retention_capture_active")
+        expect(dir_exists(root + "/snapshots/old")).to_equal(true)
+        expect(scv_compile_snapshot_gc_v1(root, [], 1)).to_equal(0)
+        step("Reopening the same reservation is idempotent and never expires it")
+        build_retention_store_capture_begin_v2(root, "manager-A", retention_store_limits()).unwrap()
+        expect(build_retention_store_load_v1(root).unwrap().capture_owners).to_equal(["manager-A"])
+
+    it "rejects a V1-shaped replacement that drops active V2 reservations":
+        step("An old caller cannot erase a new reader barrier even with exact CAS inputs")
+        val root = retention_store_fixture("capture-v1-replacement")
+        build_retention_store_capture_begin_v2(root, "manager-A", retention_store_limits()).unwrap()
+        val state = build_retention_store_load_v1(root).unwrap()
+        val old_caller = BuildRetentionStateV1(generation: state.generation + 1,
+            nodes: state.nodes, pins: state.pins, leases: state.leases)
+        expect(build_retention_store_commit_v1(root, state.generation, build_retention_root_v1(state), old_caller, retention_store_limits()).unwrap_err()).to_equal("retention_capture_drop")
+        expect(build_retention_root_v1(build_retention_store_load_v1(root).unwrap())).to_equal(build_retention_root_v1(state))
+        step("Failed validation also cannot erase a managed physical snapshot")
+        expect(scv_compile_snapshot_invalid_destination_cleanup_v2(root, root + "/snapshots/old")).to_equal(false)
+        expect(dir_exists(root + "/snapshots/old")).to_equal(true)
+
     it "removes a planned snapshot through its existing provenance and receipt checker":
         step("Publish authority, derive a plan, and execute the store callback")
         val root = retention_store_fixture("delete")

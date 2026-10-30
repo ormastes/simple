@@ -23,8 +23,21 @@ fn build_retention_parse_v1(bytes: [u8]) -> Result<BuildRetentionStateV1, text>:
     val document = match sdn_parse_strict_bytes_v1(bytes, limits):
         case Ok(value): value
         case Err(issue): return Err("retention_sdn: " + issue.code)
-    val fields = scv_config_dict_v1(document.value, "retention", ["version", "generation", "nodes", "pins", "leases"])?
-    scv_config_int_v1(fields["version"], "version", 1, 1)?
+    val raw = match document.value:
+        case Dict(value): value
+        case _: return Err("retention_mapping_required")
+    if not raw.contains_key("version"): return Err("retention_version_required")
+    val version = scv_config_int_v1(raw["version"], "version", 1, 2)?
+    var names = ["version", "generation", "nodes", "pins", "leases"]
+    if version == 2: names.push("capture_owners")
+    val fields = scv_config_dict_v1(document.value, "retention", names)?
+    var capture_owners: [text] = []
+    if version == 2:
+        if not fields.contains_key("capture_owners"): return Err("retention_capture_owners_required")
+        for owner in retention_array_v1(fields["capture_owners"])?:
+            capture_owners.push(scv_config_text_v1(owner, "capture_owner")?)
+        if capture_owners.len() == 0: return Err("retention_capture_owners_empty")
+    elif fields.contains_key("capture_owners"): return Err("retention_v1_capture_owners")
     val generation = scv_config_int_v1(fields["generation"], "generation", 1, 9223372036854775807)?
     var nodes: [BuildRetentionNodeV1] = []
     for item in retention_array_v1(fields["nodes"])?:
@@ -48,7 +61,7 @@ fn build_retention_parse_v1(bytes: [u8]) -> Result<BuildRetentionStateV1, text>:
         leases.push(BuildRetentionLeaseV1(owner: scv_config_text_v1(lease["owner"], "owner")?,
             root: scv_config_text_v1(lease["root"], "root")?,
             expires_at: scv_config_int_v1(lease["expires_at"], "expires_at", 0, 9223372036854775807)?))
-    val state = BuildRetentionStateV1(generation: generation, nodes: nodes, pins: pins, leases: leases)
+    val state = BuildRetentionStateV1(generation: generation, nodes: nodes, pins: pins, leases: leases, capture_owners: capture_owners)
     build_retention_plan_v1(state, build_retention_validation_limits_v1(), 0)?
     Ok(state)
 

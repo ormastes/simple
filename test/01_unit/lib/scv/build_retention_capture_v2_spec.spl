@@ -1,0 +1,38 @@
+"""Versioned capture reservations; authored assertions, execution deferred."""
+use std.spec.{describe, it, expect}
+use std.scv.build_retention_v1.*
+use std.scv.build_retention_codec_v1.{build_retention_parse_v1, build_retention_validation_limits_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn capture_state() -> BuildRetentionStateV1:
+    BuildRetentionStateV1(generation: 1, nodes: [], pins: [], leases: [])
+
+describe "Retention capture reservation format":
+    it "preserves exact historical V1 bytes and root when no capture is reserved":
+        val source = "version: 1\ngeneration: 1\nnodes: [\n\n]\npins: [\n\n]\nleases: [\n\n]\n"
+        val state = capture_state()
+        expect(build_retention_sdn_v1(state)).to_equal(source)
+        expect(build_retention_root_v1(state)).to_equal(sha256_text("scv.build-retention.v1\n" + source))
+        val parsed = build_retention_parse_v1(source.bytes()).unwrap()
+        expect(parsed.capture_owners.len()).to_equal(0)
+        expect(build_retention_sdn_v1(parsed)).to_equal(source)
+
+    it "binds a V2 reservation to state identity and rejects invalid owners":
+        var state = capture_state()
+        val old_root = build_retention_root_v1(state)
+        state.capture_owners = ["manager-A"]
+        val source = build_retention_sdn_v1(state)
+        expect(source).to_start_with("version: 2\n")
+        expect(build_retention_parse_v1(source.bytes()).unwrap().capture_owners).to_equal(["manager-A"])
+        expect(build_retention_root_v1(state) == old_root).to_equal(false)
+        state.capture_owners = ["manager-A", "manager-A"]
+        expect(build_retention_plan_v1(state, build_retention_validation_limits_v1(), 0).is_err()).to_equal(true)
+        state.capture_owners = ["../manager"]
+        expect(build_retention_parse_v1(build_retention_sdn_v1(state).bytes()).is_err()).to_equal(true)
+
+    it "refuses missing empty unknown and V1-spoofed reservation fields":
+        val source = build_retention_sdn_v1(capture_state())
+        expect(build_retention_parse_v1(source.replace("version: 1", "version: 2").bytes()).is_err()).to_equal(true)
+        expect(build_retention_parse_v1((source.replace("version: 1", "version: 2") + "capture_owners: []\n").bytes()).is_err()).to_equal(true)
+        expect(build_retention_parse_v1((source + "capture_owners: [\"manager-A\"]\n").bytes()).is_err()).to_equal(true)
+        expect(build_retention_parse_v1((source + "unrecognized: true\n").bytes()).is_err()).to_equal(true)
