@@ -1,0 +1,41 @@
+"""
+Qualified enum payload patterns (`case Type.Variant(x):`) bind the payload in
+the pure-Simple interpreter, whatever the binder name and wherever the match
+sits. The core parser builds these patterns as method calls, which match_pattern
+previously sent to the equality default and failed with "undefined variable".
+"""
+# @req REQ-INTERP-ENUM-METHOD-OWNER
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error}
+use compiler.core.interpreter.value.{val_get_int}
+
+val TICKET = "enum Ticket:\n    Ready(value: i64)\n    Empty\n"
+
+fn run_main(body: text) -> i64:
+    val result = core_interpret(TICKET + "fn main() -> i64:\n" + body, "enum_qualified_pattern.spl")
+    if eval_has_error(): return -1
+    val_get_int(result)
+
+describe "qualified enum payload patterns":
+    it "binds the payload of a matching qualified variant":
+        step("Match a Ready value with Ticket.Ready(value)")
+        expect(run_main("    val t = Ticket.Ready(7)\n    match t:\n        case Ticket.Ready(value): value\n        case Ticket.Empty: 3\n")).to_equal(7)
+
+    it "selects the unit arm when the payload arm does not match":
+        step("Match an Empty value against a payload arm first")
+        expect(run_main("    val t = Ticket.Empty\n    match t:\n        case Ticket.Ready(value): value\n        case Ticket.Empty: 3\n")).to_equal(3)
+
+    it "accepts any binder name and the wildcard sub-pattern":
+        step("Bind the payload as v, then ignore it with _")
+        expect(run_main("    val t = Ticket.Ready(8)\n    match t:\n        case Ticket.Ready(v): v\n        case _: 3\n")).to_equal(8)
+        expect(run_main("    val t = Ticket.Ready(8)\n    match t:\n        case Ticket.Ready(_): 9\n        case _: 3\n")).to_equal(9)
+
+    it "accepts the Type::Variant spelling":
+        step("Match with the double-colon qualifier")
+        expect(run_main("    val t = Ticket.Ready(6)\n    match t:\n        case Ticket::Ready(value): value\n        case Ticket::Empty: 3\n")).to_equal(6)
+
+    it "falls through to a later arm on a variant mismatch":
+        step("A qualified payload arm for the other variant does not match")
+        expect(run_main("    val t = Ticket.Empty\n    match t:\n        case Ticket.Ready(_): 9\n        case _: 4\n")).to_equal(4)
