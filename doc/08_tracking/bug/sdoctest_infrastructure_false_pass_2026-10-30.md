@@ -1,7 +1,7 @@
 # Expected-failure doctest accepted process infrastructure failure
 
-Status: source-reviewed finding; candidate repair and real-process regression
-await runtime qualification.
+Status: source reviewed; actual native process-launch regression verified.
+Full semantic-control suite remains unqualified.
 
 PR #5332 added a branch in `sdoctest/runner.spl` that reports Passed for a
 `ShouldFail` block whenever exit status is -1 and stderr is nonempty without a
@@ -24,3 +24,23 @@ The harness must verify the fixture exists without execute permissions and
 pin the real CLI's admission/hash. A recording shell is not semantic compiler
 evidence. Runtime results and required gates remain pending; no native PASS is
 claimed by this source change.
+
+## Focused native evidence
+
+The admitted attempt12 producer `1759a66577ca33191743401f77d712a2396debceb964ee283622a7744d92f8d1`
+built the actual block-runner fixture (139 modules). The actual SCV source audit
+matched both production runner and fixture to reviewed source `76b8939f67f`.
+Evidence directory: `/tmp/simple-sdoctest-infrastructure-native12-20261030`.
+
+One runtime execution verified both non-executable-child assertions: a real
+mode-0600 file returned `Error` with and without `ShouldFail`, including provider
+stderr `rt_process_run_timeout execvp: Permission denied`. This directly tests
+the removed false-PASS branch rather than a compiler-selection refusal.
+
+The complete five-case probe returned **8, not PASS**. Its positive semantic
+control failed when the admitted build compiler was used as the child; a fully
+qualified CLI was unavailable. Thus semantic negative/positive execution is
+not established by this run, and there is no full application or five-case
+suite PASS claim. The patch preserves the existing ordinary nonzero branch;
+source review and the two actual launch-failure assertions are the scoped
+repair evidence. Required broad runtime gates remain pending separately.
