@@ -1,0 +1,139 @@
+# Standalone diagnostic oracle. Source-authored; execution qualification is separate.
+# No SSpec/test CLI dependency and no semantic issuer/install/execute admission.
+use compiler.driver.driver_frozen_semantic_prerequisites_v1.{
+    compiler_driver_diagnose_frozen_semantic_prerequisites_v1,
+    compiler_driver_observe_frozen_owner_prerequisites_v1}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.semantic_prerequisite_types_v1.*
+use compiler.driver.semantic_owner_prerequisite_types_v1.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.common.cache_contract.three_payload_execution_v3.{three_payload_compiled_execution_available_v3}
+use compiler.semantics.semantic_scope_issuers_v2.{semantic_scope_issuer_gateway_install_available_v2}
+use std.common.string_core.{text_to_bytes}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+fn probe_request(source: text) -> FrozenSemanticPrerequisiteRequestV1:
+    FrozenSemanticPrerequisiteRequestV1(source_bytes: text_to_bytes(source), source_path: "src/owned.spl",
+        module_name: "owned", expected_source_sha256: sha256_text(source),
+        target_triple: "x86_64-unknown-linux-gnu",
+        limits: FrozenSemanticPrerequisiteLimitsV1(max_source_bytes: 65536, max_functions: 64,
+            max_ast_nodes: 4096, max_depth: 32))
+
+# Every call must have completed the actual parser/HIR/HM path and retired scratch.
+# Offsets at the call sites make every failing control return a distinct exit.
+fn probe_common(result: FrozenSemanticPrerequisiteDiagnosticV1, source: text) -> i64:
+    if transient_array_scope_state_v1() != 0: return 1
+    if result.semantic_authorized or result.full_artifact_authorized: return 2
+    if three_payload_compiled_execution_available_v3(): return 3
+    if semantic_scope_issuer_gateway_install_available_v2(): return 4
+    if result.source_sha256 != sha256_text(source): return 5
+    if result.source_path != "src/owned.spl" or result.module_name != "owned": return 6
+    if result.target_triple != "x86_64-unknown-linux-gnu": return 7
+    if result.preprocessed_sha256.len() != 64 or result.target_decision_digest.len() == 0: return 8
+    if result.parsed_functions != 1 or result.lowered_functions != 1 or result.hm_checked_functions != 1: return 9
+    if result.supported_profile_id != FROZEN_SEMANTIC_LITERAL_PROFILE_V1: return 10
+    0
+
+fn probe_valid(result: FrozenSemanticPrerequisiteDiagnosticV1, boolean: bool) -> i64:
+    if result.status != "diagnosed" or result.errors.len() != 0: return 11
+    if result.observations.len() != 1: return 12
+    val observed = result.observations[0]
+    if boolean:
+        if observed.function_name != "yes" or observed.declared_type != "bool": return 13
+        if observed.literal_kind != "bool" or not observed.boolean_literal: return 14
+    else:
+        if observed.function_name != "answer" or observed.declared_type != "i64": return 13
+        if observed.literal_kind != "i64" or observed.integer_literal != 42: return 14
+    0
+
+fn probe_owner(result: FrozenSemanticOwnerPrerequisiteObservationV1, expressions: i64, explicit_return: bool) -> i64:
+    if result.semantic_authorized or result.full_artifact_authorized: return 15
+    if result.declaration_count != 1 or result.declaration_handles_issued != 1 or result.declaration_consumptions != 1: return 16
+    if result.foreign_handle_refusals != 1 or result.mutated_owner_refusals != 1 or result.retired_handle_refusals != 1: return 17
+    if result.active_handles_after_retirement != 0 or result.body_handles_issued != 0: return 18
+    if result.hm_annotated_functions != 1 or result.hm_annotated_expressions != expressions: return 19
+    if result.body_verifier_calls != 1: return 20
+    if explicit_return:
+        if result.body_verifier_status != "unavailable": return 21
+        if result.body_verifier_detail != "unsupported-semantics:function body": return 22
+    else:
+        if result.body_verifier_status != "facts-only": return 21
+        if result.body_verifier_detail != "live-attempt-pin-body-lease-required": return 22
+    0
+
+fn probe_rejected(result: FrozenSemanticPrerequisiteDiagnosticV1) -> i64:
+    if result.status != "rejected" or result.reason != "hm-typecheck-rejected": return 11
+    if result.errors.len() == 0: return 12
+    0
+
+fn main() -> i64:
+    val integer_source = "fn answer() -> i64:\n    42\n"
+    val boolean_source = "fn yes() -> bool:\n    true\n"
+    val return_source = "fn answer() -> i64:\n    return 42\n"
+    val wrong_source = "fn wrong() -> i64:\n    true\n"
+    var controls: i64 = 0
+
+    val old_integer = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(
+        CompilerDriver.create(driver_core_compile_options_default()), probe_request(integer_source))
+    var failure = probe_common(old_integer, integer_source)
+    if failure != 0: return failure
+    failure = probe_valid(old_integer, false)
+    if failure != 0: return failure
+    controls = controls + 1
+
+    val integer = compiler_driver_observe_frozen_owner_prerequisites_v1(
+        CompilerDriver.create(driver_core_compile_options_default()), probe_request(integer_source))
+    failure = probe_common(integer.diagnostic, integer_source)
+    if failure != 0: return 30 + failure
+    failure = probe_valid(integer.diagnostic, false)
+    if failure != 0: return 30 + failure
+    failure = probe_owner(integer.owner_observation, 1, false)
+    if failure != 0: return 30 + failure
+    controls = controls + 1
+
+    val boolean = compiler_driver_observe_frozen_owner_prerequisites_v1(
+        CompilerDriver.create(driver_core_compile_options_default()), probe_request(boolean_source))
+    failure = probe_common(boolean.diagnostic, boolean_source)
+    if failure != 0: return 60 + failure
+    failure = probe_valid(boolean.diagnostic, true)
+    if failure != 0: return 60 + failure
+    failure = probe_owner(boolean.owner_observation, 1, false)
+    if failure != 0: return 60 + failure
+    controls = controls + 1
+
+    val returned = compiler_driver_observe_frozen_owner_prerequisites_v1(
+        CompilerDriver.create(driver_core_compile_options_default()), probe_request(return_source))
+    failure = probe_common(returned.diagnostic, return_source)
+    if failure != 0: return 90 + failure
+    failure = probe_valid(returned.diagnostic, false)
+    if failure != 0: return 90 + failure
+    failure = probe_owner(returned.owner_observation, 2, true)
+    if failure != 0: return 90 + failure
+    controls = controls + 1
+
+    val old_wrong = compiler_driver_diagnose_frozen_semantic_prerequisites_v1(
+        CompilerDriver.create(driver_core_compile_options_default()), probe_request(wrong_source))
+    failure = probe_common(old_wrong, wrong_source)
+    if failure != 0: return 120 + failure
+    failure = probe_rejected(old_wrong)
+    if failure != 0: return 120 + failure
+    controls = controls + 1
+
+    val wrong = compiler_driver_observe_frozen_owner_prerequisites_v1(
+        CompilerDriver.create(driver_core_compile_options_default()), probe_request(wrong_source))
+    failure = probe_common(wrong.diagnostic, wrong_source)
+    if failure != 0: return 150 + failure
+    failure = probe_rejected(wrong.diagnostic)
+    if failure != 0: return 150 + failure
+    val refused = wrong.owner_observation
+    if refused.semantic_authorized or refused.full_artifact_authorized: return 165
+    if refused.declaration_count != 0 or refused.declaration_handles_issued != 0 or refused.declaration_consumptions != 0: return 166
+    if refused.body_handles_issued != 0 or refused.body_verifier_calls != 0: return 167
+    if refused.hm_annotated_functions != 0 or refused.hm_annotated_expressions != 0: return 168
+    if refused.active_handles_after_retirement != 0: return 169
+    controls = controls + 1
+
+    if controls != 6: return 180
+    print "status: PASS\ncontrols: {controls}\nqualification: diagnostic_only"
+    0
