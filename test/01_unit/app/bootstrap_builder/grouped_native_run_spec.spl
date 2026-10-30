@@ -11,6 +11,8 @@ use app.bootstrap_builder.grouped_native_run.{native_group_normalize_crashed_scc
     native_group_blocked_marker_matches_v1, native_group_has_compile_failure_v1,
     native_group_failure_class_v1, native_group_recover_progress_v1,
     native_group_attempt_root_v1, native_group_cache_root_v1, native_group_environment_v1}
+use std.common.build_manager.grouped_native_worker_request.{NativeGroupWorkerRequestV1,
+    native_group_worker_expected_cache_v1, native_group_worker_cache_dir_v1}
 
 describe "grouped native terminal failure classification":
     it "retains a deterministic compiler rejection without retrying the same group":
@@ -210,6 +212,15 @@ describe "grouped native stable compiler cache root":
         var output = stable_run_v1()
         output.output_root = "C:/output-2"
         expect(native_group_cache_root_v1(output, manifest) != base).to_equal(true)
+        var state = stable_run_v1()
+        state.state_root = "C:/state-2"
+        expect(native_group_cache_root_v1(state, manifest) != base).to_equal(true)
+        var phase = stable_run_v1()
+        phase.phase = "phase5"
+        expect(native_group_cache_root_v1(phase, manifest) != base).to_equal(true)
+        var backend = stable_run_v1()
+        backend.backend = "cranelift"
+        expect(native_group_cache_root_v1(backend, manifest) != base).to_equal(true)
         expect(native_group_cache_root_v1(run, stable_manifest_v1("group-2", 1, 1)) != base).to_equal(true)
 
     it "keeps the cache root short and under state_root":
@@ -224,6 +235,22 @@ describe "grouped native stable compiler cache root":
         val hex = leaf[6:]
         for i in 0..16:
             expect("0123456789abcdef".contains(hex[i:i + 1])).to_equal(true)
+
+    it "hands the worker the same compiler cache paths the broker environment sets":
+        val run = stable_run_v1()
+        val manifest = stable_manifest_v1("group-1", 1, 1)
+        val cache_root = native_group_cache_root_v1(run, manifest)
+        val attempt_root = native_group_attempt_root_v1(run, manifest)
+        val resource = NativeGroupResourceV1("group-1", 1, 1073741824, 1073741824, 1073741824, true, 268435456, 536870912)
+        val environment = native_group_environment_v1(run, attempt_root, cache_root, resource)
+        val request = NativeGroupWorkerRequestV1(run.producer_program, run.producer_digest,
+            attempt_root + "/group.manifest.sdn", "e".repeat(64), attempt_root + "/result.sdn",
+            run.source_root, run.source_root + "/src/a.spl", run.index_read_root, run.run_id,
+            run.output_root, run.backend, run.max_threads, run.target, run.lifetime_ms, cache_root)
+        val broker_cache = env_assignment_v1(environment, "SIMPLE_CACHE")
+        expect(native_group_worker_expected_cache_v1(request)).to_equal(broker_cache)
+        expect(native_group_worker_cache_dir_v1(request)).to_equal(broker_cache + "/native")
+        expect(broker_cache).to_equal(cache_root + "/cache")
 
     it "points compiler caches at the stable root and temp at the attempt root":
         val run = stable_run_v1()
