@@ -15,6 +15,7 @@ fn field_then_postfix_question_is_not_glued() {
     let dbg = debug_of("val y = x.value?\n");
     assert!(!dbg.contains("\"value?\""), "field name glued with `?`: {dbg}");
     assert!(dbg.contains("\"value\""), "field `value` missing: {dbg}");
+    assert!(dbg.contains("Try("), "postfix `?` not parsed as Try: {dbg}");
 }
 
 #[test]
@@ -22,6 +23,7 @@ fn field_question_in_condition_is_not_glued() {
     let dbg = debug_of("if self.slot_a?:\n    pass\n");
     assert!(!dbg.contains("\"slot_a?\""), "field name glued with `?`: {dbg}");
     assert!(dbg.contains("\"slot_a\""), "field `slot_a` missing: {dbg}");
+    assert!(dbg.contains("Try("), "postfix `?` not parsed as Try: {dbg}");
 }
 
 #[test]
