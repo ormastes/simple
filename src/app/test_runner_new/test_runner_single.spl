@@ -41,6 +41,9 @@ use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
 # than reimplemented on purpose -- a second copy of this classification would
 # drift out of sync exactly as the duplicated composite-grammar parsers did.
 use std.test_runner.compiler_select.{select_test_child_binary}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.sdoctest.config.{load_sdoctest_config}
+use std.test_runner.sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
 use std.test_runner.test_executor_parsing.{make_result_from_output, spec_source_has_raw_assert}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
@@ -1191,8 +1194,32 @@ fn _cov_branch_report_for_file(path: text, dec_total: dict<text, i64>,
     val pct = (hit * 100) / total
     "coverage-branch: {path} {pct}% ({hit}/{total} decisions)"
 
+# md test kind: a Markdown target (or --sdoctest) runs its sdoctest fences
+# here instead of being rejected as "expected .spl test file". Fences run on
+# the resolved --compiler; a compiler that cannot be pinned refuses (exit 2).
+fn _single_is_md_run(args: [text]) -> bool:
+    for arg in args:
+        if arg == "--sdoctest" or (not arg.starts_with("-") and arg.ends_with(".md")):
+            return true
+    false
+
+fn _single_run_md(args: [text]) -> i64:
+    val options = parse_test_args(args)
+    match select_test_child_binary(options.compiler):
+        case Err(message):
+            print "error: test-runner: " + message
+            return 2
+        case Ok(selected):
+            if selected != "":
+                env_set("SIMPLE_BINARY", selected)
+    val result = run_sdoctest_mode(options, load_sdoctest_config("config/sdoctest.sdn"))
+    print_sdoctest_summary(result)
+    if result.is_ok(): 0 else: 1
+
 fn main() -> i64:
     val args = clean_args()
+    if _single_is_md_run(args):
+        return _single_run_md(args)
     var run = parse_child_run(args)
     if not run.valid:
         print "Simple Test Runner child"
