@@ -43,7 +43,9 @@ use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_sel
     worker_surface_restrict_claims_v1, worker_surface_text_v1, worker_surface_counters_v1,
     worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
     worker_hir_restrict_loads_v1, source_path_by_canonical_map_v1,
-    worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_v1}
+    worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_v1,
+    worker_admitted_edges_v1, worker_admitted_edges_selected_v1, worker_admitted_closure_v1, worker_admitted_order_v1,
+    worker_admitted_error_v1, WorkerAdmittedGraphV1}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1, unit_tldr_imports_enabled_v1}
 use compiler.driver.driver_unit_tldr_imports_v1.{UnitTldrPlanV1, unit_tldr_plan_v1, unit_tldr_empty_plan_v1,
     unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1, unit_tldr_log_line_v1}
@@ -76,6 +78,7 @@ use compiler.driver.driver_source_loading.{
     _driver_unique_physical_sources
 }
 use compiler.driver.driver_log_helpers.{
+    driver_phase_trace_enabled,
     log_debug,
     log_phase,
     log_module_surface_released,
@@ -110,6 +113,8 @@ use compiler.driver.driver_source_parse_support.{
     driver_parse_shard_claimed, _driver_parse_shard_owns, _driver_publish_frontend_cache_scope,
     _STREAM_PARSE_ERROR_PREFIX, driver_frontend_offload_decision
 }
+
+var _worker_readiness_edges_reported_v1: bool = false
 
 impl CompilerDriver:
     # The streaming surface owner is intentionally committed in place.  Do not
@@ -175,10 +180,17 @@ impl CompilerDriver:
         if tldr_imports_enabled_v1() and worker_unit:
             self.ctx.add_error("TLDR-IMPORTS-E-BODY-REQUIRED: file worker needs admitted imported bodies")
             return false
+        var admitted_graph = WorkerAdmittedGraphV1(edges: [], errors: [])
         if worker_unit:
+            val edge_result = worker_admitted_edges_v1(source_paths, source_contents, source_module_names,
+                self.ctx.source_resolution_roots_owner, self.ctx.options.library_mode)
+            if edge_result.is_err():
+                self.ctx.add_error(edge_result.unwrap_err())
+                return false
+            admitted_graph = edge_result.unwrap()
             val pick_result = worker_unit_pick_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
                 driver_parse_env_get_v1("SIMPLE_HIR_SHARD_OWNER") ?? "", source_paths,
-                worker_unit_pick_order_v1(source_paths, canonical_paths, source_contents),
+                worker_admitted_order_v1(admitted_graph.edges),
                 native_file_worker_batch_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? ""))
             if pick_result.is_err():
                 self.ctx.add_error("file-worker unit pick failed: {pick_result.unwrap_err()}")
@@ -263,7 +275,18 @@ impl CompilerDriver:
                         case Err(msg): panic(msg)
                         case Ok(_): pass
                 log_phase("phase2:surface:closure:start")
-                worker_needed = worker_surface_closure_v1(source_paths, canonical_paths, source_contents, seeds)
+                if not worker_unit:
+                    val edge_result = worker_admitted_edges_selected_v1(source_paths, source_contents, source_module_names,
+                        self.ctx.source_resolution_roots_owner, self.ctx.options.library_mode, seeds)
+                    if edge_result.is_err():
+                        self.ctx.add_error(edge_result.unwrap_err())
+                        return false
+                    admitted_graph = edge_result.unwrap()
+                worker_needed = worker_admitted_closure_v1(admitted_graph.edges, seeds)
+                val edge_error = worker_admitted_error_v1(admitted_graph, worker_needed)
+                if edge_error != "":
+                    self.ctx.add_error(edge_error)
+                    return false
             for _p in source_paths:
                 worker_built.push(false)
         while source_index < frozen_source_count:
@@ -387,7 +410,7 @@ impl CompilerDriver:
         val retained_surfaces = ModuleSurfacesByName(
             surfaces: [], index_by_name: {},
             ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
-        val finish_error = builder.finish_into(retained_surfaces)
+        val finish_error: text = builder.finish_into(retained_surfaces)
         if finish_error != "":
             val paused = driver_parse_transient_scope_pause_v1()
             val error_owned = if paused: rt_transient_heap_promote(finish_error) else: false
@@ -447,6 +470,27 @@ impl CompilerDriver:
                 for t in ws.export_route_target_indices: edges.push(t)
                 surface_edges.push(edges)
             val surface_ready = worker_surface_ready_v1(surface_built, surface_edges)
+            # Report direct missing providers, not every transitive blocked
+            # consumer. Keep diagnostics bounded and outside the normal path.
+            if driver_phase_trace_enabled() and not _worker_readiness_edges_reported_v1:
+                _worker_readiness_edges_reported_v1 = true
+                var missing_rows = 0
+                var source_index = 0
+                while source_index < retained_surfaces.surfaces.len() and missing_rows < 8:
+                    if surface_built[source_index]:
+                        val source_surface = retained_surfaces.surfaces[source_index]
+                        for target_index in source_surface.import_target_indices:
+                            if missing_rows < 8 and target_index >= 0 and target_index < surface_built.len() and not surface_built[target_index]:
+                                val target_path = retained_surfaces.surfaces[target_index].canonical_path
+                                log_phase("phase2:surface:missing-direct-edge worker={worker_spec} kind=import source={source_surface.canonical_path} target={target_path}")
+                                missing_rows = missing_rows + 1
+                        for target_index in source_surface.export_route_target_indices:
+                            if missing_rows < 8 and target_index >= 0 and target_index < surface_built.len() and not surface_built[target_index]:
+                                val target_path = retained_surfaces.surfaces[target_index].canonical_path
+                                log_phase("phase2:surface:missing-direct-edge worker={worker_spec} kind=export source={source_surface.canonical_path} target={target_path}")
+                                missing_rows = missing_rows + 1
+                    source_index = source_index + 1
+                log_phase("phase2:surface:missing-direct-edge-summary worker={worker_spec} rows={missing_rows} limit=8")
             var ready_canonical: Dict<text, bool> = {}
             var si = 0
             while si < surface_ready.len():

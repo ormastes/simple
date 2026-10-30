@@ -1,7 +1,7 @@
 # Interpreter: Barrier.wait() across thread_spawn_with_args never releases
 
 - Date: 2026-10-30
-- Status: OPEN
+- Status: FIXED (see Resolution)
 - Area: Rust seed interpreter, isolated thread spawn (`interpreter_extern/concurrency.rs`)
 
 ## Symptom
@@ -40,3 +40,21 @@ the interpreter's isolated thread and the spawner.
 Interpreter isolated threads must share the atomic handles a captured
 `Barrier` holds, so `lockless_map_i64_spec.spl` lines 187, 225, 257 and 292
 complete. The spec is left as-is (not pending).
+
+## Resolution (2026-10-30)
+
+- Status: FIXED
+- Root cause: not a copied barrier. `rt_thread_spawn_isolated_with_args_context`
+  evaluated the closure inline on the spawning thread and stored the result
+  before returning, so the spawner never reached its own `gate.wait()`. The
+  `AtomicI64` handles are process-global runtime handles and were already
+  shared. lldb (`bt all`) of the hung repro showed a single interpreter thread
+  (`simple-main`) in `rt_thread_yield` under
+  `rt_thread_spawn_isolated_with_args_context` (frame #32).
+- Fix: the closure now runs on a real OS thread (64 MiB stack) after the
+  spawner's thread-local interpreter state is installed on it
+  (`InterpreterThreadState`, interpreter_state.rs); `rt_thread_join` /
+  `rt_thread_is_done` / `rt_thread_free` consult the worker's `JoinHandle`.
+- Specs: `test/01_unit/lib/nogc_async_mut/isolated_thread_barrier_spec.spl`
+  (repro + 8-worker and two-generation generalizations): old seed timeout,
+  new 3/3. `lockless_map_i64_spec.spl`: hang -> 12/12.
