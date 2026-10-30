@@ -6,6 +6,7 @@ struct SpipeSourceParts:
     imports: text
     declarations: text
     body: text
+    has_executable_body: bool = false
 
 fn spipe_rewrite_infix_expect_line(line: text) -> text:
     val trimmed = line.trim()
@@ -163,6 +164,7 @@ fn spipe_partition_source(content: text, rendered_lines: [text], code_lines: [te
     # nothing ever switched it off: every later import and top-level
     # declaration was pushed verbatim into the main body (1,657 spec files
     # carry a one-line docstring; measured 2026-09-06).
+    var has_executable_body = false
     var in_top_fn = false
     var top_fn_indent = 0
     var in_import_block = false
@@ -288,13 +290,17 @@ fn spipe_partition_source(content: text, rendered_lines: [text], code_lines: [te
                     continue
                 # Fall through to body processing
 
+        # Retain lexical body evidence separately from rendered comments/text.
+        val body_code = code_lines[fact_index].trim()
+        if not string_continuation[fact_index] and body_code != "" and body_code != "\"\"" and body_code != "pass" and body_code != "...":
+            has_executable_body = true
         # Everything else goes into fn main() body
         if trimmed.len() > 0:
             body_parts.push("    " + line)
         else:
             body_parts.push("")
 
-    Ok(SpipeSourceParts(imports: import_parts.join("\n"), declarations: top_level_parts.join("\n"), body: body_parts.join("\n")))
+    Ok(SpipeSourceParts(imports: import_parts.join("\n"), declarations: top_level_parts.join("\n"), body: body_parts.join("\n"), has_executable_body: has_executable_body))
 
 fn native_framework_result_prefix(content: text) -> text:
     for index in 0..32:
@@ -347,20 +353,9 @@ fn native_plain_wrapper_source(content: text, code_lines: [text], string_continu
     # binding replay, global visibility, and executable source order.
     if content.trim() == "": return Err("native-plain: source is empty")
     if code_lines.len() != string_continuation.len(): return Err("native-plain: source line mapping changed")
-    var has_body = false
-    for index in 0..code_lines.len():
-        if string_continuation[index]: continue
-        val code = code_lines[index]
-        if code.starts_with(" ") or code.starts_with("\t"): continue
-        if native_source_defines_main_v1(code):
-            return Err("native-plain: source defines main; completion entry wrapper unavailable")
-        val trimmed = code.trim()
-        if trimmed != "" and not trimmed.starts_with("#") and not trimmed.starts_with("use ") and
-                not trimmed.starts_with("export ") and not trimmed.starts_with("@") and
-                (not spipe_is_partition_declaration(trimmed, true) or trimmed.starts_with("val ") or
-                 trimmed.starts_with("var ") or trimmed.starts_with("let ") or trimmed.starts_with("pub val ")):
-            has_body = true
-    if not has_body: return Err("native-plain: no executable body")
+    val partition = spipe_partition_source(content, content.split("\n"), code_lines, string_continuation, true, string_byte_ranges)
+    if partition.is_err(): return Err("native-plain: completion entry wrapper unavailable: " + partition.unwrap_err())
+    if not partition.unwrap().has_executable_body: return Err("native-plain: no executable body")
     val prefix = native_framework_result_prefix(content)
     if prefix == "": return Err("native-plain: result alias namespace exhausted")
     val complete = prefix + "complete"
