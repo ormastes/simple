@@ -17111,6 +17111,26 @@ int64_t rt_process_spawn_async_value(int64_t cmd, SplArray* args) {
     return pid;
 }
 
+/* Value-ABI facade over rt_process_spawn_session (runtime_process_tree.c):
+ * same unpacking as rt_process_spawn_async_value, but the child becomes a
+ * session leader so rt_process_kill_tree(pid) can reach every descendant.
+ * Returns pid > 0, -errno, or RT_PTREE_UNSUPPORTED; never a fake pid. */
+int64_t rt_process_spawn_session_value(int64_t cmd, SplArray* args) {
+    const char* command = rt_interp_cstr(cmd);
+    if (!command) return -EINVAL;
+    int64_t argc = rt_array_len(args);
+    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -E2BIG;
+    const char** argv = (const char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
+    if (!argv) return -ENOMEM;
+    for (int64_t i = 0; i < argc; i++) {
+        const char* value = rt_interp_cstr(rt_array_get_text(args, i));
+        argv[i] = value ? value : "";
+    }
+    int64_t pid = rt_process_spawn_session(command, argv, argc);
+    free(argv);
+    return pid;
+}
+
 int64_t rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return (int64_t)(uintptr_t)rt_process_run_array(cmd, cmd_len, args);
 }

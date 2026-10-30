@@ -29,6 +29,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_process_tree.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_process_tree.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_sosix_darwin_snapshot_v1_impl.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_sosix_darwin_process_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_sosix_darwin_image_private.h");
@@ -430,6 +432,11 @@ fn compile_c_runtime_sources() {
         // exact-equivalent since every value it deep-frees is a string.
         // Re-added after the tree-wipe restore ae55a746719 dropped it again.
         "runtime_process_owned.c",
+        // Session-owned process trees (rt_process_spawn_session / kill_tree,
+        // rt_child_set_pdeathsig, rt_proc_start_time). libc-only TU; the
+        // interpreter reaches it through interpreter_extern/bootstrap_runtime.rs
+        // and runtime_process_owned.c calls rt_proc_start_time from it.
+        "runtime_process_tree.c",
         // Env-gated SIGPROF PC sampler (diagnostic tooling; see the TU header).
         // This list is NOT interpreter-only: the cc archive below is bundled
         // WHOLESALE into this crate's staticlib/cdylib outputs, and the
@@ -733,6 +740,7 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
         "runtime_bootstrap_linux_provider.c",
+        "runtime_process_tree.c",
     ];
     for source in LINKED_C_SOURCES {
         if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {
