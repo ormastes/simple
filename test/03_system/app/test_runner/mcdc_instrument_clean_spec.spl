@@ -1,4 +1,7 @@
 # @req REQ-MCDC-ENFORCEMENT-005
+# @tag:in-development
+# All three examples are red until the MC/DC wrapper compiles these shapes:
+# doc/08_tracking/bug/mcdc_runner_never_finalizes_evidence_2026-10-30.md
 """
 # Specs that used to break the instrumented wrapper now instrument cleanly
 
@@ -19,11 +22,15 @@ val NAMESPACE_SRC = "test/01_unit/fs_driver/instance_test.spl"
 val RECORDER = "use std.spec\nstruct Rec:\n    recorder: i64\n    count: i64\ndescribe \"recorder field\":\n    it \"reads a field named recorder\":\n        val r = Rec(recorder: 4, count: 2)\n        if r.recorder > 1 and r.count < 5:\n            expect(r.recorder).to_equal(4)\n"
 val FALSE_EQ = "use std.spec\ndescribe \"to_equal false\":\n    it \"asserts a false boolean\":\n        val a = 3\n        expect(a > 5).to_equal(false)\n        expect(a < 2 or a > 9).to_equal(false)\n"
 
+# MC/DC variables the outer runner may have set; each child run starts clean
+# so a CI waiver or mode cannot flip the default-profile examples.
+val UNSET_MCDC_ENV = ["-u", "SIMPLE_MCDC_MODE", "-u", "SIMPLE_MCDC_MODE_ERROR", "-u", "SIMPLE_MCDC_OFF_WAIVER_REASON", "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEWER", "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", "-u", "SIMPLE_MCDC_OFF_WAIVER_VERSION"]
+val NO_BINARY = "error: SIMPLE_BINARY is unset; set it to the compiler under test (no fallback to the deployed bin/simple)"
+
+# The compiler under test. Deliberately no fallback to bin/simple, which is
+# the deployed binary and may be stale.
 fn real_binary() -> text:
-    val b = env_get("SIMPLE_BINARY")
-    if b != "":
-        return b
-    "bin/simple"
+    env_get("SIMPLE_BINARY")
 
 fn make_case(case: text, name: text, body: text) -> text:
     val dir = "build/mcdc_kind/" + case
@@ -33,7 +40,9 @@ fn make_case(case: text, name: text, body: text) -> text:
     dir
 
 fn run_dir(dir: text) -> (text, i64):
-    val argv = [real_binary(), "test", dir, "--no-db", "--no-cache", "--assert-ran"]
+    if real_binary() == "":
+        return (NO_BINARY, 127)
+    val argv = UNSET_MCDC_ENV + [real_binary(), "test", dir, "--no-db", "--no-cache", "--assert-ran"]
     val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
     (out + err, code)
 
