@@ -8,7 +8,7 @@ use std.nogc_sync_mut.io.file_ops.{file_read}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
     SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
-    SemanticQueryReadManifestV1,
+    SemanticQueryReadManifestV1, semantic_query_key_canonical_v1,
 }
 use compiler.common.cache_contract.reverse_reference_shard_v1.{
     ReverseReferenceShardV1,
@@ -17,6 +17,7 @@ use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
     OldNewMembershipV1, old_new_membership_union_v1,
     old_new_membership_zero_match_witness_valid_v1,
     seed_reverse_shards_v1, stage_reverse_shards_v1,
+    rebuild_reverse_shards_from_forward_v1,
     persist_reverse_reference_shard_v1, read_reverse_reference_shard_v1,
 }
 use compiler.driver.cache.cas.verified_cas_store.{verified_cas_object_path_v1}
@@ -42,7 +43,106 @@ fn manifest(consumer: SemanticQueryKeyV1,
     SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
         ordered_reads: reads)
 
+fn oracle_edge_identity(partition: text, producer: SemanticQueryKeyV1,
+        facet: text, consumer: SemanticQueryKeyV1) -> text:
+    partition + "\u0000" + semantic_query_key_canonical_v1(producer) +
+        "\u0000" + facet + "\u0000" + semantic_query_key_canonical_v1(consumer)
+
 describe "L7 P5 reverse-reference coordinator persistence":
+    it "rebuilds an exact inverse for 3000 logical consumers and deduplicates replay":
+        step("Invert the declared forward manifests with an independent consumer-count oracle")
+        # This models 3000 distinct logical users in one serialized input; it
+        # does not claim concurrent execution or a concurrency stress test.
+        val producer = query("provider")
+        var forwards: [SemanticQueryReadManifestV1] = []
+        for index in 0..3000:
+            val consumer = query("logical-consumer-{index}")
+            forwards.push(manifest(consumer,
+                [read(producer, consumer, "membership", digest("provider-state"), 0)]))
+        val rebuilt = rebuild_reverse_shards_from_forward_v1(forwards)
+        expect(rebuilt.accepted).to_be(true)
+        expect(rebuilt.shards.len()).to_equal(1)
+        expect(rebuilt.shards[0].sorted_edges.len()).to_equal(3000)
+        var oracle: Dict<text, bool> = {}
+        for forward in forwards:
+            oracle[oracle_edge_identity("partition-a", producer, "membership",
+                forward.consumer)] = true
+        expect(oracle.keys().len()).to_equal(3000)
+        var actual: Dict<text, bool> = {}
+        for edge in rebuilt.shards[0].sorted_edges:
+            val identity = oracle_edge_identity(edge.partition_id, edge.producer,
+                edge.facet, edge.consumer)
+            expect(oracle.contains_key(identity)).to_be(true)
+            actual[identity] = true
+        expect(actual.keys().len()).to_equal(3000)
+        for identity in oracle.keys():
+            expect(actual.contains_key(identity)).to_be(true)
+        val replay = rebuild_reverse_shards_from_forward_v1([forwards[0], forwards[0]])
+        expect(replay.accepted).to_be(true)
+        expect(replay.shards.len()).to_equal(1)
+        expect(replay.shards[0].sorted_edges.len()).to_equal(1)
+
+    it "rejects conflicting consumers and incomplete manifests, and removes the last edge":
+        step("Require byte-identical replay and complete per-read coverage")
+        val producer = query("provider")
+        val consumer = query("consumer")
+        val first = manifest(consumer,
+            [read(producer, consumer, "membership", digest("old"), 0)])
+        val conflicting = manifest(consumer,
+            [read(producer, consumer, "membership", digest("different"), 0)])
+        val conflict = rebuild_reverse_shards_from_forward_v1([first, conflicting])
+        expect(conflict.accepted).to_be(false)
+        expect(conflict.shards.len()).to_equal(0)
+        var incomplete_read = read(producer, consumer, "membership", digest("old"), 0)
+        incomplete_read.completeness = SemanticCoverageV1.Conservative
+        val incomplete = rebuild_reverse_shards_from_forward_v1(
+            [manifest(consumer, [incomplete_read])])
+        expect(incomplete.accepted).to_be(false)
+        expect(incomplete.shards.len()).to_equal(0)
+        val noncanonical = SemanticQueryReadManifestV1(schema: 2,
+            consumer: consumer, ordered_reads: [])
+        expect(rebuild_reverse_shards_from_forward_v1([noncanonical]).accepted).to_be(false)
+        val prior = rebuild_reverse_shards_from_forward_v1([first])
+        expect(prior.accepted).to_be(true)
+        expect(prior.shards.len()).to_equal(1)
+        val prior_fingerprint = prior.shards[0].sorted_edges[0].consumed_fingerprint
+        val empty = rebuild_reverse_shards_from_forward_v1([manifest(consumer, [])])
+        expect(empty.accepted).to_be(true)
+        expect(empty.shards.len()).to_equal(0)
+        expect(prior.shards[0].sorted_edges.len()).to_equal(1)
+        expect(prior.shards[0].sorted_edges[0].consumed_fingerprint).to_equal(prior_fingerprint)
+
+    it "deduplicates read identities and groups uneven partition names canonically":
+        step("Sort full edge identities before flushing partition groups")
+        val producer = query("provider")
+        val consumer = query("consumer")
+        val repeated = manifest(consumer, [
+            read(producer, consumer, "membership", digest("same"), 0),
+            read(producer, consumer, "membership", digest("same"), 1)])
+        val same_edge = rebuild_reverse_shards_from_forward_v1([repeated])
+        expect(same_edge.accepted).to_be(true)
+        expect(same_edge.shards.len()).to_equal(1)
+        expect(same_edge.shards[0].sorted_edges.len()).to_equal(1)
+        val conflict_reads = [
+            read(producer, consumer, "membership", digest("same"), 0),
+            read(producer, consumer, "membership", digest("different"), 1)]
+        expect(rebuild_reverse_shards_from_forward_v1([manifest(consumer, conflict_reads)])
+            .accepted).to_be(false)
+        var partition_manifests: [SemanticQueryReadManifestV1] = []
+        val partition_names = ["z", "aa", "partition-long"]
+        for index in 0..partition_names.len():
+            val partition = partition_names[index]
+            val current_consumer = query("partition-user-{index}")
+            val partition_read = SemanticQueryReadV1(producer: producer,
+                consumer: current_consumer, facet: "membership", ordinal: 0,
+                consumed_fingerprint: digest("partition-state-{index}"),
+                witness_digest: digest("partition-witness-{index}"), partition_id: partition,
+                completeness: SemanticCoverageV1.Complete)
+            partition_manifests.push(manifest(current_consumer, [partition_read]))
+        val grouped = rebuild_reverse_shards_from_forward_v1(partition_manifests)
+        expect(grouped.accepted).to_be(true)
+        expect(grouped.shards.map(_.partition_id)).to_equal(["aa", "partition-long", "z"])
+
     it "unions old and new membership and retains an explicit zero-match witness":
         step("Union old and new candidates before scheduling removed and added matches")
         val owner = query("owner")
