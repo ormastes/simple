@@ -29,11 +29,20 @@
 
 use compiler.driver.cache.incremental_rebuild_plan_v1.{IncrementalModuleV1, PointcutDirChangeV1,
     IncrementalObjectV1, incremental_rebuild_plan_v1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.macro_forward_candidate_contract_v1.{MacroForwardCandidateV1,
+    MACRO_FORWARD_CANDIDATE_MAX_HEX_BYTES_V1,
+    macro_forward_candidate_unknown_v1, macro_forward_candidate_digest_v1}
+
+pub const FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2: i64 = 128 * 1024 * 1024
+pub const FILE_WORKER_INC_MANIFEST_MAX_MACRO_HEX_BYTES_V2: i64 = 64 * 1024 * 1024
+pub const FILE_WORKER_INC_MANIFEST_MAX_ROW_BYTES_V2: i64 = 20 * 1024 * 1024
 
 pub const FILE_WORKER_INC_DIR_ENV_V1: text = "SIMPLE_FILE_WORKER_INC_DIR"
 pub const FILE_WORKER_LINK_PLACED_ENV_V1: text = "SIMPLE_FILE_WORKER_LINK_PLACED"
 pub const FILE_WORKER_INC_PRODUCER_ENV_V1: text = "SIMPLE_FILE_WORKER_INC_PRODUCER"
 pub const FILE_WORKER_INC_MANIFEST_VERSION_V1: text = "file-worker-incremental-v1"
+pub const FILE_WORKER_INC_MANIFEST_VERSION_V2: text = "file-worker-incremental-v2"
 
 pub struct FileWorkerIncRowV1:
     path: text
@@ -46,6 +55,7 @@ pub struct FileWorkerIncRowV1:
     functions: i64
     statics: i64
     capsule: text
+    macro_candidate: MacroForwardCandidateV1
 
 pub struct FileWorkerIncSelectionV1:
     reuse: [FileWorkerIncRowV1]
@@ -59,7 +69,29 @@ fn _row_ok_v1(r: FileWorkerIncRowV1) -> bool:
     for i in r.imports:
         if i.contains(",") or i.contains("\t") or i.contains("\n"):
             return false
-    not r.cached_object.contains("\t") and not r.capsule.contains("\t")
+    not r.object_digest.contains("\t") and not r.object_digest.contains("\n") and
+        not r.cached_object.contains("\t") and not r.cached_object.contains("\n") and
+        not r.capsule.contains("\t") and not r.capsule.contains("\n") and
+        _macro_candidate_ok_v1(r.path, r.source_digest, r.macro_candidate)
+
+fn _hex_field_ok_v1(value: text) -> bool:
+    if value.len() % 2 != 0: return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn _macro_candidate_ok_v1(path: text, source_digest: text,
+        candidate: MacroForwardCandidateV1) -> bool:
+    if not candidate.known:
+        return not candidate.complete and candidate.source_digest == "" and candidate.definitions_hex == "" and
+            candidate.uses_hex == "" and candidate.digest == ""
+    candidate.source_digest != "" and candidate.source_digest == source_digest and
+        candidate.definitions_hex != "" and candidate.uses_hex != "" and
+        candidate.definitions_hex.len() + candidate.uses_hex.len() <= MACRO_FORWARD_CANDIDATE_MAX_HEX_BYTES_V1 and
+        _hex_field_ok_v1(candidate.definitions_hex) and _hex_field_ok_v1(candidate.uses_hex) and
+        candidate.digest == macro_forward_candidate_digest_v1(path, candidate.source_digest,
+            candidate.complete, candidate.definitions_hex, candidate.uses_hex)
 
 # Header line = version + "\t" + producer identity (compiler/runtime/lane cache
 # scope + native-build options). A manifest from another producer is foreign.
@@ -73,21 +105,57 @@ pub fn file_worker_inc_manifest_encode_v1(rows: [FileWorkerIncRowV1], output_dig
         out = out + "{r.path}\t{r.source_digest}\t{r.iface_digest}\t{imports}\t{r.object_digest}\t{r.cached_object}\t{r.functions}\t{r.statics}\t{r.capsule}\n"
     out
 
+# V2 transports parser-produced macro tables as hex-framed candidates. Their
+# source binding is not a witness for the MIR object generation; prepare uses
+# them only to preserve explicit Unknown and to widen invalidation safely.
+pub fn file_worker_inc_manifest_encode_v2(rows: [FileWorkerIncRowV1], output_digest: text,
+        producer: text, selected_scope_digest: text, inventory_digest: text) -> text:
+    var out = FILE_WORKER_INC_MANIFEST_VERSION_V2 + "\t" + producer + "\n" +
+        output_digest + "\n" + selected_scope_digest + "\n" + inventory_digest + "\n{rows.len()}\n"
+    var seen: Dict<text, bool> = {}
+    var macro_bytes = 0
+    for r in rows:
+        if not _row_ok_v1(r):
+            return ""
+        if seen.contains_key(r.path): return ""
+        seen[r.path] = true
+        val imports = if r.imports_known: "+" + r.imports.join(",") else: "?"
+        val candidate = r.macro_candidate
+        macro_bytes = macro_bytes + candidate.definitions_hex.len() + candidate.uses_hex.len()
+        if macro_bytes > FILE_WORKER_INC_MANIFEST_MAX_MACRO_HEX_BYTES_V2: return ""
+        val macro_known = if candidate.known: "1" else: "0"
+        val macro_complete = if candidate.complete: "1" else: "0"
+        out = out + "{r.path}\t{r.source_digest}\t{r.iface_digest}\t{imports}\t{r.object_digest}\t{r.cached_object}\t{r.functions}\t{r.statics}\t{r.capsule}\t{macro_known}\t{macro_complete}\t{candidate.source_digest}\t{candidate.definitions_hex}\t{candidate.uses_hex}\t{candidate.digest}\n"
+    if out.len() > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2: return ""
+    out
+
 # (rows, output_digest); a malformed manifest, or one written by a different
 # producer (or with an empty producer), yields no rows.
 pub fn file_worker_inc_manifest_parse_v1(content: text, producer: text) -> ([FileWorkerIncRowV1], text):
+    if producer == "" or content.len() > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2:
+        return ([], "")
     val lines = content.split("\n")
     var rows: [FileWorkerIncRowV1] = []
-    if producer == "" or lines.len() < 2 or lines[0] != FILE_WORKER_INC_MANIFEST_VERSION_V1 + "\t" + producer:
+    if lines.len() < 2:
         return (rows, "")
+    val v1 = lines[0] == FILE_WORKER_INC_MANIFEST_VERSION_V1 + "\t" + producer
+    val v2 = lines[0] == FILE_WORKER_INC_MANIFEST_VERSION_V2 + "\t" + producer
+    if not v1 and not v2: return (rows, "")
+    if v2 and lines.len() < 5: return ([], "")
     var i = 2
+    if v2: i = 5
+    var macro_bytes = 0
     while i < lines.len():
         val line = lines[i]
         i = i + 1
         if line == "":
             continue
+        if v2 and line.len() > FILE_WORKER_INC_MANIFEST_MAX_ROW_BYTES_V2:
+            return ([], "")
         val f = line.split("\t")
-        if f.len() != 9:
+        if (v1 and f.len() != 9) or (v2 and f.len() != 15):
+            return ([], "")
+        if v2 and ((f[9] != "0" and f[9] != "1") or (f[10] != "0" and f[10] != "1")):
             return ([], "")
         val known = f[3].starts_with("+")
         var imports: [text] = []
@@ -95,10 +163,41 @@ pub fn file_worker_inc_manifest_parse_v1(content: text, producer: text) -> ([Fil
             for part in f[3].substring(1).split(","):
                 if part != "":
                     imports = imports.push(part)
-        rows = rows.push(FileWorkerIncRowV1(path: f[0], source_digest: f[1], iface_digest: f[2],
+        val macro_candidate = if v2:
+            MacroForwardCandidateV1(known: f[9] == "1", complete: f[10] == "1",
+                source_digest: f[11], definitions_hex: f[12], uses_hex: f[13], digest: f[14])
+        else: macro_forward_candidate_unknown_v1()
+        val row = FileWorkerIncRowV1(path: f[0], source_digest: f[1], iface_digest: f[2],
             imports_known: known, imports: imports, object_digest: f[4], cached_object: f[5],
-            functions: f[6].to_i64() ?? 0, statics: f[7].to_i64() ?? 0, capsule: f[8]))
+            functions: f[6].to_i64() ?? 0, statics: f[7].to_i64() ?? 0, capsule: f[8],
+            macro_candidate: macro_candidate)
+        if not _row_ok_v1(row): return ([], "")
+        macro_bytes = macro_bytes + row.macro_candidate.definitions_hex.len() +
+            row.macro_candidate.uses_hex.len()
+        if v2 and macro_bytes > FILE_WORKER_INC_MANIFEST_MAX_MACRO_HEX_BYTES_V2: return ([], "")
+        for old in rows:
+            if old.path == row.path: return ([], "")
+        rows = rows.push(row)
+    if v2:
+        val expected_rows = lines[4].to_i64() ?? -1
+        if expected_rows < 0 or expected_rows != rows.len(): return ([], "")
     (rows, lines[1])
+
+pub fn file_worker_inc_manifest_selected_scope_digest_v2(content: text, producer: text) -> text:
+    if content.len() > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2: return ""
+    val lines = content.split("\n")
+    if producer == "" or lines.len() < 5 or
+            lines[0] != FILE_WORKER_INC_MANIFEST_VERSION_V2 + "\t" + producer:
+        return ""
+    lines[2]
+
+pub fn file_worker_inc_manifest_inventory_digest_v2(content: text, producer: text) -> text:
+    if content.len() > FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2: return ""
+    val lines = content.split("\n")
+    if producer == "" or lines.len() < 5 or
+            lines[0] != FILE_WORKER_INC_MANIFEST_VERSION_V2 + "\t" + producer:
+        return ""
+    lines[3]
 
 # --------------------------------------------------------------- selection --
 
@@ -149,6 +248,10 @@ pub fn file_worker_inc_receipt_line_v1(reused: i64, rebuilt: i64, relinked: bool
     "[file-workers] {reused} reused / {rebuilt} rebuilt / link={link}"
 
 export FileWorkerIncRowV1, FileWorkerIncSelectionV1
-export FILE_WORKER_INC_DIR_ENV_V1, FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1, FILE_WORKER_INC_MANIFEST_VERSION_V1
-export file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_parse_v1
+export FILE_WORKER_INC_DIR_ENV_V1, FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1, FILE_WORKER_INC_MANIFEST_VERSION_V1, FILE_WORKER_INC_MANIFEST_VERSION_V2
+export FILE_WORKER_INC_MANIFEST_MAX_BYTES_V2, FILE_WORKER_INC_MANIFEST_MAX_MACRO_HEX_BYTES_V2,
+    FILE_WORKER_INC_MANIFEST_MAX_ROW_BYTES_V2
+export file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_encode_v2, file_worker_inc_manifest_parse_v1
+export file_worker_inc_manifest_selected_scope_digest_v2
+export file_worker_inc_manifest_inventory_digest_v2
 export file_worker_inc_select_v1, file_worker_inc_receipt_line_v1, file_worker_inc_link_objects_v1

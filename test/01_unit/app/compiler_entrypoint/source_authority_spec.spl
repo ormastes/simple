@@ -4,7 +4,8 @@ use app.compiler_entrypoint.source_authority.{
     compiler_source_authority_acquire_v1, compiler_source_authority_validate_v1,
     compiler_source_authority_publish_v1, compiler_source_authority_clear_v1,
     compiler_source_authority_open_published_v1,
-    compiler_source_authority_invalid_v1, compiler_source_authority_inventory_roots_v1}
+    compiler_source_authority_invalid_v1, compiler_source_authority_inventory_roots_v1,
+    compiler_source_authority_selected_scope_v1}
 use app.io.env_ops.{env_get, env_set}
 use app.cli.native_build_warm_receipt.{_warm_scv_prepare}
 use app.io.file_ops.{path_absolute}
@@ -36,6 +37,7 @@ fn authority_fixture_body(root_path: text, roots: [text]) -> text:
     if not dir_create_all(root + "/src/app/cli"): return "mkdir"
     val code = "fn main() -> i64:\n    print \"phase2-hello-ok\"\n    0\n"
     if not file_write(root + "/src/app/cli/bootstrap_main.spl", code): return "write"
+    if not file_write(root + "/src/app/cli/next.spl", "fn next() -> i64: 1\n"): return "write-next"
     if not authority_fixture_git(root, ["init", "-q"]): return "git-init"
     if not authority_fixture_git(root, ["add", "src"]): return "git-add"
     if not authority_fixture_git(root, ["-c", "user.name=Authority fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]): return "git-commit"
@@ -43,7 +45,34 @@ fn authority_fixture_body(root_path: text, roots: [text]) -> text:
     val cache = root + "/build/scv"
     val admitted = compiler_source_authority_acquire_v1(root, cache, roots, true)
     if not admitted.valid: return "acquire:" + admitted.reason
-    if admitted.snapshot.inventory_count != 1: return "count"
+    if admitted.snapshot.inventory_count != 2: return "count"
+    val broad_scope = compiler_source_authority_selected_scope_v1(root, admitted)
+    if broad_scope.is_err(): return "selected-scope:" + broad_scope.unwrap_err()
+    val (broad_paths, broad_digests, broad_digest, broad_inventory_digest) = broad_scope.unwrap()
+    if broad_paths != [admitted.snapshot.snapshot_root + "/src/app/cli/bootstrap_main.spl",
+            admitted.snapshot.snapshot_root + "/src/app/cli/next.spl"]:
+        return "selected-scope-paths"
+    if not broad_digests.contains_key(broad_paths[0]) or
+            not broad_digests.contains_key(broad_paths[1]): return "selected-source-digests"
+    if broad_digests[broad_paths[0]] != sha256_text(code) or
+            broad_digests[broad_paths[1]] != sha256_text("fn next() -> i64: 1\n"):
+        return "selected-source-digest-values"
+    if broad_digest != admitted.snapshot.inventory_digest or
+            broad_inventory_digest != admitted.source_inventory_digest:
+        return "selected-scope-bindings"
+    val narrow = compiler_source_authority_acquire_v1(root, cache,
+        ["src/app/cli/bootstrap_main.spl"], false)
+    if not narrow.valid: return "narrow-acquire:" + narrow.reason
+    val narrow_scope = compiler_source_authority_selected_scope_v1(root, narrow)
+    if narrow_scope.is_err(): return "narrow-scope:" + narrow_scope.unwrap_err()
+    val (narrow_paths, narrow_digests, narrow_digest, narrow_inventory_digest) = narrow_scope.unwrap()
+    if narrow_paths != [narrow.snapshot.snapshot_root + "/src/app/cli/bootstrap_main.spl"]:
+        return "narrow-scope-paths"
+    if not narrow_digests.contains_key(narrow_paths[0]): return "narrow-source-digest"
+    if narrow_digests[narrow_paths[0]] != broad_digests[broad_paths[0]]:
+        return "narrow-source-digest-value"
+    if narrow_inventory_digest != broad_inventory_digest: return "wider-inventory-changed"
+    if narrow_digest == broad_digest: return "selected-scope-digest-collapsed"
     if not compiler_source_authority_publish_v1(admitted): return "publish"
     val current = compile_source_inventory_read_current_v1(cache)
     if not current.valid: return "current"

@@ -1,0 +1,251 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/cache/macro_forward_transport_v1.spl 0%
+"""
+# Native file-worker macro forward candidate transport
+
+Parser-produced macro definition and invocation tables are captured only when
+the companion is fresh for the exact source bytes. The candidate is transport
+data; it does not certify the worker object generation or authorize reuse.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:macros
+
+use std.spec
+use std.io_runtime.{dir_create_all, file_read, file_write}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_bytes}
+use std.common.serialization.{bytes_to_hex}
+use app.io.time_ops.{time_now_unix_micros}
+use compiler.driver.cache.macro_forward_transport_v1.{macro_forward_candidate_capture_v1,
+    macro_forward_candidate_invalidation_v1}
+use compiler.driver.cache.macro_forward_candidate_contract_v1.{MacroForwardCandidateV1,
+    MacroForwardModuleCandidateV1, macro_forward_candidate_digest_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
+    module_tldr_companion_sections_v1, module_tldr_companion_render_sections_v1,
+    module_artifact_module_id_v1, module_artifacts_emit_v1}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefinitionTableV1,
+    MacroUseTableV1, MacroUseV1, MacroUseStatusV1, macro_use_table_decode_v1,
+    macro_definition_table_decode_v1, macro_definition_table_encode_v1,
+    macro_use_table_encode_v1, macro_def_id_canonical_v1, macro_content_digest_v1}
+
+fn fresh_macro_root() -> text:
+    val root = "build/test_tmp/macro_forward_{time_now_unix_micros()}"
+    val _created = dir_create_all(root + "/pkg")
+    root
+
+fn macro_source() -> text:
+    "macro twice(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\n\nfn first() -> i64:\n    twice!(1)\n"
+
+fn candidate_from_tables(path: text, source_digest: text, definitions: MacroDefinitionTableV1,
+        uses: MacroUseTableV1) -> MacroForwardCandidateV1:
+    val definitions_hex = bytes_to_hex(text_to_bytes(macro_definition_table_encode_v1(definitions)))
+    val uses_hex = bytes_to_hex(text_to_bytes(macro_use_table_encode_v1(uses)))
+    MacroForwardCandidateV1(known: true, complete: true, source_digest: source_digest,
+        definitions_hex: definitions_hex, uses_hex: uses_hex,
+        digest: macro_forward_candidate_digest_v1(path, source_digest, true,
+            definitions_hex, uses_hex))
+
+fn synthetic_use(path: text, region: text, def_id: text, name: text) -> MacroUseV1:
+    MacroUseV1(invoking_source_id: path, region_id: region, stable_invocation_id: "inv:" + region,
+        requested_scoped_name: name, has_resolved_def: true, resolved_def_id: def_id,
+        resolved_def_key: macro_content_digest_v1("def-key"),
+        invocation_ast_digest: macro_content_digest_v1("invocation"),
+        argument_digest: macro_content_digest_v1("arguments"), hygiene_scope_id: "h0",
+        active_guard_id: "", generated_symbols_digest: macro_content_digest_v1("symbols"),
+        resolution_candidate_root: macro_content_digest_v1("candidates"),
+        has_absence_witness: false, absence_witness: "",
+        expand_key: macro_content_digest_v1("expand"), status: MacroUseStatusV1.Resolved,
+        coverage: "complete")
+
+describe "macro forward candidate transport":
+    it "captures parser-resolved definition and use tables from the actual companion producer":
+        val root = fresh_macro_root()
+        val source_path = root + "/pkg/user.spl"
+        val tldr_root = root + "/tldr"
+        val source = macro_source()
+        expect(file_write(source_path, source)).to_equal(true)
+        expect(module_artifacts_emit_v1(source_path, tldr_root)).to_equal("")
+        val candidate = macro_forward_candidate_capture_v1(source_path, tldr_root, sha256_text(source))
+        expect(candidate.known).to_equal(true)
+        expect(candidate.complete).to_equal(true)
+        expect(candidate.source_digest).to_equal(sha256_text(source))
+        expect(candidate.definitions_hex.len() > 0).to_equal(true)
+        expect(candidate.uses_hex.len() > 0).to_equal(true)
+        val companion = file_read(module_tldr_companion_path_v1(tldr_root, source_path))
+        val sections = module_tldr_companion_sections_v1(companion, source)
+        var use_sections = 0
+        for section in sections:
+            if section.starts_with("macro-use|"):
+                use_sections = use_sections + 1
+                val decoded = macro_use_table_decode_v1(section.substring(10))
+                expect(decoded.ok).to_equal(true)
+                expect(decoded.value.uses.len() > 0).to_equal(true)
+                expect(decoded.value.uses[0].invoking_source_id).to_equal(source_path)
+        expect(use_sections).to_equal(1)
+
+    it "represents a parser-produced empty module with explicit empty tables":
+        val root = fresh_macro_root()
+        val source_path = root + "/pkg/empty.spl"
+        val tldr_root = root + "/tldr"
+        val source = "pub fn plain() -> i64: 1\n"
+        expect(file_write(source_path, source)).to_equal(true)
+        expect(module_artifacts_emit_v1(source_path, tldr_root)).to_equal("")
+        val candidate = macro_forward_candidate_capture_v1(source_path, tldr_root, sha256_text(source))
+        expect(candidate.known).to_equal(true)
+        expect(candidate.complete).to_equal(true)
+
+    it "keeps stale or duplicate macro tables unknown":
+        val root = fresh_macro_root()
+        val source_path = root + "/pkg/stale.spl"
+        val tldr_root = root + "/tldr"
+        val source = macro_source()
+        expect(file_write(source_path, source)).to_equal(true)
+        expect(module_artifacts_emit_v1(source_path, tldr_root)).to_equal("")
+        expect(macro_forward_candidate_capture_v1(source_path, tldr_root, sha256_text(source)).known)
+            .to_equal(true)
+        val changed = source + "\n"
+        expect(file_write(source_path, changed)).to_equal(true)
+        expect(macro_forward_candidate_capture_v1(source_path, tldr_root, sha256_text(changed)).known)
+            .to_equal(false)
+        expect(file_write(source_path, source)).to_equal(true)
+        val path = module_tldr_companion_path_v1(tldr_root, source_path)
+        val content = file_read(path)
+        val sections = module_tldr_companion_sections_v1(content, source)
+        var with_duplicate: [text] = []
+        var use_section = ""
+        for section in sections:
+            with_duplicate.push(section)
+            if section.starts_with("macro-use|"):
+                use_section = section
+        with_duplicate.push(use_section)
+        expect(file_write(path, module_tldr_companion_render_sections_v1(
+            module_artifact_module_id_v1(source_path), source, with_duplicate))).to_equal(true)
+        expect(macro_forward_candidate_capture_v1(source_path, tldr_root, sha256_text(source)).known)
+            .to_equal(false)
+
+    it "rejects corrupt hex and checksum-valid non-table payloads as unknown":
+        val path = "build/test_tmp/corrupt-macro-candidate.spl"
+        val source_digest = macro_content_digest_v1("source")
+        val bad_hex_defs = "zz"
+        val bad_hex_uses = "00"
+        val bad_hex = MacroForwardCandidateV1(known: true, complete: true,
+            source_digest: source_digest, definitions_hex: bad_hex_defs, uses_hex: bad_hex_uses,
+            digest: macro_forward_candidate_digest_v1(path, source_digest, true,
+                bad_hex_defs, bad_hex_uses))
+        val invalid_table_defs = bytes_to_hex(text_to_bytes("not-a-macro-table"))
+        val invalid_table_uses = bytes_to_hex(text_to_bytes("not-a-use-table"))
+        val invalid_table = MacroForwardCandidateV1(known: true, complete: true,
+            source_digest: source_digest, definitions_hex: invalid_table_defs,
+            uses_hex: invalid_table_uses, digest: macro_forward_candidate_digest_v1(path,
+                source_digest, true, invalid_table_defs, invalid_table_uses))
+        val first = macro_forward_candidate_invalidation_v1(
+            [MacroForwardModuleCandidateV1(path: path, source_digest: source_digest,
+                candidate: bad_hex)], [], {}, "")
+        val second = macro_forward_candidate_invalidation_v1(
+            [MacroForwardModuleCandidateV1(path: path, source_digest: source_digest,
+                candidate: invalid_table)], [], {}, "")
+        expect(first.needs_full_recheck).to_equal(true)
+        expect(first.reason).to_equal("unknown-previous-candidate")
+        expect(second.needs_full_recheck).to_equal(true)
+        expect(second.reason).to_equal("unknown-previous-candidate")
+
+    it "uses changed parsed definitions to add real macro users and still requests full recheck":
+        val root = fresh_macro_root()
+        val source_path = root + "/pkg/provider.spl"
+        val tldr_root = root + "/tldr"
+        val previous_source = macro_source()
+        expect(file_write(source_path, previous_source)).to_equal(true)
+        expect(module_artifacts_emit_v1(source_path, tldr_root)).to_equal("")
+        val previous = macro_forward_candidate_capture_v1(source_path, tldr_root,
+            sha256_text(previous_source))
+        val next_source = previous_source.replace("x + x", "x + x + 1")
+        expect(file_write(source_path, next_source)).to_equal(true)
+        expect(module_artifacts_emit_v1(source_path, tldr_root)).to_equal("")
+        val current_digest = sha256_text(next_source)
+        var current_sources: Dict<text, text> = {}
+        current_sources[source_path] = current_digest
+        val invalidation = macro_forward_candidate_invalidation_v1(
+            [MacroForwardModuleCandidateV1(path: source_path,
+                source_digest: sha256_text(previous_source), candidate: previous)],
+            [source_path], current_sources, tldr_root)
+        expect(invalidation.users).to_equal([source_path])
+        expect(invalidation.needs_full_recheck).to_equal(true)
+        expect(invalidation.reason).to_equal("object-generation-witness-unavailable")
+
+    it "propagates a changed nested macro to shared parsed users by canonical definition ID":
+        val root = fresh_macro_root()
+        val provider = root + "/pkg/provider.spl"
+        val first_user = root + "/pkg/first.spl"
+        val second_user = root + "/pkg/second.spl"
+        val tldr_root = root + "/tldr"
+        val provider_source = "macro base(x: Int) -> (returns result: Int):\n    emit result:\n        x + 1\n\n" +
+            "macro wrapper(x: Int) -> (returns result: Int):\n    emit result:\n        base!(x)\n\n" +
+            "fn call() -> i64:\n    wrapper!(1)\n"
+        val user_source = "pub fn plain() -> i64: 1\n"
+        expect(file_write(provider, provider_source)).to_equal(true)
+        expect(file_write(first_user, user_source)).to_equal(true)
+        expect(file_write(second_user, user_source)).to_equal(true)
+        expect(module_artifacts_emit_v1(provider, tldr_root)).to_equal("")
+        expect(module_artifacts_emit_v1(first_user, tldr_root)).to_equal("")
+        expect(module_artifacts_emit_v1(second_user, tldr_root)).to_equal("")
+        val provider_sections = module_tldr_companion_sections_v1(
+            file_read(module_tldr_companion_path_v1(tldr_root, provider)), provider_source)
+        var definition_text = ""
+        var provider_use_text = ""
+        for section in provider_sections:
+            if section.starts_with("macro-def|"): definition_text = section.substring(10)
+            if section.starts_with("macro-use|"): provider_use_text = section.substring(10)
+        val decoded_definitions = macro_definition_table_decode_v1(definition_text)
+        expect(decoded_definitions.ok).to_equal(true)
+        var base_id = ""
+        var wrapper_id = ""
+        var wrapper_dependencies: [text] = []
+        var previous_entries = decoded_definitions.value.entries
+        var i = 0
+        while i < previous_entries.len():
+            if previous_entries[i].macro_name == "base":
+                base_id = macro_def_id_canonical_v1(previous_entries[i].def_id)
+                previous_entries[i].body_digest = macro_content_digest_v1("previous base body")
+            if previous_entries[i].macro_name == "wrapper":
+                wrapper_id = macro_def_id_canonical_v1(previous_entries[i].def_id)
+                wrapper_dependencies = previous_entries[i].dependent_macros
+            i = i + 1
+        expect(base_id != "" and wrapper_id != "").to_equal(true)
+        expect(wrapper_dependencies.contains(base_id)).to_equal(true)
+        val previous_provider_defs = MacroDefinitionTableV1(schema: decoded_definitions.value.schema,
+            module_id: decoded_definitions.value.module_id, entries: previous_entries)
+        val provider_uses = macro_use_table_decode_v1(provider_use_text)
+        expect(provider_uses.ok).to_equal(true)
+        val old_provider_digest = sha256_text(provider_source + "#old")
+        var current_sources: Dict<text, text> = {}
+        current_sources[provider] = sha256_text(provider_source)
+        current_sources[first_user] = sha256_text(user_source)
+        current_sources[second_user] = sha256_text(user_source)
+        val empty_user_defs = MacroDefinitionTableV1(schema: 1,
+            module_id: module_artifact_module_id_v1(first_user), entries: [])
+        val first_uses = MacroUseTableV1(schema: 1, module_id: module_artifact_module_id_v1(first_user),
+            uses: [synthetic_use(first_user, "site-1", wrapper_id, "wrapper")])
+        val second_uses = MacroUseTableV1(schema: 1,
+            module_id: module_artifact_module_id_v1(second_user),
+            uses: [synthetic_use(second_user, "site-1", wrapper_id, "wrapper")])
+        val previous = [
+            MacroForwardModuleCandidateV1(path: provider, source_digest: old_provider_digest,
+                candidate: candidate_from_tables(provider, old_provider_digest, previous_provider_defs,
+                    provider_uses.value)),
+            MacroForwardModuleCandidateV1(path: first_user, source_digest: sha256_text(user_source),
+                candidate: candidate_from_tables(first_user, sha256_text(user_source), empty_user_defs,
+                    first_uses)),
+            MacroForwardModuleCandidateV1(path: second_user, source_digest: sha256_text(user_source),
+                candidate: candidate_from_tables(second_user, sha256_text(user_source),
+                    MacroDefinitionTableV1(schema: 1,
+                        module_id: module_artifact_module_id_v1(second_user), entries: []), second_uses))]
+        val invalidation = macro_forward_candidate_invalidation_v1(previous,
+            [provider, first_user, second_user], current_sources, tldr_root)
+        expect(invalidation.users.contains(provider)).to_equal(true)
+        expect(invalidation.users.contains(first_user)).to_equal(true)
+        expect(invalidation.users.contains(second_user)).to_equal(true)
+        expect(invalidation.needs_full_recheck).to_equal(true)
+
