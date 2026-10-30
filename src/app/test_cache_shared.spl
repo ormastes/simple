@@ -4,7 +4,8 @@
 # Used by test_runner_new/test_result_cache.spl, test_daemon/cache.spl,
 # test_incremental_state_shared.spl, and test_runner_files.spl.
 
-use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_stat, file_exists, file_hash_sha256}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_stat}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
 
 # ============================================================================
 # Version
@@ -49,11 +50,13 @@ fn stale_entry(test_path: text) -> TestCacheEntry:
 fn _dep_fingerprint(path: text) -> text:
     # mtime alone has one-second resolution, so a same-size rewrite within
     # that second kept the old fingerprint and served a stale cached result.
-    # The content digest decides; mtime stays as a cheap extra signal.
-    # A missing path has no digest (the runtime returns nil for it).
-    if not file_exists(path):
-        return "missing"
-    "{file_stat(path)}@{file_hash_sha256(path)}"
+    # The content digest decides. A missing path, a directory, or an open/read
+    # failure has no 64-hex digest; all of those fingerprint as "unreadable",
+    # which never matches a real digest.
+    val digest = file_hash_sha256_or_empty(path)
+    if digest.len() != 64:
+        return "unreadable"
+    "{file_stat(path)}@{digest}"
 
 fn _dep_hash(test_path: text, dep_paths: [text]) -> text:
     """Build a fingerprint from file mtimes and content digests."""

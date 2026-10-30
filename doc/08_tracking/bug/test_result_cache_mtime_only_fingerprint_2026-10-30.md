@@ -31,6 +31,20 @@ dependency file).
 
 - Reproducing: `test_result_cache_spec` "invalidates cache when dependency
   content changes without changing size".
-- Generalization, in the same spec: a same-size rewrite of the test file
-  itself must invalidate, and an untouched entry must stay fresh. On the old
-  code the spec passes 3/5; on the fixed code it passes 5/5.
+- Generalization, in the same spec:
+  - a same-size rewrite of the test file itself must invalidate;
+  - an untouched entry must stay fresh;
+  - a dependency that was missing at record time and appears later must
+    invalidate.
+
+  The fixed code passes 6/6. On the old code the two same-size examples fail
+  whenever both writes land in the same mtime second, which is likely but not
+  guaranteed.
+
+## Follow-up (not done here)
+
+A miss hashes the closure twice: once for `check_freshness` and once for
+`record_*`. There is no per-run `{path: fingerprint}` memo, and dependency sets
+overlap heavily. A cold full run therefore pays about 63 x 76 us x 2 per spec.
+A memo would recover most of that. The long-lived test daemon would need to
+invalidate it on file-change events.
