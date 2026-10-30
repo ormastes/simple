@@ -1,9 +1,8 @@
 # Incremental cache user acceptance — 2026-10-30
 
-Status: UNRUN; end-to-end acceptance BLOCKED. This is an authored inventory and acceptance contract, not a test report. No compiler, native build, test runner, or SPipe docgen was executed. The qualified Linux full CLI is unavailable and the prior compiler diagnostic retry budget is exhausted. Do not substitute the Rust seed or count static review as execution.
+Status: end-to-end acceptance incomplete. The original 2026-10-30 inventory was UNRUN, with no compiler, native build, test runner, or SPipe docgen execution in that assessment. The dated updates below record subsequent provisional native controls and the first feature-suite compile failure. The user's later 12-hour working window supersedes the original diagnostic attempt limit; it does not permit unchanged retries or repeated green checks. Do not substitute the Rust seed or count static review as execution.
 
 2026-10-31 source update: the matrix below records the original source assessment. PR #5526 implements the FileFiber canonical await bridge and adds 16 authored cases (11 unit, 2 integration, 3 system); its former missing-adapter gap is now **implemented, runtime UNRUN**, with unsafe lifetime/fatal-retention limits retained. PR #5524 transports advisory macro candidates but still requires full recheck where publication/object-generation authority is absent. PR #5518 adds prelink identity coverage, PR #5522 runner-facade coverage, and PR #5520 source-reviewed telemetry with no added executable case count. The existing [SDN inventory](incremental_cache_execution_inventory_2026-10-30.sdn), section `followup_accounting_2026_10_31`, records exact paths and the 3e4df source overlay: **50 paths, 279 authored case instances, no feature assertion execution credit**. Older Cranelift runner controls (green 2/red 1) and the C delegated-parent cleanup control are separately scoped evidence; neither qualifies these feature cases or LLVM.
-
 
 ## Evidence rules
 
