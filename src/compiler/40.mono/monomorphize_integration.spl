@@ -1958,6 +1958,19 @@ impl MonomorphizationPass:
             case _:
                 nil
 
+    me stamp_inferred_projection_type_v1(expr: HirExpr) -> HirExpr:
+        # Projection inference already validates the container and selector.
+        # Persist its caller-owned element type for downstream field layout;
+        # leave authoritative concrete annotations and unknown evidence alone.
+        if expr.has_type_ and hir_type_is_concrete(expr.type_): return expr
+        if val inferred = self.infer_expr_type(expr):
+            if hir_type_is_concrete(inferred):
+                var out = expr
+                out.has_type_ = true
+                out.type_ = inferred
+                return out
+        expr
+
     me stamp_instance_field_use(expr: HirExpr, operand: HirExpr) -> HirExpr:
         """`b.items[0]`, `b.first ?? d`, `b.first!`: an element/payload taken
         straight out of a generic instance's field. HIR typed it from the
@@ -4179,9 +4192,11 @@ impl MonomorphizationPass:
                 val b2: HirExpr = base
                 val i2: HirExpr = index
                 out = self.stamp_instance_field_use(out, b2)
+                out = self.stamp_inferred_projection_type_v1(out)
                 out.kind = HirExprKind.Index(self.rewrite_expr(b2), self.rewrite_expr(i2))
             case HirExprKind.TupleIndex(base, index):
                 val b3: HirExpr = base
+                out = self.stamp_inferred_projection_type_v1(out)
                 out.kind = HirExprKind.TupleIndex(self.rewrite_expr(b3), index)
             case HirExprKind.OptionalChain(base, field):
                 val b4: HirExpr = base
