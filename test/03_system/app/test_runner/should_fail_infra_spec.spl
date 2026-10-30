@@ -1,0 +1,98 @@
+# @req REQ-TESTRUNNER-MD-KIND
+# @req REQ-TESTRUNNER-COMMENT-KIND
+# @cover src/lib/nogc_sync_mut/test_runner/sdoctest/runner.spl 5%
+# @cover src/lib/nogc_sync_mut/test_runner/doctest_runner.spl 5%
+"""
+# A should_fail example passes only on its own failure
+
+An author marks an example `should_fail` to document code that must fail. It
+passes only when the EXAMPLE fails: a failing assertion, a panic or a runtime
+error. When the child never really ran the example -- an unknown extern, an
+unresolvable module, a missing binary, a signal death without an assert/panic
+diagnostic -- the result is an Error, never a pass. This holds for Markdown
+fences (`simple test <doc.md>`) and for comment doctests
+(`simple test --spl-doctest <file.spl>`).
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.sdoctest.types.{should_fail_infra_reason}
+
+val DIR = "build/should_fail_infra"
+val MISSING_EXTERN = ["extern fn rt_should_fail_missing_zz() -> i64", "print rt_should_fail_missing_zz()"]
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY") ?? ""
+    if b != "":
+        return b
+    "bin/simple"
+
+fn sf_fixture(name: text, body: text) -> text:
+    process_run_bounded("mkdir", ["-p", DIR], 10000, 65536)
+    val path = DIR + "/" + name
+    file_write(path, body)
+    path
+
+fn md_fence(lines: [text]) -> text:
+    "```simple:should_fail\n" + lines.join("\n") + "\n```\n"
+
+fn comment_block(lines: [text]) -> text:
+    var out = "## ```simple should_fail\n"
+    for l in lines:
+        out = out + "## " + l + "\n"
+    out + "## ```\nfn f():\n    1\n"
+
+fn run(args: [text]) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), args, 300000, 4194304)
+    (out + err, code)
+
+describe "should_fail classification":
+    it "treats an assert/panic abort as the example's own failure":
+        expect(should_fail_infra_reason(-1, "PANIC Assertion violation: condition failed")).to_equal("")
+        expect(should_fail_infra_reason(101, "Message: Assertion violation")).to_equal("")
+        expect(should_fail_infra_reason(1, "error: semantic: panic: boom")).to_equal("")
+
+    it "treats infrastructure failures as errors":
+        expect(should_fail_infra_reason(1, "error: semantic: unknown extern function: rt_x")).to_contain("unknown extern")
+        expect(should_fail_infra_reason(1, "error: semantic: Cannot resolve module: std.q")).to_contain("module resolution")
+        expect(should_fail_infra_reason(127, "")).to_contain("could not be executed")
+        expect(should_fail_infra_reason(-1, "")).to_contain("failed to start")
+        expect(should_fail_infra_reason(-1, "killed by signal 9")).to_contain("without an assert/panic")
+
+describe "should_fail end to end":
+    # @capture(exec)
+    it "passes a Markdown should_fail fence whose assertion fails":
+        step("Write a should_fail fence with a false assertion")
+        val md = sf_fixture("assert.md", md_fence(["assert 1 == 2"]))
+        val (report, code) = run(["test", "--no-session-daemon", md])
+        expect(code).to_equal(0)
+        expect(report).to_contain("1 total, 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "does not pass a Markdown should_fail fence with a missing extern":
+        step("Write a should_fail fence that calls an unbacked extern")
+        val md = sf_fixture("extern.md", md_fence(MISSING_EXTERN))
+        val (report, code) = run(["test", "--no-session-daemon", md])
+        expect(code).to_equal(1)
+        expect(report).to_contain("unknown extern")
+        expect(report.contains("1 total, 1 passed")).to_equal(false)
+
+    # @capture(exec)
+    it "passes a comment should_fail example whose assertion fails":
+        step("Write a comment example with a false assertion")
+        val path = sf_fixture("assert_doc.spl", comment_block(["assert_equal(1, 2)"]))
+        val (report, code) = run(["test", "--no-session-daemon", "--spl-doctest", path])
+        expect(code).to_equal(0)
+        expect(report).to_contain("SPL Doctest: 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "does not pass a comment should_fail example with a missing extern":
+        step("Write a comment example that calls an unbacked extern")
+        val path = sf_fixture("extern_doc.spl", comment_block(MISSING_EXTERN))
+        val (report, code) = run(["test", "--no-session-daemon", "--spl-doctest", path])
+        expect(code).to_equal(1)
+        expect(report).to_contain("unknown extern")
+        expect(report.contains("SPL Doctest: 1 passed")).to_equal(false)
