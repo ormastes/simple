@@ -91,3 +91,20 @@ Rust runtime at HEAD, so they stay red (the first two are tagged `@tag:in-develo
 Restoring them means restoring the C runtime sources, the Rust symbol table
 rows and deploying a rebuilt seed; the `.spl` wrappers were not restored so no
 new unbacked extern declarations enter the tree.
+
+## Restore deviations recorded by the app-layer review
+
+- **Entropy allocation after seal.** `entropy_platform_fill_exact` (an in-place
+  fill) no longer exists. `src/app/test/hal_environment_entropy_executor.spl`
+  now copies `entropy_platform_bytes()` into the result region instead. That
+  call allocates a fresh array, and the copy is not wiped afterwards, yet the
+  receipt still reports `allocation_count_after_seal = 0`. Fail-closed handling
+  is unchanged: an `Err` maps to `UnsupportedCapability`. Unblock: once
+  in-place out-parameters work, either bring back an in-place
+  `entropy_platform_fill_exact` or wipe the copy and count the allocation.
+- **Sealed facade externs.** `src/app/hal_provider/sealed_session.spl` declares
+  9 `rt_hal_sealed_*` externs. Their only implementation is
+  `src/app/hal_provider/hal_provider_sealed_facade_v1.c`, not the runtime, and
+  none of them is in `scripts/check/unbacked_extern_baseline.txt`. On a Linux
+  census the extended unbacked-extern gate may report them as new. This has not
+  been checked on Linux yet.
