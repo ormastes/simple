@@ -21,8 +21,9 @@
 # message from refusal_for().
 #
 # Lifecycle: the map holds 2*capacity + 2 i64 atomic handles plus one bool
-# handle. free() releases all of them and is idempotent. The map must not be
-# used after free().
+# handle. free() releases the i64 handles. The bool handle `_freed` is
+# intentionally retained as the idempotence guard and is NOT freed, so a second
+# free() is a no-op. The map must not be used after free().
 
 use std.nogc_sync_mut.atomic.{AtomicI64, AtomicBool, MemoryOrdering, atomic_i64_new, atomic_bool_new}
 use std.nogc_async_mut.async_core.{AsyncError}
@@ -210,8 +211,10 @@ class AtomicMap:
             i = i + 1
         out
 
-    # Releases every atomic handle. The first call wins the CAS; later calls
-    # do nothing. The map must not be used afterwards.
+    # Releases the i64 atomic handles (keys, values, _len, _claimed). _freed is
+    # intentionally NOT freed: it is the idempotence guard. The first call wins
+    # the CAS false->true; later calls do nothing. The map must not be used
+    # afterwards.
     fn free():
         if self._freed.compare_exchange(false, true, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
             var i = 0

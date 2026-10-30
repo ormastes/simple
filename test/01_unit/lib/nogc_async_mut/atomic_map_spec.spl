@@ -281,3 +281,86 @@ describe "AtomicMap":
                         expect(msg).to_equal("")
             case Err(msg):
                 expect(msg).to_equal("")
+
+    it "stores and retrieves keys near the i64 extremes and negative keys":
+        # @req REQ-AMAP-015
+        step("Insert, read and remove keys at 2^62, i64 max, -1 and -2^62, checking each home slot stays in range")
+        match AtomicMap.with_capacity(8):
+            case Ok(map):
+                val near_max = 9223372036854775807
+                val big = 4611686018427387904
+                val neg_one = -1
+                val neg_big = -4611686018427387904
+                expect(map.home_slot(big) >= 0 and map.home_slot(big) < 8).to_equal(true)
+                expect(map.home_slot(near_max) >= 0 and map.home_slot(near_max) < 8).to_equal(true)
+                expect(map.home_slot(neg_one) >= 0 and map.home_slot(neg_one) < 8).to_equal(true)
+                expect(map.home_slot(neg_big) >= 0 and map.home_slot(neg_big) < 8).to_equal(true)
+                match map.insert(big, 1):
+                    case Ok(is_new):
+                        expect(is_new).to_equal(true)
+                    case Err(e):
+                        expect(e).to_equal(AsyncError.CapacityExceeded)
+                match map.insert(near_max, 2):
+                    case Ok(is_new):
+                        expect(is_new).to_equal(true)
+                    case Err(e):
+                        expect(e).to_equal(AsyncError.CapacityExceeded)
+                match map.insert(neg_one, 3):
+                    case Ok(is_new):
+                        expect(is_new).to_equal(true)
+                    case Err(e):
+                        expect(e).to_equal(AsyncError.CapacityExceeded)
+                match map.insert(neg_big, 4):
+                    case Ok(is_new):
+                        expect(is_new).to_equal(true)
+                    case Err(e):
+                        expect(e).to_equal(AsyncError.CapacityExceeded)
+                expect(map.get(big).unwrap()).to_equal(1)
+                expect(map.get(near_max).unwrap()).to_equal(2)
+                expect(map.get(neg_one).unwrap()).to_equal(3)
+                expect(map.get(neg_big).unwrap()).to_equal(4)
+                expect(map.remove(neg_one).unwrap()).to_equal(3)
+                expect(map.has(neg_one)).to_equal(false)
+                expect(map.len()).to_equal(3)
+                map.free()
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "keeps len exact and reuses key slots under remove and reinsert churn":
+        # @req REQ-AMAP-016
+        step("Fill a capacity-8 map with keys 1 to 6, remove them all, reinsert them all, then add a seventh key")
+        match AtomicMap.with_capacity(8):
+            case Ok(map):
+                var k = 1
+                while k <= 6:
+                    match map.insert(k, k * 10):
+                        case Ok(is_new):
+                            expect(is_new).to_equal(true)
+                        case Err(e):
+                            expect(e).to_equal(AsyncError.CapacityExceeded)
+                    k = k + 1
+                expect(map.len()).to_equal(6)
+                k = 1
+                while k <= 6:
+                    expect(map.remove(k).unwrap()).to_equal(k * 10)
+                    k = k + 1
+                expect(map.len()).to_equal(0)
+                # reused key slots do not consume new claims, so all six reinserts succeed
+                k = 1
+                while k <= 6:
+                    match map.insert(k, k + 100):
+                        case Ok(is_new):
+                            expect(is_new).to_equal(true)
+                        case Err(e):
+                            expect("reinsert of a previously used key was refused").to_equal("accepted")
+                    k = k + 1
+                expect(map.len()).to_equal(6)
+                match map.insert(7, 70):
+                    case Ok(is_new):
+                        expect("accepted a seventh distinct key past the limit").to_equal("refused")
+                    case Err(e):
+                        expect(e == AsyncError.CapacityExceeded).to_equal(true)
+                expect(map.len()).to_equal(6)
+                map.free()
+            case Err(msg):
+                expect(msg).to_equal("")
