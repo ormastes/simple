@@ -9,8 +9,8 @@
 
 Before #5478 the spec failed fast: 0/3, each example with
 `class SummaryLookupV1 has no field named value?`. After #5478 that parse error
-is gone, and the spec now runs past the test runner's 900s limit. The runner
-prints `Results: 0 total, 0 passed, 0 failed` and no example verdicts.
+is gone, and the run is killed at 900s. The output ends with
+`Results: 0 total, 0 passed, 0 failed` and no example verdicts.
 
 Measured with a debug seed built from release/1.0.0 plus #5478 (macOS,
 `src/compiler_rust/target/debug/simple test <spec>`).
@@ -18,9 +18,10 @@ Measured with a debug seed built from release/1.0.0 plus #5478 (macOS,
 ## Likely cause (unconfirmed)
 
 The first example walks the rendered summary once for each `limit` in
-`[1, 3, 65, 65536]`. Each step makes a `facade.read`, a `facade.page`, and a
-`sha256_text` of the page plus about a dozen expectations. With `limit = 1`
-that is one full round trip per byte. The parse error used to hide this cost.
+`[1, 3, 65, 65536]`. Each step makes a `facade.read` and a `facade.page`
+call, runs 10 expectations, and computes about 10 `sha256_text` hashes:
+`paging_auth()` twice at 4 each, `paging_token` once, and the page digest once.
+With `limit = 1` that is a full round trip per byte. The parse error used to hide this cost.
 It has not been profiled. It could be ordinary interpreter slowness, or
 superlinear work in `read`/`page`, such as re-rendering the summary or
 re-slicing the whole text on every call.
