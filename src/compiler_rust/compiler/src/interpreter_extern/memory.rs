@@ -2011,23 +2011,32 @@ pub fn rt_array_bytes_basis_ptr(args: &[Value]) -> Result<Value, CompileError> {
 /// count of either native representation, or -22 (matching the runtimes'
 /// `-EINVAL`) when the value is not an array, holds a non-int element, or
 /// holds an element outside `0..=255`.
+/// A boxed `[u8]` element is either a plain `Value::Int` or the width-tagged
+/// `Value::UInt` an untyped `[1u8, 2u8]` literal produces; both must lie in
+/// `0..=255`. Rejecting `UInt` made every write of such a literal fail.
+fn is_byte_element(item: &Value) -> bool {
+    match item {
+        Value::Int(byte) => (0..=255).contains(byte),
+        Value::UInt { value, .. } => *value <= 255,
+        _ => false,
+    }
+}
+
 fn byte_array_validate_len(arg: &Value) -> i64 {
     match arg {
         Value::ByteArray(v) | Value::FrozenByteArray(v) => v.len() as i64,
         Value::Array(items) | Value::FrozenArray(items) => {
             for item in items.iter() {
-                match item {
-                    Value::Int(byte) if (0..=255).contains(byte) => {}
-                    _ => return -22,
+                if !is_byte_element(item) {
+                    return -22;
                 }
             }
             items.len() as i64
         }
         Value::FixedSizeArray { data, .. } => {
             for item in data.iter() {
-                match item {
-                    Value::Int(byte) if (0..=255).contains(byte) => {}
-                    _ => return -22,
+                if !is_byte_element(item) {
+                    return -22;
                 }
             }
             data.len() as i64
@@ -2370,6 +2379,12 @@ mod tests {
 
         let fixed = Value::fixed_size_array(2, vec![Value::Int(7), Value::Int(8)]).unwrap();
         assert_eq!(rt_array_bytes_validate(&[fixed]).unwrap(), Value::Int(2));
+
+        let suffixed = Value::array(vec![Value::UInt { value: 0x53, width: 8 }, Value::UInt { value: 0, width: 8 }]);
+        assert_eq!(rt_array_bytes_validate(&[suffixed]).unwrap(), Value::Int(2));
+
+        let wide = Value::array(vec![Value::UInt { value: 256, width: 16 }]);
+        assert_eq!(rt_array_bytes_validate(&[wide]).unwrap(), Value::Int(-22));
 
         let out_of_range = Value::array(vec![Value::Int(256)]);
         assert_eq!(rt_array_bytes_validate(&[out_of_range]).unwrap(), Value::Int(-22));
