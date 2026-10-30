@@ -1,0 +1,112 @@
+use std.spec.*
+use std.test_runner.sdoctest.types.{SdoctestBlock}
+use std.test_runner.sdoctest.extractor.{extract_blocks_from_content}
+
+fn extract(parts: [text]) -> [SdoctestBlock]:
+    extract_blocks_from_content(parts.join("\n"), "doc.md")
+
+describe "sdoctest skip markers: fence modifier":
+    it "marks a simple:skip fence as skipped":
+        val bs = extract(["```simple:skip", "val a = 1", "```"])
+        expect(bs.len()).to_equal(1)
+        expect(bs[0].has_modifier_skip()).to_equal(true)
+
+    it "does not mark a plain fence as skipped":
+        val bs = extract(["```simple", "val a = 1", "```"])
+        expect(bs[0].has_modifier_skip()).to_equal(false)
+
+    it "marks a spl:skip fence as skipped":
+        val bs = extract(["```spl:skip", "val a = 1", "```"])
+        expect(bs[0].has_modifier_skip()).to_equal(true)
+
+describe "sdoctest skip markers: skip-next":
+    it "skips only the block right after skip-next":
+        val bs = extract(["<!--sdoctest:skip-next-->", "```simple", "val a = 1", "```", "```simple", "val b = 2", "```"])
+        expect(bs.len()).to_equal(2)
+        expect(bs[0].has_modifier_skip()).to_equal(true)
+        expect(bs[1].has_modifier_skip()).to_equal(false)
+
+    it "accepts an indented skip-next marker":
+        val bs = extract(["   <!--sdoctest:skip-next-->", "```simple", "val a = 1", "```"])
+        expect(bs[0].has_modifier_skip()).to_equal(true)
+
+    it "lets skip-next wait across prose to the next simple block":
+        val bs = extract(["<!--sdoctest:skip-next-->", "some prose", "```simple", "val a = 1", "```"])
+        expect(bs[0].has_modifier_skip()).to_equal(true)
+
+    it "is not consumed by a non-simple fence in between":
+        val bs = extract(["<!--sdoctest:skip-next-->", "```python", "x", "```", "```simple", "val a = 1", "```"])
+        expect(bs.len()).to_equal(1)
+        expect(bs[0].has_modifier_skip()).to_equal(true)
+
+describe "sdoctest skip markers: skip region":
+    it "skips every block between skip-begin and skip-end":
+        val bs = extract(["<!--sdoctest:skip-begin-->", "```simple", "val a = 1", "```", "```simple", "val b = 2", "```", "<!--sdoctest:skip-end-->"])
+        expect(bs.len()).to_equal(2)
+        expect(bs[0].has_modifier_skip()).to_equal(true)
+        expect(bs[1].has_modifier_skip()).to_equal(true)
+
+    it "stops skipping after skip-end":
+        val bs = extract(["<!--sdoctest:skip-begin-->", "```simple", "val a = 1", "```", "<!--sdoctest:skip-end-->", "```simple", "val b = 2", "```"])
+        expect(bs[0].has_modifier_skip()).to_equal(true)
+        expect(bs[1].has_modifier_skip()).to_equal(false)
+
+    it "skips to end of file when skip-end is missing":
+        val bs = extract(["<!--sdoctest:skip-begin-->", "```simple", "val a = 1", "```", "```simple", "val b = 2", "```"])
+        expect(bs[0].has_modifier_skip()).to_equal(true)
+        expect(bs[1].has_modifier_skip()).to_equal(true)
+
+    it "does not affect blocks before the region":
+        val bs = extract(["```simple", "val a = 1", "```", "<!--sdoctest:skip-begin-->", "```simple", "val b = 2", "```", "<!--sdoctest:skip-end-->"])
+        expect(bs[0].has_modifier_skip()).to_equal(false)
+        expect(bs[1].has_modifier_skip()).to_equal(true)
+
+describe "sdoctest ignore markers":
+    it "marks a block after ignore-next as ignored":
+        val bs = extract(["<!--sdoctest:ignore-next-->", "```simple", "val a = 1", "```", "```simple", "val b = 2", "```"])
+        expect(bs[0].has_modifier_ignore()).to_equal(true)
+        expect(bs[1].has_modifier_ignore()).to_equal(false)
+
+    it "marks every block in an ignore region as ignored":
+        val bs = extract(["<!--sdoctest:ignore-begin-->", "```simple", "val a = 1", "```", "```simple", "val b = 2", "```", "<!--sdoctest:ignore-end-->", "```simple", "val c = 3", "```"])
+        expect(bs[0].has_modifier_ignore()).to_equal(true)
+        expect(bs[1].has_modifier_ignore()).to_equal(true)
+        expect(bs[2].has_modifier_ignore()).to_equal(false)
+
+    it "does not treat a skipped block as ignored":
+        val bs = extract(["```simple:skip", "val a = 1", "```"])
+        expect(bs[0].has_modifier_ignore()).to_equal(false)
+
+describe "sdoctest other fence modifiers":
+    it "reads should_fail":
+        val bs = extract(["```simple:should_fail", "val a = 1", "```"])
+        expect(bs[0].has_modifier_should_fail()).to_equal(true)
+
+    it "reads fail_as_success":
+        val bs = extract(["```simple:fail_as_success", "val a = 1", "```"])
+        expect(bs[0].has_modifier_fail_as_success()).to_equal(true)
+
+    it "reads ignore_output":
+        val bs = extract(["```simple:ignore_output", "val a = 1", "```"])
+        expect(bs[0].has_modifier_ignore_output()).to_equal(true)
+
+    it "reads init and env names":
+        val bs = extract(["```simple:init=std_imports,env=slow", "val a = 1", "```"])
+        expect(bs[0].get_init_name()).to_equal("std_imports")
+        expect(bs[0].get_env_name()).to_equal("slow")
+
+    it "reads tags":
+        val bs = extract(["```simple:tag=slow,tag=net", "val a = 1", "```"])
+        expect(bs[0].get_tags().len()).to_equal(2)
+
+    it "reads a run-config from the fence":
+        val bs = extract(["```simple:@fast_env", "val a = 1", "```"])
+        expect(bs[0].get_run_config()).to_equal("fast_env")
+
+    it "reads a run-config from the preceding HTML comment":
+        val bs = extract(["<!--sdoctest:@fast_env-->", "```simple", "val a = 1", "```"])
+        expect(bs[0].get_run_config()).to_equal("fast_env")
+
+    it "applies a run-config comment to only the next block":
+        val bs = extract(["<!--sdoctest:@fast_env-->", "```simple", "val a = 1", "```", "```simple", "val b = 2", "```"])
+        expect(bs[1].get_run_config()).to_equal("")

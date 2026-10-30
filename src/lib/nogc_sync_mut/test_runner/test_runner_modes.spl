@@ -28,6 +28,8 @@ use std.test_runner.test_runner_output.{print_result, print_summary}
 # use sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
 use std.test_runner.sdoctest.types.{SdoctestRunResult, SdoctestFileResult, BlockStatus}
 use std.test_runner.doctest_runner.{run_spl_doctests_same_file, discover_spl_doctest_files}
+use std.test_runner.compiler_select.{select_test_child_binary}
+use std.test_runner.test_executor_parsing.{find_simple_binary}
 # use sdoctest.result_db.write_sdoctest_db
 # use sdoctest.doc_gen.generate_sdoctest_report
 # GROUP 9: Closure warnings
@@ -77,6 +79,21 @@ fn run_spl_doctest_mode(options: TestOptions, config: TestConfig) -> SdoctestRun
         print "No SPL files with doctests found."
         return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
+    # Every doctest child runs on the resolved compiler: --compiler=phase2 is
+    # pinned (sha256-verified) or refused; it never falls back to a default.
+    var binary = ""
+    match select_test_child_binary(options.compiler):
+        case Err(message):
+            print "error: test-runner: " + message
+            return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 1, accepted: 0, duration_ms: 0)
+        case Ok(selected):
+            binary = selected
+    if binary == "":
+        binary = find_simple_binary()
+    if binary == "":
+        print "error: test-runner: no child compiler resolved for SPL doctests; refusing to fall back"
+        return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 1, accepted: 0, duration_ms: 0)
+    print "child binary: {binary}"
     print "SPL Doctest: Running doctests from {files.len()} source file(s)..."
     val run_start = time_now_unix_micros()
     var file_results: [SdoctestFileResult] = []
@@ -88,7 +105,7 @@ fn run_spl_doctest_mode(options: TestOptions, config: TestConfig) -> SdoctestRun
     val timeout_ms = config.timeout_seconds * 1000
 
     for file_path in files:
-        val file_result = run_spl_doctests_same_file(file_path, timeout_ms)
+        val file_result = run_spl_doctests_same_file(file_path, timeout_ms, binary)
         if file_result.total > 0:
             val status = if file_result.failed == 0 and file_result.errors == 0: "PASS" else: "FAIL"
             print "  {status}  {file_result.source_file} ({file_result.passed} passed, {file_result.failed} failed, {file_result.duration_ms}ms)"

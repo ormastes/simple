@@ -1,0 +1,167 @@
+use std.spec.*
+use std.test_runner.test_runner_types.{TestLevel, TestExecutionMode}
+use std.test_runner.test_manifest.{TestManifestEntry}
+use std.test_runner.test_runner_files.{is_test_file, is_skip_marker_file, matches_level, manifest_entry_matches_level, is_legacy_mirror_path, targets_legacy_mirror, has_skip_directive, content_has_tag, platform_tag_matches, shuffle_files, simple_hash}
+use std.test_runner.test_level_detect.{is_ascii_digit_char, strip_order_prefix, path_level_segments, segments_contain, test_level_of_path, test_level_matches}
+
+# Pure-function coverage for test discovery and filtering in
+# src/lib/nogc_sync_mut/test_runner/{test_runner_files,test_level_detect}.spl.
+# One behaviour per example.
+# @req REQ-TESTRUNNER-DISCOVERY-COVERAGE
+
+fn entry_at_level(level: i64) -> TestManifestEntry:
+    TestManifestEntry(path: "x_spec.spl", file_size: 0, file_mtime: 0, test_level: level, slow_tag: false, skip_tag: false, pending_tag: false, tags: "", platform_tags: "", is_fuzz: false, is_chaos: false, is_deploy: false, is_security: false, is_baremetal: false, last_duration_ms: 0)
+
+describe "is_test_file":
+    it "accepts a _spec.spl file":
+        expect(is_test_file("test/01_unit/a_spec.spl")).to_equal(true)
+    it "accepts a _test.spl file":
+        expect(is_test_file("test/01_unit/a_test.spl")).to_equal(true)
+    it "rejects a plain helper .spl file":
+        expect(is_test_file("test/01_unit/helper.spl")).to_equal(false)
+    it "rejects a _spec file that is not .spl":
+        expect(is_test_file("test/01_unit/a_spec.md")).to_equal(false)
+    it "rejects a dotfile spec":
+        expect(is_test_file("test/01_unit/.a_spec.spl")).to_equal(false)
+    it "rejects a .spl.skip marker":
+        expect(is_test_file("test/01_unit/a_spec.spl.skip")).to_equal(false)
+
+describe "is_skip_marker_file":
+    it "accepts a spec .spl.skip marker":
+        expect(is_skip_marker_file("test/a_spec.spl.skip")).to_equal(true)
+    it "rejects a normal spec":
+        expect(is_skip_marker_file("test/a_spec.spl")).to_equal(false)
+    it "rejects a .skip file that is not a spec":
+        expect(is_skip_marker_file("test/notes.spl.skip")).to_equal(false)
+
+describe "matches_level":
+    it "All matches an unclassified path":
+        expect(matches_level("src/x_spec.spl", TestLevel.All)).to_equal(true)
+    it "Unit matches a numbered unit path":
+        expect(matches_level("test/01_unit/x_spec.spl", TestLevel.Unit)).to_equal(true)
+    it "Unit rejects an integration path":
+        expect(matches_level("test/02_integration/x_spec.spl", TestLevel.Unit)).to_equal(false)
+    it "Integration matches a numbered integration path":
+        expect(matches_level("test/02_integration/x_spec.spl", TestLevel.Integration)).to_equal(true)
+    it "Integration rejects a unit path":
+        expect(matches_level("test/01_unit/x_spec.spl", TestLevel.Integration)).to_equal(false)
+    it "System matches a numbered system path":
+        expect(matches_level("test/03_system/x_spec.spl", TestLevel.System)).to_equal(true)
+    it "System rejects a smoke path":
+        expect(matches_level("test/04_smoke/x_spec.spl", TestLevel.System)).to_equal(false)
+    it "Smoke matches a numbered smoke path":
+        expect(matches_level("test/04_smoke/x_spec.spl", TestLevel.Smoke)).to_equal(true)
+    it "Smoke rejects a unit path":
+        expect(matches_level("test/01_unit/x_spec.spl", TestLevel.Smoke)).to_equal(false)
+    it "Unit matches the shared directory":
+        expect(matches_level("test/shared/x_spec.spl", TestLevel.Unit)).to_equal(true)
+    it "System matches the feature directory":
+        expect(matches_level("test/feature/x_spec.spl", TestLevel.System)).to_equal(true)
+
+describe "manifest_entry_matches_level":
+    it "All accepts level 0":
+        expect(manifest_entry_matches_level(entry_at_level(0), TestLevel.All)).to_equal(true)
+    it "Unit accepts level 1":
+        expect(manifest_entry_matches_level(entry_at_level(1), TestLevel.Unit)).to_equal(true)
+    it "Unit rejects level 2":
+        expect(manifest_entry_matches_level(entry_at_level(2), TestLevel.Unit)).to_equal(false)
+    it "Integration accepts level 2":
+        expect(manifest_entry_matches_level(entry_at_level(2), TestLevel.Integration)).to_equal(true)
+    it "System accepts level 3":
+        expect(manifest_entry_matches_level(entry_at_level(3), TestLevel.System)).to_equal(true)
+    it "Smoke accepts level 4":
+        expect(manifest_entry_matches_level(entry_at_level(4), TestLevel.Smoke)).to_equal(true)
+    it "Smoke rejects level 0":
+        expect(manifest_entry_matches_level(entry_at_level(0), TestLevel.Smoke)).to_equal(false)
+
+describe "legacy mirror paths":
+    it "flags a relative test/unit path":
+        expect(is_legacy_mirror_path("test/unit/a_spec.spl")).to_equal(true)
+    it "flags an absolute test/integration path":
+        expect(is_legacy_mirror_path("/repo/test/integration/a_spec.spl")).to_equal(true)
+    it "does not flag the numbered unit tree":
+        expect(is_legacy_mirror_path("test/01_unit/a_spec.spl")).to_equal(false)
+    it "does not flag an unrelated mytest/unit directory":
+        expect(is_legacy_mirror_path("mytest/unit/a_spec.spl")).to_equal(false)
+    it "targets_legacy_mirror is true for the bare test/unit directory":
+        expect(targets_legacy_mirror("test/unit")).to_equal(true)
+    it "targets_legacy_mirror is true for an absolute test/integration directory":
+        expect(targets_legacy_mirror("/repo/test/integration")).to_equal(true)
+    it "targets_legacy_mirror is false for test/":
+        expect(targets_legacy_mirror("test/")).to_equal(false)
+
+describe "has_skip_directive":
+    it "detects a bare skip directive line":
+        expect(has_skip_directive("# header\n# @skip\ndescribe \"a\":\n")).to_equal(true)
+    it "detects a pending directive line":
+        expect(has_skip_directive("# @pending\n")).to_equal(true)
+    it "detects a parameterized skip directive line":
+        expect(has_skip_directive("# @skip(flaky)\n")).to_equal(true)
+    it "ignores the directive text inside a string literal":
+        expect(has_skip_directive("val s = \"# @skip\"\n")).to_equal(false)
+    it "ignores content with no directive":
+        expect(has_skip_directive("describe \"a\":\n")).to_equal(false)
+
+describe "content_has_tag":
+    it "matches a tag: keyword argument":
+        expect(content_has_tag("it \"a\", tag: \"slow\":\n", "slow")).to_equal(true)
+    it "matches a header line":
+        expect(content_has_tag("# @slow\n", "slow")).to_equal(true)
+    it "matches a tag-prefixed header line":
+        expect(content_has_tag("# @tag:slow\n", "slow")).to_equal(true)
+    it "does not match a longer tag name":
+        expect(content_has_tag("# @slower\n", "slow")).to_equal(false)
+    it "does not match an absent tag":
+        expect(content_has_tag("describe \"a\":\n", "slow")).to_equal(false)
+
+describe "platform_tag_matches":
+    it "host tag matches the interpreter mode":
+        expect(platform_tag_matches("host", TestExecutionMode.Interpreter)).to_equal(true)
+    it "interpreter tag matches the interpreter mode":
+        expect(platform_tag_matches("interpreter", TestExecutionMode.Interpreter)).to_equal(true)
+    it "smf tag does not match the interpreter mode":
+        expect(platform_tag_matches("smf", TestExecutionMode.Interpreter)).to_equal(false)
+    it "native tag matches the native mode":
+        expect(platform_tag_matches("native", TestExecutionMode.Native)).to_equal(true)
+
+describe "shuffle_files":
+    it "is deterministic for a fixed seed":
+        val files = ["a_spec.spl", "b_spec.spl", "c_spec.spl", "d_spec.spl"]
+        expect(shuffle_files(files, 7)).to_equal(shuffle_files(files, 7))
+    it "keeps every file exactly once":
+        val files = ["a_spec.spl", "b_spec.spl", "c_spec.spl", "d_spec.spl"]
+        val out = shuffle_files(files, 7)
+        expect(out.len()).to_equal(4)
+        expect(out.contains("c_spec.spl")).to_equal(true)
+    it "returns an empty list for empty input":
+        expect(shuffle_files([], 3).len()).to_equal(0)
+    it "simple_hash is stable for the same input":
+        expect(simple_hash("a/b_spec.spl", 5)).to_equal(simple_hash("a/b_spec.spl", 5))
+    it "simple_hash differs for a different seed":
+        expect(simple_hash("a/b_spec.spl", 5) != simple_hash("a/b_spec.spl", 6)).to_equal(true)
+
+describe "test_level_detect helpers":
+    it "is_ascii_digit_char accepts 7":
+        expect(is_ascii_digit_char("7")).to_equal(true)
+    it "is_ascii_digit_char rejects a letter":
+        expect(is_ascii_digit_char("a")).to_equal(false)
+    it "strip_order_prefix keeps a one-digit prefix":
+        expect(strip_order_prefix("1_unit")).to_equal("1_unit")
+    it "strip_order_prefix keeps a too-short segment":
+        expect(strip_order_prefix("01_")).to_equal("01_")
+    it "path_level_segments drops empty segments":
+        expect(path_level_segments("/test//01_unit/").len()).to_equal(2)
+    it "segments_contain finds a whole segment":
+        expect(segments_contain(["test", "unit"], "unit")).to_equal(true)
+    it "segments_contain does not match a substring":
+        expect(segments_contain(["community"], "unit")).to_equal(false)
+    it "shared classifies as unit":
+        expect(test_level_of_path("test/shared/x_spec.spl")).to_equal(1)
+    it "feature classifies as system":
+        expect(test_level_of_path("test/feature/x_spec.spl")).to_equal(3)
+    it "unit wins over integration when both segments exist":
+        expect(test_level_of_path("test/unit/integration/x_spec.spl")).to_equal(1)
+    it "level code 0 matches every path":
+        expect(test_level_matches("anything/x_spec.spl", 0)).to_equal(true)
+    it "a non-zero level code rejects an unclassified path":
+        expect(test_level_matches("anything/x_spec.spl", 1)).to_equal(false)

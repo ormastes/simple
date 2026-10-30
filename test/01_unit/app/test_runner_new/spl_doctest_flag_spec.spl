@@ -1,0 +1,67 @@
+"""How `--spl-doctest` is recognised, parsed and scoped.
+
+The client must see the flag before any daemon forwarding (the light-daemon
+protocol drops it), the argument parser must set `spl_doctest`, and the
+explicit target must narrow discovery while `--whole` must not.
+
+# @req REQ-TESTRUNNER-COMMENT-KIND
+"""
+
+use std.spec.*
+use app.test_runner_new.test_runner_client.{has_spl_doctest_flag}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_types.{doctest_discovery_scope_path, production_spl_doctest_roots}
+
+describe "has_spl_doctest_flag":
+    it "is true when the flag is present":
+        expect(has_spl_doctest_flag(["--spl-doctest", "a.spl"])).to_equal(true)
+    it "is true when the flag follows the target":
+        expect(has_spl_doctest_flag(["a.spl", "--spl-doctest"])).to_equal(true)
+    it "is false without the flag":
+        expect(has_spl_doctest_flag(["a.spl"])).to_equal(false)
+    it "is false for no arguments":
+        expect(has_spl_doctest_flag([])).to_equal(false)
+    it "does not match the sdoctest flag":
+        expect(has_spl_doctest_flag(["--sdoctest", "a.spl"])).to_equal(false)
+    it "does not match a prefix of the flag":
+        expect(has_spl_doctest_flag(["--spl-doctest-extra"])).to_equal(false)
+    it "does not match a flag spelled with an equals value":
+        expect(has_spl_doctest_flag(["--spl-doctest=1"])).to_equal(false)
+
+describe "parse_test_args":
+    it "sets spl_doctest from the flag":
+        expect(parse_test_args(["--spl-doctest", "a.spl"]).spl_doctest).to_equal(true)
+    it "leaves spl_doctest false by default":
+        expect(parse_test_args(["a.spl"]).spl_doctest).to_equal(false)
+    it "keeps the target path":
+        expect(parse_test_args(["--spl-doctest", "build/x.spl"]).path).to_equal("build/x.spl")
+    it "marks the target explicit":
+        expect(parse_test_args(["--spl-doctest", "build/x.spl"]).path_explicit).to_equal(true)
+    it "does not enable sdoctest":
+        expect(parse_test_args(["--spl-doctest", "a.spl"]).sdoctest).to_equal(false)
+    it "sets spl_doctest for --whole":
+        expect(parse_test_args(["--whole"]).spl_doctest).to_equal(true)
+    it "accepts the flag after the target":
+        val o = parse_test_args(["build/x.spl", "--spl-doctest"])
+        expect(o.spl_doctest).to_equal(true)
+        expect(o.path).to_equal("build/x.spl")
+    it "records the compiler selection next to the flag":
+        expect(parse_test_args(["--spl-doctest", "--compiler=phase2", "a.spl"]).compiler).to_equal("phase2")
+
+describe "doctest_discovery_scope_path":
+    it "is the explicit target":
+        expect(doctest_discovery_scope_path(parse_test_args(["--spl-doctest", "build/x.spl"]))).to_equal("build/x.spl")
+    it "is empty when no target is given":
+        expect(doctest_discovery_scope_path(parse_test_args(["--spl-doctest"]))).to_equal("")
+    it "is empty for --whole even with a target":
+        expect(doctest_discovery_scope_path(parse_test_args(["--whole", "test"]))).to_equal("")
+
+describe "production_spl_doctest_roots":
+    it "covers the library, the compiler and the apps":
+        val roots = production_spl_doctest_roots()
+        expect(roots.contains("src/lib/")).to_equal(true)
+        expect(roots.contains("src/compiler/")).to_equal(true)
+        expect(roots.contains("src/app/")).to_equal(true)
+    it "does not sweep the test tree":
+        for r in production_spl_doctest_roots():
+            expect(r.starts_with("test")).to_equal(false)

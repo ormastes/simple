@@ -6,19 +6,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
+$RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $ModuleDir = Join-Path $RootDir ".spipe\spipe"
-$ExampleDir = Join-Path $RootDir "examples\spipe"
+$ExampleDir = Join-Path $RootDir "examples\05_stdlib\spipe"
 
 Set-Location $RootDir
 if ($DryRun) {
     Write-Output "would_init_submodules .spipe/spipe"
 } else {
     git submodule update --init --recursive -- .spipe/spipe
+    if ($LASTEXITCODE -ne 0) {
+        throw "setup-spipe-submodule: git submodule update failed with exit code $LASTEXITCODE"
+    }
 }
 
 if (-not $DryRun) {
-    & powershell -ExecutionPolicy Bypass -File "scripts\check-spipe-submodule-gitlinks.ps1" --repair | Out-Null
+    & powershell -ExecutionPolicy Bypass -File "scripts\check\check-spipe-submodule-gitlinks.ps1" --check
+    if ($LASTEXITCODE -ne 0) {
+        throw "setup-spipe-submodule: gitlink check failed with exit code $LASTEXITCODE; index was not repaired"
+    }
 }
 
 $SpPipeDir = Join-Path $RootDir ".spipe"
@@ -62,6 +68,9 @@ if ((Test-Path $Cli) -and -not $DryRun) {
     } else {
         node $Cli doc-link $RootDir $DocRoot | Out-Null
     }
+    if ($LASTEXITCODE -ne 0) {
+        throw "setup-spipe-submodule: SPipe doc-link failed with exit code $LASTEXITCODE"
+    }
 }
 
 $setup = Join-Path $ModuleDir "scripts\setup-spipe-links.ps1"
@@ -82,3 +91,6 @@ if ($DocRoot -ne "") {
 }
 
 & powershell -ExecutionPolicy Bypass -File $setup @argsList
+if ($LASTEXITCODE -ne 0) {
+    throw "setup-spipe-submodule: delegated link setup failed with exit code $LASTEXITCODE"
+}

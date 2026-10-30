@@ -1,0 +1,75 @@
+# @req REQ-TESTRUNNER-PHASE2-4KINDS
+# @cover src/app/test_runner_new/test_runner_single.spl 5%
+"""
+# Test runner runs the md test kind
+
+**Feature IDs:** #test-runner-phase2
+**Category:** Tooling
+
+## Overview
+
+`simple test --no-session-daemon <file>.md` runs the Markdown code fences
+(sdoctest). A green fence is reported PASS with exit 0, a red fence FAIL with
+exit 1, and with `--compiler=phase2` the fences run on the phase2-built CLI
+named by SIMPLE_PHASE2_FULL_CLI (a recording stand-in here).
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, secure_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.io_runtime.{file_hash_sha256_or_empty}
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn new_root() -> text:
+    secure_temp_dir(_tp_get_temp_dir(), "md-kind-").unwrap().replace("\\", "/")
+
+fn write_md(root: text, expected: i64) -> text:
+    val path = root + "/" + ("green" if expected == 42 else "red") + ".md"
+    file_write(path, "# tiny\n\n```simple\nval x = 6 * 7\nassert x == {expected}\n```\n")
+    path
+
+# Recording stand-in for the phase2-built CLI: logs its argv, runs the real binary.
+fn write_phase2_cli(root: text) -> text:
+    val path = root + "/phase2_simple"
+    file_write(path, "#!/bin/sh\necho \"phase2-invoked $*\" >> \"{path}.log\"\nexec \"{real_binary()}\" \"$@\"\n")
+    process_run_bounded("chmod", ["+x", path], 10000, 65536)
+    path
+
+# Env is passed through `env` to the child only; this process's env is untouched.
+fn run_md(md: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), ["test", "--no-session-daemon", md], 300000, 4194304)
+    (out + err, code)
+
+fn run_md_phase2(cli: text, md: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded("env", ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=" + file_hash_sha256_or_empty(cli), real_binary(), "test", "--compiler=phase2", "--no-session-daemon", md], 300000, 4194304)
+    (out + err, code)
+
+describe "simple test md kind":
+    # @capture(exec)
+    it "reports a green md fence as PASS and a red one as FAIL":
+        val root = new_root()
+        val (green, green_code) = run_md(write_md(root, 42))
+        expect(green_code).to_equal(0)
+        expect(green).to_contain("SDoctest Results: 1 total, 1 passed, 0 failed")
+        val (red, red_code) = run_md(write_md(root, 43))
+        expect(red_code).to_equal(1)
+        expect(red).to_contain("SDoctest Results: 1 total, 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "runs md fences on the phase2 CLI with --compiler=phase2":
+        val root = new_root()
+        val cli = write_phase2_cli(root)
+        val (green, green_code) = run_md_phase2(cli, write_md(root, 42))
+        expect(green_code).to_equal(0)
+        expect(green).to_contain("SDoctest Results: 1 total, 1 passed, 0 failed")
+        val (red, red_code) = run_md_phase2(cli, write_md(root, 43))
+        expect(red_code).to_equal(1)
+        expect(red).to_contain("SDoctest Results: 1 total, 0 passed, 1 failed")
+        expect(file_read(cli + ".log")).to_contain("phase2-invoked")

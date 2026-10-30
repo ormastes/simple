@@ -1,0 +1,122 @@
+use std.spec.*
+use std.test_runner.sdoctest.types.{SdoctestBlock}
+use std.test_runner.sdoctest.extractor.{extract_blocks_from_content, strip_doctest_prompts}
+use std.test_runner.sdoctest.transcript.{parse_sdoctest_transcript, sdoctest_output_matches, sdoctest_render_command, sdoctest_is_statement}
+
+fn extract(parts: [text]) -> [SdoctestBlock]:
+    extract_blocks_from_content(parts.join("\n"), "doc.md")
+
+describe "sdoctest expected-output markers: extraction":
+    it "strips the >>> prompt from a transcript block":
+        val bs = extract(["```sdoctest", ">>> 1 + 1", "2", "```"])
+        expect(bs[0].code).to_equal("1 + 1")
+
+    it "drops the expected-output line from the executable code":
+        val bs = extract(["```sdoctest", ">>> 1 + 1", "2", "```"])
+        expect(bs[0].code.contains("2")).to_equal(false)
+
+    it "keeps the full transcript including expected output":
+        val bs = extract(["```sdoctest", ">>> 1 + 1", "2", "```"])
+        expect(bs[0].transcript).to_equal(">>> 1 + 1\n2")
+
+    it "joins ... continuation lines as extra code lines":
+        val bs = extract(["```sdoctest", ">>> fn f():", "...     1", ">>> f()", "1", "```"])
+        expect(bs[0].code).to_equal("fn f():\n    1\nf()")
+
+    it "leaves a prompt-free sdoctest fence untouched":
+        val bs = extract(["```sdoctest", "val a = 1", "assert(a == 1)", "```"])
+        expect(bs[0].code).to_equal("val a = 1\nassert(a == 1)")
+        expect(strip_doctest_prompts(["val a = 1"]).len()).to_equal(1)
+
+    it "gives a simple fence no transcript":
+        val bs = extract(["```simple", "val a = 1", "```"])
+        expect(bs[0].transcript).to_equal("")
+
+describe "sdoctest transcript parsing":
+    it "reports an unprompted body as not prompted":
+        val t = parse_sdoctest_transcript("val a = 1")
+        expect(t.prompted).to_equal(false)
+        expect(t.code).to_equal("val a = 1")
+
+    it "collects the expected output after a prompt":
+        val t = parse_sdoctest_transcript(">>> 1 + 1\n2")
+        expect(t.prompted).to_equal(true)
+        expect(t.expected).to_equal("2")
+
+    it "collects multi-line expected output":
+        val t = parse_sdoctest_transcript(">>> 1 + 1\nline one\nline two")
+        expect(t.expected).to_equal("line one\nline two")
+
+    it "collects expected output across two prompts":
+        val t = parse_sdoctest_transcript(">>> 1 + 1\n2\n>>> 3 + 4\n7")
+        expect(t.expected).to_equal("2\n7")
+
+    it "has empty expected output when no output follows":
+        val t = parse_sdoctest_transcript(">>> val a = 1")
+        expect(t.expected).to_equal("")
+
+    it "wraps an expression so its value is printed":
+        val t = parse_sdoctest_transcript(">>> 1 + 1\n2")
+        expect(t.code.contains("print __r")).to_equal(true)
+
+    it "does not wrap a val statement":
+        val t = parse_sdoctest_transcript(">>> val a = 1\n")
+        expect(t.code).to_equal("val a = 1")
+
+describe "sdoctest statement detection":
+    it "treats val and var as statements":
+        expect(sdoctest_is_statement("val a = 1")).to_equal(true)
+        expect(sdoctest_is_statement("var a = 1")).to_equal(true)
+
+    it "treats print as a statement":
+        expect(sdoctest_is_statement("print 1")).to_equal(true)
+
+    it "treats an assignment as a statement":
+        expect(sdoctest_is_statement("a = 2")).to_equal(true)
+
+    it "treats a comparison as an expression":
+        expect(sdoctest_is_statement("a == 2")).to_equal(false)
+
+    it "treats an arithmetic expression as an expression":
+        expect(sdoctest_is_statement("1 + 1")).to_equal(false)
+
+    it "ignores an equals sign inside a string":
+        expect(sdoctest_is_statement("\"a = b\"")).to_equal(false)
+
+    it "treats an empty or comment line as a statement":
+        expect(sdoctest_is_statement("")).to_equal(true)
+        expect(sdoctest_is_statement("# note")).to_equal(true)
+
+    it "renders a statement unchanged":
+        expect(sdoctest_render_command("val a = 1", 0)).to_equal("val a = 1")
+
+    it "names the wrapper function by index":
+        expect(sdoctest_render_command("1 + 1", 3).contains("__sdoctest_expr_3")).to_equal(true)
+
+describe "sdoctest output matching":
+    it "matches identical text":
+        expect(sdoctest_output_matches("2", "2")).to_equal(true)
+
+    it "rejects different text":
+        expect(sdoctest_output_matches("2", "3")).to_equal(false)
+
+    it "ignores trailing newlines on actual":
+        expect(sdoctest_output_matches("2\n", "2")).to_equal(true)
+
+    it "ignores trailing newlines on expected":
+        expect(sdoctest_output_matches("2", "2\n\n")).to_equal(true)
+
+    it "normalizes CRLF":
+        expect(sdoctest_output_matches("a\r\nb\r\n", "a\nb")).to_equal(true)
+
+    it "keeps significant leading spaces":
+        expect(sdoctest_output_matches("  2", "2")).to_equal(false)
+
+    it "keeps significant interior blank lines":
+        expect(sdoctest_output_matches("a\n\nb", "a\nb")).to_equal(false)
+
+    it "matches empty with empty":
+        expect(sdoctest_output_matches("", "")).to_equal(true)
+
+    it "rejects empty actual against non-empty expected":
+        expect(sdoctest_output_matches("", "2")).to_equal(false)

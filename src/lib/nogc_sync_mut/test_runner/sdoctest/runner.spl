@@ -10,6 +10,7 @@ use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.sffi.cli_args.{cli_get_args}
 use std.test_runner.test_executor_parsing.{find_simple_binary}
+use std.test_runner.compiler_select.{select_test_child_binary}
 use nogc_sync_mut.platform.{get_host_os, get_host_arch}
 use std.test_runner.test_runner_types.{TestOptions, TEST_OUTPUT_CAPTURE_BYTES, doctest_discovery_scope_path}
 use std.test_runner.test_runner_files.{strip_ansi}
@@ -325,7 +326,16 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
     file_atomic_write(temp_path, code)
 
     # Preserve argv boundaries through the native bounded process facade.
-    val binary = find_sdoctest_binary()
+    # --compiler=<sel> pins the child binary; refuse rather than fall back.
+    var binary = ""
+    match select_test_child_binary(options.compiler):
+        case Err(message):
+            return BlockResult(
+                block: block, status: BlockStatus.Error,
+                duration_ms: 0, stdout: "", stderr: "", error: "test-runner: " + message
+            )
+        case Ok(selected):
+            binary = if selected != "": selected else: find_sdoctest_binary()
     # Block-level @modifier takes priority over env-level run-config
     val block_run_config = block.get_run_config()
     val run_config = if block_run_config != "": block_run_config else: find_env_run_config(config, env_name)
@@ -346,6 +356,20 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
 
     # Determine status
     val should_fail = block.has_modifier_should_fail()
+
+    # A child that died abnormally (e.g. a top-level assert panics the
+    # interpreter) but reported why on stderr is a failed block, not an error.
+    if exit_code == -1 and stderr != "" and not stderr.contains("TIMEOUT") and not stderr.contains("timed out"):
+        if should_fail:
+            return BlockResult(
+                block: block, status: BlockStatus.Passed,
+                duration_ms: duration_ms, stdout: stdout, stderr: stderr, error: ""
+            )
+        return BlockResult(
+            block: block, status: BlockStatus.Failed,
+            duration_ms: duration_ms, stdout: stdout, stderr: stderr,
+            error: extract_block_error(stderr: stderr, stdout: stdout)
+        )
 
     if exit_code == -1:
         val process_error = if stderr.contains("TIMEOUT") or stderr.contains("timed out"):
@@ -428,6 +452,10 @@ fn build_temp_code(block: SdoctestBlock, config: SdoctestConfig, preamble: text)
         parts.push(parse_sdoctest_transcript(block.transcript).code)
     else:
         parts.push(block.code)
+
+    # A declarations-only fence (fn/struct/enum) is a valid doc example; give
+    # the module one top-level statement so running it is not rejected.
+    parts.push("val _sdoctest_done = 0")
 
     parts.join("\n\n")
 

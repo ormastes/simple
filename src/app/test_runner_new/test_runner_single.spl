@@ -41,6 +41,12 @@ use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
 # so a crash reported "no examples executed" instead of CRASHED. Reused rather
 # than reimplemented on purpose -- a second copy of this classification would
 # drift out of sync exactly as the duplicated composite-grammar parsers did.
+use std.test_runner.compiler_select.{select_test_child_binary}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_config.{load_test_config}
+use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
+use std.test_runner.sdoctest.config.{load_sdoctest_config}
+use std.test_runner.sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
 use std.test_runner.test_executor_parsing.{make_result_from_output, spec_source_has_raw_assert}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
@@ -213,6 +219,7 @@ struct ChildRun:
     list_only: bool
     valid: bool
     error: text
+    compiler: text = ""
 
 fn _single_option_takes_value(arg: text) -> bool:
     """Whether a forwarded test option owns the following argv token.
@@ -308,10 +315,21 @@ fn parse_child_run(args: [text]) -> ChildRun:
     var path = ""
     var timeout_secs = 120
     var list_only = false
+    var compiler = ""
     var extra_paths: [text] = []
     var i = 0
     while i < args.len():
         val arg = args[i]
+        if arg.starts_with("--compiler="):
+            compiler = arg[11:]
+            i = i + 1
+            continue
+        if arg == "--compiler":
+            if i + 1 < args.len() and not args[i + 1].starts_with("-"):
+                compiler = args[i + 1]
+                i = i + 1
+            i = i + 1
+            continue
         if _single_option_takes_value(arg):
             if i + 1 >= args.len():
                 return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "missing value for " + arg)
@@ -362,7 +380,7 @@ fn parse_child_run(args: [text]) -> ChildRun:
         return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "expected .spl test file")
     if not file_exists(path):
         return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "test file not found")
-    ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: true, error: "")
+    ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: true, error: "", compiler: compiler)
 
 fn _shell_safe_child_binary_path(p: text) -> text:
     """Publish SIMPLE_TEST_BINARY in a form a POSIX shell can execute.
@@ -1222,8 +1240,53 @@ fn _refresh_tldr_companions(binary: text, spec_path: text):
     if code != 0:
         print "warning: test-runner: tldr refresh failed (exit {code}) {err.trim()}"
 
+fn _single_run_spl_doctest(args: [text]) -> i64:
+    # `--no-session-daemon` routes every `simple test` here (driver main.rs
+    # test_should_use_single_runner), so `--spl-doctest <file.spl>` used to be
+    # run as a plain spec: "no main function" / zero-examples, never a doctest.
+    val options = parse_test_args(args)
+    # Same refusal exit (2) as the spec lane when --compiler cannot be pinned.
+    match select_test_child_binary(options.compiler):
+        case Err(message):
+            print "error: test-runner: " + message
+            return 2
+        case Ok(_): ()
+    print "=== Running SPL Doctests ==="
+    print ""
+    val result = run_spl_doctest_mode(options, load_test_config())
+    print "SPL Doctest: {result.passed} passed, {result.failed} failed, {result.skipped} skipped"
+    if result.is_ok():
+        return 0
+    1
+
+# md test kind: a Markdown target (or --sdoctest) runs its sdoctest fences
+# here instead of being rejected as "expected .spl test file". Fences run on
+# the resolved --compiler; a compiler that cannot be pinned refuses (exit 2).
+fn _single_is_md_run(args: [text]) -> bool:
+    for arg in args:
+        if arg == "--sdoctest" or (not arg.starts_with("-") and arg.ends_with(".md")):
+            return true
+    false
+
+fn _single_run_md(args: [text]) -> i64:
+    val options = parse_test_args(args)
+    match select_test_child_binary(options.compiler):
+        case Err(message):
+            print "error: test-runner: " + message
+            return 2
+        case Ok(selected):
+            if selected != "":
+                env_set("SIMPLE_BINARY", selected)
+    val result = run_sdoctest_mode(options, load_sdoctest_config("config/sdoctest.sdn"))
+    print_sdoctest_summary(result)
+    if result.is_ok(): 0 else: 1
+
 fn main() -> i64:
     val args = clean_args()
+    if args.contains("--spl-doctest"):
+        return _single_run_spl_doctest(args)
+    if _single_is_md_run(args):
+        return _single_run_md(args)
     var run = parse_child_run(args)
     if not run.valid:
         print "Simple Test Runner child"
@@ -1275,7 +1338,16 @@ fn main() -> i64:
     else:
         env_set("SIMPLE_DI_TEST", "0")
 
-    val binary = find_simple_binary()
+    var binary = find_simple_binary()
+    # --compiler=phase2: execute the spec through the verified phase2 full CLI.
+    # Missing CLI/hash or a sha256 mismatch refuses to run (exit 2).
+    match select_test_child_binary(run.compiler):
+        case Err(message):
+            print "error: test-runner: " + message
+            return 2
+        case Ok(selected):
+            if selected != "":
+                binary = selected
     if binary == "":
         print "error: test-runner: canonical invoking candidate identity is unavailable or SIMPLE_BINARY does not match it"
         print "error: refusing to fall back to deployed bin/simple or a Rust seed"
