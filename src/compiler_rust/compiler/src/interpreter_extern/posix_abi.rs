@@ -22,8 +22,10 @@
 //! between those Simple statements and may itself change the thread's real
 //! errno. So the errno-address externs return the address of a per-thread
 //! cell holding the errno that the last call bridged here left behind. The
-//! cell is refreshed immediately after every libc call this module makes,
-//! which gives the same "immediate capture" the native lane gets.
+//! cell is refreshed immediately after every libc call this module makes and
+//! after every dynamic-SFFI call (`dynamic_sffi::call_fptr`, which reaches
+//! unbridged libc functions such as `link`), which gives the same "immediate
+//! capture" the native lane gets.
 //!
 //! Hosts: the errno-address name is only claimed on Linux/Android
 //! (`__errno_location`) and Darwin/FreeBSD/DragonFly (`__error`). On any
@@ -82,7 +84,7 @@ fn ptr<T>(value: i64) -> *mut T {
     value as usize as *mut T
 }
 
-fn capture_errno() {
+pub(crate) fn capture_errno() {
     let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     LAST_ERRNO.with(|cell| cell.set(errno));
 }
@@ -120,7 +122,15 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             "realpath" => libc::realpath(ptr(a[0]), ptr(a[1])) as i64,
             "readlink" => libc::readlink(ptr(a[0]), ptr(a[1]), a[2] as usize) as i64,
             "open" => {
-                let mode = if a.len() == 3 { a[2] as libc::c_uint } else { 0 };
+                // The two-argument runtime-core declaration has no mode; with
+                // O_CREAT give the conventional 0644 instead of a mode-000 file.
+                let mode = if a.len() == 3 {
+                    a[2] as libc::c_uint
+                } else if a[1] as libc::c_int & libc::O_CREAT != 0 {
+                    0o644
+                } else {
+                    0
+                };
                 libc::open(ptr(a[0]), a[1] as libc::c_int, mode) as i64
             }
             "read" => libc::read(a[0] as libc::c_int, ptr(a[1]), a[2] as usize) as i64,
