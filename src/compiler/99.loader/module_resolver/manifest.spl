@@ -10,7 +10,7 @@
 use compiler.frontend.ast.{AstModule, Node}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.loader.module_resolver.types.{ModuleResolver, DirectoryManifest, ChildModule, Capability}
-use compiler.common.error.{CompileError}
+use compiler.common.error.{CompileError, ErrorContext}
 use compiler.common.gc_config.{GcMode, GcConfig}
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 
@@ -92,7 +92,7 @@ impl ModuleResolver:
         val source = match file_read_opt(init_path):
             Some(content): content
             nil:
-                return CompileError.io("failed to read file: {init_path}")
+                return Err(CompileError.io("failed to read file: {init_path}"))
 
         val manifest = self.parse_manifest(source, dir_path)?
 
@@ -130,9 +130,10 @@ impl ModuleResolver:
             val child_caps = manifest.capabilities.map(&:name).join(", ")
             val parent_caps = parent_capabilities.map(&:name).join(", ")
 
-            return CompileError.semantic(
-                "capability violation in module `{manifest.name}`: child capabilities [{child_caps}] must be subset of parent [{parent_caps}]"
-            ).with_note("child modules can only restrict capabilities, not expand them")
+            return Err(CompileError.semantic_with_context(
+                "capability violation in module `{manifest.name}`: child capabilities [{child_caps}] must be subset of parent [{parent_caps}]",
+                ErrorContext.empty().with_note("child modules can only restrict capabilities, not expand them")
+            ))
 
         Ok(manifest)
 
@@ -155,7 +156,7 @@ impl ModuleResolver:
         val module = match parser.parse():
             Ok(m): m
             Err(err):
-                return CompileError.parse("failed to parse __init__.spl")
+                return Err(CompileError.parse("failed to parse __init__.spl"))
 
         self.extract_manifest(module, dir_path)
 
