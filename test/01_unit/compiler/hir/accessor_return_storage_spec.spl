@@ -1,0 +1,72 @@
+# Runtime qualification requires a rebuilt self-hosted producer; no seed fallback.
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Expressions.accessor_forwarding.*
+
+fn accessor_storage_read(method_type: HirType?) -> HirExpr?:
+    var lowering = HirLowering.new()
+    val span = Span.new(10, 20, 3, 4)
+    val owner = lowering.symbols.define("StorageOwner", SymbolKind.Struct, nil, span, Visibility.Public, false, nil)
+    val method = lowering.symbols.define("StorageOwner::get_value", SymbolKind.Method, method_type, span, Visibility.Public, false, nil)
+    val fields: Dict<text, HirType> = {}
+    lowering.struct_field_types_by_name["StorageOwner"] = fields
+    val base = HirExpr(kind: HirExprKind.UnitLit, has_type_: false, span: span)
+    lowering.lower_accessor_read(base, "value", owner.id, span)
+
+fn accessor_storage_expect_call(expression: HirExpr):
+    match expression.kind:
+        case HirExprKind.MethodCall(_, name, arguments, _):
+            expect(name).to_equal("get_value")
+            expect(arguments.len()).to_equal(0)
+        case _: assert(false)
+    expect(expression.span.start).to_equal(10)
+    expect(expression.span.end).to_equal(20)
+
+fn accessor_storage_expect_absent(method_type: HirType?):
+    if val expression = accessor_storage_read(method_type):
+        accessor_storage_expect_call(expression)
+        expect(expression.has_type_).to_equal(false)
+        # Presence remains false: the concrete placeholder is not inferred metadata.
+        match expression.type_.kind:
+            case HirTypeKind.Error: ()
+            case _: assert(false)
+    else: assert(false)
+
+describe "Accessor return storage obeys the concrete HirExpr type contract":
+    it "stores a declared return type and its span without an Option wrapper":
+        step("Lower a real accessor through the symbol table and inspect its concrete type")
+        val returned = HirType(kind: HirTypeKind.Int(32, false), span: Span.new(31, 38, 7, 2))
+        val signature = HirType(kind: HirTypeKind.Function([], returned, []), span: Span.empty())
+        if val expression = accessor_storage_read(Some(signature)):
+            accessor_storage_expect_call(expression)
+            expect(expression.has_type_).to_equal(true)
+            match expression.type_.kind:
+                case HirTypeKind.Int(bits, signed):
+                    expect(bits).to_equal(32)
+                    expect(signed).to_equal(false)
+                case _: assert(false)
+            expect(expression.type_.span.start).to_equal(31)
+            expect(expression.type_.span.end).to_equal(38)
+        else: assert(false)
+
+    it "retains an inferred return present in function metadata":
+        val returned = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+        val signature = HirType(kind: HirTypeKind.Function([], returned, []), span: Span.empty())
+        if val expression = accessor_storage_read(Some(signature)):
+            accessor_storage_expect_call(expression)
+            expect(expression.has_type_).to_equal(true)
+            match expression.type_.kind:
+                case HirTypeKind.Bool: ()
+                case _: assert(false)
+        else: assert(false)
+
+    it "keeps absent method metadata absent while retaining the accessor call":
+        accessor_storage_expect_absent(nil)
+
+    it "keeps nonfunction metadata absent while retaining the accessor call":
+        accessor_storage_expect_absent(Some(HirType(kind: HirTypeKind.Error, span: Span.empty())))

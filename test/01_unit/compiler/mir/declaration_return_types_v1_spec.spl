@@ -6,6 +6,8 @@ These examples call the actual compact prescan with projected declarations.
 use std.spec.*
 use app.io.mod.{file_read}
 use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
@@ -14,6 +16,8 @@ use compiler.hir.hir_definitions.*
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.hir.return_type_interface_v1.*
 use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_data.{bootstrap_fn_param_hir_types_lookup}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1}
 use compiler.mir.hir_declaration_summary_v1.*
 use compiler.mir._MirLowering.module_lowering.*
@@ -108,3 +112,42 @@ describe "compact declaration return-type prescan":
                 expect(rti_row_canonical_text_v1(compact_row)).to_equal(rti_row_canonical_text_v1(full_row))
                 compared = compared + 1
         expect(compared).to_equal(2)
+
+    it "retains qualified parameter signatures when bare callable names collide":
+        for compact in [false, true]:
+            val lane = if compact: "compact" else: "full"
+            val left = compact_rti_hir("fn qualified_slot(value: any) -> bool:\n    true\n", "src/qualified_params/{lane}_left.spl")
+            val right = compact_rti_hir("fn qualified_slot(value: i64) -> bool:\n    true\n", "src/qualified_params/{lane}_right.spl")
+            val nominal = compact_rti_hir("class Payload:\n    value: i64\nfn qualified_slot(value: Payload) -> bool:\n    true\n", "src/qualified_params/{lane}_nominal.spl")
+            var lowering = MirLowering.new(left.symbols)
+            for provider in [left, right, nominal]:
+                if compact:
+                    lowering.prescan_declaration_callables_v1(compact_rti_declarations(provider))
+                else:
+                    for key in provider.functions.keys():
+                        val function: HirFunction = provider.functions[key]
+                        lowering.prescan_one_function_v1(provider.name, provider.symbols,
+                            function.symbol, function.name, function.is_extern, function.is_method,
+                            function.is_static, function.has_export_attr, function.func_attr,
+                            function.return_type, function.params)
+            expect(lowering.errors.len()).to_equal(0)
+            # The nominal provider poisons only the unowned bare name and its
+            # own exact key; neither valid provider may lose its signature.
+            expect(bootstrap_fn_param_hir_types_lookup("qualified_slot") == nil).to_equal(true)
+            expect(bootstrap_fn_param_hir_types_lookup("qualified_params.{lane}_nominal.qualified_slot") == nil).to_equal(true)
+            var consumer = SymbolTable.new()
+            val any_call = consumer.define("qualified_params.{lane}_left.qualified_slot", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, "qualified_params.{lane}_left")
+            val int_call = consumer.define("qualified_params.{lane}_right.qualified_slot", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, "qualified_params.{lane}_right")
+            var caller = MirLowering.new(consumer)
+            val any_params = caller.resolved_call_hir_param_types(any_call)
+            val int_params = caller.resolved_call_hir_param_types(int_call)
+            expect(any_params.len()).to_equal(1)
+            expect(int_params.len()).to_equal(1)
+            if any_params.len() == 1:
+                match any_params[0].kind:
+                    case HirTypeKind.Any: ()
+                    case _: fail("qualified Any signature was lost or replaced by a same-named owner")
+            if int_params.len() == 1:
+                match int_params[0].kind:
+                    case HirTypeKind.Int(bits, _): expect(bits).to_equal(64)
+                    case _: fail("qualified integer signature was replaced by a same-named owner")
