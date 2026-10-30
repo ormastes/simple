@@ -19,14 +19,16 @@ the raw wrapper, even though the driver imports the other one. Importing straigh
 matches no arm on a plain `text`, so `SosixHostedFileDriver.service` returned
 nil. The same code passes under `simple run` without `std.spec`.
 
-This reproduces the mechanism that
-`bare_name_registry_collision_trigger_conditions_2026-07-30.md` could not pin
-down, for functions: the trigger is a second module with a same-named
-top-level `fn` being loaded anywhere in the process.
+The trigger is a second module with a same-named top-level `fn` being loaded
+anywhere in the process. The pair was already known: the self-hosted compiler
+warns "public function 'file_read_text_at' has 2 co-compiled definitions with 2
+differing signatures" (`src/compiler/10.frontend/core/interpreter/eval_tables.spl`),
+and `src/lib/nogc_sync_mut/fs/host_path.spl` cites it as the canonical example.
+Related, for structs/enums: `bare_name_registry_collision_trigger_conditions_2026-07-30.md`.
 
 ## Fix (library)
-The raw SFFI wrapper is renamed `file_read_text_at_raw` (same pattern as
-`file_size_raw`) in `nogc_sync_mut/sffi/fs.spl`, and in the re-export lists in
+The raw SFFI wrapper is renamed `file_read_text_at_raw` (same sffi-local
+`_raw` convention as `file_read_bytes_raw` and `file_remove_raw`) in `nogc_sync_mut/sffi/fs.spl`, and in the re-export lists in
 `gc_sync_mut`, `gc_async_mut` and `nogc_async_mut` `sffi/fs.spl`. Nothing called
 it by its old name.
 
@@ -44,5 +46,5 @@ importing module's import table before the global bare-name table.
 
 ## Side note
 The spec example "round-trips through a native Windows-style backslash path"
-leaves files named like `\tmp\sosix_file_driver_winpath.txt` in the working
+leaves files named like `\var\folders\...\T\\sosix_file_driver_winpath.txt` in the working
 directory on macOS.
