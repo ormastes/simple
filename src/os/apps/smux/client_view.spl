@@ -11,6 +11,27 @@ pub fn client_input_hex(data: text) -> text:
         out = out + digits[value / 16:value / 16 + 1] + digits[value % 16:value % 16 + 1]
     return out
 
+# The input wire admits only complete UTF-8, so a scalar split across reads must
+# be held back rather than sent. Returns (bytes to send now, bytes to hold).
+pub fn client_input_wire_split(held: [u8], data: [u8]) -> ([u8], [u8]):
+    var joined: [u8] = []
+    for byte in held: joined.push(byte)
+    for byte in data: joined.push(byte)
+    val total = joined.len()
+    var back: i64 = 1
+    while back <= 3 and back <= total:
+        val byte = joined[total - back] as i64
+        if byte < 128 or byte >= 192:
+            var needed: i64 = 0
+            if byte >= 194 and byte <= 223: needed = 2
+            elif byte >= 224 and byte <= 239: needed = 3
+            elif byte >= 240 and byte <= 244: needed = 4
+            if needed > back:
+                return (joined[0:total - back], joined[total - back:])
+            return (joined, [])
+        back = back + 1
+    return (joined, [])
+
 pub fn client_reply_ids(reply: text, header: text) -> Result<[text], text>:
     if not reply.starts_with(header):
         return Err(reply)

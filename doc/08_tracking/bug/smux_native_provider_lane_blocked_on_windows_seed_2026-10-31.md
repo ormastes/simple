@@ -53,16 +53,25 @@ and `doc/08_tracking/bug` for these variables matched only
 `doc/03_plan/sys_test/smux_windows_phase3_features.md`, a manual procedure that
 names `SMUX_TEST_BINARY` and `SMUX_SHARED_CLIENTS_FIXTURE`. Nothing automates them.
 
-## Separate RED: split UTF-8 fragments
+## Resolved RED: split UTF-8 fragments
 
 `smux_client_input_spec.spl` cases "should preserve UTF-8 byte fragments split
 inside a scalar" and "should forward a prefixed unknown binding split inside its
-Unicode scalar" feed `bytes_to_text(bytes[0:1])`. `rt_bytes_to_text` is lossy before
+Unicode scalar" fed `bytes_to_text(bytes[0:1])`. `rt_bytes_to_text` is lossy before
 the decoder sees the input: `interpreter_extern/conversion.rs:192` and
 `runtime/src/value/sffi/file_io/file_ops.rs` both use `String::from_utf8_lossy`.
-Measured: a one-byte fragment reads back as `[239, 191, 189]`. No `.spl` change can
-recover it. Unblock: byte-preserving text in the runtime, or an owner decision to
-move the decoder's contract to `[u8]`, at which point the spec changes with it.
+Measured: a one-byte fragment reads back as `[239, 191, 189]`.
+
+Owner decision: text stays UTF-8. `client_input_feed` and the console `read`
+capability now carry `[u8]`. The input wire still admits only complete UTF-8
+(`interactive_protocol.spl` `smux_input_hex_decode`), so `client_input_wire_split`
+holds an incomplete tail in the client until its scalar completes.
+
+Runtime disagreement, noted and not changed: the C runtime's `rt_bytes_to_text`
+(`src/runtime/runtime.c:4236`) preserves bytes while the Rust runtime replaces them
+with U+FFFD. Malformed console bytes therefore reach the wire as U+FFFD under Rust,
+and as raw bytes the server refuses under C. Only the Windows provider exists today
+and it emits valid UTF-8, so this is not reachable yet.
 
 ## Seed bugs
 
@@ -85,13 +94,13 @@ move the decoder's contract to `[u8]`, at which point the spec changes with it.
 
 2. `"nope".to_int()` and `"1x".to_int()` return 0, so `?? default` never fires.
    Multi-character parse failure in `interpreter_method/string.rs` around :421. Other
-   smux sites using `.to_int() ?? <nonzero>` carry the same assumption, such as
-   `pane_io_service.spl:120`.
+   smux sites using `.to_int() ?? <nonzero>` may carry the same assumption;
+   `pane_io_service.spl` was fixed by `pane_csi_forward_count`.
 
 3. Seed `native-build` panics on Windows for any entry (see above). Repro:
    `seed native-build --source src/lib --entry-closure --entry hello.spl --output hello.exe`.
 
-4. `rt_bytes_to_text` is lossy, as above.
+4. `rt_bytes_to_text` disagrees between runtimes, as above.
 
 ## Native-build attempts recorded 2026-10-31 (unblock condition)
 
