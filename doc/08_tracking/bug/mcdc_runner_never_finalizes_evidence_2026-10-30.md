@@ -7,18 +7,15 @@
 - Plain and/or fixture degrades with `degraded=smf-compile-error:struct_i64_has_no_field_named_recorder`
   (fixer: fix/mcdc-wrapper-compile).
 - `--no-session-daemon` single-file lane prints nothing about MC/DC (fixer: fix/single-lane-mcdc).
-- Known-red specs (pending these fixes), all in test/03_system/app/test_runner/, each marked in-file
-  (2026-10-30) so a suite sweep is not silently red:
-  - mcdc_runner_applies_spec.spl "reports MC/DC decisions..." -- skip() linking here; body in
-    check_reports_decisions().
-  - mcdc_no_session_daemon_spec.spl "reports decisions for the instrumented single-file run" --
-    skip() linking here; body in check_nodaemon_reports_decisions(). It was a vacuous green
-    before: the fixture dir `nodaemon_decisions/` satisfied `contains("decision")`. Renamed to
-    `nodaemon_report/`, and the check now ignores the case path.
-  - mcdc_degrade_and_red_spec.spl "does not degrade a clean green spec" -- skip() linking here;
-    body in check_clean_green_not_degraded().
-  - mcdc_instrument_clean_spec.spl (3 examples) -- file tagged `@tag:in-development`.
-  To unblock: restore each skip() as `it "<name>": <body fn>()` (or drop the tag) and rerun.
+- Gated (2026-10-30, user decision): every former red example (runner_applies "reports MC/DC
+  decisions", no_session_daemon "reports decisions", degrade_and_red "does not degrade a clean
+  green spec", and the 3 instrument_clean shapes) now runs as a real example only when
+  SIMPLE_MCDC_COMPILER names a probe-capable compiler (same gate as
+  mcdc_real_instrumentation_spec, #5355), and is skipped with that reason otherwise. Under the
+  Rust seed, a sibling example asserts the explicit mcdc-unavailable:compiler-lacks-probe-emission
+  degrade (#5343) and, in the directory lane, "MC/DC: NOT compliant". The no_session_daemon
+  fixture dir is `nodaemon_report/` (it used to be `nodaemon_decisions/`, which made the check
+  vacuous).
 - No longer red: mcdc_off_and_waiver_spec.spl "names the refusal in the output" is green since
   #5336 (refusal, exit 2).
   Related: mcdc_invalid_off_not_refused_mode_stays_off_2026-10-30.md

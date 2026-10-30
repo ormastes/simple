@@ -204,3 +204,45 @@ impl SdoctestRunResult:
 # Exports
 # =========================================================================
 
+
+# =========================================================================
+# should_fail classification
+# =========================================================================
+
+# A `should_fail` example passes only when the EXAMPLE itself failed: an
+# assertion, a panic, or a runtime/semantic error raised by its code. A child
+# that never really ran the example (missing binary, spawn failure, unknown
+# extern, unresolvable module, or a death by signal with no assert/panic
+# diagnostic) is infrastructure, not the expected failure, and must never
+# read as a pass. Returns "" for a genuine example failure, otherwise the
+# infrastructure reason. exit_code 0 is not a failure at all. Consequence by
+# design: an example whose point is a bad `use` or an unbacked extern cannot
+# be a should_fail example (it reads as an Error).
+fn should_fail_infra_reason(exit_code: i64, stderr: text) -> text:
+    if exit_code == 0:
+        return ""
+    # Seed and self-hosted (loader / native lane) wordings.
+    if stderr.contains("unknown extern function") or stderr.contains("Unknown extern") or
+            stderr.contains("unimplemented extern function") or stderr.contains("undefined symbol: "):
+        return "infrastructure: unknown extern (not the example's own failure): " + _sf_first_error_line(stderr)
+    if stderr.contains("Cannot resolve module") or stderr.contains("Module resolution error") or
+            stderr.contains("Module not found") or stderr.contains("module not found"):
+        return "infrastructure: module resolution failed (not the example's own failure): " + _sf_first_error_line(stderr)
+    if exit_code == 126 or exit_code == 127:
+        return "infrastructure: child binary could not be executed (exit {exit_code})"
+    if exit_code == -1:
+        # -1 is the runtime's sentinel for timeout, spawn failure AND signal
+        # death. Only an assert/panic abort carries a diagnostic naming it.
+        if stderr.contains("Assertion violation") or stderr.contains("assertion failed") or
+                stderr.contains("PANIC") or stderr.contains("panicked") or stderr.contains("panic:"):
+            return ""
+        if stderr == "":
+            return "infrastructure: child failed to start or died without a diagnostic"
+        return "infrastructure: child died abnormally without an assert/panic diagnostic: " + _sf_first_error_line(stderr)
+    ""
+
+fn _sf_first_error_line(stderr: text) -> text:
+    for line in stderr.split("\n"):
+        if line.contains("error") or line.contains("Error"):
+            return line.trim()
+    stderr.trim()

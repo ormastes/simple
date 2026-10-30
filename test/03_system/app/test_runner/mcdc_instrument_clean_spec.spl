@@ -1,7 +1,4 @@
 # @req REQ-MCDC-ENFORCEMENT-005
-# @tag:in-development
-# All three examples are red until the MC/DC wrapper compiles these shapes:
-# doc/08_tracking/bug/mcdc_runner_never_finalizes_evidence_2026-10-30.md
 """
 # Specs that used to break the instrumented wrapper now instrument cleanly
 
@@ -10,6 +7,13 @@ interpreter: a stdlib namespace helper (`_namespace_finish` undefined), a
 struct-field access that the wrapper rewrote to `i64.recorder`, and a
 `.to_equal(false)` assertion rejected by a lint. Each must pass with no
 `degraded=` marker.
+
+## Which compiler
+Only a pure-Simple-built compiler emits MC/DC probes. The no-degrade examples
+run under the compiler named by `SIMPLE_MCDC_COMPILER` and are SKIPPED without
+one. Under the Rust seed (`SIMPLE_BINARY`), each shape must instead degrade
+explicitly as `mcdc-unavailable:compiler-lacks-probe-emission` with the
+`MC/DC: NOT compliant` summary line.
 """
 
 use std.spec.*
@@ -17,6 +21,10 @@ use std.spec.step
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.file_ops.{file_write}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_runner_execute.{mcdc_compiler_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN}
+
+val MCDC_COMPILER_GATE_REASON = "requires SIMPLE_MCDC_COMPILER naming a self-hosted (pure-Simple-built) compiler that emits MC/DC probes; the Rust seed cannot"
+val SEED_GATE_REASON = "SIMPLE_BINARY emits MC/DC probes, so the seed's mcdc-unavailable degrade does not apply"
 
 val NAMESPACE_SRC = "test/01_unit/fs_driver/instance_test.spl"
 val RECORDER = "use std.spec\nstruct Rec:\n    recorder: i64\n    count: i64\ndescribe \"recorder field\":\n    it \"reads a field named recorder\":\n        val r = Rec(recorder: 4, count: 2)\n        if r.recorder > 1 and r.count < 5:\n            expect(r.recorder).to_equal(4)\n"
@@ -39,10 +47,28 @@ fn make_case(case: text, name: text, body: text) -> text:
     file_write(dir + "/" + name + "_spec.spl", body)
     dir
 
+fn mcdc_compiler() -> text:
+    env_get("SIMPLE_MCDC_COMPILER")
+
+fn probe_capable_compiler_absent() -> bool:
+    val compiler = mcdc_compiler()
+    compiler == "" or mcdc_compiler_lacks_probes(compiler)
+
+# An unset SIMPLE_BINARY is NOT a skip: the seed examples then fail with NO_BINARY.
+fn binary_emits_probes() -> bool:
+    real_binary() != "" and not mcdc_compiler_lacks_probes(real_binary())
+
 fn run_dir(dir: text) -> (text, i64):
-    if real_binary() == "":
+    run_dir_with(real_binary(), dir, [])
+
+# The probe-capable lane forces MC/DC on, so "no degrade" cannot mean "MC/DC was off".
+fn run_dir_mcdc(dir: text) -> (text, i64):
+    run_dir_with(mcdc_compiler(), dir, ["SIMPLE_MCDC_MODE=on"])
+
+fn run_dir_with(binary: text, dir: text, envs: [text]) -> (text, i64):
+    if binary == "":
         return (NO_BINARY, 127)
-    val argv = UNSET_MCDC_ENV + [real_binary(), "test", dir, "--no-db", "--no-cache", "--assert-ran"]
+    val argv = UNSET_MCDC_ENV + envs + ["SIMPLE_BINARY=" + binary, binary, "test", dir, "--no-db", "--no-cache", "--assert-ran"]
     val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
     (out + err, code)
 
@@ -52,28 +78,69 @@ fn verdict_line(output: text) -> text:
             return line
     ""
 
-describe "instrumented wrapper compiles":
-    it "handles a spec importing the namespace module (no _namespace_finish undefined)":
-        step("Run the fs_driver instance spec, which pulls in the namespace module")
-        val dir = make_case("clean_namespace", "ns", "")
+# Case dir for one of the three shapes; the namespace shape copies a real spec.
+fn shape_case(prefix: text, shape: text) -> text:
+    if shape == "namespace":
+        val dir = make_case(prefix + "_namespace", "ns", "")
         process_run_bounded("cp", [NAMESPACE_SRC, dir + "/ns_spec.spl"], 10000, 65536)
-        val (output, _code) = run_dir(dir)
-        expect(output.contains("_namespace_finish")).to_equal(false)
-        expect(verdict_line(output).contains("degraded=")).to_equal(false)
+        return dir
+    if shape == "recorder":
+        return make_case(prefix + "_recorder", "rec", RECORDER)
+    make_case(prefix + "_false", "fe", FALSE_EQ)
 
-    it "handles a struct field named recorder (no i64 has no field recorder)":
-        step("Run the recorder-field fixture")
-        val dir = make_case("clean_recorder", "rec", RECORDER)
-        val (output, _code) = run_dir(dir)
-        expect(output.contains("has_no_field_named_`recorder`")).to_equal(false)
-        expect(output.contains("has no field named `recorder`")).to_equal(false)
-        expect(verdict_line(output)).to_contain("passed=1")
-        expect(verdict_line(output).contains("degraded=")).to_equal(false)
+fn check_seed_degrade(shape: text):
+    step("Run the {shape} fixture on the seed")
+    val (output, _code) = run_dir(shape_case("seed", shape))
+    expect(verdict_line(output)).to_contain(MCDC_UNAVAILABLE_DEGRADE_TOKEN)
+    expect(output).to_contain("MC/DC: NOT compliant")
 
-    it "handles .to_equal(false) assertions in the wrapper":
-        step("Run the to_equal(false) fixture")
-        val dir = make_case("clean_false", "fe", FALSE_EQ)
-        val (output, _code) = run_dir(dir)
-        expect(output.contains("spipe_false_boolean_wrapper_assertions")).to_equal(false)
-        expect(verdict_line(output)).to_contain("passed=1")
-        expect(verdict_line(output).contains("degraded=")).to_equal(false)
+describe "instrumented wrapper compiles":
+    it "states the gates this file is skipped under, so it is never vacuous":
+        expect(MCDC_COMPILER_GATE_REASON).to_contain("SIMPLE_MCDC_COMPILER")
+        expect(SEED_GATE_REASON).to_contain("SIMPLE_BINARY")
+
+    skip_if(fn(): probe_capable_compiler_absent(), MCDC_COMPILER_GATE_REASON)(
+        "handles a spec importing the namespace module (no _namespace_finish undefined)",
+        fn():
+            step("Run the fs_driver instance spec, which pulls in the namespace module")
+            val (output, _code) = run_dir_mcdc(shape_case("clean", "namespace"))
+            expect(output.contains("_namespace_finish")).to_equal(false)
+            expect(verdict_line(output).contains("degraded=")).to_equal(false)
+    )
+
+    skip_if(fn(): probe_capable_compiler_absent(), MCDC_COMPILER_GATE_REASON)(
+        "handles a struct field named recorder (no i64 has no field recorder)",
+        fn():
+            step("Run the recorder-field fixture")
+            val (output, _code) = run_dir_mcdc(shape_case("clean", "recorder"))
+            expect(output.contains("has_no_field_named_`recorder`")).to_equal(false)
+            expect(output.contains("has no field named `recorder`")).to_equal(false)
+            expect(verdict_line(output)).to_contain("passed=1")
+            expect(verdict_line(output).contains("degraded=")).to_equal(false)
+    )
+
+    skip_if(fn(): probe_capable_compiler_absent(), MCDC_COMPILER_GATE_REASON)(
+        "handles .to_equal(false) assertions in the wrapper",
+        fn():
+            step("Run the to_equal(false) fixture")
+            val (output, _code) = run_dir_mcdc(shape_case("clean", "false"))
+            expect(output.contains("spipe_false_boolean_wrapper_assertions")).to_equal(false)
+            expect(verdict_line(output)).to_contain("passed=1")
+            expect(verdict_line(output).contains("degraded=")).to_equal(false)
+    )
+
+describe "the Rust seed degrades explicitly":
+    skip_if(fn(): binary_emits_probes(), SEED_GATE_REASON)(
+        "marks the namespace shape mcdc-unavailable and reports MC/DC NOT compliant",
+        fn(): check_seed_degrade("namespace")
+    )
+
+    skip_if(fn(): binary_emits_probes(), SEED_GATE_REASON)(
+        "marks the recorder shape mcdc-unavailable and reports MC/DC NOT compliant",
+        fn(): check_seed_degrade("recorder")
+    )
+
+    skip_if(fn(): binary_emits_probes(), SEED_GATE_REASON)(
+        "marks the to_equal(false) shape mcdc-unavailable and reports MC/DC NOT compliant",
+        fn(): check_seed_degrade("false")
+    )

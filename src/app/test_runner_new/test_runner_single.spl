@@ -51,9 +51,9 @@ use std.test_runner.test_executor_parsing.{make_result_from_output, spec_source_
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
 use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
-use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason, aggregate_spec_file_verdict_line}
+use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
 use std.test_runner.test_runner_config.{resolve_effective_profile, apply_mcdc_mode_env, mcdc_mode_error_message}
-use std.test_runner.test_runner_execute.{run_test_file_interpreter}
+use std.test_runner.test_runner_execute.{run_test_file_interpreter, mcdc_compiler_lacks_probes, MCDC_UNAVAILABLE_REASON}
 use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
 
 use std.io_runtime.{file_exists, file_read_nullable}
@@ -1266,9 +1266,17 @@ fn _single_run_spl_doctest(args: [text]) -> i64:
 # here instead of being rejected as "expected .spl test file". Fences run on
 # the resolved --compiler; a compiler that cannot be pinned refuses (exit 2).
 fn _single_is_md_run(args: [text]) -> bool:
-    for arg in args:
-        if arg == "--sdoctest" or (not arg.starts_with("-") and arg.ends_with(".md")):
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--sdoctest":
             return true
+        elif arg == "--compiler" or _single_option_takes_value(arg):
+            # The next token belongs to this option, even if it ends in .md.
+            i = i + 1
+        elif not arg.starts_with("-") and arg.ends_with(".md"):
+            return true
+        i = i + 1
     false
 
 fn _single_run_md(args: [text]) -> i64:
@@ -1284,26 +1292,39 @@ fn _single_run_md(args: [text]) -> i64:
     print_sdoctest_summary(result)
     if result.is_ok(): 0 else: 1
 
-# Run one spec through the SAME per-file MC/DC execution path the full runner
-# uses (run_test_file_interpreter routes on/dynamic MC/DC to the native
-# instrumented lane, with its explicit, recorded fallbacks). Never a silent
-# skip: the MC/DC outcome is printed on its own line either way.
-fn _single_run_mcdc(args: [text], path: text, mcdc_mode: text) -> i64:
+# MC/DC attempt for the single lane. ADDITIVE: the normal lane body has
+# already run the spec with every lane feature (directives, env, identity,
+# infix rewrite, APK coverage) and owns the verdict. This only adds the MC/DC
+# outcome, printed on its own line whenever the lane reaches its verdict
+# (a lane error exit before that is already a red result) -- never a silent
+# skip:
+#   MC/DC: mode=<m> evidence=present|absent <path>
+#   MC/DC: mode=<m> evidence=absent DEGRADED <path>: <reason>
+# A compiler without probe emission (the Rust seed) is detected once from its
+# identity and degraded without the slow, doomed instrumented compile.
+# Returns false only when the instrumented run itself FAILED examples, so a
+# native-only failure cannot hide behind the interpreter lane's pass.
+fn _single_mcdc_attempt(args: [text], path: text, mcdc_mode: text, binary: text, timeout_secs: i64) -> bool:
+    if mcdc_compiler_lacks_probes(binary):
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {MCDC_UNAVAILABLE_REASON}"
+        return true
     var options = parse_test_args(args)
     options.path = path
+    # Same budget the lane granted (slow_it floor, @timeout_secs), not the
+    # 120s parse default.
+    options.timeout = timeout_secs
     val r = run_test_file_interpreter(path, options)
-    print aggregate_spec_file_verdict_line(r.path, r.passed, r.failed,
-        r.in_development, r.error, r.degraded_reason, r.timed_out, r.duration_ms)
     if r.mcdc_skip_reason != "":
-        print "MC/DC: mode={mcdc_mode} DEGRADED {path}: {r.mcdc_skip_reason}"
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {r.mcdc_skip_reason}"
+    elif r.timed_out:
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: instrumented run timed out after {timeout_secs}s"
+        return true
     elif r.mcdc_evidence_v1 != "":
         print "MC/DC: mode={mcdc_mode} evidence=present {path}"
+    elif r.error != "":
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {r.error}"
     else:
         print "MC/DC: mode={mcdc_mode} evidence=absent {path}"
-    if r.error != "":
-        print "error: {r.error}"
-    print_summary(path, r.passed, r.failed, r.skipped, r.pending, r.duration_ms,
-        if r.is_ok() or r.failed > 0: "" else: "no verified result")
     # Report only. This lane is also the daemon's per-file worker, and a
     # decision's independence pair may span spec files, so the MC/DC gate
     # verdict belongs to the aggregating run (test_runner_main), never to one
@@ -1314,7 +1335,10 @@ fn _single_run_mcdc(args: [text], path: text, mcdc_mode: text) -> i64:
         if not mcdc_line.starts_with("MC/DC: DEGRADED ") and
                 not mcdc_line.starts_with("MC/DC: NO EVIDENCE "):
             print mcdc_line
-    if r.is_ok(): 0 else: 1
+    if r.failed > 0:
+        print "error: test-runner: MC/DC instrumented run failed ({r.failed}): {r.error}"
+        return false
+    true
 
 fn main() -> i64:
     val args = clean_args()
@@ -1339,6 +1363,8 @@ fn main() -> i64:
         return 0
     # MC/DC: resolve the mode exactly like the full runner (same profile
     # resolution, same waiver rules -- std.test_runner.test_runner_config).
+    # The attempt itself runs INSIDE the lane body below (_single_mcdc_attempt),
+    # after the child, so MC/DC never replaces a lane feature.
     # `--no-session-daemon` only means "do not use the daemon"; it must never
     # bypass required MC/DC. The daemon's per-file children run through this
     # lane too, so this is also the daemon's enforcement point.
@@ -1347,14 +1373,6 @@ fn main() -> i64:
     if mcdc_error != "":
         print mcdc_error
         return 2
-    if mcdc_mode == "on" or mcdc_mode == "dynamic":
-        # --compiler=phase2 keeps its fail-closed exit 2 contract on this path.
-        match select_test_child_binary(run.compiler):
-            case Err(message):
-                print "error: test-runner: " + message
-                return 2
-            case Ok(_): pass
-        return _single_run_mcdc(args, run.path, mcdc_mode)
     if unsafe(capabilities: [ffi]): rt_file_read_text(run.path).contains("slow_it ") and run.timeout_secs < 600:
         run.timeout_secs = 600
     val declared_timeout = spec_timeout_secs_directive(run.path)
@@ -1808,6 +1826,9 @@ fn main() -> i64:
             print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
     if source_is_in_development(rt_file_read_text(run.path)):
         print in_development_explicit_line(run.path)
+    if mcdc_mode == "on" or mcdc_mode == "dynamic":
+        if not _single_mcdc_attempt(args, run.path, mcdc_mode, binary, run.timeout_secs) and failed == 0 and unverified_error == "":
+            failed = 1
     print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms,
         if failed == 0: unverified_error else: "", process_error)
     if cov_on and cov_sdn != "":
