@@ -1,0 +1,93 @@
+# Exercises the actual worker entry point and its persisted result, not a mock receipt.
+use std.spec.{describe, it, expect, fail}
+use std.nogc_sync_mut.spec.{skip}
+use std.nogc_sync_mut.io.process_observation_v4.{process_observation_capabilities_v4}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_hash_sha256, file_exists, file_create_exclusive, file_delete}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.common.crypto.sha256.{sha256_text}
+use app.bootstrap_builder.contracts.{BuildInputV1, BuildTaskV1, builder_task_identity_v1}
+use app.bootstrap_builder.codec.{builder_write_task_v1, builder_read_result_v1}
+use app.bootstrap_builder.worker.{builder_worker_execute_v1}
+use app.buildrunner.process_evidence.{build_runner_process_evidence_decode_v1}
+use std.common.build_manager.capacity_request.{builder_capacity_settlement_decode_v1}
+
+fn worker_execution_fixture(root: text) -> BuildTaskV1:
+    val digest = sha256_text("actual input\n")
+    BuildTaskV1(id: "copy", attempt: 1, phase: "test", producer_digest: file_hash_sha256(root + "/producer.exe"),
+        source_digest: digest, toolchain_digest: digest, dependencies: [], program: "/bin/cp",
+        args: ["input.txt", "output.txt"], inputs: [BuildInputV1(path: "input.txt", digest: digest)],
+        outputs: ["output.txt"], cache_key: digest, timeout_ms: 10000,
+        memory_limit_bytes: 1048576, links: [], memory_policy: "monitor")
+
+var worker_execution_owned_roots: [text] = []
+
+fn worker_execution_root(suffix: text) -> text:
+    get_temp_dir().replace("\\", "/") + "/builder-worker-execution-" + str(getpid()) + "-" + suffix
+
+fn prepare_worker_execution(suffix: text) -> text:
+    val root = worker_execution_root(suffix)
+    expect(file_exists(root)).to_equal(false)
+    expect(file_create_exclusive(root + ".claim", "owned worker execution fixture\n")).to_equal(true)
+    worker_execution_owned_roots = worker_execution_owned_roots.push(root)
+    expect(dir_create_all(root + "/work")).to_equal(true)
+    val copied = process_run_timeout("/bin/cp", ["/bin/cp", root + "/producer.exe"], 10000)
+    expect(copied.2).to_equal(0)
+    expect(file_write(root + "/work/input.txt", "actual input\n")).to_equal(true)
+    root
+
+describe "BuildRunner worker execution integration":
+    after_each:
+        for root in worker_execution_owned_roots:
+            if file_exists(root):
+                expect(dir_remove(root, true)).to_equal(true)
+            expect(file_delete(root + ".claim")).to_equal(true)
+        worker_execution_owned_roots = []
+    val capability = process_observation_capabilities_v4()
+    if capability.is_ok() and not capability.unwrap().available:
+        skip("runs the pinned producer and records the actual output digest", "process observation V4 is unavailable on this host")
+    else:
+        it "runs the pinned producer and records the actual output digest":
+            if capability.is_err():
+                fail("process observation capability query failed")
+                return
+            if not file_exists("/bin/cp"):
+                fail("this fixture requires /bin/cp; execution coverage is unverified")
+                return
+            val root = prepare_worker_execution("success")
+            val task = worker_execution_fixture(root)
+            expect(builder_write_task_v1(root + "/request.sdn", task)).to_equal(true)
+            expect(builder_worker_execute_v1(root + "/request.sdn", root, "local")).to_equal(0)
+            val receipt = builder_read_result_v1(root + "/result.sdn").unwrap()
+            expect(receipt.status).to_equal("OK")
+            expect(receipt.identity_digest).to_equal(builder_task_identity_v1(task))
+            expect(receipt.outputs.len()).to_equal(1)
+            expect(receipt.outputs[0].path).to_equal("output.txt")
+            expect(receipt.outputs[0].digest).to_equal(sha256_text("actual input\n"))
+            expect(file_read(root + "/work/output.txt")).to_equal("actual input\n")
+            val evidence = build_runner_process_evidence_decode_v1(file_read(root + "/compiler.process")).unwrap()
+            expect(evidence.task_identity).to_equal(receipt.identity_digest)
+            expect(evidence.outcome).to_equal("exited")
+            expect(evidence.exit_code).to_equal(0)
+            expect(evidence.stdout_digest).to_equal(file_hash_sha256(root + "/stdout.log"))
+            expect(evidence.stderr_digest).to_equal(file_hash_sha256(root + "/stderr.log"))
+            expect(file_read(root + "/compiler.reaped")).to_equal(receipt.identity_digest + "\nlocal")
+            val settlement = builder_capacity_settlement_decode_v1(file_read(root + "/capacity.settled"), receipt.identity_digest, "local").unwrap()
+            expect(settlement.disposition).to_equal("no-parent-owned")
+
+    it "rejects changed staged input before launching the producer":
+        if not file_exists("/bin/cp"):
+            fail("this fixture requires /bin/cp; execution coverage is unverified")
+            return
+        val root = prepare_worker_execution("changed")
+        val task = worker_execution_fixture(root)
+        expect(builder_write_task_v1(root + "/request.sdn", task)).to_equal(true)
+        expect(file_write(root + "/work/input.txt", "tampered\n")).to_equal(true)
+        expect(builder_worker_execute_v1(root + "/request.sdn", root, "local")).to_equal(2)
+        val receipt = builder_read_result_v1(root + "/result.sdn").unwrap()
+        expect(receipt.status).to_equal("ERROR")
+        expect(receipt.outputs.len()).to_equal(0)
+        expect(file_read(root + "/worker.error")).to_contain("input digest mismatch")
+        expect(file_exists(root + "/work/output.txt")).to_equal(false)
