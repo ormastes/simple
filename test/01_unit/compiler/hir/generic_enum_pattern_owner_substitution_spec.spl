@@ -101,3 +101,66 @@ describe "generic enum declaration payload substitution":
         expect(hir.errors.len()).to_equal(0)
         hir.lower_match_pattern(input, Some(generic_pattern_type(HirTypeKind.Named(other, [actual]))))
         expect(hir.errors.len()).to_be_greater_than(0)
+
+    it "admits a wildcard payload of a generic variant over an untyped subject":
+        step("An untyped subject supplies no type argument; a wildcard binds no type-parameter slot")
+        val parsed = parse_and_build_module("enum Packet<T>:\n    Item(value: T)\n    Mark(count: i64)\n", "generic_packet_untyped_wild.spl")
+        var hir = HirLowering.with_filename("generic_packet_untyped_wild.spl")
+        hir.nogc_strict = true
+        val owner = hir.symbols.define("Packet", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("generic_packet_untyped_wild"))
+        hir.register_declared_pattern_enum_slots(parsed.enums["Packet"], owner, "generic_packet_untyped_wild", false)
+        val wildcard = Pattern(kind: PatternKind.Wildcard, span: Span.empty())
+        val input = Pattern(kind: PatternKind.Enum("Packet", "Item", Some(EnumPatternPayload.Tuple([wildcard]))), span: Span.empty())
+        val output = hir.lower_match_pattern(input, nil)
+        var is_enum = false
+        match output.kind:
+            case HirPatternKind.Enum(_, _, _): is_enum = true
+            case _: ()
+        expect(is_enum).to_equal(true)
+        expect(hir.errors.len()).to_equal(0)
+
+    it "binds a concrete declared slot of a generic enum over an untyped subject":
+        step("A binder over a concrete slot keeps the declared type, not an unresolved type")
+        val parsed = parse_and_build_module("enum Packet<T>:\n    Item(value: T)\n    Mark(count: i64)\n", "generic_packet_untyped_mark.spl")
+        var hir = HirLowering.with_filename("generic_packet_untyped_mark.spl")
+        hir.nogc_strict = true
+        val owner = hir.symbols.define("Packet", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("generic_packet_untyped_mark"))
+        hir.register_declared_pattern_enum_slots(parsed.enums["Packet"], owner, "generic_packet_untyped_mark", false)
+        val declared = hir.declared_pattern_enum_slots["{owner.id}:Mark"]
+        val input = Pattern(kind: PatternKind.Enum("Packet", "Mark", Some(EnumPatternPayload.Tuple([generic_pattern_binding()]))), span: Span.empty())
+        val output = hir.lower_match_pattern(input, nil)
+        var child_type = generic_pattern_type(HirTypeKind.Error)
+        match output.kind:
+            case HirPatternKind.Enum(_, _, payload):
+                if val value = payload:
+                    match value:
+                        case HirPatternPayload.Tuple(children):
+                            if children.len() == 1: child_type = children[0].type_
+                        case _: ()
+            case _: ()
+        expect(child_type).to_equal(declared.field_types[0])
+        expect(hir.errors.len()).to_equal(0)
+
+    it "still fails closed when a binder covers a generic slot over an untyped subject":
+        step("REQ-ACOWN-03: a binder over the type parameter needs a declared subject owner")
+        val parsed = parse_and_build_module("enum Packet<T>:\n    Item(value: T)\n    Mark(count: i64)\n", "generic_packet_untyped_item.spl")
+        var hir = HirLowering.with_filename("generic_packet_untyped_item.spl")
+        hir.nogc_strict = true
+        val owner = hir.symbols.define("Packet", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("generic_packet_untyped_item"))
+        hir.register_declared_pattern_enum_slots(parsed.enums["Packet"], owner, "generic_packet_untyped_item", false)
+        val input = Pattern(kind: PatternKind.Enum("Packet", "Item", Some(EnumPatternPayload.Tuple([generic_pattern_binding()]))), span: Span.empty())
+        hir.lower_match_pattern(input, nil)
+        expect(hir.errors.len()).to_be_greater_than(0)
+
+    it "admits untyped subjects only when no payload binder reads a type parameter":
+        step("Pure predicate: concrete slots and wildcards pass; a binder over T does not")
+        val parameter = generic_pattern_type(HirTypeKind.TypeParam("T", []))
+        val wildcard = Pattern(kind: PatternKind.Wildcard, span: Span.empty())
+        val generic_slots = HirDeclaredPatternEnumSlots(tuple_types: [parameter], field_names: [], field_types: [], is_struct: false, type_parameters: ["T"], declaring_owner: SymbolId(id: 1))
+        val mixed_slots = HirDeclaredPatternEnumSlots(tuple_types: [parameter, generic_pattern_type(HirTypeKind.Bool)], field_names: [], field_types: [], is_struct: false, type_parameters: ["T"], declaring_owner: SymbolId(id: 1))
+        expect(declared_pattern_payload_avoids_type_parameters(generic_slots, nil)).to_equal(true)
+        expect(declared_pattern_payload_avoids_type_parameters(generic_slots, Some(EnumPatternPayload.Tuple([wildcard])))).to_equal(true)
+        expect(declared_pattern_payload_avoids_type_parameters(generic_slots, Some(EnumPatternPayload.Tuple([generic_pattern_binding()])))).to_equal(false)
+        expect(declared_pattern_payload_avoids_type_parameters(mixed_slots, Some(EnumPatternPayload.Tuple([wildcard, generic_pattern_binding()])))).to_equal(true)
+        expect(declared_pattern_payload_avoids_type_parameters(mixed_slots, Some(EnumPatternPayload.Tuple([generic_pattern_binding(), generic_pattern_binding()])))).to_equal(false)
+        expect(declared_pattern_payload_avoids_type_parameters(mixed_slots, Some(EnumPatternPayload.Tuple([wildcard])))).to_equal(false)

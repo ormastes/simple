@@ -9,7 +9,7 @@ use compiler.frontend.parser_types_expr.{EnumPatternPayload}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.{HirLowering, HirDeclaredPatternEnumSlots}
 use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
-use compiler.hir.hir_lowering.pattern_enum_substitution.{declared_pattern_slot_type_is_concrete, declared_pattern_slot_types_are_concrete, substitute_declared_pattern_types}
+use compiler.hir.hir_lowering.pattern_enum_substitution.{declared_pattern_slot_type_is_concrete, declared_pattern_slot_types_are_concrete, substitute_declared_pattern_types, declared_pattern_payload_avoids_type_parameters}
 
 # Literal suffixes use the expression cast representation in the flat bridge.
 # Fold integer-only casts here so all match consumers see a literal predicate,
@@ -392,6 +392,17 @@ impl HirLowering:
                 return left_symbol.kind == SymbolKind.Enum and right_symbol.kind == SymbolKind.Enum and origin != "" and origin == (right_symbol.defining_module ?? "") and left_symbol.name == right_symbol.name
         false
 
+    me pattern_subject_type_is_untyped(subject_type: HirType?) -> bool:
+        """True when the match subject has no inferred nominal type.
+
+        Only these carriers may drop to the payload-only admission: a Named
+        subject of another owner, or Optional, still errors downstream."""
+        if val subject = subject_type:
+            match subject.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: return true
+                case _: return false
+        true
+
     me pattern_enum_owner_provably_differs(left: SymbolId, right: SymbolId) -> bool:
         """True only for two ENUM symbols with different names.
 
@@ -490,7 +501,13 @@ impl HirLowering:
         val declaration_slots: HirDeclaredPatternEnumSlots = self.declared_pattern_enum_slots[key]
         var slots = declaration_slots
         var enum_arguments: [HirType] = []
-        if declaration_slots.type_parameters.len() > 0:
+        # An untyped subject (HIR inference gap: `.unwrap()`, an `Ok(x)` binder,
+        # a match-expression value) cannot supply type arguments. A qualified
+        # variant whose payload binds no type-parameter slot (only concrete
+        # slots or `_`) needs none: lower it against the declaration as-is.
+        # Any binder over a generic slot still fails closed below (REQ-ACOWN-03).
+        val untyped_generic_ok = declaration_slots.type_parameters.len() > 0 and enum_name != "" and self.pattern_subject_type_is_untyped(subject_type) and declared_pattern_payload_avoids_type_parameters(declaration_slots, payload)
+        if declaration_slots.type_parameters.len() > 0 and not untyped_generic_ok:
             if not subject_owner.is_valid() or not self.pattern_enum_same_owner(declaration_slots.declaring_owner, subject_owner):
                 self.error("generic enum pattern requires its declared subject owner", p.span)
                 return nil
