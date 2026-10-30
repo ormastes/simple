@@ -11,6 +11,42 @@ fn native_verdict_path() -> text:
     _tp_get_temp_dir() + "/native-verdict-protocol-" + time_now_unix_micros().to_text()
 
 describe "native completion verdict":
+    it "retains opaque panic diagnostics without trusting forged stdout counts":
+        val result = make_native_completion_result_v1("plain_red.spl", "999 passed, 0 failed", "panic: CALIBRATION_RED_42", 1, 1, 30, native_verdict_path(), "plain")
+        expect(result.passed).to_equal(0)
+        expect(result.failed).to_equal(1)
+        expect(result.error).to_start_with("native-test: normal completion evidence missing or invalid (exit 1)")
+        expect(result.error).to_contain("child stderr (diagnostic only):\npanic: CALIBRATION_RED_42")
+        expect(result.error).to_contain("child stdout (diagnostic only):\n999 passed, 0 failed")
+
+    it "retains stdout-only failure detail without accepting early zero exit":
+        val result = make_native_completion_result_v1("early_exit.spl", "early exit marker", "", 0, 1, 30, native_verdict_path(), "plain")
+        expect(result.passed).to_equal(0)
+        expect(result.failed).to_equal(1)
+        expect(result.error).to_contain("child stdout (diagnostic only):\nearly exit marker")
+
+    it "retains diagnostic detail for a completed plain nonzero exit":
+        val path = native_verdict_path()
+        expect(file_write(path + ".complete", native_execution_completion_v1(path, "plain", 1))).to_equal(true)
+        val result = make_native_completion_result_v1("plain_red.spl", "", "failure detail RED_43", 1, 1, 30, path, "plain")
+        expect(result.passed).to_equal(0)
+        expect(result.failed).to_equal(1)
+        expect(result.error).to_start_with("native-test: plain program returned failure")
+        expect(result.error).to_contain("failure detail RED_43")
+        file_delete(path + ".complete")
+
+    it "bounds both diagnostic streams without splitting UTF-8 characters":
+        var large = ""
+        for i in 0..2000:
+            large = large + "界"
+        val result = make_native_completion_result_v1("large_red.spl", large + "STDOUT_TAIL", large + "STDERR_TAIL", 1, 1, 30, native_verdict_path(), "plain")
+        expect(result.passed).to_equal(0)
+        expect(result.failed).to_equal(1)
+        expect(result.error.len()).to_be_less_than(4096)
+        expect(result.error).to_contain("界 [truncated]")
+        expect(result.error.contains("STDOUT_TAIL")).to_equal(false)
+        expect(result.error.contains("STDERR_TAIL")).to_equal(false)
+
     it "refuses stdout pass markers when completion is absent":
         val result = make_native_completion_result_v1("plain_test.spl", "1 passed, 0 failed", "", 0, 1, 30, native_verdict_path(), "plain")
         expect(result.passed).to_equal(0)
