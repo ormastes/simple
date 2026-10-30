@@ -21,13 +21,11 @@
 #     resolves to the `color` module namespace object; the failure renders as
 #     `expected {rgb: <fn:rgb>, color_red: <fn:color_red>, ...} to equal 7`.
 #
-# The previous version of this spec asserted `_binds_payload() == false` and
-# was RED, because the plain-function half is fixed. Rather than delete the
-# signal, each scope now has its own example, so the suite stays honest: the
-# fixed scope is pinned as fixed, and the broken scope is pinned as broken.
-# When the closure scope is fixed too, the second example goes RED -- that is
-# the signal to replace its body with `expect(color).to_equal(7)` and close
-# the bug record.
+# 2026-10-30: the closure scope is FIXED too. The BDD closure executor
+# (interpreter_call/block_execution.rs) and the match-EXPRESSION evaluator
+# (interpreter/expr/control.rs) bound arm variables without marking them
+# block-local, so the identifier read preferred the same-named module global.
+# Both now call `enter_block_local`, as the statement form always did.
 
 use std.spec.{describe, it, expect}
 use std.gpu.engine2d.color.{rgb}
@@ -45,6 +43,14 @@ fn _binds_payload() -> bool:
             return false
     false
 
+# Expression form inside a plain fn, with an early `return` arm (the shape
+# that broke app.test_runner_new.sdn_worker_protocol).
+fn _expr_binds_payload() -> bool:
+    val got = match _seven():
+        Ok(color): color
+        Err(_): return false
+    got == 7
+
 describe "match pattern bindings vs module namespaces":
 
     it "positive control: an uncolliding binding carries the payload":
@@ -57,10 +63,25 @@ describe "match pattern bindings vs module namespaces":
     it "FIXED scope: in a plain fn, a binding named after a module carries the payload":
         expect(_binds_payload()).to_equal(true)
 
-    it "KNOWN DEFECT: in a BDD closure body the binding is still the module namespace":
-        # Pins CURRENT behavior. Inverting this is the fix-detection signal.
+    it "in a BDD closure body a binding named after a module carries the payload":
         match _seven():
             Ok(color):
-                expect(color == 7).to_equal(false)
+                expect(color).to_equal(7)
             Err(_):
+                expect(false).to_equal(true)
+
+    it "in a match expression a binding named after a module carries the payload":
+        val got = match _seven():
+            Ok(color): color
+            Err(_): -1
+        expect(got).to_equal(7)
+
+    it "in a match expression with a return arm the binding carries the payload":
+        expect(_expr_binds_payload()).to_equal(true)
+
+    it "in a guard the binding named after a module carries the payload":
+        match _seven():
+            Ok(color) if color == 7:
+                expect(color).to_equal(7)
+            _:
                 expect(false).to_equal(true)
