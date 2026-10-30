@@ -1,0 +1,180 @@
+# @timeout_secs 2400
+"""
+## Purpose and audience
+Pins the fail-closed arms of the SQLCipher 4 read path that the sibling codec
+specs do not reach: key and IV geometry, closed or damaged codec sessions, the
+page-1 structural guard, and secret resolution after the codec modules loaded.
+Audience: maintainers of the DevHub Messenger encrypted database reader.
+## Operator workflow
+bin/simple test test/01_unit/lib/database/codec/sqlcipher4_read_path_gaps_spec.spl
+## Compatibility and limitations
+Runs under the Phase 1 seed interpreter. Phase 2 has no test command, so its
+evidence comes from test/fixtures/devhub/fresh_secured_db/main.spl.
+## Verification guidance and troubleshooting
+Each scenario asserts the typed error code and, where it matters, the detail.
+A message that stops naming the env var usually means an env_get name collision.
+"""
+# @manual_section: fail-closed read path
+
+use std.spec.*
+use nogc_sync_mut.database.codec.sqlcipher4.{
+    Sqlcipher4Error, sqlcipher4_error_code, sqlcipher4_error_text
+}
+use nogc_sync_mut.database.codec.codec_registry.{CodecSessionV1}
+use nogc_sync_mut.database.codec.sqlcipher4_keys.{
+    Sqlcipher4KeyError, sqlcipher4_hmac_salt_from_file_salt, sqlcipher4_key_error_text
+}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{
+    SQLCIPHER4_PAGE_SIZE, SQLCIPHER4_PAGE_BODY_BYTES, SQLCIPHER4_SESSION_MATERIAL_BYTES,
+    sqlcipher4_encode_page, sqlcipher4_decode_page, sqlcipher4_page1_salt,
+    sqlcipher4_page_decode_with_session, sqlcipher4_page_encode_with_session,
+    sqlcipher4_page_close, sqlcipher4_page_open_key
+}
+use nogc_sync_mut.database.codec.secret_ref.{secret_ref_resolve_uri}
+
+fn _filled(n: i64, seed: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(((i * 13 + seed) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _page1_body() -> [u8]:
+    var out = _filled(SQLCIPHER4_PAGE_BODY_BYTES, 3)
+    out[16] = 0x10u8
+    out[17] = 0x00u8
+    out
+
+fn _code_of_bytes(result: Result<[u8], Sqlcipher4Error>) -> text:
+    match result:
+        case Ok(_):
+            "ok"
+        case Err(e):
+            sqlcipher4_error_code(e)
+
+fn _session(material: [u8], is_open: bool) -> CodecSessionV1:
+    CodecSessionV1(codec_id: "sqlcipher4", open: is_open, secret_material: material)
+
+fn _rng_short(n: i64) -> [u8]:
+    _filled(n - 1, 9)
+
+fn _rng_ok(n: i64) -> [u8]:
+    _filled(n, 9)
+
+fn _resolve_text(uri: text) -> text:
+    match secret_ref_resolve_uri(uri):
+        case Ok(_):
+            "ok"
+        case Err(e):
+            sqlcipher4_error_text(e)
+
+describe "SQLCipher 4 fail-closed read path":
+
+    it "rejects an AES or HMAC key of the wrong length before touching a page":
+        # @req REQ-CIPHER-READ-001
+        # @capture(statistics): typed error codes for each key geometry
+        step("Decode a well-sized page with a 31-byte AES key")
+        val page = _filled(SQLCIPHER4_PAGE_SIZE, 1)
+        expect(_code_of_bytes(sqlcipher4_decode_page(2, page, _filled(31, 1), _filled(32, 2)))).to_equal("SQLCIPHER4_INVALID_PAGE_GEOMETRY")
+        step("Decode the same page with a 33-byte HMAC key")
+        expect(_code_of_bytes(sqlcipher4_decode_page(2, page, _filled(32, 1), _filled(33, 2)))).to_equal("SQLCIPHER4_INVALID_PAGE_GEOMETRY")
+
+    it "rejects a wrong-length IV and a page number past the 32-bit limit on encode":
+        # @req REQ-CIPHER-READ-002
+        # @capture(statistics): typed error codes for IV and page number bounds
+        step("Encode with a 15-byte IV")
+        val body = _filled(SQLCIPHER4_PAGE_BODY_BYTES, 5)
+        expect(_code_of_bytes(sqlcipher4_encode_page(2, body, _filled(15, 1), _filled(32, 1), _filled(32, 2)))).to_equal("SQLCIPHER4_INVALID_PAGE_GEOMETRY")
+        step("Encode page 4294967296, one past the HMAC page-number field")
+        expect(_code_of_bytes(sqlcipher4_encode_page(4294967296, body, _filled(16, 1), _filled(32, 1), _filled(32, 2)))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+
+    it "rejects an invalid page 1 buffer when reading the salt":
+        # @req REQ-CIPHER-READ-003
+        # @capture(statistics): typed error code for a short page 1
+        step("Read the salt from a 100-byte buffer")
+        expect(_code_of_bytes(sqlcipher4_page1_salt(_filled(100, 1)))).to_equal("SQLCIPHER4_INVALID_PAGE_GEOMETRY")
+
+    it "rejects a page 1 whose authentic ciphertext decrypts without the page-size field":
+        # @req REQ-CIPHER-READ-004
+        # @capture(statistics): typed error code from the structural guard
+        step("Encode page 1 with an AES key, keeping the HMAC key")
+        val hmac_key = _filled(32, 2)
+        val encoded = match sqlcipher4_encode_page(1, _page1_body(), _filled(16, 7), _filled(32, 1), hmac_key):
+            case Ok(p):
+                p
+            case Err(e):
+                fail("encode failed: {sqlcipher4_error_code(e)}")
+        step("Decode with the same HMAC key and a different AES key")
+        expect(_code_of_bytes(sqlcipher4_decode_page(1, encoded, _filled(32, 200), hmac_key))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+
+    it "refuses to use a closed session or one with damaged key material":
+        # @req REQ-CIPHER-READ-005
+        # @capture(statistics): typed error codes for invalid sessions
+        step("Decode through a session marked closed")
+        val page = _filled(SQLCIPHER4_PAGE_SIZE, 1)
+        val material = _filled(SQLCIPHER4_SESSION_MATERIAL_BYTES, 4)
+        expect(_code_of_bytes(sqlcipher4_page_decode_with_session(2, page, _session(material, false)))).to_equal("SQLCIPHER4_MISSING_SECRET")
+        step("Decode through a session holding 79 bytes of material")
+        expect(_code_of_bytes(sqlcipher4_page_decode_with_session(2, page, _session(_filled(79, 4), true)))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+
+    it "rejects an rng that returns the wrong IV length":
+        # @req REQ-CIPHER-READ-006
+        # @capture(statistics): typed error code for a short rng result
+        step("Encode through a session whose rng returns 15 bytes")
+        val session = _session(_filled(SQLCIPHER4_SESSION_MATERIAL_BYTES, 4), true)
+        val body = _filled(SQLCIPHER4_PAGE_BODY_BYTES, 5)
+        expect(_code_of_bytes(sqlcipher4_page_encode_with_session(2, body, session, _rng_short))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+        step("Encode through the same session with a correct rng")
+        expect(_code_of_bytes(sqlcipher4_page_encode_with_session(2, body, session, _rng_ok))).to_equal("ok")
+
+    it "wipes session key material on close so later decodes fail authentication":
+        # @req REQ-CIPHER-READ-007
+        # @capture(statistics): residual material and post-close error code
+        step("Encode a page, then close the session that encoded it")
+        val session = _session(_filled(SQLCIPHER4_SESSION_MATERIAL_BYTES, 4), true)
+        val encoded = match sqlcipher4_page_encode_with_session(2, _filled(SQLCIPHER4_PAGE_BODY_BYTES, 5), session, _rng_ok):
+            case Ok(p):
+                p
+            case Err(e):
+                fail("encode failed: {sqlcipher4_error_code(e)}")
+        expect(_code_of_bytes(sqlcipher4_page_decode_with_session(2, encoded, session))).to_equal("ok")
+        match sqlcipher4_page_close(session):
+            case Ok(_):
+                pass
+            case Err(e):
+                fail("close failed: {sqlcipher4_error_code(e)}")
+        step("Decode the same page through the wiped session")
+        expect(_code_of_bytes(sqlcipher4_page_decode_with_session(2, encoded, session))).to_equal("SQLCIPHER4_AUTHENTICATION_FAILED")
+
+    it "names the env var when a secret is unset after the codec modules loaded":
+        # @req REQ-CIPHER-READ-008
+        # @capture(statistics): resolver detail text for an unset secret
+        step("Resolve a reference whose env var is unset")
+        val outcome = _resolve_text("secret://read_path/absent")
+        expect(outcome).to_contain("SQLCIPHER4_MISSING_SECRET")
+        expect(outcome).to_contain("SIMPLE_SECRET_READ_PATH_ABSENT")
+
+    it "rejects a reference name with a forbidden character":
+        # @req REQ-CIPHER-READ-009
+        # @capture(statistics): typed error for a forbidden name character
+        step("Resolve a reference containing a space")
+        expect(_resolve_text("secret://bad name")).to_contain("forbidden character")
+
+    it "rejects a wrong-length salt when masking, and reports a missing secret before deriving":
+        # @req REQ-CIPHER-READ-010
+        # @capture(statistics): safe error text for salt and secret failures
+        step("Mask a 15-byte salt")
+        val masked = match sqlcipher4_hmac_salt_from_file_salt(_filled(15, 1)):
+            case Ok(_):
+                "ok"
+            case Err(e):
+                sqlcipher4_key_error_text(e)
+        expect(masked).to_equal("cipher_profile_mismatch:kdf_salt_bytes:16:15")
+        step("Open a session from an unset reference with a short salt")
+        val opened = match sqlcipher4_page_open_key("secret://read_path/absent", _filled(15, 1)):
+            case Ok(_):
+                "ok"
+            case Err(e):
+                sqlcipher4_error_code(e)
+        expect(opened).to_equal("SQLCIPHER4_MISSING_SECRET")
