@@ -26,6 +26,7 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
+use simple_runtime::cache_daemon_host_authority_v1 as daemon;
 use simple_runtime::cache_host_authority_v1 as host;
 use simple_runtime::file_view as view;
 use simple_runtime::value::{rt_array_get, rt_array_len_safe, rt_string_new, HeapObjectType, RuntimeValue};
@@ -119,6 +120,13 @@ const SUPPORTED: &[&str] = &[
     "rt_cache_host_quarantine_v1",
     "rt_cache_host_fsync_v1",
     "rt_cache_host_close_v1",
+    "rt_cache_host_authenticate_peer_v1",
+    "rt_cache_host_acquire_exclusive_lock_v1",
+    "rt_cache_host_boot_identity_v1",
+    "rt_cache_host_advance_writer_epoch_v1",
+    "rt_cache_host_publish_readiness_v1",
+    "rt_cache_host_validate_readiness_v1",
+    "rt_cache_host_release_daemon_receipt_v1",
     "rt_file_view_open_beneath_no_follow_v1",
     "rt_file_view_mapping_supported_v1",
     "rt_file_view_map_copy_v1",
@@ -301,6 +309,42 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 arity(n, a, 1)?;
                 host::rt_cache_host_close_v1(int(n, a, 0)?)
             }
+            "rt_cache_host_authenticate_peer_v1" => {
+                arity(n, a, 2)?;
+                daemon::rt_cache_host_authenticate_peer_v1(int(n, a, 0)?, int(n, a, 1)?)
+            }
+            "rt_cache_host_acquire_exclusive_lock_v1" => {
+                arity(n, a, 2)?;
+                daemon::rt_cache_host_acquire_exclusive_lock_v1(int(n, a, 0)?, int(n, a, 1)?)
+            }
+            "rt_cache_host_boot_identity_v1" => {
+                arity(n, a, 1)?;
+                daemon::rt_cache_host_boot_identity_v1(int(n, a, 0)?)
+            }
+            "rt_cache_host_advance_writer_epoch_v1" => {
+                arity(n, a, 2)?;
+                daemon::rt_cache_host_advance_writer_epoch_v1(int(n, a, 0)?, int(n, a, 1)?)
+            }
+            "rt_cache_host_publish_readiness_v1" => {
+                arity(n, a, 4)?;
+                let (nonce, nonce_len) = bytes(n, a, 2)?;
+                daemon::rt_cache_host_publish_readiness_v1(int(n, a, 0)?, int(n, a, 1)?, nonce.as_ptr(), nonce_len)
+            }
+            "rt_cache_host_validate_readiness_v1" => {
+                arity(n, a, 5)?;
+                let (nonce, nonce_len) = bytes(n, a, 2)?;
+                daemon::rt_cache_host_validate_readiness_v1(
+                    int(n, a, 0)?,
+                    int(n, a, 1)?,
+                    nonce.as_ptr(),
+                    nonce_len,
+                    int(n, a, 4)?,
+                )
+            }
+            "rt_cache_host_release_daemon_receipt_v1" => {
+                arity(n, a, 1)?;
+                daemon::rt_cache_host_release_daemon_receipt_v1(int(n, a, 0)?)
+            }
             "rt_file_view_open_beneath_no_follow_v1" => {
                 arity(n, a, 2)?;
                 let root = tagged_text(text(n, a, 0)?);
@@ -382,6 +426,46 @@ fn pread_receipt(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_receipt_family_is_bridged_and_fails_closed_on_bad_handles() {
+        for name in [
+            "rt_cache_host_authenticate_peer_v1",
+            "rt_cache_host_acquire_exclusive_lock_v1",
+            "rt_cache_host_boot_identity_v1",
+            "rt_cache_host_advance_writer_epoch_v1",
+            "rt_cache_host_publish_readiness_v1",
+            "rt_cache_host_validate_readiness_v1",
+            "rt_cache_host_release_daemon_receipt_v1",
+        ] {
+            assert!(is_supported_name(name), "{name} must be bridged");
+        }
+        let status = |name: &str, args: &[Value]| dispatch(name, args).unwrap().as_int().unwrap();
+        assert!(status("rt_cache_host_authenticate_peer_v1", &[Value::Int(0), Value::Int(-1)]) < 0);
+        assert!(status("rt_cache_host_acquire_exclusive_lock_v1", &[Value::Int(0), Value::Int(0)]) < 0);
+        assert!(status("rt_cache_host_advance_writer_epoch_v1", &[Value::Int(0), Value::Int(0)]) < 0);
+        let nonce = Value::byte_array(vec![7; 32]);
+        assert!(
+            status(
+                "rt_cache_host_publish_readiness_v1",
+                &[Value::Int(0), Value::Int(0), nonce.clone(), Value::Int(32)]
+            ) < 0
+        );
+        assert!(
+            status(
+                "rt_cache_host_validate_readiness_v1",
+                &[Value::Int(0), Value::Int(0), nonce.clone(), Value::Int(32), Value::Int(0)]
+            ) < 0
+        );
+        assert!(status("rt_cache_host_release_daemon_receipt_v1", &[Value::Int(0)]) < 0);
+        // A nonce length past the array is refused, never read.
+        assert!(dispatch(
+            "rt_cache_host_publish_readiness_v1",
+            &[Value::Int(0), Value::Int(0), nonce, Value::Int(33)]
+        )
+        .is_err());
+        assert!(dispatch("rt_cache_host_authenticate_peer_v1", &[Value::Int(0)]).is_err());
+    }
 
     #[test]
     fn opens_a_real_root_and_reads_it_through_a_pinned_file_view() {
