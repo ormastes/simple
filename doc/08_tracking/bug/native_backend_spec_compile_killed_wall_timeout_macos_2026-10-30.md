@@ -1,6 +1,6 @@
-# test_runner_native_backend_spec: native compile killed as wall-timeout on macOS (2026-10-30)
+# test_runner_native_backend_spec: native compile hits the 120 s test deadline on macOS (2026-10-30)
 
-Status: OPEN. The spec stays RED; root cause not yet found.
+Status: OPEN. The spec stays RED.
 
 ## Symptom
 
@@ -8,40 +8,44 @@ Status: OPEN. The spec stays RED; root cause not yet found.
 (Darwin 25.5, arm64) for both LLVM and Cranelift.
 
 The first observation was `Native backend producer changed while compiling`.
-That was environmental: the shared seed
-`src/compiler_rust/target/release/simple` was rebuilt by another session
-during the run, at 10:59. `run_test_file_native` correctly refuses a producer
-whose sha256 changed mid-compile.
+That was environmental: the shared seed was rebuilt by another session during
+the run. `run_test_file_native` correctly refuses a producer whose digest
+changed (`test_runner_execute.spl:1222`).
 
-With a private, immutable seed copy, `run_test_file_native` returns this for a
-one-example fixture with `--native-backend=cranelift --no-cache --sequential`:
+With an immutable private seed copy, a one-example fixture returns:
 
 ```
 Native backend compilation failed: cranelift (exit=-1, limit=timeout,
-budget=failure, completion=unavailable); stdout: ; stderr: <seed banner + lint warnings only>
+budget=failure, completion=unavailable)
 ```
 
-The result is the same with `--timeout=1500`. The whole probe, including about
-40 s of interpreter load, finished in about 125 s.
+## Cause (from code reading; the confirming run is still to do)
 
-## What is known
+- The compile child's only wall deadline is `options.timeout * 1000`
+  (`test_runner_execute.spl:1062`). `native_owned_process.spl:25` puts it into
+  `ResourceBudget.max_wall_ms` and ignores the Large class default.
+  `options.timeout` defaults to 120 s.
+- On macOS, the owned observed runner is `ENOTSUP`. The scope falls back to
+  `process_run_bounded` (`resource_scope.spl` legacy fallback), which SIGKILLs
+  the group at the deadline and reports `WallTimeout`. That explains
+  `limit=timeout`, `budget=failure` and `completion=unavailable`.
+- Most likely, a whole native build of the `std.spec` +
+  `app.test_runner_new.test_runner_args` closure takes longer than 120 s on
+  this host.
 
-- The compile child runs as `ExecutionResourceClass.Large` (wall 1,800,000 ms,
-  CPU 7,200,000 ms) with `max_wall_ms = options.timeout * 1000`
-  (`test_runner_execute.spl:1062`).
-- `limit=timeout` means `run_scoped_child` saw
-  `TerminationCause.WallTimeout` (`native_owned_process.spl`). A wall timeout
-  after about 1 minute does not match either configured deadline.
-- `completion=unavailable`: macOS has no process-completion receipt. RLIMIT_AS
-  is also unenforced here, according to the `[resource-scope]` notice.
+The probe passed `--timeout=1500`, but that form is not recognised: only
+`--timeout N` is (`test_runner_args.spl:373-376`). The flag was silently
+ignored, so the probe did not test a longer deadline.
 
 ## Next step
 
-Instrument the macOS owned-scope deadline path (`resource_scope.spl`, owned
-execution scope). Find which deadline produces `WallTimeout` well before
-`max_wall_ms`. Also check whether a native-build of the std.spec closure
-finishes at all on this host within the Large budget. Then close the record,
-or narrow it to a toolchain or host prerequisite.
+1. Rerun the probe with `--timeout 1500`.
+2. Measure the native compile duration of the fixture closure.
+3. Then either raise the spec's compile deadline, speed up the build, or
+   record the host as too slow.
 
-The spec is not marked pending: under the seed, a runtime `pending()` inside an
-`it` body counts as passed.
+Also consider accepting `--timeout=N`, or rejecting it loudly, instead of
+dropping it silently.
+
+The spec is not marked pending: under the seed, a runtime `pending()` inside
+an `it` body counts as passed.
