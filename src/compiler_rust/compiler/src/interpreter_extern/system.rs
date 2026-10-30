@@ -231,6 +231,19 @@ fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result
             Ok(Some(status)) => break Ok(status),
             Ok(None) => {
                 if start.elapsed() >= timeout {
+                    // The leader was spawned as a process-group leader
+                    // (configure_timeout_child_process_group), so kill the
+                    // group: a leader-only kill left `sh -c 'x &'` children
+                    // running and, holding the pipe write ends, kept the
+                    // reader threads below from reaching EOF.
+                    #[cfg(unix)]
+                    {
+                        let rc = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                        if rc != 0 {
+                            let _ = child.kill();
+                        }
+                    }
+                    #[cfg(not(unix))]
                     let _ = child.kill();
                     let _ = child.wait();
                     break Err(());
@@ -826,6 +839,9 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
 
     let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
+    // Same group-leader contract as rt_process_run_bounded: the deadline must
+    // reach the children the leader forked, not just the leader.
+    configure_timeout_child_process_group(&mut command);
     let mut child = match command
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
