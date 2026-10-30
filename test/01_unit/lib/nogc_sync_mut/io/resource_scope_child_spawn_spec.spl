@@ -2,6 +2,9 @@ use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, ExecutionResour
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.common.perf.execution_metrics.{ResourceEvidenceQuality, ResourceBudget, TerminationCause}
 use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io_runtime.{host_os, env_get, env_set, env_remove_process}
+use std.nogc_sync_mut.io.env_ops.{host_is_simpleos}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_is_simpleos}
 
 # The test runner's child path: _run_scoped_child (test_runner_execute.spl)
 # builds a Unit-class scope from standard_resource_budget and calls
@@ -55,6 +58,35 @@ describe "execution resource scope memory cap":
         val mechanism = resource_scope_memory_enforcement()
         val known = mechanism == "cgroup" or mechanism == "systemd-scope" or mechanism == "rlimit-as" or mechanism == "none"
         expect(known).to_be(true)
+
+    it "reports the mechanism the host can actually enforce, never a silent cap":
+        # SimpleOS: no hosted cgroup/ulimit, so the only honest answer is "none".
+        # macOS: RLIMIT_AS is unimplemented by Darwin -> "none" (runner also warns).
+        # Windows: no scope memory cap -> "none". Linux/FreeBSD: a real mechanism.
+        val mechanism = resource_scope_memory_enforcement()
+        val os = host_os()
+        if sosix_test_is_simpleos() or os == "macos" or os == "darwin" or os == "windows":
+            expect(mechanism).to_equal("none")
+        else:
+            expect(mechanism == "cgroup" or mechanism == "systemd-scope" or mechanism == "rlimit-as").to_be(true)
+
+    it "reports none, never rlimit-as, under the SimpleOS kernel marker":
+        val prior = env_get("SIMPLE_OS_KERNEL")
+        env_remove_process("SIMPLE_OS_KERNEL")
+        val baseline = resource_scope_memory_enforcement()
+        val baseline_simpleos = host_is_simpleos()
+        env_set("SIMPLE_OS_KERNEL", "simpleos")
+        val simpleos = resource_scope_memory_enforcement()
+        val marked_simpleos = host_is_simpleos()
+        env_remove_process("SIMPLE_OS_KERNEL")
+        val restored = resource_scope_memory_enforcement()
+        if prior != "": env_set("SIMPLE_OS_KERNEL", prior)
+        # the shared detector itself: marker set -> true, unset -> false
+        expect(marked_simpleos).to_equal(true)
+        expect(baseline_simpleos).to_equal(false)
+        expect(simpleos).to_equal("none")
+        # positive control: removing the marker restores the host's own answer
+        expect(restored).to_equal(baseline)
 
     it "does not fail a child that only reserves address space beyond the cap":
         # dd mallocs (mmaps) its whole 1 GiB input buffer and, reading from
