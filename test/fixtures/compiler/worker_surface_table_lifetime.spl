@@ -14,12 +14,13 @@ fn publish_scope(prefix: text, index: i64, retain: bool) -> bool:
     val key = prefix + ":key:" + index.to_text()
     val surface = prefix + ":surface:" + index.to_text()
     val published = worker_surface_table_publish_v1(key, surface)
+    val early_refused = if retain: not worker_surface_table_promote_transient_owner_v1() else: true
     val paused = rt_transient_array_scope_pause()
     var retained = not retain
     if paused and retain:
         retained = worker_surface_table_promote_transient_owner_v1()
     val ended = rt_transient_array_scope_end()
-    published and paused and retained and ended
+    published and early_refused and paused and retained and ended
 
 fn churn_scope(prefix: text) -> bool:
     if not rt_transient_array_scope_begin(): return false
@@ -70,9 +71,15 @@ fn main() -> i64:
     if not publish_scope(prefix, 2, retain): return 4
     if not churn_scope(prefix): return 5
     if not retained_entry(prefix, 1) or not retained_entry(prefix, 2): return 6
+    # Repeated dirty leases must retain both new entries and the oldest entry.
+    # This also exercises dict growth after its raw class carrier is retained.
+    for index in 3..67:
+        if not publish_scope(prefix, index, retain): return 9
+        if not churn_scope(prefix): return 10
+        if not retained_entry(prefix, 1) or not retained_entry(prefix, index): return 11
     if not class_graph_retained(prefix): return 7
     if not retain:
         print "CONTROL: omission did not reproduce; lifetime cause remains unproven"
         return 8
-    print "PASS: production surface owner retains two publications and complete class graph"
+    print "PASS: production surface owner retains 66 publications and complete class graph"
     0
