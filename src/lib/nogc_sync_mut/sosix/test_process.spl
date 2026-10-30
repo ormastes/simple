@@ -9,13 +9,16 @@ use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_spawn_redirec
 use std.nogc_sync_mut.io.env_ops.{env_get, host_os, host_is_simpleos}
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 export use std.nogc_sync_mut.io.windows_redirected_process.{
     windows_redirected_completion as sosix_test_process_completion,
     windows_redirected_failure_reason as sosix_test_process_failure_reason
 }
 
 fn sosix_test_owned_capture() -> bool:
-    host_os() == "windows"
+    # Cached runtime platform guard: this runs per child spawn, so it must not
+    # fall back to host_os()'s uncached `uname -s` probe.
+    host_is_windows_host()
 
 fn sosix_test_host_os() -> text:
     host_os()
@@ -40,16 +43,22 @@ fn sosix_test_temp_dir_realpath(path: text) -> text:
     out.trim()
 
 fn sosix_test_temp_dir() -> text:
-    if sosix_test_owned_capture():
-        # Windows TEMP is NOT long-name canonicalized (8.3 names such as
-        # RUNNER~1 survive); tracked for the runtime lane.
-        val temp = (env_get("TEMP") ?? "").trim()
-        if temp != "": return temp
-        return "C:\\Temp"
+    # Hot path (every runner temp file): the cache is checked before any host
+    # probe, and the Windows guard is the cached host_is_windows_host(), never
+    # the uncached host_os() `uname -s` spawn.
     val raw = (env_get("TMPDIR") ?? "").trim()
     val temp = if raw != "": raw else: "/tmp"
     if _sosix_test_temp_dir_cache != "" and _sosix_test_temp_dir_cache.starts_with(temp + "\n"):
         return _sosix_test_temp_dir_cache[temp.len() + 1:]
+    if host_is_windows_host():
+        # Windows TEMP is NOT long-name canonicalized (8.3 names such as
+        # RUNNER~1 survive); documented pending item.
+        val win_temp = (env_get("TEMP") ?? "").trim()
+        if win_temp != "": return win_temp
+        return "C:/Windows/Temp"
+    if host_is_simpleos():
+        # No hosted /bin/sh to resolve with; the path is used as given.
+        return temp
     val resolved = sosix_test_temp_dir_realpath(temp)
     if resolved == "":
         eprint("[sosix] temp dir '" + temp + "' could not be resolved to a canonical path; using it unresolved")
