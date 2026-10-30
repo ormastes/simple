@@ -48,11 +48,22 @@ pub fn build_runner_scv_managed_context_error_v1(context: BuildRunnerTaskContext
         if not builder_digest_valid_v1(digest): return "scv-managed-context-invalid"
     ""
 
+# Retry attempts share one capture epoch, but unrelated task subjects cannot.
+pub fn build_runner_scv_managed_epoch_v1(task: BuildTaskV1) -> Result<text, text>:
+    if builder_task_identity_v1(task) == "": return Err("scv-managed-task-invalid")
+    var canonical = task
+    canonical.attempt = 1
+    val identity = builder_task_identity_v1(canonical)
+    if identity == "": return Err("scv-managed-task-invalid")
+    Ok("buildrunner-declared-inputs-v1-" + identity)
+
 # Logical construction alone never grants observation or compiler authority.
 pub fn build_runner_scv_managed_construct_v1(task: BuildTaskV1, context: BuildRunnerTaskContextV1,
         entries: [BuildInputEntryV1], epoch: text) -> Result<BuildRunnerScvManagedV1, text>:
     val refusal = build_runner_scv_managed_context_error_v1(context)
     if refusal != "": return Err(refusal)
+    val task_identity = builder_task_identity_v1(task)
+    if task_identity == "": return Err("scv-managed-task-invalid")
     if not builder_digest_valid_v1(task.producer_digest): return Err("scv-managed-compiler-digest-invalid")
     if task.links.len() != 0: return Err("scv-managed-links-unavailable")
     if entries.len() != task.inputs.len(): return Err("scv-managed-input-set-differs")
@@ -80,7 +91,7 @@ pub fn build_runner_scv_managed_construct_v1(task: BuildTaskV1, context: BuildRu
     val feed = scv_build_feed_subscribe_v1(scv_build_feed_new_v1(snapshot, 64)?, task.id, snapshot.cursor)?
     # No consumer manifest/receipt is fabricated from a successful task result.
     val graph = scv_build_graph_empty_v1(snapshot.snapshot_id)?
-    Ok(BuildRunnerScvManagedV1(task_identity: builder_task_identity_v1(task), task_attempt: task.attempt, capture: capture,
+    Ok(BuildRunnerScvManagedV1(task_identity: task_identity, task_attempt: task.attempt, capture: capture,
         snapshot: snapshot, feed: feed, graph: graph, staging_root: "",
         unavailable: ["editor-overlays", "generated-producer-receipts", "external-producer-receipts",
             "physical-file-modes", "physical-path-aliases", "filesystem-event-coverage",
@@ -184,9 +195,7 @@ pub fn build_runner_scv_managed_open_v1(task: BuildTaskV1, context: BuildRunnerT
     if not file_is_regular_no_follow(program) or file_hash_sha256(program) != task.producer_digest:
         return Err("scv-managed-compiler-digest-differs")
     if builder_worker_environment_digest_v1()? != context.environment_digest: return Err("scv-managed-environment-differs")
-    var canonical = task
-    canonical.attempt = 0
-    val epoch = "buildrunner-declared-inputs-v1-" + builder_task_identity_v1(canonical)
+    val epoch = build_runner_scv_managed_epoch_v1(task)?
     val owner = build_runner_scv_managed_construct_v1(task, context, entries, epoch)?
     build_runner_scv_managed_stage_v1(owner, state_root, task)
 
@@ -240,7 +249,7 @@ pub fn build_runner_scv_managed_retain_v1(source_payload: text, tasks: Dict<text
             return Err(refusal)
     if file_exists(path):
         if file_read_regular_no_follow_bounded(path, 1048576)? != payload: return Err("scv-managed-retained-subject-differs")
-    elif require_existing and tasks.len() > 0: return Err("scv-managed-retained-binding-missing")
+    elif require_existing: return Err("scv-managed-retained-binding-missing")
     elif not file_atomic_write(path, payload): return Err("scv-managed-binding-publish-failed")
     Ok(BuildRunnerScvManagedSetV1(tasks: tasks, unavailable: unavailable,
         record_path: path, record_payload: payload, source_session_digest: sha256_text(source_payload)))

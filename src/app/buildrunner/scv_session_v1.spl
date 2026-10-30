@@ -127,6 +127,9 @@ pub fn build_runner_scv_session_open_v1(run: BuildRunV1, config: BuilderCliV1,
     var identities: Dict<text, text> = {}
     for task in run.tasks: identities[task.id] = build_runner_scv_admission_digest_v1(bindings[task.id])?
     val payload = build_runner_scv_record_encode_v1(plan.source_sha256, config.source_root, cache_root, plan.source_scopes, adapter, admitted.source_inventory_digest, identities)
+    # This immutable source record is also the first-initialization intent.
+    # A crash during staging may replay it only before a scheduler journal
+    # exists; accepted/recovery and verification paths require both records.
     if retained != "":
         if retained != payload: return Err("scv-retained-session-binding-differs")
     elif not file_atomic_write(record_path, payload): return Err("scv-session-binding-publish-failed")
@@ -144,7 +147,7 @@ pub fn build_runner_scv_session_open_v1(run: BuildRunV1, config: BuilderCliV1,
             managed_tasks[task.id] = build_runner_scv_managed_open_v1(task, context,
                 adapter, paths, config.source_root, config.state)?
     val managed = build_runner_scv_managed_retain_v1(payload, managed_tasks, unavailable,
-        config.state, retained != "")?
+        config.state, require_existing or file_exists(config.state + "/journal.sdn"))?
     Ok(Some(BuildRunnerScvSessionV1(adapter: adapter, bindings: bindings,
         record_path: record_path, record_payload: payload, managed: managed)))
 

@@ -8,7 +8,8 @@ use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context
 use app.buildrunner.scv_managed_session_v1.{build_runner_scv_managed_construct_v1,
     build_runner_scv_managed_check_v1, build_runner_scv_managed_unknown_v1,
     build_runner_scv_managed_record_v1, build_runner_scv_managed_context_error_v1,
-    build_runner_scv_managed_identity_error_v1, build_runner_scv_managed_restore_error_v1}
+    build_runner_scv_managed_identity_error_v1, build_runner_scv_managed_restore_error_v1,
+    build_runner_scv_managed_epoch_v1}
 use std.scv.build_capture_v1.{BuildInputEntryV1, ScvBuildCursorV1, scv_build_capture_reconcile_v1}
 use test.fixtures.buildrunner.scv_cli_fixture_v1.{setup_scv_cli_task_v1}
 
@@ -31,6 +32,21 @@ fn setup_managed_task() -> BuildTaskV1:
     task
 
 describe "BuildRunner managed logical input bridge":
+    it "uses valid retry-stable task identities for distinct capture epochs":
+        val task = setup_managed_task()
+        val epoch = build_runner_scv_managed_epoch_v1(task).unwrap()
+        expect(epoch.len()).to_be_greater_than("buildrunner-declared-inputs-v1-".len())
+        var retry = task
+        retry.attempt = 2
+        expect(build_runner_scv_managed_epoch_v1(retry).unwrap()).to_equal(epoch)
+        var different = task
+        different.args.push("--different-build-subject")
+        expect(build_runner_scv_managed_epoch_v1(different).unwrap() == epoch).to_equal(false)
+        var invalid = task
+        invalid.attempt = 0
+        expect(build_runner_scv_managed_epoch_v1(invalid).is_err()).to_equal(true)
+        expect(build_runner_scv_managed_construct_v1(invalid, setup_managed_context(), setup_managed_entries(), epoch).is_err()).to_equal(true)
+
     it "keeps legacy contexts source-only and requires actual target and configuration subjects":
         val context = BuildRunnerTaskContextV1("llvm", sha256_text("runtime"), sha256_text("policy"), sha256_text("environment"))
         val payload = build_runner_context_encode_v1(context).unwrap()
