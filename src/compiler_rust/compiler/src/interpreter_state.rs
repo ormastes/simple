@@ -1292,7 +1292,11 @@ macro_rules! interpreter_thread_state {
         /// Captured on the spawning thread and installed on the worker before
         /// it evaluates anything. Values are cloned; runtime handles inside
         /// them (atomics, mutexes, raw addresses) are process-global, so the
-        /// worker and the spawner share them.
+        /// worker and the spawner share them. Interpreter-level state is a
+        /// snapshot, not shared: a worker's writes to module-level `var`s
+        /// stay on the worker (isolated-thread semantics) and are not merged
+        /// back on join. The snapshot is intentionally partial: unit tables,
+        /// DI singletons, move tracking and BDD registries start empty.
         pub(crate) struct InterpreterThreadState {
             $( $field: $ty, )*
         }
@@ -1322,6 +1326,13 @@ interpreter_thread_state! {
     newtypes: HashMap<String, Arc<NewtypeDef>> = NEWTYPES,
     module_globals: HashMap<String, Value> = MODULE_GLOBALS,
     module_globals_by_owner: OwnedGlobals = MODULE_GLOBALS_BY_OWNER,
+    module_globals_initial_by_owner: HashMap<Arc<str>, HashMap<String, Value>> = MODULE_GLOBALS_INITIAL_BY_OWNER,
+    user_macros: HashMap<String, MacroDef> = USER_MACROS,
+    macro_definition_order: Vec<String> = MACRO_DEFINITION_ORDER,
+    di_config: Option<Arc<DiConfig>> = DI_CONFIG,
+    aop_config: Option<Arc<AopConfig>> = AOP_CONFIG,
+    execution_mode: ExecutionMode = EXECUTION_MODE,
+    module_export_owners: HashMap<usize, Arc<str>> = crate::interpreter::module_cache::MODULE_EXPORT_OWNERS,
     module_env_by_owner: HashMap<Arc<str>, Arc<crate::value::LayeredEnv>> = MODULE_ENV_BY_OWNER,
     module_global_bindings_by_owner: HashMap<Arc<str>, Arc<ModuleBindings>> = MODULE_GLOBAL_BINDINGS_BY_OWNER,
     literal_functions: HashMap<String, LiteralFunctionInfo> = LITERAL_FUNCTIONS,
