@@ -1,0 +1,77 @@
+# @req REQ-TESTRUNNER-COMMENT-KIND
+# @cover src/lib/nogc_sync_mut/test_runner/doctest_runner.spl 10%
+"""
+# Comment doctests run the examples of real library source
+
+**Feature IDs:** #test-runner-comment-kind
+**Category:** Tooling
+
+## Overview
+
+The examples shipped in the standard library's own documentation must run
+under `simple test --spl-doctest <src file>`. The count the runner reports
+must equal the number of examples the extractor finds in that file, so a
+file whose examples silently stop being picked up cannot stay green.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.doctest_runner.{extract_doctests}
+
+val DATASET = "src/lib/gc_async_mut/pure/data/dataset.spl"
+val CODEC = "src/lib/nogc_sync_mut/database/sql/codec.spl"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn run_doctest(path: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), ["test", "--no-session-daemon", "--spl-doctest", path], 900000, 4194304)
+    (out + err, code)
+
+describe "simple test --spl-doctest on library source":
+    # @capture(exec)
+    it "passes every example of a multi-example library file":
+        val expected = extract_doctests(DATASET).len()
+        step("The library file documents several examples")
+        expect(expected).to_be_greater_than(1)
+        step("Run the comment doctest on the library file")
+        val (report, code) = run_doctest(DATASET)
+        expect(code).to_equal(0)
+        expect(report).to_contain("PASS  " + DATASET)
+        expect(report).to_contain("SPL Doctest: {expected} passed, 0 failed")
+
+    # @capture(exec)
+    it "passes the example of a single-example library file":
+        val expected = extract_doctests(CODEC).len()
+        expect(expected).to_equal(1)
+        step("Run the comment doctest on the library file")
+        val (report, code) = run_doctest(CODEC)
+        expect(code).to_equal(0)
+        expect(report).to_contain("SPL Doctest: 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "passes the single-hash examples of a library file":
+        val path = "src/lib/nogc_sync_mut/concurrent/channel.spl"
+        val expected = extract_doctests(path).len()
+        step("The library file documents its examples with single-hash comments")
+        expect(expected).to_be_greater_than(1)
+        step("Run the comment doctest on the library file")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(0)
+        expect(report).to_contain("SPL Doctest: {expected} passed, 0 failed")
+
+    # KNOWN RED: the example in dataloader.spl iterates `loader.iter()` and the
+    # interpreter rejects the iterator object. See
+    # doc/08_tracking/bug/dataloader_doc_example_not_iterable_2026-10-30.md
+    # @capture(exec)
+    it "passes the example of the data loader library file":
+        val path = "src/lib/gc_async_mut/pure/data/dataloader.spl"
+        step("Run the comment doctest on the library file")
+        val (report, code) = run_doctest(path)
+        expect(report).to_contain("SPL Doctest: 1 passed, 0 failed")
+        expect(code).to_equal(0)

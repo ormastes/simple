@@ -1,0 +1,152 @@
+# @req REQ-TESTRUNNER-COMMENT-KIND
+# @cover src/lib/nogc_sync_mut/test_runner/test_runner_modes.spl 10%
+"""
+# A comment doctest run that finds nothing is never a pass
+
+**Feature IDs:** #test-runner-comment-kind
+**Category:** Tooling
+
+## Overview
+
+An operator points `simple test --spl-doctest` at a file or directory. If
+nothing under that target holds a runnable example, the run must say so and
+fail: a green result with zero examples would let a mistyped path or a
+deleted example pass unnoticed. A directory is judged by what its files hold,
+and one green file does not hide a red sibling.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val DIR = "build/comment_kind/no_examples"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn mkdir(path: text):
+    process_run_bounded("mkdir", ["-p", path], 10000, 65536)
+
+fn put(path: text, body: text) -> text:
+    file_write(path, body)
+    path
+
+fn run_doctest(path: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded(real_binary(), ["test", "--no-session-daemon", "--spl-doctest", path], 600000, 4194304)
+    (out + err, code)
+
+val GREEN = "## ```simple\n## assert_equal(1, 1)\n## ```\nfn g():\n    1\n"
+val RED = "## ```simple\n## assert_equal(1, 2)\n## ```\nfn r():\n    1\n"
+
+describe "simple test --spl-doctest with nothing to run":
+    # @capture(exec)
+    it "fails a file with no comments at all":
+        mkdir(DIR)
+        step("Write a file with code only")
+        val path = put(DIR + "/code_only.spl", "fn f():\n    1\n")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "does not report a synthetic PASS for a file with no examples":
+        mkdir(DIR)
+        step("Write a file with code only")
+        val path = put(DIR + "/no_synthetic_pass.spl", "fn f():\n    1\n")
+        val (report, code) = run_doctest(path)
+        expect(report.contains("PASS  " + path)).to_equal(false)
+        expect(report).to_contain("0 passed, 1 failed")
+        expect(code).to_equal(1)
+
+    # @capture(exec)
+    it "fails a file whose comments are prose only":
+        mkdir(DIR)
+        step("Write a file with prose doc comments")
+        val path = put(DIR + "/prose_only.spl", "## Adds one.\n## Returns n + 1.\nfn f(n: i64) -> i64:\n    n + 1\n")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails a file whose only fence is not runnable code":
+        mkdir(DIR)
+        step("Write a file with a text fence")
+        val path = put(DIR + "/text_fence.spl", "## ```text\n## not code\n## ```\nfn f():\n    1\n")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails a file with plain commented-out code and no fence":
+        mkdir(DIR)
+        step("Write a file with commented code but no fence")
+        val path = put(DIR + "/commented_code.spl", "# val x = 1\n# assert_equal(x, 2)\nfn f():\n    1\n")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails a file whose example fence is never closed":
+        mkdir(DIR)
+        step("Write a file with an unterminated fence")
+        val path = put(DIR + "/unterminated.spl", "## ```simple\n## assert_equal(1, 1)\nfn f():\n    1\n")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails a file that does not exist":
+        step("Run against a missing path")
+        val (report, code) = run_doctest(DIR + "/does_not_exist.spl")
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "fails an empty file":
+        mkdir(DIR)
+        step("Write an empty file")
+        val path = put(DIR + "/empty.spl", "")
+        val (report, code) = run_doctest(path)
+        expect(code).to_equal(1)
+        expect(report.contains("PASS  " + path)).to_equal(false)
+
+describe "simple test --spl-doctest on a directory":
+    # @capture(exec)
+    it "fails a directory without any example":
+        val dir = DIR + "/empty_dir"
+        mkdir(dir)
+        step("Write a code-only file into an otherwise empty directory")
+        put(dir + "/plain.spl", "fn f():\n    1\n")
+        val (report, code) = run_doctest(dir)
+        expect(code).to_equal(1)
+        expect(report).to_contain("no doctest blocks found")
+
+    # @capture(exec)
+    it "passes a directory whose example files are all green":
+        val dir = DIR + "/all_green_dir"
+        mkdir(dir)
+        step("Write two green files and one code-only file")
+        put(dir + "/a.spl", GREEN)
+        put(dir + "/b.spl", GREEN)
+        put(dir + "/plain.spl", "fn f():\n    1\n")
+        val (report, code) = run_doctest(dir)
+        expect(code).to_equal(0)
+        expect(report).to_contain("SPL Doctest: 2 passed, 0 failed")
+
+    # @capture(exec)
+    it "does not let a green file hide a red sibling":
+        val dir = DIR + "/mixed_dir"
+        mkdir(dir)
+        step("Write one green and one red file")
+        put(dir + "/good.spl", GREEN)
+        put(dir + "/bad.spl", RED)
+        val (report, code) = run_doctest(dir)
+        expect(code).to_equal(1)
+        expect(report).to_contain("SPL Doctest: 1 passed, 1 failed")
+        expect(report).to_contain("FAIL  " + dir + "/bad.spl")
+        expect(report).to_contain("PASS  " + dir + "/good.spl")
