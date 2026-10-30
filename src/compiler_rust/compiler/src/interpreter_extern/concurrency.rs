@@ -1284,6 +1284,21 @@ fn atomic_cell(args: &[Value], symbol: &str) -> Result<*mut i64, CompileError> {
     Ok(addr as usize as *mut i64)
 }
 
+/// `rt_par_atomic_i64_is_lock_free(addr) -> i64`: 1 when `addr` names an
+/// aligned i64 cell on a lock-free target. Null/misaligned yields 0 (not an
+/// error), matching the runtime contract.
+pub fn rt_par_atomic_i64_is_lock_free(args: &[Value]) -> Result<Value, CompileError> {
+    let addr = int_arg(args, 0, "rt_par_atomic_i64_is_lock_free")?;
+    Ok(Value::Int(unsafe {
+        simple_runtime::rt_par_atomic_i64_is_lock_free(addr as usize as *mut i64)
+    }))
+}
+
+pub fn rt_par_atomic_load_i64(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = atomic_cell(args, "rt_par_atomic_load_i64")?;
+    Ok(Value::Int(unsafe { simple_runtime::rt_par_atomic_load_i64(ptr) }))
+}
+
 pub fn rt_par_atomic_add_i64(args: &[Value]) -> Result<Value, CompileError> {
     let ptr = atomic_cell(args, "rt_par_atomic_add_i64")?;
     let value = int_arg(args, 1, "rt_par_atomic_add_i64")?;
