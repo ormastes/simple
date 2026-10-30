@@ -993,58 +993,44 @@ fn handle_method_call_with_self_update_inner(
             if let Value::Object { class, fields } = &inner_result {
                 if let Some(resolved) = resolve_object_method(classes, impl_methods, class, method) {
                     let eval_args = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
-                    {
-                        // `_updated_inner_self` is deliberately dropped: the
-                        // write-back gate below keys on `inner_update`'s own
-                        // self, not on the outer call's receiver (see the
-                        // 2026-09-01 bug note).
-                        let (outer_result, _updated_inner_self) = exec_resolved_method_with_self_owned_values(
-                            &resolved,
-                            &eval_args,
-                            args,
-                            class,
-                            Arc::clone(fields),
-                            env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                        if let Some((ref obj_name, ref inner_self)) = inner_update {
-                            // Same gate as the non-owned fallback below, and for
-                            // the same reason: overwrite the ROOT binding with
-                            // the outer result only when the chain provably
-                            // threads one mutable identity through both links.
-                            //
-                            // The old gate here compared `updated_inner_self`'s
-                            // class to `class` -- the class of the OUTER call's
-                            // own receiver -- which is the same object, so it was
-                            // trivially true and said nothing about `obj_name`.
-                            // `val ok = self.symbols.lookup_or_invalid(n).is_valid()`
-                            // therefore wrote `is_valid()`'s BOOL into the frame's
-                            // `self` slot, and every later `self.<field>` in that
-                            // frame failed with "cannot access field on value of
-                            // type 'bool'". The 2026-08-31 fix hardened the
-                            // fallback path below but missed this owned-values
-                            // sibling.
-                            // doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
-                            // doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
-                            if let (
-                                Value::Object { class: inner_class, .. },
-                                Value::Object { class: outer_class, .. },
-                            ) = (inner_self, &outer_result)
-                            {
-                                if inner_class == outer_class
-                                    && method_is_me(classes, impl_methods, inner_class, inner_method)
-                                    && method_is_me(classes, impl_methods, inner_class, method)
-                                {
-                                    return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
-                                }
-                            }
-                            return Ok((outer_result, inner_update));
+                    // The chain threads one mutable identity only when the
+                    // inner `me` returned its own self (same field storage) and
+                    // the outer call is `me` too. A `me` that returns a NEW
+                    // object of the same class is a pure result: the outer call
+                    // acts on that temporary and must not reach the root. Both
+                    // earlier gates got this wrong by comparing classes and
+                    // writing the outer RESULT into the root binding.
+                    // doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
+                    // doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
+                    // doc/08_tracking/bug/smux_native_provider_lane_blocked_on_windows_seed_2026-10-31.md
+                    let threaded_root = inner_update.as_ref().and_then(|(obj_name, inner_self)| match inner_self {
+                        Value::Object {
+                            class: inner_class,
+                            fields: self_fields,
+                        } if Arc::ptr_eq(self_fields, fields)
+                            && method_is_me(classes, impl_methods, inner_class, inner_method)
+                            && method_is_me(classes, impl_methods, inner_class, method) =>
+                        {
+                            Some(obj_name.clone())
                         }
-                        return Ok((outer_result, None));
+                        _ => None,
+                    });
+                    let (outer_result, updated_outer_self) = exec_resolved_method_with_self_owned_values(
+                        &resolved,
+                        &eval_args,
+                        args,
+                        class,
+                        Arc::clone(fields),
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    if let Some(obj_name) = threaded_root {
+                        return Ok((outer_result, Some((obj_name, updated_outer_self))));
                     }
+                    return Ok((outer_result, inner_update));
                 }
             }
 
@@ -1081,34 +1067,7 @@ fn handle_method_call_with_self_update_inner(
                 impl_methods,
             )?;
 
-            // For chained mutable method calls, propagate the final result
-            // If the outer method returned an object of the SAME CLASS, it's likely
-            // the modified self from a `me` method
-            if let Some((ref obj_name, ref inner_self)) = inner_update {
-                // Write the OUTER result back into the root variable only when the
-                // chain provably threads one mutable identity through both links:
-                // the inner AND the outer method must be declared `me`. The old
-                // gate was class equality alone ("same type in/out = mutated
-                // self"), which corrupted every non-mutating fluent chain on the
-                // interpreter lane: `val h = t.head(2).head(1)` overwrote the
-                // immutable `t` with the final result (nrows 3 -> 1) while the
-                // split form and the JIT both kept `t` intact. Builder-style
-                // `me` chains (`b.add(1).add(2)`) still write back. Mock chains
-                // (`m.when(..).returns(..)`) never reached this path: mocks are
-                // `Value::Mock` with interior mutability, not `Value::Object`.
-                // doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
-                if let (Value::Object { class: inner_class, .. }, Value::Object { class: outer_class, .. }) =
-                    (inner_self, &outer_result)
-                {
-                    if inner_class == outer_class
-                        && method_is_me(classes, impl_methods, inner_class, inner_method)
-                        && method_is_me(classes, impl_methods, inner_class, method)
-                    {
-                        return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
-                    }
-                }
-            }
-            // Fall back to propagating the inner update for non-object results or different types
+            // No user method was resolved, so only the inner update can apply.
             return Ok((outer_result, inner_update));
         }
 

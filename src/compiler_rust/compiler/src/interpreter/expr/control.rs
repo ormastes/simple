@@ -156,6 +156,10 @@ pub(super) fn eval_control_expr(
             if let Some((line, column, sub)) = cov_site {
                 crate::interpreter::record_decision_site(line, column, sub, take_then);
             }
+            // A DoBlock branch captures a clone of this frame below.
+            if matches!(if take_then { Some(then_branch.as_ref()) } else { else_branch.as_deref() }, Some(Expr::DoBlock(_))) {
+                crate::interpreter::interpreter_call::publish_before_block_clone(env);
+            }
             let branch_result = if take_then {
                 evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)?
             } else if let Some(else_b) = else_branch {
@@ -279,6 +283,7 @@ pub(super) fn eval_control_expr(
                             continue;
                         }
                     }
+                    crate::interpreter::interpreter_call::publish_before_block_clone(env);
                     let mut arm_env = env.clone();
                     // Dirty-only write-back (see copy_back_block_writes): the
                     // old whole-env write-back iterated every VISIBLE entry,

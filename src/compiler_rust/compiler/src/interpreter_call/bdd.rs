@@ -1013,6 +1013,7 @@ pub(super) fn eval_bdd_builtin(
             // Create a fresh environment for this test to prevent memory accumulation.
             // Each test gets its own copy of the environment that is discarded after the test.
             // This prevents values created during one test from persisting into subsequent tests.
+            crate::interpreter::interpreter_call::publish_before_block_clone(env);
             let mut test_env = env.clone();
 
             // Use cached hooks to avoid O(n²) performance with deeply nested contexts

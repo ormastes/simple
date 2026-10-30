@@ -92,3 +92,12 @@ move the decoder's contract to `[u8]`, at which point the spec changes with it.
    `seed native-build --source src/lib --entry-closure --entry hello.spl --output hello.exe`.
 
 4. `rt_bytes_to_text` is lossy, as above.
+
+## Native-build attempts recorded 2026-10-31 (unblock condition)
+
+A hello-world `native-build` on this Windows host failed both ways; neither is evidence for the native lane.
+
+- Seed from this branch, sha256 `7005d1119c1d299f`: panics at vendored `cranelift-jit/src/backend.rs:307`, `i32::try_from(what - at)`, because the PLT and GOT land more than 2 GB apart.
+- Stage 3 from another lane's worktree, built 2026-10-25, sha256 `13d73267e690b2cd`, with LLVM 23 and the MSVC env: `lld-link: undefined symbol: rt_proc_start_time`, referenced by `rt_process_start_identity`. Its runtime source list predates the current tree. A Stage 3 is not a Stage 4 substitute in any case.
+
+Unblocks when a Windows Stage 4 full CLI from this source exists (bootstrap lane, PR #5540), or the seed's JIT keeps PLT and GOT within 2 GB.
