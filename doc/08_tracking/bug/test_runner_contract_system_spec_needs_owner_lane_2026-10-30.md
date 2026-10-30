@@ -30,6 +30,11 @@ this record, then returns. It used to die on an opaque `unwrap`. In the
 bootstrap phase-verification lane the authority is present, so the scenarios
 run unchanged with the same assertions. No assertion was weakened.
 
+That holds only for non-delegating rows: stage3 and stage4, or stage2 with
+`BOOTSTRAP_STAGE2_TEST_DELEGATE=0`. With the default delegation, the stage2
+inventory rows set `SIMPLE_NO_BOOTSTRAP_DELEGATE=0`
+(`stage2_row_delegation_env`), so the spec reports BLOCKED there as well.
+
 `pending(...)` was tried first and rejected. Under the seed, the
 `std.spec.pending` function shadows the BDD `pending` builtin and only prints,
 so the enclosing `it` still counts as passed (`passed=4`). That is the
