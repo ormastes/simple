@@ -1,0 +1,350 @@
+# @req REQ-TLDR-ASYNC-001
+# Exercise real TldrTableV1 request, waiter, publication and resolution ownership.
+
+use std.spec.{describe, it, expect, step}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrHandleV1, TldrAsyncErrorV1}
+use compiler.driver.cache.reader.tldr_table_fill_v1.{tldr_table_fill_async_v1}
+use compiler.driver.cache.source_reader_v1.{SourceReader, file_source_reader_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1}
+use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult, RingToken}
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefI64, AsyncRefError, AsyncSubscriptionI64, AsyncWakeScanI64, async_ref_deliver_wake_i64}
+use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, RingSubmission}
+use std.nogc_async_mut.async_ring.software_provider.{SoftwareRingProvider}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, file_write_exact, file_delete, getpid}
+use std.io_runtime.{file_exists}
+
+fn tldr_async_test_table() -> TldrTableV1:
+    unsafe(capabilities: [ffi]):
+        match TldrTableV1.create_async(4, 4):
+            case Ok(table): table
+            case Err(error): fail("async TLDR table creation failed: {error}")
+
+fn tldr_async_test_submission(
+    ring: SimpleRing<i64, i64>,
+    provider: SoftwareRingProvider<i64, i64>,
+    owner: u64,
+    task: u64
+) -> RingSubmission<i64>:
+    val reservation = match ring.reserve(owner, task):
+        case Ok(value): value
+        case Err(error): fail("TLDR waiter ring reservation failed: {error}")
+    match ring.commit(owner, reservation, task as i64):
+        case Ok(_): ()
+        case Err(error): fail("TLDR waiter ring commit failed: {error}")
+    match provider.take_one(ring):
+        case Ok(Some(submission)): submission
+        case Ok(nil): fail("TLDR waiter provider returned no submission")
+        case Err(error): fail("TLDR waiter provider take failed: {error}")
+
+fn expect_tldr_async_pending(subscription: AsyncSubscriptionI64, expected: RingToken):
+    unsafe(capabilities: [ffi]):
+        match subscription.poll():
+            case TaskPollResult.Pending(token):
+                expect(token.ring_id).to_equal(expected.ring_id)
+                expect(token.slot).to_equal(expected.slot)
+                expect(token.generation.value).to_equal(expected.generation.value)
+            case state: fail("TLDR caller was not pending on its exact ring token: {state}")
+
+fn expect_tldr_async_artifact(
+    table: TldrTableV1,
+    handle: TldrHandleV1,
+    reference: AsyncRefI64,
+    expected: text
+):
+    unsafe(capabilities: [ffi]):
+        match table.resolve_async(handle, reference):
+            case Ok(Some(artifact)): expect(artifact).to_equal(expected)
+            case Ok(nil): fail("published TLDR artifact resolved as absent")
+            case Err(error): fail("published TLDR artifact resolution failed: {error}")
+
+fn tldr_async_fixture_dir() -> text:
+    "build/test_tmp/tldr_async_waiter_{getpid()}"
+
+describe "TLDR async waiter publication through the real table owner":
+    it "terminalizes one missing-source failure for both waiters and retries only in a new table":
+        val table = tldr_async_test_table()
+        val fixture_dir = tldr_async_fixture_dir() + "/failure"
+        val tldr_root = fixture_dir + "/tldr"
+        val source_path = fixture_dir + "/module_recovery.spl"
+        expect(dir_create_all(fixture_dir)).to_equal(true)
+        if file_exists(source_path):
+            expect(file_delete(source_path)).to_equal(true)
+        expect(file_exists(source_path)).to_equal(false)
+        val reader = file_source_reader_v1(tldr_root)
+        val handle = table.handle("module-recovery", "RecoveryType")
+        val join_handle = table.handle("module-recovery", "AnotherType")
+        val ring_id = 9961u64
+        val owner = 9962u64
+        val source_error = "source not found: {source_path}"
+        val failure_code = -84517001
+        unsafe(capabilities: [ffi]):
+            step("Hold the failed source fill until both callers subscribe")
+            val leader = table.request_async(handle).unwrap()
+            expect(table.take_fill_requests()).to_equal(["module-recovery"])
+            val joiner = table.request_async(join_handle).unwrap()
+            expect(joiner.same_reference(leader)).to_equal(true)
+            expect(table.take_fill_requests().len()).to_equal(0)
+
+            val ring = SimpleRing<i64, i64>.create(ring_id, owner, 2).unwrap()
+            val provider = SoftwareRingProvider<i64, i64>.create(9963u64, 2).unwrap()
+            val leader_submission = tldr_async_test_submission(ring, provider, owner, 9964u64)
+            val joiner_submission = tldr_async_test_submission(ring, provider, owner, 9965u64)
+            val leader_subscription = leader.subscribe(leader_submission.token).unwrap()
+            val joiner_subscription = joiner.subscribe(joiner_submission.token).unwrap()
+            expect_tldr_async_pending(leader_subscription, leader_submission.token)
+            expect_tldr_async_pending(joiner_subscription, joiner_submission.token)
+
+            step("Publish one terminal source failure and wake both callers")
+            expect(tldr_table_fill_async_v1(table, reader, "module-recovery", source_path)).to_equal(source_error)
+            match table.resolve_async(handle, leader):
+                case Err(TldrAsyncErrorV1.Source(observed)): expect(observed).to_equal(source_error)
+                case other: fail("shared source diagnostic was not retained: {other}")
+            match table.publish_async("module-recovery", "late recovered text"):
+                case Err(TldrAsyncErrorV1.Conflict): ()
+                case other: fail("failed request accepted a late artifact: {other}")
+
+            var cursor = leader.wake_cursor().unwrap()
+            var saw_leader = false
+            var saw_joiner = false
+            var wake_count = 0
+            var wake_scan_done = false
+            var wake_scan_steps = 0
+            while wake_scan_steps < 8 and not wake_scan_done:
+                wake_scan_steps = wake_scan_steps + 1
+                match cursor.next_pending(8):
+                    case AsyncWakeScanI64.Wake(wake):
+                        expect(wake.token.ring_id).to_equal(ring_id)
+                        if wake.token.slot == leader_submission.token.slot:
+                            expect(saw_leader).to_equal(false)
+                            expect(wake.token.generation.value).to_equal(leader_submission.token.generation.value)
+                            saw_leader = true
+                        else if wake.token.slot == joiner_submission.token.slot:
+                            expect(saw_joiner).to_equal(false)
+                            expect(wake.token.generation.value).to_equal(joiner_submission.token.generation.value)
+                            saw_joiner = true
+                        else:
+                            fail("source failure woke an unrelated ring slot: {wake.token.slot}")
+                        cursor = async_ref_deliver_wake_i64(ring, wake).unwrap()
+                        wake_count = wake_count + 1
+                    case AsyncWakeScanI64.More(next_cursor): cursor = next_cursor
+                    case AsyncWakeScanI64.Done: wake_scan_done = true
+                    case AsyncWakeScanI64.Invalid: fail("source failure wake cursor became invalid")
+            expect(wake_scan_done).to_equal(true)
+            expect(wake_count).to_equal(2)
+            expect(saw_leader).to_equal(true)
+            expect(saw_joiner).to_equal(true)
+
+            var saw_leader_completion = false
+            var saw_joiner_completion = false
+            var completion_count = 0
+            while completion_count < 2:
+                match ring.take_completion(owner):
+                    case Ok(Some(completion)):
+                        expect(completion.token.ring_id).to_equal(ring_id)
+                        expect(completion.value.is_none()).to_equal(true)
+                        expect(completion.error).to_equal(failure_code.to_text())
+                        if completion.token.slot == leader_submission.token.slot:
+                            expect(saw_leader_completion).to_equal(false)
+                            expect(completion.token.generation.value).to_equal(leader_submission.token.generation.value)
+                            saw_leader_completion = true
+                        else if completion.token.slot == joiner_submission.token.slot:
+                            expect(saw_joiner_completion).to_equal(false)
+                            expect(completion.token.generation.value).to_equal(joiner_submission.token.generation.value)
+                            saw_joiner_completion = true
+                        else:
+                            fail("source failure completion used an unrelated slot: {completion.token.slot}")
+                        completion_count = completion_count + 1
+                    case Ok(nil): fail("source failure stranded a subscribed caller")
+                    case Err(error): fail("source failure completion read failed: {error}")
+            expect(saw_leader_completion).to_equal(true)
+            expect(saw_joiner_completion).to_equal(true)
+            match leader_subscription.poll():
+                case TaskPollResult.Ready(Err(AsyncRefError.Failed(code))): expect(code).to_equal(failure_code)
+                case state: fail("leader remained pending after source failure: {state}")
+            match joiner_subscription.poll():
+                case TaskPollResult.Ready(Err(AsyncRefError.Failed(code))): expect(code).to_equal(failure_code)
+                case state: fail("joiner remained pending after source failure: {state}")
+
+            val repeated = table.request_async(handle).unwrap()
+            expect(repeated.same_reference(leader)).to_equal(true)
+            expect(table.take_fill_requests().len()).to_equal(0)
+            expect(file_write_exact(source_path, "pub struct RecoveryFixture:\n    value: i64\n")).to_equal(true)
+            expect(tldr_table_fill_async_v1(table, reader, "module-recovery", source_path)).to_equal(source_error)
+            match table.resolve_async(handle, repeated):
+                case Err(TldrAsyncErrorV1.Source(observed)): expect(observed).to_equal(source_error)
+                case other: fail("old terminal reference changed after source appeared: {other}")
+
+            step("Retry the same key only in a new table scope")
+            val retry_table = tldr_async_test_table()
+            val retry_handle = retry_table.handle("module-recovery", "RecoveryType")
+            val retry_reference = retry_table.request_async(retry_handle).unwrap()
+            expect(retry_reference.same_reference(leader)).to_equal(false)
+            expect(retry_table.take_fill_requests()).to_equal(["module-recovery"])
+            expect(tldr_table_fill_async_v1(retry_table, reader, "module-recovery", source_path)).to_equal("")
+            val recovery_artifact = reader.read_tldr(source_path)
+            expect(recovery_artifact.contains("RecoveryFixture")).to_equal(true)
+            expect_tldr_async_artifact(retry_table, retry_handle, retry_reference, recovery_artifact)
+            expect(retry_table.request_async(retry_handle).unwrap().same_reference(retry_reference)).to_equal(true)
+            expect(retry_table.take_fill_requests().len()).to_equal(0)
+            table.close_async_quiescent()
+            retry_table.close_async_quiescent()
+        expect(file_delete(source_path)).to_equal(true)
+        expect(file_delete(module_tldr_companion_path_v1(tldr_root, source_path))).to_equal(true)
+
+    it "rejects an unclaimed fill and skips source work for a ready table hit":
+        val table = tldr_async_test_table()
+        val reader = file_source_reader_v1(tldr_async_fixture_dir() + "/no_work/tldr")
+        unsafe(capabilities: [ffi]):
+            step("Reject a fill without an owner claim")
+            val missing_claim = tldr_table_fill_async_v1(
+                table, reader, "never-claimed", "build/test_tmp/tldr-async-missing.spl")
+            expect(missing_claim.starts_with("async tldr claim unavailable")).to_equal(true)
+            expect(table.take_fill_requests().len()).to_equal(0)
+
+            step("Resolve a ready table hit without reading its source")
+            val handle = table.handle("already-ready", "ReadyType")
+            val reference = table.request_async(handle).unwrap()
+            expect(table.publish_async("already-ready", "cached exact TLDR").unwrap()).to_equal(true)
+            val ready_fill = tldr_table_fill_async_v1(
+                table, reader, "already-ready", "build/test_tmp/tldr-async-never-created.spl")
+            expect(ready_fill).to_equal("")
+            expect(table.take_fill_requests().len()).to_equal(0)
+            expect_tldr_async_artifact(table, handle, reference, "cached exact TLDR")
+            table.close_async_quiescent()
+
+    it "joins a pending caller, advances unrelated work, and wakes both callers from one publication":
+        val table = tldr_async_test_table()
+        val fixture_dir = tldr_async_fixture_dir()
+        val tldr_root = fixture_dir + "/tldr"
+        val main_path = fixture_dir + "/module_main.spl"
+        val unrelated_path = fixture_dir + "/module_unrelated.spl"
+        expect(dir_create_all(fixture_dir)).to_equal(true)
+        expect(file_write_exact(main_path, "pub struct MainFixture:\n    value: i64\n")).to_equal(true)
+        expect(file_write_exact(unrelated_path, "pub struct UnrelatedFixture:\n    count: i64\n")).to_equal(true)
+        val reader = file_source_reader_v1(tldr_root)
+        # Materialize deterministic real SourceReader artifacts before the
+        # controlled table fill; the table adapter will read these same bytes.
+        expect(reader.update_tldr(main_path)).to_equal("")
+        expect(reader.update_tldr(unrelated_path)).to_equal("")
+        val artifact = reader.read_tldr(main_path)
+        val unrelated_artifact = reader.read_tldr(unrelated_path)
+        expect(artifact != "").to_equal(true)
+        expect(unrelated_artifact != "").to_equal(true)
+        expect(artifact.contains("MainFixture")).to_equal(true)
+        expect(unrelated_artifact.contains("UnrelatedFixture")).to_equal(true)
+        val main_handle = table.handle("module-main", "MainType")
+        val join_handle = table.handle("module-main", "OtherType")
+        val unrelated_handle = table.handle("module-unrelated", "UnrelatedType")
+        val ring_id = 9951u64
+        val owner = 9952u64
+        unsafe(capabilities: [ffi]):
+            expect(table.loaded_count()).to_equal(0)
+            step("Hold the first TLDR fill before publication")
+            val leader = table.request_async(main_handle).unwrap()
+            val main_claims = table.take_fill_requests()
+            expect(main_claims).to_equal(["module-main"])
+
+            step("Join the second caller to the pending artifact")
+            val joiner = table.request_async(join_handle).unwrap()
+            expect(joiner.same_reference(leader)).to_equal(true)
+            expect(table.take_fill_requests().len()).to_equal(0)
+            val ring = SimpleRing<i64, i64>.create(ring_id, owner, 2).unwrap()
+            val provider = SoftwareRingProvider<i64, i64>.create(9953u64, 2).unwrap()
+            val leader_submission = tldr_async_test_submission(ring, provider, owner, 9954u64)
+            val joiner_submission = tldr_async_test_submission(ring, provider, owner, 9955u64)
+            val leader_subscription = leader.subscribe(leader_submission.token).unwrap()
+            val joiner_subscription = joiner.subscribe(joiner_submission.token).unwrap()
+            expect_tldr_async_pending(leader_subscription, leader_submission.token)
+            expect_tldr_async_pending(joiner_subscription, joiner_submission.token)
+
+            val unrelated = table.request_async(unrelated_handle).unwrap()
+            expect(table.take_fill_requests()).to_equal(["module-unrelated"])
+            expect(tldr_table_fill_async_v1(table, reader, "module-unrelated", unrelated_path)).to_equal("")
+            expect_tldr_async_artifact(table, unrelated_handle, unrelated, unrelated_artifact)
+            expect(table.loaded_count()).to_equal(1)
+            expect_tldr_async_pending(leader_subscription, leader_submission.token)
+            expect_tldr_async_pending(joiner_subscription, joiner_submission.token)
+
+            step("Publish once and resume the original waiting handle")
+            expect(tldr_table_fill_async_v1(table, reader, "module-main", main_path)).to_equal("")
+            expect(table.loaded_count()).to_equal(2)
+            var cursor = leader.wake_cursor().unwrap()
+            var saw_leader = false
+            var saw_joiner = false
+            var wake_count = 0
+            var wake_scan_done = false
+            var wake_scan_steps = 0
+            while wake_scan_steps < 8 and not wake_scan_done:
+                wake_scan_steps = wake_scan_steps + 1
+                match cursor.next_pending(8):
+                    case AsyncWakeScanI64.Wake(wake):
+                        expect(wake.token.ring_id).to_equal(ring_id)
+                        if wake.token.slot == leader_submission.token.slot:
+                            expect(saw_leader).to_equal(false)
+                            expect(wake.token.generation.value).to_equal(leader_submission.token.generation.value)
+                            saw_leader = true
+                        else if wake.token.slot == joiner_submission.token.slot:
+                            expect(saw_joiner).to_equal(false)
+                            expect(wake.token.generation.value).to_equal(joiner_submission.token.generation.value)
+                            saw_joiner = true
+                        else:
+                            fail("publication woke an unrelated ring slot: {wake.token.slot}")
+                        cursor = async_ref_deliver_wake_i64(ring, wake).unwrap()
+                        wake_count = wake_count + 1
+                    case AsyncWakeScanI64.More(next_cursor): cursor = next_cursor
+                    case AsyncWakeScanI64.Done: wake_scan_done = true
+                    case AsyncWakeScanI64.Invalid: fail("publication wake cursor became invalid")
+            expect(wake_scan_done).to_equal(true)
+            expect(wake_count).to_equal(2)
+            expect(saw_leader).to_equal(true)
+            expect(saw_joiner).to_equal(true)
+
+            var observed_artifact_id = -1
+            var completion_count = 0
+            var saw_leader_completion = false
+            var saw_joiner_completion = false
+            while completion_count < 2:
+                match ring.take_completion(owner):
+                    case Ok(Some(completion)):
+                        expect(completion.token.ring_id).to_equal(ring_id)
+                        expect(completion.error).to_equal("")
+                        expect(completion.value.is_some()).to_equal(true)
+                        val artifact_id = completion.value.unwrap()
+                        if observed_artifact_id < 0:
+                            observed_artifact_id = artifact_id
+                        else:
+                            expect(artifact_id).to_equal(observed_artifact_id)
+                        if completion.token.slot == leader_submission.token.slot:
+                            expect(saw_leader_completion).to_equal(false)
+                            expect(completion.token.generation.value).to_equal(leader_submission.token.generation.value)
+                            saw_leader_completion = true
+                        else if completion.token.slot == joiner_submission.token.slot:
+                            expect(saw_joiner_completion).to_equal(false)
+                            expect(completion.token.generation.value).to_equal(joiner_submission.token.generation.value)
+                            saw_joiner_completion = true
+                        else:
+                            fail("completion used an unrelated ring slot: {completion.token.slot}")
+                        completion_count = completion_count + 1
+                    case Ok(nil): fail("published TLDR did not complete every subscribed caller")
+                    case Err(error): fail("TLDR completion read failed: {error}")
+            expect(saw_leader_completion).to_equal(true)
+            expect(saw_joiner_completion).to_equal(true)
+
+            expect_tldr_async_artifact(table, main_handle, leader, artifact)
+            expect_tldr_async_artifact(table, join_handle, joiner, artifact)
+            match leader_subscription.poll():
+                case TaskPollResult.Ready(Ok(value)): expect(value).to_equal(observed_artifact_id)
+                case state: fail("leader did not observe the shared published artifact: {state}")
+            match joiner_subscription.poll():
+                case TaskPollResult.Ready(Ok(value)): expect(value).to_equal(observed_artifact_id)
+                case state: fail("joiner did not observe the shared published artifact: {state}")
+
+            val third = table.request_async(main_handle).unwrap()
+            expect(third.same_reference(leader)).to_equal(true)
+            expect(table.take_fill_requests().len()).to_equal(0)
+            expect_tldr_async_artifact(table, main_handle, third, artifact)
+            table.close_async_quiescent()
+        expect(file_delete(main_path)).to_equal(true)
+        expect(file_delete(unrelated_path)).to_equal(true)
+        expect(file_delete(module_tldr_companion_path_v1(tldr_root, main_path))).to_equal(true)
+        expect(file_delete(module_tldr_companion_path_v1(tldr_root, unrelated_path))).to_equal(true)

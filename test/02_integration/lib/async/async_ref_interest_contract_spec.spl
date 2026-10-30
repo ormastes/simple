@@ -1,0 +1,188 @@
+# @req REQ-ASYNC-REF-001
+# Real ring/provider lifecycle contracts for stale generations and cancellation boundaries.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64}
+use std.nogc_async_mut.async_ring.async_ref.{
+    AsyncRefError, AsyncRefI64, AsyncRefStateI64, AsyncWakeI64, AsyncWakeScanI64,
+    async_ref_deliver_wake_i64
+}
+use std.nogc_async_mut.async_ring.simple_ring.{
+    SimpleRing, SimpleRingError, RingSubmission, RingCancelOutcome
+}
+use std.nogc_async_mut.async_ring.software_provider.{SoftwareRingProvider}
+use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult}
+
+fn interest_contract_map() -> LocklessMapI64:
+    unsafe(capabilities: [ffi]):
+        match LocklessMapI64.create(4, 4, 4, 4):
+            case Ok(map): map
+            case Err(error): fail("interest contract map creation failed: {error}")
+
+fn close_interest_contract_map(map: LocklessMapI64):
+    unsafe(capabilities: [ffi]): map.close_quiescent()
+
+fn interest_contract_submission(
+    ring: SimpleRing<i64, i64>,
+    provider: SoftwareRingProvider<i64, i64>,
+    owner: u64,
+    task: u64
+) -> RingSubmission<i64>:
+    val reservation = match ring.reserve(owner, task):
+        case Ok(value): value
+        case Err(error): fail("interest contract reservation failed: {error}")
+    match ring.commit(owner, reservation, task as i64):
+        case Ok(_): ()
+        case Err(error): fail("interest contract commit failed: {error}")
+    match provider.take_one(ring):
+        case Ok(Some(value)): value
+        case Ok(nil): fail("interest contract provider returned no submission")
+        case Err(error): fail("interest contract provider take failed: {error}")
+
+fn expect_interest_wake(scan: AsyncWakeScanI64) -> AsyncWakeI64:
+    match scan:
+        case AsyncWakeScanI64.Wake(wake): wake
+        case AsyncWakeScanI64.More(_): fail("interest wake scan yielded before a wake")
+        case AsyncWakeScanI64.Done: fail("interest wake scan found no pending wake")
+        case AsyncWakeScanI64.Invalid: fail("interest wake scan found an invalid waiter")
+
+describe "AsyncRefI64 ring interest lifecycle":
+    it "should reject an old ring generation and deliver the reused slot only to its current reference":
+        step("Retire only the cancelled consumer interest")
+        unsafe(capabilities: [ffi]):
+            val map = interest_contract_map()
+            val old_reference = map.request(51, 5101).unwrap()
+            val current_reference = map.request(52, 5202).unwrap()
+            val ring = SimpleRing<i64, i64>.create(961u64, 962u64, 1).unwrap()
+            val provider = SoftwareRingProvider<i64, i64>.create(963u64, 1).unwrap()
+            val old_submission = interest_contract_submission(ring, provider, 962u64, 5101u64)
+            old_reference.subscribe(old_submission.token).unwrap()
+            expect(old_reference.try_start()).to_equal(true)
+            expect(old_reference.complete(5111).unwrap()).to_equal(true)
+            val stale_wake = expect_interest_wake(old_reference.wake_cursor().unwrap().next_pending(4))
+
+            match ring.cancel(962u64, old_submission.token):
+                case RingCancelOutcome.ProviderCancelRequested(token):
+                    expect(token.slot).to_equal(old_submission.token.slot)
+                    expect(token.generation.value).to_equal(old_submission.token.generation.value)
+                case _: fail("in-flight old generation did not accept provider cancellation")
+            provider.complete_cancelled(ring, old_submission, "retire old generation").unwrap()
+            val old_completion = ring.take_completion_retained(962u64).unwrap().unwrap()
+            expect(old_completion.token.generation.value).to_equal(old_submission.token.generation.value)
+            expect(old_completion.error).to_equal("retire old generation")
+            ring.release_retained_completion(962u64, old_submission.token).unwrap()
+
+            val current_submission = interest_contract_submission(ring, provider, 962u64, 5202u64)
+            expect(current_submission.token.slot).to_equal(old_submission.token.slot)
+            expect(current_submission.token.generation.value).to_be_greater_than(old_submission.token.generation.value)
+            val current_interest = current_reference.subscribe(current_submission.token).unwrap()
+            expect(current_reference.try_start()).to_equal(true)
+            expect(current_reference.complete(5222).unwrap()).to_equal(true)
+
+            match async_ref_deliver_wake_i64(ring, stale_wake):
+                case Err(SimpleRingError.StaleToken): ()
+                case Err(error): fail("old generation returned the wrong delivery error: {error}")
+                case Ok(_): fail("old generation delivered into a reused ring slot")
+            val current_wake = expect_interest_wake(
+                current_reference.wake_cursor().unwrap().next_pending(4))
+            expect(current_wake.token.ring_id).to_equal(current_submission.token.ring_id)
+            expect(current_wake.token.slot).to_equal(current_submission.token.slot)
+            expect(current_wake.token.generation.value).to_equal(current_submission.token.generation.value)
+            async_ref_deliver_wake_i64(ring, current_wake).unwrap()
+            val completion = ring.take_completion(962u64).unwrap().unwrap()
+            expect(completion.token.generation.value).to_equal(current_submission.token.generation.value)
+            expect(completion.task_key).to_equal(current_submission.task_key)
+            expect(completion.value.unwrap()).to_equal(5222)
+            expect(completion.error).to_equal("")
+            match ring.take_completion(962u64):
+                case Ok(nil): ()
+                case Ok(Some(_)): fail("stale generation published an extra completion")
+                case Err(error): fail("ring extra-completion check failed: {error}")
+            match current_interest.poll():
+                case TaskPollResult.Ready(Ok(value)): expect(value).to_equal(5222)
+                case TaskPollResult.Ready(Err(error)): fail("current interest failed: {error}")
+                case TaskPollResult.Pending(_): fail("current interest stayed pending after exact delivery")
+            close_interest_contract_map(map)
+
+    it "should preserve a shared failure when one of two consumer interests is cancelled":
+        step("Retire only the cancelled consumer interest")
+        unsafe(capabilities: [ffi]):
+            val map = interest_contract_map()
+            val reference = map.request(61, 6101).unwrap()
+            val ring = SimpleRing<i64, i64>.create(971u64, 972u64, 2).unwrap()
+            val provider = SoftwareRingProvider<i64, i64>.create(973u64, 2).unwrap()
+            val cancelled_submission = interest_contract_submission(ring, provider, 972u64, 6101u64)
+            val live_submission = interest_contract_submission(ring, provider, 972u64, 6102u64)
+            val cancelled = reference.subscribe(cancelled_submission.token).unwrap()
+            val live = reference.subscribe(live_submission.token).unwrap()
+            expect(cancelled.cancel_interest().unwrap()).to_equal(true)
+            match ring.cancel(972u64, cancelled_submission.token):
+                case RingCancelOutcome.ProviderCancelRequested(token):
+                    expect(token.generation.value).to_equal(cancelled_submission.token.generation.value)
+                case _: fail("cancelled interest reservation was not routed to its provider")
+            provider.complete_cancelled(ring, cancelled_submission, "interest retired").unwrap()
+            val retired = ring.take_completion_retained(972u64).unwrap().unwrap()
+            expect(retired.token.slot).to_equal(cancelled_submission.token.slot)
+            expect(retired.error).to_equal("interest retired")
+            ring.release_retained_completion(972u64, cancelled_submission.token).unwrap()
+
+            val failure_code = -9223372036854775807i64 - 1i64
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.fail(failure_code).unwrap()).to_equal(true)
+            val wake = expect_interest_wake(reference.wake_cursor().unwrap().next_pending(4))
+            expect(wake.token.slot).to_equal(live_submission.token.slot)
+            expect(wake.token.generation.value).to_equal(live_submission.token.generation.value)
+            async_ref_deliver_wake_i64(ring, wake).unwrap()
+            val failure = ring.take_completion(972u64).unwrap().unwrap()
+            expect(failure.token.slot).to_equal(live_submission.token.slot)
+            expect(failure.token.generation.value).to_equal(live_submission.token.generation.value)
+            expect(failure.value.is_none()).to_equal(true)
+            expect(failure.error).to_equal(failure_code.to_text())
+            match live.poll():
+                case TaskPollResult.Ready(Err(AsyncRefError.Failed(observed))):
+                    expect(observed).to_equal(failure_code)
+                case _: fail("live consumer did not observe the exact shared failure")
+            match cancelled.poll():
+                case TaskPollResult.Ready(Err(AsyncRefError.CancelledInterest)): ()
+                case _: fail("cancelled consumer observed a shared completion")
+            match reference.try_ready():
+                case AsyncRefStateI64.Failed(observed): expect(observed).to_equal(failure_code)
+                case _: fail("consumer cancellation changed the immutable shared failure")
+            close_interest_contract_map(map)
+
+    it "should allow the producer to publish after the final ring interest is retired":
+        step("Keep terminal outcomes immutable after cancellation")
+        unsafe(capabilities: [ffi]):
+            val map = interest_contract_map()
+            val reference = map.request(71, 7101).unwrap()
+            val ring = SimpleRing<i64, i64>.create(981u64, 982u64, 1).unwrap()
+            val provider = SoftwareRingProvider<i64, i64>.create(983u64, 1).unwrap()
+            val submission = interest_contract_submission(ring, provider, 982u64, 7101u64)
+            val subscription = reference.subscribe(submission.token).unwrap()
+            expect(subscription.cancel_interest().unwrap()).to_equal(true)
+            match ring.cancel(982u64, submission.token):
+                case RingCancelOutcome.ProviderCancelRequested(token):
+                    expect(token.slot).to_equal(submission.token.slot)
+                    expect(token.generation.value).to_equal(submission.token.generation.value)
+                case _: fail("last consumer interest cancellation did not reach the provider")
+            provider.complete_cancelled(ring, submission, "last consumer retired").unwrap()
+            val retired = ring.take_completion_retained(982u64).unwrap().unwrap()
+            expect(retired.token.generation.value).to_equal(submission.token.generation.value)
+            expect(retired.error).to_equal("last consumer retired")
+            ring.release_retained_completion(982u64, submission.token).unwrap()
+
+            expect(reference.try_start()).to_equal(true)
+            expect(reference.complete(7171).unwrap()).to_equal(true)
+            match reference.try_ready():
+                case AsyncRefStateI64.Ready(value): expect(value).to_equal(7171)
+                case _: fail("retiring the last ring interest prevented producer publication")
+            match reference.wake_cursor():
+                case nil: ()
+                case Some(cursor):
+                    match cursor.next_pending(4):
+                        case AsyncWakeScanI64.Done: ()
+                        case _: fail("cancelled interest remained eligible for a wake")
+            match subscription.poll():
+                case TaskPollResult.Ready(Err(AsyncRefError.CancelledInterest)): ()
+                case _: fail("retired ring interest observed a consumer completion")
+            close_interest_contract_map(map)

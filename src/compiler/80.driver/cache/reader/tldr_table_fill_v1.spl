@@ -1,23 +1,67 @@
 # Reader-backed table publication. Keep source loading outside the storage owner
 # so worker surface cache users do not import the full frontend.
-use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrAsyncErrorV1}
 use compiler.driver.cache.source_reader_v1.{SourceReader}
+use std.nogc_async_mut.async_ring.async_ref.{AsyncRefStateI64}
+
+fn _tldr_read_or_update<R: SourceReader>(reader: R, source_path: text) -> Result<text, text>:
+    var tldr = reader.read_tldr(source_path)
+    if tldr == "":
+        val error = reader.update_tldr(source_path)
+        if error != "":
+            return Err(error)
+        tldr = reader.read_tldr(source_path)
+    if tldr == "":
+        return Err("tldr unavailable: {source_path}")
+    Ok(tldr)
 
 # Fill one requested module through the SourceReader contract (the reader
 # chain decides cache vs. file vs. in-process parse). "" on success.
 pub fn tldr_table_fill_v1<R: SourceReader>(table: TldrTableV1, reader: R,
         module_key: text, source_path: text) -> text:
-    var tldr = reader.read_tldr(source_path)
-    if tldr == "":
-        val error = reader.update_tldr(source_path)
-        if error != "":
-            return error
-        tldr = reader.read_tldr(source_path)
-    if tldr == "":
-        return "tldr unavailable: {source_path}"
-    if not table.publish(module_key, tldr):
-        return "tldr conflicts with the published entry: {module_key}"
-    ""
+    match _tldr_read_or_update(reader, source_path):
+        case Err(error): error
+        case Ok(tldr):
+            if not table.publish(module_key, tldr):
+                return "tldr conflicts with the published entry: {module_key}"
+            ""
+
+# Async table producer adapter. The existing owner claim must precede source
+# access; this function never creates a request or duplicates the fill queue.
+@unsafe(reason: "uses the table's live AsyncRef scope; the table owner serializes producer access", capabilities: [ffi])
+pub fn tldr_table_fill_async_v1<R: SourceReader>(table: TldrTableV1, reader: R,
+        module_key: text, source_path: text) -> text:
+    val reference = match table.async_fill_reference(module_key):
+        case Ok(value): value
+        case Err(error): return "async tldr claim unavailable for {module_key}: {error}"
+    match reference.try_ready():
+        case AsyncRefStateI64.Ready(_):
+            match table.resolve_async(table.handle(module_key, ""), reference):
+                case Ok(Some(_)): return ""
+                case Ok(nil): return "ready async tldr has no table artifact: {module_key}"
+                case Err(error): return "async tldr ready validation failed for {module_key}: {error}"
+        case AsyncRefStateI64.Failed(code):
+            match table.resolve_async(table.handle(module_key, ""), reference):
+                case Err(TldrAsyncErrorV1.Source(source_error)): return source_error
+                case Err(error): return "async tldr claim already failed for {module_key} ({code}): {error}"
+                case _: return "async tldr claim already failed for {module_key}: {code}"
+        case AsyncRefStateI64.InvalidReference:
+            return "async tldr claim is invalid for {module_key}"
+        case AsyncRefStateI64.Pending: ()
+
+    match _tldr_read_or_update(reader, source_path):
+        case Err(source_error):
+            match table.fail_async(module_key, source_error):
+                case Ok(true): source_error
+                case Ok(false):
+                    "source read failed for {module_key}: {source_error}; async failure was not published"
+                case Err(error):
+                    "source read failed for {module_key}: {source_error}; async failure publication failed: {error}"
+        case Ok(tldr):
+            match table.publish_async(module_key, tldr):
+                case Ok(true): ""
+                case Ok(false): "async tldr publication was not admitted: {module_key}"
+                case Err(error): "async tldr publication failed for {module_key}: {error}"
 
 
-export tldr_table_fill_v1
+export tldr_table_fill_v1, tldr_table_fill_async_v1
