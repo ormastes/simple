@@ -30,7 +30,9 @@ Restoring the three files byte-identical was tried. The import errors went away,
 but the next layer is also missing on release:
 
 - `std.nogc_sync_mut.io.coverage_mcdc` (223 lines, share-history only)
-- `McdcPolicy.StaticOff` / `StaticOn` (`compiler.common.config`)
+- `McdcPolicy.StaticOff` / `StaticOn` (`compiler.common.config`). Release has the
+  same variants as `McdcMode` in `src/lib/common/mcdc/model.spl`, imported by
+  `config.spl:7`, so this item is an import rename, not a feature port.
 - `pack_index_cached_count` (`compiler.loader.aspect_pack_index_cache`)
 
 Measured with the owners restored: aspect_loader_integration 0/1,
@@ -45,8 +47,9 @@ feature onto the current release owners.
 
 ## To close
 
-1. Port `coverage_mcdc`, the `McdcPolicy` static variants and
-   `pack_index_cached_count` onto the current release owners, without reverting
-   `398a1232eb3`.
+1. Port `coverage_mcdc` and `pack_index_cached_count` onto the current release
+   owners, without reverting `398a1232eb3`. Rewrite the `McdcPolicy` uses in
+   the restored owners and in `mcdc_aspect_pack_payload_spec.spl` to release's
+   `McdcMode`.
 2. Restore the three `99.loader` owners from `a8244005f9b`.
 3. Remove `@tag:in-development` from the three specs and run them one file at a time.

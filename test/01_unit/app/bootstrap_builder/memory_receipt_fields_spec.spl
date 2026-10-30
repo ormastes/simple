@@ -1,0 +1,128 @@
+"""
+## Purpose and audience
+
+Purpose: pin every field of the build memory receipt with its exact refusal
+string. The receipt says what was reserved, what was enforced, and which peak
+metric was observed. Each refusal here is the boundary between a truthful
+receipt and one that overclaims a memory cap or mislabels its metric.
+
+Audience: engineers changing the memory receipt or the enforcement policy who
+need the exact reason a manager rejects a receipt.
+
+## Operator workflow
+
+1. Run `SIMPLE_LIB=$PWD/src bin/simple test test/01_unit/app/bootstrap_builder/memory_receipt_fields_spec.spl`.
+2. Every scenario must pass. Refusal strings are part of the receipt contract.
+
+## Compatibility and limitations
+
+Pure receipt validation and encoding. Identical on macOS, Linux, Windows,
+FreeBSD and SimpleOS; no cgroup or Job Object is created by these tests.
+"""
+
+use std.spec.{describe, it, expect, fail}
+use std.common.build_manager.memory_policy.{
+    BuilderMemoryReceiptV1, builder_memory_enforcement_bytes_v1,
+    builder_memory_receipt_validate_v1, builder_memory_receipt_encode_v1
+}
+
+val HELLO_MEMORY_IDENTITY = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+fn hello_memory_receipt_v1(policy: text, enforcement: text, reserved: i64, enforced: i64,
+        peak: i64, metric: text) -> BuilderMemoryReceiptV1:
+    BuilderMemoryReceiptV1(task_identity: HELLO_MEMORY_IDENTITY, requested_policy: policy,
+        reserved_bytes: reserved, enforcement: enforcement, enforced_bytes: enforced,
+        observed_peak_bytes: peak, peak_metric: metric)
+
+describe "BuildRunner memory receipt field validation":
+    it "accepts an enforced cgroup receipt and encodes exactly eight fields":
+        # @req REQ-HBR-005
+        val receipt = hello_memory_receipt_v1("enforce", "cgroup-memory-max", 1048576, 1048576, 100, "cgroup-memory-peak")
+        step("Positive control: the enforced receipt validates")
+        expect(builder_memory_receipt_validate_v1(receipt)).to_equal("")
+        step("Encode the receipt and require exactly eight newline-terminated fields")
+        match builder_memory_receipt_encode_v1(receipt):
+            case Ok(wire):
+                val lines = wire.split("\n")
+                expect(lines.len()).to_equal(9)
+                expect(lines[8]).to_equal("")
+                expect(lines[0]).to_equal("format=simple-build-memory-v1")
+                expect(lines[7]).to_equal("peak_metric=cgroup-memory-peak")
+            case Err(reason): fail(reason)
+
+    it "accepts a monitor receipt that claims no cap":
+        # @req REQ-HBR-005
+        step("Positive control: monitor, enforcement none, enforced 0, any qualified metric")
+        val receipt = hello_memory_receipt_v1("monitor", "none", 1048576, 0, 0, "process-tree-peak")
+        expect(builder_memory_receipt_validate_v1(receipt)).to_equal("")
+
+    it "refuses a malformed identity and an invalid reservation with exact reasons":
+        # @req REQ-HBR-005
+        var bad_identity = hello_memory_receipt_v1("monitor", "none", 1048576, 0, 0, "child-rss-peak")
+        bad_identity.task_identity = "xyz"
+        expect(builder_memory_receipt_validate_v1(bad_identity)).to_equal("invalid memory receipt identity")
+        step("Refuse a zero reservation")
+        val zero = hello_memory_receipt_v1("enforce", "cgroup-memory-max", 0, 0, 0, "cgroup-memory-peak")
+        expect(builder_memory_receipt_validate_v1(zero)).to_equal("invalid memory reservation")
+        step("Refuse a negative observed peak")
+        val negative = hello_memory_receipt_v1("monitor", "none", 1048576, 0, -1, "job-commit-peak")
+        expect(builder_memory_receipt_validate_v1(negative)).to_equal("invalid observed memory peak")
+
+    it "refuses an unqualified metric and an unknown policy with exact reasons":
+        # @req REQ-HBR-005
+        step("Refuse the unqualified rss metric")
+        val rss = hello_memory_receipt_v1("monitor", "none", 1048576, 0, 0, "rss")
+        expect(builder_memory_receipt_validate_v1(rss)).to_equal("unqualified memory metric")
+        step("Refuse an unknown requested policy")
+        val unknown = hello_memory_receipt_v1("x", "none", 1048576, 0, 0, "job-commit-peak")
+        expect(builder_memory_receipt_validate_v1(unknown)).to_equal("invalid requested memory policy")
+        step("Positive control: the same receipt under enforce with a matching cgroup enforcement validates")
+        val enforce = hello_memory_receipt_v1("enforce", "cgroup-memory-max", 1048576, 1048576, 0, "cgroup-memory-peak")
+        expect(builder_memory_receipt_validate_v1(enforce)).to_equal("")
+
+    it "refuses a monitor receipt that claims a memory cap":
+        # @req REQ-HBR-005
+        val capped = hello_memory_receipt_v1("monitor", "none", 1048576, 5, 0, "job-commit-peak")
+        expect(builder_memory_receipt_validate_v1(capped)).to_equal("monitor receipt claims a memory cap")
+        step("Positive control: the same monitor receipt with enforced 0 validates")
+        val uncapped = hello_memory_receipt_v1("monitor", "none", 1048576, 0, 0, "job-commit-peak")
+        expect(builder_memory_receipt_validate_v1(uncapped)).to_equal("")
+
+    it "refuses an enforce receipt whose enforced bytes differ from the reservation":
+        # @req REQ-HBR-005
+        val unproven = hello_memory_receipt_v1("enforce", "cgroup-memory-max", 1048576, 1024, 0, "cgroup-memory-peak")
+        expect(builder_memory_receipt_validate_v1(unproven)).to_equal("requested memory enforcement unproven")
+        step("Positive control: enforced equal to reserved validates")
+        val proven = hello_memory_receipt_v1("enforce", "cgroup-memory-max", 1048576, 1048576, 0, "cgroup-memory-peak")
+        expect(builder_memory_receipt_validate_v1(proven)).to_equal("")
+
+    it "refuses a Job memory enforcement paired with a non-commit metric":
+        # @req REQ-HBR-005
+        val mismatch = hello_memory_receipt_v1("enforce", "job-memory", 1048576, 1048576, 0, "cgroup-memory-peak")
+        expect(builder_memory_receipt_validate_v1(mismatch)).to_equal("Job memory metric mismatch")
+        step("Positive control: job-memory with job-commit-peak validates")
+        val matched = hello_memory_receipt_v1("enforce", "job-memory", 1048576, 1048576, 0, "job-commit-peak")
+        expect(builder_memory_receipt_validate_v1(matched)).to_equal("")
+
+    it "refuses a cgroup enforcement paired with a non-cgroup metric":
+        # @req REQ-HBR-005
+        val mismatch = hello_memory_receipt_v1("enforce", "cgroup-memory-max", 1048576, 1048576, 0, "job-commit-peak")
+        expect(builder_memory_receipt_validate_v1(mismatch)).to_equal("cgroup memory metric mismatch")
+        step("Positive control: cgroup-memory-max with cgroup-memory-peak validates")
+        val matched = hello_memory_receipt_v1("enforce", "cgroup-memory-max", 1048576, 1048576, 0, "cgroup-memory-peak")
+        expect(builder_memory_receipt_validate_v1(matched)).to_equal("")
+
+    it "maps policy to enforcement bytes and refuses a zero reservation":
+        # @req REQ-HBR-005
+        step("A monitor policy charges no enforced bytes")
+        match builder_memory_enforcement_bytes_v1("monitor", 10):
+            case Ok(bytes): expect(bytes).to_equal(0)
+            case Err(reason): fail(reason)
+        step("An enforce policy charges the full reservation")
+        match builder_memory_enforcement_bytes_v1("enforce", 10):
+            case Ok(bytes): expect(bytes).to_equal(10)
+            case Err(reason): fail(reason)
+        step("A zero reservation is refused under enforce")
+        match builder_memory_enforcement_bytes_v1("enforce", 0):
+            case Ok(_): fail("zero reservation accepted")
+            case Err(reason): expect(reason).to_equal("positive task memory reservation required")
