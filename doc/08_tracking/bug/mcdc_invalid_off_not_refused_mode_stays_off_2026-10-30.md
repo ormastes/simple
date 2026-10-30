@@ -10,3 +10,12 @@
   "does not leave SIMPLE_MCDC_MODE=off ...", "does not leave a bogus mode ..."),
   generalisation: mcdc_mode_resolution_spec.spl (green, resolver itself is correct).
 - Unblock: runner main must check SIMPLE_MCDC_MODE_ERROR after propagate_env_vars and exit non-zero.
+
+## Status: FIXED (2026-10-30)
+
+- Refusal (exit 2 naming the waiver vars) in the full runner and single lane: PR #5336
+  (`apply_mcdc_mode_env` + `mcdc_mode_error_message`); acceptance in
+  test/03_system/app/test_runner/mcdc_off_and_waiver_spec.spl.
+- Env fail-closed: `apply_mcdc_mode_env` now also sets SIMPLE_MCDC_MODE=on on
+  invalid-off / invalid-mode, so no child can inherit "off" or a bogus value even if a
+  caller ignores the refusal. mcdc_propagate_env_spec.spl 8/8.
