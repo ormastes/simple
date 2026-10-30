@@ -1,4 +1,3 @@
-# @req REQ-HBR-006
 # @manual_section: primary
 """
 ## Purpose and audience
@@ -6,14 +5,20 @@ A BuildRunner worker that exceeds its task timeout must stop the compiler, repor
 TIMEOUT, and leave no process behind. Audience: QA reviewers of the hello build
 path, who need to see that a hung compile cannot outlive its budget.
 ## Compatibility and limitations
-Needs a process observation V4 provider and /bin/sleep, /bin/cp, /bin/kill.
-Unsupported hosts skip explicitly with a reason: the seed interpreter cannot spawn
-processes on SimpleOS, and Windows needs the Job object provider.
+The task contract refusal of an out-of-range timeout runs on every host.
+The worker scenarios need a process observation V4 provider and POSIX
+/bin/sleep, /bin/cp and /bin/kill; they run on Linux and FreeBSD (and macOS
+when V4 is available). Windows is skipped: this spec has no Job object
+(Start-Sleep) variant yet. SimpleOS (SIMPLE_OS_KERNEL=simpleos) is skipped: the
+seed interpreter cannot spawn processes there. A failing capability query is a
+FAIL, never a skip.
 ## Verification guidance and troubleshooting
 A RED means the timeout did not terminate the child tree or the status drifted
 from TIMEOUT. Check compiler.process and worker.error under the attempt root.
 """
 use std.spec
+use std.common.build_manager.contracts.{builder_validate_task_v1}
+use app.io.env_ops.{env_get}
 use std.nogc_sync_mut.spec.{skip}
 use std.nogc_sync_mut.io.process_observation_v4.{process_observation_capabilities_v4}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
@@ -48,12 +53,14 @@ fn prepare_timeout_root(suffix: text, program: text) -> text:
     root
 
 fn timeout_unsupported_reason() -> text:
-    if not file_exists("/bin/sleep") or not file_exists("/bin/cp"):
-        return "no POSIX /bin/sleep or /bin/cp on this host (Windows Job object provider or SimpleOS spawn unavailable)"
+    if (env_get("SIMPLE_OS_KERNEL") ?? "") == "simpleos":
+        return "SimpleOS: the seed interpreter cannot spawn worker processes"
+    if file_exists("C:/Windows/System32/kernel32.dll"):
+        return "Windows: no Job object (Start-Sleep) variant of this timeout fixture yet"
+    if not file_exists("/bin/sleep") or not file_exists("/bin/cp") or not file_exists("/bin/kill"):
+        return "host lacks POSIX /bin/sleep, /bin/cp or /bin/kill"
     val capability = process_observation_capabilities_v4()
-    if capability.is_err():
-        return "process observation capability query failed"
-    if not capability.unwrap().available:
+    if capability.is_ok() and not capability.unwrap().available:
         return "process observation V4 is unavailable on this host"
     ""
 
@@ -63,12 +70,24 @@ describe "BuildRunner worker timeout cleanup integration":
         if file_exists(root): dir_remove(root, true)
         val ok_root = timeout_probe_root("ok")
         if file_exists(ok_root): dir_remove(ok_root, true)
+    it "refuses a task whose timeout exceeds the seven-day bound":
+        # @req REQ-HBR-006
+        step("Positive control: a task with a 200 millisecond timeout is admitted")
+        expect(builder_validate_task_v1(timeout_fixture_task("/bin/sleep", ["30"], 200, sha256_text("x")))).to_equal("")
+        step("A task with a timeout above 604800000 milliseconds is refused")
+        expect(builder_validate_task_v1(timeout_fixture_task("/bin/sleep", ["30"], 604800001, sha256_text("x")))).to_equal("invalid attempt or timeout")
+
     val unsupported = timeout_unsupported_reason()
     if unsupported != "":
         skip("reports OK for a producer that finishes inside its timeout", unsupported)
         skip("stops a sleeping producer at its timeout and leaves no process behind", unsupported)
     else:
         it "reports OK for a producer that finishes inside its timeout":
+            # @req REQ-HBR-006
+            val capability = process_observation_capabilities_v4()
+            if capability.is_err():
+                fail("process observation capability query failed")
+                return
             # Positive control: the same worker path with a producer that completes.
             step("A copy task with a generous timeout is dispatched to the worker")
             val root = prepare_timeout_root("ok", "/bin/cp")
@@ -82,6 +101,11 @@ describe "BuildRunner worker timeout cleanup integration":
             expect(receipt.outputs.len()).to_equal(1)
 
         it "stops a sleeping producer at its timeout and leaves no process behind":
+            # @req REQ-HBR-006
+            val capability = process_observation_capabilities_v4()
+            if capability.is_err():
+                fail("process observation capability query failed")
+                return
             step("A sleep task with a 200 millisecond timeout is dispatched to the worker")
             val root = prepare_timeout_root("sleep", "/bin/sleep")
             val digest = file_hash_sha256(root + "/producer.exe")
