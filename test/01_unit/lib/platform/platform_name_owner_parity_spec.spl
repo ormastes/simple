@@ -1,0 +1,111 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Reproducing spec for the rt_platform_name owner-parity fix (2026-10-30).
+# audit: rt cross-OS audit rows 3/4 (platform name): the Rust seed answered
+# "unix" on FreeBSD while the C runtime answered "freebsd", and the
+# pure-Simple owner (src/runtime/simple_core/core_process.spl) answered a
+# literal "linux" on every host including SimpleOS.
+
+use std.spec.step
+use std.spec.*
+
+use std.io_runtime.{host_os, platform_name, shell, file_exists}
+use std.nogc_sync_mut.env.platform.{detect_os}
+
+# ============================================================================
+# Three owners, one table.
+#
+# rt_platform_name has three implementations (C runtime_native.c, Rust seed
+# env_process.rs, pure-Simple core_process.spl). The ONLY sanctioned consumers
+# are std.io_runtime.host_os() and std.nogc_sync_mut.env.platform.detect_os();
+# everything else must go through them. This spec pins that (a) the owner the
+# spec runs under emits a canonical name, (b) both consumers agree with it and
+# with each other, (c) `uname -s` agrees on POSIX hosts, and (d) on a host with
+# a C compiler, the C owner compiled from source agrees with the owner that is
+# running this spec. (d) is what makes a seed-vs-native disagreement like the
+# FreeBSD "unix" one visible on a developer machine without a cross build.
+# ============================================================================
+
+fn canonical_platform_name(name: text) -> bool:
+    (name == "windows" or name == "macos" or name == "linux" or name == "freebsd"
+        or name == "illumos" or name == "solaris" or name == "simpleos" or name == "unknown")
+
+fn uname_to_platform(sysname: text) -> text:
+    if sysname == "Darwin": return "macos"
+    if sysname == "Linux": return "linux"
+    if sysname == "FreeBSD": return "freebsd"
+    if sysname == "OpenBSD": return "openbsd"
+    if sysname == "NetBSD": return "netbsd"
+    if sysname == "SimpleOS": return "simpleos"
+    ""
+
+describe "rt_platform_name owners agree":
+    context "the running owner":
+        it "emits a canonical name and never the retired unix catch-all":
+            # @req REQ-SSPEC-UNIT
+            step("emits a canonical name and never the retired unix catch-all")
+            val raw = platform_name()
+            expect(canonical_platform_name(raw)).to_equal(true)
+            expect(raw == "unix").to_equal(false)
+
+        it "is what both documented consumers report":
+            # @req REQ-SSPEC-UNIT
+            step("is what both documented consumers report")
+            val raw = platform_name()
+            val os = host_os()
+            # host_os() only falls back to uname when the owner says "unknown".
+            if raw != "unknown":
+                expect(os).to_equal(raw)
+            expect(detect_os()).to_equal(os)
+
+    context "against the kernel":
+        it "matches uname -s on POSIX hosts":
+            # @req REQ-SSPEC-UNIT
+            step("matches uname -s on POSIX hosts")
+            val os = host_os()
+            if os != "windows":
+                val uname = shell("uname -s")
+                expect(uname.exit_code).to_equal(0)
+                val sysname = uname.stdout.trim()
+                if sysname == "SunOS":
+                    expect(os == "illumos" or os == "solaris").to_equal(true)
+                else:
+                    expect(uname_to_platform(sysname)).to_equal(os)
+
+    context "against the C runtime owner compiled from source":
+        it "agrees with the owner running this spec":
+            # @req REQ-SSPEC-UNIT
+            step("agrees with the owner running this spec")
+            val os = host_os()
+            val source = "src/runtime/runtime_native.c"
+            if os == "windows" or not file_exists(source):
+                # No portable `cc` invocation on Windows; the per-target
+                # mapping is pinned there by the cargo test instead.
+                step("C cross-check skipped: host={os} source_present={file_exists(source)}")
+                expect(true).to_equal(true)
+            else:
+                val have_cc = shell("command -v cc >/dev/null 2>&1")
+                if have_cc.exit_code != 0:
+                    step("C cross-check skipped: no cc on PATH")
+                    expect(true).to_equal(true)
+                else:
+                    val mk = shell("mktemp -d 2>/dev/null || mktemp -d -t spl_platform_name")
+                    expect(mk.exit_code).to_equal(0)
+                    val dir = mk.stdout.trim()
+                    expect(dir.len() > 0).to_equal(true)
+                    val harness = "#include <stdio.h>\n#include <stdint.h>\nint64_t rt_platform_name(void);\nint64_t rt_string_len(int64_t s);\nconst uint8_t* rt_string_data(int64_t s);\nint main(void){int64_t s=rt_platform_name();fwrite(rt_string_data(s),1,(size_t)rt_string_len(s),stdout);return 0;}\n"
+                    val wrote = shell("printf '%s' '{harness}' > '{dir}/harness.c'")
+                    expect(wrote.exit_code).to_equal(0)
+                    # Only rt_platform_name/rt_string_* are called, so the
+                    # runtime's other externs may stay unresolved at link time.
+                    val lazy = if os == "macos": "-Wl,-undefined,dynamic_lookup" else: "-Wl,--unresolved-symbols=ignore-all"
+                    val build = shell("cc -w -O0 -I src/runtime src/runtime/runtime_native.c '{dir}/harness.c' {lazy} -o '{dir}/harness' 2>&1")
+                    if build.exit_code != 0:
+                        print "C runtime harness build failed:\n{build.stdout}"
+                    expect(build.exit_code).to_equal(0)
+                    val run = shell("'{dir}/harness'")
+                    shell("rm -rf '{dir}'")
+                    expect(run.exit_code).to_equal(0)
+                    val c_name = run.stdout.trim()
+                    expect(canonical_platform_name(c_name)).to_equal(true)
+                    expect(c_name).to_equal(platform_name())
