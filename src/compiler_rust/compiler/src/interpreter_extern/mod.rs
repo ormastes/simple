@@ -1606,6 +1606,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_stat_mtime", file_io::rt_file_stat_mtime);
     insert_simple!("rt_file_stat_size", file_io::rt_file_stat_size);
     insert_simple!("rt_file_truncate", file_io::rt_file_truncate);
+    insert_simple!("rt_mmap", file_io::rt_mmap);
     insert_simple!("rt_mmap_create", file_io::rt_mmap_create);
     insert_simple!("rt_munmap", file_io::rt_munmap);
     insert_simple!("rt_msync", file_io::rt_msync);
