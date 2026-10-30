@@ -17,7 +17,8 @@ Host: macOS arm64, Rust seed `src/compiler_rust/target/release/simple` (built 20
   missing files.
 - With the guard lowered for that run (`SIMPLE_BUILD_MEMORY_RESERVE_BYTES=4294967296`), a direct
   `SIMPLE_FRONTEND_CACHE_DIR=<dir> bin/simple native-build --source <fixture> --entry-closure
-  --threads 2 --cache-dir <c> --entry <fixture>/main.spl --output <out>` exits **0**. But it writes
+  --threads 2 --cache-dir <c> --entry <fixture>/main.spl --output <out>` **hangs**. Two runs
+  both hit a 1500 s timeout (exit 124) after their last log write about a minute in. It writes
   no `<out>` binary, no `<dir>` frontend cache directory, and no `[frontend-cache] hits=… misses=…
   parses=…` summary line. The log is only import/export warnings.
 - The whole spec under the lowered guard exceeds the runner's 900 s per-file cap.
@@ -34,10 +35,9 @@ on this lane produces output again, so it is not merged.
 
 ## Next steps
 
-1. Find why seed `native-build` exits 0 without producing the output binary or touching
-   `SIMPLE_FRONTEND_CACHE_DIR`. Check whether it routes to the pure-Simple driver or the
-   `native_project` pipeline, and why that path returns success with no artifact. An exit 0 with no
-   artifact is itself a fail-open.
+1. Find where seed `native-build` stalls on this 3-module fixture (attach lldb to the hung
+   process). It never reaches `SIMPLE_FRONTEND_CACHE_DIR`. Check whether it routes to the pure-Simple driver or the
+   `native_project` pipeline, and why that path returns success with no artifact.
 2. Make the spec report a memory-guard refusal (or set a test-scoped reserve) instead of failing on
    missing files.
 3. Then merge the spec branch above and confirm 5/5.
