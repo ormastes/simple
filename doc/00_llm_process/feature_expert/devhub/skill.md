@@ -221,3 +221,11 @@ release work changes this feature area, add or refresh links here BEFORE committ
 so the next agent starts from the current project state.
 
 Structure mirrors the sibling entries under `doc/00_llm_process/feature_expert/`.
+
+## Windows native repair status (2026-10-30)
+
+The async HTTP client encoder now delegates to `std.nogc_async_mut.http.url.url_encode`, preserving the public wrapper while using canonical UTF-8 percent encoding. Its native regression fixture is `test/fixtures/devhub/async_http_url_encode/main.spl`; runtime qualification is pending. Do not restore the duplicate codepoint loop or unsupported radix `to_string` call.
+
+The pinned Phase 2 full DevHub build failed during MIR lowering and produced no executable; generic `T` specialization remains unresolved. Secured Messenger acceptance separately fails with `SQLCIPHER4_MISSING_SECRET` in the full closure although a minimal resolver probe passes. Neither GUI launch nor production database readiness is established. See `doc/09_report/verification/devhub_native_build_20261030.md` and `devhub_key_resolution_diagnostics_20261030.md` for retained evidence; no Stage 4 or release PASS is claimed.
+
+The focused async HTTP encoder native regression subsequently passed five actual-value checks under the pinned Phase 2 producer. Evidence: `build/devhub-release-dev-20261030/focused-url-encode-run2/corrected-result.sdn`; the original harness FAIL receipt remains preserved because its expected PASS label differed from the fixture source. No test was rerun. Full DevHub compilation and launch remain pending due to the separate generic-type blocker.

@@ -1,0 +1,43 @@
+# Minimal production SecretRef boundary probe. Never print secret values.
+use std.io_runtime.{env_get, exit}
+use nogc_sync_mut.database.codec.secret_ref.{SecretRef, secret_ref_parse, secret_ref_resolve}
+use nogc_sync_mut.database.codec.sqlcipher4.{sqlcipher4_error_text}
+
+fn check_ref(uri: text, expected_key: text):
+    val direct = env_get(expected_key)
+    if direct.len() == 0:
+        print "FAIL direct environment presence"
+        exit(1)
+    print "PASS direct environment presence"
+    val parsed: SecretRef = match secret_ref_parse(uri):
+        case Ok(value): value
+        case Err(problem):
+            print "FAIL parse: {sqlcipher4_error_text(problem)}"
+            exit(2)
+            return
+    if parsed.uri != uri or parsed.env_key != expected_key:
+        print "FAIL reference binding: {parsed.env_key}"
+        exit(3)
+    print "PASS reference binding"
+    val resolved: [u8] = match secret_ref_resolve(parsed):
+        case Ok(value): value
+        case Err(problem):
+            print "FAIL resolve: {sqlcipher4_error_text(problem)}"
+            exit(4)
+            return
+    if resolved.len() != direct.len():
+        print "FAIL resolved byte count"
+        exit(5)
+    var i = 0
+    while i < resolved.len():
+        if resolved[i].to_i64() != direct.char_code_at(i):
+            print "FAIL resolved ASCII bytes"
+            exit(6)
+        resolved[i] = 0u8
+        i = i + 1
+    print "PASS resolved bytes and caller wipe"
+
+fn main() -> i64:
+    check_ref("secret://messenger/fresh", "SIMPLE_SECRET_MESSENGER_FRESH")
+    check_ref("secret://probe-adjacent.value", "SIMPLE_SECRET_PROBE_ADJACENT_VALUE")
+    0
