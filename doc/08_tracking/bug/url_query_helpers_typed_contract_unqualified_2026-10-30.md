@@ -1,44 +1,43 @@
-# URL query helper types remain unqualified
+# URL query helper native qualification
 
-Status: **OPEN**. The production helpers now declare their pair contract:
+Status: **Native fixture passed; full SSpec and CLI qualification remain unrun.**
+
+The production query APIs retain concrete pair contracts:
 `parse_query_string` returns `[(text, text)]`, `parse_query_param` returns
-`(text, text)`, and `build_query_string` accepts `[(text, text)]`. The function
-algorithms were not changed.
+`(text, text)`, and `build_query_string` accepts `[(text, text)]`. The builder
+uses explicitly typed tuple/text locals and joins the accumulated parts with
+`parts.join("&")`.
 
-The prior bare `list` and `tuple` declarations erased the element contract to
-`Array(Any)` and an empty tuple type in HIR. The old URL utility SSpec copied
-the implementations locally, so it did not compile or execute the production
-query helpers. A new SSpec and standalone fixture import the production module
-directly.
+## Final bounded native evidence
 
-## Bounded native evidence
+- Rebased PR head: `c7a8621c417`.
+- Producer: admitted Stage 2 `simple`, SHA-256
+  `9633bf0af8b70d5f0324a35b244b3d08a62cdbcd1f8a3cd2aff246620f572dbd`, with
+  its matching frozen runtime capsule.
+- Exact source qualification used URL SHA-256
+  `56626fd50fecc434fa9bdea4b5cfc49072fa5dae156ce8205d36c215c81c36ad`, shared
+  checks SHA-256
+  `0fe3089a5b2efffaf3b396344b40bdd1ff0a8bec0f9042f08fc12820926ff97d`, and
+  fixture main SHA-256
+  `155ce51a9e3d18e99ddc07a67917dbe1447881b404c2710369b257ac68c8ac28`.
+- Native build exit status 0; watchdog quiescent, peak 2,570,780 KiB under the
+  8,388,608 KiB cap.
+- The executable ran once and printed `URL_QUERY_CONTRACT_PASS|checks=8`.
+  The exact encoded string and ordered duplicate-key round-trip assertions
+  passed.
+- The SSpec and full compiler/test suites were not run.
 
-The final fixture compiled with exit 0 using the attempt17 admitted producer
-(`9633bf0af8b70d5f0324a35b244b3d08a62cdbcd1f8a3cd2aff246620f572dbd`) and its
-matching runtime capsule. The process-tree watchdog recorded exit 0,
-quiescence, and peak RSS 2,377,108 KiB under the 8,388,608 KiB cap. The frozen
-SCV snapshot hashes for the changed URL module and fixture match the worktree.
+## Diagnostic history and remaining scope
 
-The one allowed execution exited 1 with:
+The first native fixture attempt failed at the builder assertion (`checks=-7`)
+with the original reversed join receiver. Isolated native diagnostics showed
+that direct ASCII and UTF-8 encoders were correct; implicit tuple-array field
+locals could become pointer-like numeric strings. Explicit local types and the
+array-receiver join produced the expected builder value and 8/8 checks. This
+qualifies the URL call boundary on the admitted producer; it does not establish
+a general tuple inference fix.
 
-```text
-URL_QUERY_CONTRACT_FAIL|checks=-7
-```
-
-Fieldwise checks for empty parse/build, ordered multiple pairs, flag pairs,
-empty values, splitting at the first `=`, and UTF-8/plus decoding passed. The
-exact encoded-builder output check failed. The round-trip group was therefore
-not executed. SSpec execution was not run.
-
-An earlier aggregate-equality diagnostic returned `checks=-2` for the
-multiple-pairs comparison. The final fieldwise checks passed every key/value
-and length in that group. The reason for that aggregate-versus-fieldwise
-difference is unknown; it does not establish a compiler equality defect or a
-URL library defect. The final encoded output was not captured, so its mismatch
-is also unresolved. Do not treat these type annotations or native results as
-release qualification.
-
-Full logs, executable, source hashes, and watchdog receipts are preserved in
-the ignored worktree directory `build/url-query-contract-cycle5/` and
-`build/url-query-contract-cycle6/`. The structured receipt is
-[`url_query_helpers_typed_contract_unqualified_2026-10-30.sdn`](url_query_helpers_typed_contract_unqualified_2026-10-30.sdn).
+The initial failed logs and receipts remain in the original worktree's
+`build/url-query-contract-cycle6/`. Detailed type-provenance evidence and the
+open compiler follow-up are recorded in
+[`native_tuple_array_local_text_provenance_2026-10-30.md`](native_tuple_array_local_text_provenance_2026-10-30.md).
