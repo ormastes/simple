@@ -1,0 +1,17 @@
+# Native test execution requires completion evidence
+
+The explicit native backend executed its compiled artifact, then used the legacy stdout mapper. A successful plain program with no BDD output became a zero-test failure; printed pass markers could instead be interpreted as test evidence. Native SSpec already emitted real framework tallies, but the native executor never supplied their per-child destination.
+
+The runner now passes a fresh invocation-specific evidence path through argv. Generated SSpec entrypoints set a child-local framework path before executing examples and write a separate SDN completion receipt after summary/status finalization. The parent requires both normal completion and valid real BDD counts. Partial tallies followed by exit(0), missing/malformed completion, mismatched status, signals, and resource termination cannot pass from stdout.
+
+Plain top-level scripts retain their original source verbatim and append a completion statement. The compiler's existing synthetic main retains executable binding order and module-global visibility. Completion is written only after the body finishes. Their result counts one completed program, not a BDD example or an assertion count. Authored main is explicitly unsupported by this initial wrapper: unsafe renaming could alter recursion and helper references. This limitation never falls back to stdout success. Existing non-explicit SMF/coverage routes retain their current behavior.
+
+Ownership: the parent exclusively allocates each random path after compiling the selected artifact, passes it only to that child, and validates exact invocation path, kind, and process status. Children exclusively create the completion sidecar. Concurrent invocations do not mutate the parent's evidence environment. Framework tally and trace-event writers share the explicit child-local path; legacy environment transport remains compatible for other execution modes.
+
+This is evidence against accidental early termination, not a security boundary against arbitrary hostile code in the same process. Such code can inspect argv and forge files. No authentication claim is made for the completion marker itself. Existing artifact/source/runtime admission remains the separate producer authority.
+
+Validation fixtures: plain green/order, plain panic, plain spoofed stdout plus exit(0), two-example SSpec green, failed expectation, and SSpec exit(0) after an actual completed example. Protocol tests cover invocation mismatch, process-status mismatch, absent/zero BDD counts, and real counts overriding stdout. Native execution is pending; source tests alone do not qualify the runner or session daemon.
+
+Argument compatibility: the CLI owner has no child-local argv filtering/override API. The reserved `--simple-native-evidence=` argument remains visible to programs inspecting their raw argv, like the existing MC/DC manifest transport. This initial route does not promise an unchanged argument count. The parser accepts only that exact prefix, rejects duplicates/relative paths, and leaves unrelated selector arguments untouched; it does not mutate global argument state.
+
+Windows absolute drive and UNC receipt paths use the existing host-path facade. Source-level platform cases are present; Windows native execution is not yet validated.

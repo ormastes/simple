@@ -5,7 +5,7 @@ The two real compiled framework fixtures are separate admission controls.
 """
 # codex-system-test
 use std.spec.{describe, it, expect, step}
-use std.common.test_runner.native_framework_wrapper.{native_framework_wrapper_source, spipe_partition_source}
+use std.common.test_runner.native_framework_wrapper.{native_framework_wrapper_source, native_plain_wrapper_source, spipe_partition_source}
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines, simple_string_byte_ranges}
 
 fn framework_wrap(source: text) -> text:
@@ -134,3 +134,40 @@ describe "complete configured native framework wrapper":
         expect(parts.imports).to_contain("ScenarioOmissionStatus")
         expect(parts.declarations).to_end_with("\n]")
         expect(parts.body).to_contain("expect 1 == 1")
+
+
+describe "native invocation completion wrappers":
+    it "sets the child evidence path before real SSpec examples and finishes afterwards":
+        val source = "use std.spec.*\ndescribe \"suite\":\n    it \"case\":\n        expect(2 + 2).to_equal(4)\n"
+        val output = native_framework_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source), true).unwrap()
+        expect(output.index_of("set_path(__simple_native_spec_0_evidence_path)")).to_be_less_than(output.index_of("    describe"))
+        expect(output.index_of("finish(__simple_native_spec_0_evidence_path")).to_be_greater_than(output.index_of("expect(2 + 2)"))
+        expect(output.contains("env_set(")).to_equal(false)
+
+    it "preserves plain binding order without manufacturing BDD examples":
+        val source = "var value: i64 = 1\nvalue = value + 2\nval observed: i64 = value\nif observed != 3: panic(\"wrong order\")\n"
+        val output = native_plain_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source)).unwrap()
+        expect(output.starts_with(source)).to_equal(true)
+        expect(output.contains("fn main() -> i64:")).to_equal(false)
+        expect(output.index_of("value = value + 2")).to_be_less_than(output.index_of("val observed"))
+        expect(output.contains("use std.spec")).to_equal(false)
+        expect(output.contains("describe ")).to_equal(false)
+
+    it "refuses authored main until an entry-preserving wrapper exists":
+        val source = "fn main() -> i64:\n    0\n"
+        val result = native_plain_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("source defines main")
+
+    it "allows nested main methods while refusing only a top-level entry":
+        val nested = "struct Worker:\n    fn main() -> i64:\n        7\nval worker = Worker()\nif worker.main() != 7: panic(\"nested main failed\")\n"
+        val allowed = native_plain_wrapper_source(nested, simple_code_lines(nested), simple_string_continuation_lines(nested), simple_string_byte_ranges(nested))
+        expect(allowed.is_ok()).to_equal(true)
+        val entry = "pub async fn main () -> i64:\n    0\n"
+        expect(native_plain_wrapper_source(entry, simple_code_lines(entry), simple_string_continuation_lines(entry), simple_string_byte_ranges(entry)).is_err()).to_equal(true)
+
+    it "keeps module-global bindings visible to helpers":
+        val source = "val expected: i64 = 41\nfn check() -> bool:\n    expected == 41\nif not check(): panic(\"lost global\")\n"
+        val output = native_plain_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source)).unwrap()
+        expect(output.starts_with(source)).to_equal(true)
+        expect(output.index_of("native_execution_finish_v1")).to_be_greater_than(output.index_of("if not check()"))
