@@ -338,11 +338,31 @@ fn dispatch_registers_tuple_construction_family() {
 
 /// POSIX libc externs declared by path_identity_abi.spl / errno_abi.spl are
 /// served by `posix_abi` (twin of `windows_abi`); they are outside the rt_
-/// universe above, so pin them here.
+/// universe above, so pin them here. The errno owner is pinned by the HOST's
+/// spelling only (`__error` on Darwin/FreeBSD, `__errno_location` on Linux,
+/// `__errno` on NetBSD/OpenBSD); every other spelling must stay an explicit
+/// unknown extern, never a silent stub.
 #[cfg(unix)]
 #[test]
 fn posix_abi_serves_path_identity_externs() {
-    for name in ["malloc", "free", "realpath", "readlink", "__errno_location", "__error"] {
+    for name in ["malloc", "free", "realpath", "readlink", "open", "read", "pread", "write", "close", "fsync"] {
         assert!(super::posix_abi::is_supported_name(name), "{name} not served by posix_abi");
+    }
+    let expected_host_owner = if cfg!(any(target_os = "macos", target_os = "freebsd")) {
+        Some("__error")
+    } else if cfg!(target_os = "linux") {
+        Some("__errno_location")
+    } else if cfg!(any(target_os = "netbsd", target_os = "openbsd")) {
+        Some("__errno")
+    } else {
+        super::posix_abi::ERRNO_ADDRESS_NAME
+    };
+    assert_eq!(super::posix_abi::ERRNO_ADDRESS_NAME, expected_host_owner);
+    for spelling in super::posix_abi::ALL_ERRNO_SPELLINGS {
+        assert_eq!(
+            super::posix_abi::is_supported_name(spelling),
+            expected_host_owner == Some(*spelling),
+            "{spelling}"
+        );
     }
 }
