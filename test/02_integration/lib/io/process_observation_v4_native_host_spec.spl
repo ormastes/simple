@@ -1,0 +1,171 @@
+# Real Linux V4 host evidence through the public pinned-process facade.
+# Build the static fixture with scripts/check/build-process-observation-v4-static-fixture.shs
+# and set PROCESS_OBSERVATION_V4_STATIC_FIXTURE to its output path.
+use std.spec.{describe, it, expect, fail, pending}
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{platform_name}
+use std.spec.skip_governance.{validate_bare_pending}
+use std.common.process.observation_v4.{
+    ProcessObservationRequestV4, ProcessObservationPacketKindV4,
+    ProcessObservationStatusV4, ProcessObservationEnforcementKindV4,
+    ProcessObservationDescendantPolicyV4, freeze_process_observation_receipt_v4,
+    freeze_process_observation_cleanup_receipt_v4}
+use std.nogc_sync_mut.io.process_observation_v4.{
+    OwnedExecutablePin, OwnedCwdPinV4, ProcessObservationLeaseV4,
+    process_observation_capabilities_v4,
+    process_observation_start_pinned_v4}
+
+fn process_observation_v4_native_fixture_path() -> text:
+    env_get("PROCESS_OBSERVATION_V4_STATIC_FIXTURE") ?? ""
+
+fn process_observation_v4_retirement_text(result: Result<bool, text>) -> text:
+    match result:
+        case Ok(_value): "owner retired"
+        case Err(reason): "owner retirement failed: " + reason
+
+fn process_observation_v4_drain_owner(
+    owner: ProcessObservationLeaseV4
+) -> Result<bool, text>:
+    var lease = owner
+    val _cancel = lease.cancel(100000000)
+    var receipt = match lease.collect(100000000):
+        case Ok(value): value
+        case Err(cancel_reason):
+            return Err("owner remains unobservable after cancellation: " + cancel_reason)
+    var turns = 0
+    while receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen and
+            receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupFrozen and
+            turns < 100:
+        receipt = lease.collect(50000000)?
+        turns = turns + 1
+    if receipt.packet.packet_kind == ProcessObservationPacketKindV4.Frozen:
+        val frozen = freeze_process_observation_receipt_v4(receipt)?
+        val ack = lease.acknowledge(frozen)?
+        if ack.packet.packet_kind != ProcessObservationPacketKindV4.Ack:
+            return Err("owner drain returned a non-Ack packet")
+        return Ok(true)
+    if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+        val frozen_cleanup = freeze_process_observation_cleanup_receipt_v4(receipt)?
+        val ack = lease.acknowledge_cleanup(frozen_cleanup)?
+        if ack.packet.packet_kind != ProcessObservationPacketKindV4.CleanupAck:
+            return Err("owner drain returned a non-CleanupAck packet")
+        return Ok(true)
+    Err("owner drain reached its bounded turn limit with a retained live ticket")
+
+fn process_observation_v4_run_pinned_static_child(path: text):
+    val absolute_path = path_absolute(path)
+    expect(file_is_regular_no_follow(absolute_path)).to_equal(true)
+    val capabilities = match process_observation_capabilities_v4():
+        case Ok(value): value
+        case Err(reason):
+            fail("native V4 capability query failed: " + reason)
+            return
+    expect(capabilities.available).to_equal(true)
+
+    var executable = match OwnedExecutablePin.pin(absolute_path):
+        case Ok(value): value
+        case Err(reason):
+            fail("static V4 fixture could not be pinned: " + reason)
+            return
+    var cwd = match OwnedCwdPinV4.pin("/tmp"):
+        case Ok(value): value
+        case Err(reason):
+            val _closed = executable.close()
+            fail("V4 cwd could not be pinned: " + reason)
+            return
+    val request = ProcessObservationRequestV4(
+        argv: [absolute_path], environment: [], canonical_cwd: "/tmp",
+        canonical_pinned_directory: "/tmp", executable_pin: 1,
+        executable_digest: executable.digest().unwrap(), cwd_pin_claim: 1,
+        cwd_identity_digest: cwd.digest().unwrap(),
+        capability_bits: capabilities.capability_bits,
+        wall_budget_ns: 5000000000, term_grace_ns: 100000000,
+        cleanup_budget_ns: 5000000000, stdout_limit_bytes: 4096,
+        stderr_limit_bytes: 4096, memory_limit_bytes: 0,
+        enforcement_kind: ProcessObservationEnforcementKindV4.None,
+        descendant_policy: ProcessObservationDescendantPolicyV4.LeaderOnly,
+        max_clock_resolution_ns: 10000000)
+    val started = match process_observation_start_pinned_v4(executable, cwd, request):
+        case Ok(value): value
+        case Err(reason):
+            val _cwd_closed = cwd.close()
+            val _exe_closed = executable.close()
+            fail("pinned V4 fixture start failed: " + reason)
+            return
+    val _cwd_closed = cwd.close()
+    val _exe_closed = executable.close()
+    var lease = started.lease
+    var receipt = started.receipt
+    var turns = 0
+    while receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen and turns < 100:
+        receipt = match lease.collect(50000000):
+            case Ok(value): value
+            case Err(reason):
+                val retired = process_observation_v4_drain_owner(lease)
+                fail("native V4 collection failed: " + reason + "; " + process_observation_v4_retirement_text(retired))
+                return
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+            val cleanup = freeze_process_observation_cleanup_receipt_v4(receipt)
+            match cleanup:
+                case Ok(value):
+                    match lease.acknowledge_cleanup(value):
+                        case Ok(_ack):
+                            fail("native V4 child returned cleanup-only authority")
+                            return
+                        case Err(reason):
+                            val retired = process_observation_v4_drain_owner(lease)
+                            fail("cleanup-only V4 acknowledgement failed: " + reason + "; " + process_observation_v4_retirement_text(retired))
+                            return
+                case Err(_reason):
+                    val retired = process_observation_v4_drain_owner(lease)
+                    fail("cleanup-only V4 receipt could not be frozen; " + process_observation_v4_retirement_text(retired))
+                    return
+            return
+        turns = turns + 1
+    if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen:
+        val retired = process_observation_v4_drain_owner(lease)
+        fail("native V4 fixture did not reach a frozen receipt; " + process_observation_v4_retirement_text(retired))
+        return
+    val frozen = match freeze_process_observation_receipt_v4(receipt):
+        case Ok(value): value
+        case Err(reason):
+            val retired = process_observation_v4_drain_owner(lease)
+            fail("native V4 receipt could not be frozen: " + reason + "; " + process_observation_v4_retirement_text(retired))
+            return
+    val acknowledged = match lease.acknowledge(frozen):
+        case Ok(value): value
+        case Err(reason):
+            val retired = process_observation_v4_drain_owner(lease)
+            fail("native V4 exact acknowledgement failed: " + reason + "; " + process_observation_v4_retirement_text(retired))
+            return
+
+    expect(receipt.packet.status).to_equal(ProcessObservationStatusV4.Terminal)
+    expect(receipt.packet.exec_errno).to_equal(0)
+    expect(receipt.packet.exit_code).to_equal(23)
+    expect(receipt.packet.leader_reaped).to_equal(true)
+    expect(receipt.stdout).to_equal([110u8, 97u8, 116u8, 105u8, 118u8, 101u8, 45u8, 118u8, 52u8, 10u8])
+    expect(receipt.stderr).to_equal([])
+    expect(acknowledged.packet.packet_kind).to_equal(ProcessObservationPacketKindV4.Ack)
+    expect(acknowledged.packet.request_id_high).to_equal(frozen.packet.request_id_high)
+    expect(acknowledged.packet.request_id_low).to_equal(frozen.packet.request_id_low)
+    expect(acknowledged.packet.ticket_high).to_equal(frozen.packet.ticket_high)
+    expect(acknowledged.packet.ticket_low).to_equal(frozen.packet.ticket_low)
+    expect(acknowledged.binding_digest).to_equal(frozen.binding_digest)
+    expect(lease.active).to_equal(false)
+    expect(lease.acknowledged).to_equal(true)
+
+describe "Linux process observation V4 native host lifecycle":
+    val fixture = process_observation_v4_native_fixture_path()
+    val profile = env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+    if platform_name() != "linux" or fixture == "":
+        if not validate_bare_pending(profile).ok:
+            it "fails closed when the qualified Linux static fixture is unavailable":
+                fail("native V4 host lifecycle unavailable: Linux and PROCESS_OBSERVATION_V4_STATIC_FIXTURE are required")
+        else:
+            it "records unavailable native V4 host coverage as pending":
+                pending("native V4 host lifecycle requires Linux and a qualified static fixture")
+    else:
+        it "pins, observes, freezes, and acknowledges a real native child":
+            process_observation_v4_run_pinned_static_child(fixture)

@@ -82,3 +82,14 @@ seed red/green tests pass. The matched native runner now clears HIR/MIR/AOP
 304/304 without E-RTI-006; later code generation hit a temporary RSS limit,
 so runner execution and HAL/SOSIX acceptance remain pending.
 See `doc/08_tracking/bug/rti_frontend_core_alias_owner_2026_10_30.md`.
+
+### Bootstrap native SSpec authority refresh (2026-10-30)
+
+The native runner emits `--refresh-source-authority` for generated source.
+The bootstrap CLI must route ordinary refresh intent to the canonical native
+coordinator before raw worker-option validation or stale-authority prepasses.
+Forward original argv; worker/profile/grouped refresh remains refused.
+Focused route cases and evidence are in
+`test/01_unit/app/cli/bootstrap_source_authority_refresh_spec.spl` and
+`doc/08_tracking/bug/bootstrap_refresh_source_authority_route_2026_10_30.md`.
+Native execution requires a rebuilt producer; seed diagnostics do not qualify it.

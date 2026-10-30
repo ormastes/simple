@@ -27,6 +27,7 @@ use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir,
 use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
 use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode}
 use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
+use app.cli.bootstrap_source_authority_route.{bootstrap_source_authority_refresh_route_v1}
 use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v1,
     native_build_focused_capsule_shards_v1, run_native_file_worker_v1,
     native_build_authority_source_roots_v1, native_build_coordinator_prepublish_closure_v1,
@@ -395,6 +396,22 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     if composition_error != "":
         print "error: {composition_error}"
         return 1
+    # Refresh must reach the canonical authority owner before bootstrap option
+    # validation or a prepass can consume an inherited, now stale snapshot.
+    val authority_refresh = match bootstrap_source_authority_refresh_route_v1(
+            bootstrap_native_build_worker_args(args),
+            (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") == "1" or
+                bootstrap_shard_child_active() or (env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? "") != "",
+            (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1",
+            (env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"):
+        case Ok(value): value
+        case Err(reason):
+            eprint "SCV-E-ADMISSION: " + reason
+            return 1
+    if authority_refresh:
+        # Forward the original argv: stripping the option here loses the
+        # canonical coordinator's refresh intent and stale-closure invalidation.
+        return run_bootstrap_stage3_process_route(args)
     # The admitted Stage-2 compiler must route a grouped request through the
     # same isolated native-build coordinator as the normal CLI. Its special
     # Stage3/Stage4 focused-binary paths are single-entry only and reject the
@@ -427,6 +444,7 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         print "  --no-borrow-check           Skip the borrow checker"
         print "  --entry <file.spl>          Explicit entry module"
         print "  --source <dir>              Bound the scanned source roots"
+        print "  --refresh-source-authority  Admit current checkout sources in the coordinator"
         print "  --list-optimizations        List available MIR optimizations"
         print "  -h, --help                  Show this help"
         return 0
