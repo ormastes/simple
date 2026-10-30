@@ -95,6 +95,13 @@ fn add_consumer(prior: RrAtomicGenerationV2, consumer: SemanticQueryKeyV1,
     expect(staged.accepted).to_be(true)
     candidate(staged)
 
+fn strictly_ascending(values: [text]) -> bool:
+    var i = 1
+    while i < values.len():
+        if not (values[i - 1] < values[i]): return false
+        i = i + 1
+    true
+
 fn edge_count_for_consumer(generation: RrAtomicGenerationV2,
         consumer_id: text) -> i64:
     var count: i64 = 0
@@ -209,6 +216,18 @@ describe "RR atomic generation V2 transition model [importance=critical; importa
         match recover_rr_atomic_generation_v2(replay):
             case Some(active): expect(active.manifest_digest).to_equal(other.manifest_digest)
             case nil: fail("stale-stage refusal lost the coherent prior generation")
+
+    it "should keep shard and forward refs strictly ascending and unique [importance=critical; importance_weight=3]":
+        step("Stage a two-consumer generation and check both digest lists are sorted and deduplicated")
+        val producer_a = query("producer-a")
+        val consumer_a = query("consumer-a")
+        val consumer_b = query("consumer-b")
+        val first = genesis(consumer_a, [read(producer_a, consumer_a, "old-a", 0)])
+        val generation = add_consumer(first, consumer_b,
+            [read(producer_a, consumer_b, "old-b", 0)])
+        expect(generation.manifest.forward_manifest_refs.len() >= 2).to_be(true)
+        expect(strictly_ascending(generation.manifest.rr_shard_refs)).to_be(true)
+        expect(strictly_ascending(generation.manifest.forward_manifest_refs)).to_be(true)
 
     it "should recover exactly one coherent generation at every crash point [importance=critical; importance_weight=3]":
         step("Check old-before-swap and new-after-swap recovery identities")
